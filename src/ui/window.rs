@@ -2426,6 +2426,46 @@ pub(crate) fn proxy_scale_for_mode(
     }
 }
 
+fn proxy_mode_label(mode: &crate::ui_state::ProxyMode) -> &'static str {
+    match mode {
+        crate::ui_state::ProxyMode::QuarterRes => "Quarter Resolution",
+        _ => "Half Resolution",
+    }
+}
+
+fn proxy_toggle_tooltip(
+    current_proxy_mode: &crate::ui_state::ProxyMode,
+    remembered_proxy_mode: &crate::ui_state::ProxyMode,
+) -> String {
+    if current_proxy_mode.is_enabled() {
+        format!(
+            "Proxy playback on ({}). Click to switch back to original media (Shift+P). Change Half/Quarter in Preferences.",
+            proxy_mode_label(current_proxy_mode)
+        )
+    } else {
+        format!(
+            "Proxy playback off. Click to restore {} proxies (Shift+P). Change Half/Quarter in Preferences.",
+            proxy_mode_label(remembered_proxy_mode)
+        )
+    }
+}
+
+fn proxy_toggle_label(mode: &crate::ui_state::ProxyMode) -> &'static str {
+    if mode.is_enabled() {
+        "Using Proxies"
+    } else {
+        "Original Media"
+    }
+}
+
+fn background_render_label(enabled: bool) -> &'static str {
+    if enabled {
+        "Background Render"
+    } else {
+        "Live Rendering"
+    }
+}
+
 fn ready_proxy_path_for_source(
     cache: &crate::media::proxy_cache::ProxyCache,
     source_path: &str,
@@ -2437,6 +2477,67 @@ fn ready_proxy_path_for_source(
             .filter(|m| m.len() > 0)
             .map(|_| proxy_path.clone())
     })
+}
+
+fn reload_source_preview_selection(
+    path: &str,
+    duration_ns: u64,
+    source_info: SourcePlacementInfo,
+    player: &Rc<RefCell<Player>>,
+    project: &Rc<RefCell<Project>>,
+    proxy_cache: &Rc<RefCell<crate::media::proxy_cache::ProxyCache>>,
+    proxy_mode: &crate::ui_state::ProxyMode,
+    source_original_uri_for_proxy_fallback: &std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    set_audio_only: &Rc<dyn Fn(bool)>,
+) {
+    set_audio_only(source_info.is_audio_only);
+    let original_uri = format!("file://{path}");
+    let (fr_num, fr_den) = {
+        let proj = project.borrow();
+        (proj.frame_rate.numerator, proj.frame_rate.denominator)
+    };
+    if let Ok(mut fallback_uri) = source_original_uri_for_proxy_fallback.lock() {
+        *fallback_uri = Some(original_uri.clone());
+    }
+    if proxy_mode.is_enabled() && !source_info.is_audio_only && !source_info.is_animated_svg {
+        proxy_cache
+            .borrow_mut()
+            .request(path, proxy_scale_for_mode(proxy_mode), None);
+    }
+    let load_uri = if source_info.is_animated_svg {
+        match crate::media::animated_svg::ensure_rendered_clip(
+            path,
+            0,
+            duration_ns,
+            Some(duration_ns),
+            fr_num,
+            fr_den,
+        ) {
+            Ok(render_path) => format!("file://{render_path}"),
+            Err(err) => {
+                log::warn!(
+                    "source preview: failed to render animated SVG {}: {}",
+                    path,
+                    err
+                );
+                original_uri.clone()
+            }
+        }
+    } else {
+        let cache = proxy_cache.borrow();
+        if proxy_mode.is_enabled() {
+            if let Some(proxy_path) = ready_proxy_path_for_source(&cache, path, None) {
+                log::info!("source preview: using proxy {}", proxy_path);
+                format!("file://{proxy_path}")
+            } else {
+                log::info!("source preview: proxy not ready, loading original {}", path);
+                original_uri.clone()
+            }
+        } else {
+            original_uri.clone()
+        }
+    };
+    let _ = player.borrow().load(&load_uri);
 }
 
 fn collect_unique_clip_sources(project: &Project) -> Vec<(String, Option<String>)> {
@@ -3017,6 +3118,202 @@ pub fn build_window(
             }
         })
     };
+    let sync_proxy_toggle_impl: Rc<
+        RefCell<Option<Rc<dyn Fn(&crate::ui_state::PreferencesState)>>>,
+    > = Rc::new(RefCell::new(None));
+    let sync_background_render_toggle_impl: Rc<
+        RefCell<Option<Rc<dyn Fn(&crate::ui_state::PreferencesState)>>>,
+    > = Rc::new(RefCell::new(None));
+    let refresh_source_preview_preferences_impl: Rc<
+        RefCell<
+            Option<
+                Rc<dyn Fn(&crate::ui_state::PreferencesState, &crate::ui_state::PreferencesState)>,
+            >,
+        >,
+    > = Rc::new(RefCell::new(None));
+    let apply_preferences_state: Rc<dyn Fn(crate::ui_state::PreferencesState)> = {
+        let preferences_state = preferences_state.clone();
+        let player = player.clone();
+        let prog_player = prog_player.clone();
+        let proxy_cache = proxy_cache.clone();
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let mcp_sender = mcp_sender.clone();
+        let mcp_socket_stop = mcp_socket_stop.clone();
+        let sync_proxy_toggle_impl = sync_proxy_toggle_impl.clone();
+        let sync_background_render_toggle_impl = sync_background_render_toggle_impl.clone();
+        let refresh_source_preview_preferences_impl =
+            refresh_source_preview_preferences_impl.clone();
+        Rc::new(move |mut new_state| {
+            let old_state = preferences_state.borrow().clone();
+            if !new_state.last_non_off_proxy_mode.is_enabled() {
+                new_state.last_non_off_proxy_mode = old_state.remembered_proxy_mode();
+            }
+            *preferences_state.borrow_mut() = new_state.clone();
+            crate::ui_state::save_preferences_state(&new_state);
+            if let Err(e) = player
+                .borrow()
+                .set_hardware_acceleration(new_state.hardware_acceleration_enabled)
+            {
+                eprintln!("Failed to apply hardware acceleration setting: {e}");
+            }
+            player
+                .borrow()
+                .set_source_playback_priority(new_state.source_playback_priority.clone());
+            prog_player
+                .borrow_mut()
+                .set_playback_priority(new_state.playback_priority.clone());
+            prog_player
+                .borrow_mut()
+                .set_proxy_enabled(new_state.proxy_mode.is_enabled());
+            proxy_cache
+                .borrow_mut()
+                .set_sidecar_mirror_enabled(new_state.proxy_mode.is_enabled());
+            prog_player
+                .borrow_mut()
+                .set_proxy_scale_divisor(match new_state.proxy_mode {
+                    crate::ui_state::ProxyMode::QuarterRes => 4,
+                    _ => 2,
+                });
+            prog_player
+                .borrow_mut()
+                .set_preview_quality(new_state.preview_quality.divisor());
+            prog_player
+                .borrow_mut()
+                .set_experimental_preview_optimizations(
+                    new_state.experimental_preview_optimizations,
+                );
+            prog_player
+                .borrow_mut()
+                .set_realtime_preview(new_state.realtime_preview);
+            prog_player
+                .borrow_mut()
+                .set_background_prerender(new_state.background_prerender);
+            prog_player
+                .borrow_mut()
+                .set_preview_luts(new_state.preview_luts);
+            prog_player.borrow_mut().set_audio_crossfade_preview(
+                new_state.crossfade_enabled,
+                new_state.crossfade_curve.clone(),
+                new_state.crossfade_duration_ns,
+            );
+            prog_player
+                .borrow_mut()
+                .set_duck_settings(new_state.duck_enabled, new_state.duck_amount_db);
+            if new_state.proxy_mode.is_enabled() {
+                // If the proxy scale changed, invalidate old entries so clips are
+                // re-transcoded at the new resolution.
+                if new_state.proxy_mode != old_state.proxy_mode
+                    || new_state.preview_luts != old_state.preview_luts
+                {
+                    proxy_cache.borrow_mut().invalidate_all();
+                }
+                let scale = match new_state.proxy_mode {
+                    crate::ui_state::ProxyMode::QuarterRes => {
+                        crate::media::proxy_cache::ProxyScale::Quarter
+                    }
+                    _ => crate::media::proxy_cache::ProxyScale::Half,
+                };
+                let clips: Vec<(String, Option<String>, bool, f32)> = {
+                    let proj = project.borrow();
+                    proj.tracks
+                        .iter()
+                        .flat_map(|t| t.clips.iter())
+                        .map(|c| {
+                            (
+                                c.source_path.clone(),
+                                c.lut_key(),
+                                c.vidstab_enabled,
+                                c.vidstab_smoothing,
+                            )
+                        })
+                        .collect()
+                };
+                {
+                    let mut cache = proxy_cache.borrow_mut();
+                    for (path, lut, vs_en, vs_sm) in &clips {
+                        cache.request_with_vidstab(path, scale, lut.as_deref(), *vs_en, *vs_sm);
+                    }
+                }
+                let paths = proxy_cache.borrow().proxies.clone();
+                prog_player.borrow_mut().update_proxy_paths(paths);
+            } else if new_state.preview_luts {
+                if new_state.proxy_mode != old_state.proxy_mode
+                    || new_state.preview_luts != old_state.preview_luts
+                {
+                    proxy_cache.borrow_mut().invalidate_all();
+                }
+                let (project_w, project_h, clips): (u32, u32, Vec<(String, Option<String>)>) = {
+                    let proj = project.borrow();
+                    (
+                        proj.width,
+                        proj.height,
+                        collect_unique_lut_clip_sources(&proj),
+                    )
+                };
+                {
+                    let mut cache = proxy_cache.borrow_mut();
+                    for (path, lut) in &clips {
+                        cache.request(
+                            path,
+                            crate::media::proxy_cache::ProxyScale::Project {
+                                width: project_w,
+                                height: project_h,
+                            },
+                            lut.as_deref(),
+                        );
+                    }
+                }
+                let paths = proxy_cache.borrow().proxies.clone();
+                prog_player.borrow_mut().update_proxy_paths(paths);
+            } else {
+                prog_player.borrow_mut().update_proxy_paths(HashMap::new());
+            }
+            timeline_state.borrow_mut().show_waveform_on_video = new_state.show_waveform_on_video;
+            timeline_state.borrow_mut().show_timeline_preview = new_state.show_timeline_preview;
+            timeline_state.borrow_mut().show_track_audio_levels = new_state.show_track_audio_levels;
+            // Start/stop MCP socket server based on preference change.
+            if new_state.mcp_socket_enabled && mcp_socket_stop.borrow().is_none() {
+                let stop = crate::mcp::start_mcp_socket_server((*mcp_sender).clone());
+                *mcp_socket_stop.borrow_mut() = Some(stop);
+            } else if !new_state.mcp_socket_enabled {
+                if let Some(stop) = mcp_socket_stop.borrow_mut().take() {
+                    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            if let Some(sync_proxy_toggle) = sync_proxy_toggle_impl.borrow().as_ref().cloned() {
+                sync_proxy_toggle(&new_state);
+            }
+            if let Some(sync_background_render_toggle) = sync_background_render_toggle_impl
+                .borrow()
+                .as_ref()
+                .cloned()
+            {
+                sync_background_render_toggle(&new_state);
+            }
+            if let Some(refresh_source_preview) = refresh_source_preview_preferences_impl
+                .borrow()
+                .as_ref()
+                .cloned()
+            {
+                refresh_source_preview(&old_state, &new_state);
+            }
+        })
+    };
+    let proxy_toggle_updating = Rc::new(Cell::new(false));
+    let toggle_proxy_quick: Rc<dyn Fn(bool)> = {
+        let preferences_state = preferences_state.clone();
+        let apply_preferences_state = apply_preferences_state.clone();
+        let proxy_toggle_updating = proxy_toggle_updating.clone();
+        Rc::new(move |enabled| {
+            if proxy_toggle_updating.get() {
+                return;
+            }
+            let mut new_state = preferences_state.borrow().clone();
+            new_state.set_proxy_enabled(enabled);
+            apply_preferences_state(new_state);
+        })
+    };
     let open_preferences_impl: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
     let open_preferences: Rc<dyn Fn()> = {
         let cb = open_preferences_impl.clone();
@@ -3029,180 +3326,15 @@ pub fn build_window(
     *open_preferences_impl.borrow_mut() = Some({
         let window_weak = window_weak.clone();
         let preferences_state = preferences_state.clone();
-        let player = player.clone();
-        let prog_player = prog_player.clone();
-        let proxy_cache = proxy_cache.clone();
-        let project = project.clone();
-        let timeline_state = timeline_state.clone();
-        let mcp_sender = mcp_sender.clone();
-        let mcp_socket_stop = mcp_socket_stop.clone();
         let bg_removal_cache = bg_removal_cache.clone();
+        let apply_preferences_state = apply_preferences_state.clone();
         Rc::new(move || {
             if let Some(win) = window_weak.upgrade() {
                 let current = preferences_state.borrow().clone();
-                let old_proxy_mode = current.proxy_mode.clone();
-                let old_preview_luts = current.preview_luts;
-                let preferences_state = preferences_state.clone();
-                let player = player.clone();
-                let prog_player = prog_player.clone();
-                let proxy_cache = proxy_cache.clone();
-                let project = project.clone();
-                let timeline_state = timeline_state.clone();
-                let mcp_sender = mcp_sender.clone();
-                let mcp_socket_stop = mcp_socket_stop.clone();
-                let bg_removal_cache = bg_removal_cache.clone();
-                let on_save: Rc<dyn Fn(crate::ui_state::PreferencesState)> =
-                    Rc::new(move |new_state| {
-                        *preferences_state.borrow_mut() = new_state.clone();
-                        crate::ui_state::save_preferences_state(&new_state);
-                        if let Err(e) = player
-                            .borrow()
-                            .set_hardware_acceleration(new_state.hardware_acceleration_enabled)
-                        {
-                            eprintln!("Failed to apply hardware acceleration setting: {e}");
-                        }
-                        player.borrow().set_source_playback_priority(
-                            new_state.source_playback_priority.clone(),
-                        );
-                        prog_player
-                            .borrow_mut()
-                            .set_playback_priority(new_state.playback_priority.clone());
-                        prog_player
-                            .borrow_mut()
-                            .set_proxy_enabled(new_state.proxy_mode.is_enabled());
-                        proxy_cache
-                            .borrow_mut()
-                            .set_sidecar_mirror_enabled(new_state.proxy_mode.is_enabled());
-                        prog_player.borrow_mut().set_proxy_scale_divisor(
-                            match new_state.proxy_mode {
-                                crate::ui_state::ProxyMode::QuarterRes => 4,
-                                _ => 2,
-                            },
-                        );
-                        prog_player
-                            .borrow_mut()
-                            .set_preview_quality(new_state.preview_quality.divisor());
-                        prog_player
-                            .borrow_mut()
-                            .set_experimental_preview_optimizations(
-                                new_state.experimental_preview_optimizations,
-                            );
-                        prog_player
-                            .borrow_mut()
-                            .set_realtime_preview(new_state.realtime_preview);
-                        prog_player
-                            .borrow_mut()
-                            .set_background_prerender(new_state.background_prerender);
-                        prog_player
-                            .borrow_mut()
-                            .set_preview_luts(new_state.preview_luts);
-                        prog_player.borrow_mut().set_audio_crossfade_preview(
-                            new_state.crossfade_enabled,
-                            new_state.crossfade_curve.clone(),
-                            new_state.crossfade_duration_ns,
-                        );
-                        prog_player
-                            .borrow_mut()
-                            .set_duck_settings(new_state.duck_enabled, new_state.duck_amount_db);
-                        if new_state.proxy_mode.is_enabled() {
-                            // If the proxy scale changed, invalidate old entries so clips are
-                            // re-transcoded at the new resolution.
-                            if new_state.proxy_mode != old_proxy_mode
-                                || new_state.preview_luts != old_preview_luts
-                            {
-                                proxy_cache.borrow_mut().invalidate_all();
-                            }
-                            let scale = match new_state.proxy_mode {
-                                crate::ui_state::ProxyMode::QuarterRes => {
-                                    crate::media::proxy_cache::ProxyScale::Quarter
-                                }
-                                _ => crate::media::proxy_cache::ProxyScale::Half,
-                            };
-                            let clips: Vec<(String, Option<String>, bool, f32)> = {
-                                let proj = project.borrow();
-                                proj.tracks
-                                    .iter()
-                                    .flat_map(|t| t.clips.iter())
-                                    .map(|c| {
-                                        (
-                                            c.source_path.clone(),
-                                            c.lut_key(),
-                                            c.vidstab_enabled,
-                                            c.vidstab_smoothing,
-                                        )
-                                    })
-                                    .collect()
-                            };
-                            {
-                                let mut cache = proxy_cache.borrow_mut();
-                                for (path, lut, vs_en, vs_sm) in &clips {
-                                    cache.request_with_vidstab(
-                                        path,
-                                        scale,
-                                        lut.as_deref(),
-                                        *vs_en,
-                                        *vs_sm,
-                                    );
-                                }
-                            }
-                            let paths = proxy_cache.borrow().proxies.clone();
-                            prog_player.borrow_mut().update_proxy_paths(paths);
-                        } else if new_state.preview_luts {
-                            if new_state.proxy_mode != old_proxy_mode
-                                || new_state.preview_luts != old_preview_luts
-                            {
-                                proxy_cache.borrow_mut().invalidate_all();
-                            }
-                            let (project_w, project_h, clips): (
-                                u32,
-                                u32,
-                                Vec<(String, Option<String>)>,
-                            ) = {
-                                let proj = project.borrow();
-                                (
-                                    proj.width,
-                                    proj.height,
-                                    collect_unique_lut_clip_sources(&proj),
-                                )
-                            };
-                            {
-                                let mut cache = proxy_cache.borrow_mut();
-                                for (path, lut) in &clips {
-                                    cache.request(
-                                        path,
-                                        crate::media::proxy_cache::ProxyScale::Project {
-                                            width: project_w,
-                                            height: project_h,
-                                        },
-                                        lut.as_deref(),
-                                    );
-                                }
-                            }
-                            let paths = proxy_cache.borrow().proxies.clone();
-                            prog_player.borrow_mut().update_proxy_paths(paths);
-                        } else {
-                            prog_player.borrow_mut().update_proxy_paths(HashMap::new());
-                        }
-                        timeline_state.borrow_mut().show_waveform_on_video =
-                            new_state.show_waveform_on_video;
-                        timeline_state.borrow_mut().show_timeline_preview =
-                            new_state.show_timeline_preview;
-                        timeline_state.borrow_mut().show_track_audio_levels =
-                            new_state.show_track_audio_levels;
-                        // Start/stop MCP socket server based on preference change.
-                        if new_state.mcp_socket_enabled && mcp_socket_stop.borrow().is_none() {
-                            let stop = crate::mcp::start_mcp_socket_server((*mcp_sender).clone());
-                            *mcp_socket_stop.borrow_mut() = Some(stop);
-                        } else if !new_state.mcp_socket_enabled {
-                            if let Some(stop) = mcp_socket_stop.borrow_mut().take() {
-                                stop.store(true, std::sync::atomic::Ordering::Relaxed);
-                            }
-                        }
-                    });
                 preferences::show_preferences_dialog(
                     win.upcast_ref(),
                     current,
-                    on_save,
+                    apply_preferences_state.clone(),
                     bg_removal_cache.clone(),
                 );
             }
@@ -5250,6 +5382,43 @@ pub fn build_window(
         on_overwrite.clone(),
         on_close_preview.clone(),
     );
+    *refresh_source_preview_preferences_impl.borrow_mut() = Some({
+        let player = player.clone();
+        let source_marks = source_marks.clone();
+        let library = library.clone();
+        let project = project.clone();
+        let proxy_cache = proxy_cache.clone();
+        let source_original_uri_for_proxy_fallback = source_original_uri_for_proxy_fallback.clone();
+        let set_audio_only = set_audio_only.clone();
+        Rc::new(move |old_state, new_state| {
+            if old_state.proxy_mode == new_state.proxy_mode {
+                return;
+            }
+            let (path, duration_ns) = {
+                let marks = source_marks.borrow();
+                (marks.path.clone(), marks.duration_ns)
+            };
+            if path.is_empty() {
+                return;
+            }
+            let source_info = {
+                let lib = library.borrow();
+                let proj = project.borrow();
+                lookup_source_placement_info(&lib.items, &proj, &path)
+            };
+            reload_source_preview_selection(
+                &path,
+                duration_ns,
+                source_info,
+                &player,
+                &project,
+                &proxy_cache,
+                &new_state.proxy_mode,
+                &source_original_uri_for_proxy_fallback,
+                &set_audio_only,
+            );
+        })
+    });
 
     // Wire on_drop_clip — placed here so it can read source_marks to honour
     // the in/out selection set in the source monitor.
@@ -7331,66 +7500,21 @@ pub fn build_window(
                 let proj = project.borrow();
                 lookup_source_placement_info(&lib.items, &proj, &path)
             };
-            // Switch preview stack to audio banner when clip has no video.
-            set_audio_only(source_info.is_audio_only);
             if should_reload {
                 let proxy_mode = preferences_state.borrow().proxy_mode.clone();
-                let source_proxy_enabled = proxy_mode.is_enabled();
-                let original_uri = format!("file://{path}");
-                let (fr_num, fr_den) = {
-                    let proj = project.borrow();
-                    (proj.frame_rate.numerator, proj.frame_rate.denominator)
-                };
-                if let Ok(mut fallback_uri) = source_original_uri_for_proxy_fallback.lock() {
-                    *fallback_uri = Some(original_uri.clone());
-                }
-                if source_proxy_enabled
-                    && !source_info.is_audio_only
-                    && !source_info.is_animated_svg
-                {
-                    proxy_cache.borrow_mut().request(
-                        &path,
-                        proxy_scale_for_mode(&proxy_mode),
-                        None,
-                    );
-                }
-                let load_uri = if source_info.is_animated_svg {
-                    match crate::media::animated_svg::ensure_rendered_clip(
-                        &path,
-                        0,
-                        duration_ns,
-                        Some(duration_ns),
-                        fr_num,
-                        fr_den,
-                    ) {
-                        Ok(render_path) => format!("file://{render_path}"),
-                        Err(err) => {
-                            log::warn!(
-                                "source preview: failed to render animated SVG {}: {}",
-                                path,
-                                err
-                            );
-                            original_uri.clone()
-                        }
-                    }
-                } else {
-                    let cache = proxy_cache.borrow();
-                    if source_proxy_enabled {
-                        if let Some(proxy_path) = ready_proxy_path_for_source(&cache, &path, None) {
-                            log::info!("source preview: using proxy {}", proxy_path);
-                            format!("file://{proxy_path}")
-                        } else {
-                            log::info!(
-                                "source preview: proxy not ready, loading original {}",
-                                path
-                            );
-                            original_uri.clone()
-                        }
-                    } else {
-                        original_uri
-                    }
-                };
-                let _ = player.borrow().load(&load_uri);
+                reload_source_preview_selection(
+                    &path,
+                    duration_ns,
+                    source_info,
+                    &player,
+                    &project,
+                    &proxy_cache,
+                    &proxy_mode,
+                    &source_original_uri_for_proxy_fallback,
+                    &set_audio_only,
+                );
+            } else {
+                set_audio_only(source_info.is_audio_only);
             }
             let mut m = source_marks.borrow_mut();
             m.path = path;
@@ -8828,17 +8952,31 @@ pub fn build_window(
     let background_render_toggle = gtk::ToggleButton::new();
     background_render_toggle.set_active(initial_background_prerender);
     let background_render_row = gtk::Box::new(Orientation::Horizontal, 4);
+    let background_render_toggle_updating = Rc::new(Cell::new(false));
     let background_render_icon = gtk::Image::from_icon_name(if initial_background_prerender {
         "system-run-symbolic"
     } else {
         "process-stop-symbolic"
     });
-    let background_render_text = gtk::Label::new(Some("Background Render"));
+    let background_render_text =
+        gtk::Label::new(Some(background_render_label(initial_background_prerender)));
     background_render_row.append(&background_render_icon);
     background_render_row.append(&background_render_text);
     background_render_toggle.set_child(Some(&background_render_row));
     background_render_toggle.add_css_class("round");
     background_render_toggle.add_css_class("flat");
+    let proxy_quick_toggle = gtk::ToggleButton::with_label(proxy_toggle_label(&initial_proxy_mode));
+    proxy_quick_toggle.set_active(initial_proxy_mode.is_enabled());
+    proxy_quick_toggle.set_tooltip_text(Some(&proxy_toggle_tooltip(
+        &initial_proxy_mode,
+        &preferences_state.borrow().remembered_proxy_mode(),
+    )));
+    proxy_quick_toggle.add_css_class("round");
+    proxy_quick_toggle.add_css_class("flat");
+    {
+        let toggle_proxy_quick = toggle_proxy_quick.clone();
+        proxy_quick_toggle.connect_toggled(move |btn| toggle_proxy_quick(btn.is_active()));
+    }
     // ── Media Browser toggle ──
     let media_browser_toggle = gtk::ToggleButton::new();
     media_browser_toggle.set_active(true);
@@ -8892,12 +9030,50 @@ pub fn build_window(
     status_bar.append(&media_browser_toggle);
     status_bar.append(&track_levels_toggle);
     status_bar.append(&background_render_toggle);
+    status_bar.append(&proxy_quick_toggle);
     status_bar.append(&status_label);
     status_bar.append(&status_progress);
     let status_spacer = gtk::Box::new(Orientation::Horizontal, 0);
     status_spacer.set_hexpand(true);
     status_bar.append(&status_spacer);
     status_bar.append(&inspector_toggle);
+    *sync_background_render_toggle_impl.borrow_mut() = Some({
+        let background_render_toggle = background_render_toggle.clone();
+        let background_render_toggle_updating = background_render_toggle_updating.clone();
+        let background_render_icon = background_render_icon.clone();
+        let background_render_text = background_render_text.clone();
+        Rc::new(move |prefs: &crate::ui_state::PreferencesState| {
+            background_render_toggle_updating.set(true);
+            let enabled = prefs.background_prerender;
+            if background_render_toggle.is_active() != enabled {
+                background_render_toggle.set_active(enabled);
+            }
+            background_render_icon.set_icon_name(Some(if enabled {
+                "system-run-symbolic"
+            } else {
+                "process-stop-symbolic"
+            }));
+            background_render_text.set_text(background_render_label(enabled));
+            background_render_toggle_updating.set(false);
+        })
+    });
+    *sync_proxy_toggle_impl.borrow_mut() = Some({
+        let proxy_quick_toggle = proxy_quick_toggle.clone();
+        let proxy_toggle_updating = proxy_toggle_updating.clone();
+        Rc::new(move |prefs: &crate::ui_state::PreferencesState| {
+            proxy_toggle_updating.set(true);
+            let enabled = prefs.proxy_mode.is_enabled();
+            if proxy_quick_toggle.is_active() != enabled {
+                proxy_quick_toggle.set_active(enabled);
+            }
+            proxy_quick_toggle.set_label(proxy_toggle_label(&prefs.proxy_mode));
+            proxy_quick_toggle.set_tooltip_text(Some(&proxy_toggle_tooltip(
+                &prefs.proxy_mode,
+                &prefs.remembered_proxy_mode(),
+            )));
+            proxy_toggle_updating.set(false);
+        })
+    });
 
     // Wrap main content + status bar in a vertical box
     let outer_vbox = gtk::Box::new(Orientation::Vertical, 0);
@@ -9114,22 +9290,15 @@ pub fn build_window(
     }
     {
         let preferences_state = preferences_state.clone();
-        let prog_player = prog_player.clone();
-        let background_render_icon = background_render_icon.clone();
+        let apply_preferences_state = apply_preferences_state.clone();
+        let background_render_toggle_updating = background_render_toggle_updating.clone();
         background_render_toggle.connect_toggled(move |btn| {
-            let enabled = btn.is_active();
-            prog_player.borrow_mut().set_background_prerender(enabled);
-            background_render_icon.set_icon_name(Some(if enabled {
-                "system-run-symbolic"
-            } else {
-                "process-stop-symbolic"
-            }));
-            let new_state = {
-                let mut prefs = preferences_state.borrow_mut();
-                prefs.background_prerender = enabled;
-                prefs.clone()
-            };
-            crate::ui_state::save_preferences_state(&new_state);
+            if background_render_toggle_updating.get() {
+                return;
+            }
+            let mut new_state = preferences_state.borrow().clone();
+            new_state.background_prerender = btn.is_active();
+            apply_preferences_state(new_state);
         });
     }
 
@@ -9432,6 +9601,7 @@ pub fn build_window(
                         &on_source_selected,
                         &on_project_changed_mcp_light,
                         &on_project_changed_mcp_full,
+                        &apply_preferences_state,
                         &suppress_resume_on_next_reload,
                         &clear_media_browser_on_next_reload,
                     );
@@ -9662,6 +9832,34 @@ pub fn build_window(
                 return glib::Propagation::Stop;
             }
             glib::Propagation::Proceed
+        });
+        window.add_controller(key_ctrl);
+    }
+    // ── Window-level Shift+P: toggle proxy playback ─────────────────────────
+    {
+        let toggle_proxy_quick = toggle_proxy_quick.clone();
+        let preferences_state = preferences_state.clone();
+        let key_ctrl = gtk4::EventControllerKey::new();
+        key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        key_ctrl.connect_key_pressed(move |ctrl, key, _, mods| {
+            use gtk4::gdk::{Key, ModifierType};
+            if !mods.contains(ModifierType::SHIFT_MASK)
+                || mods.contains(ModifierType::CONTROL_MASK)
+                || mods.contains(ModifierType::ALT_MASK)
+                || (key != Key::P && key != Key::p)
+            {
+                return glib::Propagation::Proceed;
+            }
+            if let Some(widget) = ctrl.widget() {
+                if let Some(focused) = widget.root().and_then(|r| r.focus()) {
+                    if is_text_input_focused(&focused) {
+                        return glib::Propagation::Proceed;
+                    }
+                }
+            }
+            let enabled = !preferences_state.borrow().proxy_mode.is_enabled();
+            toggle_proxy_quick(enabled);
+            glib::Propagation::Stop
         });
         window.add_controller(key_ctrl);
     }
@@ -9923,6 +10121,7 @@ fn handle_mcp_command(
     on_source_selected: &Rc<dyn Fn(String, u64)>,
     on_project_changed: &Rc<dyn Fn()>,
     on_project_changed_full: &Rc<dyn Fn()>,
+    apply_preferences_state: &Rc<dyn Fn(crate::ui_state::PreferencesState)>,
     suppress_resume_on_next_reload: &Rc<Cell<bool>>,
     clear_media_browser_on_next_reload: &Rc<Cell<bool>>,
 ) {
@@ -10401,6 +10600,7 @@ fn handle_mcp_command(
                     "playback_priority": prefs.playback_priority.as_str(),
                     "source_playback_priority": prefs.source_playback_priority.as_str(),
                     "proxy_mode": prefs.proxy_mode.as_str(),
+                    "last_non_off_proxy_mode": prefs.remembered_proxy_mode().as_str(),
                     "show_timeline_preview": prefs.show_timeline_preview,
                     "show_track_audio_levels": prefs.show_track_audio_levels,
                     "gsk_renderer": prefs.gsk_renderer.as_str(),
@@ -10534,86 +10734,14 @@ fn handle_mcp_command(
 
         McpCommand::SetProxyMode { mode, reply } => {
             let parsed = crate::ui_state::ProxyMode::from_str(&mode);
-            let enabled = parsed.is_enabled();
-            let new_state = {
-                let mut prefs = preferences_state.borrow_mut();
-                prefs.proxy_mode = parsed;
-                prefs.clone()
-            };
-            crate::ui_state::save_preferences_state(&new_state);
-            proxy_cache.borrow_mut().set_sidecar_mirror_enabled(enabled);
-            prog_player.borrow_mut().set_proxy_enabled(enabled);
-            prog_player
-                .borrow_mut()
-                .set_preview_luts(new_state.preview_luts);
-            prog_player
-                .borrow_mut()
-                .set_proxy_scale_divisor(match new_state.proxy_mode {
-                    crate::ui_state::ProxyMode::QuarterRes => 4,
-                    _ => 2,
-                });
-            if enabled {
-                let scale = match new_state.proxy_mode {
-                    crate::ui_state::ProxyMode::QuarterRes => {
-                        crate::media::proxy_cache::ProxyScale::Quarter
-                    }
-                    _ => crate::media::proxy_cache::ProxyScale::Half,
-                };
-                let clip_sources: Vec<(String, Option<String>)> = {
-                    let proj = project.borrow();
-                    let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
-                    proj.tracks
-                        .iter()
-                        .flat_map(|t| t.clips.iter())
-                        .filter_map(|c| {
-                            let key = (c.source_path.clone(), c.lut_key());
-                            if seen.insert(key.clone()) {
-                                Some(key)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect()
-                };
-                {
-                    let mut cache = proxy_cache.borrow_mut();
-                    cache.invalidate_all();
-                    for (path, lut) in &clip_sources {
-                        cache.request(path, scale, lut.as_deref());
-                    }
-                }
-                let paths = proxy_cache.borrow().proxies.clone();
-                prog_player.borrow_mut().update_proxy_paths(paths);
-            } else if new_state.preview_luts {
-                let (project_w, project_h, lut_sources): (u32, u32, Vec<(String, Option<String>)>) = {
-                    let proj = project.borrow();
-                    (
-                        proj.width,
-                        proj.height,
-                        collect_unique_lut_clip_sources(&proj),
-                    )
-                };
-                {
-                    let mut cache = proxy_cache.borrow_mut();
-                    cache.invalidate_all();
-                    for (path, lut) in &lut_sources {
-                        cache.request(
-                            path,
-                            crate::media::proxy_cache::ProxyScale::Project {
-                                width: project_w,
-                                height: project_h,
-                            },
-                            lut.as_deref(),
-                        );
-                    }
-                }
-                let paths = proxy_cache.borrow().proxies.clone();
-                prog_player.borrow_mut().update_proxy_paths(paths);
-            }
+            let mut new_state = preferences_state.borrow().clone();
+            new_state.set_proxy_mode(parsed);
+            apply_preferences_state(new_state.clone());
             reply
                 .send(json!({
                     "success": true,
-                    "proxy_mode": new_state.proxy_mode.as_str()
+                    "proxy_mode": new_state.proxy_mode.as_str(),
+                    "last_non_off_proxy_mode": new_state.remembered_proxy_mode().as_str()
                 }))
                 .ok();
         }
@@ -10689,13 +10817,9 @@ fn handle_mcp_command(
         }
 
         McpCommand::SetBackgroundPrerender { enabled, reply } => {
-            prog_player.borrow_mut().set_background_prerender(enabled);
-            let new_state = {
-                let mut prefs = preferences_state.borrow_mut();
-                prefs.background_prerender = enabled;
-                prefs.clone()
-            };
-            crate::ui_state::save_preferences_state(&new_state);
+            let mut new_state = preferences_state.borrow().clone();
+            new_state.background_prerender = enabled;
+            apply_preferences_state(new_state.clone());
             reply
                 .send(json!({
                     "success": true,
@@ -10705,41 +10829,9 @@ fn handle_mcp_command(
         }
 
         McpCommand::SetPreviewLuts { enabled, reply } => {
-            prog_player.borrow_mut().set_preview_luts(enabled);
-            let new_state = {
-                let mut prefs = preferences_state.borrow_mut();
-                prefs.preview_luts = enabled;
-                prefs.clone()
-            };
-            crate::ui_state::save_preferences_state(&new_state);
-            if !new_state.proxy_mode.is_enabled() && enabled {
-                let (project_w, project_h, lut_sources): (u32, u32, Vec<(String, Option<String>)>) = {
-                    let proj = project.borrow();
-                    (
-                        proj.width,
-                        proj.height,
-                        collect_unique_lut_clip_sources(&proj),
-                    )
-                };
-                {
-                    let mut cache = proxy_cache.borrow_mut();
-                    cache.invalidate_all();
-                    for (path, lut) in &lut_sources {
-                        cache.request(
-                            path,
-                            crate::media::proxy_cache::ProxyScale::Project {
-                                width: project_w,
-                                height: project_h,
-                            },
-                            lut.as_deref(),
-                        );
-                    }
-                }
-                let paths = proxy_cache.borrow().proxies.clone();
-                prog_player.borrow_mut().update_proxy_paths(paths);
-            } else if !enabled && !new_state.proxy_mode.is_enabled() {
-                prog_player.borrow_mut().update_proxy_paths(HashMap::new());
-            }
+            let mut new_state = preferences_state.borrow().clone();
+            new_state.preview_luts = enabled;
+            apply_preferences_state(new_state.clone());
             reply
                 .send(json!({
                     "success": true,

@@ -592,7 +592,7 @@ pub fn show_preferences_dialog(
 
     dialog.connect_response(move |d, resp| {
         if resp == ResponseType::Accept {
-            on_save(PreferencesState {
+            let mut new_state = PreferencesState {
                 hardware_acceleration_enabled: hw_accel.is_active(),
                 playback_priority: PlaybackPriority::from_str(
                     playback_priority.active_id().as_deref().unwrap_or("smooth"),
@@ -603,7 +603,8 @@ pub fn show_preferences_dialog(
                         .as_deref()
                         .unwrap_or("smooth"),
                 ),
-                proxy_mode: ProxyMode::from_str(proxy_mode.active_id().as_deref().unwrap_or("off")),
+                proxy_mode: current.proxy_mode.clone(),
+                last_non_off_proxy_mode: current.last_non_off_proxy_mode.clone(),
                 show_waveform_on_video: waveform_video_check.is_active(),
                 show_timeline_preview: timeline_preview_check.is_active(),
                 source_monitor_auto_link_av: source_monitor_auto_link_av_check.is_active(),
@@ -632,7 +633,11 @@ pub fn show_preferences_dialog(
                 duck_amount_db: current.duck_amount_db,
                 backup_enabled: backup_enabled_check.is_active(),
                 backup_max_versions: backup_max_versions_spin.value() as usize,
-            });
+            };
+            new_state.set_proxy_mode(ProxyMode::from_str(
+                proxy_mode.active_id().as_deref().unwrap_or("off"),
+            ));
+            on_save(new_state);
         }
         d.close();
     });

@@ -599,7 +599,7 @@ Tracking docs:
 - [x] 3-Point and 4-Point editing (Insert/Overwrite from Source)
 - [x] J/K/L scrubbing (shuttle control in program monitor; pitch-corrected audio via Rubberband is a planned enhancement)
 - [x] Match Frame (`F` shortcut to find timeline clip in media library, load in source monitor, seek to matching frame; MCP `match_frame` tool)
-- [ ] Proxy Workflow: One-click toggle between original and proxy media
+- [x] Proxy Workflow: One-click toggle between original and proxy media
 - [ ] Keyword ranges + favorite/reject ratings in browser
 - [ ] Auditions / clip versions (swap alternate takes nondestructively)
 - [ ] Plugin architecture for third-party video effects (e.g. OFX/LV2 bridge)

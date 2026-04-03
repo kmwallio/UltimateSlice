@@ -215,6 +215,10 @@ impl ProxyMode {
     }
 }
 
+fn default_last_non_off_proxy_mode() -> ProxyMode {
+    ProxyMode::HalfRes
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CrossfadeCurve {
@@ -627,6 +631,10 @@ pub struct PreferencesState {
     pub source_playback_priority: PlaybackPriority,
     #[serde(default)]
     pub proxy_mode: ProxyMode,
+    /// Last non-Off proxy mode, used by the quick proxy toggle to restore the
+    /// user's preferred proxy quality.
+    #[serde(default = "default_last_non_off_proxy_mode")]
+    pub last_non_off_proxy_mode: ProxyMode,
     /// Show audio waveforms overlaid on video clips in the timeline.
     #[serde(default)]
     pub show_waveform_on_video: bool,
@@ -692,6 +700,7 @@ impl Default for PreferencesState {
             playback_priority: PlaybackPriority::default(),
             source_playback_priority: PlaybackPriority::default(),
             proxy_mode: ProxyMode::default(),
+            last_non_off_proxy_mode: default_last_non_off_proxy_mode(),
             show_waveform_on_video: false,
             show_timeline_preview: default_show_timeline_preview(),
             source_monitor_auto_link_av: default_source_monitor_auto_link_av(),
@@ -711,6 +720,34 @@ impl Default for PreferencesState {
             backup_enabled: default_backup_enabled(),
             backup_max_versions: default_backup_max_versions(),
         }
+    }
+}
+
+impl PreferencesState {
+    pub fn remembered_proxy_mode(&self) -> ProxyMode {
+        if self.last_non_off_proxy_mode.is_enabled() {
+            self.last_non_off_proxy_mode.clone()
+        } else {
+            default_last_non_off_proxy_mode()
+        }
+    }
+
+    pub fn set_proxy_mode(&mut self, mode: ProxyMode) {
+        if mode.is_enabled() {
+            self.last_non_off_proxy_mode = mode.clone();
+        } else if !self.last_non_off_proxy_mode.is_enabled() {
+            self.last_non_off_proxy_mode = default_last_non_off_proxy_mode();
+        }
+        self.proxy_mode = mode;
+    }
+
+    pub fn set_proxy_enabled(&mut self, enabled: bool) {
+        let mode = if enabled {
+            self.remembered_proxy_mode()
+        } else {
+            ProxyMode::Off
+        };
+        self.set_proxy_mode(mode);
     }
 }
 
@@ -957,5 +994,35 @@ mod tests {
         assert_eq!(decoded.crossfade_curve, CrossfadeCurve::EqualPower);
         let encoded = serde_json::to_string(&decoded).unwrap();
         assert!(encoded.contains(r#""crossfade_curve":"equal_power""#));
+    }
+
+    #[test]
+    fn preferences_default_missing_proxy_restore_mode_to_half_res() {
+        let parsed: UiState =
+            serde_json::from_str(r#"{"preferences":{"proxy_mode":"off"}}"#).unwrap();
+        assert_eq!(parsed.preferences.proxy_mode, ProxyMode::Off);
+        assert_eq!(
+            parsed.preferences.remembered_proxy_mode(),
+            ProxyMode::HalfRes
+        );
+    }
+
+    #[test]
+    fn preferences_set_proxy_mode_remembers_last_enabled_mode() {
+        let mut prefs = PreferencesState::default();
+        prefs.set_proxy_mode(ProxyMode::QuarterRes);
+        prefs.set_proxy_mode(ProxyMode::Off);
+        assert_eq!(prefs.proxy_mode, ProxyMode::Off);
+        assert_eq!(prefs.remembered_proxy_mode(), ProxyMode::QuarterRes);
+    }
+
+    #[test]
+    fn preferences_set_proxy_enabled_restores_last_enabled_mode() {
+        let mut prefs = PreferencesState::default();
+        prefs.set_proxy_mode(ProxyMode::QuarterRes);
+        prefs.set_proxy_enabled(false);
+        prefs.set_proxy_enabled(true);
+        assert_eq!(prefs.proxy_mode, ProxyMode::QuarterRes);
+        assert_eq!(prefs.remembered_proxy_mode(), ProxyMode::QuarterRes);
     }
 }

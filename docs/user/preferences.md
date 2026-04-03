@@ -67,6 +67,8 @@ Backups are stored in `~/.local/share/ultimateslice/backups/` (or `$XDG_DATA_HOM
   - `Off` (default): uses original source media and does not request/generate proxy files.
   - `Half Res`: generates half-resolution H.264 proxies.
   - `Quarter Res`: generates quarter-resolution H.264 proxies.
+- The bottom status bar includes a proxy state toggle next to the render-mode toggle. It reads **Using Proxies** when proxy playback is active and **Original Media** when it is off, and **`Shift+P`** provides the same quick on/off action without opening Preferences.
+- Turning the quick toggle back on restores the last non-`Off` proxy size you chose here, so the fast toggle keeps using your preferred `Half Res` or `Quarter Res` setting.
 - Proxy files are transcoded in the background via ffmpeg and prefer a managed local cache root at `$XDG_CACHE_HOME/ultimateslice/proxies` (fallback `/tmp/ultimateslice/proxies`) for better external-drive playback.
 - While a proxy is still incomplete/unusable, UltimateSlice keeps playback on original media and switches to the proxy only after it is valid.
 - If local-cache writes/transcodes fail, UltimateSlice falls back to alongside-media `UltimateSlice.cache/` for that source.
@@ -84,8 +86,8 @@ Backups are stored in `~/.local/share/ultimateslice/backups/` (or `$XDG_DATA_HOM
 - Export always uses original full-resolution media regardless of proxy mode.
 - The setting is persisted across launches.
 - MCP automation:
-  - `get_preferences` returns `proxy_mode`.
-  - `set_proxy_mode` updates the mode and re-generates proxies as needed.
+  - `get_preferences` returns `proxy_mode` and `last_non_off_proxy_mode`.
+  - `set_proxy_mode` updates the mode, preserves the last non-`Off` proxy size for quick restore, and re-generates proxies as needed.
 
 ## Preview LUTs (Playback)
 
@@ -136,7 +138,7 @@ Backups are stored in `~/.local/share/ultimateslice/backups/` (or `$XDG_DATA_HOM
 ## Background Prerender (Playback)
 
 - **Background prerender** pre-renders complex upcoming overlap sections (3+ active video tracks) to temporary disk clips in the background.
-- You can quickly toggle it from the bottom status bar via **Background Render** (next to **Track Audio Levels**) without opening Preferences.
+- You can quickly toggle it from the bottom status bar next to **Track Audio Levels** without opening Preferences. The button reads **Background Render** when prerendering is enabled and **Live Rendering** when it is disabled.
 - The toggle uses run/stop symbolic icons (`process-stop-symbolic` when off, `system-run-symbolic` when on) to make state visible at a glance.
 - When available, Program Monitor playback can use the prerendered section clip instead of rebuilding all video layers live for that segment.
 - If both **Real-time preview** and **Background prerender** are enabled, 3+ track overlap boundaries now prefer the prerender-capable path so prerender clips are still used during full playthrough.

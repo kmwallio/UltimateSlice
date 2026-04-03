@@ -12,6 +12,7 @@
 | `Ctrl+O` | Open project XML (`.uspxml` / `.fcpxml`) |
 | `Ctrl+S` | Save project XML (default `.uspxml`) |
 | `Ctrl+,` | Open Preferences |
+| `Shift+P` | Toggle proxy playback on/off (switches the bottom status bar between `Original Media` and `Using Proxies`, and restores the last non-Off proxy size) |
 | `Ctrl+J` | Go to timecode (jump playhead) |
 | `Ctrl+Z` | Undo |
 | `Ctrl+Y` / `Ctrl+Shift+Z` | Redo |
