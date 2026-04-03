@@ -74,6 +74,8 @@ Backups are stored in `~/.local/share/ultimateslice/backups/` (or `$XDG_DATA_HOM
 - If local-cache writes/transcodes fail, UltimateSlice falls back to alongside-media `UltimateSlice.cache/` for that source.
 - When **Proxy mode is enabled**, successful local proxy transcodes are also mirrored into alongside-media `UltimateSlice.cache/` for reuse.
 - Managed local proxy cache entries are pruned at startup when stale (older than 24h by ownership index).
+- Proxy file names now encode the current source identity and proxy-affecting variant state (resolution, LUT, stabilization), so changed media/settings regenerate a distinct proxy instead of silently reusing a stale file.
+- When the current project's proxy expectations change, UltimateSlice automatically removes stale/superseded current-format proxy variants and leftover `.partial` files from the managed local cache and the matching `UltimateSlice.cache/` directories for that project's sources.
 - On project unload/app close, UltimateSlice always cleans tracked proxy files from managed local cache (`$XDG_CACHE_HOME`/`/tmp`).
 - Alongside-media `UltimateSlice.cache/` proxies are preserved only when **Proxy mode is enabled** (for reopen/reuse); if **Proxy mode is disabled**, those tracked sidecar proxies are cleaned too.
 - When Proxy mode is enabled, project reload eagerly primes a capped set of near-playhead proxy sources so first playback can pick up local proxies sooner on slower/external storage.

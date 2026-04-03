@@ -383,6 +383,7 @@ Tracking docs:
    - [x] Proxy shutdown cleanup policy: always clean managed local/tmp proxies on unload/close; preserve tracked `UltimateSlice.cache` proxies only when Proxy mode is enabled (clean sidecar proxies too when disabled)
    - [x] Enabled-mode sidecar proxy mirroring: when Proxy mode is enabled, local proxy transcodes are mirrored to alongside-media `UltimateSlice.cache` as well
    - [x] Preview LUTs preference: when Proxy mode is Off, generate/use project-resolution LUT-baked preview media for LUT-assigned clips
+   - [x] Automatic stale proxy cleanup: proxy paths now fingerprint source identity and proxy-affecting variant state, and current-project stale/superseded proxy variants are pruned automatically from managed local and matching sidecar cache dirs
    - [x] Export/proxy progress percentage now uses bitrate×duration size estimates with ffmpeg `total_size` tracking, capped below 100% until ffmpeg completion
    - [x] Parallel proxy transcoding: 4 worker threads process ffmpeg transcodes concurrently instead of sequentially
   - [x] Optimized effects pipeline: single-pass `videoconvertscale` for decode→RGBA downscale, early downscale before effects, conditional element creation for no-op effects, leaky scope queue to prevent display backpressure
@@ -528,7 +529,7 @@ Tracking docs:
 - [x] Project save / load as FCPXML (wired to New/Open/Save buttons in toolbar)
 - [x] Recent projects list
 - [x] Auto-save (60s timer, writes to /tmp/ultimateslice-autosave.fcpxml when project is dirty)
-- [ ] Proxy media generation and management
+- [x] Proxy media generation and management
 - [x] Auto-backup with versioned history (timestamped backups to `$XDG_DATA_HOME/ultimateslice/backups/`, per-project pruning, restore UI, configurable in Preferences, MCP `list_backups` tool)
 
 ### Media Management

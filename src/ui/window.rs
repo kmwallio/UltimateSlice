@@ -2540,17 +2540,26 @@ fn reload_source_preview_selection(
     let _ = player.borrow().load(&load_uri);
 }
 
-fn collect_unique_clip_sources(project: &Project) -> Vec<(String, Option<String>)> {
-    let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
+fn collect_unique_proxy_variants(
+    project: &Project,
+    scale: crate::media::proxy_cache::ProxyScale,
+) -> Vec<crate::media::proxy_cache::ProxyVariantSpec> {
+    let mut seen: HashSet<crate::media::proxy_cache::ProxyVariantSpec> = HashSet::new();
     project
         .tracks
         .iter()
         .filter(|t| t.kind == TrackKind::Video)
         .flat_map(|t| t.clips.iter())
         .filter_map(|c| {
-            let key = (c.source_path.clone(), c.lut_key());
-            if seen.insert(key.clone()) {
-                Some(key)
+            let spec = crate::media::proxy_cache::ProxyVariantSpec::new(
+                c.source_path.clone(),
+                scale,
+                c.lut_key(),
+                c.vidstab_enabled,
+                c.vidstab_smoothing,
+            );
+            if seen.insert(spec.clone()) {
+                Some(spec)
             } else {
                 None
             }
@@ -2558,8 +2567,14 @@ fn collect_unique_clip_sources(project: &Project) -> Vec<(String, Option<String>
         .collect()
 }
 
-fn collect_unique_lut_clip_sources(project: &Project) -> Vec<(String, Option<String>)> {
-    let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
+fn collect_unique_preview_lut_proxy_variants(
+    project: &Project,
+) -> Vec<crate::media::proxy_cache::ProxyVariantSpec> {
+    let mut seen: HashSet<crate::media::proxy_cache::ProxyVariantSpec> = HashSet::new();
+    let scale = crate::media::proxy_cache::ProxyScale::Project {
+        width: project.width,
+        height: project.height,
+    };
     project
         .tracks
         .iter()
@@ -2570,9 +2585,15 @@ fn collect_unique_lut_clip_sources(project: &Project) -> Vec<(String, Option<Str
             if lut.is_empty() {
                 return None;
             }
-            let key = (c.source_path.clone(), Some(lut));
-            if seen.insert(key.clone()) {
-                Some(key)
+            let spec = crate::media::proxy_cache::ProxyVariantSpec::new(
+                c.source_path.clone(),
+                scale,
+                Some(lut),
+                false,
+                0.0,
+            );
+            if seen.insert(spec.clone()) {
+                Some(spec)
             } else {
                 None
             }
@@ -2580,19 +2601,20 @@ fn collect_unique_lut_clip_sources(project: &Project) -> Vec<(String, Option<Str
         .collect()
 }
 
-fn collect_near_playhead_clip_sources(
+fn collect_near_playhead_proxy_variants(
     project: &Project,
     playhead_ns: u64,
     window_ns: u64,
     max_items: usize,
-) -> Vec<(String, Option<String>)> {
+    scale: crate::media::proxy_cache::ProxyScale,
+) -> Vec<crate::media::proxy_cache::ProxyVariantSpec> {
     if max_items == 0 {
         return Vec::new();
     }
     let window_start = playhead_ns.saturating_sub(window_ns);
     let window_end = playhead_ns.saturating_add(window_ns);
 
-    let mut candidates: Vec<(u64, u64, String, Option<String>)> = project
+    let mut candidates: Vec<(u64, u64, crate::media::proxy_cache::ProxyVariantSpec)> = project
         .tracks
         .iter()
         .filter(|t| t.kind == TrackKind::Video)
@@ -2610,26 +2632,45 @@ fn collect_near_playhead_clip_sources(
             (
                 distance,
                 c.timeline_start,
-                c.source_path.clone(),
-                c.lut_key(),
+                crate::media::proxy_cache::ProxyVariantSpec::new(
+                    c.source_path.clone(),
+                    scale,
+                    c.lut_key(),
+                    c.vidstab_enabled,
+                    c.vidstab_smoothing,
+                ),
             )
         })
         .collect();
 
-    candidates.sort_by_key(|(distance, timeline_start, _, _)| (*distance, *timeline_start));
+    candidates.sort_by_key(|(distance, timeline_start, _)| (*distance, *timeline_start));
 
     let mut out = Vec::new();
-    let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
-    for (_, _, path, lut) in candidates {
-        let key = (path, lut);
-        if seen.insert(key.clone()) {
-            out.push(key);
+    let mut seen: HashSet<crate::media::proxy_cache::ProxyVariantSpec> = HashSet::new();
+    for (_, _, spec) in candidates {
+        if seen.insert(spec.clone()) {
+            out.push(spec);
             if out.len() >= max_items {
                 break;
             }
         }
     }
     out
+}
+
+fn request_proxy_variants(
+    cache: &mut crate::media::proxy_cache::ProxyCache,
+    variants: &[crate::media::proxy_cache::ProxyVariantSpec],
+) {
+    for variant in variants {
+        cache.request_with_vidstab(
+            &variant.source_path,
+            variant.scale,
+            variant.lut_key(),
+            variant.vidstab_enabled,
+            variant.vidstab_smoothing(),
+        );
+    }
 }
 
 /// Cancel any pending title-flush timer and schedule a new one.
@@ -3214,26 +3255,14 @@ pub fn build_window(
                     }
                     _ => crate::media::proxy_cache::ProxyScale::Half,
                 };
-                let clips: Vec<(String, Option<String>, bool, f32)> = {
+                let variants = {
                     let proj = project.borrow();
-                    proj.tracks
-                        .iter()
-                        .flat_map(|t| t.clips.iter())
-                        .map(|c| {
-                            (
-                                c.source_path.clone(),
-                                c.lut_key(),
-                                c.vidstab_enabled,
-                                c.vidstab_smoothing,
-                            )
-                        })
-                        .collect()
+                    collect_unique_proxy_variants(&proj, scale)
                 };
                 {
                     let mut cache = proxy_cache.borrow_mut();
-                    for (path, lut, vs_en, vs_sm) in &clips {
-                        cache.request_with_vidstab(path, scale, lut.as_deref(), *vs_en, *vs_sm);
-                    }
+                    cache.cleanup_stale_variants(&variants);
+                    request_proxy_variants(&mut cache, &variants);
                 }
                 let paths = proxy_cache.borrow().proxies.clone();
                 prog_player.borrow_mut().update_proxy_paths(paths);
@@ -3243,26 +3272,14 @@ pub fn build_window(
                 {
                     proxy_cache.borrow_mut().invalidate_all();
                 }
-                let (project_w, project_h, clips): (u32, u32, Vec<(String, Option<String>)>) = {
+                let variants = {
                     let proj = project.borrow();
-                    (
-                        proj.width,
-                        proj.height,
-                        collect_unique_lut_clip_sources(&proj),
-                    )
+                    collect_unique_preview_lut_proxy_variants(&proj)
                 };
                 {
                     let mut cache = proxy_cache.borrow_mut();
-                    for (path, lut) in &clips {
-                        cache.request(
-                            path,
-                            crate::media::proxy_cache::ProxyScale::Project {
-                                width: project_w,
-                                height: project_h,
-                            },
-                            lut.as_deref(),
-                        );
-                    }
+                    cache.cleanup_stale_variants(&variants);
+                    request_proxy_variants(&mut cache, &variants);
                 }
                 let paths = proxy_cache.borrow().proxies.clone();
                 prog_player.borrow_mut().update_proxy_paths(paths);
@@ -3693,41 +3710,27 @@ pub fn build_window(
                 // Re-generate proxies so the newly assigned/cleared LUT is baked in.
                 let prefs = preferences_state.borrow();
                 if prefs.proxy_mode.is_enabled() || prefs.preview_luts {
-                    let (scale, clips): (
-                        crate::media::proxy_cache::ProxyScale,
-                        Vec<(String, Option<String>)>,
-                    ) = {
+                    let variants = {
                         let proj = project.borrow();
                         if prefs.proxy_mode.is_enabled() {
-                            (
+                            collect_unique_proxy_variants(
+                                &proj,
                                 match prefs.proxy_mode {
                                     crate::ui_state::ProxyMode::QuarterRes => {
                                         crate::media::proxy_cache::ProxyScale::Quarter
                                     }
                                     _ => crate::media::proxy_cache::ProxyScale::Half,
                                 },
-                                proj.tracks
-                                    .iter()
-                                    .flat_map(|t| t.clips.iter())
-                                    .map(|c| (c.source_path.clone(), c.lut_key()))
-                                    .collect(),
                             )
                         } else {
-                            (
-                                crate::media::proxy_cache::ProxyScale::Project {
-                                    width: proj.width,
-                                    height: proj.height,
-                                },
-                                collect_unique_lut_clip_sources(&proj),
-                            )
+                            collect_unique_preview_lut_proxy_variants(&proj)
                         }
                     };
                     {
                         let mut cache = proxy_cache.borrow_mut();
                         cache.invalidate_all();
-                        for (path, lut) in &clips {
-                            cache.request(path, scale, lut.as_deref());
-                        }
+                        cache.cleanup_stale_variants(&variants);
+                        request_proxy_variants(&mut cache, &variants);
                     }
                     let paths = proxy_cache.borrow().proxies.clone();
                     prog_player.borrow_mut().update_proxy_paths(paths);
@@ -3824,26 +3827,14 @@ pub fn build_window(
                         }
                         _ => crate::media::proxy_cache::ProxyScale::Half,
                     };
-                    let clips: Vec<(String, Option<String>, bool, f32)> = {
+                    let variants = {
                         let proj = project.borrow();
-                        proj.tracks
-                            .iter()
-                            .flat_map(|t| t.clips.iter())
-                            .map(|c| {
-                                (
-                                    c.source_path.clone(),
-                                    c.lut_key(),
-                                    c.vidstab_enabled,
-                                    c.vidstab_smoothing,
-                                )
-                            })
-                            .collect()
+                        collect_unique_proxy_variants(&proj, scale)
                     };
                     {
                         let mut cache = proxy_cache.borrow_mut();
-                        for (path, lut, vs_en, vs_sm) in &clips {
-                            cache.request_with_vidstab(path, scale, lut.as_deref(), *vs_en, *vs_sm);
-                        }
+                        cache.cleanup_stale_variants(&variants);
+                        request_proxy_variants(&mut cache, &variants);
                     }
                     let paths = proxy_cache.borrow().proxies.clone();
                     prog_player.borrow_mut().update_proxy_paths(paths);
@@ -6827,15 +6818,13 @@ pub fn build_window(
                     let refresh_proxy_paths = manual_proxy_mode;
                     if desired_proxy_enabled && refresh_proxy_paths {
                         last_proxy_refresh_us_c.set(now_us);
-                        let clip_sources = {
+                        let variants = {
                             let proj = project.borrow();
-                            collect_unique_clip_sources(&proj)
+                            collect_unique_proxy_variants(&proj, desired_scale)
                         };
                         {
                             let mut cache = proxy_cache.borrow_mut();
-                            for (path, lut) in &clip_sources {
-                                cache.request(path, desired_scale, lut.as_deref());
-                            }
+                            request_proxy_variants(&mut cache, &variants);
                         }
                         let paths = proxy_cache.borrow().proxies.clone();
                         player.update_proxy_paths(paths);
@@ -6844,26 +6833,13 @@ pub fn build_window(
                         && now_us - last_proxy_refresh_us_c.get() >= 1_000_000
                     {
                         last_proxy_refresh_us_c.set(now_us);
-                        let (project_w, project_h, lut_sources) = {
+                        let variants = {
                             let proj = project.borrow();
-                            (
-                                proj.width,
-                                proj.height,
-                                collect_unique_lut_clip_sources(&proj),
-                            )
+                            collect_unique_preview_lut_proxy_variants(&proj)
                         };
                         {
                             let mut cache = proxy_cache.borrow_mut();
-                            for (path, lut) in &lut_sources {
-                                cache.request(
-                                    path,
-                                    crate::media::proxy_cache::ProxyScale::Project {
-                                        width: project_w,
-                                        height: project_h,
-                                    },
-                                    lut.as_deref(),
-                                );
-                            }
+                            request_proxy_variants(&mut cache, &variants);
                         }
                         let paths = proxy_cache.borrow().proxies.clone();
                         player.update_proxy_paths(paths);
@@ -8575,47 +8551,30 @@ pub fn build_window(
                         let manual_proxy_mode = proxy_mode.is_enabled();
                         if manual_proxy_mode {
                             let manual_scale = proxy_scale_for_mode(&proxy_mode);
-                            let near_playhead_sources: Vec<(String, Option<String>)> = {
+                            let near_playhead_variants = {
                                 let proj = project_reload.borrow();
-                                collect_near_playhead_clip_sources(
+                                collect_near_playhead_proxy_variants(
                                     &proj,
                                     prev_pos,
                                     NEAR_PLAYHEAD_PROXY_PRIME_WINDOW_NS,
                                     NEAR_PLAYHEAD_PROXY_PRIME_MAX_SOURCES,
+                                    manual_scale,
                                 )
                             };
-                            {
-                                let mut cache = proxy_cache_reload.borrow_mut();
-                                for (path, lut) in &near_playhead_sources {
-                                    cache.request(path, manual_scale, lut.as_deref());
-                                }
-                            }
-                            let clip_sources: Vec<(String, Option<String>)> = {
+                            let clip_variants = {
                                 let proj = project_reload.borrow();
-                                let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
-                                proj.tracks
-                                    .iter()
-                                    .flat_map(|t| t.clips.iter())
-                                    .filter_map(|c| {
-                                        let key = (c.source_path.clone(), c.lut_key());
-                                        if seen.insert(key.clone()) {
-                                            Some(key)
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                    .collect()
+                                collect_unique_proxy_variants(&proj, manual_scale)
                             };
                             {
                                 let mut cache = proxy_cache_reload.borrow_mut();
-                                for (path, lut) in &clip_sources {
-                                    cache.request(path, manual_scale, lut.as_deref());
-                                }
+                                cache.cleanup_stale_variants(&clip_variants);
+                                request_proxy_variants(&mut cache, &near_playhead_variants);
+                                request_proxy_variants(&mut cache, &clip_variants);
                             }
-                            if !near_playhead_sources.is_empty() {
+                            if !near_playhead_variants.is_empty() {
                                 log::debug!(
                                     "window:on_project_changed primed {} near-playhead proxy source(s) around {}ns",
-                                    near_playhead_sources.len(),
+                                    near_playhead_variants.len(),
                                     prev_pos
                                 );
                             }
