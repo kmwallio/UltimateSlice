@@ -35,7 +35,8 @@ pub struct SubtitleLine {
     pub bg_box_color: (f64, f64, f64, f64),
     /// Normalized font description used for preview rendering/fallback.
     pub font_desc: String,
-    /// Vertical position: 0.0 (top) to 1.0 (bottom). Default 0.85.
+    /// Vertical position: 0.0 (top) to 1.0 (bottom), mapped to the subtitle line's
+    /// top/center/bottom anchor the same way export does.
     pub position_y: f64,
 }
 
@@ -80,6 +81,54 @@ fn cairo_weight_from_pango(weight: pango::Weight) -> gtk::cairo::FontWeight {
         | pango::Weight::Heavy
         | pango::Weight::Ultraheavy => gtk::cairo::FontWeight::Bold,
         _ => gtk::cairo::FontWeight::Normal,
+    }
+}
+
+fn subtitle_preview_scale_factor(height: f64) -> f64 {
+    (height / 1080.0).max(0.01)
+}
+
+fn subtitle_preview_outline_width(outline_width: f64, height: f64) -> f64 {
+    let scaled = outline_width * subtitle_preview_scale_factor(height);
+    if outline_width > 0.0 {
+        scaled.max(1.0)
+    } else {
+        0.0
+    }
+}
+
+fn subtitle_preview_box_padding(height: f64) -> (f64, f64, f64) {
+    let scale = subtitle_preview_scale_factor(height);
+    let pad_x = (8.0 * scale).clamp(2.0, 12.0);
+    let pad_y = (4.0 * scale).clamp(1.0, 6.0);
+    let radius = (4.0 * scale).clamp(1.0, 8.0);
+    (pad_x, pad_y, radius)
+}
+
+fn subtitle_preview_underline_metrics(font_size: f64) -> (f64, f64) {
+    let thickness = (font_size * 0.06).clamp(1.0, 4.0);
+    let offset = (font_size * 0.12).clamp(1.0, 8.0);
+    (thickness, offset)
+}
+
+fn subtitle_preview_stroke_width(height: f64) -> f64 {
+    (4.0 * subtitle_preview_scale_factor(height)).max(1.0)
+}
+
+fn subtitle_preview_baseline_y(
+    position_y: f64,
+    canvas_height: f64,
+    text_y_bearing: f64,
+    text_height: f64,
+) -> f64 {
+    let pos_y = position_y.clamp(0.05, 0.95);
+    let anchor_y = pos_y * canvas_height;
+    if pos_y < 0.33 {
+        anchor_y - text_y_bearing
+    } else if pos_y < 0.66 {
+        anchor_y - (text_y_bearing + text_height / 2.0)
+    } else {
+        anchor_y - (text_y_bearing + text_height)
     }
 }
 
@@ -426,10 +475,7 @@ pub fn build_program_monitor(
             }
             let w = width as f64;
             let h = height as f64;
-            // Group lines by position_y (within 0.02 tolerance) so lines at the
-            // same position stack, but lines at different positions render independently.
             for line in guard.iter() {
-                let ty_base = h * line.position_y;
                 // Scale font: Pango pts → pixels (×4/3), then proportional to preview height.
                 // Matches the export scaling: font_size * 4/3 * (out_h / 1080).
                 let desc = pango::FontDescription::from_string(&line.font_desc);
@@ -471,46 +517,50 @@ pub fn build_program_monitor(
                 let te = cr
                     .text_extents(&display_text)
                     .unwrap_or_else(|_| cr.text_extents("M").unwrap());
+                let ve = cr
+                    .text_extents("Ag")
+                    .unwrap_or_else(|_| cr.text_extents("M").unwrap());
+                let text_y_bearing = ve.y_bearing().min(te.y_bearing());
+                let text_height = ve.height().max(te.height());
                 let tx = (w - te.width()) / 2.0 - te.x_bearing();
-                let ty = ty_base;
+                let ty =
+                    subtitle_preview_baseline_y(line.position_y, h, text_y_bearing, text_height);
 
                 // Background box.
                 if line.bg_box {
-                    let pad_x = 8.0;
-                    let pad_y = 4.0;
+                    let (pad_x, pad_y, radius) = subtitle_preview_box_padding(h);
                     let (br, bg, bb, ba) = line.bg_box_color;
                     cr.set_source_rgba(br, bg, bb, ba);
                     let box_x = tx + te.x_bearing() - pad_x;
-                    let box_y = ty - te.height() - pad_y;
+                    let box_y = ty + text_y_bearing - pad_y;
                     let box_w = te.width() + pad_x * 2.0;
-                    let box_h = te.height() + pad_y * 2.0;
-                    let r = 4.0;
+                    let box_h = text_height + pad_y * 2.0;
                     cr.new_sub_path();
                     cr.arc(
-                        box_x + box_w - r,
-                        box_y + r,
-                        r,
+                        box_x + box_w - radius,
+                        box_y + radius,
+                        radius,
                         -std::f64::consts::FRAC_PI_2,
                         0.0,
                     );
                     cr.arc(
-                        box_x + box_w - r,
-                        box_y + box_h - r,
-                        r,
+                        box_x + box_w - radius,
+                        box_y + box_h - radius,
+                        radius,
                         0.0,
                         std::f64::consts::FRAC_PI_2,
                     );
                     cr.arc(
-                        box_x + r,
-                        box_y + box_h - r,
-                        r,
+                        box_x + radius,
+                        box_y + box_h - radius,
+                        radius,
                         std::f64::consts::FRAC_PI_2,
                         std::f64::consts::PI,
                     );
                     cr.arc(
-                        box_x + r,
-                        box_y + r,
-                        r,
+                        box_x + radius,
+                        box_y + radius,
+                        radius,
                         std::f64::consts::PI,
                         3.0 * std::f64::consts::FRAC_PI_2,
                     );
@@ -521,8 +571,9 @@ pub fn build_program_monitor(
                 // Outline for the full text.
                 if line.outline_width > 0.0 {
                     let (or, og, ob, oa) = line.outline_color;
+                    let outline_width = subtitle_preview_outline_width(line.outline_width, h);
                     cr.set_source_rgba(or, og, ob, oa);
-                    cr.set_line_width(line.outline_width * 1.5);
+                    cr.set_line_width(outline_width);
                     let _ = cr.move_to(tx, ty);
                     cr.text_path(&display_text);
                     cr.stroke().ok();
@@ -559,14 +610,17 @@ pub fn build_program_monitor(
                                     cr.set_source_rgba(tr, tg, tb, ta);
                                 }
                                 SubtitleHighlightMode::Underline => {
+                                    let (underline_thickness, underline_offset) =
+                                        subtitle_preview_underline_metrics(font_size);
                                     let (tr, tg, tb, ta) = line.color;
                                     cr.set_source_rgba(tr, tg, tb, ta);
                                     let _ = cr.move_to(word_x, ty);
                                     let _ = cr.show_text(&word.text);
                                     // Draw underline.
-                                    cr.set_line_width(1.5);
-                                    let _ = cr.move_to(word_x, ty + 3.0);
-                                    let _ = cr.line_to(word_x + we.x_advance(), ty + 3.0);
+                                    cr.set_line_width(underline_thickness);
+                                    let _ = cr.move_to(word_x, ty + underline_offset);
+                                    let _ =
+                                        cr.line_to(word_x + we.x_advance(), ty + underline_offset);
                                     cr.stroke().ok();
                                     word_x += we.x_advance();
                                     continue;
@@ -581,7 +635,7 @@ pub fn build_program_monitor(
                                     // Stroke outline.
                                     let (hr, hg, hb, ha) = line.highlight_color;
                                     cr.set_source_rgba(hr, hg, hb, ha);
-                                    cr.set_line_width(2.5);
+                                    cr.set_line_width(subtitle_preview_stroke_width(h));
                                     let _ = cr.move_to(word_x, ty);
                                     cr.text_path(&word.text);
                                     cr.stroke().ok();
@@ -968,6 +1022,59 @@ pub fn build_program_monitor(
         frame_updater,
         subtitle_text_setter,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        subtitle_preview_baseline_y, subtitle_preview_box_padding, subtitle_preview_outline_width,
+        subtitle_preview_stroke_width, subtitle_preview_underline_metrics,
+    };
+
+    #[test]
+    fn subtitle_outline_scales_with_preview_height() {
+        assert!((subtitle_preview_outline_width(2.5, 1080.0) - 2.5).abs() < 1e-6);
+        assert!((subtitle_preview_outline_width(2.5, 540.0) - 1.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn subtitle_box_padding_scales_with_preview_height() {
+        let (pad_x, pad_y, radius) = subtitle_preview_box_padding(540.0);
+        assert!((pad_x - 4.0).abs() < 1e-6);
+        assert!((pad_y - 2.0).abs() < 1e-6);
+        assert!((radius - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn subtitle_underline_metrics_scale_with_font_size() {
+        let (thickness, offset) = subtitle_preview_underline_metrics(32.0);
+        assert!((thickness - 1.92).abs() < 1e-6);
+        assert!((offset - 3.84).abs() < 1e-6);
+    }
+
+    #[test]
+    fn subtitle_stroke_width_scales_with_preview_height() {
+        assert!((subtitle_preview_stroke_width(1080.0) - 4.0).abs() < 1e-6);
+        assert!((subtitle_preview_stroke_width(540.0) - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn subtitle_baseline_anchors_to_top_center_and_bottom_regions() {
+        let y_bearing = -18.0;
+        let text_height = 22.0;
+
+        let top_baseline = subtitle_preview_baseline_y(0.2, 100.0, y_bearing, text_height);
+        let top_edge = top_baseline + y_bearing;
+        assert!((top_edge - 20.0).abs() < 1e-6);
+
+        let center_baseline = subtitle_preview_baseline_y(0.5, 100.0, y_bearing, text_height);
+        let center_y = center_baseline + y_bearing + text_height / 2.0;
+        assert!((center_y - 50.0).abs() < 1e-6);
+
+        let bottom_baseline = subtitle_preview_baseline_y(0.85, 100.0, y_bearing, text_height);
+        let bottom_edge = bottom_baseline + y_bearing + text_height;
+        assert!((bottom_edge - 85.0).abs() < 1e-6);
+    }
 }
 
 /// Build a VU meter DrawingArea showing L/R audio peak levels in dBFS.

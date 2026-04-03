@@ -144,6 +144,7 @@ When a visual timeline clip or adjustment layer is selected, the Program Monitor
 - Manual timeline seeks use the paused accurate-seek path and then resume playback if it was active, so the frame shown at the playhead is updated before playback continues.
 - While paused, the monitor is repainted continuously so delayed post-seek frame updates still appear without requiring playback to resume.
 - Subtitle text is drawn in the Program Monitor overlay layer above the video pictures, so subtitles remain visible even when the underlying video frame is coming from background-prerendered playback.
+- Subtitle preview and export still use different renderers (GTK/Cairo overlay in preview, libass/ASS in export), but the monitor now scales subtitle outline, box padding, underline, and stroke metrics from the preview height/font size using the same 1080-based sizing model as export, and it maps `subtitle_position_y` to the same anchored top/center/bottom subtitle region instead of using it as a raw baseline, which keeps common subtitle styles visually closer.
 
 ## Playhead Accuracy
 

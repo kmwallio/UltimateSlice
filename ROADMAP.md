@@ -628,9 +628,10 @@ Tracking docs:
   - [x] Word highlight modes: None, Bold, Color, Underline, Stroke (karaoke-style)
   - [x] Time-based word window (configurable seconds around active word)
   - [x] Multi-track subtitle support with independent per-clip positioning/styling
-  - [x] Program Monitor overlay with real-time word highlighting
-  - [x] Export burn-in via ASS/SRT subtitle filter (post-compositing, above all tracks)
-  - [x] Shared subtitle font parsing/alignment: Program Monitor preview and export now derive subtitle family/style/size from the same normalized font description for better bold/italic/fallback consistency
+- [x] Program Monitor overlay with real-time word highlighting
+- [x] Export burn-in via ASS/SRT subtitle filter (post-compositing, above all tracks)
+- [x] Shared subtitle font parsing/alignment: Program Monitor preview and export now derive subtitle family/style/size from the same normalized font description for better bold/italic/fallback consistency
+- [x] Subtitle renderer-detail parity cleanup: Program Monitor subtitle outline, box, underline, and stroke metrics now scale from the same 1080-based sizing model used by export, and subtitle vertical positioning now uses the same normalized top/center/bottom anchoring model as export, reducing visible preview-vs-export styling drift without changing the separate GTK-overlay vs libass renderer architecture
   - [x] SRT file export, 7 MCP tools, FCPXML round-trip, timeline CC badge
   - [x] Whisper output cleanup (contraction merging, punctuation spacing)
 - [ ] AI Scene Cut Detection for long source files
