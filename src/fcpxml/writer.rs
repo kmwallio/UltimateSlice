@@ -1,4 +1,7 @@
-use crate::model::project::{FrameRate, Project};
+use crate::model::{
+    media_library::MediaItem,
+    project::{FrameRate, Project},
+};
 use anyhow::Result;
 use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::Writer;
@@ -1383,6 +1386,58 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
     Ok(String::from_utf8(result)?)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollectFilesMode {
+    TimelineUsedOnly,
+    EntireLibrary,
+}
+
+impl CollectFilesMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TimelineUsedOnly => "timeline_used",
+            Self::EntireLibrary => "entire_library",
+        }
+    }
+
+    pub fn ui_label(self) -> &'static str {
+        match self {
+            Self::TimelineUsedOnly => "Timeline-used only",
+            Self::EntireLibrary => "Entire library",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "timeline_used" | "timeline_used_only" => Some(Self::TimelineUsedOnly),
+            "entire_library" => Some(Self::EntireLibrary),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CollectFilesProgress {
+    Copying {
+        copied_files: usize,
+        total_files: usize,
+        current_file: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectFilesResult {
+    pub destination_dir: PathBuf,
+    pub media_files_copied: usize,
+    pub lut_files_copied: usize,
+}
+
+impl CollectFilesResult {
+    pub fn total_files_copied(&self) -> usize {
+        self.media_files_copied + self.lut_files_copied
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExportProjectWithMediaProgress {
     Copying {
@@ -1391,6 +1446,164 @@ pub enum ExportProjectWithMediaProgress {
         current_file: String,
     },
     WritingProjectXml,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectFilesManifest {
+    pub result: CollectFilesResult,
+    pub source_to_destination_path: HashMap<String, PathBuf>,
+    pub lut_source_to_destination_path: HashMap<String, PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyCollectedFilesResult {
+    pub project_media_references_updated: usize,
+    pub project_lut_references_updated: usize,
+    pub library_items_updated: usize,
+}
+
+impl ApplyCollectedFilesResult {
+    pub fn updated_any(&self) -> bool {
+        self.project_media_references_updated > 0
+            || self.project_lut_references_updated > 0
+            || self.library_items_updated > 0
+    }
+}
+
+/// Copy referenced project media into a destination directory without writing project XML.
+pub fn collect_files(
+    project: &Project,
+    library: &[MediaItem],
+    destination_dir: &Path,
+    mode: CollectFilesMode,
+) -> Result<CollectFilesResult> {
+    collect_files_with_progress(project, library, destination_dir, mode, |_| {})
+}
+
+pub fn collect_files_with_manifest<F>(
+    project: &Project,
+    library: &[MediaItem],
+    destination_dir: &Path,
+    mode: CollectFilesMode,
+    on_progress: F,
+) -> Result<CollectFilesManifest>
+where
+    F: FnMut(CollectFilesProgress),
+{
+    collect_files_internal(project, library, destination_dir, mode, true, on_progress)
+}
+
+pub fn collect_files_with_progress<F>(
+    project: &Project,
+    library: &[MediaItem],
+    destination_dir: &Path,
+    mode: CollectFilesMode,
+    on_progress: F,
+) -> Result<CollectFilesResult>
+where
+    F: FnMut(CollectFilesProgress),
+{
+    Ok(collect_files_with_manifest(project, library, destination_dir, mode, on_progress)?.result)
+}
+
+pub fn apply_collected_files_manifest(
+    project: &mut Project,
+    library: &mut [MediaItem],
+    manifest: &CollectFilesManifest,
+) -> ApplyCollectedFilesResult {
+    let (project_media_references_updated, project_lut_references_updated) =
+        apply_collected_files_to_tracks(
+            project.tracks.as_mut_slice(),
+            &manifest.source_to_destination_path,
+            &manifest.lut_source_to_destination_path,
+        );
+    let mut library_items_updated = 0usize;
+    for item in library.iter_mut() {
+        let Some(new_path) =
+            remapped_collect_path(&item.source_path, &manifest.source_to_destination_path)
+        else {
+            continue;
+        };
+        if item.source_path != new_path {
+            item.source_path = new_path;
+            library_items_updated += 1;
+        }
+    }
+    if project_media_references_updated > 0
+        || project_lut_references_updated > 0
+        || library_items_updated > 0
+    {
+        project.dirty = true;
+    }
+    ApplyCollectedFilesResult {
+        project_media_references_updated,
+        project_lut_references_updated,
+        library_items_updated,
+    }
+}
+
+fn apply_collected_files_to_tracks(
+    tracks: &mut [crate::model::track::Track],
+    source_to_destination_path: &HashMap<String, PathBuf>,
+    lut_source_to_destination_path: &HashMap<String, PathBuf>,
+) -> (usize, usize) {
+    let mut project_media_references_updated = 0usize;
+    let mut project_lut_references_updated = 0usize;
+    for track in tracks {
+        for clip in track.clips.iter_mut() {
+            if let Some(new_path) =
+                remapped_collect_path(&clip.source_path, source_to_destination_path)
+            {
+                if clip.source_path != new_path {
+                    clip.source_path = new_path;
+                    clip.fcpxml_original_source_path = None;
+                    project_media_references_updated += 1;
+                }
+            }
+            for lut_path in &mut clip.lut_paths {
+                let Some(new_path) =
+                    remapped_collect_path(lut_path, lut_source_to_destination_path)
+                else {
+                    continue;
+                };
+                if *lut_path != new_path {
+                    *lut_path = new_path;
+                    project_lut_references_updated += 1;
+                }
+            }
+            if let Some(angles) = clip.multicam_angles.as_mut() {
+                for angle in angles {
+                    if let Some(new_path) =
+                        remapped_collect_path(&angle.source_path, source_to_destination_path)
+                    {
+                        if angle.source_path != new_path {
+                            angle.source_path = new_path;
+                            project_media_references_updated += 1;
+                        }
+                    }
+                }
+            }
+            if let Some(compound_tracks) = clip.compound_tracks.as_mut() {
+                let (nested_media, nested_luts) = apply_collected_files_to_tracks(
+                    compound_tracks.as_mut_slice(),
+                    source_to_destination_path,
+                    lut_source_to_destination_path,
+                );
+                project_media_references_updated += nested_media;
+                project_lut_references_updated += nested_luts;
+            }
+        }
+    }
+    (
+        project_media_references_updated,
+        project_lut_references_updated,
+    )
+}
+
+fn remapped_collect_path(path: &str, path_map: &HashMap<String, PathBuf>) -> Option<String> {
+    path_map
+        .get(path)
+        .map(|mapped| mapped.to_string_lossy().to_string())
 }
 
 /// Export a packaged project: write `.uspxml` and copy referenced timeline media
@@ -1423,24 +1636,99 @@ where
         .filter(|s| !s.trim().is_empty())
         .unwrap_or("Project");
     let library_dir = parent.join(format!("{stem}.Library"));
-    std::fs::create_dir_all(&library_dir)?;
+    let collected = collect_files_internal(
+        project,
+        &[],
+        &library_dir,
+        CollectFilesMode::TimelineUsedOnly,
+        false,
+        |progress| match progress {
+            CollectFilesProgress::Copying {
+                copied_files,
+                total_files,
+                current_file,
+            } => on_progress(ExportProjectWithMediaProgress::Copying {
+                copied_files,
+                total_files,
+                current_file,
+            }),
+        },
+    )?;
+
+    let mut export_project = project.clone();
+    export_project.source_fcpxml = None;
+    export_project.file_path = None;
+    export_project.dirty = true;
+    for clip in export_project
+        .tracks
+        .iter_mut()
+        .flat_map(|track| track.clips.iter_mut())
+    {
+        if clip.source_path.is_empty() {
+            clip.fcpxml_original_source_path = None;
+            continue;
+        }
+        let mapped = collected
+            .source_to_destination_path
+            .get(&clip.source_path)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Missing packaged media mapping for source: {}",
+                    clip.source_path
+                )
+            })?;
+        let portable_path = normalize_packaged_path_for_portability(mapped);
+        clip.source_path = portable_path.to_string_lossy().to_string();
+        clip.fcpxml_original_source_path = None;
+    }
+
+    for clip in export_project
+        .tracks
+        .iter_mut()
+        .flat_map(|track| track.clips.iter_mut())
+    {
+        let mut rewritten: Vec<String> = Vec::new();
+        for lut_path in &clip.lut_paths {
+            let Some(mapped) = collected.lut_source_to_destination_path.get(lut_path) else {
+                continue;
+            };
+            let portable_path = normalize_packaged_path_for_portability(mapped);
+            rewritten.push(portable_path.to_string_lossy().to_string());
+        }
+        clip.lut_paths = rewritten;
+    }
+
+    on_progress(ExportProjectWithMediaProgress::WritingProjectXml);
+    let xml = write_fcpxml_for_path(&export_project, &output_fcpxml_path)?;
+    std::fs::write(&output_fcpxml_path, xml)?;
+    Ok(collected.result.destination_dir)
+}
+
+fn collect_files_internal<F>(
+    project: &Project,
+    library: &[MediaItem],
+    destination_dir: &Path,
+    mode: CollectFilesMode,
+    reserve_existing_names: bool,
+    mut on_progress: F,
+) -> Result<CollectFilesManifest>
+where
+    F: FnMut(CollectFilesProgress),
+{
+    let destination_dir = if destination_dir.is_absolute() {
+        destination_dir.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(destination_dir)
+    };
+    std::fs::create_dir_all(&destination_dir)?;
 
     let mut source_to_canonical_path: HashMap<String, PathBuf> = HashMap::new();
     let mut unique_canonical_sources: Vec<PathBuf> = Vec::new();
     let mut seen_canonical_sources: HashSet<PathBuf> = HashSet::new();
-    let mut used_file_names: HashSet<String> = HashSet::new();
-
-    for clip in project.tracks.iter().flat_map(|track| track.clips.iter()) {
-        if source_to_canonical_path.contains_key(&clip.source_path) {
-            continue;
-        }
-        let source_local_path = source_path_to_local_path(&clip.source_path)?;
+    for source_path in source_paths_for_collect_mode(project, library, mode) {
+        let source_local_path = source_path_to_local_path(&source_path)?;
         if !source_local_path.exists() {
-            anyhow::bail!(
-                "Source media not found for clip '{}': {}",
-                clip.label,
-                source_local_path.display()
-            );
+            anyhow::bail!("Source media not found: {}", source_local_path.display());
         }
         let canonical_source = std::fs::canonicalize(&source_local_path).map_err(|e| {
             anyhow::anyhow!(
@@ -1448,14 +1736,25 @@ where
                 source_local_path.display()
             )
         })?;
-
         if seen_canonical_sources.insert(canonical_source.clone()) {
             unique_canonical_sources.push(canonical_source.clone());
         }
-        source_to_canonical_path.insert(clip.source_path.clone(), canonical_source);
+        source_to_canonical_path.insert(source_path, canonical_source);
     }
 
-    let mut canonical_to_export_path: HashMap<PathBuf, PathBuf> = HashMap::new();
+    let mut used_file_names: HashSet<String> = HashSet::new();
+    if reserve_existing_names {
+        if let Ok(entries) = std::fs::read_dir(&destination_dir) {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if !name.is_empty() {
+                        used_file_names.insert(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    let mut canonical_to_destination_path: HashMap<PathBuf, PathBuf> = HashMap::new();
     for canonical_source in &unique_canonical_sources {
         let file_name = canonical_source
             .file_name()
@@ -1469,17 +1768,52 @@ where
             })?;
         let unique_name = unique_packaged_media_name(file_name, canonical_source, &used_file_names);
         used_file_names.insert(unique_name.clone());
-        canonical_to_export_path.insert(canonical_source.clone(), library_dir.join(unique_name));
+        canonical_to_destination_path
+            .insert(canonical_source.clone(), destination_dir.join(unique_name));
     }
 
-    let total_files = unique_canonical_sources.len();
-    for (index, canonical_source) in unique_canonical_sources.iter().enumerate() {
-        let destination = canonical_to_export_path
+    let mut lut_source_to_canonical_path: HashMap<String, PathBuf> = HashMap::new();
+    let mut unique_canonical_luts: Vec<PathBuf> = Vec::new();
+    let mut seen_canonical_luts: HashSet<PathBuf> = HashSet::new();
+    for lut_path in collect_clip_lut_paths(project) {
+        let lut_local = match source_path_to_local_path(&lut_path) {
+            Ok(path) => path,
+            Err(_) => continue,
+        };
+        if !lut_local.exists() {
+            continue;
+        }
+        let lut_canonical = std::fs::canonicalize(&lut_local).unwrap_or(lut_local);
+        if seen_canonical_luts.insert(lut_canonical.clone()) {
+            unique_canonical_luts.push(lut_canonical.clone());
+        }
+        lut_source_to_canonical_path.insert(lut_path, lut_canonical);
+    }
+
+    let mut lut_canonical_to_destination_path: HashMap<PathBuf, PathBuf> = HashMap::new();
+    for lut_canonical in &unique_canonical_luts {
+        let lut_file_name = lut_canonical
+            .file_name()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("lut.cube");
+        let unique_name =
+            unique_packaged_media_name(lut_file_name, lut_canonical, &used_file_names);
+        used_file_names.insert(unique_name.clone());
+        lut_canonical_to_destination_path
+            .insert(lut_canonical.clone(), destination_dir.join(unique_name));
+    }
+
+    let total_files = unique_canonical_sources.len() + unique_canonical_luts.len();
+    let mut copied_files = 0usize;
+
+    for canonical_source in &unique_canonical_sources {
+        let destination = canonical_to_destination_path
             .get(canonical_source)
             .cloned()
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "Missing packaged destination for source media: {}",
+                    "Missing destination for source media: {}",
                     canonical_source.display()
                 )
             })?;
@@ -1491,9 +1825,10 @@ where
             )
         })?;
         let resolved_destination = std::fs::canonicalize(&destination).unwrap_or(destination);
-        canonical_to_export_path.insert(canonical_source.clone(), resolved_destination);
-        on_progress(ExportProjectWithMediaProgress::Copying {
-            copied_files: index + 1,
+        canonical_to_destination_path.insert(canonical_source.clone(), resolved_destination);
+        copied_files += 1;
+        on_progress(CollectFilesProgress::Copying {
+            copied_files,
             total_files,
             current_file: canonical_source
                 .file_name()
@@ -1503,91 +1838,112 @@ where
         });
     }
 
-    let mut source_to_export_path: HashMap<String, String> = HashMap::new();
+    for lut_canonical in &unique_canonical_luts {
+        let destination = lut_canonical_to_destination_path
+            .get(lut_canonical)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!("Missing destination for LUT: {}", lut_canonical.display())
+            })?;
+        std::fs::copy(lut_canonical, &destination).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to copy LUT {} to {}: {e}",
+                lut_canonical.display(),
+                destination.display()
+            )
+        })?;
+        let resolved_destination = std::fs::canonicalize(&destination).unwrap_or(destination);
+        lut_canonical_to_destination_path.insert(lut_canonical.clone(), resolved_destination);
+        copied_files += 1;
+        on_progress(CollectFilesProgress::Copying {
+            copied_files,
+            total_files,
+            current_file: lut_canonical
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("lut")
+                .to_string(),
+        });
+    }
+
+    let mut source_to_destination_path: HashMap<String, PathBuf> = HashMap::new();
     for (source_path, canonical_source) in source_to_canonical_path {
-        let exported_path = canonical_to_export_path
+        let destination = canonical_to_destination_path
             .get(&canonical_source)
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "Missing exported media mapping for source: {}",
+                    "Missing collected media mapping for source: {}",
                     canonical_source.display()
                 )
-            })?;
-        let portable_path = normalize_packaged_path_for_portability(exported_path);
-        source_to_export_path.insert(source_path, portable_path.to_string_lossy().to_string());
+            })?
+            .clone();
+        source_to_destination_path.insert(source_path, destination);
     }
 
-    let mut export_project = project.clone();
-    export_project.source_fcpxml = None;
-    export_project.file_path = None;
-    export_project.dirty = true;
-    for clip in export_project
-        .tracks
-        .iter_mut()
-        .flat_map(|track| track.clips.iter_mut())
-    {
-        let mapped = source_to_export_path
-            .get(&clip.source_path)
+    let mut lut_source_to_destination_path: HashMap<String, PathBuf> = HashMap::new();
+    for (lut_path, lut_canonical) in lut_source_to_canonical_path {
+        let destination = lut_canonical_to_destination_path
+            .get(&lut_canonical)
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "Missing packaged media mapping for source: {}",
-                    clip.source_path
+                    "Missing collected LUT mapping for source: {}",
+                    lut_canonical.display()
                 )
-            })?;
-        clip.source_path = mapped.clone();
-        clip.fcpxml_original_source_path = None;
+            })?
+            .clone();
+        lut_source_to_destination_path.insert(lut_path, destination);
     }
 
-    // Copy LUT files into the Library directory and rewrite paths.
-    let mut lut_canonical_to_export: HashMap<PathBuf, PathBuf> = HashMap::new();
-    let mut lut_used_names: HashSet<String> = HashSet::new();
-    for clip in export_project
-        .tracks
-        .iter_mut()
-        .flat_map(|track| track.clips.iter_mut())
-    {
-        let mut rewritten: Vec<String> = Vec::new();
-        for lut_path_str in &clip.lut_paths {
-            let lut_local = match source_path_to_local_path(lut_path_str) {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-            if !lut_local.exists() {
-                continue;
-            }
-            let lut_canonical = std::fs::canonicalize(&lut_local).unwrap_or(lut_local);
-            if let Some(existing_export) = lut_canonical_to_export.get(&lut_canonical) {
-                let portable = normalize_packaged_path_for_portability(existing_export);
-                rewritten.push(portable.to_string_lossy().to_string());
-                continue;
-            }
-            let lut_file_name = lut_canonical
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("lut.cube");
-            let unique_lut_name =
-                unique_packaged_media_name(lut_file_name, &lut_canonical, &lut_used_names);
-            lut_used_names.insert(unique_lut_name.clone());
-            let lut_dest = library_dir.join(&unique_lut_name);
-            std::fs::copy(&lut_canonical, &lut_dest).map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to copy LUT {} to {}: {e}",
-                    lut_canonical.display(),
-                    lut_dest.display()
-                )
-            })?;
-            let resolved_dest = std::fs::canonicalize(&lut_dest).unwrap_or(lut_dest);
-            lut_canonical_to_export.insert(lut_canonical, resolved_dest.clone());
-            let portable = normalize_packaged_path_for_portability(&resolved_dest);
-            rewritten.push(portable.to_string_lossy().to_string());
+    Ok(CollectFilesManifest {
+        result: CollectFilesResult {
+            destination_dir,
+            media_files_copied: unique_canonical_sources.len(),
+            lut_files_copied: unique_canonical_luts.len(),
+        },
+        source_to_destination_path,
+        lut_source_to_destination_path,
+    })
+}
+
+fn source_paths_for_collect_mode(
+    project: &Project,
+    library: &[MediaItem],
+    mode: CollectFilesMode,
+) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut seen = HashSet::new();
+    for clip in project.tracks.iter().flat_map(|track| track.clips.iter()) {
+        push_unique_source_path(&mut paths, &mut seen, &clip.source_path);
+    }
+    if mode == CollectFilesMode::EntireLibrary {
+        for item in library.iter().filter(|item| item.has_backing_file()) {
+            push_unique_source_path(&mut paths, &mut seen, &item.source_path);
         }
-        clip.lut_paths = rewritten;
     }
+    paths
+}
 
-    on_progress(ExportProjectWithMediaProgress::WritingProjectXml);
-    let xml = write_fcpxml_for_path(&export_project, &output_fcpxml_path)?;
-    std::fs::write(&output_fcpxml_path, xml)?;
-    Ok(library_dir)
+fn collect_clip_lut_paths(project: &Project) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut seen = HashSet::new();
+    for lut_path in project
+        .tracks
+        .iter()
+        .flat_map(|track| track.clips.iter())
+        .flat_map(|clip| clip.lut_paths.iter())
+    {
+        push_unique_source_path(&mut paths, &mut seen, lut_path);
+    }
+    paths
+}
+
+fn push_unique_source_path(paths: &mut Vec<String>, seen: &mut HashSet<String>, source_path: &str) {
+    if source_path.trim().is_empty() {
+        return;
+    }
+    if seen.insert(source_path.to_string()) {
+        paths.push(source_path.to_string());
+    }
 }
 
 fn source_path_to_local_path(source_path: &str) -> Result<PathBuf> {
@@ -5675,6 +6031,353 @@ mod tests {
         assert!(
             srcs.iter().all(|src| src.starts_with(&library_uri_prefix)),
             "all media-rep sources should point into packaged library: {srcs:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_collect_files_timeline_used_only_excludes_unused_library_media() {
+        let root = unique_test_dir("collect-timeline-only");
+        std::fs::create_dir_all(&root).expect("create root");
+        let used_source = root.join("used.mp4");
+        let unused_source = root.join("unused.mp4");
+        std::fs::write(&used_source, b"used-media").expect("write used source");
+        std::fs::write(&unused_source, b"unused-media").expect("write unused source");
+
+        let destination = root.join("Collected");
+        let mut project = Project::new("CollectTimelineOnly");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        track.add_clip(Clip::new(
+            used_source.to_string_lossy().to_string(),
+            1_000_000_000,
+            0,
+            ClipKind::Video,
+        ));
+        project.tracks.push(track);
+
+        let library = vec![
+            crate::model::media_library::MediaItem::new(
+                used_source.to_string_lossy().to_string(),
+                1_000_000_000,
+            ),
+            crate::model::media_library::MediaItem::new(
+                unused_source.to_string_lossy().to_string(),
+                1_000_000_000,
+            ),
+        ];
+
+        let summary = collect_files(
+            &project,
+            &library,
+            &destination,
+            CollectFilesMode::TimelineUsedOnly,
+        )
+        .expect("timeline-used collection should succeed");
+        assert_eq!(summary.media_files_copied, 1);
+        assert_eq!(summary.lut_files_copied, 0);
+        assert_eq!(summary.total_files_copied(), 1);
+        assert!(
+            destination.join("used.mp4").exists(),
+            "used media should be copied"
+        );
+        assert!(
+            !destination.join("unused.mp4").exists(),
+            "unused library media should not be copied in timeline-used mode"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_collect_files_entire_library_includes_unused_library_media() {
+        let root = unique_test_dir("collect-entire-library");
+        std::fs::create_dir_all(&root).expect("create root");
+        let used_source = root.join("used.mp4");
+        let unused_source = root.join("unused.mp4");
+        std::fs::write(&used_source, b"used-media").expect("write used source");
+        std::fs::write(&unused_source, b"unused-media").expect("write unused source");
+
+        let destination = root.join("Collected");
+        let mut project = Project::new("CollectEntireLibrary");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        track.add_clip(Clip::new(
+            used_source.to_string_lossy().to_string(),
+            1_000_000_000,
+            0,
+            ClipKind::Video,
+        ));
+        project.tracks.push(track);
+
+        let library = vec![
+            crate::model::media_library::MediaItem::new(
+                used_source.to_string_lossy().to_string(),
+                1_000_000_000,
+            ),
+            crate::model::media_library::MediaItem::new(
+                unused_source.to_string_lossy().to_string(),
+                1_000_000_000,
+            ),
+        ];
+
+        let summary = collect_files(
+            &project,
+            &library,
+            &destination,
+            CollectFilesMode::EntireLibrary,
+        )
+        .expect("entire-library collection should succeed");
+        assert_eq!(summary.media_files_copied, 2);
+        assert_eq!(summary.lut_files_copied, 0);
+        assert_eq!(summary.total_files_copied(), 2);
+        assert!(
+            destination.join("used.mp4").exists(),
+            "used media should be copied"
+        );
+        assert!(
+            destination.join("unused.mp4").exists(),
+            "unused library media should be copied in entire-library mode"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_collect_files_deduplicates_media_lut_name_collisions() {
+        let root = unique_test_dir("collect-lut-collision");
+        let media_dir = root.join("media");
+        let lut_dir = root.join("luts");
+        std::fs::create_dir_all(&media_dir).expect("create media dir");
+        std::fs::create_dir_all(&lut_dir).expect("create lut dir");
+
+        let media_path = media_dir.join("shared.bin");
+        let lut_path = lut_dir.join("shared.bin");
+        std::fs::write(&media_path, b"media-bytes").expect("write media file");
+        std::fs::write(&lut_path, b"lut-bytes").expect("write lut file");
+
+        let destination = root.join("Collected");
+        let mut project = Project::new("CollectCollision");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut clip = Clip::new(
+            media_path.to_string_lossy().to_string(),
+            1_000_000_000,
+            0,
+            ClipKind::Video,
+        );
+        clip.lut_paths.push(lut_path.to_string_lossy().to_string());
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let summary = collect_files(
+            &project,
+            &[],
+            &destination,
+            CollectFilesMode::TimelineUsedOnly,
+        )
+        .expect("collection should succeed");
+        assert_eq!(summary.media_files_copied, 1);
+        assert_eq!(summary.lut_files_copied, 1);
+        assert_eq!(summary.total_files_copied(), 2);
+
+        let mut collected: Vec<(String, Vec<u8>)> = std::fs::read_dir(&destination)
+            .expect("read destination")
+            .map(|entry| {
+                let path = entry.expect("entry").path();
+                let name = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .expect("utf8 file name")
+                    .to_string();
+                let bytes = std::fs::read(&path).expect("read collected file");
+                (name, bytes)
+            })
+            .collect();
+        collected.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(collected.len(), 2, "media and LUT should both be present");
+        assert_ne!(
+            collected[0].0, collected[1].0,
+            "collision handling should assign distinct destination names"
+        );
+        assert!(
+            collected
+                .iter()
+                .any(|(_, bytes)| bytes.as_slice() == b"media-bytes"),
+            "expected copied media file contents"
+        );
+        assert!(
+            collected
+                .iter()
+                .any(|(_, bytes)| bytes.as_slice() == b"lut-bytes"),
+            "expected copied LUT file contents"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_collect_files_preserves_existing_destination_files() {
+        let root = unique_test_dir("collect-existing-destination");
+        std::fs::create_dir_all(&root).expect("create root");
+        let source = root.join("clip.mp4");
+        std::fs::write(&source, b"new-media").expect("write source");
+
+        let destination = root.join("Collected");
+        std::fs::create_dir_all(&destination).expect("create destination");
+        std::fs::write(destination.join("clip.mp4"), b"existing-media")
+            .expect("write existing destination file");
+
+        let mut project = Project::new("CollectExistingDestination");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        track.add_clip(Clip::new(
+            source.to_string_lossy().to_string(),
+            1_000_000_000,
+            0,
+            ClipKind::Video,
+        ));
+        project.tracks.push(track);
+
+        let summary = collect_files(
+            &project,
+            &[],
+            &destination,
+            CollectFilesMode::TimelineUsedOnly,
+        )
+        .expect("collection should succeed");
+        assert_eq!(summary.media_files_copied, 1);
+
+        let mut collected: Vec<(String, Vec<u8>)> = std::fs::read_dir(&destination)
+            .expect("read destination")
+            .map(|entry| {
+                let path = entry.expect("entry").path();
+                let name = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .expect("utf8 file name")
+                    .to_string();
+                let bytes = std::fs::read(&path).expect("read collected file");
+                (name, bytes)
+            })
+            .collect();
+        collected.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(collected.len(), 2, "existing file should be preserved");
+        assert!(
+            collected
+                .iter()
+                .any(|(name, bytes)| name == "clip.mp4" && bytes.as_slice() == b"existing-media"),
+            "existing destination file should not be overwritten"
+        );
+        assert!(
+            collected
+                .iter()
+                .any(|(name, bytes)| name != "clip.mp4" && bytes.as_slice() == b"new-media"),
+            "newly collected file should be copied with a distinct name"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_apply_collected_files_manifest_updates_next_save_paths() {
+        let root = unique_test_dir("collect-apply-next-save");
+        std::fs::create_dir_all(&root).expect("create root");
+        let used_source = root.join("used.mp4");
+        let unused_source = root.join("unused.mp4");
+        let lut_path = root.join("look.cube");
+        std::fs::write(&used_source, b"used-media").expect("write used source");
+        std::fs::write(&unused_source, b"unused-media").expect("write unused source");
+        std::fs::write(&lut_path, b"lut-bytes").expect("write lut");
+
+        let destination = root.join("Collected");
+        let mut project = Project::new("CollectApplyNextSave");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut clip = Clip::new(
+            used_source.to_string_lossy().to_string(),
+            1_000_000_000,
+            0,
+            ClipKind::Video,
+        );
+        clip.fcpxml_original_source_path = Some("/Volumes/original/used.mp4".to_string());
+        clip.lut_paths.push(lut_path.to_string_lossy().to_string());
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let mut library = vec![
+            crate::model::media_library::MediaItem::new(
+                used_source.to_string_lossy().to_string(),
+                1_000_000_000,
+            ),
+            crate::model::media_library::MediaItem::new(
+                unused_source.to_string_lossy().to_string(),
+                1_000_000_000,
+            ),
+        ];
+
+        let manifest = collect_files_with_manifest(
+            &project,
+            &library,
+            &destination,
+            CollectFilesMode::EntireLibrary,
+            |_| {},
+        )
+        .expect("collection manifest should succeed");
+        let summary =
+            apply_collected_files_manifest(&mut project, library.as_mut_slice(), &manifest);
+        assert!(
+            summary.updated_any(),
+            "project/library references should update"
+        );
+        assert_eq!(summary.project_media_references_updated, 1);
+        assert_eq!(summary.project_lut_references_updated, 1);
+        assert_eq!(summary.library_items_updated, 2);
+        assert!(
+            project.dirty,
+            "relinking collected paths should dirty the project"
+        );
+
+        let collected_used = manifest
+            .source_to_destination_path
+            .get(&used_source.to_string_lossy().to_string())
+            .expect("collected used source")
+            .to_string_lossy()
+            .to_string();
+        let collected_unused = manifest
+            .source_to_destination_path
+            .get(&unused_source.to_string_lossy().to_string())
+            .expect("collected unused source")
+            .to_string_lossy()
+            .to_string();
+        let collected_lut = manifest
+            .lut_source_to_destination_path
+            .get(&lut_path.to_string_lossy().to_string())
+            .expect("collected lut")
+            .to_string_lossy()
+            .to_string();
+
+        let clip = &project.tracks[0].clips[0];
+        assert_eq!(clip.source_path, collected_used);
+        assert_eq!(clip.lut_paths, vec![collected_lut.clone()]);
+        assert_eq!(clip.fcpxml_original_source_path, None);
+        assert_eq!(library[0].source_path, collected_used);
+        assert_eq!(library[1].source_path, collected_unused);
+
+        let xml = write_fcpxml_for_path(&project, Path::new("/tmp/collect-apply.uspxml"))
+            .expect("write updated project xml");
+        assert!(
+            xml.contains(&collected_used),
+            "saved project should reference collected media path"
+        );
+        assert!(
+            xml.contains(&collected_lut),
+            "saved project should reference collected LUT path"
+        );
+        assert!(
+            !xml.contains("/Volumes/original/used.mp4"),
+            "saved project should stop using preserved original FCPXML source path"
         );
 
         let _ = std::fs::remove_dir_all(&root);

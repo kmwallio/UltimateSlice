@@ -725,6 +725,51 @@ fn relink_missing_media_under_root(
     }
 }
 
+fn apply_collected_files_manifest_to_project_state(
+    project: &Rc<RefCell<Project>>,
+    library: &Rc<RefCell<MediaLibrary>>,
+    source_marks: &Rc<RefCell<crate::model::media_library::SourceMarks>>,
+    on_source_selected: &Rc<dyn Fn(String, u64)>,
+    on_project_changed: &Rc<dyn Fn()>,
+    manifest: &crate::fcpxml::writer::CollectFilesManifest,
+) -> crate::fcpxml::writer::ApplyCollectedFilesResult {
+    let remapped_source = {
+        let current_path = source_marks.borrow().path.clone();
+        if current_path.is_empty() {
+            None
+        } else {
+            manifest
+                .source_to_destination_path
+                .get(&current_path)
+                .map(|path| path.to_string_lossy().to_string())
+        }
+    };
+    let summary = {
+        let mut proj = project.borrow_mut();
+        let mut lib = library.borrow_mut();
+        crate::fcpxml::writer::apply_collected_files_manifest(
+            &mut proj,
+            lib.items.as_mut_slice(),
+            manifest,
+        )
+    };
+    if !summary.updated_any() {
+        return summary;
+    }
+    if let Some(new_path) = remapped_source {
+        let duration_ns = library
+            .borrow()
+            .items
+            .iter()
+            .find(|item| item.source_path == new_path)
+            .map(|item| item.duration_ns)
+            .unwrap_or_else(|| source_marks.borrow().duration_ns);
+        on_source_selected(new_path, duration_ns);
+    }
+    on_project_changed();
+    summary
+}
+
 #[derive(Clone, Copy)]
 struct SourcePlacementInfo {
     is_audio_only: bool,
@@ -4973,6 +5018,18 @@ pub fn build_window(
     // Shared countdown counter for the program monitor overlay (0 = hidden).
     let voiceover_countdown: Rc<Cell<u32>> = Rc::new(Cell::new(0));
     let voiceover_recording: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
+    let on_apply_collected_files_impl: Rc<
+        RefCell<Option<Rc<dyn Fn(crate::fcpxml::writer::CollectFilesManifest)>>>,
+    > = Rc::new(RefCell::new(None));
+    let on_apply_collected_files_gui: Rc<dyn Fn(crate::fcpxml::writer::CollectFilesManifest)> = {
+        let cb = on_apply_collected_files_impl.clone();
+        Rc::new(move |manifest| {
+            let callback = cb.borrow().as_ref().cloned();
+            if let Some(f) = callback {
+                f(manifest);
+            }
+        })
+    };
 
     let (header, btn_record) = toolbar::build_toolbar(
         project.clone(),
@@ -4990,6 +5047,10 @@ pub fn build_window(
                 suppress_resume_on_next_reload.set(true);
                 clear_media_browser_on_next_reload.set(true);
             }
+        },
+        {
+            let cb = on_apply_collected_files_gui.clone();
+            move |manifest| cb(manifest)
         },
         {
             let cb = on_export_frame_gui.clone();
@@ -7505,6 +7566,23 @@ pub fn build_window(
             m.source_timecode_base_ns = source_info.source_timecode_base_ns;
         })
     };
+    *on_apply_collected_files_impl.borrow_mut() = Some({
+        let project = project.clone();
+        let library = library.clone();
+        let source_marks = source_marks.clone();
+        let on_source_selected = on_source_selected.clone();
+        let on_project_changed = on_project_changed.clone();
+        Rc::new(move |manifest| {
+            apply_collected_files_manifest_to_project_state(
+                &project,
+                &library,
+                &source_marks,
+                &on_source_selected,
+                &on_project_changed,
+                &manifest,
+            );
+        })
+    });
 
     // Wire on_match_frame — locates the selected clip's source in the media
     // library, loads it in the source monitor, and seeks to the matching frame.
@@ -9501,6 +9579,7 @@ pub fn build_window(
         let proxy_cache = proxy_cache.clone();
         let bg_removal_cache = bg_removal_cache.clone();
         let on_close_preview = on_close_preview.clone();
+        let source_marks = source_marks.clone();
         let on_source_selected = on_source_selected.clone();
         let on_project_changed = on_project_changed.clone();
         let mcp_light_refresh_next = mcp_light_refresh_next.clone();
@@ -9557,6 +9636,7 @@ pub fn build_window(
                         &bg_removal_cache,
                         &stt_cache,
                         &on_close_preview,
+                        &source_marks,
                         &on_source_selected,
                         &on_project_changed_mcp_light,
                         &on_project_changed_mcp_full,
@@ -10077,6 +10157,7 @@ fn handle_mcp_command(
     bg_removal_cache: &Rc<RefCell<crate::media::bg_removal_cache::BgRemovalCache>>,
     stt_cache: &Rc<RefCell<crate::media::stt_cache::SttCache>>,
     on_close_preview: &Rc<dyn Fn()>,
+    source_marks: &Rc<RefCell<crate::model::media_library::SourceMarks>>,
     on_source_selected: &Rc<dyn Fn(String, u64)>,
     on_project_changed: &Rc<dyn Fn()>,
     on_project_changed_full: &Rc<dyn Fn()>,
@@ -12448,6 +12529,64 @@ fn handle_mcp_command(
                     .send(json!({"success": false, "error": e.to_string()}))
                     .ok(),
             };
+        }
+
+        McpCommand::CollectProjectFiles {
+            directory_path,
+            mode,
+            use_collected_locations_on_next_save,
+            reply,
+        } => {
+            let proj_snapshot = project.borrow().clone();
+            let library_snapshot = library.borrow().items.clone();
+            let result = crate::fcpxml::writer::collect_files_with_manifest(
+                &proj_snapshot,
+                &library_snapshot,
+                std::path::Path::new(&directory_path),
+                mode,
+                |_| {},
+            );
+            match result {
+                Ok(manifest) => {
+                    let summary = manifest.result.clone();
+                    let apply_summary = if use_collected_locations_on_next_save {
+                        apply_collected_files_manifest_to_project_state(
+                            project,
+                            library,
+                            source_marks,
+                            on_source_selected,
+                            on_project_changed_full,
+                            &manifest,
+                        )
+                    } else {
+                        crate::fcpxml::writer::ApplyCollectedFilesResult {
+                            project_media_references_updated: 0,
+                            project_lut_references_updated: 0,
+                            library_items_updated: 0,
+                        }
+                    };
+                    reply
+                        .send(json!({
+                            "success": true,
+                            "directory_path": summary.destination_dir.to_string_lossy(),
+                            "mode": mode.as_str(),
+                            "use_collected_locations_on_next_save": use_collected_locations_on_next_save,
+                            "project_paths_updated": apply_summary.updated_any(),
+                            "project_media_references_updated": apply_summary.project_media_references_updated,
+                            "project_lut_references_updated": apply_summary.project_lut_references_updated,
+                            "library_items_updated": apply_summary.library_items_updated,
+                            "media_files": summary.media_files_copied,
+                            "lut_files": summary.lut_files_copied,
+                            "total_files": summary.total_files_copied()
+                        }))
+                        .ok();
+                }
+                Err(e) => {
+                    reply
+                        .send(json!({"success": false, "error": e.to_string()}))
+                        .ok();
+                }
+            }
         }
 
         McpCommand::OpenFcpxml { path, reply } => {

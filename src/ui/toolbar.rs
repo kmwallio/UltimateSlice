@@ -44,6 +44,12 @@ enum ExportProjectWithMediaUiEvent {
     Error(String),
 }
 
+enum CollectFilesUiEvent {
+    Progress(fcpxml::writer::CollectFilesProgress),
+    Done(fcpxml::writer::CollectFilesManifest),
+    Error(String),
+}
+
 fn video_codec_from_selected(selected: u32) -> VideoCodec {
     match selected {
         0 => VideoCodec::H264,
@@ -291,6 +297,98 @@ pub fn confirm_unsaved_then(
     dialog.present();
 }
 
+#[allow(deprecated)]
+fn choose_collect_files_target(
+    window: Option<gtk::Window>,
+    project: Rc<RefCell<Project>>,
+    on_selected: Rc<dyn Fn(std::path::PathBuf, fcpxml::writer::CollectFilesMode, bool)>,
+) {
+    let dialog = gtk::Dialog::builder()
+        .title("Collect Files")
+        .modal(true)
+        .default_width(460)
+        .build();
+    dialog.set_transient_for(window.as_ref());
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+    dialog.add_button("Choose Folder…", gtk::ResponseType::Accept);
+
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    content.set_margin_start(16);
+    content.set_margin_end(16);
+    content.set_margin_top(16);
+    content.set_margin_bottom(16);
+
+    let label = gtk::Label::new(Some(
+        "Copy project media into a destination folder for archival or transfer. Choose whether to collect only timeline-used media or the entire project library. Existing clip LUT files used on the timeline are included automatically.",
+    ));
+    label.set_wrap(true);
+    label.set_xalign(0.0);
+
+    let timeline_only =
+        gtk::CheckButton::with_label(fcpxml::writer::CollectFilesMode::TimelineUsedOnly.ui_label());
+    timeline_only.set_active(true);
+    let entire_library =
+        gtk::CheckButton::with_label(fcpxml::writer::CollectFilesMode::EntireLibrary.ui_label());
+    entire_library.set_group(Some(&timeline_only));
+
+    let mode_hint = gtk::Label::new(Some(
+        "Timeline-used only makes a smaller handoff copy. Entire library also includes imported clips that are not currently on the timeline.",
+    ));
+    mode_hint.set_wrap(true);
+    mode_hint.set_xalign(0.0);
+    mode_hint.add_css_class("dim-label");
+
+    let use_collected_locations_on_next_save =
+        gtk::CheckButton::with_label("Use collected locations on next save");
+    let use_locations_hint = gtk::Label::new(Some(
+        "After copying finishes, update the current project to point at the collected files so the next project save/export writes those paths.",
+    ));
+    use_locations_hint.set_wrap(true);
+    use_locations_hint.set_xalign(0.0);
+    use_locations_hint.add_css_class("dim-label");
+
+    content.append(&label);
+    content.append(&timeline_only);
+    content.append(&entire_library);
+    content.append(&mode_hint);
+    content.append(&use_collected_locations_on_next_save);
+    content.append(&use_locations_hint);
+    dialog.content_area().append(&content);
+
+    dialog.connect_response(move |d, resp| match resp {
+        gtk::ResponseType::Accept => {
+            let mode = if entire_library.is_active() {
+                fcpxml::writer::CollectFilesMode::EntireLibrary
+            } else {
+                fcpxml::writer::CollectFilesMode::TimelineUsedOnly
+            };
+            d.close();
+
+            let file_dialog = gtk::FileDialog::new();
+            file_dialog.set_title("Choose Destination Folder");
+            if let Some(file_path) = project.borrow().file_path.clone() {
+                if let Some(parent) = std::path::Path::new(&file_path).parent() {
+                    file_dialog.set_initial_folder(Some(&gio::File::for_path(parent)));
+                }
+            }
+
+            let window = window.clone();
+            let on_selected = on_selected.clone();
+            let use_collected_locations_on_next_save =
+                use_collected_locations_on_next_save.is_active();
+            file_dialog.select_folder(window.as_ref(), gio::Cancellable::NONE, move |result| {
+                if let Ok(file) = result {
+                    if let Some(path) = file.path() {
+                        on_selected(path, mode, use_collected_locations_on_next_save);
+                    }
+                }
+            });
+        }
+        _ => d.close(),
+    });
+    dialog.present();
+}
+
 /// Build the main `HeaderBar` toolbar.
 #[allow(deprecated)]
 pub fn build_toolbar(
@@ -300,6 +398,7 @@ pub fn build_toolbar(
     bg_removal_cache: Rc<RefCell<crate::media::bg_removal_cache::BgRemovalCache>>,
     on_project_changed: impl Fn() + 'static + Clone,
     on_project_reloaded: impl Fn() + 'static + Clone,
+    on_use_collected_locations: impl Fn(fcpxml::writer::CollectFilesManifest) + 'static + Clone,
     on_export_frame: impl Fn() + 'static + Clone,
     on_record_voiceover: impl Fn() + 'static + Clone,
 ) -> (HeaderBar, Button) {
@@ -1671,6 +1770,150 @@ pub fn build_toolbar(
             });
         });
     }
+    let btn_collect_files = gtk::Button::with_label("Collect Files…");
+    btn_collect_files.add_css_class("flat");
+    {
+        let project = project.clone();
+        let library = library.clone();
+        let export_pop_weak = export_pop.downgrade();
+        btn_collect_files.connect_clicked(move |btn| {
+            if let Some(pop) = export_pop_weak.upgrade() {
+                pop.popdown();
+            }
+
+            let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+            let on_selected: Rc<dyn Fn(std::path::PathBuf, fcpxml::writer::CollectFilesMode, bool)> =
+                Rc::new({
+                    let project = project.clone();
+                    let library = library.clone();
+                    let on_use_collected_locations = on_use_collected_locations.clone();
+                    move |destination_dir, mode, use_collected_locations_on_next_save| {
+                        let destination_string = destination_dir.to_string_lossy().to_string();
+                        let project_snapshot = project.borrow().clone();
+                        let library_snapshot = library.borrow().items.clone();
+                        let (tx, rx) = std::sync::mpsc::channel::<CollectFilesUiEvent>();
+                        let destination_for_worker = destination_dir.clone();
+
+                        std::thread::spawn(move || {
+                            let result = fcpxml::writer::collect_files_with_manifest(
+                                &project_snapshot,
+                                &library_snapshot,
+                                &destination_for_worker,
+                                mode,
+                                |progress| {
+                                    let _ = tx.send(CollectFilesUiEvent::Progress(progress));
+                                },
+                            );
+                            match result {
+                                Ok(summary) => {
+                                    let _ = tx.send(CollectFilesUiEvent::Done(summary));
+                                }
+                                Err(e) => {
+                                    let _ = tx.send(CollectFilesUiEvent::Error(e.to_string()));
+                                }
+                            }
+                        });
+
+                        let progress_dialog = gtk::Window::builder()
+                            .title("Collecting Files…")
+                            .default_width(420)
+                            .build();
+                        let vbox = gtk::Box::new(gtk::Orientation::Vertical, 12);
+                        vbox.set_margin_start(20);
+                        vbox.set_margin_end(20);
+                        vbox.set_margin_top(20);
+                        vbox.set_margin_bottom(20);
+
+                        let status_label = gtk::Label::new(Some(&format!(
+                            "Preparing {} collection…",
+                            mode.ui_label()
+                        )));
+                        status_label.set_halign(gtk::Align::Start);
+                        status_label.set_wrap(true);
+
+                        let progress_bar = gtk::ProgressBar::new();
+                        progress_bar.set_show_text(true);
+                        progress_bar.set_fraction(0.0);
+                        progress_bar.set_text(Some("0%"));
+
+                        let close_btn = gtk::Button::with_label("Close");
+                        close_btn.set_halign(gtk::Align::End);
+
+                        vbox.append(&status_label);
+                        vbox.append(&progress_bar);
+                        vbox.append(&close_btn);
+                        progress_dialog.set_child(Some(&vbox));
+                        progress_dialog.present();
+
+                        {
+                            let pd = progress_dialog.clone();
+                            close_btn.connect_clicked(move |_| {
+                                pd.close();
+                            });
+                        }
+
+                        let on_use_collected_locations = on_use_collected_locations.clone();
+                        glib::timeout_add_local(std::time::Duration::from_millis(120), move || {
+                            while let Ok(event) = rx.try_recv() {
+                                match event {
+                                    CollectFilesUiEvent::Progress(
+                                        fcpxml::writer::CollectFilesProgress::Copying {
+                                            copied_files,
+                                            total_files,
+                                            current_file,
+                                        },
+                                    ) => {
+                                        let fraction = if total_files == 0 {
+                                            0.0
+                                        } else {
+                                            (copied_files as f64) / (total_files as f64)
+                                        };
+                                        progress_bar.set_fraction(fraction.clamp(0.0, 1.0));
+                                        progress_bar
+                                            .set_text(Some(&format!("{:.0}%", fraction * 100.0)));
+                                        status_label.set_text(&format!(
+                                        "Copying {current_file} ({copied_files}/{total_files})…"
+                                    ));
+                                    }
+                                    CollectFilesUiEvent::Done(manifest) => {
+                                        let summary = manifest.result.clone();
+                                        if use_collected_locations_on_next_save {
+                                            on_use_collected_locations(manifest);
+                                        }
+                                        progress_bar.set_fraction(1.0);
+                                        progress_bar.set_text(Some("Done!"));
+                                        let status = if use_collected_locations_on_next_save {
+                                            format!(
+                                                "Collected {} media file(s) and {} LUT file(s) into {} and updated the project to use those files on the next save",
+                                                summary.media_files_copied,
+                                                summary.lut_files_copied,
+                                                destination_string
+                                            )
+                                        } else {
+                                            format!(
+                                                "Collected {} media file(s) and {} LUT file(s) into {}",
+                                                summary.media_files_copied,
+                                                summary.lut_files_copied,
+                                                destination_string
+                                            )
+                                        };
+                                        status_label.set_text(&status);
+                                        return glib::ControlFlow::Break;
+                                    }
+                                    CollectFilesUiEvent::Error(e) => {
+                                        status_label.set_text(&format!("Error: {e}"));
+                                        eprintln!("Collect-files error: {e}");
+                                        return glib::ControlFlow::Break;
+                                    }
+                                }
+                            }
+                            glib::ControlFlow::Continue
+                        });
+                    }
+                });
+            choose_collect_files_target(window, project.clone(), on_selected);
+        });
+    }
     let btn_export_frame = gtk::Button::with_label("Export Frame…");
     btn_export_frame.add_css_class("flat");
     {
@@ -1853,6 +2096,7 @@ pub fn build_toolbar(
     }
 
     export_pop_box.append(&btn_export_project_with_media);
+    export_pop_box.append(&btn_collect_files);
     export_pop_box.append(&btn_export_frame);
     export_pop_box.append(&btn_export_edl);
     export_pop_box.append(&btn_export_otio);

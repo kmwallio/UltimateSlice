@@ -106,8 +106,12 @@ Useful playback-tuning toggles:
 - `python3 tools/mcp_call.py set_background_prerender '{"enabled":true}'`
 - `python3 tools/mcp_call.py get_performance_snapshot '{}'`
 - `python3 tools/mcp_call.py save_project_with_media '{"path":"/absolute/path/MyProject.uspxml"}'`
+- `python3 tools/mcp_call.py collect_project_files '{"directory_path":"/absolute/path/CollectedMedia","mode":"entire_library"}'`
+- `python3 tools/mcp_call.py collect_project_files '{"directory_path":"/absolute/path/CollectedMedia","mode":"entire_library","use_collected_locations_on_next_save":true}'`
 
 `set_background_prerender` enables temporary disk prerender of complex upcoming overlap sections (cleaned when the app/player closes).
+
+`collect_project_files` leaves the current project paths unchanged by default; set `use_collected_locations_on_next_save` to `true` when you want the next project save/export to use the copied media paths.
 
 ## Project management examples
 
@@ -130,6 +134,14 @@ python3 tools/mcp_call.py open_otio '{"path":"/absolute/path/project.otio"}'
 ```
 
 `create_project`, `open_fcpxml`, and `open_otio` replace the current project and switch the visible window from the Welcome screen to the editor view, so screenshots and subsequent UI-driven automation land on the active project.
+
+Collect media files into a folder without writing project XML:
+
+```bash
+python3 tools/mcp_call.py collect_project_files '{"directory_path":"/absolute/path/CollectedMedia","mode":"timeline_used"}'
+```
+
+Use `mode:"entire_library"` to include imported-but-unused library media too. If omitted, the MCP tool defaults to `timeline_used`.
 
 ## Transform MCP examples
 

@@ -220,6 +220,12 @@ pub enum McpCommand {
         path: String,
         reply: SyncSender<Value>,
     },
+    CollectProjectFiles {
+        directory_path: String,
+        mode: crate::fcpxml::writer::CollectFilesMode,
+        use_collected_locations_on_next_save: bool,
+        reply: SyncSender<Value>,
+    },
     ExportMp4 {
         path: String,
         reply: SyncSender<Value>,

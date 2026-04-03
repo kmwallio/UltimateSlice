@@ -640,6 +640,26 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "collect_project_files",
+            "description": "Copy referenced project media into a destination directory for archival or transfer, without writing project XML. Supports timeline-used-only or entire-library collection modes and also copies clip LUT files that exist on disk.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "directory_path": { "type": "string", "description": "Absolute path of the destination directory for collected files." },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["timeline_used", "entire_library"],
+                        "description": "Collection scope. Defaults to timeline_used."
+                    },
+                    "use_collected_locations_on_next_save": {
+                        "type": "boolean",
+                        "description": "When true, update the in-memory project to point at the collected media and LUT files so the next project save/export writes those collected paths."
+                    }
+                },
+                "required": ["directory_path"]
+            }
+        },
+        {
             "name": "open_fcpxml",
             "description": "Load a project from a Final Cut Pro XML (.fcpxml) file (supports versions up to 1.14), replacing the current project.",
             "inputSchema": {
@@ -1946,6 +1966,35 @@ fn dispatch_tool_payload(
             reply: tx,
         },
 
+        "collect_project_files" => {
+            let directory_path = args["directory_path"].as_str().unwrap_or("").to_string();
+            if directory_path.is_empty() {
+                return Err(tool_error_payload(-32602, "directory_path is required"));
+            }
+            let mode = match args.get("mode").and_then(|v| v.as_str()) {
+                None => crate::fcpxml::writer::CollectFilesMode::TimelineUsedOnly,
+                Some(value) => match crate::fcpxml::writer::CollectFilesMode::from_str(value) {
+                    Some(mode) => mode,
+                    None => {
+                        return Err(tool_error_payload(
+                            -32602,
+                            "mode must be 'timeline_used' or 'entire_library'",
+                        ));
+                    }
+                },
+            };
+            let use_collected_locations_on_next_save = args
+                .get("use_collected_locations_on_next_save")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            McpCommand::CollectProjectFiles {
+                directory_path,
+                mode,
+                use_collected_locations_on_next_save,
+                reply: tx,
+            }
+        }
+
         "open_fcpxml" => McpCommand::OpenFcpxml {
             path: args["path"].as_str().unwrap_or("").to_string(),
             reply: tx,
@@ -2979,6 +3028,55 @@ mod tests {
         let params = json!({
             "name": "save_project_with_media",
             "arguments": { "path": "/tmp/packaged.uspxml" }
+        });
+        let mut cache = std::collections::HashMap::new();
+        let response = call_tool(&id, &params, &sender, &mut cache);
+        assert_eq!(response["id"], id);
+        assert_eq!(response["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn call_tool_dispatches_collect_project_files() {
+        let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
+        std::thread::spawn(move || {
+            let cmd = receiver.recv().expect("expected command");
+            match cmd {
+                McpCommand::CollectProjectFiles {
+                    directory_path,
+                    mode,
+                    use_collected_locations_on_next_save,
+                    reply,
+                } => {
+                    assert_eq!(directory_path, "/tmp/collected");
+                    assert_eq!(mode, crate::fcpxml::writer::CollectFilesMode::EntireLibrary);
+                    assert!(use_collected_locations_on_next_save);
+                    reply
+                        .send(json!({
+                            "success": true,
+                            "directory_path": directory_path,
+                            "mode": mode.as_str(),
+                            "use_collected_locations_on_next_save": true,
+                            "project_paths_updated": true,
+                            "project_media_references_updated": 3,
+                            "project_lut_references_updated": 1,
+                            "library_items_updated": 2,
+                            "media_files": 3,
+                            "lut_files": 1,
+                            "total_files": 4
+                        }))
+                        .ok();
+                }
+                _ => panic!("unexpected MCP command"),
+            }
+        });
+        let id = json!(10);
+        let params = json!({
+            "name": "collect_project_files",
+            "arguments": {
+                "directory_path": "/tmp/collected",
+                "mode": "entire_library",
+                "use_collected_locations_on_next_save": true
+            }
         });
         let mut cache = std::collections::HashMap::new();
         let response = call_tool(&id, &params, &sender, &mut cache);

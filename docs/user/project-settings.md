@@ -94,6 +94,14 @@ Use **Export ▼ → Export Project with Media…** to create a portable package
 - If different source files share the same filename, UltimateSlice keeps the first name and adds deterministic suffixes for collisions.
 - Shows an export progress window while copying media and writing the packaged project XML.
 
+Use **Export ▼ → Collect Files…** when you want the media copy without saving project XML:
+- **Timeline-used only** copies just the source files referenced by clips on the timeline.
+- **Entire library** also copies imported media that is currently unused on the timeline.
+- Clip LUT files that exist on disk are copied too.
+- Files are copied into the folder you choose; if names collide, UltimateSlice keeps the first name and adds deterministic suffixes for the rest.
+- Optional **Use collected locations on next save** updates the open project to point at the copied media/LUT files after collection finishes, so the next project save/export writes the collected paths instead of the old locations.
+- No project XML is written or rewritten by this workflow.
+
 When you open an existing FCPXML and save it without making edits, UltimateSlice preserves the original document verbatim so unknown attributes/fields from other tools are retained.
 For edited saves, unsupported `asset-clip` attributes/child tags and imported resource `<asset>` metadata payloads (including nested `<metadata><md .../></metadata>`) are still carried forward in regenerated output. Unknown attrs/child tags are also preserved across core document structure (`<fcpxml>`, `<resources>`, selected `<library>/<event>/<project>/<sequence>/<spine>`, plus selected sequence `<format>` attrs) during dirty-save regeneration. Regenerated documents include `<!DOCTYPE fcpxml>` and keep source references in nested `<media-rep>` entries rather than legacy `asset@src`.
 UltimateSlice also reads and writes native spine `<transition>` elements, mapping them to clip transition settings so common transition timing/name metadata interoperates better with other FCPXML tools.

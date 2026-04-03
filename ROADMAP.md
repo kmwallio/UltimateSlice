@@ -541,7 +541,7 @@ Tracking docs:
   - [x] FCPXML persistence via `us:bins`/`us:media-bins` vendor attributes on `<event>`
   - [x] MCP tools: `create_bin`, `delete_bin`, `rename_bin`, `list_bins`, `move_to_bin`; `list_library` includes `bin_id`
 - [x] Offline / missing media indicators — visual badge on clips when source_path doesn't exist
-- [ ] Consolidate / collect files — copy all referenced media into one directory for archival or transfer
+- [x] Consolidate / collect files — copy project media into a chosen folder for archival or transfer, with **Timeline-used only** and **Entire library** modes in the UI plus MCP `collect_project_files` automation
 - [x] Metadata display & filtering — media browser cards now surface resolution, codec, frame rate, duration, and file size with search/type/resolution filters and expanded `list_library` metadata
 
 ### Canvas / Sequence Settings
