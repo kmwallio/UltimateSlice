@@ -2219,6 +2219,58 @@ fn build_title_filter(clip: &crate::model::clip::Clip, out_h: u32) -> String {
 
 /// Build a single subtitle filter for post-compositing burn-in.
 /// Takes timeline-absolute segments collected from all clips.
+#[derive(Clone, Debug, PartialEq)]
+struct SubtitleFontStyle {
+    family: String,
+    size_points: f64,
+    bold: bool,
+    italic: bool,
+}
+
+fn subtitle_font_style_from_desc(font_desc: &str) -> SubtitleFontStyle {
+    let desc = pango::FontDescription::from_string(font_desc);
+    let family = desc
+        .family()
+        .map(|family| family.trim().to_string())
+        .filter(|family| !family.is_empty())
+        .unwrap_or_else(|| "Sans".to_string());
+    let size_points = if desc.size() > 0 {
+        desc.size() as f64 / pango::SCALE as f64
+    } else {
+        24.0
+    };
+    let bold = matches!(
+        desc.weight(),
+        pango::Weight::Semibold
+            | pango::Weight::Bold
+            | pango::Weight::Ultrabold
+            | pango::Weight::Heavy
+            | pango::Weight::Ultraheavy
+    );
+    let italic = matches!(desc.style(), pango::Style::Italic | pango::Style::Oblique);
+    SubtitleFontStyle {
+        family,
+        size_points,
+        bold,
+        italic,
+    }
+}
+
+fn resolve_subtitle_font_style(font_desc: &str) -> SubtitleFontStyle {
+    let base_size = crate::media::title_font::parse_subtitle_font(font_desc).size_points();
+    let resolved_desc =
+        crate::media::title_font::build_preview_subtitle_font_desc(font_desc, base_size);
+    subtitle_font_style_from_desc(&resolved_desc)
+}
+
+fn ass_bool(enabled: bool) -> i32 {
+    if enabled {
+        -1
+    } else {
+        0
+    }
+}
+
 fn build_subtitle_filter_composited(
     segments: &[(u64, u64, String, &crate::model::clip::Clip)],
     style_clip: &crate::model::clip::Clip,
@@ -2231,8 +2283,10 @@ fn build_subtitle_filter_composited(
     }
 
     let scale_factor = out_h as f64 / TITLE_REFERENCE_HEIGHT;
-    let (font_name, font_size) = parse_subtitle_font(&style_clip.subtitle_font);
-    let scaled_size = (font_size * (4.0 / 3.0) * scale_factor).round() as u32;
+    let font_style = resolve_subtitle_font_style(&style_clip.subtitle_font);
+    let scaled_size = (font_style.size_points * (4.0 / 3.0) * scale_factor).round() as u32;
+    let ass_bold = ass_bool(font_style.bold);
+    let ass_italic = ass_bool(font_style.italic);
 
     let rgba = style_clip.subtitle_color;
     let r = ((rgba >> 24) & 0xFF) as u8;
@@ -2251,7 +2305,8 @@ fn build_subtitle_filter_composited(
     };
 
     let mut style_parts = format!(
-        "FontName={font_name},FontSize={scaled_size},PrimaryColour={ass_primary},Alignment={ass_align},MarginV={margin_v}"
+        "FontName={},FontSize={scaled_size},PrimaryColour={ass_primary},Alignment={ass_align},MarginV={margin_v},Bold={ass_bold},Italic={ass_italic}",
+        font_style.family
     );
 
     if style_clip.subtitle_outline_width > 0.0 {
@@ -2344,7 +2399,10 @@ fn build_subtitle_filter_composited(
             }
             let _ = writeln!(
                 sub_file,
-                "Style: Default,{font_name},{scaled_size},{ass_primary},&H000000FF,{outline_color},{back_color},0,0,0,0,100,100,0,0,{border_style},{outline_w},{shadow_depth},{ass_align},10,10,{margin_v},1"
+                "Style: Default,{font_name},{scaled_size},{ass_primary},&H000000FF,{outline_color},{back_color},{ass_bold},{ass_italic},0,0,100,100,0,0,{border_style},{outline_w},{shadow_depth},{ass_align},10,10,{margin_v},1",
+                font_name = font_style.family,
+                ass_bold = ass_bold,
+                ass_italic = ass_italic
             );
             let _ = writeln!(sub_file);
             let _ = writeln!(sub_file, "[Events]");
@@ -2480,18 +2538,6 @@ fn build_subtitle_filter_composited(
         let filter = format!("subtitles='{escaped_path}':force_style='{style_parts}'");
         (filter, Some(sub_file))
     }
-}
-
-/// Parse subtitle font descriptor (e.g. "Sans Bold 24") into (name, size).
-fn parse_subtitle_font(font_desc: &str) -> (String, f64) {
-    // Try to extract trailing numeric size.
-    let parts: Vec<&str> = font_desc.rsplitn(2, ' ').collect();
-    if parts.len() == 2 {
-        if let Ok(size) = parts[0].parse::<f64>() {
-            return (parts[1].to_string(), size);
-        }
-    }
-    (font_desc.to_string(), 24.0)
 }
 
 /// Export subtitles from all clips in the project as an SRT file.
@@ -4078,16 +4124,18 @@ mod tests {
         append_pan_filter_chain, audio_crossfade_curve_name, build_adjustment_layer_filter_graph,
         build_adjustment_scope_alpha_expression, build_audio_crossfade_filters, build_color_filter,
         build_crop_filter, build_grading_filter, build_keyframed_property_expression,
-        build_pan_expression, build_rotation_filter, build_temperature_tint_filter,
-        build_timing_filter, build_title_filter, build_volume_filter,
-        clamped_primary_xfade_duration_s, compute_clip_audio_fades, compute_export_coloradj_params,
-        estimate_export_size_bytes, flatten_compound_tracks, has_linked_audio_peer,
-        has_transform_keyframes, parse_progress_line, video_input_seek_and_duration,
-        write_chapter_metadata, AudioCodec, ClipAudioFade, ColorFilterCapabilities, ExportOptions,
-        VideoCodec,
+        build_pan_expression, build_rotation_filter, build_subtitle_filter_composited,
+        build_temperature_tint_filter, build_timing_filter, build_title_filter,
+        build_volume_filter, clamped_primary_xfade_duration_s, compute_clip_audio_fades,
+        compute_export_coloradj_params, estimate_export_size_bytes, flatten_compound_tracks,
+        has_linked_audio_peer, has_transform_keyframes, parse_progress_line,
+        resolve_subtitle_font_style, video_input_seek_and_duration, write_chapter_metadata,
+        AudioCodec, ClipAudioFade, ColorFilterCapabilities, ExportOptions, VideoCodec,
     };
     use crate::media::program_player::ProgramPlayer;
-    use crate::model::clip::{Clip, ClipKind, KeyframeInterpolation, NumericKeyframe};
+    use crate::model::clip::{
+        Clip, ClipKind, KeyframeInterpolation, NumericKeyframe, SubtitleSegment, SubtitleWord,
+    };
     use crate::model::project::Project;
     use crate::ui_state::CrossfadeCurve;
     use gstreamer as gst;
@@ -4188,6 +4236,19 @@ mod tests {
         clip
     }
 
+    fn make_subtitle_video_clip(font_desc: &str) -> Clip {
+        let mut clip = make_video_clip("sub", 0, 5_000_000_000);
+        clip.subtitle_font = font_desc.to_string();
+        clip.subtitle_segments = vec![SubtitleSegment {
+            id: "seg-1".to_string(),
+            start_ns: 0,
+            end_ns: 1_000_000_000,
+            text: "Hello world".to_string(),
+            words: Vec::new(),
+        }];
+        clip
+    }
+
     #[test]
     fn compute_clip_audio_fades_for_adjacent_clips() {
         let a = make_audio_clip("a", 0, 2_000_000_000);
@@ -4249,6 +4310,51 @@ mod tests {
                 fade_out_ns: 0
             })
         );
+    }
+
+    #[test]
+    fn resolve_subtitle_font_style_uses_subtitle_default_size() {
+        let style = resolve_subtitle_font_style("");
+        assert_eq!(style.size_points, 24.0);
+    }
+
+    #[test]
+    fn subtitle_force_style_splits_family_and_style_flags() {
+        let clip = make_subtitle_video_clip("DejaVu Sans Mono Bold Oblique 24");
+        let segs = vec![(0_u64, 1_000_000_000_u64, "Hello world".to_string(), &clip)];
+
+        let (filter, _temp) = build_subtitle_filter_composited(&segs, &clip, 1080);
+
+        assert!(filter.contains("FontName=DejaVu Sans Mono"));
+        assert!(filter.contains("Bold=-1"));
+        assert!(filter.contains("Italic=-1"));
+        assert!(!filter.contains("FontName=DejaVu Sans Mono Bold Oblique"));
+    }
+
+    #[test]
+    fn karaoke_subtitle_ass_style_uses_family_and_style_flags() {
+        let mut clip = make_subtitle_video_clip("DejaVu Sans Mono Bold Oblique 24");
+        clip.subtitle_highlight_mode = crate::model::clip::SubtitleHighlightMode::Color;
+        clip.subtitle_segments[0].words = vec![
+            SubtitleWord {
+                start_ns: 0,
+                end_ns: 500_000_000,
+                text: "Hello".to_string(),
+            },
+            SubtitleWord {
+                start_ns: 500_000_000,
+                end_ns: 1_000_000_000,
+                text: "world".to_string(),
+            },
+        ];
+        let segs = vec![(0_u64, 1_000_000_000_u64, "Hello world".to_string(), &clip)];
+
+        let (_filter, temp) = build_subtitle_filter_composited(&segs, &clip, 1080);
+        let temp = temp.expect("karaoke path should create ASS temp file");
+        let ass = std::fs::read_to_string(temp.path()).expect("read ASS file");
+
+        assert!(ass.contains("Style: Default,DejaVu Sans Mono,32"));
+        assert!(ass.contains(",-1,-1,0,0,100,100"));
     }
 
     #[test]

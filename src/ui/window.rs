@@ -4142,7 +4142,14 @@ pub fn build_window(
                     move |result| {
                         if let Ok(font_desc) = result {
                             let desc_str = font_desc.to_string();
-                            font_btn_c.set_label(&desc_str);
+                            let normalized =
+                                crate::media::title_font::normalize_subtitle_font_label(&desc_str);
+                            let tooltip = crate::media::title_font::build_subtitle_font_tooltip(
+                                &desc_str,
+                                "Click to choose a subtitle font",
+                            );
+                            font_btn_c.set_label(&normalized);
+                            font_btn_c.set_tooltip_text(Some(&tooltip));
                             let selected = ts_c.borrow().selected_clip_id.clone();
                             if let Some(ref clip_id) = selected {
                                 let mut proj = project_c.borrow_mut();
@@ -6796,15 +6803,16 @@ pub fn build_window(
                                         let oc = clip.subtitle_outline_color;
                                         let bc = clip.subtitle_bg_box_color;
                                         let hc = clip.subtitle_highlight_color;
-                                        let (font_family, font_size) = clip
-                                            .subtitle_font
-                                            .rsplit_once(' ')
-                                            .and_then(|(name, s)| {
-                                                s.parse::<f64>()
-                                                    .ok()
-                                                    .map(|sz| (name.to_string(), sz))
-                                            })
-                                            .unwrap_or(("Sans Bold".to_string(), 24.0));
+                                        let base_size =
+                                            crate::media::title_font::parse_subtitle_font(
+                                                &clip.subtitle_font,
+                                            )
+                                            .size_points();
+                                        let font_desc =
+                                            crate::media::title_font::build_preview_subtitle_font_desc(
+                                                &clip.subtitle_font,
+                                                base_size,
+                                            );
 
                                         // Build word-level display with active word highlighting.
                                         // Fixed groups: divide words into groups of N, show the
@@ -6866,8 +6874,7 @@ pub fn build_window(
                                                 ((bc >> 8) & 0xFF) as f64 / 255.0,
                                                 (bc & 0xFF) as f64 / 255.0,
                                             ),
-                                            font_family: font_family.clone(),
-                                            font_size,
+                                            font_desc,
                                             position_y: clip.subtitle_position_y,
                                         });
                                         break;

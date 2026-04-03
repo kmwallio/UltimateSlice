@@ -41,6 +41,16 @@ fn sync_title_font_button(button: &gtk4::Button, font_desc: &str) {
     button.set_tooltip_text(Some(&tooltip));
 }
 
+fn sync_subtitle_font_button(button: &gtk4::Button, font_desc: &str) {
+    let normalized = crate::media::title_font::normalize_subtitle_font_label(font_desc);
+    let tooltip = crate::media::title_font::build_subtitle_font_tooltip(
+        font_desc,
+        "Click to choose a subtitle font",
+    );
+    button.set_label(&normalized);
+    button.set_tooltip_text(Some(&tooltip));
+}
+
 fn db_to_linear_volume(db: f64) -> f64 {
     (10.0f64)
         .powf(db.clamp(VOLUME_DB_MIN, VOLUME_DB_MAX) / 20.0)
@@ -1441,7 +1451,7 @@ impl InspectorView {
                 }
                 // Style controls are always visible so users can configure before generating.
                 self.subtitle_style_box.set_visible(true);
-                self.subtitle_font_btn.set_label(&c.subtitle_font);
+                sync_subtitle_font_button(&self.subtitle_font_btn, &c.subtitle_font);
                 let rgba = c.subtitle_color;
                 let r = ((rgba >> 24) & 0xFF) as f32 / 255.0;
                 let g = ((rgba >> 16) & 0xFF) as f32 / 255.0;
@@ -2805,7 +2815,7 @@ pub fn build_inspector(
 
     row_label(&subtitle_style_box, "Font");
     let subtitle_font_btn = gtk4::Button::with_label("Sans Bold 24");
-    subtitle_font_btn.set_tooltip_text(Some("Click to choose a subtitle font"));
+    sync_subtitle_font_button(&subtitle_font_btn, "Sans Bold 24");
     subtitle_style_box.append(&subtitle_font_btn);
 
     row_label(&subtitle_style_box, "Text Color");

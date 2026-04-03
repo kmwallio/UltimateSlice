@@ -630,6 +630,7 @@ Tracking docs:
   - [x] Multi-track subtitle support with independent per-clip positioning/styling
   - [x] Program Monitor overlay with real-time word highlighting
   - [x] Export burn-in via ASS/SRT subtitle filter (post-compositing, above all tracks)
+  - [x] Shared subtitle font parsing/alignment: Program Monitor preview and export now derive subtitle family/style/size from the same normalized font description for better bold/italic/fallback consistency
   - [x] SRT file export, 7 MCP tools, FCPXML round-trip, timeline CC badge
   - [x] Whisper output cleanup (contraction merging, punctuation spacing)
 - [ ] AI Scene Cut Detection for long source files

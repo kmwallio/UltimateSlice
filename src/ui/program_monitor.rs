@@ -33,10 +33,8 @@ pub struct SubtitleLine {
     pub bg_box: bool,
     /// Background box color.
     pub bg_box_color: (f64, f64, f64, f64),
-    /// Font family name (e.g. "Sans Bold").
-    pub font_family: String,
-    /// Font size scaling factor (from clip font descriptor).
-    pub font_size: f64,
+    /// Normalized font description used for preview rendering/fallback.
+    pub font_desc: String,
     /// Vertical position: 0.0 (top) to 1.0 (bottom). Default 0.85.
     pub position_y: f64,
 }
@@ -60,10 +58,28 @@ impl Default for SubtitleLine {
             outline_width: 2.0,
             bg_box: true,
             bg_box_color: (0.0, 0.0, 0.0, 0.6),
-            font_family: "Sans Bold".to_string(),
-            font_size: 24.0,
+            font_desc: crate::media::title_font::DEFAULT_SUBTITLE_FONT_DESC.to_string(),
             position_y: 0.85,
         }
+    }
+}
+
+fn cairo_slant_from_pango(style: pango::Style) -> gtk::cairo::FontSlant {
+    match style {
+        pango::Style::Italic => gtk::cairo::FontSlant::Italic,
+        pango::Style::Oblique => gtk::cairo::FontSlant::Oblique,
+        _ => gtk::cairo::FontSlant::Normal,
+    }
+}
+
+fn cairo_weight_from_pango(weight: pango::Weight) -> gtk::cairo::FontWeight {
+    match weight {
+        pango::Weight::Semibold
+        | pango::Weight::Bold
+        | pango::Weight::Ultrabold
+        | pango::Weight::Heavy
+        | pango::Weight::Ultraheavy => gtk::cairo::FontWeight::Bold,
+        _ => gtk::cairo::FontWeight::Normal,
     }
 }
 
@@ -416,31 +432,26 @@ pub fn build_program_monitor(
                 let ty_base = h * line.position_y;
                 // Scale font: Pango pts → pixels (×4/3), then proportional to preview height.
                 // Matches the export scaling: font_size * 4/3 * (out_h / 1080).
-                let font_size = (line.font_size * (4.0 / 3.0) * h / 1080.0).clamp(10.0, 72.0);
-                // Parse font family for weight (Bold, Italic).
-                let family = &line.font_family;
-                let slant = if family.contains("Italic") || family.contains("Oblique") {
-                    gtk::cairo::FontSlant::Italic
+                let desc = pango::FontDescription::from_string(&line.font_desc);
+                let base_size_points = if desc.size() > 0 {
+                    desc.size() as f64 / pango::SCALE as f64
                 } else {
-                    gtk::cairo::FontSlant::Normal
+                    24.0
                 };
-                let weight = if family.contains("Bold") {
-                    gtk::cairo::FontWeight::Bold
-                } else {
-                    gtk::cairo::FontWeight::Normal
-                };
-                let face = family
-                    .replace("Bold", "")
-                    .replace("Italic", "")
-                    .replace("Oblique", "")
-                    .trim()
-                    .to_string();
+                let font_size = (base_size_points * (4.0 / 3.0) * h / 1080.0).clamp(10.0, 72.0);
+                let face = desc
+                    .family()
+                    .map(|family| family.trim().to_string())
+                    .filter(|family| !family.is_empty())
+                    .unwrap_or_else(|| "Sans".to_string());
+                let slant = cairo_slant_from_pango(desc.style());
+                let weight = cairo_weight_from_pango(desc.weight());
                 let face = if face.is_empty() {
                     "Sans".to_string()
                 } else {
                     face
                 };
-                cr.select_font_face(&face, slant, weight);
+                cr.select_font_face(face.as_str(), slant, weight);
                 cr.set_font_size(font_size);
 
                 // Build the display string and measure it.

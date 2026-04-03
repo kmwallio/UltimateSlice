@@ -4,10 +4,12 @@ use std::sync::{Mutex, OnceLock};
 
 pub(crate) const DEFAULT_TITLE_FONT_DESC: &str = "Sans Bold 36";
 const DEFAULT_TITLE_FONT_SIZE_POINTS: f64 = 36.0;
+pub(crate) const DEFAULT_SUBTITLE_FONT_DESC: &str = "Sans Bold 24";
+const DEFAULT_SUBTITLE_FONT_SIZE_POINTS: f64 = 24.0;
 const FC_MATCH_SEPARATOR: &str = "\u{1f}";
 
 #[derive(Clone, Debug)]
-pub(crate) struct TitleFontSpec {
+pub(crate) struct FontSpec {
     desc: pango::FontDescription,
     normalized_desc: String,
     family: String,
@@ -41,8 +43,20 @@ struct FcMatchRecord {
 
 static DRAWTEXT_FONT_CACHE: OnceLock<Mutex<HashMap<String, DrawtextFontMatch>>> = OnceLock::new();
 
-pub(crate) fn parse_title_font(font_desc: &str) -> TitleFontSpec {
-    TitleFontSpec::new(font_desc)
+pub(crate) fn parse_title_font(font_desc: &str) -> FontSpec {
+    FontSpec::new(
+        font_desc,
+        DEFAULT_TITLE_FONT_DESC,
+        DEFAULT_TITLE_FONT_SIZE_POINTS,
+    )
+}
+
+pub(crate) fn parse_subtitle_font(font_desc: &str) -> FontSpec {
+    FontSpec::new(
+        font_desc,
+        DEFAULT_SUBTITLE_FONT_DESC,
+        DEFAULT_SUBTITLE_FONT_SIZE_POINTS,
+    )
 }
 
 pub(crate) fn normalize_title_font_label(font_desc: &str) -> String {
@@ -51,9 +65,21 @@ pub(crate) fn normalize_title_font_label(font_desc: &str) -> String {
         .to_string()
 }
 
+pub(crate) fn normalize_subtitle_font_label(font_desc: &str) -> String {
+    parse_subtitle_font(font_desc)
+        .normalized_description()
+        .to_string()
+}
+
 pub(crate) fn build_preview_title_font_desc(font_desc: &str, size_points: f64) -> String {
     let spec = parse_title_font(font_desc);
-    let resolution = resolve_drawtext_font(font_desc);
+    let resolution = resolve_drawtext_font_for_spec(&spec);
+    spec.preview_description_for_match(&resolution, size_points)
+}
+
+pub(crate) fn build_preview_subtitle_font_desc(font_desc: &str, size_points: f64) -> String {
+    let spec = parse_subtitle_font(font_desc);
+    let resolution = resolve_drawtext_font_for_spec(&spec);
     spec.preview_description_for_match(&resolution, size_points)
 }
 
@@ -67,23 +93,38 @@ pub(crate) fn build_drawtext_font_option(font_desc: &str) -> String {
 
 pub(crate) fn build_title_font_tooltip(font_desc: &str, base: &str) -> String {
     let spec = parse_title_font(font_desc);
-    let resolution = resolve_drawtext_font(font_desc);
+    let resolution = resolve_drawtext_font_for_spec(&spec);
+    build_font_tooltip(&spec, &resolution, base, "Export/prerender")
+}
+
+pub(crate) fn build_subtitle_font_tooltip(font_desc: &str, base: &str) -> String {
+    let spec = parse_subtitle_font(font_desc);
+    let resolution = resolve_drawtext_font_for_spec(&spec);
+    build_font_tooltip(&spec, &resolution, base, "Preview/export")
+}
+
+fn build_font_tooltip(
+    spec: &FontSpec,
+    resolution: &DrawtextFontMatch,
+    base: &str,
+    target_label: &str,
+) -> String {
     let Some(matched_label) = resolution.matched_label() else {
         return match resolution.kind {
             DrawtextFontMatchKind::Unavailable => format!(
-                "{base}\nExport/prerender font resolution unavailable; using best-effort font matching."
+                "{base}\n{target_label} font resolution unavailable; using best-effort font matching."
             ),
             _ => base.to_string(),
         };
     };
     match resolution.kind {
-        DrawtextFontMatchKind::Exact => format!("{base}\nExport/prerender: {matched_label}"),
+        DrawtextFontMatchKind::Exact => format!("{base}\n{target_label}: {matched_label}"),
         DrawtextFontMatchKind::Fallback => format!(
-            "{base}\nRequested \"{}\" falls back in export/prerender to {matched_label}.",
+            "{base}\nRequested \"{}\" falls back in {target_label} to {matched_label}.",
             spec.normalized_description()
         ),
         DrawtextFontMatchKind::Unavailable => format!(
-            "{base}\nExport/prerender font resolution unavailable; using best-effort font matching."
+            "{base}\n{target_label} font resolution unavailable; using best-effort font matching."
         ),
     }
 }
@@ -98,6 +139,10 @@ pub(crate) fn escape_drawtext_value(value: &str) -> String {
 
 pub(crate) fn resolve_drawtext_font(font_desc: &str) -> DrawtextFontMatch {
     let spec = parse_title_font(font_desc);
+    resolve_drawtext_font_for_spec(&spec)
+}
+
+fn resolve_drawtext_font_for_spec(spec: &FontSpec) -> DrawtextFontMatch {
     let cache_key = spec.fontconfig_pattern().to_string();
     {
         let cache = drawtext_font_cache()
@@ -108,7 +153,7 @@ pub(crate) fn resolve_drawtext_font(font_desc: &str) -> DrawtextFontMatch {
         }
     }
 
-    let resolved = resolve_drawtext_font_uncached(&spec);
+    let resolved = resolve_drawtext_font_uncached(spec);
     let mut cache = drawtext_font_cache()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -116,11 +161,11 @@ pub(crate) fn resolve_drawtext_font(font_desc: &str) -> DrawtextFontMatch {
     resolved
 }
 
-impl TitleFontSpec {
-    fn new(font_desc: &str) -> Self {
+impl FontSpec {
+    fn new(font_desc: &str, default_desc: &str, default_size_points: f64) -> Self {
         let trimmed = font_desc.trim();
         let mut desc = pango::FontDescription::from_string(if trimmed.is_empty() {
-            DEFAULT_TITLE_FONT_DESC
+            default_desc
         } else {
             trimmed
         });
@@ -129,10 +174,10 @@ impl TitleFontSpec {
             .map(|family| family.trim().to_string())
             .filter(|family| !family.is_empty());
         if family.is_none() {
-            desc = pango::FontDescription::from_string(DEFAULT_TITLE_FONT_DESC);
+            desc = pango::FontDescription::from_string(default_desc);
         }
         if desc.size() <= 0 {
-            desc.set_size((DEFAULT_TITLE_FONT_SIZE_POINTS * pango::SCALE as f64).round() as i32);
+            desc.set_size((default_size_points * pango::SCALE as f64).round() as i32);
         }
         let family = desc
             .family()
@@ -216,7 +261,7 @@ fn drawtext_font_cache() -> &'static Mutex<HashMap<String, DrawtextFontMatch>> {
     DRAWTEXT_FONT_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn resolve_drawtext_font_uncached(spec: &TitleFontSpec) -> DrawtextFontMatch {
+fn resolve_drawtext_font_uncached(spec: &FontSpec) -> DrawtextFontMatch {
     let output = Command::new("fc-match")
         .arg("-f")
         .arg(format!(
@@ -286,7 +331,7 @@ fn parse_fc_match_record(stdout: &str) -> Option<FcMatchRecord> {
     })
 }
 
-fn evaluate_match_kind(spec: &TitleFontSpec, record: &FcMatchRecord) -> DrawtextFontMatchKind {
+fn evaluate_match_kind(spec: &FontSpec, record: &FcMatchRecord) -> DrawtextFontMatchKind {
     let family_matches = if is_generic_family(&spec.family) {
         record
             .family

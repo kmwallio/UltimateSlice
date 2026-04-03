@@ -195,6 +195,30 @@ Program Monitor overlay integration:
 
 ---
 
+## Subtitles / Captions
+
+Clips with subtitle segments show subtitle style controls in the Inspector.
+
+| Field | Description |
+|---|---|
+| **Font** | Subtitle font description (Pango-style, e.g. `Sans Bold 24`) |
+| **Text Color** | Main subtitle text color |
+| **Word Highlight** | `None`, `Bold`, `Color`, `Underline`, or `Stroke` |
+| **Highlight Color** | Active-word color for `Color` / `Stroke` highlight modes |
+| **Word Window** | Number of nearby words grouped on screen around the active word |
+| **Vertical Position** | Subtitle placement from top (`0.0`) to bottom (`1.0`) |
+| **Outline Color** | Subtitle outline/stroke color |
+| **Background Box** | Toggle the subtitle background box |
+| **Background Color** | Background box color |
+| **Copy Style / Paste Style** | Reuse subtitle styling across clips |
+
+- Program Monitor preview renders subtitles in the monitor overlay.
+- Export burns subtitle styling above the composited video.
+- Subtitle font selection now uses the same normalized family/style/size parsing in preview and export, so descriptions like `Bold`, `Italic`, `Oblique`, and narrowed families stay closer between the Program Monitor and exported burn-in.
+- Preview and export still use different subtitle renderers, so very fine styling details can still vary slightly.
+
+---
+
 ## Title / Text Overlay
 
 Rendered via GStreamer `textoverlay` (preview) and FFmpeg `drawtext` (export).

@@ -143,6 +143,7 @@ When a visual timeline clip or adjustment layer is selected, the Program Monitor
 - During paused scrubbing, Program Monitor keeps a short previous/current/next frame cache around the playhead (keyed by frame position and current render state) and uses cache hits to tighten in-place seek settle waits, reducing repeated scrub stutter around nearby frames.
 - Manual timeline seeks use the paused accurate-seek path and then resume playback if it was active, so the frame shown at the playhead is updated before playback continues.
 - While paused, the monitor is repainted continuously so delayed post-seek frame updates still appear without requiring playback to resume.
+- Subtitle text is drawn in the Program Monitor overlay layer above the video pictures, so subtitles remain visible even when the underlying video frame is coming from background-prerendered playback.
 
 ## Playhead Accuracy
 
