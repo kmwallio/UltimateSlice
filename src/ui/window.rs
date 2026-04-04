@@ -1005,130 +1005,6 @@ struct SourcePlacementInfo {
     source_timecode_base_ns: Option<u64>,
 }
 
-// ── Auto-backup helpers ──────────────────────────────────────────────────
-
-pub fn backup_dir() -> Option<std::path::PathBuf> {
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share"))
-        })?;
-    Some(base.join("ultimateslice").join("backups"))
-}
-
-fn sanitize_backup_filename(title: &str) -> String {
-    let s: String = title
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if s.is_empty() {
-        "Untitled".to_string()
-    } else {
-        s
-    }
-}
-
-fn format_backup_timestamp() -> String {
-    use std::time::SystemTime;
-    let now = SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = now.as_secs();
-    // Convert to local time components (UTC offset not critical for filename ordering)
-    let days = secs / 86400;
-    let time_of_day = secs % 86400;
-    let hours = time_of_day / 3600;
-    let minutes = (time_of_day % 3600) / 60;
-    let seconds = time_of_day % 60;
-    // Approximate date from days since epoch (sufficient for unique filenames)
-    let (year, month, day) = days_to_ymd(days);
-    format!("{year:04}{month:02}{day:02}_{hours:02}{minutes:02}{seconds:02}")
-}
-
-pub fn days_to_ymd(days_since_epoch: u64) -> (u64, u64, u64) {
-    // Civil date from days since 1970-01-01 (Euclidean affine algorithm)
-    let z = days_since_epoch as i64 + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y as u64, m, d)
-}
-
-fn prune_old_backups(dir: &std::path::Path, title_prefix: &str, max_versions: usize) {
-    let prefix_underscore = format!("{title_prefix}_");
-    let mut backups: Vec<_> = std::fs::read_dir(dir)
-        .ok()
-        .into_iter()
-        .flatten()
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            let name = e.file_name();
-            let s = name.to_string_lossy();
-            s.starts_with(&prefix_underscore) && s.ends_with(".uspxml")
-        })
-        .collect();
-    if backups.len() <= max_versions {
-        return;
-    }
-    backups.sort_by(|a, b| {
-        let ma = a
-            .metadata()
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::UNIX_EPOCH);
-        let mb = b
-            .metadata()
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::UNIX_EPOCH);
-        mb.cmp(&ma) // newest first
-    });
-    for old in backups.iter().skip(max_versions) {
-        let _ = std::fs::remove_file(old.path());
-    }
-}
-
-/// List all backup files in the backup directory, newest first.
-pub fn list_backup_files() -> Vec<(std::path::PathBuf, String, u64)> {
-    let dir = match backup_dir() {
-        Some(d) => d,
-        None => return Vec::new(),
-    };
-    let mut entries: Vec<_> = std::fs::read_dir(&dir)
-        .ok()
-        .into_iter()
-        .flatten()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().ends_with(".uspxml"))
-        .filter_map(|e| {
-            let meta = e.metadata().ok()?;
-            let name = e.file_name().to_string_lossy().to_string();
-            let size = meta.len();
-            Some((e.path(), name, size))
-        })
-        .collect();
-    entries.sort_by(|a, b| {
-        let ma = std::fs::metadata(&a.0)
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::UNIX_EPOCH);
-        let mb = std::fs::metadata(&b.0)
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::UNIX_EPOCH);
-        mb.cmp(&ma)
-    });
-    entries
-}
-
 // ─────────────────────────────────────────────────────────────────────────
 
 fn lookup_source_placement_info(
@@ -11022,14 +10898,13 @@ pub fn build_window(
                     // Versioned backup
                     let prefs = preferences_state.borrow();
                     if prefs.backup_enabled {
-                        if let Some(dir) = backup_dir() {
-                            let _ = std::fs::create_dir_all(&dir);
-                            let proj_title = project.borrow().title.clone();
-                            let title_sanitized = sanitize_backup_filename(&proj_title);
-                            let ts = format_backup_timestamp();
-                            let backup_path = dir.join(format!("{title_sanitized}_{ts}.uspxml"));
-                            let _ = std::fs::write(&backup_path, xml);
-                            prune_old_backups(&dir, &title_sanitized, prefs.backup_max_versions);
+                        let proj_title = project.borrow().title.clone();
+                        if let Err(e) = crate::project_versions::create_versioned_backup(
+                            xml,
+                            &proj_title,
+                            prefs.backup_max_versions,
+                        ) {
+                            log::error!("Failed to write auto-backup: {e}");
                         }
                     }
                 }
@@ -15685,20 +15560,155 @@ fn handle_mcp_command(
         }
 
         McpCommand::ListBackups { reply } => {
-            let backups = list_backup_files();
+            let backups = crate::project_versions::list_backup_files();
             let list: Vec<serde_json::Value> = backups
                 .iter()
-                .map(|(path, name, size)| {
+                .map(|entry| {
                     json!({
-                        "path": path.to_string_lossy(),
-                        "name": name,
-                        "size_bytes": size,
+                        "path": entry.path.to_string_lossy(),
+                        "name": entry.name,
+                        "size_bytes": entry.size_bytes,
                     })
                 })
                 .collect();
             reply
                 .send(json!({ "ok": true, "backups": list, "count": list.len() }))
                 .ok();
+        }
+
+        McpCommand::ListProjectSnapshots { reply } => {
+            let snapshots = {
+                let proj = project.borrow();
+                crate::project_versions::list_project_snapshots_for_project(&proj)
+            };
+            let list: Vec<serde_json::Value> = snapshots
+                .iter()
+                .map(|entry| {
+                    json!({
+                        "id": entry.metadata.id,
+                        "name": entry.metadata.snapshot_name,
+                        "project_title": entry.metadata.project_title,
+                        "project_file_path": entry.metadata.project_file_path,
+                        "created_at_unix_secs": entry.metadata.created_at_unix_secs,
+                        "created_at": crate::project_versions::format_snapshot_timestamp(entry.metadata.created_at_unix_secs),
+                        "path": entry.snapshot_path.to_string_lossy(),
+                        "size_bytes": entry.size_bytes,
+                    })
+                })
+                .collect();
+            reply
+                .send(json!({ "ok": true, "snapshots": list, "count": list.len() }))
+                .ok();
+        }
+
+        McpCommand::CreateProjectSnapshot { name, reply } => {
+            crate::model::media_library::sync_bins_to_project(
+                &library.borrow(),
+                &mut project.borrow_mut(),
+            );
+            let result = {
+                let proj = project.borrow();
+                crate::project_versions::write_snapshot_project_xml(&proj).and_then(|xml| {
+                    crate::project_versions::create_project_snapshot(&proj, &xml, &name)
+                })
+            };
+            match result {
+                Ok(entry) => {
+                    reply
+                        .send(json!({
+                            "ok": true,
+                            "snapshot": {
+                                "id": entry.metadata.id,
+                                "name": entry.metadata.snapshot_name,
+                                "project_title": entry.metadata.project_title,
+                                "project_file_path": entry.metadata.project_file_path,
+                                "created_at_unix_secs": entry.metadata.created_at_unix_secs,
+                                "created_at": crate::project_versions::format_snapshot_timestamp(entry.metadata.created_at_unix_secs),
+                                "path": entry.snapshot_path.to_string_lossy(),
+                                "size_bytes": entry.size_bytes,
+                            }
+                        }))
+                        .ok();
+                }
+                Err(e) => {
+                    reply.send(json!({"ok": false, "error": e})).ok();
+                }
+            }
+        }
+
+        McpCommand::RestoreProjectSnapshot { snapshot_id, reply } => {
+            let preserved_file_path = project.borrow().file_path.clone();
+            let snapshot_id_for_worker = snapshot_id.clone();
+            let (tx, rx) = std::sync::mpsc::sync_channel::<
+                Result<(crate::project_versions::ProjectSnapshotEntry, Project), String>,
+            >(1);
+            std::thread::spawn(move || {
+                let result =
+                    crate::project_versions::load_project_snapshot(&snapshot_id_for_worker);
+                let _ = tx.send(result);
+            });
+            timeline_state.borrow_mut().loading = true;
+            let project = project.clone();
+            let timeline_state = timeline_state.clone();
+            let main_stack = main_stack.clone();
+            let on_project_changed = on_project_changed_full.clone();
+            let suppress_resume_on_next_reload = suppress_resume_on_next_reload.clone();
+            let clear_media_browser_on_next_reload = clear_media_browser_on_next_reload.clone();
+            glib::timeout_add_local(std::time::Duration::from_millis(10), move || {
+                match rx.try_recv() {
+                    Ok(Ok((entry, mut new_proj))) => {
+                        let snapshot_name = entry.metadata.snapshot_name.clone();
+                        new_proj.file_path = preserved_file_path.clone();
+                        new_proj.dirty = true;
+                        *project.borrow_mut() = new_proj;
+                        timeline_state.borrow_mut().loading = false;
+                        main_stack.set_visible_child_name("editor");
+                        suppress_resume_on_next_reload.set(true);
+                        clear_media_browser_on_next_reload.set(true);
+                        let on_project_changed = on_project_changed.clone();
+                        glib::timeout_add_local_once(
+                            std::time::Duration::from_millis(0),
+                            move || {
+                                on_project_changed();
+                            },
+                        );
+                        reply
+                            .send(json!({
+                                "ok": true,
+                                "snapshot_id": entry.metadata.id,
+                                "snapshot_name": snapshot_name,
+                                "project_file_path": entry.metadata.project_file_path,
+                                "dirty": true,
+                            }))
+                            .ok();
+                        glib::ControlFlow::Break
+                    }
+                    Ok(Err(e)) => {
+                        timeline_state.borrow_mut().loading = false;
+                        reply.send(json!({"ok": false, "error": e})).ok();
+                        glib::ControlFlow::Break
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        timeline_state.borrow_mut().loading = false;
+                        reply.send(json!({"ok": false, "error": "restore_project_snapshot worker disconnected"})).ok();
+                        glib::ControlFlow::Break
+                    }
+                }
+            });
+        }
+
+        McpCommand::DeleteProjectSnapshot { snapshot_id, reply } => {
+            match crate::project_versions::delete_project_snapshot(&snapshot_id) {
+                Ok(()) => {
+                    reply
+                        .send(json!({"ok": true, "snapshot_id": snapshot_id}))
+                        .ok();
+                }
+                Err(e) => {
+                    reply.send(json!({"ok": false, "error": e})).ok();
+                }
+            }
         }
 
         McpCommand::SetClipStabilization {

@@ -38,6 +38,401 @@ fn save_project_to_path(
     Ok(())
 }
 
+fn create_named_snapshot(
+    project: &Rc<RefCell<Project>>,
+    library: &Rc<RefCell<MediaLibrary>>,
+    snapshot_name: &str,
+) -> Result<crate::project_versions::ProjectSnapshotEntry, String> {
+    crate::model::media_library::sync_bins_to_project(&library.borrow(), &mut project.borrow_mut());
+    let proj = project.borrow();
+    let xml = crate::project_versions::write_snapshot_project_xml(&proj)?;
+    crate::project_versions::create_project_snapshot(&proj, &xml, snapshot_name)
+}
+
+fn apply_restored_project_state(
+    project: &Rc<RefCell<Project>>,
+    timeline_state: &Rc<RefCell<TimelineState>>,
+    on_project_changed: &Rc<dyn Fn()>,
+    on_project_reloaded: &Rc<dyn Fn()>,
+    mut new_proj: Project,
+    preserved_file_path: Option<String>,
+) {
+    new_proj.file_path = preserved_file_path;
+    new_proj.dirty = true;
+    *project.borrow_mut() = new_proj;
+    timeline_state.borrow_mut().loading = false;
+    on_project_reloaded();
+    on_project_changed();
+}
+
+fn restore_project_version_async<F>(
+    project: Rc<RefCell<Project>>,
+    timeline_state: Rc<RefCell<TimelineState>>,
+    on_project_changed: Rc<dyn Fn()>,
+    on_project_reloaded: Rc<dyn Fn()>,
+    preserved_file_path: Option<String>,
+    loader: F,
+) where
+    F: FnOnce() -> Result<Project, String> + Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Project, String>>(1);
+    std::thread::spawn(move || {
+        let _ = tx.send(loader());
+    });
+    timeline_state.borrow_mut().loading = true;
+    glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+        match rx.try_recv() {
+            Ok(Ok(new_proj)) => {
+                apply_restored_project_state(
+                    &project,
+                    &timeline_state,
+                    &on_project_changed,
+                    &on_project_reloaded,
+                    new_proj,
+                    preserved_file_path.clone(),
+                );
+                glib::ControlFlow::Break
+            }
+            Ok(Err(e)) => {
+                log::error!("{e}");
+                timeline_state.borrow_mut().loading = false;
+                glib::ControlFlow::Break
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                timeline_state.borrow_mut().loading = false;
+                glib::ControlFlow::Break
+            }
+        }
+    });
+}
+
+#[allow(deprecated)]
+fn choose_snapshot_name(
+    window: Option<gtk::Window>,
+    on_selected: Rc<dyn Fn(String) -> Result<(), String>>,
+) {
+    let dialog = gtk::Dialog::builder()
+        .title("Create Snapshot")
+        .modal(true)
+        .default_width(420)
+        .build();
+    dialog.set_transient_for(window.as_ref());
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+    dialog.add_button("Create Snapshot", gtk::ResponseType::Accept);
+    dialog.set_default_response(gtk::ResponseType::Accept);
+
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    content.set_margin_start(16);
+    content.set_margin_end(16);
+    content.set_margin_top(16);
+    content.set_margin_bottom(16);
+
+    let description = gtk::Label::new(Some(
+        "Save the current project as a named milestone without changing its main save path.",
+    ));
+    description.set_wrap(true);
+    description.set_xalign(0.0);
+
+    let name_entry = gtk::Entry::new();
+    name_entry.set_placeholder_text(Some("Before color pass"));
+    name_entry.set_activates_default(true);
+
+    let error_label = gtk::Label::new(None);
+    error_label.set_wrap(true);
+    error_label.set_xalign(0.0);
+
+    content.append(&description);
+    content.append(&name_entry);
+    content.append(&error_label);
+    dialog.content_area().append(&content);
+
+    {
+        let error_label = error_label.clone();
+        name_entry.connect_changed(move |_| {
+            error_label.set_text("");
+        });
+    }
+
+    dialog.connect_response(move |d, resp| match resp {
+        gtk::ResponseType::Accept => {
+            let snapshot_name = name_entry.text().trim().to_string();
+            if snapshot_name.is_empty() {
+                error_label.set_text("Snapshot name cannot be empty.");
+                return;
+            }
+            match on_selected(snapshot_name) {
+                Ok(()) => d.close(),
+                Err(e) => error_label.set_text(&e),
+            }
+        }
+        _ => d.close(),
+    });
+    dialog.present();
+}
+
+#[allow(deprecated)]
+fn confirm_delete_snapshot(
+    window: Option<gtk::Window>,
+    snapshot_name: &str,
+    on_confirm: Rc<dyn Fn()>,
+) {
+    let dialog = gtk::Dialog::builder()
+        .title("Delete Snapshot")
+        .modal(true)
+        .default_width(420)
+        .build();
+    dialog.set_transient_for(window.as_ref());
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+    dialog.add_button("Delete", gtk::ResponseType::Accept);
+
+    let label = gtk::Label::new(Some(&format!(
+        "Delete snapshot \"{snapshot_name}\"? This cannot be undone."
+    )));
+    label.set_wrap(true);
+    label.set_margin_start(16);
+    label.set_margin_end(16);
+    label.set_margin_top(16);
+    label.set_margin_bottom(16);
+    label.set_xalign(0.0);
+    dialog.content_area().append(&label);
+
+    dialog.connect_response(move |d, resp| match resp {
+        gtk::ResponseType::Accept => {
+            d.close();
+            on_confirm();
+        }
+        _ => d.close(),
+    });
+    dialog.present();
+}
+
+#[allow(deprecated)]
+fn show_project_snapshots_dialog(
+    window: Option<gtk::Window>,
+    project: Rc<RefCell<Project>>,
+    library: Rc<RefCell<MediaLibrary>>,
+    timeline_state: Rc<RefCell<TimelineState>>,
+    on_project_changed: Rc<dyn Fn()>,
+    on_project_reloaded: Rc<dyn Fn()>,
+) {
+    let dialog = gtk::Dialog::builder()
+        .title("Project Snapshots")
+        .modal(true)
+        .default_width(520)
+        .build();
+    dialog.set_transient_for(window.as_ref());
+    dialog.add_button("Close", gtk::ResponseType::Close);
+
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    content.set_margin_start(16);
+    content.set_margin_end(16);
+    content.set_margin_top(16);
+    content.set_margin_bottom(16);
+
+    let description = gtk::Label::new(Some(
+        "Snapshots capture named milestone versions of the current project. Restoring one loads that version into the editor and keeps your main save target unchanged until you save again.",
+    ));
+    description.set_wrap(true);
+    description.set_xalign(0.0);
+
+    let snapshot_dropdown = gtk::DropDown::from_strings(&[]);
+    snapshot_dropdown.set_hexpand(true);
+
+    let details_label = gtk::Label::new(None);
+    details_label.set_wrap(true);
+    details_label.set_xalign(0.0);
+
+    let empty_label = gtk::Label::new(None);
+    empty_label.set_wrap(true);
+    empty_label.set_xalign(0.0);
+    empty_label.add_css_class("dim-label");
+
+    let action_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let btn_restore = gtk::Button::with_label("Restore Selected");
+    let btn_delete = gtk::Button::with_label("Delete Selected");
+    action_row.append(&btn_restore);
+    action_row.append(&btn_delete);
+
+    content.append(&description);
+    content.append(&snapshot_dropdown);
+    content.append(&details_label);
+    content.append(&empty_label);
+    content.append(&action_row);
+    dialog.content_area().append(&content);
+
+    let entries_state: Rc<RefCell<Vec<crate::project_versions::ProjectSnapshotEntry>>> =
+        Rc::new(RefCell::new(Vec::new()));
+
+    let sync_selection_state: Rc<dyn Fn()> = {
+        let snapshot_dropdown = snapshot_dropdown.clone();
+        let btn_restore = btn_restore.clone();
+        let btn_delete = btn_delete.clone();
+        let details_label = details_label.clone();
+        let empty_label = empty_label.clone();
+        let entries_state = entries_state.clone();
+        Rc::new(move || {
+            let selected = snapshot_dropdown.selected() as usize;
+            let entries = entries_state.borrow();
+            if let Some(entry) = entries.get(selected) {
+                btn_restore.set_sensitive(true);
+                btn_delete.set_sensitive(true);
+                let source = entry
+                    .metadata
+                    .project_file_path
+                    .as_deref()
+                    .unwrap_or("Unsaved project");
+                details_label.set_text(&format!(
+                    "Created {} • Source {}",
+                    crate::project_versions::format_snapshot_timestamp(
+                        entry.metadata.created_at_unix_secs
+                    ),
+                    source
+                ));
+                empty_label.set_visible(false);
+            } else {
+                btn_restore.set_sensitive(false);
+                btn_delete.set_sensitive(false);
+                details_label.set_text("No snapshot selected.");
+                empty_label.set_visible(true);
+            }
+        })
+    };
+
+    {
+        let sync_selection_state = sync_selection_state.clone();
+        snapshot_dropdown.connect_selected_notify(move |_| {
+            sync_selection_state();
+        });
+    }
+
+    let refresh_entries: Rc<dyn Fn()> = {
+        let project = project.clone();
+        let snapshot_dropdown = snapshot_dropdown.clone();
+        let details_label = details_label.clone();
+        let empty_label = empty_label.clone();
+        let entries_state = entries_state.clone();
+        let sync_selection_state = sync_selection_state.clone();
+        Rc::new(move || {
+            let entries = {
+                let proj = project.borrow();
+                crate::project_versions::list_project_snapshots_for_project(&proj)
+            };
+            let has_entries = !entries.is_empty();
+            let model = gtk::StringList::new(&[]);
+            for entry in &entries {
+                model.append(&format!(
+                    "{} — {}",
+                    entry.metadata.snapshot_name,
+                    crate::project_versions::format_snapshot_timestamp(
+                        entry.metadata.created_at_unix_secs
+                    )
+                ));
+            }
+            *entries_state.borrow_mut() = entries;
+            snapshot_dropdown.set_model(Some(&model));
+            snapshot_dropdown.set_sensitive(has_entries);
+            snapshot_dropdown.set_selected(0);
+            if has_entries {
+                empty_label.set_text("");
+            } else {
+                empty_label.set_text("No named snapshots exist for the current project yet.");
+                details_label
+                    .set_text("Create a snapshot from the Export menu to capture a milestone.");
+            }
+            sync_selection_state();
+        })
+    };
+
+    {
+        let window = window.clone();
+        let project = project.clone();
+        let library = library.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let on_project_reloaded = on_project_reloaded.clone();
+        let entries_state = entries_state.clone();
+        let snapshot_dropdown = snapshot_dropdown.clone();
+        let dialog_weak = dialog.downgrade();
+        btn_restore.connect_clicked(move |_| {
+            let Some(entry) = entries_state
+                .borrow()
+                .get(snapshot_dropdown.selected() as usize)
+                .cloned()
+            else {
+                return;
+            };
+            let on_project_changed_guard = on_project_changed.clone();
+            let action: Rc<dyn Fn()> = Rc::new({
+                let project = project.clone();
+                let timeline_state = timeline_state.clone();
+                let on_project_changed = on_project_changed.clone();
+                let on_project_reloaded = on_project_reloaded.clone();
+                let dialog_weak = dialog_weak.clone();
+                let snapshot_id = entry.metadata.id.clone();
+                move || {
+                    if let Some(dialog) = dialog_weak.upgrade() {
+                        dialog.close();
+                    }
+                    let preserved_file_path = project.borrow().file_path.clone();
+                    let snapshot_id_for_load = snapshot_id.clone();
+                    restore_project_version_async(
+                        project.clone(),
+                        timeline_state.clone(),
+                        on_project_changed.clone(),
+                        on_project_reloaded.clone(),
+                        preserved_file_path,
+                        move || {
+                            crate::project_versions::load_project_snapshot(&snapshot_id_for_load)
+                                .map(|(_, project)| project)
+                        },
+                    );
+                }
+            });
+            confirm_unsaved_then(
+                window.clone(),
+                project.clone(),
+                library.clone(),
+                on_project_changed_guard,
+                action,
+            );
+        });
+    }
+
+    {
+        let window = window.clone();
+        let refresh_entries = refresh_entries.clone();
+        let entries_state = entries_state.clone();
+        let snapshot_dropdown = snapshot_dropdown.clone();
+        btn_delete.connect_clicked(move |_| {
+            let Some(entry) = entries_state
+                .borrow()
+                .get(snapshot_dropdown.selected() as usize)
+                .cloned()
+            else {
+                return;
+            };
+            let on_confirm: Rc<dyn Fn()> = Rc::new({
+                let refresh_entries = refresh_entries.clone();
+                let snapshot_id = entry.metadata.id.clone();
+                move || {
+                    if let Err(e) = crate::project_versions::delete_project_snapshot(&snapshot_id) {
+                        log::error!("{e}");
+                    }
+                    refresh_entries();
+                }
+            });
+            confirm_delete_snapshot(window.clone(), &entry.metadata.snapshot_name, on_confirm);
+        });
+    }
+
+    dialog.connect_response(|d, _| {
+        d.close();
+    });
+    refresh_entries();
+    dialog.present();
+}
+
 enum ExportProjectWithMediaUiEvent {
     Progress(fcpxml::writer::ExportProjectWithMediaProgress),
     Done { library_dir: std::path::PathBuf },
@@ -1924,10 +2319,56 @@ pub fn build_toolbar(
             on_export_frame();
         });
     }
+    let btn_create_snapshot = gtk::Button::with_label("Create Snapshot…");
+    btn_create_snapshot.add_css_class("flat");
+    {
+        let project = project.clone();
+        let library = library.clone();
+        let export_pop_weak = export_pop.downgrade();
+        btn_create_snapshot.connect_clicked(move |btn| {
+            if let Some(pop) = export_pop_weak.upgrade() {
+                pop.popdown();
+            }
+            let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+            let on_selected: Rc<dyn Fn(String) -> Result<(), String>> = Rc::new({
+                let project = project.clone();
+                let library = library.clone();
+                move |snapshot_name| {
+                    create_named_snapshot(&project, &library, &snapshot_name).map(|_| ())
+                }
+            });
+            choose_snapshot_name(window, on_selected);
+        });
+    }
+    let btn_manage_snapshots = gtk::Button::with_label("Manage Snapshots…");
+    btn_manage_snapshots.add_css_class("flat");
+    {
+        let project = project.clone();
+        let library = library.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed: Rc<dyn Fn()> = Rc::new(on_project_changed.clone());
+        let on_project_reloaded: Rc<dyn Fn()> = Rc::new(on_project_reloaded.clone());
+        let export_pop_weak = export_pop.downgrade();
+        btn_manage_snapshots.connect_clicked(move |btn| {
+            if let Some(pop) = export_pop_weak.upgrade() {
+                pop.popdown();
+            }
+            let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+            show_project_snapshots_dialog(
+                window,
+                project.clone(),
+                library.clone(),
+                timeline_state.clone(),
+                on_project_changed.clone(),
+                on_project_reloaded.clone(),
+            );
+        });
+    }
     let btn_restore_backup = gtk::Button::with_label("Restore from Backup…");
     btn_restore_backup.add_css_class("flat");
     {
         let project = project.clone();
+        let library = library.clone();
         let timeline_state = timeline_state.clone();
         let on_project_changed = on_project_changed.clone();
         let on_project_reloaded = on_project_reloaded.clone();
@@ -1937,73 +2378,56 @@ pub fn build_toolbar(
                 pop.popdown();
             }
             let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
-            let dialog = gtk::FileDialog::new();
-            dialog.set_title("Restore from Backup");
-            if let Some(dir) = crate::ui::window::backup_dir() {
-                let _ = std::fs::create_dir_all(&dir);
-                dialog.set_initial_folder(Some(&gio::File::for_path(&dir)));
-            }
-            let filter = gtk::FileFilter::new();
-            filter.add_pattern("*.uspxml");
-            filter.add_pattern("*.fcpxml");
-            filter.set_name(Some("Project Backups"));
-            let filters = gio::ListStore::new::<gtk::FileFilter>();
-            filters.append(&filter);
-            dialog.set_filters(Some(&filters));
-            let project = project.clone();
-            let timeline_state = timeline_state.clone();
-            let on_project_changed = on_project_changed.clone();
-            let on_project_reloaded = on_project_reloaded.clone();
-            dialog.open(window.as_ref(), gio::Cancellable::NONE, move |result| {
-                if let Ok(file) = result {
-                    if let Some(path) = file.path() {
-                        let path_str = path.to_string_lossy().to_string();
-                        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Project, String>>(1);
-                        let path_bg = path_str.clone();
-                        std::thread::spawn(move || {
-                            let result = std::fs::read_to_string(&path_bg)
-                                .map_err(|e| format!("Failed to read backup: {e}"))
-                                .and_then(|xml| {
-                                    fcpxml::parser::parse_fcpxml_with_path(
-                                        &xml,
-                                        Some(std::path::Path::new(&path_bg)),
-                                    )
-                                    .map_err(|e| format!("Backup parse error: {e}"))
-                                });
-                            let _ = tx.send(result);
-                        });
-                        let project = project.clone();
-                        let on_project_changed = on_project_changed.clone();
-                        let on_project_reloaded = on_project_reloaded.clone();
-                        let timeline_state = timeline_state.clone();
-                        timeline_state.borrow_mut().loading = true;
-                        glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
-                            match rx.try_recv() {
-                                Ok(Ok(mut new_proj)) => {
-                                    new_proj.dirty = false;
-                                    *project.borrow_mut() = new_proj;
-                                    timeline_state.borrow_mut().loading = false;
-                                    on_project_reloaded();
-                                    on_project_changed();
-                                    glib::ControlFlow::Break
-                                }
-                                Ok(Err(e)) => {
-                                    log::error!("Failed to restore backup: {e}");
-                                    timeline_state.borrow_mut().loading = false;
-                                    glib::ControlFlow::Break
-                                }
-                                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                                    glib::ControlFlow::Continue
-                                }
-                                Err(_) => {
-                                    timeline_state.borrow_mut().loading = false;
-                                    glib::ControlFlow::Break
-                                }
-                            }
-                        });
+            let on_project_changed_guard: Rc<dyn Fn()> = Rc::new(on_project_changed.clone());
+            let action: Rc<dyn Fn()> = Rc::new({
+                let project = project.clone();
+                let timeline_state = timeline_state.clone();
+                let on_project_changed: Rc<dyn Fn()> = Rc::new(on_project_changed.clone());
+                let on_project_reloaded: Rc<dyn Fn()> = Rc::new(on_project_reloaded.clone());
+                let window = window.clone();
+                move || {
+                    let dialog = gtk::FileDialog::new();
+                    dialog.set_title("Restore from Backup");
+                    if let Some(dir) = crate::project_versions::backup_dir() {
+                        let _ = std::fs::create_dir_all(&dir);
+                        dialog.set_initial_folder(Some(&gio::File::for_path(&dir)));
                     }
+                    let filter = gtk::FileFilter::new();
+                    filter.add_pattern("*.uspxml");
+                    filter.add_pattern("*.fcpxml");
+                    filter.set_name(Some("Project Backups"));
+                    let filters = gio::ListStore::new::<gtk::FileFilter>();
+                    filters.append(&filter);
+                    dialog.set_filters(Some(&filters));
+
+                    let project = project.clone();
+                    let timeline_state = timeline_state.clone();
+                    let on_project_changed = on_project_changed.clone();
+                    let on_project_reloaded = on_project_reloaded.clone();
+                    dialog.open(window.as_ref(), gio::Cancellable::NONE, move |result| {
+                        if let Ok(file) = result {
+                            if let Some(path) = file.path() {
+                                let preserved_file_path = project.borrow().file_path.clone();
+                                restore_project_version_async(
+                                    project.clone(),
+                                    timeline_state.clone(),
+                                    on_project_changed.clone(),
+                                    on_project_reloaded.clone(),
+                                    preserved_file_path,
+                                    move || crate::project_versions::load_fcpxml_project(&path),
+                                );
+                            }
+                        }
+                    });
                 }
             });
+            confirm_unsaved_then(
+                window,
+                project.clone(),
+                library.clone(),
+                on_project_changed_guard,
+                action,
+            );
         });
     }
     let btn_export_edl = gtk::Button::with_label("Export EDL…");
@@ -2163,6 +2587,8 @@ pub fn build_toolbar(
     export_pop_box.append(&btn_export_project_with_media);
     export_pop_box.append(&btn_collect_files);
     export_pop_box.append(&btn_export_frame);
+    export_pop_box.append(&btn_create_snapshot);
+    export_pop_box.append(&btn_manage_snapshots);
     export_pop_box.append(&btn_export_edl);
     export_pop_box.append(&btn_export_otio);
     export_pop_box.append(&btn_restore_backup);

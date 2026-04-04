@@ -21,7 +21,7 @@ Welcome to UltimateSlice, a Final Cut Pro–inspired non-linear video editor bui
 | [python-mcp.md](python-mcp.md) | Python socket client commands for MCP |
 | [program-monitor.md](program-monitor.md) | Previewing the assembled timeline |
 | [export.md](export.md) | Advanced export and interchange: codecs, resolution, audio options, OTIO/EDL |
-| [project-settings.md](project-settings.md) | Canvas size, frame rate, FCPXML save/load |
+| [project-settings.md](project-settings.md) | Canvas size, frame rate, FCPXML save/load, snapshots, backups |
 | [shortcuts.md](shortcuts.md) | Complete keyboard shortcut reference |
 
 For playback tuning and render-cache behavior, start with [preferences.md](preferences.md) and [program-monitor.md](program-monitor.md); for saved panel arrangements, see [workspace-layouts.md](workspace-layouts.md); MCP automation examples for the same controls live in [python-mcp.md](python-mcp.md).

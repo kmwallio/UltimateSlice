@@ -6,6 +6,7 @@ mod mcp;
 mod media;
 mod model;
 mod otio;
+mod project_versions;
 mod recent;
 mod ui;
 mod ui_state;

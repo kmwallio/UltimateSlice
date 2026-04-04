@@ -116,6 +116,15 @@ When imported FCPXML media references start with `/Volumes/...` and are missing 
 
 UltimateSlice auto-saves every 60 seconds to `/tmp/ultimateslice-autosave.fcpxml` when the project has unsaved changes. This is a safety net — use **Save…** for permanent storage.
 
+## Named Snapshots
+
+Use **Export ▼ → Create Snapshot…** to save the current project as a named milestone such as `Before color pass` or `Client v2`.
+
+- Use **Export ▼ → Manage Snapshots…** to browse snapshots for the current project, then restore or delete them.
+- Snapshots are stored in `~/.local/share/ultimateslice/snapshots/` (or `$XDG_DATA_HOME/ultimateslice/snapshots/` if set) as managed `.uspxml` versions plus snapshot metadata.
+- Restoring a snapshot loads that version into the editor and keeps the current primary save target unchanged; the restored project is marked dirty until you save again.
+- MCP tools: `list_project_snapshots`, `create_project_snapshot`, `restore_project_snapshot`, and `delete_project_snapshot`
+
 ## Versioned Backups
 
 In addition to auto-save, UltimateSlice creates **timestamped backup copies** of your project every 60 seconds (when dirty) in:
@@ -128,6 +137,6 @@ In addition to auto-save, UltimateSlice creates **timestamped backup copies** of
 
 - Backups are named `{ProjectTitle}_{YYYYMMDD_HHMMSS}.uspxml`
 - Old backups are automatically pruned to keep the most recent N versions per project title (default 20)
-- **Restore from Backup**: Use the **Export ▼ → Restore from Backup…** menu item to browse and open a previous backup
+- **Restore from Backup**: Use the **Export ▼ → Restore from Backup…** menu item to browse and load a previous backup without silently retargeting the project's main save path
 - Configure in **Preferences → General**: toggle "Auto-backup" on/off and set "Max backup versions"
 - MCP tool: `list_backups` lists available backup files with sizes

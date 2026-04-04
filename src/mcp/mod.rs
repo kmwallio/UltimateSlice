@@ -552,6 +552,21 @@ pub enum McpCommand {
     ListBackups {
         reply: SyncSender<Value>,
     },
+    ListProjectSnapshots {
+        reply: SyncSender<Value>,
+    },
+    CreateProjectSnapshot {
+        name: String,
+        reply: SyncSender<Value>,
+    },
+    RestoreProjectSnapshot {
+        snapshot_id: String,
+        reply: SyncSender<Value>,
+    },
+    DeleteProjectSnapshot {
+        snapshot_id: String,
+        reply: SyncSender<Value>,
+    },
     SyncClipsByAudio {
         clip_ids: Vec<String>,
         replace_audio: bool,

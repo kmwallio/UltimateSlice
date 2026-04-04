@@ -1399,6 +1399,44 @@ fn tools_list() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
+            "name": "list_project_snapshots",
+            "description": "List named snapshots for the current project, newest first.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "create_project_snapshot",
+            "description": "Create a named snapshot of the current project without changing its primary save path.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Human-readable snapshot name such as 'Before color pass'." }
+                },
+                "required": ["name"]
+            }
+        },
+        {
+            "name": "restore_project_snapshot",
+            "description": "Restore a named snapshot into the current project while preserving the current primary save path.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "snapshot_id": { "type": "string", "description": "Snapshot id from list_project_snapshots." }
+                },
+                "required": ["snapshot_id"]
+            }
+        },
+        {
+            "name": "delete_project_snapshot",
+            "description": "Delete a named project snapshot by id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "snapshot_id": { "type": "string", "description": "Snapshot id from list_project_snapshots." }
+                },
+                "required": ["snapshot_id"]
+            }
+        },
+        {
             "name": "set_clip_stabilization",
             "description": "Enable or configure video stabilization (libvidstab) on a clip. Stabilization is applied during export (two-pass analysis + transform).",
             "inputSchema": {
@@ -1851,6 +1889,7 @@ fn is_cacheable_read_tool(name: &str) -> bool {
             | "list_workspace_layouts"
             | "list_library"
             | "list_collections"
+            | "list_project_snapshots"
             | "list_frei0r_plugins"
     )
 }
@@ -2742,6 +2781,19 @@ fn dispatch_tool_payload(
             reply: tx,
         },
         "list_backups" => McpCommand::ListBackups { reply: tx },
+        "list_project_snapshots" => McpCommand::ListProjectSnapshots { reply: tx },
+        "create_project_snapshot" => McpCommand::CreateProjectSnapshot {
+            name: args["name"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+        "restore_project_snapshot" => McpCommand::RestoreProjectSnapshot {
+            snapshot_id: args["snapshot_id"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+        "delete_project_snapshot" => McpCommand::DeleteProjectSnapshot {
+            snapshot_id: args["snapshot_id"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
         "set_clip_stabilization" => McpCommand::SetClipStabilization {
             clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
             enabled: args
@@ -3387,6 +3439,109 @@ mod tests {
         let params = json!({
             "name": "get_performance_snapshot",
             "arguments": {}
+        });
+        let mut cache = std::collections::HashMap::new();
+        let response = call_tool(&id, &params, &sender, &mut cache);
+        assert_eq!(response["id"], id);
+        assert_eq!(response["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn call_tool_dispatches_list_project_snapshots() {
+        let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
+        std::thread::spawn(move || {
+            let cmd = receiver.recv().expect("expected command");
+            match cmd {
+                McpCommand::ListProjectSnapshots { reply } => {
+                    reply
+                        .send(json!({"ok": true, "snapshots": [], "count": 0}))
+                        .ok();
+                }
+                _ => panic!("unexpected MCP command"),
+            }
+        });
+        let id = json!(9);
+        let params = json!({
+            "name": "list_project_snapshots",
+            "arguments": {}
+        });
+        let mut cache = std::collections::HashMap::new();
+        let response = call_tool(&id, &params, &sender, &mut cache);
+        assert_eq!(response["id"], id);
+        assert_eq!(response["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn call_tool_dispatches_create_project_snapshot() {
+        let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
+        std::thread::spawn(move || {
+            let cmd = receiver.recv().expect("expected command");
+            match cmd {
+                McpCommand::CreateProjectSnapshot { name, reply } => {
+                    assert_eq!(name, "Before color");
+                    reply
+                        .send(json!({"ok": true, "snapshot": {"id": "snap-1", "name": name}}))
+                        .ok();
+                }
+                _ => panic!("unexpected MCP command"),
+            }
+        });
+        let id = json!(10);
+        let params = json!({
+            "name": "create_project_snapshot",
+            "arguments": { "name": "Before color" }
+        });
+        let mut cache = std::collections::HashMap::new();
+        let response = call_tool(&id, &params, &sender, &mut cache);
+        assert_eq!(response["id"], id);
+        assert_eq!(response["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn call_tool_dispatches_restore_project_snapshot() {
+        let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
+        std::thread::spawn(move || {
+            let cmd = receiver.recv().expect("expected command");
+            match cmd {
+                McpCommand::RestoreProjectSnapshot { snapshot_id, reply } => {
+                    assert_eq!(snapshot_id, "snap-1");
+                    reply
+                        .send(json!({"ok": true, "snapshot_id": snapshot_id, "dirty": true}))
+                        .ok();
+                }
+                _ => panic!("unexpected MCP command"),
+            }
+        });
+        let id = json!(11);
+        let params = json!({
+            "name": "restore_project_snapshot",
+            "arguments": { "snapshot_id": "snap-1" }
+        });
+        let mut cache = std::collections::HashMap::new();
+        let response = call_tool(&id, &params, &sender, &mut cache);
+        assert_eq!(response["id"], id);
+        assert_eq!(response["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn call_tool_dispatches_delete_project_snapshot() {
+        let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
+        std::thread::spawn(move || {
+            let cmd = receiver.recv().expect("expected command");
+            match cmd {
+                McpCommand::DeleteProjectSnapshot { snapshot_id, reply } => {
+                    assert_eq!(snapshot_id, "snap-1");
+                    reply
+                        .send(json!({"ok": true, "snapshot_id": snapshot_id}))
+                        .ok();
+                }
+                _ => panic!("unexpected MCP command"),
+            }
+        });
+        let id = json!(12);
+        let params = json!({
+            "name": "delete_project_snapshot",
+            "arguments": { "snapshot_id": "snap-1" }
         });
         let mut cache = std::collections::HashMap::new();
         let response = call_tool(&id, &params, &sender, &mut cache);
