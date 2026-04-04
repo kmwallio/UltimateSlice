@@ -23,6 +23,8 @@ Welcome to UltimateSlice, a Final Cut Pro–inspired non-linear video editor bui
 | [project-settings.md](project-settings.md) | Canvas size, frame rate, FCPXML save/load |
 | [shortcuts.md](shortcuts.md) | Complete keyboard shortcut reference |
 
+For playback tuning and render-cache behavior, start with [preferences.md](preferences.md) and [program-monitor.md](program-monitor.md); MCP automation examples for the same controls live in [python-mcp.md](python-mcp.md).
+
 ---
 
 ## Quick-Start Summary

@@ -179,6 +179,55 @@ impl PreviewQuality {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrerenderEncodingPreset {
+    Ultrafast,
+    Superfast,
+    Veryfast,
+    Faster,
+    Fast,
+    Medium,
+}
+
+impl Default for PrerenderEncodingPreset {
+    fn default() -> Self {
+        Self::Veryfast
+    }
+}
+
+impl PrerenderEncodingPreset {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ultrafast => "ultrafast",
+            Self::Superfast => "superfast",
+            Self::Veryfast => "veryfast",
+            Self::Faster => "faster",
+            Self::Fast => "fast",
+            Self::Medium => "medium",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "ultrafast" => Self::Ultrafast,
+            "superfast" => Self::Superfast,
+            "faster" => Self::Faster,
+            "fast" => Self::Fast,
+            "medium" => Self::Medium,
+            _ => Self::Veryfast,
+        }
+    }
+}
+
+pub const MIN_PRERENDER_CRF: u32 = 0;
+pub const MAX_PRERENDER_CRF: u32 = 51;
+pub const DEFAULT_PRERENDER_CRF: u32 = 20;
+
+pub fn clamp_prerender_crf(value: u32) -> u32 {
+    value.clamp(MIN_PRERENDER_CRF, MAX_PRERENDER_CRF)
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProxyMode {
@@ -670,6 +719,12 @@ pub struct PreferencesState {
     /// Uses more CPU and memory during playback.
     #[serde(default)]
     pub background_prerender: bool,
+    /// FFmpeg x264 preset used for background prerender video segments.
+    #[serde(default)]
+    pub prerender_preset: PrerenderEncodingPreset,
+    /// FFmpeg x264 CRF used for background prerender video segments.
+    #[serde(default = "default_prerender_crf")]
+    pub prerender_crf: u32,
     /// Preserve prerender cache files beside saved project files instead of using
     /// a temporary-only cache root.
     #[serde(default = "default_persist_prerenders_next_to_project_file")]
@@ -720,6 +775,8 @@ impl Default for PreferencesState {
             experimental_preview_optimizations: false,
             realtime_preview: true,
             background_prerender: false,
+            prerender_preset: PrerenderEncodingPreset::default(),
+            prerender_crf: default_prerender_crf(),
             persist_prerenders_next_to_project_file:
                 default_persist_prerenders_next_to_project_file(),
             preview_luts: false,
@@ -760,6 +817,11 @@ impl PreferencesState {
         };
         self.set_proxy_mode(mode);
     }
+
+    pub fn set_prerender_quality(&mut self, preset: PrerenderEncodingPreset, crf: u32) {
+        self.prerender_preset = preset;
+        self.prerender_crf = clamp_prerender_crf(crf);
+    }
 }
 
 fn default_show_timeline_preview() -> bool {
@@ -772,6 +834,10 @@ fn default_persist_proxies_next_to_original_media() -> bool {
 
 fn default_persist_prerenders_next_to_project_file() -> bool {
     true
+}
+
+fn default_prerender_crf() -> u32 {
+    DEFAULT_PRERENDER_CRF
 }
 
 fn default_show_track_audio_levels() -> bool {
@@ -975,6 +1041,11 @@ mod tests {
         assert!(parsed.preferences.persist_proxies_next_to_original_media);
         assert!(parsed.preferences.persist_prerenders_next_to_project_file);
         assert_eq!(
+            parsed.preferences.prerender_preset,
+            PrerenderEncodingPreset::Veryfast
+        );
+        assert_eq!(parsed.preferences.prerender_crf, DEFAULT_PRERENDER_CRF);
+        assert_eq!(
             parsed.preferences.crossfade_duration_ns,
             default_crossfade_duration_ns()
         );
@@ -1004,6 +1075,36 @@ mod tests {
         let json = serde_json::to_string(&prefs).unwrap();
         let decoded: PreferencesState = serde_json::from_str(&json).unwrap();
         assert!(!decoded.source_monitor_auto_link_av);
+    }
+
+    #[test]
+    fn preferences_prerender_quality_round_trip() {
+        let mut prefs = PreferencesState::default();
+        prefs.set_prerender_quality(PrerenderEncodingPreset::Fast, 17);
+        let json = serde_json::to_string(&prefs).unwrap();
+        let decoded: PreferencesState = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.prerender_preset, PrerenderEncodingPreset::Fast);
+        assert_eq!(decoded.prerender_crf, 17);
+    }
+
+    #[test]
+    fn preferences_set_prerender_quality_clamps_crf() {
+        let mut prefs = PreferencesState::default();
+        prefs.set_prerender_quality(
+            PrerenderEncodingPreset::Ultrafast,
+            MAX_PRERENDER_CRF.saturating_add(10),
+        );
+        assert_eq!(prefs.prerender_preset, PrerenderEncodingPreset::Ultrafast);
+        assert_eq!(prefs.prerender_crf, MAX_PRERENDER_CRF);
+    }
+
+    #[test]
+    fn prerender_preset_serde_uses_snake_case_values() {
+        let decoded: PreferencesState =
+            serde_json::from_str(r#"{"prerender_preset":"superfast","prerender_crf":21}"#).unwrap();
+        assert_eq!(decoded.prerender_preset, PrerenderEncodingPreset::Superfast);
+        let encoded = serde_json::to_string(&decoded).unwrap();
+        assert!(encoded.contains(r#""prerender_preset":"superfast""#));
     }
 
     #[test]

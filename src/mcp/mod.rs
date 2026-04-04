@@ -104,6 +104,11 @@ pub enum McpCommand {
         enabled: bool,
         reply: SyncSender<Value>,
     },
+    SetPrerenderQuality {
+        preset: String,
+        crf: u32,
+        reply: SyncSender<Value>,
+    },
     AddClip {
         source_path: String,
         track_index: usize,

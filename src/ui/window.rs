@@ -3076,6 +3076,8 @@ pub fn build_window(
         preferences_state.borrow().source_playback_priority.clone();
     let initial_proxy_mode = preferences_state.borrow().proxy_mode.clone();
     let initial_background_prerender = preferences_state.borrow().background_prerender;
+    let initial_prerender_preset = preferences_state.borrow().prerender_preset.clone();
+    let initial_prerender_crf = preferences_state.borrow().prerender_crf;
     let initial_persist_proxies_next_to_original_media = preferences_state
         .borrow()
         .persist_proxies_next_to_original_media;
@@ -3219,6 +3221,7 @@ pub fn build_window(
     );
     prog_player_raw.set_realtime_preview(preferences_state.borrow().realtime_preview);
     prog_player_raw.set_background_prerender(initial_background_prerender);
+    prog_player_raw.set_prerender_quality(initial_prerender_preset, initial_prerender_crf);
     {
         let p = project.borrow();
         prog_player_raw.set_prerender_project_path(
@@ -3348,6 +3351,9 @@ pub fn build_window(
             prog_player
                 .borrow_mut()
                 .set_background_prerender(new_state.background_prerender);
+            prog_player
+                .borrow_mut()
+                .set_prerender_quality(new_state.prerender_preset.clone(), new_state.prerender_crf);
             let project_file_path = { project.borrow().file_path.clone() };
             prog_player.borrow_mut().set_prerender_project_path(
                 project_file_path.as_deref(),
@@ -11107,6 +11113,8 @@ fn handle_mcp_command(
                     "experimental_preview_optimizations": prefs.experimental_preview_optimizations,
                     "realtime_preview": prefs.realtime_preview,
                     "background_prerender": prefs.background_prerender,
+                    "prerender_preset": prefs.prerender_preset.as_str(),
+                    "prerender_crf": prefs.prerender_crf,
                     "persist_prerenders_next_to_project_file": prefs.persist_prerenders_next_to_project_file,
                     "preview_luts": prefs.preview_luts,
                     "crossfade_enabled": prefs.crossfade_enabled,
@@ -11336,6 +11344,55 @@ fn handle_mcp_command(
                 .send(json!({
                     "success": true,
                     "background_prerender": enabled
+                }))
+                .ok();
+        }
+
+        McpCommand::SetPrerenderQuality { preset, crf, reply } => {
+            let parsed_preset = match preset.as_str() {
+                "ultrafast" => crate::ui_state::PrerenderEncodingPreset::Ultrafast,
+                "superfast" => crate::ui_state::PrerenderEncodingPreset::Superfast,
+                "veryfast" => crate::ui_state::PrerenderEncodingPreset::Veryfast,
+                "faster" => crate::ui_state::PrerenderEncodingPreset::Faster,
+                "fast" => crate::ui_state::PrerenderEncodingPreset::Fast,
+                "medium" => crate::ui_state::PrerenderEncodingPreset::Medium,
+                _ => {
+                    reply
+                        .send(json!({
+                            "success": false,
+                            "error": "preset must be one of: ultrafast, superfast, veryfast, faster, fast, medium"
+                        }))
+                        .ok();
+                    return;
+                }
+            };
+            if crf > crate::ui_state::MAX_PRERENDER_CRF {
+                reply
+                    .send(json!({
+                        "success": false,
+                        "error": format!(
+                            "crf must be between {} and {}",
+                            crate::ui_state::MIN_PRERENDER_CRF,
+                            crate::ui_state::MAX_PRERENDER_CRF
+                        )
+                    }))
+                    .ok();
+                return;
+            }
+            prog_player
+                .borrow_mut()
+                .set_prerender_quality(parsed_preset.clone(), crf);
+            let new_state = {
+                let mut prefs = preferences_state.borrow_mut();
+                prefs.set_prerender_quality(parsed_preset, crf);
+                prefs.clone()
+            };
+            crate::ui_state::save_preferences_state(&new_state);
+            reply
+                .send(json!({
+                    "success": true,
+                    "prerender_preset": new_state.prerender_preset.as_str(),
+                    "prerender_crf": new_state.prerender_crf
                 }))
                 .ok();
         }

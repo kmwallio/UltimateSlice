@@ -420,7 +420,7 @@ Tracking docs:
 - [ ] Preview/Export color parity improvements
   - [x] GStreamer real-time LUT element — apply LUTs in the GStreamer preview pipeline via CPU-based trilinear 3D LUT pad probe at preview resolution, with parsed-LUT caching and automatic double-apply prevention when source is already LUT-baked
   - [x] Prerender keyframe interpolation — background prerender now carries brightness/contrast/saturation/temperature/tint keyframes so animated color adjustments remain visible during prerender-backed preview
-  - [ ] Configurable prerender quality — expose CRF / encoding preset in Preferences (currently CRF 20 veryfast) to let users trade cache size and prerender speed for higher color fidelity
+  - [x] Configurable prerender quality — Preferences now expose background-prerender x264 preset + CRF controls (default `veryfast` / `20`), MCP `get_preferences` / `set_prerender_quality` surface the same settings, and prerender cache identity now includes them so stale mismatched-quality segments are not reused
   - [ ] Preview/export comparison overlay — a split-screen or A/B toggle in the Program Monitor that shows the prerender frame beside a single-frame export render, allowing direct visual parity inspection without a full export cycle
 - [x] Advanced color grading
   - [x] Match Clip Colors — automatic Reinhard-style color transfer: analyzes source and reference clip frames in CIE L\*a\*b\* space to compute slider adjustments (brightness, contrast, saturation, temperature, tint) and optional 17³ 3D LUT for fine-grained matching. Inspector "Match Color…" button, `Ctrl+Alt+M` shortcut, and `match_clip_colors` MCP tool with full undo support.

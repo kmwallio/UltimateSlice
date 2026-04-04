@@ -2,7 +2,10 @@ use crate::media::adjustment_scope::AdjustmentScopeShape;
 use crate::media::cube_lut::CubeLut;
 use crate::media::player::PlayerState;
 use crate::model::clip::{Clip as ModelClip, NumericKeyframe};
-use crate::ui_state::{CrossfadeCurve, PlaybackPriority};
+use crate::ui_state::{
+    clamp_prerender_crf, CrossfadeCurve, PlaybackPriority, PrerenderEncodingPreset,
+    DEFAULT_PRERENDER_CRF,
+};
 /// A "program monitor" player that composites the assembled timeline.
 ///
 /// Uses a GStreamer pipeline built around `compositor` (video) and `audiomixer`
@@ -1432,6 +1435,8 @@ pub struct ProgramPlayer {
     realtime_preview: bool,
     /// Prewarm upcoming boundaries earlier during active playback.
     background_prerender: bool,
+    prerender_preset: PrerenderEncodingPreset,
+    prerender_crf: u32,
     crossfade_enabled: bool,
     crossfade_curve: CrossfadeCurve,
     crossfade_duration_ns: u64,
@@ -2226,6 +2231,8 @@ impl ProgramPlayer {
                 experimental_preview_optimizations: false,
                 realtime_preview: true,
                 background_prerender: false,
+                prerender_preset: PrerenderEncodingPreset::default(),
+                prerender_crf: DEFAULT_PRERENDER_CRF,
                 crossfade_enabled: false,
                 crossfade_curve: CrossfadeCurve::default(),
                 crossfade_duration_ns: 200_000_000,
@@ -2365,6 +2372,16 @@ impl ProgramPlayer {
         } else if self.prerender_cache_persistent {
             self.prune_prerender_cache_root_files();
         }
+    }
+
+    pub fn set_prerender_quality(&mut self, preset: PrerenderEncodingPreset, crf: u32) {
+        let crf = clamp_prerender_crf(crf);
+        if self.prerender_preset == preset && self.prerender_crf == crf {
+            return;
+        }
+        self.prerender_preset = preset;
+        self.prerender_crf = crf;
+        self.prewarmed_boundary_ns = None;
     }
 
     pub fn set_audio_crossfade_preview(
@@ -6788,6 +6805,8 @@ impl ProgramPlayer {
         self.project_width.hash(&mut hasher);
         self.project_height.hash(&mut hasher);
         self.preview_divisor.hash(&mut hasher);
+        self.prerender_preset.as_str().hash(&mut hasher);
+        self.prerender_crf.hash(&mut hasher);
         self.proxy_enabled.hash(&mut hasher);
         self.proxy_scale_divisor.hash(&mut hasher);
         for &idx in active {
@@ -6984,6 +7003,8 @@ impl ProgramPlayer {
         let manifest_for_job = manifest;
         let cache_persistent = self.prerender_cache_persistent;
         let generation = self.prerender_generation;
+        let prerender_preset = self.prerender_preset.clone();
+        let prerender_crf = self.prerender_crf;
         std::thread::spawn(move || {
             let output_path_buf = PathBuf::from(&output_path);
             let mut success = Self::render_prerender_segment_video_file(
@@ -6996,6 +7017,8 @@ impl ProgramPlayer {
                 fps,
                 transition_spec_for_job.as_ref(),
                 transition_offset_ns,
+                prerender_preset,
+                prerender_crf,
             );
             if success
                 && Self::write_prerender_manifest_for_path(&output_path_buf, &manifest_for_job)
@@ -10515,6 +10538,8 @@ impl ProgramPlayer {
         fps: u32,
         transition_spec: Option<&TransitionPrerenderSpec>,
         transition_offset_ns: u64,
+        prerender_preset: PrerenderEncodingPreset,
+        prerender_crf: u32,
     ) -> bool {
         let Ok(ffmpeg) = crate::media::export::find_ffmpeg() else {
             return false;
@@ -10527,6 +10552,7 @@ impl ProgramPlayer {
         let partial_output_path = prerender_partial_output_path(&output_path_buf);
         let _ = std::fs::remove_file(&partial_output_path);
         let duration_s = duration_ns as f64 / 1_000_000_000.0;
+        let prerender_crf = clamp_prerender_crf(prerender_crf);
         let mut cmd = Command::new(&ffmpeg);
         cmd.arg("-y")
             .arg("-hide_banner")
@@ -10798,9 +10824,9 @@ impl ProgramPlayer {
             .arg("-c:v")
             .arg("libx264")
             .arg("-preset")
-            .arg("veryfast")
+            .arg(prerender_preset.as_str())
             .arg("-crf")
-            .arg("20")
+            .arg(prerender_crf.to_string())
             .arg("-pix_fmt")
             .arg("yuv420p")
             .arg("-f")
@@ -15054,6 +15080,7 @@ mod tests {
         ShortFrameCache, ThreePointParabola, TransitionPrerenderSpec, VideoSlot,
     };
     use crate::model::clip::{KeyframeInterpolation, NumericKeyframe};
+    use crate::ui_state::{PrerenderEncodingPreset, DEFAULT_PRERENDER_CRF};
     use gstreamer as gst;
     use std::collections::hash_map::DefaultHasher;
     use std::collections::HashMap;
@@ -16405,6 +16432,21 @@ mod tests {
     }
 
     #[test]
+    fn prerender_signature_changes_when_quality_changes() {
+        let _ = gst::init();
+        let (mut player, _paintable, _paintable2) = ProgramPlayer::new().expect("player");
+        let mut clip = make_clip();
+        clip.source_path = "/tmp/clip.mp4".to_string();
+        player.clips = vec![clip];
+
+        let before = player.prerender_signature_for_active(&[0]);
+        player.set_prerender_quality(PrerenderEncodingPreset::Medium, 18);
+        let after = player.prerender_signature_for_active(&[0]);
+
+        assert_ne!(before, after);
+    }
+
+    #[test]
     fn prerender_render_writes_mp4_even_with_partial_filename() {
         let mut title = make_clip();
         title.id = "title".to_string();
@@ -16428,6 +16470,8 @@ mod tests {
             24,
             None,
             0,
+            PrerenderEncodingPreset::Veryfast,
+            DEFAULT_PRERENDER_CRF,
         );
 
         assert!(ok, "expected prerender render to succeed");

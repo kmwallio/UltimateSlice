@@ -119,6 +119,7 @@ When a visual timeline clip or adjustment layer is selected, the Program Monitor
 - Saved projects now keep prerender segments in a project-scoped sibling `UltimateSlice.cache/prerender-vN/<project-hash>/` cache, and startup/open preserves that cache root so reopened projects can reuse prerendered overlap windows instead of always re-rendering them.
 - Those cached prerender segments are now written atomically through a temporary MP4 output before being promoted into place, preventing failed cache writes on overlap windows that should prerender successfully.
 - Cached prerender segments are validated against manifest-recorded source/proxy file signatures before reuse, so changed media invalidates stale segments automatically.
+- Background prerender encoding quality is configurable from Preferences via x264 preset + CRF. Lower CRF and slower presets improve fidelity, and those settings are part of the prerender cache identity so mismatched-quality cached segments are not reused.
 - Prerender cache lookups now track hit/miss telemetry (with hit-rate summaries), and `get_performance_snapshot` includes `prerender_cache_hits`, `prerender_cache_misses`, and `prerender_cache_hit_rate_percent`.
 - For proxy-backed prerender inputs, LUT is not re-applied in the prerender FFmpeg graph, preventing double LUT grading when the proxy media is already LUT-baked.
 - When a **scoped** adjustment layer is active, background prerender falls back to the live compositor-output path so the Program Monitor does not show stale full-frame adjustment renders.

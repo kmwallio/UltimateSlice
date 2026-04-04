@@ -1,5 +1,6 @@
 use crate::ui_state::{
-    CrossfadeCurve, GskRenderer, PlaybackPriority, PreferencesState, PreviewQuality, ProxyMode,
+    clamp_prerender_crf, CrossfadeCurve, GskRenderer, PlaybackPriority, PreferencesState,
+    PrerenderEncodingPreset, PreviewQuality, ProxyMode, MAX_PRERENDER_CRF, MIN_PRERENDER_CRF,
 };
 use gtk4::prelude::*;
 use gtk4::{
@@ -299,6 +300,47 @@ pub fn show_preferences_dialog(
     background_prerender_hint.set_max_width_chars(60);
     proxies_box.append(&background_prerender_check);
     proxies_box.append(&background_prerender_hint);
+
+    let prerender_preset_label = Label::new(Some("Prerender encoding preset"));
+    prerender_preset_label.set_halign(gtk::Align::Start);
+    let prerender_preset = gtk4::ComboBoxText::new();
+    prerender_preset.append(Some("ultrafast"), "Ultrafast (lowest CPU, largest files)");
+    prerender_preset.append(Some("superfast"), "Superfast");
+    prerender_preset.append(Some("veryfast"), "Veryfast (default)");
+    prerender_preset.append(Some("faster"), "Faster");
+    prerender_preset.append(Some("fast"), "Fast");
+    prerender_preset.append(Some("medium"), "Medium (highest quality per byte)");
+    prerender_preset.set_active_id(Some(current.prerender_preset.as_str()));
+    prerender_preset.set_halign(gtk::Align::Start);
+    let prerender_preset_hint = Label::new(Some(
+        "Slower presets spend more CPU to improve compression efficiency for reusable prerender cache clips.",
+    ));
+    prerender_preset_hint.set_halign(gtk::Align::Start);
+    prerender_preset_hint.add_css_class("dim-label");
+    prerender_preset_hint.set_wrap(true);
+    prerender_preset_hint.set_max_width_chars(60);
+    proxies_box.append(&prerender_preset_label);
+    proxies_box.append(&prerender_preset);
+    proxies_box.append(&prerender_preset_hint);
+
+    let prerender_crf_label = Label::new(Some("Prerender quality (CRF)"));
+    prerender_crf_label.set_halign(gtk::Align::Start);
+    let prerender_crf =
+        gtk::SpinButton::with_range(MIN_PRERENDER_CRF as f64, MAX_PRERENDER_CRF as f64, 1.0);
+    prerender_crf.set_digits(0);
+    prerender_crf.set_numeric(true);
+    prerender_crf.set_value(clamp_prerender_crf(current.prerender_crf) as f64);
+    prerender_crf.set_halign(gtk::Align::Start);
+    let prerender_crf_hint = Label::new(Some(
+        "Lower CRF increases prerender fidelity and cache size. Default is 20; x264 supports 0-51.",
+    ));
+    prerender_crf_hint.set_halign(gtk::Align::Start);
+    prerender_crf_hint.add_css_class("dim-label");
+    prerender_crf_hint.set_wrap(true);
+    prerender_crf_hint.set_max_width_chars(60);
+    proxies_box.append(&prerender_crf_label);
+    proxies_box.append(&prerender_crf);
+    proxies_box.append(&prerender_crf_hint);
 
     let persist_prerenders_check =
         CheckButton::with_label("Persist prerenders next to project file");
@@ -672,6 +714,8 @@ pub fn show_preferences_dialog(
                 experimental_preview_optimizations: experimental_check.is_active(),
                 realtime_preview: realtime_check.is_active(),
                 background_prerender: background_prerender_check.is_active(),
+                prerender_preset: current.prerender_preset.clone(),
+                prerender_crf: current.prerender_crf,
                 persist_prerenders_next_to_project_file: persist_prerenders_check.is_active(),
                 preview_luts: preview_luts_check.is_active(),
                 crossfade_enabled: crossfade_enabled_check.is_active(),
@@ -691,6 +735,21 @@ pub fn show_preferences_dialog(
             new_state.set_proxy_mode(ProxyMode::from_str(
                 proxy_mode.active_id().as_deref().unwrap_or("off"),
             ));
+            new_state.set_prerender_quality(
+                PrerenderEncodingPreset::from_str(
+                    prerender_preset
+                        .active_id()
+                        .as_deref()
+                        .unwrap_or("veryfast"),
+                ),
+                clamp_prerender_crf(
+                    prerender_crf
+                        .value()
+                        .round()
+                        .clamp(MIN_PRERENDER_CRF as f64, MAX_PRERENDER_CRF as f64)
+                        as u32,
+                ),
+            );
             on_save(new_state);
         }
         d.close();

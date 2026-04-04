@@ -1180,6 +1180,27 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_prerender_quality",
+            "description": "Set the x264 preset and CRF used for background prerendered overlap segments. Lower CRF improves fidelity but increases cache size and render time; slower presets improve compression efficiency at higher CPU cost.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "preset": {
+                        "type": "string",
+                        "enum": ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium"],
+                        "description": "x264 preset used for background prerender video segments."
+                    },
+                    "crf": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 51,
+                        "description": "x264 CRF used for background prerender video segments. Lower values improve quality and increase size. Default is 20."
+                    }
+                },
+                "required": ["preset", "crf"]
+            }
+        },
+        {
             "name": "set_prerender_project_persistence",
             "description": "Control whether saved projects keep reusable prerender cache files beside the project file instead of using only the temporary cache root.",
             "inputSchema": {
@@ -1886,6 +1907,17 @@ fn dispatch_tool_payload(
                 reply: tx,
             }
         }
+        "set_prerender_quality" => {
+            let (preset, crf) = match parse_prerender_quality_args(&args) {
+                Ok(parsed) => parsed,
+                Err(message) => return Err(tool_error_payload(-32602, message)),
+            };
+            McpCommand::SetPrerenderQuality {
+                preset: preset.to_string(),
+                crf,
+                reply: tx,
+            }
+        }
 
         "add_clip" => McpCommand::AddClip {
             source_path: args["source_path"].as_str().unwrap_or("").to_string(),
@@ -2559,6 +2591,17 @@ fn dispatch_tool_payload(
             enabled: args["enabled"].as_bool().unwrap_or(false),
             reply: tx,
         },
+        "set_prerender_quality" => {
+            let (preset, crf) = match parse_prerender_quality_args(&args) {
+                Ok(parsed) => parsed,
+                Err(message) => return Err(tool_error_payload(-32602, message)),
+            };
+            McpCommand::SetPrerenderQuality {
+                preset: preset.to_string(),
+                crf,
+                reply: tx,
+            }
+        }
         "set_prerender_project_persistence" => McpCommand::SetPrerenderProjectPersistence {
             enabled: args["enabled"].as_bool().unwrap_or(false),
             reply: tx,
@@ -3108,9 +3151,34 @@ fn parse_crossfade_settings_args(args: &Value) -> Result<(bool, &'static str, u6
     Ok((enabled, curve, duration_ns))
 }
 
+fn parse_prerender_quality_args(args: &Value) -> Result<(&'static str, u32), &'static str> {
+    let preset = match args.get("preset").and_then(Value::as_str) {
+        Some("ultrafast") => "ultrafast",
+        Some("superfast") => "superfast",
+        Some("veryfast") => "veryfast",
+        Some("faster") => "faster",
+        Some("fast") => "fast",
+        Some("medium") => "medium",
+        Some(_) => {
+            return Err(
+                "preset must be one of: ultrafast, superfast, veryfast, faster, fast, medium",
+            );
+        }
+        None => return Err("preset is required"),
+    };
+    let crf_u64 = match args.get("crf").and_then(Value::as_u64) {
+        Some(crf) => crf,
+        None => return Err("crf must be an integer"),
+    };
+    if crf_u64 > crate::ui_state::MAX_PRERENDER_CRF as u64 {
+        return Err("crf must be between 0 and 51");
+    }
+    Ok((preset, crf_u64 as u32))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{call_tool, parse_crossfade_settings_args};
+    use super::{call_tool, parse_crossfade_settings_args, parse_prerender_quality_args};
     use crate::mcp::McpCommand;
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3161,6 +3229,28 @@ mod tests {
         assert_eq!(
             parse_crossfade_settings_args(&args),
             Err("duration_ns must be an integer")
+        );
+    }
+
+    #[test]
+    fn parse_prerender_quality_accepts_valid_args() {
+        let args = json!({"preset": "fast", "crf": 18});
+        assert_eq!(parse_prerender_quality_args(&args), Ok(("fast", 18)));
+    }
+
+    #[test]
+    fn parse_prerender_quality_rejects_invalid_args() {
+        assert_eq!(
+            parse_prerender_quality_args(&json!({"preset": "turbo", "crf": 20})),
+            Err("preset must be one of: ultrafast, superfast, veryfast, faster, fast, medium")
+        );
+        assert_eq!(
+            parse_prerender_quality_args(&json!({"preset": "fast", "crf": 52})),
+            Err("crf must be between 0 and 51")
+        );
+        assert_eq!(
+            parse_prerender_quality_args(&json!({"preset": "fast", "crf": 19.5})),
+            Err("crf must be an integer")
         );
     }
 

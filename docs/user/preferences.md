@@ -168,6 +168,8 @@ Backups are stored in `~/.local/share/ultimateslice/backups/` (or `$XDG_DATA_HOM
 - Prototype path: prerender segments currently include mixed audio, and prerender playback can run as a single prerender decoder branch (video + audio) during heavy overlap sections.
 - Prerender segment duration now covers the full overlap span to the next boundary (not a fixed ~4s chunk), reducing black tails when long overlap regions are active.
 - When Proxy mode is enabled, background prerender segments render at the active proxy scale (Half/Quarter) for faster prerender generation.
+- Prerender quality is configurable from the **Proxies** page: choose an x264 preset from `Ultrafast` through `Medium`, plus a CRF value from `0` to `51` (default `Veryfast` + `20`).
+- Lower CRF improves prerender fidelity but increases cache size and render time; slower presets spend more CPU to improve compression efficiency.
 - Prerender activity is surfaced in the existing bottom status/progress bar used for proxy generation.
 - Only active when enabled in Preferences.
 - When **Persist prerenders next to project file** is enabled, saved projects keep prerender cache files in a sibling `UltimateSlice.cache/prerender-vN/<project-hash>/` directory and startup/open preserves that saved-project cache root so reopening the same project can reuse compatible prerender segments.
@@ -177,11 +179,13 @@ Backups are stored in `~/.local/share/ultimateslice/backups/` (or `$XDG_DATA_HOM
 - Disabling **Background prerender** clears the current project's prerender cache files.
 - If a prerender boundary clip fails to link reliably, UltimateSlice automatically falls back to the normal live rebuild path for stability.
 - Animated transform/mask properties, speed/reverse/freeze timing, and advanced clip-audio animation still fall back to the normal live path when prerender cannot reproduce them safely.
+- Prerender preset/CRF are part of the prerender cache identity, so changing them causes future prerender reuse to target only matching-quality cached segments.
 - When a boundary is not warm, playback falls back to the normal live rebuild path.
 - Uses more CPU/memory while playing and is disabled by default.
 - MCP automation:
-  - `get_preferences` returns `background_prerender` and `persist_prerenders_next_to_project_file`.
+  - `get_preferences` returns `background_prerender`, `prerender_preset`, `prerender_crf`, and `persist_prerenders_next_to_project_file`.
   - `set_background_prerender` toggles the setting.
+  - `set_prerender_quality` updates the background-prerender x264 preset and CRF.
 
 ## Prerender Cache Persistence (Proxies)
 
