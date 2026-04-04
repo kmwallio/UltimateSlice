@@ -12,7 +12,8 @@
   "hidden-folders" : [
     "target",
     "Sample-Media",
-    "src"
+    "src",
+    "flatpak-build"
   ],
   "folder-order" : [
     "target",
@@ -20,7 +21,8 @@
     "src",
     "docs",
     "data",
-    "tools"
+    "tools",
+    "flatpak-build"
   ],
   "notes" : "",
   "icon" : ""

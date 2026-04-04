@@ -264,7 +264,7 @@ cargo run -- --mcp
 # Attach to a running instance via Unix socket (stdio proxy):
 cargo run -- --mcp-attach
 # Via installed Flatpak (used by .mcp.json / AI agents):
-flatpak run io.github.ultimateslice --mcp
+flatpak run io.github.kmwallio.ultimateslice --mcp
 ```
 
 > **Flatpak build:** Run `python3 flatpak-cargo-generator.py Cargo.lock -o cargo-sources.json`

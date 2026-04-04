@@ -197,7 +197,7 @@ A Flatpak manifest is provided at `io.github.kmwallio.ultimateslice.yml`.
 
 ```/dev/null/bash#L1-3
 flatpak-builder build-dir io.github.kmwallio.ultimateslice.yml --user --install --force-clean
-flatpak run io.github.ultimateslice
+flatpak run io.github.kmwallio.ultimateslice
 ```
 
 ## Notes

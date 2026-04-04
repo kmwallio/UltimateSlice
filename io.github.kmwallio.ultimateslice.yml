@@ -29,15 +29,6 @@ modules:
         CARGO_HOME: /run/build/ultimate-slice/cargo
         LIBCLANG_PATH: /usr/lib/sdk/llvm20/lib
     build-commands:
-      - mkdir -p .cargo
-      - |
-        cat > .cargo/config.toml << 'EOF'
-        [source.crates-io]
-        replace-with = "vendored-sources"
-
-        [source.vendored-sources]
-        directory = "cargo/vendor"
-        EOF
       - cargo --offline build --release --locked
       - install -Dm755 target/release/ultimate-slice /app/bin/ultimate-slice
       - install -Dm644 data/io.github.kmwallio.ultimateslice.desktop /app/share/applications/io.github.kmwallio.ultimateslice.desktop
@@ -48,4 +39,13 @@ modules:
     sources:
       - type: dir
         path: .
+      - type: inline
+        contents: |
+          [source.crates-io]
+          replace-with = "vendored-sources"
+
+          [source.vendored-sources]
+          directory = "cargo/vendor"
+        dest: .cargo
+        dest-filename: config.toml
       - cargo-sources.json
