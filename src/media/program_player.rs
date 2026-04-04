@@ -182,6 +182,15 @@ fn prerender_partial_output_path(output_path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.partial", output_path.to_string_lossy()))
 }
 
+fn is_managed_prerender_segment_path(path: &Path) -> bool {
+    path.extension().and_then(|s| s.to_str()) == Some("mp4")
+        && path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|stem| stem.starts_with("seg_v"))
+            .unwrap_or(false)
+}
+
 fn remove_prerender_segment_files(output_path: &Path) {
     let _ = std::fs::remove_file(output_path);
     let _ = std::fs::remove_file(prerender_manifest_path(output_path));
@@ -2477,14 +2486,19 @@ impl ProgramPlayer {
                 if path.extension().and_then(|s| s.to_str()) != Some("mp4") {
                     continue;
                 }
+                let managed_segment = is_managed_prerender_segment_path(&path);
                 let Some(manifest) = Self::load_prerender_manifest_for_path(&path) else {
-                    remove_prerender_segment_files(&path);
-                    self.forget_prerender_segment_path(&path);
+                    if managed_segment {
+                        remove_prerender_segment_files(&path);
+                        self.forget_prerender_segment_path(&path);
+                    }
                     continue;
                 };
                 if !Self::prerender_manifest_inputs_are_fresh(&manifest.inputs) {
-                    remove_prerender_segment_files(&path);
-                    self.forget_prerender_segment_path(&path);
+                    if managed_segment {
+                        remove_prerender_segment_files(&path);
+                        self.forget_prerender_segment_path(&path);
+                    }
                     continue;
                 }
                 let modified = entry
@@ -5921,12 +5935,17 @@ impl ProgramPlayer {
                 if path.extension().and_then(|s| s.to_str()) != Some("mp4") {
                     continue;
                 }
+                let managed_segment = is_managed_prerender_segment_path(&path);
                 let Some(manifest) = Self::load_prerender_manifest_for_path(&path) else {
-                    remove_prerender_segment_files(&path);
+                    if managed_segment {
+                        remove_prerender_segment_files(&path);
+                    }
                     continue;
                 };
                 if !Self::prerender_manifest_inputs_are_fresh(&manifest.inputs) {
-                    remove_prerender_segment_files(&path);
+                    if managed_segment {
+                        remove_prerender_segment_files(&path);
+                    }
                     continue;
                 }
                 if manifest.signature != signature
@@ -16382,6 +16401,7 @@ mod tests {
         .expect("discover prerender");
         assert_eq!(discovered.key, key);
         assert_eq!(discovered.path, segment_path.to_string_lossy().to_string());
+        assert!(source_path.exists());
     }
 
     #[test]
