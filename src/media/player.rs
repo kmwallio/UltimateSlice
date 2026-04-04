@@ -91,20 +91,63 @@ impl Player {
                 .expect("gtk4paintablesink 'paintable' property must implement gdk4::Paintable")
         };
 
-        // Always try glsinkbin for efficient GL texture upload.
-        // Without it, gtk4paintablesink must upload raw CPU buffers to GPU
-        // textures on every frame, which can freeze the UI with high-res
-        // content (e.g. 5.3K GoPro HEVC).  Falls back to raw paintablesink
-        // only if glsinkbin is unavailable (no GL support).
-        let gl_video_sink = gst::ElementFactory::make("glsinkbin")
+        // Choose video-sink: try glsinkbin (GPU-resident frames) first, fall back to
+        // safe_sink (CPU path) if glsinkbin is not installed.
+        //
+        // Why glsinkbin works here (unlike the earlier attempt that was reverted):
+        // Source preview is always in SoftwareFiltered mode — avdec_h264/h265 outputs
+        // system-memory frames, never DMABuf.  The "glsinkbin bypasses video-filter via
+        // DMABuf caps negotiation" problem only arises when BOTH (a) the decoder can
+        // output DMABuf (VA-API) AND (b) the sink accepts DMABuf (glsinkbin).  With
+        // a software decoder neither condition holds, so video-filter is applied normally.
+        //
+        // With glsinkbin as direct video-sink:
+        //   • Frames become GdkGLTexture → GTK4 renders with zero CPU→GPU copy per frame.
+        //   • GL textures have no 2×2 alignment requirement, so the even-dims safety net
+        //     (safe_sink) is not needed.  We enforce even dims in the prescale capsfilter
+        //     instead (step=2 IntRange), which is earlier and cheaper.
+        //
+        // Fallback safe_sink: videoconvertscale → capsfilter(even-dims) → gtk4paintablesink.
+        // Used when glsinkbin is not installed.  Produces GdkMemoryTexture (CPU path).
+        let (video_sink, gl_video_sink) = match gst::ElementFactory::make("glsinkbin")
             .property("sink", &paintablesink)
             .build()
-            .ok();
-        let video_sink = gl_video_sink.as_ref().unwrap_or(&paintablesink);
+        {
+            Ok(glbin) => {
+                log::info!("source preview: using glsinkbin (GPU path)");
+                (glbin.clone(), Some(glbin))
+            }
+            Err(_) => {
+                log::warn!("source preview: glsinkbin unavailable, using CPU safe_sink fallback");
+                let bin = gst::Bin::new();
+                let conv = gst::ElementFactory::make("videoconvertscale")
+                    .build()
+                    .expect("videoconvertscale must be available");
+                let caps = gst::Caps::builder("video/x-raw")
+                    .field("width", gst::IntRange::<i32>::with_step(2, 65534, 2))
+                    .field("height", gst::IntRange::<i32>::with_step(2, 65534, 2))
+                    .build();
+                let even_caps = gst::ElementFactory::make("capsfilter")
+                    .property("caps", &caps)
+                    .build()
+                    .expect("capsfilter must be available");
+                bin.add_many([&conv, &even_caps, &paintablesink]).ok();
+                gst::Element::link_many([&conv, &even_caps, &paintablesink]).ok();
+                let sink_pad = conv.static_pad("sink").unwrap();
+                bin.add_pad(&gst::GhostPad::with_target(&sink_pad).unwrap())
+                    .ok();
+                (bin.upcast::<gst::Element>(), None)
+            }
+        };
 
         let pipeline = gst::ElementFactory::make("playbin")
-            .property("video-sink", video_sink)
+            .property("video-sink", &video_sink)
             .build()?;
+        // Disable subtitle/text rendering and visualisations — not needed for
+        // a source preview and saves decode work.  Use property_from_str so
+        // gstreamer-rs goes through the flags string parser instead of trying
+        // to coerce a u32 into GstPlayFlags (which panics on some builds).
+        pipeline.set_property_from_str("flags", "audio+video");
 
         let va_decoder_names = [
             "vah264dec",
@@ -158,9 +201,12 @@ impl Player {
         if let Some(ref vb) = videobalance {
             let bin = gst::Bin::new();
 
-            // Downscale oversized sources early. Default 640×360 matches
-            // the typical ~320×200 source preview widget (slight
-            // supersample). Updated at runtime via set_prescale_resolution().
+            // Downscale oversized sources early. Default 320×180 is a
+            // conservative initial cap — the 100ms adaptive timer in preview.rs
+            // will raise it to match the actual widget allocation shortly after
+            // first play.  Set low so the first few frames aren't decoded at
+            // 640×360 before the widget size is known.
+            // Updated at runtime via set_prescale_resolution().
             let prescale = gst::ElementFactory::make("videoconvertscale")
                 .build()
                 .expect("videoconvertscale must be available");
@@ -177,18 +223,20 @@ impl Player {
                     "caps",
                     &gst::Caps::builder("video/x-raw")
                         .field("format", "I420")
-                        .field("width", gst::IntRange::new(1i32, 640))
-                        .field("height", gst::IntRange::new(1i32, 360))
+                        .field("width", gst::IntRange::<i32>::with_step(2, 320, 2))
+                        .field("height", gst::IntRange::<i32>::with_step(2, 180, 2))
                         .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
                         .build(),
                 )
                 .build()
                 .expect("capsfilter must be available");
 
-            // Leaky queue after prescale: decouples the expensive
-            // decode+prescale thread from the effects chain so that slow
-            // decode at 5.3K doesn't stall the sink/main thread.
-            // leaky=downstream (2) drops oldest buffers when full.
+            // Non-leaky queue after prescale: decouples decode from the effects
+            // chain.  For file playback a non-leaky queue is always better than
+            // leaky — the decoder pauses when full and resumes without dropping
+            // frames.  A leaky queue actively drops frames on transient jitter,
+            // which is the primary cause of choppy source-preview playback.
+            // Depth and leak mode are tuned at runtime by set_playback_smoothness_policy.
             let prescale_queue = gst::ElementFactory::make("queue")
                 .property("max-size-buffers", 8u32)
                 .property("max-size-bytes", 0u32)
@@ -236,16 +284,34 @@ impl Player {
             pipeline.set_property("video-filter", &bin_element);
         }
 
-        // On macOS, playbin's internal decodebin may also auto-create
-        // videoconvertscale elements (e.g., colour-space conversion after vtdec).
-        // Intercept them and force n-threads=1 for the same IOSurface reason.
-        #[cfg(target_os = "macos")]
+        // Enable multi-threaded decoding on software decoders and fast scaling
+        // on any videoconvertscale elements that playbin auto-creates internally
+        // (colour-space converters, sinks, etc.).
+        //
+        // On macOS: vtdec (VideoToolbox) outputs IOSurface-backed NV12 buffers.
+        // The parallelized task runner in videoconvertscale reads them on worker
+        // threads after the backing memory may be released → SIGSEGV in
+        // unpack_NV12.  Force single-threaded conversion on macOS only.
         pipeline.connect("deep-element-added", false, |args| {
             let child = args[2].get::<gst::Element>().ok()?;
             let factory_name = child
                 .factory()
                 .map(|f| f.name().to_string())
                 .unwrap_or_default();
+            // Enable multi-threaded libav software decoders (avdec_h265, avdec_h264, …).
+            // max-threads=0 means "auto" but in practice FFmpeg caps it conservatively;
+            // setting it explicitly to the core count gives the full thread pool.
+            if factory_name.starts_with("avdec_") {
+                if child.find_property("max-threads").is_some() {
+                    let threads = (std::thread::available_parallelism()
+                        .map(|n| n.get() as i32)
+                        .unwrap_or(4)
+                        / 2)
+                    .clamp(2, 8);
+                    child.set_property("max-threads", threads);
+                }
+            }
+            #[cfg(target_os = "macos")]
             if factory_name == "videoconvertscale" && child.find_property("n-threads").is_some() {
                 child.set_property("n-threads", 1u32);
             }
@@ -254,7 +320,18 @@ impl Player {
 
         let state = Arc::new(Mutex::new(PlayerState::Stopped));
         let hardware_acceleration_enabled = Arc::new(Mutex::new(hardware_acceleration_enabled));
+        // Always start with HardwareFast so apply_decode_mode() below never
+        // early-returns.  The initial stored value must differ from whatever
+        // we pass to apply_decode_mode() or the early-return guard fires and
+        // the VA-API rank policy / software video-filter are never applied.
         let decode_mode = Arc::new(Mutex::new(SourceDecodeMode::HardwareFast));
+        // Source preview always uses the software-filtered path.  VA-API decoders
+        // output DMABuf frames; even with glsinkbin removed the DMABuf→system-memory
+        // conversion has proven unreliable across driver/kernel combinations, and
+        // the prescale filter (≤640×360) keeps CPU cost negligible for a preview
+        // widget.  Hardware acceleration setting is respected for the program
+        // player (export pipeline) but NOT for this source-preview player.
+        let initial_mode = SourceDecodeMode::SoftwareFiltered;
         let current_uri = Arc::new(Mutex::new(None));
         let hw_failed_uri = Arc::new(Mutex::new(None));
         let source_playback_priority =
@@ -293,11 +370,11 @@ impl Player {
             pending_seek_accurate,
         };
 
-        if *player.hardware_acceleration_enabled.lock().unwrap() && player.vaapi_available {
-            player.apply_decode_mode(SourceDecodeMode::HardwareFast);
-        } else {
-            player.apply_decode_mode(SourceDecodeMode::SoftwareFiltered);
-        }
+        // Apply the correct decode mode for startup.  Because decode_mode was
+        // initialised to HardwareFast above, calling apply_decode_mode with
+        // either value is guaranteed not to early-return, so VA-API ranks and
+        // the software video-filter are always configured correctly.
+        player.apply_decode_mode(initial_mode);
 
         Ok((player, paintable))
     }
@@ -317,6 +394,13 @@ impl Player {
         let _ = self
             .pipeline
             .state(Some(gst::ClockTime::from_mseconds(200)));
+        // Re-assert the video-filter after pipeline teardown.  Some playbin
+        // versions clear internal filter references during NULL state; also
+        // covers the case where apply_decode_mode() above early-returned
+        // (same mode as before) without calling set_property("video-filter").
+        if let Some(ref filter) = self.software_video_filter {
+            self.pipeline.set_property("video-filter", filter);
+        }
         self.pipeline.set_property("uri", uri);
         // Start async Paused preroll. Do NOT block here — gtk4paintablesink
         // needs the main loop to complete GL preroll. Blocking the main
@@ -344,7 +428,16 @@ impl Player {
 
     pub fn stop(&self) -> Result<()> {
         self.set_playback_smoothness_policy(false);
-        Self::safe_set_state(&self.pipeline, gst::State::Ready);
+        // Go to PAUSED rather than READY to preserve the gtk4paintablesink GL
+        // context.  Going to READY tears down the GL texture; the subsequent
+        // READY→PAUSED→PLAYING transition cannot reconstruct it without a full
+        // GL preroll cycle, leaving video permanently black while audio plays.
+        //
+        // We intentionally do NOT seek to position 0 here: calling seek_simple()
+        // in the same call-chain as safe_set_state creates an async race where
+        // the deferred set_state(Paused) timer can fire during a subsequent
+        // load() preroll and corrupt the playbin state machine.
+        Self::safe_set_state(&self.pipeline, gst::State::Paused);
         *self.state.lock().unwrap() = PlayerState::Stopped;
         Ok(())
     }
@@ -530,13 +623,10 @@ impl Player {
 
     pub fn set_hardware_acceleration(&self, enabled: bool) -> Result<()> {
         *self.hardware_acceleration_enabled.lock().unwrap() = enabled;
-        if let Some(uri) = self.current_uri.lock().unwrap().clone() {
-            self.load(&uri)?;
-        } else if enabled && self.vaapi_available {
-            self.apply_decode_mode(SourceDecodeMode::HardwareFast);
-        } else {
-            self.apply_decode_mode(SourceDecodeMode::SoftwareFiltered);
-        }
+        // Source preview always stays in SoftwareFiltered mode regardless of
+        // the hardware-acceleration setting — see Player::new() for rationale.
+        // We still store the flag (affects preferred_mode_for_uri callers) but
+        // do not trigger a decode-mode switch here.
         Ok(())
     }
 
@@ -556,12 +646,16 @@ impl Player {
     /// clamped to a minimum of 160×90 and maximum of 1920×1080.
     pub fn set_prescale_resolution(&self, width: i32, height: i32) {
         if let Some(ref caps_elem) = self.prescale_caps {
-            let w = width.clamp(160, 1920);
-            let h = height.clamp(90, 1080);
+            // Round down to even so the prescale always outputs even-dimension
+            // I420 frames.  GL textures (glsinkbin path) have no alignment
+            // requirement but the capsfilter uses step=2 IntRange, so the max
+            // value must also be even.
+            let w = (width.clamp(160, 1920) / 2) * 2;
+            let h = (height.clamp(90, 1080) / 2) * 2;
             let caps = gst::Caps::builder("video/x-raw")
                 .field("format", "I420")
-                .field("width", gst::IntRange::new(1i32, w))
-                .field("height", gst::IntRange::new(1i32, h))
+                .field("width", gst::IntRange::<i32>::with_step(2, w.max(2), 2))
+                .field("height", gst::IntRange::<i32>::with_step(2, h.max(2), 2))
                 .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
                 .build();
             caps_elem.set_property("caps", &caps);
@@ -586,20 +680,26 @@ impl Player {
         if current == mode {
             return;
         }
+        // Always keep the software_video_filter active regardless of decode mode.
+        // In HardwareFast mode, VA-API outputs DMA-buf frames; without the filter
+        // playsink's internal videoconvertscale can produce odd-height output
+        // (e.g. 1156×495) that is invalid for YU12 DMA-buf format, causing a
+        // torrent of per-frame "not valid for dmabuf" errors and a black display.
+        // The prescale filter (≤640×360, I420) enforces even dimensions and keeps
+        // CPU load low, so removing it in HW mode offers no practical benefit for
+        // a source-preview widget.
         match mode {
             SourceDecodeMode::SoftwareFiltered => {
                 self.set_va_decoder_rank_policy(false);
                 self.set_apple_decoder_rank_policy(false);
-                if let Some(ref filter) = self.software_video_filter {
-                    self.pipeline.set_property("video-filter", filter);
-                }
             }
             SourceDecodeMode::HardwareFast => {
                 self.set_va_decoder_rank_policy(true);
                 self.set_apple_decoder_rank_policy(true);
-                self.pipeline
-                    .set_property("video-filter", Option::<&gst::Element>::None);
             }
+        }
+        if let Some(ref filter) = self.software_video_filter {
+            self.pipeline.set_property("video-filter", filter);
         }
         *self.decode_mode.lock().unwrap() = mode;
     }
@@ -643,6 +743,9 @@ impl Player {
         let _ = self
             .pipeline
             .state(Some(gst::ClockTime::from_mseconds(150)));
+        if let Some(ref filter) = self.software_video_filter {
+            self.pipeline.set_property("video-filter", filter);
+        }
         self.pipeline.set_property("uri", uri.as_str());
         self.pipeline.set_state(gst::State::Paused)?;
         self.set_playback_smoothness_policy(false);
@@ -660,14 +763,13 @@ impl Player {
             crate::ui_state::PlaybackPriority::Accurate
         );
         if let Some(ref q) = self.prescale_queue {
-            if playing {
-                if accurate_mode {
-                    q.set_property("max-size-buffers", 6u32);
-                    q.set_property_from_str("leaky", "no");
-                } else {
-                    q.set_property("max-size-buffers", 2u32);
-                    q.set_property_from_str("leaky", "downstream");
-                }
+            // For file playback, a non-leaky queue allows the decoder to run
+            // ahead without dropping frames.  Leaky queues drop frames on any
+            // transient slowdown and are the primary cause of choppy playback.
+            // Use a larger buffer in accurate mode so scrubbing doesn't stall.
+            if playing && accurate_mode {
+                q.set_property("max-size-buffers", 6u32);
+                q.set_property_from_str("leaky", "no");
             } else {
                 q.set_property("max-size-buffers", 8u32);
                 q.set_property_from_str("leaky", "no");
@@ -696,7 +798,10 @@ impl Player {
             sink.set_property("qos", playing);
         }
         if sink.find_property("max-lateness").is_some() {
-            let max_lateness_ns: i64 = if playing { 20_000_000 } else { -1 };
+            // 40ms tolerance — same as the program player.  20ms was too tight:
+            // at 30fps a frame is 33ms, so a 21ms-late frame would be dropped
+            // even though it arrived well within the inter-frame interval.
+            let max_lateness_ns: i64 = if playing { 40_000_000 } else { -1 };
             sink.set_property("max-lateness", max_lateness_ns);
         }
     }

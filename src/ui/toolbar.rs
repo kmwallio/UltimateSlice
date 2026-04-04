@@ -2,11 +2,11 @@ use crate::fcpxml;
 use crate::media::export::{
     export_project, AudioCodec, Container, ExportOptions, ExportProgress, VideoCodec,
 };
-use crate::model::media_library::MediaItem;
+use crate::model::media_library::MediaLibrary;
 use crate::model::project::{FrameRate, Project};
 use crate::recent;
 use crate::ui::timeline::{ActiveTool, TimelineState};
-use crate::ui_state::{self, ExportPreset, ExportPresetsState};
+use crate::ui_state::{self, ExportPreset, ExportPresetsState, ExportQueueJob};
 use gio;
 use glib;
 use gtk4::prelude::*;
@@ -16,8 +16,11 @@ use std::rc::Rc;
 
 fn save_project_to_path(
     project: &Rc<RefCell<Project>>,
+    library: &Rc<RefCell<MediaLibrary>>,
     path: &std::path::Path,
 ) -> Result<(), String> {
+    // Sync bin data from library into project before writing.
+    crate::model::media_library::sync_bins_to_project(&library.borrow(), &mut project.borrow_mut());
     let xml = {
         let proj = project.borrow();
         fcpxml::writer::write_fcpxml_for_path(&proj, path)
@@ -38,6 +41,12 @@ fn save_project_to_path(
 enum ExportProjectWithMediaUiEvent {
     Progress(fcpxml::writer::ExportProjectWithMediaProgress),
     Done { library_dir: std::path::PathBuf },
+    Error(String),
+}
+
+enum CollectFilesUiEvent {
+    Progress(fcpxml::writer::CollectFilesProgress),
+    Done(fcpxml::writer::CollectFilesManifest),
     Error(String),
 }
 
@@ -68,6 +77,7 @@ fn container_from_selected(selected: u32) -> Container {
         1 => Container::Mov,
         2 => Container::WebM,
         3 => Container::Mkv,
+        4 => Container::Gif,
         _ => Container::Mp4,
     }
 }
@@ -78,6 +88,7 @@ fn selected_from_container(container: &Container) -> u32 {
         Container::Mov => 1,
         Container::WebM => 2,
         Container::Mkv => 3,
+        Container::Gif => 4,
     }
 }
 
@@ -129,16 +140,24 @@ fn collect_export_options(
     crf_slider: &gtk::Scale,
     ac_combo: &gtk::DropDown,
     ab_entry: &gtk::Entry,
+    gif_fps_spin: &gtk::SpinButton,
 ) -> ExportOptions {
     let (output_width, output_height) = output_resolution_from_selected(or_combo.selected());
+    let container = container_from_selected(ct_combo.selected());
+    let gif_fps = if container == Container::Gif {
+        Some(gif_fps_spin.value() as u32)
+    } else {
+        None
+    };
     ExportOptions {
         video_codec: video_codec_from_selected(vc_combo.selected()),
-        container: container_from_selected(ct_combo.selected()),
+        container,
         output_width,
         output_height,
         crf: crf_slider.value() as u32,
         audio_codec: audio_codec_from_selected(ac_combo.selected()),
         audio_bitrate_kbps: ab_entry.text().parse::<u32>().unwrap_or(192),
+        gif_fps,
     }
 }
 
@@ -150,6 +169,7 @@ fn apply_export_options(
     crf_slider: &gtk::Scale,
     ac_combo: &gtk::DropDown,
     ab_entry: &gtk::Entry,
+    gif_fps_spin: &gtk::SpinButton,
 ) {
     vc_combo.set_selected(selected_from_video_codec(&options.video_codec));
     ct_combo.set_selected(selected_from_container(&options.container));
@@ -160,6 +180,9 @@ fn apply_export_options(
     crf_slider.set_value(options.crf as f64);
     ac_combo.set_selected(selected_from_audio_codec(&options.audio_codec));
     ab_entry.set_text(&options.audio_bitrate_kbps.to_string());
+    if let Some(fps) = options.gif_fps {
+        gif_fps_spin.set_value(fps as f64);
+    }
 }
 
 fn refresh_preset_dropdown(
@@ -191,6 +214,7 @@ fn refresh_preset_dropdown(
 pub fn confirm_unsaved_then(
     window: Option<gtk::Window>,
     project: Rc<RefCell<Project>>,
+    library: Rc<RefCell<MediaLibrary>>,
     on_project_changed: Rc<dyn Fn()>,
     on_continue: Rc<dyn Fn()>,
 ) {
@@ -219,6 +243,7 @@ pub fn confirm_unsaved_then(
     dialog.content_area().append(&label);
 
     let project_c = project.clone();
+    let library_c = library.clone();
     let on_project_changed_c = on_project_changed.clone();
     let on_continue_c = on_continue.clone();
     dialog.connect_response(move |d, resp| match resp {
@@ -230,7 +255,7 @@ pub fn confirm_unsaved_then(
             d.close();
             let existing_path = project_c.borrow().file_path.clone();
             if let Some(path) = existing_path {
-                match save_project_to_path(&project_c, std::path::Path::new(&path)) {
+                match save_project_to_path(&project_c, &library_c, std::path::Path::new(&path)) {
                     Ok(()) => {
                         on_project_changed_c();
                         on_continue_c();
@@ -249,12 +274,13 @@ pub fn confirm_unsaved_then(
                 filters.append(&filter);
                 file_dialog.set_filters(Some(&filters));
                 let project_s = project_c.clone();
+                let library_s = library_c.clone();
                 let on_project_changed_s = on_project_changed_c.clone();
                 let on_continue_s = on_continue_c.clone();
                 file_dialog.save(window.as_ref(), gio::Cancellable::NONE, move |result| {
                     if let Ok(file) = result {
                         if let Some(path) = file.path() {
-                            match save_project_to_path(&project_s, &path) {
+                            match save_project_to_path(&project_s, &library_s, &path) {
                                 Ok(()) => {
                                     on_project_changed_s();
                                     on_continue_s();
@@ -271,15 +297,109 @@ pub fn confirm_unsaved_then(
     dialog.present();
 }
 
+#[allow(deprecated)]
+fn choose_collect_files_target(
+    window: Option<gtk::Window>,
+    project: Rc<RefCell<Project>>,
+    on_selected: Rc<dyn Fn(std::path::PathBuf, fcpxml::writer::CollectFilesMode, bool)>,
+) {
+    let dialog = gtk::Dialog::builder()
+        .title("Collect Files")
+        .modal(true)
+        .default_width(460)
+        .build();
+    dialog.set_transient_for(window.as_ref());
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+    dialog.add_button("Choose Folder…", gtk::ResponseType::Accept);
+
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    content.set_margin_start(16);
+    content.set_margin_end(16);
+    content.set_margin_top(16);
+    content.set_margin_bottom(16);
+
+    let label = gtk::Label::new(Some(
+        "Copy project media into a destination folder for archival or transfer. Choose whether to collect only timeline-used media or the entire project library. Existing clip LUT files used on the timeline are included automatically.",
+    ));
+    label.set_wrap(true);
+    label.set_xalign(0.0);
+
+    let timeline_only =
+        gtk::CheckButton::with_label(fcpxml::writer::CollectFilesMode::TimelineUsedOnly.ui_label());
+    timeline_only.set_active(true);
+    let entire_library =
+        gtk::CheckButton::with_label(fcpxml::writer::CollectFilesMode::EntireLibrary.ui_label());
+    entire_library.set_group(Some(&timeline_only));
+
+    let mode_hint = gtk::Label::new(Some(
+        "Timeline-used only makes a smaller handoff copy. Entire library also includes imported clips that are not currently on the timeline.",
+    ));
+    mode_hint.set_wrap(true);
+    mode_hint.set_xalign(0.0);
+    mode_hint.add_css_class("dim-label");
+
+    let use_collected_locations_on_next_save =
+        gtk::CheckButton::with_label("Use collected locations on next save");
+    let use_locations_hint = gtk::Label::new(Some(
+        "After copying finishes, update the current project to point at the collected files so the next project save/export writes those paths.",
+    ));
+    use_locations_hint.set_wrap(true);
+    use_locations_hint.set_xalign(0.0);
+    use_locations_hint.add_css_class("dim-label");
+
+    content.append(&label);
+    content.append(&timeline_only);
+    content.append(&entire_library);
+    content.append(&mode_hint);
+    content.append(&use_collected_locations_on_next_save);
+    content.append(&use_locations_hint);
+    dialog.content_area().append(&content);
+
+    dialog.connect_response(move |d, resp| match resp {
+        gtk::ResponseType::Accept => {
+            let mode = if entire_library.is_active() {
+                fcpxml::writer::CollectFilesMode::EntireLibrary
+            } else {
+                fcpxml::writer::CollectFilesMode::TimelineUsedOnly
+            };
+            d.close();
+
+            let file_dialog = gtk::FileDialog::new();
+            file_dialog.set_title("Choose Destination Folder");
+            if let Some(file_path) = project.borrow().file_path.clone() {
+                if let Some(parent) = std::path::Path::new(&file_path).parent() {
+                    file_dialog.set_initial_folder(Some(&gio::File::for_path(parent)));
+                }
+            }
+
+            let window = window.clone();
+            let on_selected = on_selected.clone();
+            let use_collected_locations_on_next_save =
+                use_collected_locations_on_next_save.is_active();
+            file_dialog.select_folder(window.as_ref(), gio::Cancellable::NONE, move |result| {
+                if let Ok(file) = result {
+                    if let Some(path) = file.path() {
+                        on_selected(path, mode, use_collected_locations_on_next_save);
+                    }
+                }
+            });
+        }
+        _ => d.close(),
+    });
+    dialog.present();
+}
+
 /// Build the main `HeaderBar` toolbar.
 #[allow(deprecated)]
 pub fn build_toolbar(
     project: Rc<RefCell<Project>>,
-    _library: Rc<RefCell<Vec<MediaItem>>>,
+    library: Rc<RefCell<MediaLibrary>>,
     timeline_state: Rc<RefCell<TimelineState>>,
     bg_removal_cache: Rc<RefCell<crate::media::bg_removal_cache::BgRemovalCache>>,
     on_project_changed: impl Fn() + 'static + Clone,
     on_project_reloaded: impl Fn() + 'static + Clone,
+    on_show_editor: impl Fn() + 'static + Clone,
+    on_use_collected_locations: impl Fn(fcpxml::writer::CollectFilesManifest) + 'static + Clone,
     on_export_frame: impl Fn() + 'static + Clone,
     on_record_voiceover: impl Fn() + 'static + Clone,
 ) -> (HeaderBar, Button) {
@@ -294,9 +414,11 @@ pub fn build_toolbar(
     btn_new.set_tooltip_text(Some("New project (Ctrl+N)"));
     {
         let project = project.clone();
+        let library = library.clone();
         let timeline_state = timeline_state.clone();
         let on_project_changed = on_project_changed.clone();
         let on_project_reloaded = on_project_reloaded.clone();
+        let on_show_editor = on_show_editor.clone();
         btn_new.connect_clicked(move |btn| {
             let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
             let on_project_changed_cb: Rc<dyn Fn()> = Rc::new(on_project_changed.clone());
@@ -305,6 +427,7 @@ pub fn build_toolbar(
                 let timeline_state = timeline_state.clone();
                 let on_project_changed = on_project_changed.clone();
                 let on_project_reloaded = on_project_reloaded.clone();
+                let on_show_editor = on_show_editor.clone();
                 move || {
                     *project.borrow_mut() = Project::new("Untitled");
                     {
@@ -317,21 +440,30 @@ pub fn build_toolbar(
                     }
                     on_project_reloaded();
                     on_project_changed();
+                    on_show_editor();
                 }
             });
-            confirm_unsaved_then(window, project.clone(), on_project_changed_cb, action);
+            confirm_unsaved_then(
+                window,
+                project.clone(),
+                library.clone(),
+                on_project_changed_cb,
+                action,
+            );
         });
     }
     header.pack_start(&btn_new);
 
     // Open project XML
     let btn_open = Button::with_label("Open…");
-    btn_open.set_tooltip_text(Some("Open project XML (Ctrl+O)"));
+    btn_open.set_tooltip_text(Some("Open project file (Ctrl+O)"));
     {
         let project = project.clone();
+        let library = library.clone();
         let timeline_state = timeline_state.clone();
         let on_project_changed = on_project_changed.clone();
         let on_project_reloaded = on_project_reloaded.clone();
+        let on_show_editor = on_show_editor.clone();
         btn_open.connect_clicked(move |btn| {
             let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
             let on_project_changed_cb: Rc<dyn Fn()> = Rc::new(on_project_changed.clone());
@@ -339,17 +471,19 @@ pub fn build_toolbar(
                 let project = project.clone();
                 let on_project_changed = on_project_changed.clone();
                 let on_project_reloaded = on_project_reloaded.clone();
+                let on_show_editor = on_show_editor.clone();
                 let timeline_state_cb = timeline_state.clone();
                 let window = window.clone();
                 move || {
                     let dialog = gtk::FileDialog::new();
-                    dialog.set_title("Open Project XML");
+                    dialog.set_title("Open Project");
 
                     let filter = gtk::FileFilter::new();
                     filter.add_pattern("*.uspxml");
                     filter.add_pattern("*.fcpxml");
                     filter.add_pattern("*.xml");
-                    filter.set_name(Some("Project XML Files"));
+                    filter.add_pattern("*.otio");
+                    filter.set_name(Some("Project Files"));
                     let filters = gio::ListStore::new::<gtk::FileFilter>();
                     filters.append(&filter);
                     dialog.set_filters(Some(&filters));
@@ -357,6 +491,7 @@ pub fn build_toolbar(
                     let project = project.clone();
                     let on_project_changed = on_project_changed.clone();
                     let on_project_reloaded = on_project_reloaded.clone();
+                    let on_show_editor = on_show_editor.clone();
                     let timeline_state_cb = timeline_state_cb.clone();
                     let window = window.clone();
                     dialog.open(window.as_ref(), gio::Cancellable::NONE, move |result| {
@@ -366,22 +501,16 @@ pub fn build_toolbar(
                                 // Parse FCPXML on a background thread to avoid blocking the UI.
                                 let (tx, rx) =
                                     std::sync::mpsc::sync_channel::<Result<Project, String>>(1);
-                                let path_bg = path_str.clone();
+                                let path_bg = path.clone();
                                 std::thread::spawn(move || {
-                                    let result = std::fs::read_to_string(&path_bg)
-                                        .map_err(|e| format!("Failed to read file: {e}"))
-                                        .and_then(|xml| {
-                                            fcpxml::parser::parse_fcpxml_with_path(
-                                                &xml,
-                                                Some(std::path::Path::new(&path_bg)),
-                                            )
-                                            .map_err(|e| format!("FCPXML parse error: {e}"))
-                                        });
+                                    let result =
+                                        crate::ui::project_loader::load_project_from_path(&path_bg);
                                     let _ = tx.send(result);
                                 });
                                 let project = project.clone();
                                 let on_project_changed = on_project_changed.clone();
                                 let on_project_reloaded = on_project_reloaded.clone();
+                                let on_show_editor = on_show_editor.clone();
                                 let timeline_state_cb = timeline_state_cb.clone();
                                 // Suppress timeline interaction while loading.
                                 timeline_state_cb.borrow_mut().loading = true;
@@ -403,6 +532,7 @@ pub fn build_toolbar(
                                             }
                                             on_project_reloaded();
                                             on_project_changed();
+                                            on_show_editor();
                                             glib::ControlFlow::Break
                                         }
                                         Ok(Err(e)) => {
@@ -424,7 +554,13 @@ pub fn build_toolbar(
                     });
                 }
             });
-            confirm_unsaved_then(window, project.clone(), on_project_changed_cb, action);
+            confirm_unsaved_then(
+                window,
+                project.clone(),
+                library.clone(),
+                on_project_changed_cb,
+                action,
+            );
         });
     }
     header.pack_start(&btn_open);
@@ -435,9 +571,11 @@ pub fn build_toolbar(
     btn_recent.set_tooltip_text(Some("Open a recently used project"));
     {
         let project = project.clone();
+        let library = library.clone();
         let timeline_state = timeline_state.clone();
         let on_project_changed = on_project_changed.clone();
         let on_project_reloaded = on_project_reloaded.clone();
+        let on_show_editor = on_show_editor.clone();
 
         // Build the popover upfront so MenuButton can show it immediately.
         // Repopulate the inner box each time the popover opens (connect_show)
@@ -482,9 +620,11 @@ pub fn build_toolbar(
 
                     let path_owned = path_str.clone();
                     let project = project.clone();
+                    let library = library.clone();
                     let timeline_state = timeline_state.clone();
                     let on_project_changed = on_project_changed.clone();
                     let on_project_reloaded = on_project_reloaded.clone();
+                    let on_show_editor = on_show_editor.clone();
                     let pop_weak = pop.downgrade();
                     let row_for_window = row.clone();
                     row.connect_clicked(move |_| {
@@ -495,6 +635,7 @@ pub fn build_toolbar(
                             let timeline_state = timeline_state.clone();
                             let on_project_changed = on_project_changed.clone();
                             let on_project_reloaded = on_project_reloaded.clone();
+                            let on_show_editor = on_show_editor.clone();
                             let path_owned = path_owned.clone();
                             let pop_weak = pop_weak.clone();
                             move || {
@@ -504,23 +645,20 @@ pub fn build_toolbar(
                                 // Parse FCPXML on a background thread to avoid blocking the UI.
                                 let (tx, rx) =
                                     std::sync::mpsc::sync_channel::<Result<Project, String>>(1);
-                                let path_bg = path_owned.clone();
+                                let path_bg = std::path::PathBuf::from(&path_owned);
                                 std::thread::spawn(move || {
-                                    let result = std::fs::read_to_string(&path_bg)
-                                        .map_err(|e| format!("Failed to open recent project: {e}"))
-                                        .and_then(|xml| {
-                                            fcpxml::parser::parse_fcpxml_with_path(
-                                                &xml,
-                                                Some(std::path::Path::new(&path_bg)),
-                                            )
-                                            .map_err(|e| format!("FCPXML parse error: {e}"))
-                                        });
+                                    let result =
+                                        crate::ui::project_loader::load_project_from_path(&path_bg)
+                                            .map_err(|e| {
+                                                format!("Failed to open recent project: {e}")
+                                            });
                                     let _ = tx.send(result);
                                 });
                                 let project = project.clone();
                                 let timeline_state = timeline_state.clone();
                                 let on_project_changed = on_project_changed.clone();
                                 let on_project_reloaded = on_project_reloaded.clone();
+                                let on_show_editor = on_show_editor.clone();
                                 let path_owned = path_owned.clone();
                                 // Suppress timeline interaction while loading.
                                 timeline_state.borrow_mut().loading = true;
@@ -542,6 +680,7 @@ pub fn build_toolbar(
                                             }
                                             on_project_reloaded();
                                             on_project_changed();
+                                            on_show_editor();
                                             glib::ControlFlow::Break
                                         }
                                         Ok(Err(e)) => {
@@ -566,6 +705,7 @@ pub fn build_toolbar(
                         confirm_unsaved_then(
                             window,
                             project.clone(),
+                            library.clone(),
                             on_project_changed_cb,
                             action,
                         );
@@ -580,6 +720,7 @@ pub fn build_toolbar(
     btn_save.set_tooltip_text(Some("Save project XML (Ctrl+S)"));
     {
         let project = project.clone();
+        let library = library.clone();
         let on_project_changed = on_project_changed.clone();
         btn_save.connect_clicked(move |btn| {
             let dialog = gtk::FileDialog::new();
@@ -595,13 +736,14 @@ pub fn build_toolbar(
             dialog.set_filters(Some(&filters));
 
             let project = project.clone();
+            let library = library.clone();
             let on_project_changed = on_project_changed.clone();
             let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
 
             dialog.save(window.as_ref(), gio::Cancellable::NONE, move |result| {
                 if let Ok(file) = result {
                     if let Some(path) = file.path() {
-                        match save_project_to_path(&project, &path) {
+                        match save_project_to_path(&project, &library, &path) {
                             Ok(()) => {
                                 println!("Saved to {}", path.display());
                                 on_project_changed();
@@ -645,25 +787,37 @@ pub fn build_toolbar(
             // ── Aspect ratio / resolution presets ──
             // Each aspect ratio group: (label, [(width, height, display_label)])
             let ar_presets: Vec<(&str, Vec<(u32, u32, &str)>)> = vec![
-                ("16:9 (Widescreen)", vec![
-                    (3840, 2160, "3840 × 2160  (4K UHD)"),
-                    (2560, 1440, "2560 × 1440  (1440p QHD)"),
-                    (1920, 1080, "1920 × 1080  (1080p HD)"),
-                    (1280, 720,  "1280 × 720   (720p HD)"),
-                ]),
-                ("4:3 (Standard)", vec![
-                    (1440, 1080, "1440 × 1080  (HD 4:3)"),
-                    (1024, 768,  "1024 × 768   (XGA)"),
-                    (720, 480,   "720 × 480    (SD NTSC)"),
-                ]),
-                ("9:16 (Vertical)", vec![
-                    (1080, 1920, "1080 × 1920  (Full HD Vertical)"),
-                    (720, 1280,  "720 × 1280   (HD Vertical)"),
-                ]),
-                ("1:1 (Square)", vec![
-                    (2160, 2160, "2160 × 2160  (4K Square)"),
-                    (1080, 1080, "1080 × 1080  (HD Square)"),
-                ]),
+                (
+                    "16:9 (Widescreen)",
+                    vec![
+                        (3840, 2160, "3840 × 2160  (4K UHD)"),
+                        (2560, 1440, "2560 × 1440  (1440p QHD)"),
+                        (1920, 1080, "1920 × 1080  (1080p HD)"),
+                        (1280, 720, "1280 × 720   (720p HD)"),
+                    ],
+                ),
+                (
+                    "4:3 (Standard)",
+                    vec![
+                        (1440, 1080, "1440 × 1080  (HD 4:3)"),
+                        (1024, 768, "1024 × 768   (XGA)"),
+                        (720, 480, "720 × 480    (SD NTSC)"),
+                    ],
+                ),
+                (
+                    "9:16 (Vertical)",
+                    vec![
+                        (1080, 1920, "1080 × 1920  (Full HD Vertical)"),
+                        (720, 1280, "720 × 1280   (HD Vertical)"),
+                    ],
+                ),
+                (
+                    "1:1 (Square)",
+                    vec![
+                        (2160, 2160, "2160 × 2160  (4K Square)"),
+                        (1080, 1080, "1080 × 1080  (HD Square)"),
+                    ],
+                ),
             ];
 
             // Detect current aspect ratio and resolution index
@@ -697,14 +851,21 @@ pub fn build_toolbar(
             let res_label = gtk::Label::new(Some("Resolution:"));
             res_label.set_halign(gtk::Align::End);
             let initial_res_strings: Vec<&str> = if (init_ar_idx as usize) < ar_presets.len() {
-                ar_presets[init_ar_idx as usize].1.iter().map(|r| r.2).collect()
+                ar_presets[init_ar_idx as usize]
+                    .1
+                    .iter()
+                    .map(|r| r.2)
+                    .collect()
             } else {
                 vec!["1920 × 1080  (1080p HD)"]
             };
-            let res_string_list = gtk::StringList::new(&initial_res_strings.iter().map(|s| *s).collect::<Vec<&str>>());
-            let res_combo = gtk::DropDown::builder()
-                .model(&res_string_list)
-                .build();
+            let res_string_list = gtk::StringList::new(
+                &initial_res_strings
+                    .iter()
+                    .map(|s| *s)
+                    .collect::<Vec<&str>>(),
+            );
+            let res_combo = gtk::DropDown::builder().model(&res_string_list).build();
             grid.attach(&res_label, 0, 1, 1, 1);
             grid.attach(&res_combo, 1, 1, 2, 1);
 
@@ -741,14 +902,16 @@ pub fn build_toolbar(
                 let res_combo = res_combo.clone();
                 let res_label = res_label.clone();
                 let custom_box = custom_box.clone();
-                let ar_presets_labels: Vec<Vec<String>> = ar_presets.iter()
+                let ar_presets_labels: Vec<Vec<String>> = ar_presets
+                    .iter()
                     .map(|(_, resolutions)| resolutions.iter().map(|r| r.2.to_string()).collect())
                     .collect();
                 ar_combo.connect_selected_notify(move |combo| {
                     let idx = combo.selected() as usize;
                     if idx < ar_presets_labels.len() {
                         // Preset aspect ratio: show resolution dropdown, hide custom
-                        let labels: Vec<&str> = ar_presets_labels[idx].iter().map(|s| s.as_str()).collect();
+                        let labels: Vec<&str> =
+                            ar_presets_labels[idx].iter().map(|s| s.as_str()).collect();
                         let new_model = gtk::StringList::new(&labels);
                         res_combo.set_model(Some(&new_model));
                         res_combo.set_selected(0);
@@ -793,7 +956,8 @@ pub fn build_toolbar(
             dialog.add_button("Apply", gtk::ResponseType::Accept);
 
             // Clone presets data for the response handler
-            let ar_res_data: Vec<Vec<(u32, u32)>> = ar_presets.iter()
+            let ar_res_data: Vec<Vec<(u32, u32)>> = ar_presets
+                .iter()
                 .map(|(_, resolutions)| resolutions.iter().map(|r| (r.0, r.1)).collect())
                 .collect();
 
@@ -930,6 +1094,7 @@ pub fn build_toolbar(
                 "QuickTime (.mov)",
                 "WebM (.webm)",
                 "Matroska (.mkv)",
+                "Animated GIF (.gif)",
             ]);
             ct_combo.set_selected(0);
             grid.attach(&ct_label, 0, 2, 1, 1);
@@ -949,7 +1114,7 @@ pub fn build_toolbar(
             grid.attach(&or_label, 0, 3, 1, 1);
             grid.attach(&or_combo, 1, 3, 1, 1);
 
-            // CRF
+            // CRF (hidden for GIF)
             let crf_label = gtk::Label::new(Some("Quality (CRF):"));
             crf_label.set_halign(gtk::Align::End);
             let crf_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -965,7 +1130,20 @@ pub fn build_toolbar(
             grid.attach(&crf_label, 0, 4, 1, 1);
             grid.attach(&crf_box, 1, 4, 1, 1);
 
-            // Audio codec
+            // GIF frame rate (shown only for GIF container)
+            let gif_fps_label = gtk::Label::new(Some("GIF Frame Rate:"));
+            gif_fps_label.set_halign(gtk::Align::End);
+            let gif_fps_spin = gtk::SpinButton::with_range(1.0, 30.0, 1.0);
+            gif_fps_spin.set_value(15.0);
+            gif_fps_spin.set_tooltip_text(Some(
+                "Frames per second for the animated GIF (lower = smaller file)",
+            ));
+            grid.attach(&gif_fps_label, 0, 5, 1, 1);
+            grid.attach(&gif_fps_spin, 1, 5, 1, 1);
+            gif_fps_label.set_visible(false);
+            gif_fps_spin.set_visible(false);
+
+            // Audio codec (hidden for GIF)
             let ac_label = gtk::Label::new(Some("Audio Codec:"));
             ac_label.set_halign(gtk::Align::End);
             let ac_combo = gtk::DropDown::from_strings(&[
@@ -975,17 +1153,45 @@ pub fn build_toolbar(
                 "PCM (uncompressed)",
             ]);
             ac_combo.set_selected(0);
-            grid.attach(&ac_label, 0, 5, 1, 1);
-            grid.attach(&ac_combo, 1, 5, 1, 1);
+            grid.attach(&ac_label, 0, 6, 1, 1);
+            grid.attach(&ac_combo, 1, 6, 1, 1);
 
-            // Audio bitrate
+            // Audio bitrate (hidden for GIF)
             let ab_label = gtk::Label::new(Some("Audio Bitrate:"));
             ab_label.set_halign(gtk::Align::End);
             let ab_entry = gtk::Entry::new();
             ab_entry.set_text("192");
             ab_entry.set_tooltip_text(Some("Audio bitrate in kbps (ignored for FLAC/PCM)"));
-            grid.attach(&ab_label, 0, 6, 1, 1);
-            grid.attach(&ab_entry, 1, 6, 1, 1);
+            grid.attach(&ab_label, 0, 7, 1, 1);
+            grid.attach(&ab_entry, 1, 7, 1, 1);
+
+            // Connect container selection to show/hide GIF-specific and audio rows
+            {
+                let gif_fps_label = gif_fps_label.clone();
+                let gif_fps_spin = gif_fps_spin.clone();
+                let crf_label = crf_label.clone();
+                let crf_box = crf_box.clone();
+                let ac_label = ac_label.clone();
+                let ac_combo = ac_combo.clone();
+                let ab_label = ab_label.clone();
+                let ab_entry = ab_entry.clone();
+                let vc_label = vc_label.clone();
+                let vc_combo = vc_combo.clone();
+                ct_combo.connect_selected_notify(move |ct| {
+                    let is_gif = ct.selected() == 4;
+                    gif_fps_label.set_visible(is_gif);
+                    gif_fps_spin.set_visible(is_gif);
+                    // Hide video codec + CRF rows for GIF (GIF handles its own encoding)
+                    vc_label.set_visible(!is_gif);
+                    vc_combo.set_visible(!is_gif);
+                    crf_label.set_visible(!is_gif);
+                    crf_box.set_visible(!is_gif);
+                    ac_label.set_visible(!is_gif);
+                    ac_combo.set_visible(!is_gif);
+                    ab_label.set_visible(!is_gif);
+                    ab_entry.set_visible(!is_gif);
+                });
+            }
 
             {
                 let state = presets_state.borrow();
@@ -1004,6 +1210,7 @@ pub fn build_toolbar(
                             &crf_slider,
                             &ac_combo,
                             &ab_entry,
+                            &gif_fps_spin,
                         );
                     }
                 }
@@ -1020,6 +1227,7 @@ pub fn build_toolbar(
                 let crf_slider = crf_slider.clone();
                 let ac_combo = ac_combo.clone();
                 let ab_entry = ab_entry.clone();
+                let gif_fps_spin = gif_fps_spin.clone();
                 let btn_update_preset = btn_update_preset.clone();
                 let btn_delete_preset = btn_delete_preset.clone();
                 preset_dropdown.connect_selected_notify(move |dropdown| {
@@ -1046,6 +1254,7 @@ pub fn build_toolbar(
                         &crf_slider,
                         &ac_combo,
                         &ab_entry,
+                        &gif_fps_spin,
                     );
                 });
             }
@@ -1059,6 +1268,7 @@ pub fn build_toolbar(
                 let crf_slider = crf_slider.clone();
                 let ac_combo = ac_combo.clone();
                 let ab_entry = ab_entry.clone();
+                let gif_fps_spin = gif_fps_spin.clone();
                 btn_save_preset.connect_clicked(move |_| {
                     let dialog = gtk::Dialog::builder()
                         .title("Save Export Preset")
@@ -1079,6 +1289,7 @@ pub fn build_toolbar(
                         let crf_slider = crf_slider.clone();
                         let ac_combo = ac_combo.clone();
                         let ab_entry = ab_entry.clone();
+                        let gif_fps_spin = gif_fps_spin.clone();
                         move |d, resp| {
                             if resp == gtk::ResponseType::Accept {
                                 let name = entry.text().to_string();
@@ -1089,6 +1300,7 @@ pub fn build_toolbar(
                                     &crf_slider,
                                     &ac_combo,
                                     &ab_entry,
+                                    &gif_fps_spin,
                                 );
                                 let ok = {
                                     let mut state = presets_state.borrow_mut();
@@ -1127,6 +1339,7 @@ pub fn build_toolbar(
                 let crf_slider = crf_slider.clone();
                 let ac_combo = ac_combo.clone();
                 let ab_entry = ab_entry.clone();
+                let gif_fps_spin = gif_fps_spin.clone();
                 btn_update_preset.connect_clicked(move |_| {
                     let selected = preset_dropdown.selected();
                     if selected == 0 {
@@ -1148,9 +1361,13 @@ pub fn build_toolbar(
                             &crf_slider,
                             &ac_combo,
                             &ab_entry,
+                            &gif_fps_spin,
                         );
                         let ok = state
-                            .upsert_preset(ExportPreset::from_export_options(existing_name, &options))
+                            .upsert_preset(ExportPreset::from_export_options(
+                                existing_name,
+                                &options,
+                            ))
                             .is_ok();
                         if ok {
                             ui_state::save_export_presets_state(&state);
@@ -1200,12 +1417,13 @@ pub fn build_toolbar(
 
             opt_dialog.content_area().append(&grid);
             opt_dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+            opt_dialog.add_button("Add to Queue", gtk::ResponseType::Other(1));
             opt_dialog.add_button("Choose Output File…", gtk::ResponseType::Accept);
 
             let project = project.clone();
             let bg_removal_cache = bg_removal_cache.clone();
             opt_dialog.connect_response(move |d, resp| {
-                if resp != gtk::ResponseType::Accept {
+                if resp != gtk::ResponseType::Accept && resp != gtk::ResponseType::Other(1) {
                     d.close();
                     return;
                 }
@@ -1217,6 +1435,7 @@ pub fn build_toolbar(
                     &crf_slider,
                     &ac_combo,
                     &ab_entry,
+                    &gif_fps_spin,
                 );
                 let mut state = presets_state.borrow_mut();
                 state.last_used_preset = if preset_dropdown.selected() > 0 {
@@ -1229,6 +1448,59 @@ pub fn build_toolbar(
                 };
                 ui_state::save_export_presets_state(&state);
                 let ext = options.container.extension();
+                drop(state);
+
+                // "Add to Queue" — prompt for output path then add to the queue without exporting
+                if resp == gtk::ResponseType::Other(1) {
+                    d.close();
+                    let file_dialog = gtk::FileDialog::new();
+                    file_dialog.set_title("Add to Export Queue — Choose Output File");
+                    file_dialog.set_initial_name(Some(&format!("export.{ext}")));
+                    let window: Option<gtk::Window> = None;
+                    let options_q = options.clone();
+                    file_dialog.save(window.as_ref(), gio::Cancellable::NONE, move |result| {
+                        if let Ok(file) = result {
+                            if let Some(path) = file.path() {
+                                let output = path.to_string_lossy().to_string();
+                                let preset =
+                                    ExportPreset::from_export_options("(queued)", &options_q);
+                                let job = ExportQueueJob::new(&output, preset);
+                                let mut queue = ui_state::load_export_queue_state();
+                                queue.jobs.push(job);
+                                ui_state::save_export_queue_state(&queue);
+                                // Brief confirmation toast via a small notification window
+                                let note = gtk::Window::builder()
+                                    .title("Added to Queue")
+                                    .default_width(320)
+                                    .build();
+                                let lbl = gtk::Label::new(Some(&format!(
+                                    "Added to export queue:\n{}",
+                                    std::path::Path::new(&output)
+                                        .file_name()
+                                        .and_then(|n| n.to_str())
+                                        .unwrap_or(&output)
+                                )));
+                                lbl.set_margin_start(16);
+                                lbl.set_margin_end(16);
+                                lbl.set_margin_top(16);
+                                lbl.set_margin_bottom(16);
+                                note.set_child(Some(&lbl));
+                                note.present();
+                                let note_weak = note.downgrade();
+                                glib::timeout_add_local_once(
+                                    std::time::Duration::from_secs(2),
+                                    move || {
+                                        if let Some(w) = note_weak.upgrade() {
+                                            w.close();
+                                        }
+                                    },
+                                );
+                            }
+                        }
+                    });
+                    return;
+                }
+
                 d.close();
 
                 // Now open file-chooser for the output path
@@ -1496,6 +1768,150 @@ pub fn build_toolbar(
             });
         });
     }
+    let btn_collect_files = gtk::Button::with_label("Collect Files…");
+    btn_collect_files.add_css_class("flat");
+    {
+        let project = project.clone();
+        let library = library.clone();
+        let export_pop_weak = export_pop.downgrade();
+        btn_collect_files.connect_clicked(move |btn| {
+            if let Some(pop) = export_pop_weak.upgrade() {
+                pop.popdown();
+            }
+
+            let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+            let on_selected: Rc<dyn Fn(std::path::PathBuf, fcpxml::writer::CollectFilesMode, bool)> =
+                Rc::new({
+                    let project = project.clone();
+                    let library = library.clone();
+                    let on_use_collected_locations = on_use_collected_locations.clone();
+                    move |destination_dir, mode, use_collected_locations_on_next_save| {
+                        let destination_string = destination_dir.to_string_lossy().to_string();
+                        let project_snapshot = project.borrow().clone();
+                        let library_snapshot = library.borrow().items.clone();
+                        let (tx, rx) = std::sync::mpsc::channel::<CollectFilesUiEvent>();
+                        let destination_for_worker = destination_dir.clone();
+
+                        std::thread::spawn(move || {
+                            let result = fcpxml::writer::collect_files_with_manifest(
+                                &project_snapshot,
+                                &library_snapshot,
+                                &destination_for_worker,
+                                mode,
+                                |progress| {
+                                    let _ = tx.send(CollectFilesUiEvent::Progress(progress));
+                                },
+                            );
+                            match result {
+                                Ok(summary) => {
+                                    let _ = tx.send(CollectFilesUiEvent::Done(summary));
+                                }
+                                Err(e) => {
+                                    let _ = tx.send(CollectFilesUiEvent::Error(e.to_string()));
+                                }
+                            }
+                        });
+
+                        let progress_dialog = gtk::Window::builder()
+                            .title("Collecting Files…")
+                            .default_width(420)
+                            .build();
+                        let vbox = gtk::Box::new(gtk::Orientation::Vertical, 12);
+                        vbox.set_margin_start(20);
+                        vbox.set_margin_end(20);
+                        vbox.set_margin_top(20);
+                        vbox.set_margin_bottom(20);
+
+                        let status_label = gtk::Label::new(Some(&format!(
+                            "Preparing {} collection…",
+                            mode.ui_label()
+                        )));
+                        status_label.set_halign(gtk::Align::Start);
+                        status_label.set_wrap(true);
+
+                        let progress_bar = gtk::ProgressBar::new();
+                        progress_bar.set_show_text(true);
+                        progress_bar.set_fraction(0.0);
+                        progress_bar.set_text(Some("0%"));
+
+                        let close_btn = gtk::Button::with_label("Close");
+                        close_btn.set_halign(gtk::Align::End);
+
+                        vbox.append(&status_label);
+                        vbox.append(&progress_bar);
+                        vbox.append(&close_btn);
+                        progress_dialog.set_child(Some(&vbox));
+                        progress_dialog.present();
+
+                        {
+                            let pd = progress_dialog.clone();
+                            close_btn.connect_clicked(move |_| {
+                                pd.close();
+                            });
+                        }
+
+                        let on_use_collected_locations = on_use_collected_locations.clone();
+                        glib::timeout_add_local(std::time::Duration::from_millis(120), move || {
+                            while let Ok(event) = rx.try_recv() {
+                                match event {
+                                    CollectFilesUiEvent::Progress(
+                                        fcpxml::writer::CollectFilesProgress::Copying {
+                                            copied_files,
+                                            total_files,
+                                            current_file,
+                                        },
+                                    ) => {
+                                        let fraction = if total_files == 0 {
+                                            0.0
+                                        } else {
+                                            (copied_files as f64) / (total_files as f64)
+                                        };
+                                        progress_bar.set_fraction(fraction.clamp(0.0, 1.0));
+                                        progress_bar
+                                            .set_text(Some(&format!("{:.0}%", fraction * 100.0)));
+                                        status_label.set_text(&format!(
+                                        "Copying {current_file} ({copied_files}/{total_files})…"
+                                    ));
+                                    }
+                                    CollectFilesUiEvent::Done(manifest) => {
+                                        let summary = manifest.result.clone();
+                                        if use_collected_locations_on_next_save {
+                                            on_use_collected_locations(manifest);
+                                        }
+                                        progress_bar.set_fraction(1.0);
+                                        progress_bar.set_text(Some("Done!"));
+                                        let status = if use_collected_locations_on_next_save {
+                                            format!(
+                                                "Collected {} media file(s) and {} LUT file(s) into {} and updated the project to use those files on the next save",
+                                                summary.media_files_copied,
+                                                summary.lut_files_copied,
+                                                destination_string
+                                            )
+                                        } else {
+                                            format!(
+                                                "Collected {} media file(s) and {} LUT file(s) into {}",
+                                                summary.media_files_copied,
+                                                summary.lut_files_copied,
+                                                destination_string
+                                            )
+                                        };
+                                        status_label.set_text(&status);
+                                        return glib::ControlFlow::Break;
+                                    }
+                                    CollectFilesUiEvent::Error(e) => {
+                                        status_label.set_text(&format!("Error: {e}"));
+                                        eprintln!("Collect-files error: {e}");
+                                        return glib::ControlFlow::Break;
+                                    }
+                                }
+                            }
+                            glib::ControlFlow::Continue
+                        });
+                    }
+                });
+            choose_collect_files_target(window, project.clone(), on_selected);
+        });
+    }
     let btn_export_frame = gtk::Button::with_label("Export Frame…");
     btn_export_frame.add_css_class("flat");
     {
@@ -1542,8 +1958,7 @@ pub fn build_toolbar(
                 if let Ok(file) = result {
                     if let Some(path) = file.path() {
                         let path_str = path.to_string_lossy().to_string();
-                        let (tx, rx) =
-                            std::sync::mpsc::sync_channel::<Result<Project, String>>(1);
+                        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Project, String>>(1);
                         let path_bg = path_str.clone();
                         std::thread::spawn(move || {
                             let result = std::fs::read_to_string(&path_bg)
@@ -1562,9 +1977,8 @@ pub fn build_toolbar(
                         let on_project_reloaded = on_project_reloaded.clone();
                         let timeline_state = timeline_state.clone();
                         timeline_state.borrow_mut().loading = true;
-                        glib::timeout_add_local(
-                            std::time::Duration::from_millis(50),
-                            move || match rx.try_recv() {
+                        glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+                            match rx.try_recv() {
                                 Ok(Ok(mut new_proj)) => {
                                     new_proj.dirty = false;
                                     *project.borrow_mut() = new_proj;
@@ -1585,16 +1999,197 @@ pub fn build_toolbar(
                                     timeline_state.borrow_mut().loading = false;
                                     glib::ControlFlow::Break
                                 }
-                            },
-                        );
+                            }
+                        });
                     }
                 }
             });
         });
     }
+    let btn_export_edl = gtk::Button::with_label("Export EDL…");
+    btn_export_edl.add_css_class("flat");
+    {
+        let project = project.clone();
+        let export_pop_weak = export_pop.downgrade();
+        btn_export_edl.connect_clicked(move |btn| {
+            if let Some(pop) = export_pop_weak.upgrade() {
+                pop.popdown();
+            }
+
+            let dialog = gtk::FileDialog::new();
+            dialog.set_title("Export EDL");
+            dialog.set_initial_name(Some("timeline.edl"));
+
+            let filter = gtk::FileFilter::new();
+            filter.add_pattern("*.edl");
+            filter.set_name(Some("CMX 3600 EDL Files"));
+            let filters = gio::ListStore::new::<gtk::FileFilter>();
+            filters.append(&filter);
+            dialog.set_filters(Some(&filters));
+
+            let project = project.clone();
+            let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+            dialog.save(window.as_ref(), gio::Cancellable::NONE, move |result| {
+                if let Ok(file) = result {
+                    if let Some(path) = file.path() {
+                        let edl_content = crate::edl::writer::write_edl(&project.borrow());
+                        match std::fs::write(&path, edl_content) {
+                            Ok(_) => {
+                                log::info!("EDL exported to {}", path.display());
+                            }
+                            Err(e) => {
+                                log::error!("Failed to export EDL: {e}");
+                            }
+                        }
+                    }
+                }
+            });
+        });
+    }
+
+    // -- Export OTIO button --
+    let btn_export_otio = gtk::Button::with_label("Export OTIO…");
+    btn_export_otio.add_css_class("flat");
+    {
+        let project = project.clone();
+        let export_pop_weak = export_pop.downgrade();
+        btn_export_otio.connect_clicked(move |btn| {
+            if let Some(pop) = export_pop_weak.upgrade() {
+                pop.popdown();
+            }
+
+            let project = project.clone();
+            let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+            let mode_dialog = gtk::Dialog::builder()
+                .title("Export OTIO")
+                .modal(true)
+                .default_width(460)
+                .build();
+            mode_dialog.set_transient_for(window.as_ref());
+            mode_dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+            mode_dialog.add_button("Continue…", gtk::ResponseType::Accept);
+
+            let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+            content.set_margin_start(16);
+            content.set_margin_end(16);
+            content.set_margin_top(16);
+            content.set_margin_bottom(16);
+
+            let description = gtk::Label::new(Some(
+                "Choose how UltimateSlice should write media references inside the exported OTIO file.",
+            ));
+            description.set_wrap(true);
+            description.set_xalign(0.0);
+
+            let absolute_paths = gtk::CheckButton::with_label(
+                crate::otio::writer::OtioMediaPathMode::Absolute.label(),
+            );
+            absolute_paths.set_active(true);
+            let relative_paths = gtk::CheckButton::with_label(
+                crate::otio::writer::OtioMediaPathMode::Relative.label(),
+            );
+            relative_paths.set_group(Some(&absolute_paths));
+
+            let hint = gtk::Label::new(Some(
+                "Absolute paths keep the current behavior. Relative paths are written relative to the exported .otio file location and are resolved from that folder when the OTIO file is opened again.",
+            ));
+            hint.set_wrap(true);
+            hint.set_xalign(0.0);
+            hint.add_css_class("dim-label");
+
+            content.append(&description);
+            content.append(&absolute_paths);
+            content.append(&relative_paths);
+            content.append(&hint);
+            mode_dialog.content_area().append(&content);
+
+            mode_dialog.connect_response(move |d, resp| {
+                if resp != gtk::ResponseType::Accept {
+                    d.close();
+                    return;
+                }
+                let path_mode = if relative_paths.is_active() {
+                    crate::otio::writer::OtioMediaPathMode::Relative
+                } else {
+                    crate::otio::writer::OtioMediaPathMode::Absolute
+                };
+                d.close();
+
+                let dialog = gtk::FileDialog::new();
+                dialog.set_title("Export OTIO");
+                dialog.set_initial_name(Some("timeline.otio"));
+
+                let filter = gtk::FileFilter::new();
+                filter.add_pattern("*.otio");
+                filter.set_name(Some("OpenTimelineIO Files"));
+                let filters = gio::ListStore::new::<gtk::FileFilter>();
+                filters.append(&filter);
+                dialog.set_filters(Some(&filters));
+
+                let project = project.clone();
+                let window = window.clone();
+                dialog.save(window.as_ref(), gio::Cancellable::NONE, move |result| {
+                    if let Ok(file) = result {
+                        if let Some(path) = file.path() {
+                            match crate::otio::writer::write_otio_to_path(
+                                &project.borrow(),
+                                &path,
+                                path_mode,
+                            ) {
+                                Ok(json) => match std::fs::write(&path, json) {
+                                    Ok(_) => {
+                                        log::info!(
+                                            "OTIO exported to {} with {} media references",
+                                            path.display(),
+                                            path_mode.as_str()
+                                        );
+                                    }
+                                    Err(e) => {
+                                        log::error!("Failed to write OTIO file: {e}");
+                                    }
+                                },
+                                Err(e) => {
+                                    log::error!("Failed to generate OTIO: {e}");
+                                }
+                            }
+                        }
+                    }
+                });
+            });
+            mode_dialog.present();
+        });
+    }
+
     export_pop_box.append(&btn_export_project_with_media);
+    export_pop_box.append(&btn_collect_files);
     export_pop_box.append(&btn_export_frame);
+    export_pop_box.append(&btn_export_edl);
+    export_pop_box.append(&btn_export_otio);
     export_pop_box.append(&btn_restore_backup);
+
+    // Export Queue dialog entry
+    let btn_export_queue = gtk::Button::with_label("Export Queue…");
+    btn_export_queue.add_css_class("flat");
+    btn_export_queue.set_tooltip_text(Some("View and run the batch export queue"));
+    {
+        let export_pop_weak = export_pop.downgrade();
+        let project = project.clone();
+        let bg_removal_cache = bg_removal_cache.clone();
+        btn_export_queue.connect_clicked(move |btn| {
+            if let Some(pop) = export_pop_weak.upgrade() {
+                pop.popdown();
+            }
+            let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+            let dialog = crate::ui::export_queue::build_export_queue_dialog(
+                project.clone(),
+                bg_removal_cache.clone(),
+                window.as_ref(),
+            );
+            dialog.present();
+        });
+    }
+    export_pop_box.append(&btn_export_queue);
+
     export_pop.set_child(Some(&export_pop_box));
     export_pop.set_parent(&btn_export_more);
     {
@@ -1617,7 +2212,9 @@ pub fn build_toolbar(
 
     // ── Record Voiceover ────────────────────────────────────────────────────
     let btn_record = Button::with_label("Record");
-    btn_record.set_tooltip_text(Some("Record voiceover from microphone at playhead position"));
+    btn_record.set_tooltip_text(Some(
+        "Record voiceover from microphone at playhead position",
+    ));
     btn_record.add_css_class("small-btn");
     {
         let on_record_voiceover = on_record_voiceover.clone();

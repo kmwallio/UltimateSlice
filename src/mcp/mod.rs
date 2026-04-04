@@ -100,6 +100,15 @@ pub enum McpCommand {
         mode: String,
         reply: SyncSender<Value>,
     },
+    SetProxySidecarPersistence {
+        enabled: bool,
+        reply: SyncSender<Value>,
+    },
+    SetPrerenderQuality {
+        preset: String,
+        crf: u32,
+        reply: SyncSender<Value>,
+    },
     AddClip {
         source_path: String,
         track_index: usize,
@@ -177,6 +186,21 @@ pub enum McpCommand {
         threshold: Option<f64>,
         reply: SyncSender<Value>,
     },
+    SetClipMask {
+        clip_id: String,
+        enabled: Option<bool>,
+        shape: Option<String>,
+        center_x: Option<f64>,
+        center_y: Option<f64>,
+        width: Option<f64>,
+        height: Option<f64>,
+        rotation: Option<f64>,
+        feather: Option<f64>,
+        expansion: Option<f64>,
+        invert: Option<bool>,
+        path: Option<serde_json::Value>,
+        reply: SyncSender<Value>,
+    },
     SetTitle {
         title: String,
         reply: SyncSender<Value>,
@@ -189,8 +213,27 @@ pub enum McpCommand {
         path: String,
         reply: SyncSender<Value>,
     },
+    SaveEdl {
+        path: String,
+        reply: SyncSender<Value>,
+    },
+    SaveOtio {
+        path: String,
+        path_mode: String,
+        reply: SyncSender<Value>,
+    },
+    OpenOtio {
+        path: String,
+        reply: SyncSender<Value>,
+    },
     SaveProjectWithMedia {
         path: String,
+        reply: SyncSender<Value>,
+    },
+    CollectProjectFiles {
+        directory_path: String,
+        mode: crate::fcpxml::writer::CollectFilesMode,
+        use_collected_locations_on_next_save: bool,
         reply: SyncSender<Value>,
     },
     ExportMp4 {
@@ -215,6 +258,29 @@ pub enum McpCommand {
         name: String,
         reply: SyncSender<Value>,
     },
+    ListWorkspaceLayouts {
+        reply: SyncSender<Value>,
+    },
+    SaveWorkspaceLayout {
+        name: String,
+        reply: SyncSender<Value>,
+    },
+    ApplyWorkspaceLayout {
+        name: String,
+        reply: SyncSender<Value>,
+    },
+    RenameWorkspaceLayout {
+        old_name: String,
+        new_name: String,
+        reply: SyncSender<Value>,
+    },
+    DeleteWorkspaceLayout {
+        name: String,
+        reply: SyncSender<Value>,
+    },
+    ResetWorkspaceLayout {
+        reply: SyncSender<Value>,
+    },
     ExportWithPreset {
         path: String,
         preset_name: String,
@@ -229,6 +295,79 @@ pub enum McpCommand {
     },
     RelinkMedia {
         root_path: String,
+        reply: SyncSender<Value>,
+    },
+    CreateBin {
+        name: String,
+        parent_id: Option<String>,
+        reply: SyncSender<Value>,
+    },
+    DeleteBin {
+        bin_id: String,
+        reply: SyncSender<Value>,
+    },
+    RenameBin {
+        bin_id: String,
+        name: String,
+        reply: SyncSender<Value>,
+    },
+    ListBins {
+        reply: SyncSender<Value>,
+    },
+    MoveToBin {
+        source_paths: Vec<String>,
+        bin_id: Option<String>,
+        reply: SyncSender<Value>,
+    },
+    ListCollections {
+        reply: SyncSender<Value>,
+    },
+    CreateCollection {
+        name: String,
+        search_text: Option<String>,
+        kind: Option<String>,
+        resolution: Option<String>,
+        frame_rate: Option<String>,
+        rating: Option<String>,
+        reply: SyncSender<Value>,
+    },
+    UpdateCollection {
+        collection_id: String,
+        name: Option<String>,
+        search_text: Option<String>,
+        kind: Option<String>,
+        resolution: Option<String>,
+        frame_rate: Option<String>,
+        rating: Option<String>,
+        reply: SyncSender<Value>,
+    },
+    DeleteCollection {
+        collection_id: String,
+        reply: SyncSender<Value>,
+    },
+    SetMediaRating {
+        library_key: String,
+        rating: String,
+        reply: SyncSender<Value>,
+    },
+    AddMediaKeywordRange {
+        library_key: String,
+        label: String,
+        start_ns: u64,
+        end_ns: u64,
+        reply: SyncSender<Value>,
+    },
+    UpdateMediaKeywordRange {
+        library_key: String,
+        range_id: String,
+        label: String,
+        start_ns: u64,
+        end_ns: u64,
+        reply: SyncSender<Value>,
+    },
+    DeleteMediaKeywordRange {
+        library_key: String,
+        range_id: String,
         reply: SyncSender<Value>,
     },
     ReorderTrack {
@@ -337,6 +476,10 @@ pub enum McpCommand {
         reply: SyncSender<Value>,
     },
     SetBackgroundPrerender {
+        enabled: bool,
+        reply: SyncSender<Value>,
+    },
+    SetPrerenderProjectPersistence {
         enabled: bool,
         reply: SyncSender<Value>,
     },
@@ -491,6 +634,94 @@ pub enum McpCommand {
         title_bg_box_padding: Option<f64>,
         title_clip_bg_color: Option<u32>,
         title_secondary_text: Option<String>,
+        reply: SyncSender<Value>,
+    },
+    AddToExportQueue {
+        output_path: String,
+        preset_name: Option<String>,
+        reply: SyncSender<Value>,
+    },
+    ListExportQueue {
+        reply: SyncSender<Value>,
+    },
+    ClearExportQueue {
+        /// "all", "done", "error", or None (same as "all")
+        status_filter: Option<String>,
+        reply: SyncSender<Value>,
+    },
+    RunExportQueue {
+        reply: SyncSender<Value>,
+    },
+    CreateCompoundClip {
+        clip_ids: Vec<String>,
+        reply: SyncSender<Value>,
+    },
+    BreakApartCompoundClip {
+        clip_id: String,
+        reply: SyncSender<Value>,
+    },
+    CreateMulticamClip {
+        clip_ids: Vec<String>,
+        reply: SyncSender<Value>,
+    },
+    AddAngleSwitch {
+        clip_id: String,
+        position_ns: u64,
+        angle_index: usize,
+        reply: SyncSender<Value>,
+    },
+    ListMulticamAngles {
+        clip_id: String,
+        reply: SyncSender<Value>,
+    },
+    SetMulticamAngleAudio {
+        clip_id: String,
+        angle_index: usize,
+        volume: Option<f32>,
+        muted: Option<bool>,
+        reply: SyncSender<Value>,
+    },
+    // ── Subtitle / STT commands ────────────────────────────────────────
+    GenerateSubtitles {
+        clip_id: String,
+        language: String,
+        reply: SyncSender<Value>,
+    },
+    GetClipSubtitles {
+        clip_id: String,
+        reply: SyncSender<Value>,
+    },
+    EditSubtitleText {
+        clip_id: String,
+        segment_id: String,
+        text: String,
+        reply: SyncSender<Value>,
+    },
+    EditSubtitleTiming {
+        clip_id: String,
+        segment_id: String,
+        start_ns: u64,
+        end_ns: u64,
+        reply: SyncSender<Value>,
+    },
+    ClearSubtitles {
+        clip_id: String,
+        reply: SyncSender<Value>,
+    },
+    SetSubtitleStyle {
+        clip_id: String,
+        font: Option<String>,
+        color: Option<u32>,
+        outline_color: Option<u32>,
+        outline_width: Option<f64>,
+        bg_box: Option<bool>,
+        bg_box_color: Option<u32>,
+        highlight_mode: Option<String>,
+        highlight_color: Option<u32>,
+        reply: SyncSender<Value>,
+    },
+    ExportSrt {
+        path: String,
         reply: SyncSender<Value>,
     },
 }

@@ -1,5 +1,23 @@
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::mpsc;
+
+/// Shared media metadata resolved from a probe pass.
+#[derive(Debug, Clone, Default)]
+pub struct MediaProbeMetadata {
+    pub duration_ns: Option<u64>,
+    pub is_audio_only: bool,
+    pub has_audio: bool,
+    pub source_timecode_base_ns: Option<u64>,
+    pub is_image: bool,
+    pub is_animated_svg: bool,
+    pub video_width: Option<u32>,
+    pub video_height: Option<u32>,
+    pub frame_rate_num: Option<u32>,
+    pub frame_rate_den: Option<u32>,
+    pub codec_summary: Option<String>,
+    pub file_size_bytes: Option<u64>,
+}
 
 /// Result of a background media probe.
 pub struct ProbeResult {
@@ -11,6 +29,14 @@ pub struct ProbeResult {
     pub source_timecode_base_ns: Option<u64>,
     /// True when the file is a still image (PNG, JPEG, etc.).
     pub is_image: bool,
+    /// True when the file is an animated SVG that should be treated as animated media.
+    pub is_animated_svg: bool,
+    pub video_width: Option<u32>,
+    pub video_height: Option<u32>,
+    pub frame_rate_num: Option<u32>,
+    pub frame_rate_den: Option<u32>,
+    pub codec_summary: Option<String>,
+    pub file_size_bytes: Option<u64>,
 }
 
 /// Asynchronous media probe cache.
@@ -38,18 +64,22 @@ impl MediaProbeCache {
         let tx = result_tx.clone();
         std::thread::spawn(move || {
             while let Ok(path) = work_rx.recv() {
-                let uri = format!("file://{path}");
-                let is_image = crate::model::clip::is_image_file(&path);
-                let (duration_ns, is_audio_only, has_audio, source_timecode_base_ns) =
-                    probe_media_bg(&uri, is_image);
+                let metadata = probe_media_metadata(&path);
                 if tx
                     .send(ProbeResult {
                         path,
-                        duration_ns,
-                        is_audio_only,
-                        has_audio,
-                        source_timecode_base_ns,
-                        is_image,
+                        duration_ns: metadata.duration_ns.unwrap_or(10 * 1_000_000_000),
+                        is_audio_only: metadata.is_audio_only,
+                        has_audio: metadata.has_audio,
+                        source_timecode_base_ns: metadata.source_timecode_base_ns,
+                        is_image: metadata.is_image,
+                        is_animated_svg: metadata.is_animated_svg,
+                        video_width: metadata.video_width,
+                        video_height: metadata.video_height,
+                        frame_rate_num: metadata.frame_rate_num,
+                        frame_rate_den: metadata.frame_rate_den,
+                        codec_summary: metadata.codec_summary,
+                        file_size_bytes: metadata.file_size_bytes,
                     })
                     .is_err()
                 {
@@ -98,33 +128,72 @@ impl MediaProbeCache {
 /// Default duration for still-image clips: 4 seconds.
 const IMAGE_DEFAULT_DURATION_NS: u64 = 4_000_000_000;
 
-/// Single Discoverer call that returns duration, audio-only flag, has-audio flag, and timecode.
-fn probe_media_bg(uri: &str, is_image: bool) -> (u64, bool, bool, Option<u64>) {
+/// Probe duration + stream characteristics in one pass.
+pub fn probe_media_metadata(path: &str) -> MediaProbeMetadata {
+    let uri = format!("file://{path}");
+    let is_image = crate::model::clip::is_image_file(path);
+    let file_size_bytes = std::fs::metadata(path).ok().map(|m| m.len());
+
     // For still images, skip the Discoverer entirely — images have no
     // meaningful duration or audio streams.
     if is_image {
-        return (IMAGE_DEFAULT_DURATION_NS, false, false, None);
+        let (video_width, video_height) = ffprobe_dimensions(path);
+        if crate::model::clip::is_svg_file(path) {
+            if let Ok(analysis) = crate::media::animated_svg::analyze_svg_path(path) {
+                if analysis.is_animated {
+                    return MediaProbeMetadata {
+                        duration_ns: Some(
+                            analysis.duration_ns.unwrap_or(IMAGE_DEFAULT_DURATION_NS),
+                        ),
+                        is_image: true,
+                        is_animated_svg: true,
+                        video_width,
+                        video_height,
+                        codec_summary: Some("Animated SVG".to_string()),
+                        file_size_bytes,
+                        ..MediaProbeMetadata::default()
+                    };
+                }
+            }
+        }
+        return MediaProbeMetadata {
+            duration_ns: Some(IMAGE_DEFAULT_DURATION_NS),
+            is_image: true,
+            video_width,
+            video_height,
+            codec_summary: image_codec_summary(path),
+            file_size_bytes,
+            ..MediaProbeMetadata::default()
+        };
     }
 
     use gstreamer_pbutils::Discoverer;
-    let fallback = (10 * 1_000_000_000, false, true, None);
+    let fallback = MediaProbeMetadata {
+        duration_ns: Some(10 * 1_000_000_000),
+        has_audio: true,
+        file_size_bytes,
+        ..MediaProbeMetadata::default()
+    };
     let Ok(()) = gstreamer::init() else {
         return fallback;
     };
     let Ok(discoverer) = Discoverer::new(gstreamer::ClockTime::from_seconds(5)) else {
         return fallback;
     };
-    let Ok(info) = discoverer.discover_uri(uri) else {
+    let Ok(info) = discoverer.discover_uri(&uri) else {
         return fallback;
     };
-    let duration_ns = info.duration().map(|d| d.nseconds()).unwrap_or(fallback.0);
-    let is_audio_only = info.video_streams().is_empty();
+    let duration_ns = info.duration().map(|d| d.nseconds());
+    let video_streams = info.video_streams();
+    let is_audio_only = video_streams.is_empty();
     let has_audio = !info.audio_streams().is_empty();
+    let video_stream = video_streams.first();
+    let (video_width, video_height) = video_stream
+        .map(|vs| (Some(vs.width()), Some(vs.height())))
+        .unwrap_or((None, None));
 
     // Get video frame rate for timecode conversion.
-    let video_fps = info
-        .video_streams()
-        .first()
+    let (frame_rate_num, frame_rate_den) = video_stream
         .map(|vs| {
             let fr = vs.framerate();
             (fr.numer() as u32, fr.denom() as u32)
@@ -133,16 +202,24 @@ fn probe_media_bg(uri: &str, is_image: bool) -> (u64, bool, bool, Option<u64>) {
 
     // Prefer the embedded timecode track (required by FCP) over creation
     // date/time which is only useful for multi-cam sync.
-    let file_path = uri.strip_prefix("file://").unwrap_or(uri);
-    let source_timecode_base_ns = extract_embedded_timecode(file_path, video_fps.0, video_fps.1)
-        .or_else(|| extract_creation_time_ns(&info));
+    let file_path = uri.strip_prefix("file://").unwrap_or(&uri);
+    let source_timecode_base_ns =
+        extract_embedded_timecode(file_path, frame_rate_num, frame_rate_den)
+            .or_else(|| extract_creation_time_ns(&info));
 
-    (
+    MediaProbeMetadata {
         duration_ns,
         is_audio_only,
         has_audio,
         source_timecode_base_ns,
-    )
+        video_width,
+        video_height,
+        frame_rate_num: video_stream.map(|_| frame_rate_num),
+        frame_rate_den: video_stream.map(|_| frame_rate_den),
+        codec_summary: ffprobe_codec_summary(path),
+        file_size_bytes,
+        ..MediaProbeMetadata::default()
+    }
 }
 
 /// Extract the embedded timecode from a media file's timecode track.
@@ -204,6 +281,131 @@ fn parse_timecode_to_ns(tc: &str, fps_num: u32, fps_den: u32) -> Option<u64> {
     Some(total_frames * fps_den as u64 * 1_000_000_000 / fps_num as u64)
 }
 
+fn image_codec_summary(path: &str) -> Option<String> {
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())?;
+    let label = match ext.as_str() {
+        "jpg" | "jpeg" => "JPEG",
+        "png" => "PNG",
+        "gif" => "GIF",
+        "bmp" => "BMP",
+        "tif" | "tiff" => "TIFF",
+        "webp" => "WebP",
+        "heic" => "HEIC",
+        "svg" => "SVG",
+        _ => return None,
+    };
+    Some(label.to_string())
+}
+
+fn ffprobe_dimensions(path: &str) -> (Option<u32>, Option<u32>) {
+    use std::process::Command;
+
+    let output = match Command::new("ffprobe")
+        .args([
+            "-v",
+            "quiet",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0",
+            path,
+        ])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return (None, None),
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let Some(line) = stdout.lines().next() else {
+        return (None, None);
+    };
+    let mut parts = line.split(',');
+    let width = parts
+        .next()
+        .and_then(|part| part.trim().parse::<u32>().ok());
+    let height = parts
+        .next()
+        .and_then(|part| part.trim().parse::<u32>().ok());
+    (width, height)
+}
+
+fn ffprobe_codec_summary(path: &str) -> Option<String> {
+    use std::process::Command;
+
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "quiet",
+            "-show_entries",
+            "stream=codec_type,codec_name",
+            "-of",
+            "csv=p=0",
+            path,
+        ])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let mut video_codec: Option<String> = None;
+    let mut audio_codec: Option<String> = None;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut parts = line.splitn(2, ',');
+        let Some(codec_type) = parts.next() else {
+            continue;
+        };
+        let Some(codec_name) = parts.next() else {
+            continue;
+        };
+        let codec_name = codec_name.trim();
+        if codec_name.is_empty() {
+            continue;
+        }
+        match codec_type.trim() {
+            "video" if video_codec.is_none() => {
+                video_codec = Some(pretty_codec_name(codec_name));
+            }
+            "audio" if audio_codec.is_none() => {
+                audio_codec = Some(pretty_codec_name(codec_name));
+            }
+            _ => {}
+        }
+    }
+
+    match (video_codec, audio_codec) {
+        (Some(video), Some(audio)) => Some(format!("{video} / {audio}")),
+        (Some(video), None) => Some(video),
+        (None, Some(audio)) => Some(audio),
+        (None, None) => None,
+    }
+}
+
+fn pretty_codec_name(codec: &str) -> String {
+    match codec.to_ascii_lowercase().as_str() {
+        "h264" => "H.264".to_string(),
+        "hevc" | "h265" => "H.265/HEVC".to_string(),
+        "prores" => "ProRes".to_string(),
+        "mpeg4" => "MPEG-4".to_string(),
+        "vp8" => "VP8".to_string(),
+        "vp9" => "VP9".to_string(),
+        "av1" => "AV1".to_string(),
+        "aac" => "AAC".to_string(),
+        "mp3" => "MP3".to_string(),
+        "flac" => "FLAC".to_string(),
+        "pcm_s16le" | "pcm_s24le" | "pcm_s32le" | "pcm_f32le" => "PCM".to_string(),
+        "opus" => "Opus".to_string(),
+        "vorbis" => "Vorbis".to_string(),
+        "alac" => "ALAC".to_string(),
+        other => other.to_ascii_uppercase(),
+    }
+}
+
 /// Extract time-of-day nanoseconds from GStreamer creation date/time tags.
 /// Fallback when no embedded timecode track is present.
 fn extract_creation_time_ns(info: &gstreamer_pbutils::DiscovererInfo) -> Option<u64> {
@@ -254,5 +456,30 @@ mod tests {
     fn test_parse_timecode_invalid() {
         assert!(parse_timecode_to_ns("invalid", 24000, 1001).is_none());
         assert!(parse_timecode_to_ns("00:00:00", 24000, 1001).is_none());
+    }
+
+    #[test]
+    fn test_pretty_codec_name() {
+        assert_eq!(pretty_codec_name("h264"), "H.264");
+        assert_eq!(pretty_codec_name("aac"), "AAC");
+        assert_eq!(pretty_codec_name("pcm_s24le"), "PCM");
+    }
+
+    #[test]
+    fn test_image_codec_summary() {
+        assert_eq!(
+            image_codec_summary("/tmp/example.jpeg").as_deref(),
+            Some("JPEG")
+        );
+        assert_eq!(
+            image_codec_summary("/tmp/example.SVG").as_deref(),
+            Some("SVG")
+        );
+        assert_eq!(image_codec_summary("/tmp/example.unknown"), None);
+    }
+
+    #[test]
+    fn test_ffprobe_dimensions_empty_output() {
+        assert_eq!(ffprobe_dimensions("/definitely/missing/file"), (None, None));
     }
 }

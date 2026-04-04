@@ -503,9 +503,13 @@ impl EditCommand for SplitClipCommand {
                 .find(|c| c.id == self.original_clip.id)
             {
                 let cut_offset = self.split_ns - clip.timeline_start;
-                clip.source_out = clip.source_in + cut_offset;
+                let new_source_out = clip.source_in + cut_offset;
+                clip.source_out = new_source_out;
+                // Filter left clip subtitles: keep only segments that end before the cut point.
+                clip.subtitle_segments
+                    .retain(|s| s.end_ns <= new_source_out);
             }
-            // Insert the right half
+            // Insert the right half (already has filtered subtitles from creation).
             track.add_clip(self.right_clip.clone());
         }
         project.dirty = true;
@@ -555,26 +559,92 @@ impl EditCommand for JoinThroughEditCommand {
     }
 }
 
-/// Set color correction on a clip (brightness/contrast/saturation)
-#[allow(dead_code)]
+/// Snapshot of all color-correction properties on a clip.
+/// Used by SetClipColorCommand to fully restore state on undo/redo.
+#[derive(Clone, Debug, Default)]
+pub struct ClipColorSnapshot {
+    pub brightness: f32,
+    pub contrast: f32,
+    pub saturation: f32,
+    pub temperature: f32,
+    pub tint: f32,
+    pub denoise: f32,
+    pub sharpness: f32,
+    pub blur: f32,
+    pub shadows: f32,
+    pub midtones: f32,
+    pub highlights: f32,
+    pub exposure: f32,
+    pub black_point: f32,
+    pub highlights_warmth: f32,
+    pub highlights_tint: f32,
+    pub midtones_warmth: f32,
+    pub midtones_tint: f32,
+    pub shadows_warmth: f32,
+    pub shadows_tint: f32,
+}
+
+impl ClipColorSnapshot {
+    pub fn from_clip(clip: &crate::model::clip::Clip) -> Self {
+        Self {
+            brightness: clip.brightness,
+            contrast: clip.contrast,
+            saturation: clip.saturation,
+            temperature: clip.temperature,
+            tint: clip.tint,
+            denoise: clip.denoise,
+            sharpness: clip.sharpness,
+            blur: clip.blur,
+            shadows: clip.shadows,
+            midtones: clip.midtones,
+            highlights: clip.highlights,
+            exposure: clip.exposure,
+            black_point: clip.black_point,
+            highlights_warmth: clip.highlights_warmth,
+            highlights_tint: clip.highlights_tint,
+            midtones_warmth: clip.midtones_warmth,
+            midtones_tint: clip.midtones_tint,
+            shadows_warmth: clip.shadows_warmth,
+            shadows_tint: clip.shadows_tint,
+        }
+    }
+
+    fn apply_to(&self, clip: &mut crate::model::clip::Clip) {
+        clip.brightness = self.brightness;
+        clip.contrast = self.contrast;
+        clip.saturation = self.saturation;
+        clip.temperature = self.temperature;
+        clip.tint = self.tint;
+        clip.denoise = self.denoise;
+        clip.sharpness = self.sharpness;
+        clip.blur = self.blur;
+        clip.shadows = self.shadows;
+        clip.midtones = self.midtones;
+        clip.highlights = self.highlights;
+        clip.exposure = self.exposure;
+        clip.black_point = self.black_point;
+        clip.highlights_warmth = self.highlights_warmth;
+        clip.highlights_tint = self.highlights_tint;
+        clip.midtones_warmth = self.midtones_warmth;
+        clip.midtones_tint = self.midtones_tint;
+        clip.shadows_warmth = self.shadows_warmth;
+        clip.shadows_tint = self.shadows_tint;
+    }
+}
+
+/// Set all color-correction properties on a clip (full snapshot approach).
 pub struct SetClipColorCommand {
     pub clip_id: String,
     pub track_id: String,
-    pub old_brightness: f32,
-    pub old_contrast: f32,
-    pub old_saturation: f32,
-    pub new_brightness: f32,
-    pub new_contrast: f32,
-    pub new_saturation: f32,
+    pub old_color: ClipColorSnapshot,
+    pub new_color: ClipColorSnapshot,
 }
 
 impl EditCommand for SetClipColorCommand {
     fn execute(&self, project: &mut Project) {
         if let Some(track) = project.track_mut(&self.track_id) {
             if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
-                clip.brightness = self.new_brightness;
-                clip.contrast = self.new_contrast;
-                clip.saturation = self.new_saturation;
+                self.new_color.apply_to(clip);
             }
         }
         project.dirty = true;
@@ -582,9 +652,7 @@ impl EditCommand for SetClipColorCommand {
     fn undo(&self, project: &mut Project) {
         if let Some(track) = project.track_mut(&self.track_id) {
             if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
-                clip.brightness = self.old_brightness;
-                clip.contrast = self.old_contrast;
-                clip.saturation = self.old_saturation;
+                self.old_color.apply_to(clip);
             }
         }
         project.dirty = true;
@@ -657,6 +725,175 @@ impl EditCommand for SetClipEqCommand {
     }
     fn description(&self) -> &str {
         "Set clip EQ"
+    }
+}
+
+/// Set clip volume and/or pan.
+pub struct SetClipVolumeCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_volume: f32,
+    pub new_volume: f32,
+    pub old_pan: f32,
+    pub new_pan: f32,
+}
+
+impl EditCommand for SetClipVolumeCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                clip.volume = self.new_volume;
+                clip.pan = self.new_pan;
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                clip.volume = self.old_volume;
+                clip.pan = self.old_pan;
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set clip volume/pan"
+    }
+}
+
+/// Set clip playback speed.
+pub struct SetClipSpeedCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_speed: f64,
+    pub new_speed: f64,
+}
+
+impl EditCommand for SetClipSpeedCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                clip.speed = self.new_speed;
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                clip.speed = self.old_speed;
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set clip speed"
+    }
+}
+
+/// Rename a clip's display label.
+pub struct SetClipLabelCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_label: String,
+    pub new_label: String,
+}
+
+impl EditCommand for SetClipLabelCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                clip.label = self.new_label.clone();
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                clip.label = self.old_label.clone();
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Rename clip"
+    }
+}
+
+/// Toggle a track's mute state.
+pub struct SetTrackMuteCommand {
+    pub track_id: String,
+    pub old_muted: bool,
+    pub new_muted: bool,
+}
+
+impl EditCommand for SetTrackMuteCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            track.muted = self.new_muted;
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            track.muted = self.old_muted;
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Toggle track mute"
+    }
+}
+
+/// Toggle a track's solo state.
+pub struct SetTrackSoloCommand {
+    pub track_id: String,
+    pub old_solo: bool,
+    pub new_solo: bool,
+}
+
+impl EditCommand for SetTrackSoloCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            track.soloed = self.new_solo;
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            track.soloed = self.old_solo;
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Toggle track solo"
+    }
+}
+
+/// Toggle a track's duck (sidechain) state.
+pub struct SetTrackDuckCommand {
+    pub track_id: String,
+    pub old_duck: bool,
+    pub new_duck: bool,
+}
+
+impl EditCommand for SetTrackDuckCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            track.duck = self.new_duck;
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            track.duck = self.old_duck;
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Toggle track duck"
     }
 }
 
@@ -1053,7 +1290,11 @@ impl EditCommand for SetFrei0rEffectParamsCommand {
     fn execute(&self, project: &mut Project) {
         if let Some(track) = project.track_mut(&self.track_id) {
             if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
-                if let Some(effect) = clip.frei0r_effects.iter_mut().find(|e| e.id == self.effect_id) {
+                if let Some(effect) = clip
+                    .frei0r_effects
+                    .iter_mut()
+                    .find(|e| e.id == self.effect_id)
+                {
                     effect.params = self.new_params.clone();
                 }
             }
@@ -1063,7 +1304,11 @@ impl EditCommand for SetFrei0rEffectParamsCommand {
     fn undo(&self, project: &mut Project) {
         if let Some(track) = project.track_mut(&self.track_id) {
             if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
-                if let Some(effect) = clip.frei0r_effects.iter_mut().find(|e| e.id == self.effect_id) {
+                if let Some(effect) = clip
+                    .frei0r_effects
+                    .iter_mut()
+                    .find(|e| e.id == self.effect_id)
+                {
                     effect.params = self.old_params.clone();
                 }
             }
@@ -1086,7 +1331,11 @@ impl EditCommand for ToggleFrei0rEffectCommand {
     fn execute(&self, project: &mut Project) {
         if let Some(track) = project.track_mut(&self.track_id) {
             if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
-                if let Some(effect) = clip.frei0r_effects.iter_mut().find(|e| e.id == self.effect_id) {
+                if let Some(effect) = clip
+                    .frei0r_effects
+                    .iter_mut()
+                    .find(|e| e.id == self.effect_id)
+                {
                     effect.enabled = !effect.enabled;
                 }
             }
@@ -1176,7 +1425,9 @@ pub struct SetTitlePropertiesCommand {
 
 impl EditCommand for SetTitlePropertiesCommand {
     fn execute(&self, project: &mut Project) {
-        if let Some(clip) = project.tracks.iter_mut()
+        if let Some(clip) = project
+            .tracks
+            .iter_mut()
             .flat_map(|t| t.clips.iter_mut())
             .find(|c| c.id == self.clip_id)
         {
@@ -1185,7 +1436,9 @@ impl EditCommand for SetTitlePropertiesCommand {
         project.dirty = true;
     }
     fn undo(&self, project: &mut Project) {
-        if let Some(clip) = project.tracks.iter_mut()
+        if let Some(clip) = project
+            .tracks
+            .iter_mut()
             .flat_map(|t| t.clips.iter_mut())
             .find(|c| c.id == self.clip_id)
         {
@@ -1220,6 +1473,284 @@ impl EditCommand for AddAdjustmentLayerCommand {
     fn description(&self) -> &str {
         "Add adjustment layer"
     }
+}
+
+/// Snapshot of a clip's mask state for undo/redo.
+#[derive(Clone, Debug)]
+pub struct ClipMaskSnapshot {
+    pub masks: Vec<crate::model::clip::ClipMask>,
+}
+
+impl ClipMaskSnapshot {
+    pub fn from_clip(clip: &crate::model::clip::Clip) -> Self {
+        Self {
+            masks: clip.masks.clone(),
+        }
+    }
+    fn apply_to(&self, clip: &mut crate::model::clip::Clip) {
+        clip.masks = self.masks.clone();
+    }
+}
+
+/// Set clip mask properties (full snapshot replace).
+pub struct SetClipMaskCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_mask: ClipMaskSnapshot,
+    pub new_mask: ClipMaskSnapshot,
+}
+
+impl EditCommand for SetClipMaskCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                self.new_mask.apply_to(clip);
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                self.old_mask.apply_to(clip);
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set clip mask"
+    }
+}
+
+// ── Subtitle commands ─────────────────────────────────────────────────────
+
+/// Set (or replace) all subtitle segments on a clip (used after STT generation).
+pub struct GenerateSubtitlesCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_segments: Vec<crate::model::clip::SubtitleSegment>,
+    pub new_segments: Vec<crate::model::clip::SubtitleSegment>,
+}
+
+impl EditCommand for GenerateSubtitlesCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.subtitle_segments = self.new_segments.clone();
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.subtitle_segments = self.old_segments.clone();
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Generate subtitles"
+    }
+}
+
+/// Edit the text of a single subtitle segment.
+pub struct EditSubtitleTextCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub segment_id: String,
+    pub old_text: String,
+    pub new_text: String,
+}
+
+impl EditCommand for EditSubtitleTextCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            if let Some(seg) = clip
+                .subtitle_segments
+                .iter_mut()
+                .find(|s| s.id == self.segment_id)
+            {
+                seg.text = self.new_text.clone();
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            if let Some(seg) = clip
+                .subtitle_segments
+                .iter_mut()
+                .find(|s| s.id == self.segment_id)
+            {
+                seg.text = self.old_text.clone();
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Edit subtitle text"
+    }
+}
+
+/// Edit the timing of a single subtitle segment.
+pub struct EditSubtitleTimingCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub segment_id: String,
+    pub old_start_ns: u64,
+    pub old_end_ns: u64,
+    pub new_start_ns: u64,
+    pub new_end_ns: u64,
+}
+
+impl EditCommand for EditSubtitleTimingCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            if let Some(seg) = clip
+                .subtitle_segments
+                .iter_mut()
+                .find(|s| s.id == self.segment_id)
+            {
+                seg.start_ns = self.new_start_ns;
+                seg.end_ns = self.new_end_ns;
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            if let Some(seg) = clip
+                .subtitle_segments
+                .iter_mut()
+                .find(|s| s.id == self.segment_id)
+            {
+                seg.start_ns = self.old_start_ns;
+                seg.end_ns = self.old_end_ns;
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Edit subtitle timing"
+    }
+}
+
+/// Clear all subtitle segments from a clip.
+pub struct ClearSubtitlesCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_segments: Vec<crate::model::clip::SubtitleSegment>,
+}
+
+impl EditCommand for ClearSubtitlesCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.subtitle_segments.clear();
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.subtitle_segments = self.old_segments.clone();
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Clear subtitles"
+    }
+}
+
+/// Delete a single subtitle segment from a clip.
+pub struct DeleteSubtitleSegmentCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub segment_id: String,
+    pub deleted_segment: crate::model::clip::SubtitleSegment,
+    pub index: usize,
+}
+
+impl EditCommand for DeleteSubtitleSegmentCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.subtitle_segments.retain(|s| s.id != self.segment_id);
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            let idx = self.index.min(clip.subtitle_segments.len());
+            clip.subtitle_segments
+                .insert(idx, self.deleted_segment.clone());
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Delete subtitle segment"
+    }
+}
+
+/// Set a subtitle style property on a clip.
+pub struct SetSubtitleStyleCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_font: String,
+    pub new_font: String,
+    pub old_color: u32,
+    pub new_color: u32,
+    pub old_outline_color: u32,
+    pub new_outline_color: u32,
+    pub old_outline_width: f64,
+    pub new_outline_width: f64,
+    pub old_bg_box: bool,
+    pub new_bg_box: bool,
+    pub old_bg_box_color: u32,
+    pub new_bg_box_color: u32,
+    pub old_highlight_mode: crate::model::clip::SubtitleHighlightMode,
+    pub new_highlight_mode: crate::model::clip::SubtitleHighlightMode,
+    pub old_highlight_color: u32,
+    pub new_highlight_color: u32,
+}
+
+impl EditCommand for SetSubtitleStyleCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.subtitle_font = self.new_font.clone();
+            clip.subtitle_color = self.new_color;
+            clip.subtitle_outline_color = self.new_outline_color;
+            clip.subtitle_outline_width = self.new_outline_width;
+            clip.subtitle_bg_box = self.new_bg_box;
+            clip.subtitle_bg_box_color = self.new_bg_box_color;
+            clip.subtitle_highlight_mode = self.new_highlight_mode;
+            clip.subtitle_highlight_color = self.new_highlight_color;
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.subtitle_font = self.old_font.clone();
+            clip.subtitle_color = self.old_color;
+            clip.subtitle_outline_color = self.old_outline_color;
+            clip.subtitle_outline_width = self.old_outline_width;
+            clip.subtitle_bg_box = self.old_bg_box;
+            clip.subtitle_bg_box_color = self.old_bg_box_color;
+            clip.subtitle_highlight_mode = self.old_highlight_mode;
+            clip.subtitle_highlight_color = self.old_highlight_color;
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set subtitle style"
+    }
+}
+
+/// Helper: find a mutable clip reference by clip_id and track_id.
+fn find_clip_mut<'a>(
+    project: &'a mut Project,
+    clip_id: &str,
+    track_id: &str,
+) -> Option<&'a mut Clip> {
+    project
+        .track_mut(track_id)?
+        .clips
+        .iter_mut()
+        .find(|c| c.id == clip_id)
 }
 
 #[cfg(test)]
@@ -1776,5 +2307,100 @@ mod tests {
         let mut history = EditHistory::new();
         assert!(!history.undo(&mut project));
         assert!(!history.redo(&mut project));
+    }
+
+    // ── Compound clip undo tests ──────────────────────────────────────
+
+    #[test]
+    fn test_set_track_clips_command_on_nested_track() {
+        let mut project = Project::new("Test");
+        project.tracks.clear();
+
+        // Create a compound clip with an internal video track
+        let mut inner_track = Track::new_video("Inner V1");
+        let inner_track_id = inner_track.id.clone();
+        let mut clip_a = Clip::new("a.mp4", 5_000, 0, ClipKind::Video);
+        clip_a.id = "A".into();
+        inner_track.add_clip(clip_a.clone());
+
+        let mut compound = Clip::new_compound(0, vec![inner_track]);
+        compound.id = "compound".into();
+        let mut root_track = Track::new_video("Root V1");
+        root_track.add_clip(compound);
+        project.tracks.push(root_track);
+
+        // Verify inner clip exists
+        assert!(project.clip_ref("A").is_some());
+
+        // Delete the inner clip via SetTrackClipsCommand targeting the nested track
+        let old_clips = vec![clip_a];
+        let new_clips: Vec<Clip> = vec![];
+        let cmd = SetTrackClipsCommand {
+            track_id: inner_track_id.clone(),
+            old_clips: old_clips.clone(),
+            new_clips: new_clips.clone(),
+            label: "Delete inner clip".into(),
+        };
+
+        cmd.execute(&mut project);
+        // Inner clip should be gone
+        assert!(project.clip_ref("A").is_none());
+        let inner = project.track_ref(&inner_track_id).unwrap();
+        assert!(inner.clips.is_empty());
+
+        // Undo should restore it
+        cmd.undo(&mut project);
+        assert!(project.clip_ref("A").is_some());
+        let inner = project.track_ref(&inner_track_id).unwrap();
+        assert_eq!(inner.clips.len(), 1);
+    }
+
+    #[test]
+    fn test_set_multiple_tracks_clips_command_on_nested_tracks() {
+        let mut project = Project::new("Test");
+        project.tracks.clear();
+
+        let mut inner_v = Track::new_video("Inner V");
+        let inner_v_id = inner_v.id.clone();
+        let mut clip_v = Clip::new("v.mp4", 5_000, 0, ClipKind::Video);
+        clip_v.id = "V1".into();
+        inner_v.add_clip(clip_v.clone());
+
+        let mut inner_a = Track::new_audio("Inner A");
+        let inner_a_id = inner_a.id.clone();
+        let mut clip_a = Clip::new("a.wav", 5_000, 0, ClipKind::Audio);
+        clip_a.id = "A1".into();
+        inner_a.add_clip(clip_a.clone());
+
+        let mut compound = Clip::new_compound(0, vec![inner_v, inner_a]);
+        compound.id = "compound".into();
+        let mut root = Track::new_video("Root");
+        root.add_clip(compound);
+        project.tracks.push(root);
+
+        // Use SetMultipleTracksClipsCommand to clear both nested tracks
+        let cmd = SetMultipleTracksClipsCommand {
+            changes: vec![
+                TrackClipsChange {
+                    track_id: inner_v_id.clone(),
+                    old_clips: vec![clip_v],
+                    new_clips: vec![],
+                },
+                TrackClipsChange {
+                    track_id: inner_a_id.clone(),
+                    old_clips: vec![clip_a],
+                    new_clips: vec![],
+                },
+            ],
+            label: "Clear compound internals".into(),
+        };
+
+        cmd.execute(&mut project);
+        assert!(project.track_ref(&inner_v_id).unwrap().clips.is_empty());
+        assert!(project.track_ref(&inner_a_id).unwrap().clips.is_empty());
+
+        cmd.undo(&mut project);
+        assert_eq!(project.track_ref(&inner_v_id).unwrap().clips.len(), 1);
+        assert_eq!(project.track_ref(&inner_a_id).unwrap().clips.len(), 1);
     }
 }

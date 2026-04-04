@@ -1,18 +1,21 @@
 use crate::media::player::Player;
 use crate::media::program_player::{ProgramClip, ProgramPlayer};
 use crate::model::clip::{Clip, ClipKind, Phase1KeyframeProperty};
-use crate::model::media_library::MediaItem;
+use crate::model::media_library::{
+    media_keyword_summary, FrameRateFilter, MediaCollection, MediaFilterCriteria, MediaItem,
+    MediaKeywordRange, MediaKindFilter, MediaLibrary, MediaRating, MediaRatingFilter,
+    ResolutionFilter,
+};
 use crate::model::project::Project;
 use crate::model::track::TrackKind;
 use crate::recent;
 use crate::ui::timecode;
 use crate::ui::timeline::{build_timeline_panel, TimelineState};
 use crate::ui::{
-    audio_effects_browser, effects_browser, inspector, keyframe_editor, media_browser,
-    preferences, preview,
-    program_monitor, title_templates, titles_browser, toolbar,
+    audio_effects_browser, effects_browser, inspector, keyframe_editor, media_browser, preferences,
+    preview, program_monitor, title_templates, titles_browser, toolbar,
 };
-use crate::undo::TrackClipsChange;
+use crate::undo::{EditCommand, TrackClipsChange};
 use glib;
 use gtk4::prelude::*;
 use gtk4::{self as gtk, ApplicationWindow, Orientation, Paned, ScrolledWindow};
@@ -25,6 +28,8 @@ thread_local! {
         RefCell::new(None);
 }
 
+const SOURCE_KEYWORD_NEW_ID: &str = "__new__";
+
 /// Check whether the focused widget is a text-input widget.
 /// In GTK4, `Entry` delegates keyboard focus to an internal `gtk4::Text`
 /// child, so `focused.is::<Entry>()` returns false when the user is typing
@@ -36,6 +41,245 @@ fn is_text_input_focused(focused: &gtk4::Widget) -> bool {
         || focused.is::<gtk4::SearchEntry>()
         || focused.is::<gtk4::TextView>()
         || focused.is::<gtk4::SpinButton>()
+}
+
+fn workspace_paned_extent(paned: &Paned) -> i32 {
+    match paned.orientation() {
+        Orientation::Horizontal => paned.allocation().width(),
+        Orientation::Vertical => paned.allocation().height(),
+        _ => 0,
+    }
+}
+
+fn workspace_paned_child_min_size(child: Option<gtk::Widget>, orientation: Orientation) -> i32 {
+    child
+        .map(|widget| widget.measure(orientation, -1).0.max(0))
+        .unwrap_or(0)
+}
+
+fn clamp_workspace_paned_position(paned: &Paned, desired: i32) -> i32 {
+    let desired = desired.max(0);
+    let total = workspace_paned_extent(paned);
+    if total <= 0 {
+        return desired;
+    }
+    let orientation = paned.orientation();
+    let min_start = workspace_paned_child_min_size(paned.start_child(), orientation);
+    let min_end = workspace_paned_child_min_size(paned.end_child(), orientation);
+    let min_bound = min_start.min(total);
+    let max_bound = total.saturating_sub(min_end);
+    if max_bound < min_bound {
+        desired.clamp(0, total)
+    } else {
+        desired.clamp(min_bound, max_bound)
+    }
+}
+
+fn capture_workspace_paned_state(
+    paned: &Paned,
+    fallback_position: i32,
+    fallback_ratio_permille: Option<u16>,
+) -> (i32, Option<u16>) {
+    let total = workspace_paned_extent(paned);
+    if total <= 0 {
+        return (fallback_position.max(0), fallback_ratio_permille);
+    }
+    let position = clamp_workspace_paned_position(paned, paned.position());
+    (
+        position,
+        crate::ui_state::workspace_split_ratio_from_pixels(position, total),
+    )
+}
+
+fn workspace_target_paned_position(
+    paned: &Paned,
+    position: i32,
+    ratio_permille: Option<u16>,
+) -> Option<i32> {
+    let total = workspace_paned_extent(paned);
+    if total <= 0 {
+        return None;
+    }
+    let scaled =
+        crate::ui_state::workspace_split_position_from_ratio(ratio_permille, total, position);
+    Some(clamp_workspace_paned_position(paned, scaled))
+}
+
+fn schedule_workspace_layout_apply_completion(
+    apply_generation: u64,
+    workspace_layout_apply_generation: Rc<Cell<u64>>,
+    workspace_layouts_applying: Rc<Cell<bool>>,
+    workspace_layout_pending_name: Rc<RefCell<Option<String>>>,
+    sync_workspace_layout_state: Rc<dyn Fn()>,
+    apply_split_positions: Rc<dyn Fn()>,
+    pane_positions_ready: Rc<dyn Fn() -> bool>,
+    remaining_attempts: u8,
+) {
+    glib::timeout_add_local_once(std::time::Duration::from_millis(16), move || {
+        if workspace_layout_apply_generation.get() != apply_generation {
+            return;
+        }
+        if !pane_positions_ready() {
+            if remaining_attempts > 0 {
+                schedule_workspace_layout_apply_completion(
+                    apply_generation,
+                    workspace_layout_apply_generation.clone(),
+                    workspace_layouts_applying.clone(),
+                    workspace_layout_pending_name.clone(),
+                    sync_workspace_layout_state.clone(),
+                    apply_split_positions.clone(),
+                    pane_positions_ready.clone(),
+                    remaining_attempts - 1,
+                );
+            } else {
+                workspace_layout_pending_name.borrow_mut().take();
+                workspace_layouts_applying.set(false);
+            }
+            return;
+        }
+        apply_split_positions();
+        workspace_layouts_applying.set(false);
+        sync_workspace_layout_state();
+    });
+}
+
+fn media_kind_filter_id(filter: MediaKindFilter) -> &'static str {
+    match filter {
+        MediaKindFilter::All => "all",
+        MediaKindFilter::Video => "video",
+        MediaKindFilter::Audio => "audio",
+        MediaKindFilter::Image => "image",
+        MediaKindFilter::Offline => "offline",
+    }
+}
+
+fn resolution_filter_id(filter: ResolutionFilter) -> &'static str {
+    match filter {
+        ResolutionFilter::All => "all",
+        ResolutionFilter::SdOrSmaller => "sd",
+        ResolutionFilter::Hd => "hd",
+        ResolutionFilter::FullHd => "fhd",
+        ResolutionFilter::UltraHd => "uhd",
+    }
+}
+
+fn frame_rate_filter_id(filter: FrameRateFilter) -> &'static str {
+    match filter {
+        FrameRateFilter::All => "all",
+        FrameRateFilter::Fps24OrLess => "fps24",
+        FrameRateFilter::Fps25To30 => "fps25_30",
+        FrameRateFilter::Fps31To59 => "fps31_59",
+        FrameRateFilter::Fps60Plus => "fps60",
+    }
+}
+
+fn media_rating_id(rating: MediaRating) -> &'static str {
+    match rating {
+        MediaRating::None => "none",
+        MediaRating::Favorite => "favorite",
+        MediaRating::Reject => "reject",
+    }
+}
+
+fn media_rating_filter_id(filter: MediaRatingFilter) -> &'static str {
+    match filter {
+        MediaRatingFilter::All => "all",
+        MediaRatingFilter::Favorite => "favorite",
+        MediaRatingFilter::Reject => "reject",
+        MediaRatingFilter::Unrated => "unrated",
+    }
+}
+
+fn parse_media_kind_filter(id: Option<&str>) -> Option<MediaKindFilter> {
+    match id {
+        Some("all") => Some(MediaKindFilter::All),
+        Some("video") => Some(MediaKindFilter::Video),
+        Some("audio") => Some(MediaKindFilter::Audio),
+        Some("image") => Some(MediaKindFilter::Image),
+        Some("offline") => Some(MediaKindFilter::Offline),
+        Some(_) => None,
+        None => Some(MediaKindFilter::All),
+    }
+}
+
+fn parse_resolution_filter(id: Option<&str>) -> Option<ResolutionFilter> {
+    match id {
+        Some("all") => Some(ResolutionFilter::All),
+        Some("sd") => Some(ResolutionFilter::SdOrSmaller),
+        Some("hd") => Some(ResolutionFilter::Hd),
+        Some("fhd") => Some(ResolutionFilter::FullHd),
+        Some("uhd") => Some(ResolutionFilter::UltraHd),
+        Some(_) => None,
+        None => Some(ResolutionFilter::All),
+    }
+}
+
+fn parse_frame_rate_filter(id: Option<&str>) -> Option<FrameRateFilter> {
+    match id {
+        Some("all") => Some(FrameRateFilter::All),
+        Some("fps24") => Some(FrameRateFilter::Fps24OrLess),
+        Some("fps25_30") => Some(FrameRateFilter::Fps25To30),
+        Some("fps31_59") => Some(FrameRateFilter::Fps31To59),
+        Some("fps60") => Some(FrameRateFilter::Fps60Plus),
+        Some(_) => None,
+        None => Some(FrameRateFilter::All),
+    }
+}
+
+fn parse_media_rating_filter(id: Option<&str>) -> Option<MediaRatingFilter> {
+    match id {
+        Some("all") => Some(MediaRatingFilter::All),
+        Some("favorite") => Some(MediaRatingFilter::Favorite),
+        Some("reject") => Some(MediaRatingFilter::Reject),
+        Some("unrated") => Some(MediaRatingFilter::Unrated),
+        Some(_) => None,
+        None => Some(MediaRatingFilter::All),
+    }
+}
+
+fn collection_criteria_from_mcp(
+    search_text: Option<String>,
+    kind: Option<String>,
+    resolution: Option<String>,
+    frame_rate: Option<String>,
+    rating: Option<String>,
+) -> Result<MediaFilterCriteria, String> {
+    Ok(MediaFilterCriteria {
+        search_text: search_text.unwrap_or_default(),
+        kind: parse_media_kind_filter(kind.as_deref())
+            .ok_or_else(|| "invalid kind filter".to_string())?,
+        resolution: parse_resolution_filter(resolution.as_deref())
+            .ok_or_else(|| "invalid resolution filter".to_string())?,
+        frame_rate: parse_frame_rate_filter(frame_rate.as_deref())
+            .ok_or_else(|| "invalid frame_rate filter".to_string())?,
+        rating: parse_media_rating_filter(rating.as_deref())
+            .ok_or_else(|| "invalid rating filter".to_string())?,
+    })
+}
+
+fn format_source_keyword_time(ns: u64) -> String {
+    let total_seconds = ns / 1_000_000_000;
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
+fn format_source_keyword_range(range: &MediaKeywordRange) -> String {
+    let label = range.label.trim();
+    let label = if label.is_empty() { "Untitled" } else { label };
+    let start = format_source_keyword_time(range.start_ns);
+    let end_ns = range.end_ns.max(range.start_ns);
+    if end_ns == range.start_ns {
+        format!("{label} @ {start}")
+    } else {
+        let end = format_source_keyword_time(end_ns);
+        format!("{label} ({start} - {end})")
+    }
 }
 
 fn flash_window_status_title(
@@ -113,6 +357,8 @@ fn sync_transform_overlay_to_playhead(
     selected_clip_id: Option<&str>,
     playhead_ns: u64,
 ) {
+    // Default content inset to 0 (will be overridden by caller if program player available)
+    transform_overlay.set_content_inset(0.0, 0.0);
     match selected_clip_id {
         Some(cid) => {
             let clip_opt = project
@@ -127,6 +373,24 @@ fn sync_transform_overlay_to_playhead(
                     transform_overlay.set_transform(scale, pos_x, pos_y);
                     transform_overlay.set_rotation(rotate);
                     transform_overlay.set_crop(cl, cr, ct, cb);
+                    if let Some(mask) = c.masks.first() {
+                        transform_overlay.set_mask(
+                            mask.enabled,
+                            match mask.shape {
+                                crate::model::clip::MaskShape::Rectangle => 0,
+                                crate::model::clip::MaskShape::Ellipse => 1,
+                                crate::model::clip::MaskShape::Path => 2,
+                            },
+                            mask.center_x,
+                            mask.center_y,
+                            mask.width,
+                            mask.height,
+                            mask.rotation,
+                            mask.path.as_ref().map(|p| p.points.as_slice()),
+                        );
+                    } else {
+                        transform_overlay.set_mask(false, 0, 0.5, 0.5, 0.25, 0.25, 0.0, None);
+                    }
                     transform_overlay.set_clip_selected(true);
                 } else {
                     transform_overlay.set_clip_selected(false);
@@ -139,6 +403,19 @@ fn sync_transform_overlay_to_playhead(
             transform_overlay.set_clip_selected(false);
         }
     }
+}
+
+fn selected_clip_is_adjustment(project: &Project, selected_clip_id: Option<&str>) -> bool {
+    selected_clip_id
+        .and_then(|cid| {
+            project
+                .tracks
+                .iter()
+                .flat_map(|t| t.clips.iter())
+                .find(|c| c.id == cid)
+        })
+        .map(|clip| clip.kind == ClipKind::Adjustment)
+        .unwrap_or(false)
 }
 
 fn seek_playhead_and_notify(
@@ -252,6 +529,73 @@ fn present_go_to_timecode_dialog(
     entry.select_region(0, -1);
 }
 
+#[allow(deprecated)]
+fn present_text_entry_dialog(
+    window: &gtk::ApplicationWindow,
+    title: &str,
+    accept_label: &str,
+    hint: &str,
+    initial_text: &str,
+    placeholder: Option<&str>,
+    on_accept: Rc<dyn Fn(String) -> Result<(), String>>,
+) {
+    let dialog = gtk::Dialog::builder()
+        .title(title)
+        .transient_for(window)
+        .modal(true)
+        .default_width(360)
+        .build();
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+    dialog.add_button(accept_label, gtk::ResponseType::Accept);
+    dialog.set_default_response(gtk::ResponseType::Accept);
+
+    let content = dialog.content_area();
+    if !hint.is_empty() {
+        let hint_label = gtk::Label::new(Some(hint));
+        hint_label.set_halign(gtk::Align::Start);
+        hint_label.add_css_class("dim-label");
+        hint_label.set_wrap(true);
+        content.append(&hint_label);
+    }
+
+    let entry = gtk::Entry::new();
+    entry.set_text(initial_text);
+    entry.set_placeholder_text(placeholder);
+    entry.set_activates_default(true);
+    content.append(&entry);
+
+    let error_label = gtk::Label::new(None);
+    error_label.set_halign(gtk::Align::Start);
+    error_label.set_wrap(true);
+    error_label.add_css_class("error");
+    error_label.set_visible(false);
+    content.append(&error_label);
+
+    entry.connect_changed({
+        let error_label = error_label.clone();
+        move |_| error_label.set_visible(false)
+    });
+
+    let entry_for_response = entry.clone();
+    dialog.connect_response(move |d, resp| {
+        if resp != gtk::ResponseType::Accept {
+            d.close();
+            return;
+        }
+        match on_accept(entry_for_response.text().to_string()) {
+            Ok(()) => d.close(),
+            Err(err) => {
+                error_label.set_text(&err);
+                error_label.set_visible(true);
+            }
+        }
+    });
+
+    dialog.present();
+    entry.grab_focus();
+    entry.select_region(0, -1);
+}
+
 fn lookup_source_timecode_base_ns(
     library: &[MediaItem],
     project: &Project,
@@ -271,6 +615,120 @@ fn lookup_source_timecode_base_ns(
         })
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct ProjectLibraryEntry {
+    sync_key: String,
+    item_id: String,
+    source_path: String,
+    duration_ns: u64,
+    source_timecode_base_ns: Option<u64>,
+    is_animated_svg: bool,
+    clip_kind: Option<ClipKind>,
+    label: String,
+    title_text: Option<String>,
+}
+
+impl ProjectLibraryEntry {
+    fn from_clip(clip: &Clip) -> Self {
+        let clip_kind = clip.source_path.is_empty().then_some(clip.kind.clone());
+        let title_text = if clip.kind == ClipKind::Title && !clip.title_text.trim().is_empty() {
+            Some(clip.title_text.clone())
+        } else {
+            None
+        };
+        Self {
+            sync_key: if clip.source_path.is_empty() {
+                format!("clip:{}", clip.id)
+            } else {
+                clip.source_path.clone()
+            },
+            item_id: clip.id.clone(),
+            source_path: clip.source_path.clone(),
+            duration_ns: if clip.source_path.is_empty() {
+                clip.duration()
+            } else {
+                clip.media_duration_ns.unwrap_or(0)
+            },
+            source_timecode_base_ns: clip.source_timecode_base_ns,
+            is_animated_svg: clip.animated_svg,
+            clip_kind,
+            label: clip.label.clone(),
+            title_text,
+        }
+    }
+
+    fn apply_to_item(&self, item: &mut MediaItem) {
+        if self.source_path.is_empty() {
+            item.duration_ns = self.duration_ns;
+            item.is_audio_only = false;
+            item.has_audio = false;
+            item.is_image = false;
+            item.video_width = None;
+            item.video_height = None;
+            item.frame_rate_num = None;
+            item.frame_rate_den = None;
+            item.codec_summary = None;
+            item.file_size_bytes = None;
+            item.is_missing = false;
+            item.label = self.label.clone();
+            item.clip_kind = self.clip_kind.clone();
+            item.title_text = self.title_text.clone();
+        } else if item.duration_ns == 0 && self.duration_ns > 0 {
+            item.duration_ns = self.duration_ns;
+        }
+        if item.source_timecode_base_ns.is_none() && self.source_timecode_base_ns.is_some() {
+            item.source_timecode_base_ns = self.source_timecode_base_ns;
+        }
+        item.is_animated_svg = self.is_animated_svg;
+    }
+
+    fn into_media_item(self) -> MediaItem {
+        let mut item = MediaItem::new(self.source_path, self.duration_ns);
+        item.id = self.item_id;
+        item.source_timecode_base_ns = self.source_timecode_base_ns;
+        item.is_animated_svg = self.is_animated_svg;
+        item.clip_kind = self.clip_kind;
+        item.title_text = self.title_text;
+        if !item.has_backing_file() {
+            item.label = self.label;
+            item.is_missing = false;
+        }
+        item
+    }
+}
+
+fn collect_project_library_entries(project: &Project) -> Vec<ProjectLibraryEntry> {
+    let mut seen = HashSet::new();
+    project
+        .tracks
+        .iter()
+        .flat_map(|track| track.clips.iter())
+        .filter_map(|clip| {
+            let entry = ProjectLibraryEntry::from_clip(clip);
+            seen.insert(entry.sync_key.clone()).then_some(entry)
+        })
+        .collect()
+}
+
+fn sync_library_with_project_entries(library: &mut MediaLibrary, entries: &[ProjectLibraryEntry]) {
+    for entry in entries {
+        if let Some(item) = library
+            .items
+            .iter_mut()
+            .find(|item| item.matches_library_key(&entry.sync_key))
+        {
+            entry.apply_to_item(item);
+        }
+    }
+
+    let existing: HashSet<String> = library.items.iter().map(MediaItem::library_key).collect();
+    for entry in entries {
+        if !existing.contains(&entry.sync_key) {
+            library.items.push(entry.clone().into_media_item());
+        }
+    }
+}
+
 fn collect_media_source_paths(project: &Project, library: &[MediaItem]) -> HashSet<String> {
     let mut paths: HashSet<String> = project
         .tracks
@@ -288,7 +746,10 @@ fn collect_media_source_paths(project: &Project, library: &[MediaItem]) -> HashS
     paths
 }
 
-fn build_media_availability_index(project: &Project, library: &[MediaItem]) -> HashMap<String, bool> {
+fn build_media_availability_index(
+    project: &Project,
+    library: &[MediaItem],
+) -> HashMap<String, bool> {
     let mut availability = HashMap::new();
     for path in collect_media_source_paths(project, library) {
         availability.insert(
@@ -490,11 +951,57 @@ fn relink_missing_media_under_root(
     }
 }
 
+fn apply_collected_files_manifest_to_project_state(
+    project: &Rc<RefCell<Project>>,
+    library: &Rc<RefCell<MediaLibrary>>,
+    source_marks: &Rc<RefCell<crate::model::media_library::SourceMarks>>,
+    on_source_selected: &Rc<dyn Fn(String, u64)>,
+    on_project_changed: &Rc<dyn Fn()>,
+    manifest: &crate::fcpxml::writer::CollectFilesManifest,
+) -> crate::fcpxml::writer::ApplyCollectedFilesResult {
+    let remapped_source = {
+        let current_path = source_marks.borrow().path.clone();
+        if current_path.is_empty() {
+            None
+        } else {
+            manifest
+                .source_to_destination_path
+                .get(&current_path)
+                .map(|path| path.to_string_lossy().to_string())
+        }
+    };
+    let summary = {
+        let mut proj = project.borrow_mut();
+        let mut lib = library.borrow_mut();
+        crate::fcpxml::writer::apply_collected_files_manifest(
+            &mut proj,
+            lib.items.as_mut_slice(),
+            manifest,
+        )
+    };
+    if !summary.updated_any() {
+        return summary;
+    }
+    if let Some(new_path) = remapped_source {
+        let duration_ns = library
+            .borrow()
+            .items
+            .iter()
+            .find(|item| item.source_path == new_path)
+            .map(|item| item.duration_ns)
+            .unwrap_or_else(|| source_marks.borrow().duration_ns);
+        on_source_selected(new_path, duration_ns);
+    }
+    on_project_changed();
+    summary
+}
+
 #[derive(Clone, Copy)]
 struct SourcePlacementInfo {
     is_audio_only: bool,
     has_audio: bool,
     is_image: bool,
+    is_animated_svg: bool,
     source_timecode_base_ns: Option<u64>,
 }
 
@@ -632,13 +1139,18 @@ fn lookup_source_placement_info(
     let item = library.iter().find(|item| item.source_path == source_path);
     let mut is_audio_only = item.map(|item| item.is_audio_only).unwrap_or(false);
     let mut has_audio = item.map(|item| item.has_audio).unwrap_or(false);
+    let is_animated_svg = item.map(|item| item.is_animated_svg).unwrap_or_else(|| {
+        crate::model::clip::is_svg_file(source_path)
+            && crate::media::animated_svg::analyze_svg_path(source_path)
+                .map(|analysis| analysis.is_animated)
+                .unwrap_or(false)
+    });
     let is_image = item
         .map(|item| item.is_image)
         .unwrap_or_else(|| crate::model::clip::is_image_file(source_path));
 
     if item.is_none() || (!has_audio && !is_audio_only) {
-        let uri = format!("file://{source_path}");
-        let metadata = media_browser::probe_media_metadata(&uri);
+        let metadata = crate::media::probe_cache::probe_media_metadata(source_path);
         is_audio_only = metadata.is_audio_only;
         has_audio = metadata.has_audio;
     }
@@ -653,6 +1165,7 @@ fn lookup_source_placement_info(
         is_audio_only,
         has_audio,
         is_image,
+        is_animated_svg,
         source_timecode_base_ns: lookup_source_timecode_base_ns(library, project, source_path),
     }
 }
@@ -835,6 +1348,7 @@ fn build_source_clips_for_plan(
     timeline_start_ns: u64,
     source_timecode_base_ns: Option<u64>,
     media_duration_ns: Option<u64>,
+    animated_svg: bool,
 ) -> Vec<(usize, Clip)> {
     plan.targets
         .iter()
@@ -849,6 +1363,7 @@ fn build_source_clips_for_plan(
                 plan.link_group_id.as_deref(),
                 media_duration_ns,
             );
+            clip.animated_svg = animated_svg;
             if target.mute_embedded_audio {
                 clip.volume = 0.0;
             }
@@ -979,6 +1494,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn collect_project_library_entries_keeps_distinct_sourceless_titles() {
+        let mut project = Project::new("Test");
+        let video_idx = project
+            .tracks
+            .iter()
+            .position(|track| track.kind == TrackKind::Video)
+            .expect("video track should exist");
+
+        let mut title_a = Clip::new("", 4_000_000_000, 0, ClipKind::Title);
+        title_a.id = "title-a".to_string();
+        title_a.label = "Lower Third".to_string();
+        title_a.title_text = "Jane Doe".to_string();
+
+        let mut title_b = Clip::new("", 5_000_000_000, 6_000_000_000, ClipKind::Title);
+        title_b.id = "title-b".to_string();
+        title_b.label = "Lower Third".to_string();
+        title_b.title_text = "John Doe".to_string();
+
+        project.tracks[video_idx].clips.push(title_a);
+        project.tracks[video_idx].clips.push(title_b);
+
+        let entries = collect_project_library_entries(&project);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].sync_key, "clip:title-a");
+        assert_eq!(entries[1].sync_key, "clip:title-b");
+        assert_eq!(entries[0].title_text.as_deref(), Some("Jane Doe"));
+        assert_eq!(entries[1].title_text.as_deref(), Some("John Doe"));
+    }
+
+    #[test]
     fn source_monitor_plan_links_video_and_audio_when_both_tracks_exist() {
         let project = Project::new("Test");
         let preferred_audio_track_id = project
@@ -991,6 +1536,7 @@ mod tests {
             is_audio_only: false,
             has_audio: true,
             is_image: false,
+            is_animated_svg: false,
             source_timecode_base_ns: Some(42),
         };
 
@@ -1020,6 +1566,7 @@ mod tests {
             1_000,
             source_info.source_timecode_base_ns,
             None,
+            false,
         );
         let link_group_id = plan.link_group_id.as_deref();
         assert_eq!(created.len(), 2);
@@ -1048,6 +1595,7 @@ mod tests {
             is_audio_only: false,
             has_audio: true,
             is_image: false,
+            is_animated_svg: false,
             source_timecode_base_ns: None,
         };
 
@@ -1072,6 +1620,7 @@ mod tests {
             is_audio_only: false,
             has_audio: true,
             is_image: false,
+            is_animated_svg: false,
             source_timecode_base_ns: None,
         };
 
@@ -1095,12 +1644,14 @@ mod tests {
             is_audio_only: true,
             has_audio: true,
             is_image: false,
+            is_animated_svg: false,
             source_timecode_base_ns: None,
         };
         let silent_video = SourcePlacementInfo {
             is_audio_only: false,
             has_audio: false,
             is_image: false,
+            is_animated_svg: false,
             source_timecode_base_ns: None,
         };
 
@@ -1124,6 +1675,7 @@ mod tests {
             is_audio_only: false,
             has_audio: true,
             is_image: false,
+            is_animated_svg: false,
             source_timecode_base_ns: None,
         };
 
@@ -1145,6 +1697,7 @@ mod tests {
             is_audio_only: false,
             has_audio: false,
             is_image: false,
+            is_animated_svg: false,
             source_timecode_base_ns: None,
         };
 
@@ -1191,6 +1744,7 @@ mod tests {
             is_audio_only: true,
             has_audio: true,
             is_image: false,
+            is_animated_svg: false,
             source_timecode_base_ns: None,
         };
 
@@ -1216,6 +1770,7 @@ mod tests {
             is_audio_only: true,
             has_audio: true,
             is_image: false,
+            is_animated_svg: false,
             source_timecode_base_ns: None,
         };
 
@@ -1234,6 +1789,7 @@ mod tests {
             is_audio_only: false,
             has_audio: true,
             is_image: false,
+            is_animated_svg: false,
             source_timecode_base_ns: None,
         };
 
@@ -1272,6 +1828,7 @@ mod tests {
             playhead,
             None,
             None,
+            false,
         ) {
             let _ = insert_clip_at_playhead_on_track(
                 &mut project.tracks[track_idx],
@@ -1345,6 +1902,7 @@ mod tests {
             range_start,
             None,
             None,
+            false,
         ) {
             let _ = overwrite_clip_range_on_track(
                 &mut project.tracks[track_idx],
@@ -1485,8 +2043,14 @@ mod tests {
         project.tracks[0].clips.clear();
         project.tracks[1].clips.clear();
         project.tracks[0].add_clip(build_source_clip(
-            missing_path, 0, 1_000_000_000, 0,
-            ClipKind::Video, None, None, None,
+            missing_path,
+            0,
+            1_000_000_000,
+            0,
+            ClipKind::Video,
+            None,
+            None,
+            None,
         ));
         let mut library = vec![MediaItem::new(missing_path, 1_000_000_000)];
         assert!(library[0].is_missing, "precondition: item is missing");
@@ -1503,47 +2067,31 @@ mod tests {
         let timeline_project = Rc::new(RefCell::new(project.clone()));
         let mut st = TimelineState::new(timeline_project);
         let missing1 = refresh_media_availability_state(&project, library.as_mut_slice(), &mut st);
-        assert!(missing1.is_empty(), "step 2: no missing; got {:?}", missing1);
+        assert!(
+            missing1.is_empty(),
+            "step 2: no missing; got {:?}",
+            missing1
+        );
         assert!(!library[0].is_missing, "step 2: is_missing should be false");
         assert!(st.missing_media_paths.is_empty(), "step 2: timeline clear");
 
         // Step 3: Simulate on_project_changed_impl library sync
-        // (collect media_from_project → update existing → add new)
-        {
-            let mut media_seen: HashSet<&str> = HashSet::new();
-            let media_from_project: Vec<(String, u64, Option<u64>)> = project
-                .tracks
-                .iter()
-                .flat_map(|t| t.clips.iter())
-                .filter(|c| media_seen.insert(c.source_path.as_str()))
-                .map(|c| (c.source_path.clone(), c.media_duration_ns.unwrap_or(0), c.source_timecode_base_ns))
-                .collect();
-
-            let seen: HashSet<String> = library.iter().map(|i| i.source_path.clone()).collect();
-            for (path, dur, stc) in &media_from_project {
-                if let Some(item) = library.iter_mut().find(|i| i.source_path == *path) {
-                    if item.duration_ns == 0 && *dur > 0 {
-                        item.duration_ns = *dur;
-                    }
-                    if item.source_timecode_base_ns.is_none() && stc.is_some() {
-                        item.source_timecode_base_ns = *stc;
-                    }
-                }
-            }
-            let new_items: Vec<_> = media_from_project
-                .into_iter()
-                .filter(|(path, _, _)| !seen.contains(path))
-                .collect();
-            for (path, dur, stc) in new_items {
-                let mut item = MediaItem::new(path, dur);
-                item.source_timecode_base_ns = stc;
-                library.push(item);
-            }
-        }
+        let media_from_project = collect_project_library_entries(&project);
+        let mut wrapped_library = MediaLibrary {
+            items: library,
+            bins: Vec::new(),
+            collections: Vec::new(),
+        };
+        sync_library_with_project_entries(&mut wrapped_library, &media_from_project);
+        let mut library = wrapped_library.items;
 
         // Step 4: second refresh_media_availability_state (inside on_project_changed_impl)
         let missing2 = refresh_media_availability_state(&project, library.as_mut_slice(), &mut st);
-        assert!(missing2.is_empty(), "step 4: no missing; got {:?}", missing2);
+        assert!(
+            missing2.is_empty(),
+            "step 4: no missing; got {:?}",
+            missing2
+        );
         assert!(!library[0].is_missing, "step 4: is_missing should be false");
         assert!(st.missing_media_paths.is_empty(), "step 4: timeline clear");
 
@@ -1860,11 +2408,7 @@ fn apply_remove_silent_parts_results(
     // No silence found → nothing to do
     if silence_intervals.is_empty() {
         if let Some(win) = window {
-            flash_window_status_title(
-                win,
-                project,
-                "No silence detected — clip unchanged",
-            );
+            flash_window_status_title(win, project, "No silence detected — clip unchanged");
         }
         return;
     }
@@ -1876,7 +2420,11 @@ fn apply_remove_silent_parts_results(
             Some(t) => t,
             None => {
                 if let Some(win) = window {
-                    flash_window_status_title(win, project, "Silence removal failed — track not found");
+                    flash_window_status_title(
+                        win,
+                        project,
+                        "Silence removal failed — track not found",
+                    );
                 }
                 return;
             }
@@ -1885,7 +2433,11 @@ fn apply_remove_silent_parts_results(
             Some(c) => c.clone(),
             None => {
                 if let Some(win) = window {
-                    flash_window_status_title(win, project, "Silence removal failed — clip not found");
+                    flash_window_status_title(
+                        win,
+                        project,
+                        "Silence removal failed — clip not found",
+                    );
                 }
                 return;
             }
@@ -1917,11 +2469,7 @@ fn apply_remove_silent_parts_results(
 
     if non_silent.is_empty() {
         if let Some(win) = window {
-            flash_window_status_title(
-                win,
-                project,
-                "Entire clip is silent — no segments to keep",
-            );
+            flash_window_status_title(win, project, "Entire clip is silent — no segments to keep");
         }
         return;
     }
@@ -2140,12 +2688,52 @@ fn auto_preview_divisor(
     }
 }
 
-fn proxy_scale_for_mode(
+pub(crate) fn proxy_scale_for_mode(
     mode: &crate::ui_state::ProxyMode,
 ) -> crate::media::proxy_cache::ProxyScale {
     match mode {
         crate::ui_state::ProxyMode::QuarterRes => crate::media::proxy_cache::ProxyScale::Quarter,
         _ => crate::media::proxy_cache::ProxyScale::Half,
+    }
+}
+
+fn proxy_mode_label(mode: &crate::ui_state::ProxyMode) -> &'static str {
+    match mode {
+        crate::ui_state::ProxyMode::QuarterRes => "Quarter Resolution",
+        _ => "Half Resolution",
+    }
+}
+
+fn proxy_toggle_tooltip(
+    current_proxy_mode: &crate::ui_state::ProxyMode,
+    remembered_proxy_mode: &crate::ui_state::ProxyMode,
+) -> String {
+    if current_proxy_mode.is_enabled() {
+        format!(
+            "Proxy playback on ({}). Click to switch back to original media (Shift+P). Change Half/Quarter in Preferences.",
+            proxy_mode_label(current_proxy_mode)
+        )
+    } else {
+        format!(
+            "Proxy playback off. Click to restore {} proxies (Shift+P). Change Half/Quarter in Preferences.",
+            proxy_mode_label(remembered_proxy_mode)
+        )
+    }
+}
+
+fn proxy_toggle_label(mode: &crate::ui_state::ProxyMode) -> &'static str {
+    if mode.is_enabled() {
+        "Using Proxies"
+    } else {
+        "Original Media"
+    }
+}
+
+fn background_render_label(enabled: bool) -> &'static str {
+    if enabled {
+        "Background Render"
+    } else {
+        "Live Rendering"
     }
 }
 
@@ -2162,17 +2750,87 @@ fn ready_proxy_path_for_source(
     })
 }
 
-fn collect_unique_clip_sources(project: &Project) -> Vec<(String, Option<String>)> {
-    let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
+fn reload_source_preview_selection(
+    path: &str,
+    duration_ns: u64,
+    source_info: SourcePlacementInfo,
+    player: &Rc<RefCell<Player>>,
+    project: &Rc<RefCell<Project>>,
+    proxy_cache: &Rc<RefCell<crate::media::proxy_cache::ProxyCache>>,
+    proxy_mode: &crate::ui_state::ProxyMode,
+    source_original_uri_for_proxy_fallback: &std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    set_audio_only: &Rc<dyn Fn(bool)>,
+) {
+    set_audio_only(source_info.is_audio_only);
+    let original_uri = format!("file://{path}");
+    let (fr_num, fr_den) = {
+        let proj = project.borrow();
+        (proj.frame_rate.numerator, proj.frame_rate.denominator)
+    };
+    if let Ok(mut fallback_uri) = source_original_uri_for_proxy_fallback.lock() {
+        *fallback_uri = Some(original_uri.clone());
+    }
+    if proxy_mode.is_enabled() && !source_info.is_audio_only && !source_info.is_animated_svg {
+        proxy_cache
+            .borrow_mut()
+            .request(path, proxy_scale_for_mode(proxy_mode), None);
+    }
+    let load_uri = if source_info.is_animated_svg {
+        match crate::media::animated_svg::ensure_rendered_clip(
+            path,
+            0,
+            duration_ns,
+            Some(duration_ns),
+            fr_num,
+            fr_den,
+        ) {
+            Ok(render_path) => format!("file://{render_path}"),
+            Err(err) => {
+                log::warn!(
+                    "source preview: failed to render animated SVG {}: {}",
+                    path,
+                    err
+                );
+                original_uri.clone()
+            }
+        }
+    } else {
+        let cache = proxy_cache.borrow();
+        if proxy_mode.is_enabled() {
+            if let Some(proxy_path) = ready_proxy_path_for_source(&cache, path, None) {
+                log::info!("source preview: using proxy {}", proxy_path);
+                format!("file://{proxy_path}")
+            } else {
+                log::info!("source preview: proxy not ready, loading original {}", path);
+                original_uri.clone()
+            }
+        } else {
+            original_uri.clone()
+        }
+    };
+    let _ = player.borrow().load(&load_uri);
+}
+
+fn collect_unique_proxy_variants(
+    project: &Project,
+    scale: crate::media::proxy_cache::ProxyScale,
+) -> Vec<crate::media::proxy_cache::ProxyVariantSpec> {
+    let mut seen: HashSet<crate::media::proxy_cache::ProxyVariantSpec> = HashSet::new();
     project
         .tracks
         .iter()
         .filter(|t| t.kind == TrackKind::Video)
         .flat_map(|t| t.clips.iter())
         .filter_map(|c| {
-            let key = (c.source_path.clone(), c.lut_key());
-            if seen.insert(key.clone()) {
-                Some(key)
+            let spec = crate::media::proxy_cache::ProxyVariantSpec::new(
+                c.source_path.clone(),
+                scale,
+                c.lut_key(),
+                c.vidstab_enabled,
+                c.vidstab_smoothing,
+            );
+            if seen.insert(spec.clone()) {
+                Some(spec)
             } else {
                 None
             }
@@ -2180,8 +2838,14 @@ fn collect_unique_clip_sources(project: &Project) -> Vec<(String, Option<String>
         .collect()
 }
 
-fn collect_unique_lut_clip_sources(project: &Project) -> Vec<(String, Option<String>)> {
-    let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
+fn collect_unique_preview_lut_proxy_variants(
+    project: &Project,
+) -> Vec<crate::media::proxy_cache::ProxyVariantSpec> {
+    let mut seen: HashSet<crate::media::proxy_cache::ProxyVariantSpec> = HashSet::new();
+    let scale = crate::media::proxy_cache::ProxyScale::Project {
+        width: project.width,
+        height: project.height,
+    };
     project
         .tracks
         .iter()
@@ -2192,9 +2856,15 @@ fn collect_unique_lut_clip_sources(project: &Project) -> Vec<(String, Option<Str
             if lut.is_empty() {
                 return None;
             }
-            let key = (c.source_path.clone(), Some(lut));
-            if seen.insert(key.clone()) {
-                Some(key)
+            let spec = crate::media::proxy_cache::ProxyVariantSpec::new(
+                c.source_path.clone(),
+                scale,
+                Some(lut),
+                false,
+                0.0,
+            );
+            if seen.insert(spec.clone()) {
+                Some(spec)
             } else {
                 None
             }
@@ -2202,19 +2872,20 @@ fn collect_unique_lut_clip_sources(project: &Project) -> Vec<(String, Option<Str
         .collect()
 }
 
-fn collect_near_playhead_clip_sources(
+fn collect_near_playhead_proxy_variants(
     project: &Project,
     playhead_ns: u64,
     window_ns: u64,
     max_items: usize,
-) -> Vec<(String, Option<String>)> {
+    scale: crate::media::proxy_cache::ProxyScale,
+) -> Vec<crate::media::proxy_cache::ProxyVariantSpec> {
     if max_items == 0 {
         return Vec::new();
     }
     let window_start = playhead_ns.saturating_sub(window_ns);
     let window_end = playhead_ns.saturating_add(window_ns);
 
-    let mut candidates: Vec<(u64, u64, String, Option<String>)> = project
+    let mut candidates: Vec<(u64, u64, crate::media::proxy_cache::ProxyVariantSpec)> = project
         .tracks
         .iter()
         .filter(|t| t.kind == TrackKind::Video)
@@ -2232,26 +2903,45 @@ fn collect_near_playhead_clip_sources(
             (
                 distance,
                 c.timeline_start,
-                c.source_path.clone(),
-                c.lut_key(),
+                crate::media::proxy_cache::ProxyVariantSpec::new(
+                    c.source_path.clone(),
+                    scale,
+                    c.lut_key(),
+                    c.vidstab_enabled,
+                    c.vidstab_smoothing,
+                ),
             )
         })
         .collect();
 
-    candidates.sort_by_key(|(distance, timeline_start, _, _)| (*distance, *timeline_start));
+    candidates.sort_by_key(|(distance, timeline_start, _)| (*distance, *timeline_start));
 
     let mut out = Vec::new();
-    let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
-    for (_, _, path, lut) in candidates {
-        let key = (path, lut);
-        if seen.insert(key.clone()) {
-            out.push(key);
+    let mut seen: HashSet<crate::media::proxy_cache::ProxyVariantSpec> = HashSet::new();
+    for (_, _, spec) in candidates {
+        if seen.insert(spec.clone()) {
+            out.push(spec);
             if out.len() >= max_items {
                 break;
             }
         }
     }
     out
+}
+
+fn request_proxy_variants(
+    cache: &mut crate::media::proxy_cache::ProxyCache,
+    variants: &[crate::media::proxy_cache::ProxyVariantSpec],
+) {
+    for variant in variants {
+        cache.request_with_vidstab(
+            &variant.source_path,
+            variant.scale,
+            variant.lut_key(),
+            variant.vidstab_enabled,
+            variant.vidstab_smoothing(),
+        );
+    }
 }
 
 /// Cancel any pending title-flush timer and schedule a new one.
@@ -2271,14 +2961,253 @@ fn schedule_title_flush(
     }
     let pp = prog_player.clone();
     let timer = timer_raw.clone();
-    let new_id = glib::timeout_add_local_once(
-        std::time::Duration::from_millis(32),
-        move || {
-            timer.set(0);
-            pp.borrow().flush_compositor_for_title_update();
-        },
-    );
+    let new_id = glib::timeout_add_local_once(std::time::Duration::from_millis(32), move || {
+        timer.set(0);
+        pp.borrow().flush_compositor_for_title_update();
+    });
     timer_raw.set(new_id.as_raw());
+}
+
+/// Convert a single `Clip` into one or more `ProgramClip` entries.
+/// For regular clips this returns a single-element Vec; for compound clips it
+/// recursively flattens internal tracks into program clips with adjusted
+/// timeline positions and track indices.
+fn clip_to_program_clips(
+    c: &crate::model::clip::Clip,
+    audio_only: bool,
+    duck: bool,
+    duck_amount_db: f64,
+    track_index: usize,
+    suppress_embedded_audio_ids: &std::collections::HashSet<String>,
+    timeline_offset: u64,
+    depth: usize,
+) -> Vec<ProgramClip> {
+    use crate::model::clip::ClipKind;
+
+    // Compound clips: recursively flatten internal clips
+    if c.kind == ClipKind::Compound && depth < 16 {
+        if let Some(ref internal_tracks) = c.compound_tracks {
+            let compound_offset = timeline_offset.saturating_add(c.timeline_start);
+            let mut result = Vec::new();
+            for (inner_idx, inner_track) in internal_tracks.iter().enumerate() {
+                let inner_audio = inner_track.kind == crate::model::track::TrackKind::Audio;
+                for inner_clip in &inner_track.clips {
+                    let inner_track_idx = track_index + inner_idx;
+                    result.extend(clip_to_program_clips(
+                        inner_clip,
+                        inner_audio,
+                        inner_track.duck,
+                        inner_track.duck_amount_db,
+                        inner_track_idx,
+                        suppress_embedded_audio_ids,
+                        compound_offset,
+                        depth + 1,
+                    ));
+                }
+            }
+            return result;
+        }
+        return Vec::new();
+    }
+
+    // Multicam clips: expand into sequential ProgramClips per angle segment
+    if c.kind == ClipKind::Multicam {
+        let clip_start = timeline_offset.saturating_add(c.timeline_start);
+        let clip_dur = c.duration();
+        let segments = c.multicam_segments();
+        let mut result = Vec::new();
+
+        // Video segments: one ProgramClip per contiguous angle segment (no embedded audio)
+        for (seg_start, seg_end, angle_idx) in &segments {
+            if let Some(angle) = c.multicam_angles.as_ref().and_then(|a| a.get(*angle_idx)) {
+                let angle_source_in = angle.source_in.saturating_add(*seg_start);
+                let angle_source_out = angle
+                    .source_in
+                    .saturating_add(*seg_end)
+                    .min(angle.source_out);
+                let mut seg_clip = crate::model::clip::Clip::new(
+                    &angle.source_path,
+                    angle_source_out,
+                    0,
+                    ClipKind::Video,
+                );
+                seg_clip.source_in = angle_source_in;
+                seg_clip.source_out = angle_source_out;
+                seg_clip.timeline_start = clip_start.saturating_add(*seg_start);
+                let mut seg_results = clip_to_program_clips(
+                    &seg_clip,
+                    false, // not audio_only
+                    duck,
+                    duck_amount_db,
+                    track_index,
+                    suppress_embedded_audio_ids,
+                    0,
+                    depth + 1,
+                );
+                // Video segments have no embedded audio (audio comes from the mix below)
+                for pc in &mut seg_results {
+                    pc.has_audio = false;
+                }
+                result.extend(seg_results);
+            }
+        }
+
+        // Audio mix: one continuous audio ProgramClip per unmuted angle spanning the full multicam duration
+        if let Some(ref angles) = c.multicam_angles {
+            for (ai, angle) in angles.iter().enumerate() {
+                if angle.muted {
+                    continue;
+                }
+                let angle_source_in = angle.source_in;
+                let angle_source_out = angle
+                    .source_in
+                    .saturating_add(clip_dur)
+                    .min(angle.source_out);
+                let mut audio_clip = crate::model::clip::Clip::new(
+                    &angle.source_path,
+                    angle_source_out,
+                    clip_start,
+                    ClipKind::Audio,
+                );
+                audio_clip.source_in = angle_source_in;
+                audio_clip.source_out = angle_source_out;
+                audio_clip.volume = angle.volume;
+                audio_clip.id = format!("{}-audio-{}", c.id, ai);
+                let audio_results = clip_to_program_clips(
+                    &audio_clip,
+                    true, // audio_only
+                    duck,
+                    duck_amount_db,
+                    track_index + angles.len() + ai, // offset track index to avoid collisions
+                    suppress_embedded_audio_ids,
+                    0,
+                    depth + 1,
+                );
+                result.extend(audio_results);
+            }
+        }
+
+        return result;
+    }
+
+    let effective_timeline_start = timeline_offset.saturating_add(c.timeline_start);
+
+    vec![ProgramClip {
+        id: c.id.clone(),
+        source_path: c.source_path.clone(),
+        source_in_ns: c.source_in,
+        source_out_ns: c.source_out,
+        timeline_start_ns: effective_timeline_start,
+        brightness: c.brightness as f64,
+        contrast: c.contrast as f64,
+        saturation: c.saturation as f64,
+        temperature: c.temperature as f64,
+        tint: c.tint as f64,
+        brightness_keyframes: c.brightness_keyframes.clone(),
+        contrast_keyframes: c.contrast_keyframes.clone(),
+        saturation_keyframes: c.saturation_keyframes.clone(),
+        temperature_keyframes: c.temperature_keyframes.clone(),
+        tint_keyframes: c.tint_keyframes.clone(),
+        denoise: c.denoise as f64,
+        sharpness: c.sharpness as f64,
+        blur: c.blur as f64,
+        blur_keyframes: c.blur_keyframes.clone(),
+        vidstab_enabled: c.vidstab_enabled,
+        vidstab_smoothing: c.vidstab_smoothing,
+        volume: c.volume as f64,
+        volume_keyframes: c.volume_keyframes.clone(),
+        pan: c.pan as f64,
+        pan_keyframes: c.pan_keyframes.clone(),
+        eq_bands: c.eq_bands,
+        eq_low_gain_keyframes: c.eq_low_gain_keyframes.clone(),
+        eq_mid_gain_keyframes: c.eq_mid_gain_keyframes.clone(),
+        eq_high_gain_keyframes: c.eq_high_gain_keyframes.clone(),
+        crop_left: c.crop_left,
+        crop_left_keyframes: c.crop_left_keyframes.clone(),
+        crop_right: c.crop_right,
+        crop_right_keyframes: c.crop_right_keyframes.clone(),
+        crop_top: c.crop_top,
+        crop_top_keyframes: c.crop_top_keyframes.clone(),
+        crop_bottom: c.crop_bottom,
+        crop_bottom_keyframes: c.crop_bottom_keyframes.clone(),
+        rotate: c.rotate,
+        rotate_keyframes: c.rotate_keyframes.clone(),
+        flip_h: c.flip_h,
+        flip_v: c.flip_v,
+        title_text: c.title_text.clone(),
+        title_font: c.title_font.clone(),
+        title_color: c.title_color,
+        title_x: c.title_x,
+        title_y: c.title_y,
+        title_outline_color: c.title_outline_color,
+        title_outline_width: c.title_outline_width,
+        title_shadow: c.title_shadow,
+        title_shadow_color: c.title_shadow_color,
+        title_shadow_offset_x: c.title_shadow_offset_x,
+        title_shadow_offset_y: c.title_shadow_offset_y,
+        title_bg_box: c.title_bg_box,
+        title_bg_box_color: c.title_bg_box_color,
+        title_bg_box_padding: c.title_bg_box_padding,
+        title_clip_bg_color: c.title_clip_bg_color,
+        title_secondary_text: c.title_secondary_text.clone(),
+        is_title: c.kind == ClipKind::Title,
+        speed: c.speed,
+        speed_keyframes: c.speed_keyframes.clone(),
+        slow_motion_interp: c.slow_motion_interp,
+        reverse: c.reverse,
+        freeze_frame: c.freeze_frame,
+        freeze_frame_source_ns: c.freeze_frame_source_ns,
+        freeze_frame_hold_duration_ns: c.freeze_frame_hold_duration_ns,
+        is_audio_only: audio_only,
+        duck,
+        duck_amount_db,
+        ladspa_effects: c.ladspa_effects.clone(),
+        pitch_shift_semitones: c.pitch_shift_semitones,
+        pitch_preserve: c.pitch_preserve,
+        anamorphic_desqueeze: c.anamorphic_desqueeze,
+        track_index,
+        transition_after: c.transition_after.clone(),
+        transition_after_ns: c.transition_after_ns,
+        lut_paths: c.lut_paths.clone(),
+        scale: c.scale,
+        scale_keyframes: c.scale_keyframes.clone(),
+        opacity: c.opacity,
+        opacity_keyframes: c.opacity_keyframes.clone(),
+        blend_mode: c.blend_mode,
+        position_x: c.position_x,
+        position_x_keyframes: c.position_x_keyframes.clone(),
+        position_y: c.position_y,
+        position_y_keyframes: c.position_y_keyframes.clone(),
+        shadows: c.shadows as f64,
+        midtones: c.midtones as f64,
+        highlights: c.highlights as f64,
+        exposure: c.exposure as f64,
+        black_point: c.black_point as f64,
+        highlights_warmth: c.highlights_warmth as f64,
+        highlights_tint: c.highlights_tint as f64,
+        midtones_warmth: c.midtones_warmth as f64,
+        midtones_tint: c.midtones_tint as f64,
+        shadows_warmth: c.shadows_warmth as f64,
+        shadows_tint: c.shadows_tint as f64,
+        has_audio: !c.is_freeze_frame()
+            && c.kind != ClipKind::Title
+            && c.kind != ClipKind::Adjustment
+            && c.kind != ClipKind::Compound
+            && c.kind != ClipKind::Multicam
+            && !suppress_embedded_audio_ids.contains(&c.id),
+        is_image: c.kind == ClipKind::Image,
+        animated_svg: c.animated_svg,
+        media_duration_ns: c.media_duration_ns,
+        is_adjustment: c.kind == ClipKind::Adjustment,
+        chroma_key_enabled: c.chroma_key_enabled,
+        chroma_key_color: c.chroma_key_color,
+        chroma_key_tolerance: c.chroma_key_tolerance,
+        chroma_key_softness: c.chroma_key_softness,
+        bg_removal_enabled: c.bg_removal_enabled,
+        bg_removal_threshold: c.bg_removal_threshold,
+        frei0r_effects: c.frei0r_effects.clone(),
+        masks: c.masks.clone(),
+    }]
 }
 
 /// Build and show the main application window.
@@ -2297,8 +3226,10 @@ pub fn build_window(
     let project = Rc::new(RefCell::new(Project::new("Untitled")));
 
     // Shared media library (items visible in the browser, not yet on timeline)
-    let library: Rc<RefCell<Vec<MediaItem>>> = Rc::new(RefCell::new(Vec::new()));
+    let library: Rc<RefCell<MediaLibrary>> = Rc::new(RefCell::new(MediaLibrary::new()));
     let preferences_state = Rc::new(RefCell::new(crate::ui_state::load_preferences_state()));
+    let workspace_layouts_state =
+        Rc::new(RefCell::new(crate::ui_state::load_workspace_layouts_state()));
 
     // MCP command channel — created unconditionally so the socket transport can
     // be toggled at runtime via Preferences without restarting.
@@ -2314,6 +3245,14 @@ pub fn build_window(
         preferences_state.borrow().source_playback_priority.clone();
     let initial_proxy_mode = preferences_state.borrow().proxy_mode.clone();
     let initial_background_prerender = preferences_state.borrow().background_prerender;
+    let initial_prerender_preset = preferences_state.borrow().prerender_preset.clone();
+    let initial_prerender_crf = preferences_state.borrow().prerender_crf;
+    let initial_persist_proxies_next_to_original_media = preferences_state
+        .borrow()
+        .persist_proxies_next_to_original_media;
+    let initial_persist_prerenders_next_to_project_file = preferences_state
+        .borrow()
+        .persist_prerenders_next_to_project_file;
     let initial_preview_luts = preferences_state.borrow().preview_luts;
     let initial_preview_quality = preferences_state.borrow().preview_quality.clone();
     let initial_show_waveform_on_video = preferences_state.borrow().show_waveform_on_video;
@@ -2345,42 +3284,46 @@ pub fn build_window(
                 let player_for_bus = player.clone();
                 let source_original_uri_for_proxy_fallback =
                     source_original_uri_for_proxy_fallback.clone();
+                // Debounce: ignore repeated errors within 2 s of the last
+                // handled error.  VA-API dmabuf errors can flood in at 30 fps;
+                // without a cooldown the proxy-fallback code runs on every
+                // already-queued error message after the first reload, causing
+                // an infinite HW→SW→HW→… loop.
+                let last_error_handled = std::rc::Rc::new(std::cell::Cell::new(
+                    std::time::Instant::now()
+                        .checked_sub(std::time::Duration::from_secs(10))
+                        .unwrap_or(std::time::Instant::now()),
+                ));
                 let _watch = bus.add_watch_local(move |_bus, msg: &gstreamer::Message| {
                     use gstreamer::MessageView;
                     match msg.view() {
                         MessageView::Error(err) => {
+                            // Debounce: only act on errors that are >2s apart.
+                            let now = std::time::Instant::now();
+                            let elapsed = now.duration_since(last_error_handled.get());
+                            if elapsed < std::time::Duration::from_secs(2) {
+                                return glib::ControlFlow::Continue;
+                            }
+                            last_error_handled.set(now);
                             log::error!(
                                 "Source preview pipeline error: {} (debug: {:?})",
                                 err.error(),
                                 err.debug()
                             );
-                            let mut should_fallback = false;
-                            let err_text = err.error().to_string().to_lowercase();
-                            let dbg_text = err
-                                .debug()
-                                .map(|d| d.to_string().to_lowercase())
-                                .unwrap_or_default();
-                            if err_text.contains("not-negotiated")
-                                || dbg_text.contains("not-negotiated")
-                                || dbg_text.contains("dmabuf")
-                                || dbg_text.contains("va")
-                            {
-                                should_fallback = true;
-                            }
                             let mut hw_fallback_applied = false;
-                            if should_fallback {
-                                match player_for_bus.borrow().fallback_to_software_after_error() {
-                                    Ok(true) => {
-                                        hw_fallback_applied = true;
-                                        log::warn!(
-                                            "Source preview fallback: switched to software decode mode after HW-path error"
-                                        );
-                                    }
-                                    Ok(false) => {}
-                                    Err(e) => log::error!(
-                                        "Source preview fallback failed: {e:#}"
-                                    ),
+                            // Any source-preview pipeline error while in HW mode should trigger
+                            // a software-decode retry. Restricting this to specific substrings
+                            // misses some backend-specific error messages that still manifest
+                            // as "audio plays, video black" in the source monitor.
+                            match player_for_bus.borrow().fallback_to_software_after_error() {
+                                Ok(true) => {
+                                    hw_fallback_applied = true;
+                                    log::warn!(
+                                        "Source preview fallback: switched to software decode mode after HW-path error"
+                                    );
                                 }
+                                Ok(false) => {}
+                                Err(e) => log::error!("Source preview fallback failed: {e:#}"),
                             }
                             // If proxy playback fails at runtime, retry once with
                             // the original source URI so preview does not stay black
@@ -2418,6 +3361,9 @@ pub fn build_window(
                     }
                     glib::ControlFlow::Continue
                 });
+                // BusWatchGuard removes the watch when dropped.  Intentionally
+                // leak it so the watch stays active for the entire app lifetime.
+                std::mem::forget(_watch);
             }
         }
     }
@@ -2444,6 +3390,14 @@ pub fn build_window(
     );
     prog_player_raw.set_realtime_preview(preferences_state.borrow().realtime_preview);
     prog_player_raw.set_background_prerender(initial_background_prerender);
+    prog_player_raw.set_prerender_quality(initial_prerender_preset, initial_prerender_crf);
+    {
+        let p = project.borrow();
+        prog_player_raw.set_prerender_project_path(
+            p.file_path.as_deref(),
+            initial_persist_prerenders_next_to_project_file,
+        );
+    }
     prog_player_raw.set_audio_crossfade_preview(
         preferences_state.borrow().crossfade_enabled,
         preferences_state.borrow().crossfade_curve.clone(),
@@ -2456,12 +3410,13 @@ pub fn build_window(
     let prog_player = Rc::new(RefCell::new(prog_player_raw));
 
     let proxy_cache = Rc::new(RefCell::new(crate::media::proxy_cache::ProxyCache::new()));
-    proxy_cache
-        .borrow_mut()
-        .set_sidecar_mirror_enabled(initial_proxy_mode.is_enabled());
+    proxy_cache.borrow_mut().set_sidecar_mirror_enabled(
+        initial_proxy_mode.is_enabled() && initial_persist_proxies_next_to_original_media,
+    );
     let bg_removal_cache = Rc::new(RefCell::new(
         crate::media::bg_removal_cache::BgRemovalCache::new(),
     ));
+    let stt_cache = Rc::new(RefCell::new(crate::media::stt_cache::SttCache::new()));
     let effective_proxy_enabled = Rc::new(Cell::new(initial_proxy_mode.is_enabled()));
     let effective_proxy_scale_divisor = Rc::new(Cell::new(match initial_proxy_mode {
         crate::ui_state::ProxyMode::QuarterRes => 4,
@@ -2493,6 +3448,187 @@ pub fn build_window(
             }
         })
     };
+    let sync_proxy_toggle_impl: Rc<
+        RefCell<Option<Rc<dyn Fn(&crate::ui_state::PreferencesState)>>>,
+    > = Rc::new(RefCell::new(None));
+    let sync_background_render_toggle_impl: Rc<
+        RefCell<Option<Rc<dyn Fn(&crate::ui_state::PreferencesState)>>>,
+    > = Rc::new(RefCell::new(None));
+    let refresh_source_preview_preferences_impl: Rc<
+        RefCell<
+            Option<
+                Rc<dyn Fn(&crate::ui_state::PreferencesState, &crate::ui_state::PreferencesState)>,
+            >,
+        >,
+    > = Rc::new(RefCell::new(None));
+    let apply_preferences_state: Rc<dyn Fn(crate::ui_state::PreferencesState)> = {
+        let preferences_state = preferences_state.clone();
+        let player = player.clone();
+        let prog_player = prog_player.clone();
+        let proxy_cache = proxy_cache.clone();
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let mcp_sender = mcp_sender.clone();
+        let mcp_socket_stop = mcp_socket_stop.clone();
+        let sync_proxy_toggle_impl = sync_proxy_toggle_impl.clone();
+        let sync_background_render_toggle_impl = sync_background_render_toggle_impl.clone();
+        let refresh_source_preview_preferences_impl =
+            refresh_source_preview_preferences_impl.clone();
+        Rc::new(move |mut new_state| {
+            let old_state = preferences_state.borrow().clone();
+            if !new_state.last_non_off_proxy_mode.is_enabled() {
+                new_state.last_non_off_proxy_mode = old_state.remembered_proxy_mode();
+            }
+            *preferences_state.borrow_mut() = new_state.clone();
+            crate::ui_state::save_preferences_state(&new_state);
+            if let Err(e) = player
+                .borrow()
+                .set_hardware_acceleration(new_state.hardware_acceleration_enabled)
+            {
+                eprintln!("Failed to apply hardware acceleration setting: {e}");
+            }
+            player
+                .borrow()
+                .set_source_playback_priority(new_state.source_playback_priority.clone());
+            prog_player
+                .borrow_mut()
+                .set_playback_priority(new_state.playback_priority.clone());
+            prog_player
+                .borrow_mut()
+                .set_proxy_enabled(new_state.proxy_mode.is_enabled());
+            proxy_cache.borrow_mut().set_sidecar_mirror_enabled(
+                new_state.proxy_mode.is_enabled()
+                    && new_state.persist_proxies_next_to_original_media,
+            );
+            prog_player
+                .borrow_mut()
+                .set_proxy_scale_divisor(match new_state.proxy_mode {
+                    crate::ui_state::ProxyMode::QuarterRes => 4,
+                    _ => 2,
+                });
+            prog_player
+                .borrow_mut()
+                .set_preview_quality(new_state.preview_quality.divisor());
+            prog_player
+                .borrow_mut()
+                .set_experimental_preview_optimizations(
+                    new_state.experimental_preview_optimizations,
+                );
+            prog_player
+                .borrow_mut()
+                .set_realtime_preview(new_state.realtime_preview);
+            prog_player
+                .borrow_mut()
+                .set_background_prerender(new_state.background_prerender);
+            prog_player
+                .borrow_mut()
+                .set_prerender_quality(new_state.prerender_preset.clone(), new_state.prerender_crf);
+            let project_file_path = { project.borrow().file_path.clone() };
+            prog_player.borrow_mut().set_prerender_project_path(
+                project_file_path.as_deref(),
+                new_state.persist_prerenders_next_to_project_file,
+            );
+            prog_player
+                .borrow_mut()
+                .set_preview_luts(new_state.preview_luts);
+            prog_player.borrow_mut().set_audio_crossfade_preview(
+                new_state.crossfade_enabled,
+                new_state.crossfade_curve.clone(),
+                new_state.crossfade_duration_ns,
+            );
+            prog_player
+                .borrow_mut()
+                .set_duck_settings(new_state.duck_enabled, new_state.duck_amount_db);
+            if new_state.proxy_mode.is_enabled() {
+                // If the proxy scale changed, invalidate old entries so clips are
+                // re-transcoded at the new resolution.
+                if new_state.proxy_mode != old_state.proxy_mode
+                    || new_state.preview_luts != old_state.preview_luts
+                {
+                    proxy_cache.borrow_mut().invalidate_all();
+                }
+                let scale = match new_state.proxy_mode {
+                    crate::ui_state::ProxyMode::QuarterRes => {
+                        crate::media::proxy_cache::ProxyScale::Quarter
+                    }
+                    _ => crate::media::proxy_cache::ProxyScale::Half,
+                };
+                let variants = {
+                    let proj = project.borrow();
+                    collect_unique_proxy_variants(&proj, scale)
+                };
+                {
+                    let mut cache = proxy_cache.borrow_mut();
+                    cache.cleanup_stale_variants(&variants);
+                    request_proxy_variants(&mut cache, &variants);
+                }
+                let paths = proxy_cache.borrow().proxies.clone();
+                prog_player.borrow_mut().update_proxy_paths(paths);
+            } else if new_state.preview_luts {
+                if new_state.proxy_mode != old_state.proxy_mode
+                    || new_state.preview_luts != old_state.preview_luts
+                {
+                    proxy_cache.borrow_mut().invalidate_all();
+                }
+                let variants = {
+                    let proj = project.borrow();
+                    collect_unique_preview_lut_proxy_variants(&proj)
+                };
+                {
+                    let mut cache = proxy_cache.borrow_mut();
+                    cache.cleanup_stale_variants(&variants);
+                    request_proxy_variants(&mut cache, &variants);
+                }
+                let paths = proxy_cache.borrow().proxies.clone();
+                prog_player.borrow_mut().update_proxy_paths(paths);
+            } else {
+                prog_player.borrow_mut().update_proxy_paths(HashMap::new());
+            }
+            timeline_state.borrow_mut().show_waveform_on_video = new_state.show_waveform_on_video;
+            timeline_state.borrow_mut().show_timeline_preview = new_state.show_timeline_preview;
+            timeline_state.borrow_mut().show_track_audio_levels = new_state.show_track_audio_levels;
+            // Start/stop MCP socket server based on preference change.
+            if new_state.mcp_socket_enabled && mcp_socket_stop.borrow().is_none() {
+                let stop = crate::mcp::start_mcp_socket_server((*mcp_sender).clone());
+                *mcp_socket_stop.borrow_mut() = Some(stop);
+            } else if !new_state.mcp_socket_enabled {
+                if let Some(stop) = mcp_socket_stop.borrow_mut().take() {
+                    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            if let Some(sync_proxy_toggle) = sync_proxy_toggle_impl.borrow().as_ref().cloned() {
+                sync_proxy_toggle(&new_state);
+            }
+            if let Some(sync_background_render_toggle) = sync_background_render_toggle_impl
+                .borrow()
+                .as_ref()
+                .cloned()
+            {
+                sync_background_render_toggle(&new_state);
+            }
+            if let Some(refresh_source_preview) = refresh_source_preview_preferences_impl
+                .borrow()
+                .as_ref()
+                .cloned()
+            {
+                refresh_source_preview(&old_state, &new_state);
+            }
+        })
+    };
+    let proxy_toggle_updating = Rc::new(Cell::new(false));
+    let toggle_proxy_quick: Rc<dyn Fn(bool)> = {
+        let preferences_state = preferences_state.clone();
+        let apply_preferences_state = apply_preferences_state.clone();
+        let proxy_toggle_updating = proxy_toggle_updating.clone();
+        Rc::new(move |enabled| {
+            if proxy_toggle_updating.get() {
+                return;
+            }
+            let mut new_state = preferences_state.borrow().clone();
+            new_state.set_proxy_enabled(enabled);
+            apply_preferences_state(new_state);
+        })
+    };
     let open_preferences_impl: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
     let open_preferences: Rc<dyn Fn()> = {
         let cb = open_preferences_impl.clone();
@@ -2505,168 +3641,15 @@ pub fn build_window(
     *open_preferences_impl.borrow_mut() = Some({
         let window_weak = window_weak.clone();
         let preferences_state = preferences_state.clone();
-        let player = player.clone();
-        let prog_player = prog_player.clone();
-        let proxy_cache = proxy_cache.clone();
-        let project = project.clone();
-        let timeline_state = timeline_state.clone();
-        let mcp_sender = mcp_sender.clone();
-        let mcp_socket_stop = mcp_socket_stop.clone();
         let bg_removal_cache = bg_removal_cache.clone();
+        let apply_preferences_state = apply_preferences_state.clone();
         Rc::new(move || {
             if let Some(win) = window_weak.upgrade() {
                 let current = preferences_state.borrow().clone();
-                let old_proxy_mode = current.proxy_mode.clone();
-                let old_preview_luts = current.preview_luts;
-                let preferences_state = preferences_state.clone();
-                let player = player.clone();
-                let prog_player = prog_player.clone();
-                let proxy_cache = proxy_cache.clone();
-                let project = project.clone();
-                let timeline_state = timeline_state.clone();
-                let mcp_sender = mcp_sender.clone();
-                let mcp_socket_stop = mcp_socket_stop.clone();
-                let bg_removal_cache = bg_removal_cache.clone();
-                let on_save: Rc<dyn Fn(crate::ui_state::PreferencesState)> =
-                    Rc::new(move |new_state| {
-                        *preferences_state.borrow_mut() = new_state.clone();
-                        crate::ui_state::save_preferences_state(&new_state);
-                        if let Err(e) = player
-                            .borrow()
-                            .set_hardware_acceleration(new_state.hardware_acceleration_enabled)
-                        {
-                            eprintln!("Failed to apply hardware acceleration setting: {e}");
-                        }
-                        player.borrow().set_source_playback_priority(
-                            new_state.source_playback_priority.clone(),
-                        );
-                        prog_player
-                            .borrow_mut()
-                            .set_playback_priority(new_state.playback_priority.clone());
-                        prog_player
-                            .borrow_mut()
-                            .set_proxy_enabled(new_state.proxy_mode.is_enabled());
-                        proxy_cache
-                            .borrow_mut()
-                            .set_sidecar_mirror_enabled(new_state.proxy_mode.is_enabled());
-                        prog_player.borrow_mut().set_proxy_scale_divisor(
-                            match new_state.proxy_mode {
-                                crate::ui_state::ProxyMode::QuarterRes => 4,
-                                _ => 2,
-                            },
-                        );
-                        prog_player
-                            .borrow_mut()
-                            .set_preview_quality(new_state.preview_quality.divisor());
-                        prog_player
-                            .borrow_mut()
-                            .set_experimental_preview_optimizations(
-                                new_state.experimental_preview_optimizations,
-                            );
-                        prog_player
-                            .borrow_mut()
-                            .set_realtime_preview(new_state.realtime_preview);
-                        prog_player
-                            .borrow_mut()
-                            .set_background_prerender(new_state.background_prerender);
-                        prog_player
-                            .borrow_mut()
-                            .set_preview_luts(new_state.preview_luts);
-                        prog_player.borrow_mut().set_audio_crossfade_preview(
-                            new_state.crossfade_enabled,
-                            new_state.crossfade_curve.clone(),
-                            new_state.crossfade_duration_ns,
-                        );
-                        prog_player.borrow_mut().set_duck_settings(
-                            new_state.duck_enabled,
-                            new_state.duck_amount_db,
-                        );
-                        if new_state.proxy_mode.is_enabled() {
-                            // If the proxy scale changed, invalidate old entries so clips are
-                            // re-transcoded at the new resolution.
-                            if new_state.proxy_mode != old_proxy_mode
-                                || new_state.preview_luts != old_preview_luts
-                            {
-                                proxy_cache.borrow_mut().invalidate_all();
-                            }
-                            let scale = match new_state.proxy_mode {
-                                crate::ui_state::ProxyMode::QuarterRes => {
-                                    crate::media::proxy_cache::ProxyScale::Quarter
-                                }
-                                _ => crate::media::proxy_cache::ProxyScale::Half,
-                            };
-                            let clips: Vec<(String, Option<String>, bool, f32)> = {
-                                let proj = project.borrow();
-                                proj.tracks
-                                    .iter()
-                                    .flat_map(|t| t.clips.iter())
-                                    .map(|c| (c.source_path.clone(), c.lut_key(), c.vidstab_enabled, c.vidstab_smoothing))
-                                    .collect()
-                            };
-                            {
-                                let mut cache = proxy_cache.borrow_mut();
-                                for (path, lut, vs_en, vs_sm) in &clips {
-                                    cache.request_with_vidstab(path, scale, lut.as_deref(), *vs_en, *vs_sm);
-                                }
-                            }
-                            let paths = proxy_cache.borrow().proxies.clone();
-                            prog_player.borrow_mut().update_proxy_paths(paths);
-                        } else if new_state.preview_luts {
-                            if new_state.proxy_mode != old_proxy_mode
-                                || new_state.preview_luts != old_preview_luts
-                            {
-                                proxy_cache.borrow_mut().invalidate_all();
-                            }
-                            let (project_w, project_h, clips): (
-                                u32,
-                                u32,
-                                Vec<(String, Option<String>)>,
-                            ) = {
-                                let proj = project.borrow();
-                                (
-                                    proj.width,
-                                    proj.height,
-                                    collect_unique_lut_clip_sources(&proj),
-                                )
-                            };
-                            {
-                                let mut cache = proxy_cache.borrow_mut();
-                                for (path, lut) in &clips {
-                                    cache.request(
-                                        path,
-                                        crate::media::proxy_cache::ProxyScale::Project {
-                                            width: project_w,
-                                            height: project_h,
-                                        },
-                                        lut.as_deref(),
-                                    );
-                                }
-                            }
-                            let paths = proxy_cache.borrow().proxies.clone();
-                            prog_player.borrow_mut().update_proxy_paths(paths);
-                        } else {
-                            prog_player.borrow_mut().update_proxy_paths(HashMap::new());
-                        }
-                        timeline_state.borrow_mut().show_waveform_on_video =
-                            new_state.show_waveform_on_video;
-                        timeline_state.borrow_mut().show_timeline_preview =
-                            new_state.show_timeline_preview;
-                        timeline_state.borrow_mut().show_track_audio_levels =
-                            new_state.show_track_audio_levels;
-                        // Start/stop MCP socket server based on preference change.
-                        if new_state.mcp_socket_enabled && mcp_socket_stop.borrow().is_none() {
-                            let stop = crate::mcp::start_mcp_socket_server((*mcp_sender).clone());
-                            *mcp_socket_stop.borrow_mut() = Some(stop);
-                        } else if !new_state.mcp_socket_enabled {
-                            if let Some(stop) = mcp_socket_stop.borrow_mut().take() {
-                                stop.store(true, std::sync::atomic::Ordering::Relaxed);
-                            }
-                        }
-                    });
                 preferences::show_preferences_dialog(
                     win.upcast_ref(),
                     current,
-                    on_save,
+                    apply_preferences_state.clone(),
                     bg_removal_cache.clone(),
                 );
             }
@@ -2714,10 +3697,25 @@ pub fn build_window(
             let project = project.clone();
             move |b, c, s, temp, tnt, d, sh, bl, shd, mid, hil, exp, bp, hw, ht, mw, mt, sw, st| {
                 prog_player.borrow_mut().update_current_effects(
-                    b as f64, c as f64, s as f64, temp as f64, tnt as f64,
-                    d as f64, sh as f64, shd as f64, mid as f64, hil as f64,
-                    exp as f64, bp as f64, hw as f64, ht as f64, mw as f64, mt as f64,
-                    sw as f64, st as f64, bl as f64,
+                    b as f64,
+                    c as f64,
+                    s as f64,
+                    temp as f64,
+                    tnt as f64,
+                    d as f64,
+                    sh as f64,
+                    shd as f64,
+                    mid as f64,
+                    hil as f64,
+                    exp as f64,
+                    bp as f64,
+                    hw as f64,
+                    ht as f64,
+                    mw as f64,
+                    mt as f64,
+                    sw as f64,
+                    st as f64,
+                    bl as f64,
                 );
                 // Update window title dirty marker without a full reload
                 if let Some(win) = window_weak.upgrade() {
@@ -2844,8 +3842,14 @@ pub fn build_window(
             let timeline_state = timeline_state.clone();
             let transform_overlay_cell = transform_overlay_cell.clone();
             move |cl, cr, ct, cb, rot, fh, fv, sc, px, py| {
-                player.borrow().set_transform(cl, cr, ct, cb, rot, fh, fv);
                 let selected = timeline_state.borrow().selected_clip_id.clone();
+                let is_adjustment = {
+                    let proj = project.borrow();
+                    selected_clip_is_adjustment(&proj, selected.as_deref())
+                };
+                if !is_adjustment {
+                    player.borrow().set_transform(cl, cr, ct, cb, rot, fh, fv);
+                }
                 let mut pp = prog_player.borrow_mut();
                 if let Some(ref clip_id) = selected {
                     pp.update_transform_for_clip(clip_id, cl, cr, ct, cb, rot, fh, fv, sc, px, py);
@@ -2905,7 +3909,9 @@ pub fn build_window(
                 let (font, color) = {
                     let proj = project.borrow();
                     if let Some(ref clip_id) = selected {
-                        proj.tracks.iter().flat_map(|t| t.clips.iter())
+                        proj.tracks
+                            .iter()
+                            .flat_map(|t| t.clips.iter())
                             .find(|c| &c.id == clip_id)
                             .map(|c| (c.title_font.clone(), c.title_color))
                             .unwrap_or(("Sans Bold 36".to_string(), 0xFFFFFFFF))
@@ -2942,9 +3948,18 @@ pub fn build_window(
                 let (outline_width, outline_color, shadow, bg_box) = {
                     let proj = project.borrow();
                     if let Some(ref clip_id) = selected {
-                        proj.tracks.iter().flat_map(|t| t.clips.iter())
+                        proj.tracks
+                            .iter()
+                            .flat_map(|t| t.clips.iter())
                             .find(|c| &c.id == clip_id)
-                            .map(|c| (c.title_outline_width, c.title_outline_color, c.title_shadow, c.title_bg_box))
+                            .map(|c| {
+                                (
+                                    c.title_outline_width,
+                                    c.title_outline_color,
+                                    c.title_shadow,
+                                    c.title_bg_box,
+                                )
+                            })
                             .unwrap_or((0.0, 0x000000FF, false, false))
                     } else {
                         (0.0, 0x000000FF, false, false)
@@ -2953,7 +3968,13 @@ pub fn build_window(
                 // Instant: set GStreamer textoverlay properties (non-blocking)
                 let pp = prog_player.borrow();
                 if let Some(ref clip_id) = selected {
-                    pp.update_title_style_for_clip(clip_id, outline_width, outline_color, shadow, bg_box);
+                    pp.update_title_style_for_clip(
+                        clip_id,
+                        outline_width,
+                        outline_color,
+                        shadow,
+                        bg_box,
+                    );
                 } else {
                     pp.update_current_title_style(outline_width, outline_color, shadow, bg_box);
                 }
@@ -2987,41 +4008,27 @@ pub fn build_window(
                 // Re-generate proxies so the newly assigned/cleared LUT is baked in.
                 let prefs = preferences_state.borrow();
                 if prefs.proxy_mode.is_enabled() || prefs.preview_luts {
-                    let (scale, clips): (
-                        crate::media::proxy_cache::ProxyScale,
-                        Vec<(String, Option<String>)>,
-                    ) = {
+                    let variants = {
                         let proj = project.borrow();
                         if prefs.proxy_mode.is_enabled() {
-                            (
+                            collect_unique_proxy_variants(
+                                &proj,
                                 match prefs.proxy_mode {
                                     crate::ui_state::ProxyMode::QuarterRes => {
                                         crate::media::proxy_cache::ProxyScale::Quarter
                                     }
                                     _ => crate::media::proxy_cache::ProxyScale::Half,
                                 },
-                                proj.tracks
-                                    .iter()
-                                    .flat_map(|t| t.clips.iter())
-                                    .map(|c| (c.source_path.clone(), c.lut_key()))
-                                    .collect(),
                             )
                         } else {
-                            (
-                                crate::media::proxy_cache::ProxyScale::Project {
-                                    width: proj.width,
-                                    height: proj.height,
-                                },
-                                collect_unique_lut_clip_sources(&proj),
-                            )
+                            collect_unique_preview_lut_proxy_variants(&proj)
                         }
                     };
                     {
                         let mut cache = proxy_cache.borrow_mut();
                         cache.invalidate_all();
-                        for (path, lut) in &clips {
-                            cache.request(path, scale, lut.as_deref());
-                        }
+                        cache.cleanup_stale_variants(&variants);
+                        request_proxy_variants(&mut cache, &variants);
                     }
                     let paths = proxy_cache.borrow().proxies.clone();
                     prog_player.borrow_mut().update_proxy_paths(paths);
@@ -3118,19 +4125,14 @@ pub fn build_window(
                         }
                         _ => crate::media::proxy_cache::ProxyScale::Half,
                     };
-                    let clips: Vec<(String, Option<String>, bool, f32)> = {
+                    let variants = {
                         let proj = project.borrow();
-                        proj.tracks
-                            .iter()
-                            .flat_map(|t| t.clips.iter())
-                            .map(|c| (c.source_path.clone(), c.lut_key(), c.vidstab_enabled, c.vidstab_smoothing))
-                            .collect()
+                        collect_unique_proxy_variants(&proj, scale)
                     };
                     {
                         let mut cache = proxy_cache.borrow_mut();
-                        for (path, lut, vs_en, vs_sm) in &clips {
-                            cache.request_with_vidstab(path, scale, lut.as_deref(), *vs_en, *vs_sm);
-                        }
+                        cache.cleanup_stale_variants(&variants);
+                        request_proxy_variants(&mut cache, &variants);
                     }
                     let paths = proxy_cache.borrow().proxies.clone();
                     prog_player.borrow_mut().update_proxy_paths(paths);
@@ -3166,10 +4168,22 @@ pub fn build_window(
                             .map(|c| c.frei0r_effects.clone())
                     })
                 };
+                // Also update mask shared state for live slider feedback.
+                {
+                    let proj = project.borrow();
+                    let selected = timeline_state.borrow().selected_clip_id.clone();
+                    if let Some(masks) = selected.and_then(|cid| {
+                        proj.tracks
+                            .iter()
+                            .flat_map(|t| t.clips.iter())
+                            .find(|c| c.id == cid)
+                            .map(|c| c.masks.clone())
+                    }) {
+                        prog_player.borrow_mut().update_current_masks(&masks);
+                    }
+                }
                 if let Some(effects) = effects {
-                    let needs_reseek = prog_player
-                        .borrow_mut()
-                        .update_frei0r_effects(&effects);
+                    let needs_reseek = prog_player.borrow_mut().update_frei0r_effects(&effects);
                     if needs_reseek {
                         // Schedule a debounced reseek: cancel the previous timer
                         // (via ticket) and set a new one. The 32ms delay coalesces
@@ -3201,9 +4215,11 @@ pub fn build_window(
             let timeline_panel_cell = timeline_panel_cell.clone();
             let keyframe_editor_cell = keyframe_editor_cell.clone();
             move |clip_id: &str, speed: f64, keyframes: &[crate::model::clip::NumericKeyframe]| {
-                prog_player
-                    .borrow_mut()
-                    .update_speed_keyframes_for_clip(clip_id, speed, keyframes.to_vec());
+                prog_player.borrow_mut().update_speed_keyframes_for_clip(
+                    clip_id,
+                    speed,
+                    keyframes.to_vec(),
+                );
                 // Redraw timeline and dopesheet to reflect new duration/keyframes
                 if let Some(ref w) = *timeline_panel_cell.borrow() {
                     w.queue_draw();
@@ -3258,9 +4274,20 @@ pub fn build_window(
                             norm_rx.borrow_mut().take();
                             norm_in_progress.set(false);
                             match result {
-                                Ok((clip_id, track_id, old_volume, old_measured, measured_lufs, target_lufs)) => {
-                                    let gain = crate::media::export::compute_lufs_gain(measured_lufs, target_lufs);
-                                    let new_volume = (old_volume as f64 * gain).clamp(0.0, 4.0) as f32;
+                                Ok((
+                                    clip_id,
+                                    track_id,
+                                    old_volume,
+                                    old_measured,
+                                    measured_lufs,
+                                    target_lufs,
+                                )) => {
+                                    let gain = crate::media::export::compute_lufs_gain(
+                                        measured_lufs,
+                                        target_lufs,
+                                    );
+                                    let new_volume =
+                                        (old_volume as f64 * gain).clamp(0.0, 4.0) as f32;
                                     {
                                         let mut proj = project.borrow_mut();
                                         let cmd = crate::undo::NormalizeClipAudioCommand {
@@ -3277,7 +4304,10 @@ pub fn build_window(
                                     on_project_changed();
                                     if let Some(win) = window_weak.upgrade() {
                                         let proj = project.borrow();
-                                        let title = format!("UltimateSlice \u{2014} {} \u{2022}", proj.title);
+                                        let title = format!(
+                                            "UltimateSlice \u{2014} {} \u{2022}",
+                                            proj.title
+                                        );
                                         win.set_title(Some(&title));
                                     }
                                     log::info!(
@@ -3289,7 +4319,8 @@ pub fn build_window(
                                     log::warn!("Normalize analysis failed: {e}");
                                     if let Some(win) = window_weak.upgrade() {
                                         let proj = project.borrow();
-                                        let title = format!("UltimateSlice \u{2014} {}", proj.title);
+                                        let title =
+                                            format!("UltimateSlice \u{2014} {}", proj.title);
                                         win.set_title(Some(&title));
                                     }
                                 }
@@ -3345,7 +4376,9 @@ pub fn build_window(
                 *norm_rx.borrow_mut() = Some(rx);
                 std::thread::spawn(move || {
                     let result = crate::media::export::analyze_loudness_lufs(
-                        &source_path, source_in, source_out,
+                        &source_path,
+                        source_in,
+                        source_out,
                     );
                     let _ = tx.send(match result {
                         Ok(measured_lufs) => Ok((
@@ -3396,6 +4429,20 @@ pub fn build_window(
                 on_project_changed();
             }
         },
+        // on_execute_command: inspector pushes undo-tracked commands through here
+        {
+            let timeline_state = timeline_state.clone();
+            let project = project.clone();
+            let on_project_changed = on_project_changed.clone();
+            move |cmd: Box<dyn crate::undo::EditCommand>| {
+                {
+                    let mut st = timeline_state.borrow_mut();
+                    let mut proj = project.borrow_mut();
+                    st.history.execute(cmd, &mut proj);
+                }
+                on_project_changed();
+            }
+        },
     );
 
     // Sync normalize button state with in-progress flag.
@@ -3435,11 +4482,582 @@ pub fn build_window(
         inspector_view.relink_btn.connect_clicked(move |_| cb());
     }
 
+    // Wire inspector "Generate Subtitles" button to STT cache.
+    {
+        let stt_cache = stt_cache.clone();
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let lang_dropdown = inspector_view.subtitle_language_dropdown.clone();
+        let inspector_view_gen = inspector_view.clone();
+        inspector_view
+            .subtitle_generate_btn
+            .connect_clicked(move |_btn| {
+                let selected = timeline_state.borrow().selected_clip_id.clone();
+                if let Some(ref clip_id) = selected {
+                    let proj = project.borrow();
+                    let languages = [
+                        "auto", "en", "es", "fr", "de", "it", "pt", "ja", "zh", "ko", "ru", "ar",
+                        "hi",
+                    ];
+                    let lang_idx = lang_dropdown.selected() as usize;
+                    let language = languages.get(lang_idx).unwrap_or(&"auto");
+                    for track in &proj.tracks {
+                        if let Some(clip) = track.clips.iter().find(|c| &c.id == clip_id) {
+                            stt_cache.borrow_mut().request(
+                                &clip.source_path,
+                                clip.source_in,
+                                clip.source_out,
+                                language,
+                            );
+                            inspector_view_gen.stt_generating.set(true);
+                            break;
+                        }
+                    }
+                }
+            });
+    }
+
+    // Wire inspector "Clear Subtitles" button.
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        inspector_view
+            .subtitle_clear_btn
+            .connect_clicked(move |_btn| {
+                let selected = timeline_state.borrow().selected_clip_id.clone();
+                if let Some(ref clip_id) = selected {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.subtitle_segments.clear();
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                    drop(proj);
+                    on_project_changed();
+                }
+            });
+    }
+
+    // Wire subtitle font button — opens GTK FontDialog.
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let font_btn = inspector_view.subtitle_font_btn.clone();
+        inspector_view
+            .subtitle_font_btn
+            .connect_clicked(move |btn| {
+                let dialog = gtk4::FontDialog::new();
+                let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+                let project_c = project.clone();
+                let ts_c = timeline_state.clone();
+                let opc = on_project_changed.clone();
+                let font_btn_c = font_btn.clone();
+                dialog.choose_font(
+                    window.as_ref(),
+                    None::<&pango::FontDescription>,
+                    None::<&gio::Cancellable>,
+                    move |result| {
+                        if let Ok(font_desc) = result {
+                            let desc_str = font_desc.to_string();
+                            let normalized =
+                                crate::media::title_font::normalize_subtitle_font_label(&desc_str);
+                            let tooltip = crate::media::title_font::build_subtitle_font_tooltip(
+                                &desc_str,
+                                "Click to choose a subtitle font",
+                            );
+                            font_btn_c.set_label(&normalized);
+                            font_btn_c.set_tooltip_text(Some(&tooltip));
+                            let selected = ts_c.borrow().selected_clip_id.clone();
+                            if let Some(ref clip_id) = selected {
+                                let mut proj = project_c.borrow_mut();
+                                for track in &mut proj.tracks {
+                                    if let Some(clip) =
+                                        track.clips.iter_mut().find(|c| &c.id == clip_id)
+                                    {
+                                        clip.subtitle_font = desc_str.clone();
+                                        proj.dirty = true;
+                                        break;
+                                    }
+                                }
+                                drop(proj);
+                                opc();
+                            }
+                        }
+                    },
+                );
+            });
+    }
+
+    // Wire subtitle color button.
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let updating = inspector_view.updating.clone();
+        inspector_view
+            .subtitle_color_btn
+            .connect_notify_local(Some("rgba"), move |btn, _| {
+                if *updating.borrow() {
+                    return;
+                }
+                let rgba = btn.rgba();
+                let r = (rgba.red() * 255.0) as u32;
+                let g = (rgba.green() * 255.0) as u32;
+                let b = (rgba.blue() * 255.0) as u32;
+                let a = (rgba.alpha() * 255.0) as u32;
+                let color = (r << 24) | (g << 16) | (b << 8) | a;
+                let selected = timeline_state.borrow().selected_clip_id.clone();
+                if let Some(ref clip_id) = selected {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.subtitle_color = color;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                    drop(proj);
+                    on_project_changed();
+                }
+            });
+    }
+
+    // Wire subtitle highlight mode dropdown.
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let hl_color_row = inspector_view.subtitle_highlight_color_row.clone();
+        let updating = inspector_view.updating.clone();
+        inspector_view
+            .subtitle_highlight_dropdown
+            .connect_notify_local(Some("selected"), move |dd, _| {
+                if *updating.borrow() {
+                    return;
+                }
+                let idx = dd.selected();
+                let mode = match idx {
+                    1 => crate::model::clip::SubtitleHighlightMode::Bold,
+                    2 => crate::model::clip::SubtitleHighlightMode::Color,
+                    3 => crate::model::clip::SubtitleHighlightMode::Underline,
+                    4 => crate::model::clip::SubtitleHighlightMode::Stroke,
+                    _ => crate::model::clip::SubtitleHighlightMode::None,
+                };
+                hl_color_row.set_visible(idx == 2 || idx == 4);
+                let selected = timeline_state.borrow().selected_clip_id.clone();
+                if let Some(ref clip_id) = selected {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.subtitle_highlight_mode = mode;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                    drop(proj);
+                    on_project_changed();
+                }
+            });
+    }
+
+    // Wire subtitle highlight color button.
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let updating = inspector_view.updating.clone();
+        inspector_view
+            .subtitle_highlight_color_btn
+            .connect_notify_local(Some("rgba"), move |btn, _| {
+                if *updating.borrow() {
+                    return;
+                }
+                let rgba = btn.rgba();
+                let r = (rgba.red() * 255.0) as u32;
+                let g = (rgba.green() * 255.0) as u32;
+                let b = (rgba.blue() * 255.0) as u32;
+                let a = (rgba.alpha() * 255.0) as u32;
+                let color = (r << 24) | (g << 16) | (b << 8) | a;
+                let selected = timeline_state.borrow().selected_clip_id.clone();
+                if let Some(ref clip_id) = selected {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.subtitle_highlight_color = color;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                    drop(proj);
+                    on_project_changed();
+                }
+            });
+    }
+
+    // Wire subtitle word window slider.
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let updating = inspector_view.updating.clone();
+        inspector_view
+            .subtitle_word_window_slider
+            .connect_value_changed(move |s| {
+                if *updating.borrow() {
+                    return;
+                }
+                let val = s.value();
+                let selected = timeline_state.borrow().selected_clip_id.clone();
+                if let Some(ref clip_id) = selected {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.subtitle_word_window_secs = val;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+            });
+    }
+
+    // Wire subtitle position slider.
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let updating = inspector_view.updating.clone();
+        inspector_view
+            .subtitle_position_slider
+            .connect_value_changed(move |s| {
+                if *updating.borrow() {
+                    return;
+                }
+                let val = s.value();
+                let selected = timeline_state.borrow().selected_clip_id.clone();
+                if let Some(ref clip_id) = selected {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.subtitle_position_y = val;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+            });
+    }
+
+    // Wire subtitle background box toggle.
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let updating = inspector_view.updating.clone();
+        inspector_view
+            .subtitle_bg_box_check
+            .connect_toggled(move |btn| {
+                if *updating.borrow() {
+                    return;
+                }
+                let enabled = btn.is_active();
+                let selected = timeline_state.borrow().selected_clip_id.clone();
+                if let Some(ref clip_id) = selected {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.subtitle_bg_box = enabled;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+            });
+    }
+
+    // Wire subtitle outline color button.
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let updating = inspector_view.updating.clone();
+        inspector_view
+            .subtitle_outline_color_btn
+            .connect_notify_local(Some("rgba"), move |btn, _| {
+                if *updating.borrow() {
+                    return;
+                }
+                let rgba = btn.rgba();
+                let r = (rgba.red() * 255.0) as u32;
+                let g = (rgba.green() * 255.0) as u32;
+                let b = (rgba.blue() * 255.0) as u32;
+                let a = (rgba.alpha() * 255.0) as u32;
+                let color = (r << 24) | (g << 16) | (b << 8) | a;
+                let selected = timeline_state.borrow().selected_clip_id.clone();
+                if let Some(ref clip_id) = selected {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.subtitle_outline_color = color;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+            });
+    }
+
+    // Wire subtitle background color button.
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let updating = inspector_view.updating.clone();
+        inspector_view
+            .subtitle_bg_color_btn
+            .connect_notify_local(Some("rgba"), move |btn, _| {
+                if *updating.borrow() {
+                    return;
+                }
+                let rgba = btn.rgba();
+                let r = (rgba.red() * 255.0) as u32;
+                let g = (rgba.green() * 255.0) as u32;
+                let b = (rgba.blue() * 255.0) as u32;
+                let a = (rgba.alpha() * 255.0) as u32;
+                let color = (r << 24) | (g << 16) | (b << 8) | a;
+                let selected = timeline_state.borrow().selected_clip_id.clone();
+                if let Some(ref clip_id) = selected {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.subtitle_bg_box_color = color;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+            });
+    }
+
+    // Wire Export SRT button.
+    {
+        let project = project.clone();
+        let window_weak = window.downgrade();
+        inspector_view
+            .subtitle_export_srt_btn
+            .connect_clicked(move |_btn| {
+                let Some(win) = window_weak.upgrade() else {
+                    return;
+                };
+                let dialog = gtk4::FileDialog::new();
+                dialog.set_title("Export Subtitles as SRT");
+                let filter = gtk4::FileFilter::new();
+                filter.add_pattern("*.srt");
+                filter.set_name(Some("SRT Subtitle Files"));
+                let filters = gio::ListStore::new::<gtk4::FileFilter>();
+                filters.append(&filter);
+                dialog.set_filters(Some(&filters));
+                dialog.set_initial_name(Some("subtitles.srt"));
+                let project_c = project.clone();
+                dialog.save(Some(&win), None::<&gio::Cancellable>, move |result| {
+                    if let Ok(file) = result {
+                        if let Some(path) = file.path() {
+                            let proj = project_c.borrow();
+                            if let Err(e) =
+                                crate::media::export::export_srt(&proj, &path.to_string_lossy())
+                            {
+                                log::error!("SRT export failed: {e}");
+                            }
+                        }
+                    }
+                });
+            });
+    }
+
+    // Wire Import SRT button.
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let inspector_view_imp = inspector_view.clone();
+        let window_weak = window.downgrade();
+        inspector_view
+            .subtitle_import_srt_btn
+            .connect_clicked(move |_btn| {
+                let Some(win) = window_weak.upgrade() else {
+                    return;
+                };
+                let dialog = gtk4::FileDialog::new();
+                dialog.set_title("Import SRT Subtitles");
+                let filter = gtk4::FileFilter::new();
+                filter.add_pattern("*.srt");
+                filter.set_name(Some("SRT Subtitle Files"));
+                let filters = gio::ListStore::new::<gtk4::FileFilter>();
+                filters.append(&filter);
+                dialog.set_filters(Some(&filters));
+                let project_c = project.clone();
+                let ts_c = timeline_state.clone();
+                let opc = on_project_changed.clone();
+                let iv = inspector_view_imp.clone();
+                dialog.open(Some(&win), None::<&gio::Cancellable>, move |result| {
+                    if let Ok(file) = result {
+                        if let Some(path) = file.path() {
+                            let selected = ts_c.borrow().selected_clip_id.clone();
+                            if let Some(ref clip_id) = selected {
+                                // Get clip's source_in for timestamp offset.
+                                let source_in = {
+                                    let proj = project_c.borrow();
+                                    proj.tracks
+                                        .iter()
+                                        .flat_map(|t| t.clips.iter())
+                                        .find(|c| &c.id == clip_id)
+                                        .map(|c| c.source_in)
+                                        .unwrap_or(0)
+                                };
+                                match crate::media::export::import_srt(
+                                    &path.to_string_lossy(),
+                                    source_in,
+                                ) {
+                                    Ok(segments) if !segments.is_empty() => {
+                                        // Find track_id and push undo command.
+                                        let (track_id, old_segments) = {
+                                            let proj = project_c.borrow();
+                                            proj.tracks
+                                                .iter()
+                                                .find(|t| t.clips.iter().any(|c| &c.id == clip_id))
+                                                .map(|t| {
+                                                    let old = t
+                                                        .clips
+                                                        .iter()
+                                                        .find(|c| &c.id == clip_id)
+                                                        .map(|c| c.subtitle_segments.clone())
+                                                        .unwrap_or_default();
+                                                    (t.id.clone(), old)
+                                                })
+                                                .unwrap_or_default()
+                                        };
+                                        let cmd = crate::undo::GenerateSubtitlesCommand {
+                                            clip_id: clip_id.clone(),
+                                            track_id,
+                                            old_segments,
+                                            new_segments: segments,
+                                        };
+                                        use crate::undo::EditCommand;
+                                        cmd.execute(&mut project_c.borrow_mut());
+                                        ts_c.borrow_mut().history.undo_stack.push(Box::new(cmd));
+                                        ts_c.borrow_mut().history.redo_stack.clear();
+                                        iv.subtitle_segments_snapshot.borrow_mut().clear();
+                                        opc();
+                                    }
+                                    Ok(_) => {
+                                        log::warn!("SRT import: no segments found in file");
+                                    }
+                                    Err(e) => {
+                                        log::error!("SRT import failed: {e}");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            });
+    }
+
+    // Wire subtitle Copy Style button.
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let clipboard = inspector_view.subtitle_style_clipboard.clone();
+        let paste_btn = inspector_view.subtitle_paste_style_btn.clone();
+        inspector_view
+            .subtitle_copy_style_btn
+            .connect_clicked(move |_| {
+                let selected = timeline_state.borrow().selected_clip_id.clone();
+                if let Some(ref clip_id) = selected {
+                    let proj = project.borrow();
+                    for track in &proj.tracks {
+                        if let Some(clip) = track.clips.iter().find(|c| &c.id == clip_id) {
+                            *clipboard.borrow_mut() =
+                                Some(crate::ui::inspector::SubtitleStyleClipboard {
+                                    font: clip.subtitle_font.clone(),
+                                    color: clip.subtitle_color,
+                                    outline_color: clip.subtitle_outline_color,
+                                    outline_width: clip.subtitle_outline_width,
+                                    bg_box: clip.subtitle_bg_box,
+                                    bg_box_color: clip.subtitle_bg_box_color,
+                                    highlight_mode: clip.subtitle_highlight_mode,
+                                    highlight_color: clip.subtitle_highlight_color,
+                                    position_y: clip.subtitle_position_y,
+                                    word_window_secs: clip.subtitle_word_window_secs,
+                                });
+                            paste_btn.set_sensitive(true);
+                            break;
+                        }
+                    }
+                }
+            });
+    }
+
+    // Wire subtitle Paste Style button.
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let clipboard = inspector_view.subtitle_style_clipboard.clone();
+        inspector_view
+            .subtitle_paste_style_btn
+            .connect_clicked(move |_| {
+                let style = clipboard.borrow().clone();
+                let selected = timeline_state.borrow().selected_clip_id.clone();
+                if let (Some(style), Some(ref clip_id)) = (style, selected) {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            clip.subtitle_font = style.font;
+                            clip.subtitle_color = style.color;
+                            clip.subtitle_outline_color = style.outline_color;
+                            clip.subtitle_outline_width = style.outline_width;
+                            clip.subtitle_bg_box = style.bg_box;
+                            clip.subtitle_bg_box_color = style.bg_box_color;
+                            clip.subtitle_highlight_mode = style.highlight_mode;
+                            clip.subtitle_highlight_color = style.highlight_color;
+                            clip.subtitle_position_y = style.position_y;
+                            clip.subtitle_word_window_secs = style.word_window_secs;
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                    drop(proj);
+                    on_project_changed();
+                }
+            });
+    }
+
     // Wire timeline's on_project_changed + on_seek + on_play_pause
     {
         let cb = on_project_changed.clone();
         timeline_state.borrow_mut().on_project_changed = Some(Rc::new(move || cb()));
     }
+    // Multicam angle viewer panel widgets (created early so closures can capture them;
+    // appended to the sidebar layout later in the function).
+    let multicam_panel = gtk::Box::new(Orientation::Vertical, 4);
+    multicam_panel.set_margin_start(6);
+    multicam_panel.set_margin_end(6);
+    multicam_panel.set_margin_top(4);
+    multicam_panel.set_margin_bottom(4);
+    multicam_panel.set_visible(false);
+    {
+        let header = gtk::Label::new(Some("Multicam Angles"));
+        header.add_css_class("heading");
+        header.set_halign(gtk::Align::Start);
+        multicam_panel.append(&header);
+        let hint = gtk::Label::new(Some("Press 1-9 to switch angles"));
+        hint.set_halign(gtk::Align::Start);
+        hint.add_css_class("dim-label");
+        multicam_panel.append(&hint);
+    }
+    let multicam_angles_box = gtk::Box::new(Orientation::Vertical, 2);
+    multicam_panel.append(&multicam_angles_box);
+
     // Wire on_clip_selected: lightweight inspector sync without pipeline rebuild.
     {
         let inspector_view = inspector_view.clone();
@@ -3447,6 +5065,10 @@ pub fn build_window(
         let transform_overlay_cell = transform_overlay_cell.clone();
         let keyframe_editor_cell = keyframe_editor_cell.clone();
         let timeline_state_for_sel = timeline_state.clone();
+        let multicam_panel_for_sel = multicam_panel.clone();
+        let multicam_angles_box_for_sel = multicam_angles_box.clone();
+        let timeline_state_for_multicam_btn = timeline_state.clone();
+        let on_project_changed_for_multicam = on_project_changed.clone();
         timeline_state.borrow_mut().on_clip_selected =
             Some(Rc::new(move |clip_id: Option<String>| {
                 let proj = project.borrow();
@@ -3464,6 +5086,69 @@ pub fn build_window(
                 if let Some(ref editor) = *keyframe_editor_cell.borrow() {
                     editor.clear_selection();
                     editor.queue_redraw();
+                }
+                // Update multicam angle panel visibility and contents
+                let is_multicam = clip_id
+                    .as_deref()
+                    .and_then(|id| proj.clip_ref(id))
+                    .map(|c| c.is_multicam())
+                    .unwrap_or(false);
+                multicam_panel_for_sel.set_visible(is_multicam);
+                if is_multicam {
+                    // Clear old buttons
+                    while let Some(child) = multicam_angles_box_for_sel.first_child() {
+                        multicam_angles_box_for_sel.remove(&child);
+                    }
+                    if let Some(clip) = clip_id.as_deref().and_then(|id| proj.clip_ref(id)) {
+                        let active =
+                            clip.active_angle_at(playhead_ns.saturating_sub(clip.timeline_start));
+                        if let Some(ref angles) = clip.multicam_angles {
+                            for (i, angle) in angles.iter().enumerate() {
+                                let row = gtk::Box::new(Orientation::Horizontal, 4);
+                                // Angle switch button
+                                let btn = gtk::Button::with_label(&format!(
+                                    "[{}] {}",
+                                    i + 1,
+                                    angle.label
+                                ));
+                                btn.add_css_class("flat");
+                                btn.set_hexpand(true);
+                                if i == active {
+                                    btn.add_css_class("suggested-action");
+                                }
+                                let ts = timeline_state_for_multicam_btn.clone();
+                                btn.connect_clicked(move |_| {
+                                    let mut st = ts.borrow_mut();
+                                    let changed = st.insert_multicam_angle_switch(i);
+                                    let proj_cb = st.on_project_changed.clone();
+                                    drop(st);
+                                    if changed {
+                                        if let Some(cb) = proj_cb {
+                                            cb();
+                                        }
+                                    }
+                                });
+                                row.append(&btn);
+                                // Audio mute indicator
+                                let audio_label = if angle.muted {
+                                    "🔇"
+                                } else if angle.volume < 0.01 {
+                                    "🔈"
+                                } else {
+                                    "🔊"
+                                };
+                                let audio_btn = gtk::Label::new(Some(audio_label));
+                                let vol_str = if angle.muted {
+                                    "Audio: muted".to_string()
+                                } else {
+                                    format!("Audio: {:.0}%", angle.volume * 100.0)
+                                };
+                                audio_btn.set_tooltip_text(Some(&vol_str));
+                                row.append(&audio_btn);
+                                multicam_angles_box_for_sel.append(&row);
+                            }
+                        }
+                    }
                 }
             }));
     }
@@ -3580,11 +5265,34 @@ pub fn build_window(
         })
     };
     // ── Voiceover recorder ────────────────────────────────────────────────
-    let voiceover_recorder: Rc<RefCell<crate::media::voiceover::VoiceoverRecorder>> =
-        Rc::new(RefCell::new(crate::media::voiceover::VoiceoverRecorder::new()));
+    let voiceover_recorder: Rc<RefCell<crate::media::voiceover::VoiceoverRecorder>> = Rc::new(
+        RefCell::new(crate::media::voiceover::VoiceoverRecorder::new()),
+    );
     // Shared countdown counter for the program monitor overlay (0 = hidden).
     let voiceover_countdown: Rc<Cell<u32>> = Rc::new(Cell::new(0));
     let voiceover_recording: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
+    let on_apply_collected_files_impl: Rc<
+        RefCell<Option<Rc<dyn Fn(crate::fcpxml::writer::CollectFilesManifest)>>>,
+    > = Rc::new(RefCell::new(None));
+    let on_apply_collected_files_gui: Rc<dyn Fn(crate::fcpxml::writer::CollectFilesManifest)> = {
+        let cb = on_apply_collected_files_impl.clone();
+        Rc::new(move |manifest| {
+            let callback = cb.borrow().as_ref().cloned();
+            if let Some(f) = callback {
+                f(manifest);
+            }
+        })
+    };
+    let on_show_editor_impl: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    let on_show_editor_gui: Rc<dyn Fn()> = {
+        let cb = on_show_editor_impl.clone();
+        Rc::new(move || {
+            let callback = cb.borrow().as_ref().cloned();
+            if let Some(f) = callback {
+                f();
+            }
+        })
+    };
 
     let (header, btn_record) = toolbar::build_toolbar(
         project.clone(),
@@ -3602,6 +5310,14 @@ pub fn build_window(
                 suppress_resume_on_next_reload.set(true);
                 clear_media_browser_on_next_reload.set(true);
             }
+        },
+        {
+            let cb = on_show_editor_gui.clone();
+            move || cb()
+        },
+        {
+            let cb = on_apply_collected_files_gui.clone();
+            move |manifest| cb(manifest)
         },
         {
             let cb = on_export_frame_gui.clone();
@@ -3636,7 +5352,10 @@ pub fn build_window(
                                 .and_then(|tid| {
                                     proj.tracks
                                         .iter()
-                                        .find(|t| t.id == tid && t.kind == crate::model::track::TrackKind::Audio)
+                                        .find(|t| {
+                                            t.id == tid
+                                                && t.kind == crate::model::track::TrackKind::Audio
+                                        })
                                         .map(|t| t.id.clone())
                                 })
                                 .or_else(|| {
@@ -3701,7 +5420,9 @@ pub fn build_window(
                 }
 
                 // ── Open voiceover recording dialog ──────────────
-                let Some(win) = window_weak.upgrade() else { return };
+                let Some(win) = window_weak.upgrade() else {
+                    return;
+                };
 
                 #[allow(deprecated)]
                 let dialog = gtk4::Dialog::builder()
@@ -3734,11 +5455,13 @@ pub fn build_window(
                 body.append(&mic_dropdown);
 
                 // Mute playback checkbox
-                let mute_check = gtk4::CheckButton::with_label("Mute playback audio during recording");
+                let mute_check =
+                    gtk4::CheckButton::with_label("Mute playback audio during recording");
                 mute_check.set_active(true);
                 body.append(&mute_check);
 
-                let mono_check = gtk4::CheckButton::with_label("Record as mono (recommended for single mic)");
+                let mono_check =
+                    gtk4::CheckButton::with_label("Record as mono (recommended for single mic)");
                 mono_check.set_active(true);
                 body.append(&mono_check);
 
@@ -3750,8 +5473,7 @@ pub fn build_window(
                     let target = selected_tid
                         .and_then(|tid| {
                             proj.tracks.iter().find(|t| {
-                                t.id == tid
-                                    && t.kind == crate::model::track::TrackKind::Audio
+                                t.id == tid && t.kind == crate::model::track::TrackKind::Audio
                             })
                         })
                         .or_else(|| {
@@ -3781,7 +5503,8 @@ pub fn build_window(
                 body.append(&pos_label);
 
                 // Countdown info
-                let countdown_label = gtk4::Label::new(Some("3-second countdown before recording begins"));
+                let countdown_label =
+                    gtk4::Label::new(Some("3-second countdown before recording begins"));
                 countdown_label.set_halign(gtk4::Align::Start);
                 countdown_label.add_css_class("dim-label");
                 body.append(&countdown_label);
@@ -3816,9 +5539,8 @@ pub fn build_window(
                     let record_mono = mono_check.is_active();
 
                     // Find selected device
-                    let selected_device: Option<gstreamer::Device> = mic_id
-                        .as_deref()
-                        .and_then(|id| {
+                    let selected_device: Option<gstreamer::Device> =
+                        mic_id.as_deref().and_then(|id| {
                             if id == "default" {
                                 None
                             } else if let Some(idx_str) = id.strip_prefix("dev_") {
@@ -3932,6 +5654,41 @@ pub fn build_window(
     top_paned.set_hexpand(true);
     top_paned.set_vexpand(true);
     top_paned.set_position(320);
+    let workspace_layouts_applying = Rc::new(Cell::new(false));
+    let workspace_layout_pending_name: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let workspace_layout_apply_generation = Rc::new(Cell::new(0u64));
+    let workspace_layout_controls_updating = Rc::new(Cell::new(false));
+    let sync_workspace_layout_controls_impl: Rc<RefCell<Option<Rc<dyn Fn()>>>> =
+        Rc::new(RefCell::new(None));
+    let sync_workspace_layout_controls: Rc<dyn Fn()> = {
+        let cb = sync_workspace_layout_controls_impl.clone();
+        Rc::new(move || {
+            if let Some(f) = cb.borrow().as_ref() {
+                f();
+            }
+        })
+    };
+    let sync_workspace_layout_state_impl: Rc<RefCell<Option<Rc<dyn Fn()>>>> =
+        Rc::new(RefCell::new(None));
+    let sync_workspace_layout_state: Rc<dyn Fn()> = {
+        let cb = sync_workspace_layout_state_impl.clone();
+        Rc::new(move || {
+            if let Some(f) = cb.borrow().as_ref() {
+                f();
+            }
+        })
+    };
+    let apply_workspace_arrangement_impl: Rc<
+        RefCell<Option<Rc<dyn Fn(crate::ui_state::WorkspaceArrangement)>>>,
+    > = Rc::new(RefCell::new(None));
+    let apply_workspace_arrangement: Rc<dyn Fn(crate::ui_state::WorkspaceArrangement)> = {
+        let cb = apply_workspace_arrangement_impl.clone();
+        Rc::new(move |arrangement| {
+            if let Some(f) = cb.borrow().as_ref() {
+                f(arrangement);
+            }
+        })
+    };
 
     // ── Build preview first so we have source_marks ───────────────────────
     // on_append stub: real impl filled in below after source_marks is available.
@@ -3971,7 +5728,7 @@ pub fn build_window(
             }
         })
     };
-    let (preview_widget, source_marks, clip_name_label) = preview::build_preview(
+    let (preview_widget, source_marks, clip_name_label, set_audio_only) = preview::build_preview(
         player.clone(),
         paintable,
         on_append.clone(),
@@ -3979,6 +5736,218 @@ pub fn build_window(
         on_overwrite.clone(),
         on_close_preview.clone(),
     );
+    let source_monitor_panel = gtk::Box::new(Orientation::Vertical, 4);
+    source_monitor_panel.append(&preview_widget);
+
+    let source_keyword_controls = gtk::Box::new(Orientation::Vertical, 4);
+    source_keyword_controls.set_margin_start(8);
+    source_keyword_controls.set_margin_end(8);
+    source_keyword_controls.set_margin_bottom(8);
+
+    let source_keyword_row = gtk::Box::new(Orientation::Horizontal, 4);
+    let source_keyword_combo = gtk::ComboBoxText::new();
+    source_keyword_combo.append(Some(SOURCE_KEYWORD_NEW_ID), "New keyword range");
+    source_keyword_combo.set_active_id(Some(SOURCE_KEYWORD_NEW_ID));
+    source_keyword_combo.set_hexpand(true);
+    source_keyword_row.append(&source_keyword_combo);
+
+    let source_keyword_entry = gtk::Entry::new();
+    source_keyword_entry.set_hexpand(true);
+    source_keyword_entry.set_placeholder_text(Some("Keyword label"));
+    source_keyword_row.append(&source_keyword_entry);
+
+    let add_source_keyword_btn = gtk::Button::with_label("Add");
+    source_keyword_row.append(&add_source_keyword_btn);
+
+    let update_source_keyword_btn = gtk::Button::with_label("Update");
+    source_keyword_row.append(&update_source_keyword_btn);
+
+    let remove_source_keyword_btn = gtk::Button::with_label("Remove");
+    source_keyword_row.append(&remove_source_keyword_btn);
+
+    source_keyword_controls.append(&source_keyword_row);
+
+    let source_keyword_status_label =
+        gtk::Label::new(Some("Use source In/Out marks to define a keyword range."));
+    source_keyword_status_label.set_halign(gtk::Align::Start);
+    source_keyword_status_label.set_xalign(0.0);
+    source_keyword_status_label.set_wrap(true);
+    source_keyword_status_label.add_css_class("media-meta-secondary");
+    source_keyword_controls.append(&source_keyword_status_label);
+
+    source_monitor_panel.append(&source_keyword_controls);
+
+    let selected_source_keyword_id: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let refresh_source_keyword_actions: Rc<dyn Fn()> = {
+        let source_marks = source_marks.clone();
+        let library = library.clone();
+        let selected_source_keyword_id = selected_source_keyword_id.clone();
+        let source_keyword_entry = source_keyword_entry.clone();
+        let add_source_keyword_btn = add_source_keyword_btn.clone();
+        let update_source_keyword_btn = update_source_keyword_btn.clone();
+        let remove_source_keyword_btn = remove_source_keyword_btn.clone();
+        let source_keyword_status_label = source_keyword_status_label.clone();
+        Rc::new(move || {
+            let (path, in_ns, out_ns) = {
+                let marks = source_marks.borrow();
+                (marks.path.clone(), marks.in_ns, marks.out_ns)
+            };
+            let entry_text = source_keyword_entry.text().trim().to_string();
+            let selected_id = selected_source_keyword_id.borrow().clone();
+            let (has_item, selected_range_text, summary_text) = {
+                let lib = library.borrow();
+                let item = lib.items.iter().find(|item| item.source_path == path);
+                let selected_range_text = item.and_then(|item| {
+                    selected_id.as_deref().and_then(|range_id| {
+                        item.keyword_ranges
+                            .iter()
+                            .find(|range| range.id == range_id)
+                            .map(format_source_keyword_range)
+                    })
+                });
+                let summary_text = item.and_then(|item| media_keyword_summary(item, 3));
+                (item.is_some(), selected_range_text, summary_text)
+            };
+            let has_valid_range = !path.is_empty() && out_ns > in_ns;
+            let has_label = !entry_text.is_empty();
+            let has_selected_range = selected_range_text.is_some();
+
+            add_source_keyword_btn.set_sensitive(has_item && has_valid_range && has_label);
+            update_source_keyword_btn
+                .set_sensitive(has_item && has_valid_range && has_selected_range && has_label);
+            remove_source_keyword_btn.set_sensitive(has_item && has_selected_range);
+
+            let status = if path.is_empty() {
+                "Load a source clip to add keyword ranges.".to_string()
+            } else if !has_item {
+                "This source is not available in the media library.".to_string()
+            } else if !has_valid_range {
+                "Set source In and Out to define a keyword range.".to_string()
+            } else if let Some(selected_range_text) = selected_range_text {
+                format!("Selected: {selected_range_text}")
+            } else if let Some(summary_text) = summary_text {
+                format!("Current: {summary_text}")
+            } else {
+                "Use source In/Out marks to define a keyword range.".to_string()
+            };
+            source_keyword_status_label.set_text(&status);
+        })
+    };
+    let refresh_source_keyword_picker: Rc<dyn Fn()> = {
+        let source_marks = source_marks.clone();
+        let library = library.clone();
+        let selected_source_keyword_id = selected_source_keyword_id.clone();
+        let source_keyword_combo = source_keyword_combo.clone();
+        let refresh_source_keyword_actions = refresh_source_keyword_actions.clone();
+        Rc::new(move || {
+            let path = source_marks.borrow().path.clone();
+            let selected_id = selected_source_keyword_id.borrow().clone();
+            let ranges = {
+                let lib = library.borrow();
+                lib.items
+                    .iter()
+                    .find(|item| item.source_path == path)
+                    .map(|item| item.keyword_ranges.clone())
+                    .unwrap_or_default()
+            };
+            source_keyword_combo.remove_all();
+            source_keyword_combo.append(Some(SOURCE_KEYWORD_NEW_ID), "New keyword range");
+            let mut active_id = SOURCE_KEYWORD_NEW_ID.to_string();
+            for range in &ranges {
+                source_keyword_combo.append(
+                    Some(range.id.as_str()),
+                    format_source_keyword_range(range).as_str(),
+                );
+                if selected_id.as_deref() == Some(range.id.as_str()) {
+                    active_id = range.id.clone();
+                }
+            }
+            if active_id == SOURCE_KEYWORD_NEW_ID {
+                *selected_source_keyword_id.borrow_mut() = None;
+            }
+            source_keyword_combo.set_active_id(Some(&active_id));
+            refresh_source_keyword_actions();
+        })
+    };
+    {
+        let source_marks = source_marks.clone();
+        let library = library.clone();
+        let selected_source_keyword_id = selected_source_keyword_id.clone();
+        let source_keyword_entry = source_keyword_entry.clone();
+        let refresh_source_keyword_actions = refresh_source_keyword_actions.clone();
+        source_keyword_combo.connect_changed(move |combo| {
+            let path = source_marks.borrow().path.clone();
+            let selected_id = combo.active_id().and_then(|id| {
+                let id = id.to_string();
+                (id != SOURCE_KEYWORD_NEW_ID).then_some(id)
+            });
+            *selected_source_keyword_id.borrow_mut() = selected_id.clone();
+            let selected_label = {
+                let lib = library.borrow();
+                lib.items
+                    .iter()
+                    .find(|item| item.source_path == path)
+                    .and_then(|item| {
+                        selected_id.as_deref().and_then(|range_id| {
+                            item.keyword_ranges
+                                .iter()
+                                .find(|range| range.id == range_id)
+                                .map(|range| range.label.clone())
+                        })
+                    })
+            };
+            if let Some(selected_label) = selected_label {
+                source_keyword_entry.set_text(&selected_label);
+            } else {
+                source_keyword_entry.set_text("");
+            }
+            refresh_source_keyword_actions();
+        });
+    }
+    {
+        let refresh_source_keyword_actions = refresh_source_keyword_actions.clone();
+        source_keyword_entry.connect_changed(move |_| {
+            refresh_source_keyword_actions();
+        });
+    }
+    refresh_source_keyword_picker();
+    *refresh_source_preview_preferences_impl.borrow_mut() = Some({
+        let player = player.clone();
+        let source_marks = source_marks.clone();
+        let library = library.clone();
+        let project = project.clone();
+        let proxy_cache = proxy_cache.clone();
+        let source_original_uri_for_proxy_fallback = source_original_uri_for_proxy_fallback.clone();
+        let set_audio_only = set_audio_only.clone();
+        Rc::new(move |old_state, new_state| {
+            if old_state.proxy_mode == new_state.proxy_mode {
+                return;
+            }
+            let (path, duration_ns) = {
+                let marks = source_marks.borrow();
+                (marks.path.clone(), marks.duration_ns)
+            };
+            if path.is_empty() {
+                return;
+            }
+            let source_info = {
+                let lib = library.borrow();
+                let proj = project.borrow();
+                lookup_source_placement_info(&lib.items, &proj, &path)
+            };
+            reload_source_preview_selection(
+                &path,
+                duration_ns,
+                source_info,
+                &player,
+                &project,
+                &proxy_cache,
+                &new_state.proxy_mode,
+                &source_original_uri_for_proxy_fallback,
+                &set_audio_only,
+            );
+        })
+    });
 
     // Wire on_drop_clip — placed here so it can read source_marks to honour
     // the in/out selection set in the source monitor.
@@ -3998,12 +5967,13 @@ pub fn build_window(
                             is_audio_only: marks.is_audio_only,
                             has_audio: marks.has_audio,
                             is_image: marks.is_image,
+                            is_animated_svg: marks.is_animated_svg,
                             source_timecode_base_ns: marks.source_timecode_base_ns,
                         }
                     } else {
                         let lib = library.borrow();
                         let proj = project.borrow();
-                        lookup_source_placement_info(&lib, &proj, &source_path)
+                        lookup_source_placement_info(&lib.items, &proj, &source_path)
                     }
                 };
                 let mut proj = project.borrow_mut();
@@ -4077,8 +6047,16 @@ pub fn build_window(
                             label: "Drop clip".to_string(),
                         })
                     };
-                    timeline_state_for_drop.borrow_mut().history.undo_stack.push(cmd);
-                    timeline_state_for_drop.borrow_mut().history.redo_stack.clear();
+                    timeline_state_for_drop
+                        .borrow_mut()
+                        .history
+                        .undo_stack
+                        .push(cmd);
+                    timeline_state_for_drop
+                        .borrow_mut()
+                        .history
+                        .redo_stack
+                        .clear();
                     on_project_changed();
                     return;
                 }
@@ -4093,11 +6071,15 @@ pub fn build_window(
                         }
                     };
                     let media_dur = if source_info.is_image {
-                        None
+                        if source_info.is_animated_svg {
+                            Some(duration_ns)
+                        } else {
+                            None
+                        }
                     } else {
                         Some(duration_ns)
                     };
-                    let clip = build_source_clip(
+                    let mut clip = build_source_clip(
                         &source_path,
                         src_in,
                         src_out,
@@ -4107,6 +6089,7 @@ pub fn build_window(
                         None,
                         media_dur,
                     );
+                    clip.animated_svg = source_info.is_animated_svg;
                     let change = add_clip_to_track(track, clip, magnetic_mode);
                     proj.dirty = true;
                     drop(proj);
@@ -4116,8 +6099,16 @@ pub fn build_window(
                         new_clips: change.new_clips,
                         label: "Drop clip".to_string(),
                     });
-                    timeline_state_for_drop.borrow_mut().history.undo_stack.push(cmd);
-                    timeline_state_for_drop.borrow_mut().history.redo_stack.clear();
+                    timeline_state_for_drop
+                        .borrow_mut()
+                        .history
+                        .undo_stack
+                        .push(cmd);
+                    timeline_state_for_drop
+                        .borrow_mut()
+                        .history
+                        .redo_stack
+                        .clear();
                     on_project_changed();
                 }
             },
@@ -4139,13 +6130,29 @@ pub fn build_window(
 
                 for path in &file_paths {
                     let is_image = crate::model::clip::is_image_file(path);
+                    let animated_svg_analysis = if crate::model::clip::is_svg_file(path) {
+                        crate::media::animated_svg::analyze_svg_path(path).ok()
+                    } else {
+                        None
+                    };
+                    let is_animated_svg = animated_svg_analysis
+                        .as_ref()
+                        .is_some_and(|analysis| analysis.is_animated);
 
                     // Import into library if not already present (synchronous probe).
-                    let already_in_library = library.borrow().iter().any(|item| item.source_path == *path);
+                    let already_in_library = library
+                        .borrow()
+                        .items
+                        .iter()
+                        .any(|item| item.source_path == *path);
                     if !already_in_library {
-                        let uri = format!("file://{path}");
-                        let metadata = crate::ui::media_browser::probe_media_metadata(&uri);
-                        let duration_ns = if is_image {
+                        let metadata = crate::media::probe_cache::probe_media_metadata(path);
+                        let duration_ns = if is_animated_svg {
+                            animated_svg_analysis
+                                .as_ref()
+                                .and_then(|analysis| analysis.duration_ns)
+                                .unwrap_or(4_000_000_000u64)
+                        } else if is_image {
                             4_000_000_000u64
                         } else {
                             metadata.duration_ns.unwrap_or(10_000_000_000)
@@ -4154,27 +6161,42 @@ pub fn build_window(
                         item.is_audio_only = metadata.is_audio_only;
                         item.has_audio = metadata.has_audio;
                         item.is_image = is_image;
-                        item.source_timecode_base_ns = lookup_source_timecode_base_ns(
-                            &library.borrow(),
-                            &project.borrow(),
-                            path,
-                        );
-                        library.borrow_mut().push(item);
+                        item.is_animated_svg = is_animated_svg;
+                        item.source_timecode_base_ns =
+                            metadata.source_timecode_base_ns.or_else(|| {
+                                lookup_source_timecode_base_ns(
+                                    &library.borrow().items,
+                                    &project.borrow(),
+                                    path,
+                                )
+                            });
+                        item.video_width = metadata.video_width;
+                        item.video_height = metadata.video_height;
+                        item.frame_rate_num = metadata.frame_rate_num;
+                        item.frame_rate_den = metadata.frame_rate_den;
+                        item.codec_summary = metadata.codec_summary.clone();
+                        item.file_size_bytes = metadata.file_size_bytes;
+                        library.borrow_mut().items.push(item);
                     }
 
                     // Look up placement info (may re-probe if needed).
                     let source_info = {
                         let lib = library.borrow();
                         let proj = project.borrow();
-                        lookup_source_placement_info(&lib, &proj, path)
+                        lookup_source_placement_info(&lib.items, &proj, path)
                     };
 
                     let duration_ns = {
                         let lib = library.borrow();
-                        lib.iter()
+                        lib.items
+                            .iter()
                             .find(|item| item.source_path == *path)
                             .map(|item| item.duration_ns)
-                            .unwrap_or(if is_image { 4_000_000_000 } else { 10_000_000_000 })
+                            .unwrap_or(if is_image {
+                                4_000_000_000
+                            } else {
+                                10_000_000_000
+                            })
                     };
 
                     let src_in = 0u64;
@@ -4182,12 +6204,19 @@ pub fn build_window(
 
                     let mut proj = project.borrow_mut();
 
-                    let auto_link_pair =
-                        !source_info.is_audio_only && source_info.has_audio && !source_info.is_image;
-                    let video_track_idx =
-                        find_preferred_track_index_by_index(&proj, Some(track_idx), TrackKind::Video);
-                    let audio_track_idx =
-                        find_preferred_track_index_by_index(&proj, Some(track_idx), TrackKind::Audio);
+                    let auto_link_pair = !source_info.is_audio_only
+                        && source_info.has_audio
+                        && !source_info.is_image;
+                    let video_track_idx = find_preferred_track_index_by_index(
+                        &proj,
+                        Some(track_idx),
+                        TrackKind::Video,
+                    );
+                    let audio_track_idx = find_preferred_track_index_by_index(
+                        &proj,
+                        Some(track_idx),
+                        TrackKind::Audio,
+                    );
 
                     if auto_link_pair && video_track_idx.is_some() && audio_track_idx.is_some() {
                         let link_group_id = uuid::Uuid::new_v4().to_string();
@@ -4234,8 +6263,16 @@ pub fn build_window(
                                 TrackKind::Audio => ClipKind::Audio,
                             }
                         };
-                        let media_dur = if source_info.is_image { None } else { Some(duration_ns) };
-                        let clip = build_source_clip(
+                        let media_dur = if source_info.is_image {
+                            if source_info.is_animated_svg {
+                                Some(duration_ns)
+                            } else {
+                                None
+                            }
+                        } else {
+                            Some(duration_ns)
+                        };
+                        let mut clip = build_source_clip(
                             path,
                             src_in,
                             src_out,
@@ -4245,6 +6282,7 @@ pub fn build_window(
                             None,
                             media_dur,
                         );
+                        clip.animated_svg = source_info.is_animated_svg;
                         track_changes.push(add_clip_to_track(track, clip, magnetic_mode));
                     }
 
@@ -4269,8 +6307,16 @@ pub fn build_window(
                             label: "Drop files from file manager".to_string(),
                         })
                     };
-                    timeline_state_for_ext.borrow_mut().history.undo_stack.push(cmd);
-                    timeline_state_for_ext.borrow_mut().history.redo_stack.clear();
+                    timeline_state_for_ext
+                        .borrow_mut()
+                        .history
+                        .undo_stack
+                        .push(cmd);
+                    timeline_state_for_ext
+                        .borrow_mut()
+                        .history
+                        .redo_stack
+                        .clear();
                     on_project_changed();
                 }
             },
@@ -4287,8 +6333,9 @@ pub fn build_window(
         let project = project.clone();
         let on_project_changed = on_project_changed.clone();
         let window_weak = window.downgrade();
-        let sync_rx: Rc<RefCell<Option<std::sync::mpsc::Receiver<Vec<(String, i64, f32, Option<f64>)>>>>> =
-            Rc::new(RefCell::new(None));
+        let sync_rx: Rc<
+            RefCell<Option<std::sync::mpsc::Receiver<Vec<(String, i64, f32, Option<f64>)>>>>,
+        > = Rc::new(RefCell::new(None));
         let sync_rx_for_timer = sync_rx.clone();
         let audio_sync_in_progress_timer = audio_sync_in_progress.clone();
         // Poll timer for sync results
@@ -4400,6 +6447,159 @@ pub fn build_window(
                 },
             ));
         }
+    }
+
+    // Wire on_create_multicam — spawns audio sync in background, then creates multicam clip.
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let window_weak = window_weak.clone();
+        let multicam_sync_rx: Rc<
+            RefCell<
+                Option<
+                    std::sync::mpsc::Receiver<(
+                        Vec<(String, String, u64, u64, u64, String)>,
+                        Vec<(String, i64, f32, Option<f64>)>,
+                    )>,
+                >,
+            >,
+        > = Rc::new(RefCell::new(None));
+        // Poll timer for multicam sync results
+        {
+            let multicam_sync_rx = multicam_sync_rx.clone();
+            let project = project.clone();
+            let timeline_state = timeline_state.clone();
+            let on_project_changed = on_project_changed.clone();
+            let window_weak = window_weak.clone();
+            glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+                let result = {
+                    let rx_opt = multicam_sync_rx.borrow();
+                    rx_opt.as_ref().and_then(|rx| rx.try_recv().ok())
+                };
+                if let Some((clip_infos, sync_results)) = result {
+                    *multicam_sync_rx.borrow_mut() = None;
+                    // Build multicam angles from sync results
+                    let anchor_id = clip_infos
+                        .first()
+                        .map(|(id, ..)| id.clone())
+                        .unwrap_or_default();
+                    let anchor_start = clip_infos
+                        .first()
+                        .map(|(_, _, _, _, tl, _)| *tl)
+                        .unwrap_or(0);
+                    let mut angles: Vec<crate::model::clip::MulticamAngle> = Vec::new();
+                    for (i, (id, path, src_in, src_out, _tl_start, _track_id)) in
+                        clip_infos.iter().enumerate()
+                    {
+                        let offset_ns = if *id == anchor_id {
+                            0i64
+                        } else {
+                            sync_results
+                                .iter()
+                                .find(|(rid, ..)| rid == id)
+                                .map(|(_, o, _, _)| *o)
+                                .unwrap_or(0)
+                        };
+                        let label = format!("Angle {}", i + 1);
+                        // Compute synced source_in: anchor's source_in + offset
+                        let synced_in = (*src_in as i64 + offset_ns).max(0) as u64;
+                        let synced_out = *src_out;
+                        angles.push(crate::model::clip::MulticamAngle {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            label,
+                            source_path: path.clone(),
+                            source_in: synced_in,
+                            source_out: synced_out,
+                            sync_offset_ns: offset_ns,
+                            source_timecode_base_ns: None,
+                            media_duration_ns: None,
+                            volume: if i == 0 { 1.0 } else { 0.0 },
+                            muted: i != 0,
+                        });
+                    }
+                    if angles.len() >= 2 {
+                        let multicam = crate::model::clip::Clip::new_multicam(anchor_start, angles);
+                        let multicam_id = multicam.id.clone();
+                        // Remove original clips and add multicam clip
+                        let selected_ids: std::collections::HashSet<String> =
+                            clip_infos.iter().map(|(id, ..)| id.clone()).collect();
+                        let mut proj = project.borrow_mut();
+                        let mut changes = Vec::new();
+                        let mut placement_track_id: Option<String> = None;
+                        for track in &proj.tracks {
+                            if track.clips.iter().any(|c| selected_ids.contains(&c.id)) {
+                                let old_clips = track.clips.clone();
+                                let mut new_clips: Vec<crate::model::clip::Clip> = track
+                                    .clips
+                                    .iter()
+                                    .filter(|c| !selected_ids.contains(&c.id))
+                                    .cloned()
+                                    .collect();
+                                if placement_track_id.is_none() {
+                                    new_clips.push(multicam.clone());
+                                    new_clips.sort_by_key(|c| c.timeline_start);
+                                    placement_track_id = Some(track.id.clone());
+                                }
+                                changes.push(crate::undo::TrackClipsChange {
+                                    track_id: track.id.clone(),
+                                    old_clips,
+                                    new_clips,
+                                });
+                            }
+                        }
+                        let cmd = Box::new(crate::undo::SetMultipleTracksClipsCommand {
+                            changes,
+                            label: "Create Multicam Clip".to_string(),
+                        });
+                        {
+                            let mut st = timeline_state.borrow_mut();
+                            st.history.execute(cmd, &mut proj);
+                        }
+                        drop(proj);
+                        on_project_changed();
+                    }
+                    if let Some(win) = window_weak.upgrade() {
+                        let proj = project.borrow();
+                        let title = &proj.title;
+                        win.set_title(Some(&format!("UltimateSlice — {title}")));
+                    }
+                }
+                glib::ControlFlow::Continue
+            });
+        }
+        timeline_state.borrow_mut().on_create_multicam = Some(Rc::new(
+            move |clip_infos: Vec<(String, String, u64, u64, u64, String)>| {
+                if multicam_sync_rx.borrow().is_some() {
+                    return; // sync already in progress
+                }
+                if let Some(win) = window_weak.upgrade() {
+                    let proj = project.borrow();
+                    win.set_title(Some(&format!(
+                        "UltimateSlice — {} (Syncing multicam...)",
+                        proj.title
+                    )));
+                }
+                let (tx, rx) = std::sync::mpsc::channel();
+                *multicam_sync_rx.borrow_mut() = Some(rx);
+                let clip_infos_clone = clip_infos.clone();
+                std::thread::spawn(move || {
+                    let _ = gstreamer::init();
+                    let clips: Vec<(String, String, u64, u64)> = clip_infos_clone
+                        .iter()
+                        .map(|(id, path, src_in, src_out, _, _)| {
+                            (id.clone(), path.clone(), *src_in, *src_out)
+                        })
+                        .collect();
+                    let sync_results = crate::media::audio_sync::sync_clips_by_audio(&clips);
+                    let results: Vec<(String, i64, f32, Option<f64>)> = sync_results
+                        .into_iter()
+                        .map(|r| (r.clip_id, r.offset_ns, r.confidence, r.drift_speed))
+                        .collect();
+                    let _ = tx.send((clip_infos, results));
+                });
+            },
+        ));
     }
 
     // Shared flag: true while silence detection is running (read by status bar timer).
@@ -4516,6 +6716,10 @@ pub fn build_window(
         vu_peak_cell,
         prog_canvas_frame,
         _prog_safe_area_setter,
+        prog_false_color_setter,
+        prog_zebra_setter,
+        prog_frame_updater,
+        prog_subtitle_text_setter,
     ) = {
         // Build the interactive transform overlay and wire its drag callback.
         let transform_overlay = Rc::new(crate::ui::transform_overlay::TransformOverlay::new(
@@ -4611,7 +6815,13 @@ pub fn build_window(
                     let sc = inspector_view.scale_slider.value();
                     let px = inspector_view.position_x_slider.value();
                     let py = inspector_view.position_y_slider.value();
-                    player.borrow().set_transform(cl, cr, ct, cb, rot, fh, fv);
+                    let is_adjustment = {
+                        let proj = project.borrow();
+                        selected_clip_is_adjustment(&proj, selected.as_deref())
+                    };
+                    if !is_adjustment {
+                        player.borrow().set_transform(cl, cr, ct, cb, rot, fh, fv);
+                    }
                     let mut pp = prog_player.borrow_mut();
                     pp.enter_transform_live_mode();
                     pp.set_transform_properties_only(
@@ -4669,7 +6879,13 @@ pub fn build_window(
                     let sc = inspector_view.scale_slider.value();
                     let px = inspector_view.position_x_slider.value();
                     let py = inspector_view.position_y_slider.value();
-                    player.borrow().set_transform(cl, cr, ct, cb, rot, fh, fv);
+                    let is_adjustment = {
+                        let proj = project.borrow();
+                        selected_clip_is_adjustment(&proj, selected.as_deref())
+                    };
+                    if !is_adjustment {
+                        player.borrow().set_transform(cl, cr, ct, cb, rot, fh, fv);
+                    }
                     let mut pp = prog_player.borrow_mut();
                     pp.enter_transform_live_mode();
                     pp.set_transform_properties_only(
@@ -4756,6 +6972,81 @@ pub fn build_window(
                     }
                 }
             },
+            // on_mask_path_change: live update during drag
+            {
+                let project = project.clone();
+                let timeline_state = timeline_state.clone();
+                let prog_player = prog_player.clone();
+                move |points: &[crate::model::clip::BezierPoint]| {
+                    let selected = timeline_state.borrow().selected_clip_id.clone();
+                    if let Some(ref clip_id) = selected {
+                        let mut proj = project.borrow_mut();
+                        for track in &mut proj.tracks {
+                            if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                                if let Some(ref mut mask) = clip.masks.first_mut() {
+                                    mask.path = Some(crate::model::clip::MaskPath {
+                                        points: points.to_vec(),
+                                    });
+                                    proj.dirty = true;
+                                }
+                                break;
+                            }
+                        }
+                        drop(proj);
+                        // Push live mask update to preview pipeline.
+                        let masks = {
+                            let proj = project.borrow();
+                            proj.tracks
+                                .iter()
+                                .flat_map(|t| t.clips.iter())
+                                .find(|c| &c.id == clip_id)
+                                .map(|c| c.masks.clone())
+                                .unwrap_or_default()
+                        };
+                        prog_player.borrow_mut().update_current_masks(&masks);
+                    }
+                }
+            },
+            // on_mask_path_dbl_click: add/delete point (commits as undo snapshot)
+            {
+                let project = project.clone();
+                let timeline_state = timeline_state.clone();
+                let prog_player = prog_player.clone();
+                let on_project_changed = on_project_changed.clone();
+                move |points: &[crate::model::clip::BezierPoint]| {
+                    let selected = timeline_state.borrow().selected_clip_id.clone();
+                    if let Some(ref clip_id) = selected {
+                        {
+                            let mut proj = project.borrow_mut();
+                            for track in &mut proj.tracks {
+                                if let Some(clip) =
+                                    track.clips.iter_mut().find(|c| &c.id == clip_id)
+                                {
+                                    if let Some(ref mut mask) = clip.masks.first_mut() {
+                                        mask.path = Some(crate::model::clip::MaskPath {
+                                            points: points.to_vec(),
+                                        });
+                                        proj.dirty = true;
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        // Push to preview + trigger full project change for inspector sync.
+                        let masks = {
+                            let proj = project.borrow();
+                            proj.tracks
+                                .iter()
+                                .flat_map(|t| t.clips.iter())
+                                .find(|c| &c.id == clip_id)
+                                .map(|c| c.masks.clone())
+                                .unwrap_or_default()
+                        };
+                        prog_player.borrow_mut().update_current_masks(&masks);
+                        on_project_changed();
+                    }
+                }
+            },
         ));
         // Initialise project dimensions (default 1920×1080 until first on_project_changed)
         {
@@ -4823,6 +7114,31 @@ pub fn build_window(
                     let mut state = monitor_state.borrow_mut();
                     if state.show_safe_areas != show {
                         state.show_safe_areas = show;
+                        crate::ui_state::save_program_monitor_state(&state);
+                    }
+                }
+            },
+            monitor_state.borrow().show_false_color,
+            {
+                let monitor_state = monitor_state.clone();
+                move |show| {
+                    let mut state = monitor_state.borrow_mut();
+                    if state.show_false_color != show {
+                        state.show_false_color = show;
+                        crate::ui_state::save_program_monitor_state(&state);
+                    }
+                }
+            },
+            monitor_state.borrow().show_zebra,
+            monitor_state.borrow().zebra_threshold,
+            {
+                let monitor_state = monitor_state.clone();
+                move |show, threshold| {
+                    let mut state = monitor_state.borrow_mut();
+                    if state.show_zebra != show || (state.zebra_threshold - threshold).abs() > 1e-6
+                    {
+                        state.show_zebra = show;
+                        state.zebra_threshold = threshold;
                         crate::ui_state::save_program_monitor_state(&state);
                     }
                 }
@@ -4922,6 +7238,8 @@ pub fn build_window(
     {
         let monitor_state = monitor_state.clone();
         let monitor_popped = monitor_popped.clone();
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
         docked_scopes_paned.connect_position_notify(move |p| {
             if monitor_popped.get() {
                 return;
@@ -4931,6 +7249,9 @@ pub fn build_window(
             if state.docked_split_pos != pos {
                 state.docked_split_pos = pos;
                 crate::ui_state::save_program_monitor_state(&state);
+            }
+            if !workspace_layouts_applying.get() {
+                sync_workspace_layout_state();
             }
         });
     }
@@ -4970,6 +7291,9 @@ pub fn build_window(
         let keyframe_editor_poll = keyframe_editor_cell.clone();
         let timeline_state_poll = timeline_state.clone();
         let inspector_view_poll = inspector_view.clone();
+        let prog_frame_updater_poll = prog_frame_updater.clone();
+        let prog_subtitle_setter_poll = prog_subtitle_text_setter.clone();
+        let monitor_state_poll = monitor_state.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(33), move || {
             let (pos_ns, playing, opacity_a, opacity_b, peaks, track_peaks, scope_frame, jkl_rate) = {
                 let mut player = pp.borrow_mut();
@@ -5037,15 +7361,13 @@ pub fn build_window(
                     let refresh_proxy_paths = manual_proxy_mode;
                     if desired_proxy_enabled && refresh_proxy_paths {
                         last_proxy_refresh_us_c.set(now_us);
-                        let clip_sources = {
+                        let variants = {
                             let proj = project.borrow();
-                            collect_unique_clip_sources(&proj)
+                            collect_unique_proxy_variants(&proj, desired_scale)
                         };
                         {
                             let mut cache = proxy_cache.borrow_mut();
-                            for (path, lut) in &clip_sources {
-                                cache.request(path, desired_scale, lut.as_deref());
-                            }
+                            request_proxy_variants(&mut cache, &variants);
                         }
                         let paths = proxy_cache.borrow().proxies.clone();
                         player.update_proxy_paths(paths);
@@ -5054,26 +7376,13 @@ pub fn build_window(
                         && now_us - last_proxy_refresh_us_c.get() >= 1_000_000
                     {
                         last_proxy_refresh_us_c.set(now_us);
-                        let (project_w, project_h, lut_sources) = {
+                        let variants = {
                             let proj = project.borrow();
-                            (
-                                proj.width,
-                                proj.height,
-                                collect_unique_lut_clip_sources(&proj),
-                            )
+                            collect_unique_preview_lut_proxy_variants(&proj)
                         };
                         {
                             let mut cache = proxy_cache.borrow_mut();
-                            for (path, lut) in &lut_sources {
-                                cache.request(
-                                    path,
-                                    crate::media::proxy_cache::ProxyScale::Project {
-                                        width: project_w,
-                                        height: project_h,
-                                    },
-                                    lut.as_deref(),
-                                );
-                            }
+                            request_proxy_variants(&mut cache, &variants);
                         }
                         let paths = proxy_cache.borrow().proxies.clone();
                         player.update_proxy_paths(paths);
@@ -5081,7 +7390,10 @@ pub fn build_window(
                 }
                 player.poll();
                 let (oa, ob) = player.transition_opacities();
-                let sf = if scopes_rev.reveals_child() {
+                let sf = if scopes_rev.reveals_child()
+                    || monitor_state_poll.borrow().show_false_color
+                    || monitor_state_poll.borrow().show_zebra
+                {
                     player.try_pull_scope_frame()
                 } else {
                     None
@@ -5113,6 +7425,7 @@ pub fn build_window(
             ts.borrow_mut().track_audio_peak_db = track_peaks;
             // Update colour scopes with the latest video frame.
             if let Some(frame) = scope_frame {
+                prog_frame_updater_poll(frame.clone());
                 crate::ui::color_scopes::update_scope_frame(&scopes_st, frame);
             }
             // Update J/K/L speed label.
@@ -5147,6 +7460,8 @@ pub fn build_window(
                     if selected.is_some() {
                         let proj = project.borrow();
                         sync_transform_overlay_to_playhead(to, &proj, selected.as_deref(), pos_ns);
+                        let (ix, iy) = pp.borrow().content_inset();
+                        to.set_content_inset(ix, iy);
                     }
                 }
                 // Update inspector sliders to reflect keyframe-evaluated values
@@ -5154,6 +7469,109 @@ pub fn build_window(
                 {
                     let proj = project.borrow();
                     inspector_view_poll.update_keyframed_sliders(&proj, pos_ns);
+                }
+                // Update subtitle overlay text for current playhead position.
+                // Collect active subtitles from ALL clips at the playhead, with per-clip styling.
+                {
+                    let proj = project.borrow();
+                    let mut lines: Vec<crate::ui::program_monitor::SubtitleLine> = Vec::new();
+                    for track in &proj.tracks {
+                        for clip in &track.clips {
+                            if clip.subtitle_segments.is_empty() {
+                                continue;
+                            }
+                            let clip_end = clip.timeline_start + clip.duration();
+                            if pos_ns >= clip.timeline_start && pos_ns < clip_end {
+                                let local_ns = ((pos_ns - clip.timeline_start) as f64 * clip.speed)
+                                    as u64
+                                    + clip.source_in;
+                                for seg in &clip.subtitle_segments {
+                                    if local_ns >= seg.start_ns && local_ns < seg.end_ns {
+                                        let c = clip.subtitle_color;
+                                        let oc = clip.subtitle_outline_color;
+                                        let bc = clip.subtitle_bg_box_color;
+                                        let hc = clip.subtitle_highlight_color;
+                                        let base_size =
+                                            crate::media::title_font::parse_subtitle_font(
+                                                &clip.subtitle_font,
+                                            )
+                                            .size_points();
+                                        let font_desc =
+                                            crate::media::title_font::build_preview_subtitle_font_desc(
+                                                &clip.subtitle_font,
+                                                base_size,
+                                            );
+
+                                        // Build word-level display with active word highlighting.
+                                        // Fixed groups: divide words into groups of N, show the
+                                        // group containing the active word. The group stays on
+                                        // screen until its last word finishes, then advances.
+                                        let group_size =
+                                            (clip.subtitle_word_window_secs as usize).max(2);
+                                        let mut word_displays = Vec::new();
+                                        if !seg.words.is_empty()
+                                            && clip.subtitle_highlight_mode
+                                                != crate::model::clip::SubtitleHighlightMode::None
+                                        {
+                                            // Find which word is active.
+                                            let active_idx = seg.words.iter().position(|w| {
+                                                local_ns >= w.start_ns && local_ns < w.end_ns
+                                            });
+                                            // Determine which fixed group the active word belongs to.
+                                            let center = active_idx.unwrap_or(0);
+                                            let group_start = (center / group_size) * group_size;
+                                            let group_end =
+                                                (group_start + group_size).min(seg.words.len());
+                                            for (wi, word) in
+                                                seg.words[group_start..group_end].iter().enumerate()
+                                            {
+                                                word_displays.push(crate::ui::program_monitor::SubtitleWordDisplay {
+                                                    text: word.text.clone(),
+                                                    active: Some(group_start + wi) == active_idx,
+                                                });
+                                            }
+                                        }
+
+                                        lines.push(crate::ui::program_monitor::SubtitleLine {
+                                            words: word_displays,
+                                            text: seg.text.clone(),
+                                            color: (
+                                                ((c >> 24) & 0xFF) as f64 / 255.0,
+                                                ((c >> 16) & 0xFF) as f64 / 255.0,
+                                                ((c >> 8) & 0xFF) as f64 / 255.0,
+                                                (c & 0xFF) as f64 / 255.0,
+                                            ),
+                                            highlight_color: (
+                                                ((hc >> 24) & 0xFF) as f64 / 255.0,
+                                                ((hc >> 16) & 0xFF) as f64 / 255.0,
+                                                ((hc >> 8) & 0xFF) as f64 / 255.0,
+                                                (hc & 0xFF) as f64 / 255.0,
+                                            ),
+                                            highlight_mode: clip.subtitle_highlight_mode,
+                                            outline_color: (
+                                                ((oc >> 24) & 0xFF) as f64 / 255.0,
+                                                ((oc >> 16) & 0xFF) as f64 / 255.0,
+                                                ((oc >> 8) & 0xFF) as f64 / 255.0,
+                                                (oc & 0xFF) as f64 / 255.0,
+                                            ),
+                                            outline_width: clip.subtitle_outline_width,
+                                            bg_box: clip.subtitle_bg_box,
+                                            bg_box_color: (
+                                                ((bc >> 24) & 0xFF) as f64 / 255.0,
+                                                ((bc >> 16) & 0xFF) as f64 / 255.0,
+                                                ((bc >> 8) & 0xFF) as f64 / 255.0,
+                                                (bc & 0xFF) as f64 / 255.0,
+                                            ),
+                                            font_desc,
+                                            position_y: clip.subtitle_position_y,
+                                        });
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    prog_subtitle_setter_poll(lines);
                 }
                 if let Some(ref editor) = *keyframe_editor_poll.borrow() {
                     editor.queue_redraw();
@@ -5165,40 +7583,52 @@ pub fn build_window(
     }
 
     // Scopes toggle for the docked monitor/scopes split.
+    let scopes_btn = gtk::ToggleButton::with_label("▾ Scopes");
+    scopes_btn.add_css_class("flat");
+    scopes_btn.set_halign(gtk::Align::Start);
+    scopes_btn.set_margin_start(4);
+    scopes_btn.set_active(monitor_state.borrow().scopes_visible);
     {
-        let scopes_btn = gtk::ToggleButton::with_label("▾ Scopes");
-        scopes_btn.add_css_class("flat");
-        scopes_btn.set_halign(gtk::Align::Start);
-        scopes_btn.set_margin_start(4);
         let rev = scopes_revealer.clone();
         let docked_paned = docked_scopes_paned.clone();
         let monitor_state = monitor_state.clone();
         let prog_player_scope = prog_player.clone();
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
         scopes_btn.connect_toggled(move |b| {
             let visible = b.is_active();
             prog_player_scope.borrow().set_scope_enabled(visible);
             if visible {
                 if docked_paned.end_child().is_none() {
                     docked_paned.set_end_child(Some(&rev));
-                    let pos = monitor_state.borrow().docked_split_pos.max(160);
-                    docked_paned.set_position(pos);
+                }
+                {
+                    let state = monitor_state.borrow();
+                    docked_paned.set_position(state.docked_split_pos.max(160));
                 }
                 rev.set_reveal_child(true);
             } else {
                 let pos = docked_paned.position().max(160);
-                {
-                    let mut state = monitor_state.borrow_mut();
-                    if state.docked_split_pos != pos {
-                        state.docked_split_pos = pos;
-                        crate::ui_state::save_program_monitor_state(&state);
-                    }
-                }
                 rev.set_reveal_child(false);
                 docked_paned.set_end_child(Option::<&gtk::Widget>::None);
+                {
+                    let mut state = monitor_state.borrow_mut();
+                    state.docked_split_pos = pos;
+                    state.scopes_visible = false;
+                    crate::ui_state::save_program_monitor_state(&state);
+                }
+            }
+            if visible {
+                let mut state = monitor_state.borrow_mut();
+                state.scopes_visible = true;
+                crate::ui_state::save_program_monitor_state(&state);
+            }
+            if !workspace_layouts_applying.get() {
+                sync_workspace_layout_state();
             }
         });
-        prog_monitor_host.append(&scopes_btn);
     }
+    prog_monitor_host.append(&scopes_btn);
     let program_empty_hint = gtk::Label::new(Some(
         "Import media, then append or insert a clip to preview your timeline here.",
     ));
@@ -5223,6 +7653,8 @@ pub fn build_window(
         let popped = monitor_popped.clone();
         let monitor_state = monitor_state.clone();
         let scopes_rev = scopes_revealer.clone();
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
         Rc::new(move || {
             if !popped.get() {
                 let state = monitor_state.borrow().clone();
@@ -5243,6 +7675,8 @@ pub fn build_window(
                 let popped_c = popped.clone();
                 let monitor_state_c = monitor_state.clone();
                 let scopes_rev_c = scopes_rev.clone();
+                let workspace_layouts_applying_c = workspace_layouts_applying.clone();
+                let sync_workspace_layout_state_c = sync_workspace_layout_state.clone();
                 pop_win.connect_close_request(move |w| {
                     let mut state = monitor_state_c.borrow_mut();
                     state.width = w.width().max(320);
@@ -5256,6 +7690,9 @@ pub fn build_window(
                     scopes_rev_c.set_vexpand(false);
                     popped_c.set(false);
                     *pop_cell_c.borrow_mut() = None;
+                    if !workspace_layouts_applying_c.get() {
+                        sync_workspace_layout_state_c();
+                    }
                     glib::Propagation::Proceed
                 });
 
@@ -5267,6 +7704,9 @@ pub fn build_window(
                     crate::ui_state::save_program_monitor_state(&state);
                 }
                 *pop_cell.borrow_mut() = Some(pop_win);
+                if !workspace_layouts_applying.get() {
+                    sync_workspace_layout_state();
+                }
             } else {
                 let win = pop_cell.borrow().as_ref().cloned();
                 if let Some(w) = win {
@@ -5296,6 +7736,7 @@ pub fn build_window(
                 is_audio_only: marks.is_audio_only,
                 has_audio: marks.has_audio,
                 is_image: marks.is_image,
+                is_animated_svg: marks.is_animated_svg,
                 source_timecode_base_ns: marks.source_timecode_base_ns,
             };
             drop(marks);
@@ -5320,7 +7761,11 @@ pub fn build_window(
                     let magnetic_mode_for_placement =
                         magnetic_mode && !placement_plan.uses_linked_pair();
                     let media_dur_opt = if source_info.is_image {
-                        None
+                        if source_info.is_animated_svg {
+                            Some(media_dur)
+                        } else {
+                            None
+                        }
                     } else {
                         Some(media_dur)
                     };
@@ -5332,6 +7777,7 @@ pub fn build_window(
                         timeline_start,
                         source_info.source_timecode_base_ns,
                         media_dur_opt,
+                        source_info.is_animated_svg,
                     ) {
                         let _ = add_clip_to_track(
                             &mut proj.tracks[track_idx],
@@ -5366,6 +7812,7 @@ pub fn build_window(
                 is_audio_only: marks.is_audio_only,
                 has_audio: marks.has_audio,
                 is_image: marks.is_image,
+                is_animated_svg: marks.is_animated_svg,
                 source_timecode_base_ns: marks.source_timecode_base_ns,
             };
             drop(marks);
@@ -5395,7 +7842,11 @@ pub fn build_window(
                 let magnetic_mode_for_placement =
                     magnetic_mode && !placement_plan.uses_linked_pair();
                 let media_dur_opt = if source_info.is_image {
-                    None
+                    if source_info.is_animated_svg {
+                        Some(media_dur)
+                    } else {
+                        None
+                    }
                 } else {
                     Some(media_dur)
                 };
@@ -5407,6 +7858,7 @@ pub fn build_window(
                     playhead,
                     source_info.source_timecode_base_ns,
                     media_dur_opt,
+                    source_info.is_animated_svg,
                 ) {
                     track_changes.push(insert_clip_at_playhead_on_track(
                         &mut proj.tracks[track_idx],
@@ -5466,6 +7918,7 @@ pub fn build_window(
                 is_audio_only: marks.is_audio_only,
                 has_audio: marks.has_audio,
                 is_image: marks.is_image,
+                is_animated_svg: marks.is_animated_svg,
                 source_timecode_base_ns: marks.source_timecode_base_ns,
             };
             drop(marks);
@@ -5498,7 +7951,11 @@ pub fn build_window(
                 let magnetic_mode_for_placement =
                     magnetic_mode && !placement_plan.uses_linked_pair();
                 let media_dur_opt = if source_info.is_image {
-                    None
+                    if source_info.is_animated_svg {
+                        Some(media_dur)
+                    } else {
+                        None
+                    }
                 } else {
                     Some(media_dur)
                 };
@@ -5510,6 +7967,7 @@ pub fn build_window(
                     playhead,
                     source_info.source_timecode_base_ns,
                     media_dur_opt,
+                    source_info.is_animated_svg,
                 ) {
                     track_changes.push(overwrite_clip_range_on_track(
                         &mut proj.tracks[track_idx],
@@ -5554,16 +8012,20 @@ pub fn build_window(
     let on_source_selected: Rc<dyn Fn(String, u64)> = {
         let player = player.clone();
         let source_marks = source_marks.clone();
-        let preview_widget = preview_widget.clone();
+        let source_monitor_panel = source_monitor_panel.clone();
         let clip_name_label = clip_name_label.clone();
         let library = library.clone();
         let project = project.clone();
         let proxy_cache = proxy_cache.clone();
         let preferences_state = preferences_state.clone();
         let source_original_uri_for_proxy_fallback = source_original_uri_for_proxy_fallback.clone();
+        let set_audio_only = set_audio_only.clone();
+        let selected_source_keyword_id = selected_source_keyword_id.clone();
+        let source_keyword_entry = source_keyword_entry.clone();
+        let refresh_source_keyword_picker = refresh_source_keyword_picker.clone();
         Rc::new(move |path: String, duration_ns: u64| {
             // Show the source preview now that a clip is selected
-            preview_widget.set_visible(true);
+            source_monitor_panel.set_visible(true);
             // Update the clip name label
             let name = std::path::Path::new(&path)
                 .file_stem()
@@ -5580,35 +8042,23 @@ pub fn build_window(
             let source_info = {
                 let lib = library.borrow();
                 let proj = project.borrow();
-                lookup_source_placement_info(&lib, &proj, &path)
+                lookup_source_placement_info(&lib.items, &proj, &path)
             };
             if should_reload {
                 let proxy_mode = preferences_state.borrow().proxy_mode.clone();
-                let source_proxy_enabled = proxy_mode.is_enabled();
-                let original_uri = format!("file://{path}");
-                if let Ok(mut fallback_uri) = source_original_uri_for_proxy_fallback.lock() {
-                    *fallback_uri = Some(original_uri.clone());
-                }
-                if source_proxy_enabled && !source_info.is_audio_only {
-                    proxy_cache.borrow_mut().request(
-                        &path,
-                        proxy_scale_for_mode(&proxy_mode),
-                        None,
-                    );
-                }
-                let load_uri = {
-                    let cache = proxy_cache.borrow();
-                    if source_proxy_enabled {
-                        if let Some(proxy_path) = ready_proxy_path_for_source(&cache, &path, None) {
-                            format!("file://{proxy_path}")
-                        } else {
-                            original_uri.clone()
-                        }
-                    } else {
-                        original_uri
-                    }
-                };
-                let _ = player.borrow().load(&load_uri);
+                reload_source_preview_selection(
+                    &path,
+                    duration_ns,
+                    source_info,
+                    &player,
+                    &project,
+                    &proxy_cache,
+                    &proxy_mode,
+                    &source_original_uri_for_proxy_fallback,
+                    &set_audio_only,
+                );
+            } else {
+                set_audio_only(source_info.is_audio_only);
             }
             let mut m = source_marks.borrow_mut();
             m.path = path;
@@ -5619,9 +8069,31 @@ pub fn build_window(
             m.is_audio_only = source_info.is_audio_only;
             m.has_audio = source_info.has_audio;
             m.is_image = source_info.is_image;
+            m.is_animated_svg = source_info.is_animated_svg;
             m.source_timecode_base_ns = source_info.source_timecode_base_ns;
+            drop(m);
+            *selected_source_keyword_id.borrow_mut() = None;
+            source_keyword_entry.set_text("");
+            refresh_source_keyword_picker();
         })
     };
+    *on_apply_collected_files_impl.borrow_mut() = Some({
+        let project = project.clone();
+        let library = library.clone();
+        let source_marks = source_marks.clone();
+        let on_source_selected = on_source_selected.clone();
+        let on_project_changed = on_project_changed.clone();
+        Rc::new(move |manifest| {
+            apply_collected_files_manifest_to_project_state(
+                &project,
+                &library,
+                &source_marks,
+                &on_source_selected,
+                &on_project_changed,
+                &manifest,
+            );
+        })
+    });
 
     // Wire on_match_frame — locates the selected clip's source in the media
     // library, loads it in the source monitor, and seeks to the matching frame.
@@ -5632,6 +8104,7 @@ pub fn build_window(
         let source_marks = source_marks.clone();
         let on_source_selected = on_source_selected.clone();
         let timeline_state_for_mf = timeline_state.clone();
+        let refresh_source_keyword_actions = refresh_source_keyword_actions.clone();
         timeline_state.borrow_mut().on_match_frame = Some(Rc::new(move || {
             let (selected_id, playhead_ns) = {
                 let st = timeline_state_for_mf.borrow();
@@ -5646,7 +8119,14 @@ pub fn build_window(
                     .iter()
                     .flat_map(|t| t.clips.iter())
                     .find(|c| c.id == selected_id)
-                    .map(|c| (c.source_path.clone(), c.source_in, c.source_out, c.timeline_start))
+                    .map(|c| {
+                        (
+                            c.source_path.clone(),
+                            c.source_in,
+                            c.source_out,
+                            c.timeline_start,
+                        )
+                    })
             };
             let Some((source_path, source_in, source_out, timeline_start)) = clip_info else {
                 return;
@@ -5656,7 +8136,8 @@ pub fn build_window(
             }
             let duration_ns = {
                 let lib = library.borrow();
-                lib.iter()
+                lib.items
+                    .iter()
                     .find(|item| item.source_path == source_path)
                     .map(|item| item.duration_ns)
                     .unwrap_or(source_out)
@@ -5664,8 +8145,7 @@ pub fn build_window(
             // Load the source clip in the source monitor.
             on_source_selected(source_path, duration_ns);
             // Compute the source position matching the playhead.
-            let source_pos = source_in
-                + playhead_ns.saturating_sub(timeline_start);
+            let source_pos = source_in + playhead_ns.saturating_sub(timeline_start);
             let source_pos = source_pos.min(source_out).max(source_in);
             // Seek the source player to the matching frame.
             let _ = player.borrow().seek(source_pos);
@@ -5674,12 +8154,242 @@ pub fn build_window(
             m.in_ns = source_in;
             m.out_ns = source_out;
             m.display_pos_ns = source_pos;
+            drop(m);
+            refresh_source_keyword_actions();
         }));
     }
 
     // ── Media browser ─────────────────────────────────────────────────────
+    // Callback for "Create Multicam Clip" from media browser.
+    // Places selected media files on the first video track, then triggers multicam creation.
+    let on_create_multicam_from_browser: Rc<dyn Fn(Vec<String>)> = {
+        let project = project.clone();
+        let library = library.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        Rc::new(move |source_paths: Vec<String>| {
+            if source_paths.len() < 2 {
+                return;
+            }
+            // Place clips on the first video track at timeline end
+            let mut clip_ids = Vec::new();
+            {
+                let mut proj = project.borrow_mut();
+                let video_track = proj
+                    .tracks
+                    .iter_mut()
+                    .find(|t| t.kind == crate::model::track::TrackKind::Video);
+                let Some(track) = video_track else { return };
+                let mut pos = track
+                    .clips
+                    .iter()
+                    .map(|c| c.timeline_end())
+                    .max()
+                    .unwrap_or(0);
+                let lib = library.borrow();
+                for path in &source_paths {
+                    let dur = lib
+                        .items
+                        .iter()
+                        .find(|item| item.source_path == *path)
+                        .map(|item| item.duration_ns)
+                        .unwrap_or(5_000_000_000);
+                    let clip = crate::model::clip::Clip::new(
+                        path,
+                        dur,
+                        pos,
+                        crate::model::clip::ClipKind::Video,
+                    );
+                    clip_ids.push(clip.id.clone());
+                    track.add_clip(clip);
+                    pos += dur;
+                }
+                proj.dirty = true;
+            }
+            // Select the placed clips and trigger multicam creation
+            {
+                let mut st = timeline_state.borrow_mut();
+                st.set_selected_clip_ids(clip_ids.into_iter().collect());
+                let _ = st.request_create_multicam();
+            }
+            on_project_changed();
+        })
+    };
+    let on_library_changed: Rc<dyn Fn()> = {
+        let project = project.clone();
+        let library = library.clone();
+        let on_project_changed = on_project_changed.clone();
+        let refresh_source_keyword_picker = refresh_source_keyword_picker.clone();
+        Rc::new(move || {
+            {
+                let lib = library.borrow();
+                let mut proj = project.borrow_mut();
+                crate::model::media_library::sync_bins_to_project(&lib, &mut proj);
+                proj.dirty = true;
+            }
+            on_project_changed();
+            refresh_source_keyword_picker();
+        })
+    };
+    {
+        let library = library.clone();
+        let source_marks = source_marks.clone();
+        let source_keyword_entry = source_keyword_entry.clone();
+        let selected_source_keyword_id = selected_source_keyword_id.clone();
+        let source_keyword_status_label = source_keyword_status_label.clone();
+        let refresh_source_keyword_picker = refresh_source_keyword_picker.clone();
+        let on_library_changed = on_library_changed.clone();
+        add_source_keyword_btn.connect_clicked(move |_| {
+            let label = source_keyword_entry.text().trim().to_string();
+            if label.is_empty() {
+                source_keyword_status_label.set_text("Enter a keyword label.");
+                return;
+            }
+            let (path, start_ns, end_ns) = {
+                let marks = source_marks.borrow();
+                (marks.path.clone(), marks.in_ns, marks.out_ns)
+            };
+            if path.is_empty() {
+                source_keyword_status_label.set_text("Load a source clip to add keyword ranges.");
+                return;
+            }
+            if end_ns <= start_ns {
+                source_keyword_status_label
+                    .set_text("Set source In and Out to define a keyword range.");
+                return;
+            }
+            let new_range_id = {
+                let mut lib = library.borrow_mut();
+                lib.items
+                    .iter_mut()
+                    .find(|item| item.source_path == path)
+                    .map(|item| {
+                        let range = MediaKeywordRange::new(label.clone(), start_ns, end_ns);
+                        let range_id = range.id.clone();
+                        item.keyword_ranges.push(range);
+                        range_id
+                    })
+            };
+            let Some(new_range_id) = new_range_id else {
+                source_keyword_status_label
+                    .set_text("This source is not available in the media library.");
+                return;
+            };
+            *selected_source_keyword_id.borrow_mut() = Some(new_range_id);
+            on_library_changed();
+            refresh_source_keyword_picker();
+        });
+    }
+    {
+        let library = library.clone();
+        let source_marks = source_marks.clone();
+        let source_keyword_entry = source_keyword_entry.clone();
+        let selected_source_keyword_id = selected_source_keyword_id.clone();
+        let source_keyword_status_label = source_keyword_status_label.clone();
+        let refresh_source_keyword_picker = refresh_source_keyword_picker.clone();
+        let on_library_changed = on_library_changed.clone();
+        update_source_keyword_btn.connect_clicked(move |_| {
+            let Some(selected_range_id) = selected_source_keyword_id.borrow().clone() else {
+                source_keyword_status_label.set_text("Select a keyword range to update.");
+                return;
+            };
+            let label = source_keyword_entry.text().trim().to_string();
+            if label.is_empty() {
+                source_keyword_status_label.set_text("Enter a keyword label.");
+                return;
+            }
+            let (path, start_ns, end_ns) = {
+                let marks = source_marks.borrow();
+                (marks.path.clone(), marks.in_ns, marks.out_ns)
+            };
+            if path.is_empty() {
+                source_keyword_status_label
+                    .set_text("Load a source clip to update keyword ranges.");
+                return;
+            }
+            if end_ns <= start_ns {
+                source_keyword_status_label
+                    .set_text("Set source In and Out to define a keyword range.");
+                return;
+            }
+            let updated = {
+                let mut lib = library.borrow_mut();
+                lib.items
+                    .iter_mut()
+                    .find(|item| item.source_path == path)
+                    .and_then(|item| {
+                        item.keyword_ranges
+                            .iter_mut()
+                            .find(|range| range.id == selected_range_id)
+                    })
+                    .map(|range| {
+                        range.label = label.clone();
+                        range.start_ns = start_ns;
+                        range.end_ns = end_ns;
+                    })
+                    .is_some()
+            };
+            if !updated {
+                source_keyword_status_label
+                    .set_text("Selected keyword range is no longer available.");
+                return;
+            }
+            on_library_changed();
+            refresh_source_keyword_picker();
+        });
+    }
+    {
+        let library = library.clone();
+        let source_marks = source_marks.clone();
+        let source_keyword_entry = source_keyword_entry.clone();
+        let selected_source_keyword_id = selected_source_keyword_id.clone();
+        let source_keyword_status_label = source_keyword_status_label.clone();
+        let refresh_source_keyword_picker = refresh_source_keyword_picker.clone();
+        let on_library_changed = on_library_changed.clone();
+        remove_source_keyword_btn.connect_clicked(move |_| {
+            let Some(selected_range_id) = selected_source_keyword_id.borrow().clone() else {
+                source_keyword_status_label.set_text("Select a keyword range to remove.");
+                return;
+            };
+            let path = source_marks.borrow().path.clone();
+            if path.is_empty() {
+                source_keyword_status_label
+                    .set_text("Load a source clip to remove keyword ranges.");
+                return;
+            }
+            let removed = {
+                let mut lib = library.borrow_mut();
+                if let Some(item) = lib.items.iter_mut().find(|item| item.source_path == path) {
+                    let before = item.keyword_ranges.len();
+                    item.keyword_ranges
+                        .retain(|range| range.id != selected_range_id);
+                    item.keyword_ranges.len() != before
+                } else {
+                    false
+                }
+            };
+            if !removed {
+                source_keyword_status_label
+                    .set_text("Selected keyword range is no longer available.");
+                return;
+            }
+            *selected_source_keyword_id.borrow_mut() = None;
+            source_keyword_entry.set_text("");
+            on_library_changed();
+            refresh_source_keyword_picker();
+        });
+    }
+
     let (browser, clear_media_selection, force_rebuild_media_browser) =
-        media_browser::build_media_browser(library.clone(), on_source_selected.clone(), on_relink_media_gui.clone());
+        media_browser::build_media_browser(
+            library.clone(),
+            on_source_selected.clone(),
+            on_relink_media_gui.clone(),
+            on_create_multicam_from_browser,
+            on_library_changed,
+            proxy_cache.clone(),
+            preferences_state.clone(),
+        );
 
     // Now that both on_source_selected and force_rebuild_media_browser exist,
     // fill in the real relink implementation.
@@ -5701,7 +8411,7 @@ pub fn build_window(
             let missing_paths = {
                 let proj = project.borrow();
                 let lib = library.borrow();
-                collect_missing_source_paths(&proj, &lib)
+                collect_missing_source_paths(&proj, &lib.items)
             };
             if missing_paths.is_empty() {
                 flash_window_status_title(&win, &project, "No offline media to relink");
@@ -5742,7 +8452,9 @@ pub fn build_window(
                 let win_for_result = win.clone();
                 dialog.open(Some(&win), gio::Cancellable::NONE, move |result| {
                     let Ok(file) = result else { return };
-                    let Some(new_file_path) = file.path() else { return };
+                    let Some(new_file_path) = file.path() else {
+                        return;
+                    };
                     let new_path_str = new_file_path.to_string_lossy().to_string();
 
                     // Replace old_path → new_path_str in project clips and library
@@ -5759,7 +8471,7 @@ pub fn build_window(
                             }
                         }
                         let mut lc = 0usize;
-                        for item in lib.iter_mut() {
+                        for item in lib.items.iter_mut() {
                             if item.source_path == old_path {
                                 item.source_path = new_path_str.clone();
                                 lc += 1;
@@ -5772,7 +8484,10 @@ pub fn build_window(
                     };
                     log::info!(
                         "[relink] direct: {} → {} (clips={}, lib={})",
-                        old_path, new_path_str, clip_count, lib_count,
+                        old_path,
+                        new_path_str,
+                        clip_count,
+                        lib_count,
                     );
 
                     // Refresh source monitor if the relinked path was loaded
@@ -5781,6 +8496,7 @@ pub fn build_window(
                         if current_path == old_path {
                             let duration_ns = library
                                 .borrow()
+                                .items
                                 .iter()
                                 .find(|item| item.source_path == new_path_str)
                                 .map(|item| item.duration_ns)
@@ -5794,14 +8510,18 @@ pub fn build_window(
                         let proj = project.borrow();
                         let mut lib = library.borrow_mut();
                         let mut st = timeline_state.borrow_mut();
-                        refresh_media_availability_state(&proj, lib.as_mut_slice(), &mut st);
+                        refresh_media_availability_state(&proj, lib.items.as_mut_slice(), &mut st);
                     }
                     on_project_changed();
                     {
                         let proj = project.borrow();
                         let mut lib = library.borrow_mut();
                         let mut st = timeline_state.borrow_mut();
-                        let mp = refresh_media_availability_state(&proj, lib.as_mut_slice(), &mut st);
+                        let mp = refresh_media_availability_state(
+                            &proj,
+                            lib.items.as_mut_slice(),
+                            &mut st,
+                        );
                         let (selected, playhead_ns) = (st.selected_clip_id.clone(), st.playhead_ns);
                         drop(st);
                         inspector_view.update(&proj, selected.as_deref(), playhead_ns, Some(&mp));
@@ -5852,7 +8572,7 @@ pub fn build_window(
                     let summary = {
                         let mut proj = project.borrow_mut();
                         let mut lib = library.borrow_mut();
-                        relink_missing_media_under_root(&mut proj, lib.as_mut_slice(), &root_path)
+                        relink_missing_media_under_root(&mut proj, lib.items.as_mut_slice(), &root_path)
                     };
                     log::info!(
                         "[relink] scanned={} remapped={} unresolved={} clips={} library={}",
@@ -5877,7 +8597,7 @@ pub fn build_window(
                     if let Some(new_path) = remapped_source {
                         let duration_ns = library
                             .borrow()
-                            .iter()
+                            .items.iter()
                             .find(|item| item.source_path == new_path)
                             .map(|item| item.duration_ns)
                             .unwrap_or_else(|| source_marks.borrow().duration_ns);
@@ -5889,14 +8609,14 @@ pub fn build_window(
                         let proj = project.borrow();
                         let mut lib = library.borrow_mut();
                         let mut st = timeline_state.borrow_mut();
-                        refresh_media_availability_state(&proj, lib.as_mut_slice(), &mut st);
+                        refresh_media_availability_state(&proj, lib.items.as_mut_slice(), &mut st);
                     }
                     on_project_changed();
                     let remaining_missing = {
                         let proj = project.borrow();
                         let mut lib = library.borrow_mut();
                         let mut st = timeline_state.borrow_mut();
-                        let mp = refresh_media_availability_state(&proj, lib.as_mut_slice(), &mut st);
+                        let mp = refresh_media_availability_state(&proj, lib.items.as_mut_slice(), &mut st);
                         let (selected, playhead_ns) = (st.selected_clip_id.clone(), st.playhead_ns);
                         drop(st);
                         inspector_view.update(&proj, selected.as_deref(), playhead_ns, Some(&mp));
@@ -5942,19 +8662,25 @@ pub fn build_window(
     // ── on_close_preview: deselect media + hide preview + reset source state ──
     *on_close_preview_impl.borrow_mut() = Some({
         let clear_media_selection = clear_media_selection.clone();
-        let preview_widget = preview_widget.clone();
+        let source_monitor_panel = source_monitor_panel.clone();
         let clip_name_label = clip_name_label.clone();
         let source_marks = source_marks.clone();
         let player = player.clone();
+        let selected_source_keyword_id = selected_source_keyword_id.clone();
+        let source_keyword_entry = source_keyword_entry.clone();
+        let refresh_source_keyword_picker = refresh_source_keyword_picker.clone();
         let source_original_uri_for_proxy_fallback = source_original_uri_for_proxy_fallback.clone();
         Rc::new(move || {
             clear_media_selection();
-            preview_widget.set_visible(false);
+            source_monitor_panel.set_visible(false);
             clip_name_label.set_text("No source loaded");
             {
                 let mut m = source_marks.borrow_mut();
                 *m = crate::model::media_library::SourceMarks::default();
             }
+            *selected_source_keyword_id.borrow_mut() = None;
+            source_keyword_entry.set_text("");
+            refresh_source_keyword_picker();
             if let Ok(mut fallback_uri) = source_original_uri_for_proxy_fallback.lock() {
                 *fallback_uri = None;
             }
@@ -5963,7 +8689,7 @@ pub fn build_window(
     });
     // Left panel: vertical Paned — browser/effects stack (top) + source preview (bottom)
     // The Paned lets the user resize the split after a source is selected.
-    preview_widget.set_visible(false);
+    source_monitor_panel.set_visible(false);
 
     // ── Effects Browser ──────────────────────────────────────────────────
     let on_apply_effect: Rc<dyn Fn(String)> = {
@@ -5985,7 +8711,9 @@ pub fn build_window(
             // Check clip is video/image and find its effect count for insert index.
             let index = {
                 let proj = project.borrow();
-                let clip = proj.tracks.iter()
+                let clip = proj
+                    .tracks
+                    .iter()
                     .flat_map(|t| t.clips.iter())
                     .find(|c| c.id == clip_id);
                 match clip {
@@ -6046,11 +8774,11 @@ pub fn build_window(
         let timeline_state = timeline_state.clone();
         Rc::new(move |ladspa_name: String| {
             let reg = crate::media::ladspa_registry::LadspaRegistry::get_or_discover();
-            let Some(info) = reg.find_by_name(&ladspa_name) else { return };
-            let effect = crate::model::clip::LadspaEffect::new(
-                &info.ladspa_name,
-                &info.gst_element_name,
-            );
+            let Some(info) = reg.find_by_name(&ladspa_name) else {
+                return;
+            };
+            let effect =
+                crate::model::clip::LadspaEffect::new(&info.ladspa_name, &info.gst_element_name);
             let clip_id = {
                 let st = timeline_state.borrow();
                 st.selected_clip_id.clone()
@@ -6154,7 +8882,9 @@ pub fn build_window(
             // Find clip, snapshot, apply.
             let cmd = {
                 let mut proj = project.borrow_mut();
-                let clip = proj.tracks.iter_mut()
+                let clip = proj
+                    .tracks
+                    .iter_mut()
                     .flat_map(|t| t.clips.iter_mut())
                     .find(|c| c.id == clip_id);
                 match clip {
@@ -6200,24 +8930,150 @@ pub fn build_window(
     left_stack.set_transition_duration(150);
     left_stack.add_titled(&browser, Some("media"), "Media");
     left_stack.add_titled(&effects_browser_widget, Some("effects"), "Effects");
-    left_stack.add_titled(&audio_effects_browser_widget, Some("audio_effects"), "Audio FX");
+    left_stack.add_titled(
+        &audio_effects_browser_widget,
+        Some("audio_effects"),
+        "Audio FX",
+    );
     left_stack.add_titled(&titles_browser_widget, Some("titles"), "Titles");
 
-    let left_stack_switcher = gtk::StackSwitcher::new();
-    left_stack_switcher.set_stack(Some(&left_stack));
-    left_stack_switcher.set_halign(gtk::Align::Center);
-    left_stack_switcher.set_margin_top(4);
-    left_stack_switcher.set_margin_bottom(2);
+    // ── Dynamic tab bar (replaces StackSwitcher) ─────────────────────────
+    // 4 ToggleButtons in a radio group.  Layout restructures at runtime:
+    //   wide (≥ 330 px): 1 row  [Media][Effects][Audio FX][Titles]
+    //   narrow (< 330 px): row1 [Media][Effects]
+    //                      row2 [Audio FX][Titles]
+    let tab_btn = |label: &str| -> gtk::ToggleButton {
+        let b = gtk::ToggleButton::with_label(label);
+        b.set_hexpand(true);
+        b
+    };
+    let tb_media = tab_btn("Media");
+    let tb_effects = tab_btn("Effects");
+    let tb_audio_fx = tab_btn("Audio FX");
+    let tb_titles = tab_btn("Titles");
+    tb_media.set_active(true);
+    tb_effects.set_group(Some(&tb_media));
+    tb_audio_fx.set_group(Some(&tb_media));
+    tb_titles.set_group(Some(&tb_media));
+
+    let tab_row1 = gtk::Box::new(Orientation::Horizontal, 0);
+    tab_row1.add_css_class("linked");
+    tab_row1.set_hexpand(true);
+    tab_row1.set_margin_top(4);
+    tab_row1.set_margin_bottom(2);
+    tab_row1.append(&tb_media);
+    tab_row1.append(&tb_effects);
+    tab_row1.append(&tb_audio_fx);
+    tab_row1.append(&tb_titles);
+
+    let tab_row2 = gtk::Box::new(Orientation::Horizontal, 0);
+    tab_row2.add_css_class("linked");
+    tab_row2.set_hexpand(true);
+    tab_row2.set_margin_bottom(2);
+    tab_row2.set_visible(false); // hidden in wide mode
+
+    let tab_bar = gtk::Box::new(Orientation::Vertical, 0);
+    tab_bar.set_hexpand(true);
+    tab_bar.append(&tab_row1);
+    tab_bar.append(&tab_row2);
+
+    // Wire buttons → stack page switches
+    {
+        let s = left_stack.clone();
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
+        tb_media.connect_toggled(move |b| {
+            if b.is_active() {
+                s.set_visible_child_name("media");
+                if !workspace_layouts_applying.get() {
+                    sync_workspace_layout_state();
+                }
+            }
+        });
+    }
+    {
+        let s = left_stack.clone();
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
+        tb_effects.connect_toggled(move |b| {
+            if b.is_active() {
+                s.set_visible_child_name("effects");
+                if !workspace_layouts_applying.get() {
+                    sync_workspace_layout_state();
+                }
+            }
+        });
+    }
+    {
+        let s = left_stack.clone();
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
+        tb_audio_fx.connect_toggled(move |b| {
+            if b.is_active() {
+                s.set_visible_child_name("audio_effects");
+                if !workspace_layouts_applying.get() {
+                    sync_workspace_layout_state();
+                }
+            }
+        });
+    }
+    {
+        let s = left_stack.clone();
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
+        tb_titles.connect_toggled(move |b| {
+            if b.is_active() {
+                s.set_visible_child_name("titles");
+                if !workspace_layouts_applying.get() {
+                    sync_workspace_layout_state();
+                }
+            }
+        });
+    }
+
+    // Respond to width changes: dynamically restructure into 1 or 2 rows
+    {
+        let tab_row1 = tab_row1.clone();
+        let tab_row2 = tab_row2.clone();
+        let tb_audio_fx = tb_audio_fx.clone();
+        let tb_titles = tb_titles.clone();
+        let narrow_state = std::cell::Cell::new(false);
+        let narrow_state = std::rc::Rc::new(narrow_state);
+        tab_bar.connect_notify_local(Some("width"), move |widget, _| {
+            let w = widget.width();
+            if w == 0 {
+                return;
+            }
+            let narrow = w < 330;
+            if narrow == narrow_state.get() {
+                return;
+            }
+            narrow_state.set(narrow);
+            if narrow {
+                tab_row1.remove(&tb_audio_fx);
+                tab_row1.remove(&tb_titles);
+                tab_row2.append(&tb_audio_fx);
+                tab_row2.append(&tb_titles);
+                tab_row2.set_visible(true);
+            } else {
+                tab_row2.remove(&tb_audio_fx);
+                tab_row2.remove(&tb_titles);
+                tab_row1.append(&tb_audio_fx);
+                tab_row1.append(&tb_titles);
+                tab_row2.set_visible(false);
+            }
+        });
+    }
 
     let left_stack_container = gtk::Box::new(Orientation::Vertical, 0);
-    left_stack_container.append(&left_stack_switcher);
+    left_stack_container.append(&tab_bar);
     left_stack_container.append(&left_stack);
 
     let left_vpaned = Paned::new(Orientation::Vertical);
     left_vpaned.set_vexpand(true);
     left_vpaned.set_position(320); // browser gets ~320 px by default
     left_vpaned.set_start_child(Some(&left_stack_container));
-    left_vpaned.set_end_child(Some(&preview_widget));
+    left_vpaned.set_end_child(Some(&source_monitor_panel));
     top_paned.set_start_child(Some(&left_vpaned));
 
     root_vpaned.set_start_child(Some(&top_paned));
@@ -6291,15 +9147,25 @@ pub fn build_window(
         let force_rebuild_media_browser = force_rebuild_media_browser.clone();
 
         *on_project_changed_impl.borrow_mut() = Some(Box::new(move || {
+            // Sync compound clip duration when editing inside a compound.
+            timeline_state.borrow().sync_compound_duration();
             let use_light_refresh = mcp_light_refresh_next.replace(false);
             if clear_media_browser_on_next_reload.replace(false) {
                 on_close_preview();
-                library.borrow_mut().clear();
+                {
+                    let mut lib = library.borrow_mut();
+                    lib.items.clear();
+                    lib.bins.clear();
+                    lib.collections.clear();
+                }
                 prog_player.borrow_mut().stop();
-                let proxy_mode_enabled = preferences_state.borrow().proxy_mode.is_enabled();
+                let preserve_sidecar_proxies = {
+                    let prefs = preferences_state.borrow();
+                    prefs.proxy_mode.is_enabled() && prefs.persist_proxies_next_to_original_media
+                };
                 {
                     let mut cache = proxy_cache.borrow_mut();
-                    cache.cleanup_for_unload(proxy_mode_enabled);
+                    cache.cleanup_for_unload(preserve_sidecar_proxies);
                     cache.invalidate_all();
                 }
                 prog_player.borrow_mut().update_proxy_paths(HashMap::new());
@@ -6318,7 +9184,7 @@ pub fn build_window(
             // Update inspector and collect program clips — drop proj borrow before GStreamer call
             let (clips, media_from_project, project_dims, project_frame_rate): (
                 Vec<ProgramClip>,
-                Vec<(String, u64, Option<u64>)>,
+                Vec<ProjectLibraryEntry>,
                 (u32, u32),
                 (u32, u32),
             ) = {
@@ -6338,6 +9204,8 @@ pub fn build_window(
                     }
                     let playhead_ns = timeline_state.borrow().playhead_ns;
                     sync_transform_overlay_to_playhead(to, &proj, selected.as_deref(), playhead_ns);
+                    let (ix, iy) = prog_player.borrow().content_inset();
+                    to.set_content_inset(ix, iy);
                 }
 
                 let suppress_embedded_audio_ids: HashSet<String> = proj
@@ -6362,136 +9230,26 @@ pub fn build_window(
                     .filter(|(_, t)| proj.track_is_active_for_output(t))
                     .flat_map(|(t_idx, t)| {
                         let audio_only = t.kind == TrackKind::Audio;
-                        let suppress_embedded_audio_ids = suppress_embedded_audio_ids.clone();
-                        t.clips.iter().map(move |c| ProgramClip {
-                            id: c.id.clone(),
-                            source_path: c.source_path.clone(),
-                            source_in_ns: c.source_in,
-                            source_out_ns: c.source_out,
-                            timeline_start_ns: c.timeline_start,
-                            brightness: c.brightness as f64,
-                            contrast: c.contrast as f64,
-                            saturation: c.saturation as f64,
-                            temperature: c.temperature as f64,
-                            tint: c.tint as f64,
-                            brightness_keyframes: c.brightness_keyframes.clone(),
-                            contrast_keyframes: c.contrast_keyframes.clone(),
-                            saturation_keyframes: c.saturation_keyframes.clone(),
-                            temperature_keyframes: c.temperature_keyframes.clone(),
-                            tint_keyframes: c.tint_keyframes.clone(),
-                            denoise: c.denoise as f64,
-                            sharpness: c.sharpness as f64,
-                            blur: c.blur as f64,
-                            blur_keyframes: c.blur_keyframes.clone(),
-                            vidstab_enabled: c.vidstab_enabled,
-                            vidstab_smoothing: c.vidstab_smoothing,
-                            volume: c.volume as f64,
-                            volume_keyframes: c.volume_keyframes.clone(),
-                            pan: c.pan as f64,
-                            pan_keyframes: c.pan_keyframes.clone(),
-                            eq_bands: c.eq_bands,
-                            eq_low_gain_keyframes: c.eq_low_gain_keyframes.clone(),
-                            eq_mid_gain_keyframes: c.eq_mid_gain_keyframes.clone(),
-                            eq_high_gain_keyframes: c.eq_high_gain_keyframes.clone(),
-                            crop_left: c.crop_left,
-                            crop_left_keyframes: c.crop_left_keyframes.clone(),
-                            crop_right: c.crop_right,
-                            crop_right_keyframes: c.crop_right_keyframes.clone(),
-                            crop_top: c.crop_top,
-                            crop_top_keyframes: c.crop_top_keyframes.clone(),
-                            crop_bottom: c.crop_bottom,
-                            crop_bottom_keyframes: c.crop_bottom_keyframes.clone(),
-                            rotate: c.rotate,
-                            rotate_keyframes: c.rotate_keyframes.clone(),
-                            flip_h: c.flip_h,
-                            flip_v: c.flip_v,
-                            title_text: c.title_text.clone(),
-                            title_font: c.title_font.clone(),
-                            title_color: c.title_color,
-                            title_x: c.title_x,
-                            title_y: c.title_y,
-                            title_outline_color: c.title_outline_color,
-                            title_outline_width: c.title_outline_width,
-                            title_shadow: c.title_shadow,
-                            title_shadow_color: c.title_shadow_color,
-                            title_shadow_offset_x: c.title_shadow_offset_x,
-                            title_shadow_offset_y: c.title_shadow_offset_y,
-                            title_bg_box: c.title_bg_box,
-                            title_bg_box_color: c.title_bg_box_color,
-                            title_bg_box_padding: c.title_bg_box_padding,
-                            title_clip_bg_color: c.title_clip_bg_color,
-                            title_secondary_text: c.title_secondary_text.clone(),
-                            is_title: c.kind == ClipKind::Title,
-                            speed: c.speed,
-                            speed_keyframes: c.speed_keyframes.clone(),
-                            slow_motion_interp: c.slow_motion_interp,
-                            reverse: c.reverse,
-                            freeze_frame: c.freeze_frame,
-                            freeze_frame_source_ns: c.freeze_frame_source_ns,
-                            freeze_frame_hold_duration_ns: c.freeze_frame_hold_duration_ns,
-                            is_audio_only: audio_only,
-                            duck: t.duck,
-                            duck_amount_db: t.duck_amount_db,
-                            ladspa_effects: c.ladspa_effects.clone(),
-                            pitch_shift_semitones: c.pitch_shift_semitones,
-                            pitch_preserve: c.pitch_preserve,
-                            anamorphic_desqueeze: c.anamorphic_desqueeze,
-                            track_index: t_idx,
-                            transition_after: c.transition_after.clone(),
-                            transition_after_ns: c.transition_after_ns,
-                            lut_paths: c.lut_paths.clone(),
-                            scale: c.scale,
-                            scale_keyframes: c.scale_keyframes.clone(),
-                            opacity: c.opacity,
-                            opacity_keyframes: c.opacity_keyframes.clone(),
-                            blend_mode: c.blend_mode,
-                            position_x: c.position_x,
-                            position_x_keyframes: c.position_x_keyframes.clone(),
-                            position_y: c.position_y,
-                            position_y_keyframes: c.position_y_keyframes.clone(),
-                            shadows: c.shadows as f64,
-                            midtones: c.midtones as f64,
-                            highlights: c.highlights as f64,
-                            exposure: c.exposure as f64,
-                            black_point: c.black_point as f64,
-                            highlights_warmth: c.highlights_warmth as f64,
-                            highlights_tint: c.highlights_tint as f64,
-                            midtones_warmth: c.midtones_warmth as f64,
-                            midtones_tint: c.midtones_tint as f64,
-                            shadows_warmth: c.shadows_warmth as f64,
-                            shadows_tint: c.shadows_tint as f64,
-                            has_audio: !c.is_freeze_frame()
-                                && c.kind != ClipKind::Title
-                                && c.kind != ClipKind::Adjustment
-                                && !suppress_embedded_audio_ids.contains(&c.id),
-                            is_image: c.kind == ClipKind::Image,
-                            is_adjustment: c.kind == ClipKind::Adjustment,
-                            chroma_key_enabled: c.chroma_key_enabled,
-                            chroma_key_color: c.chroma_key_color,
-                            chroma_key_tolerance: c.chroma_key_tolerance,
-                            chroma_key_softness: c.chroma_key_softness,
-                            bg_removal_enabled: c.bg_removal_enabled,
-                            bg_removal_threshold: c.bg_removal_threshold,
-                            frei0r_effects: c.frei0r_effects.clone(),
+                        let suppress = suppress_embedded_audio_ids.clone();
+                        t.clips.iter().flat_map(move |c| {
+                            clip_to_program_clips(
+                                c,
+                                audio_only,
+                                t.duck,
+                                t.duck_amount_db,
+                                t_idx,
+                                &suppress,
+                                0,
+                                0,
+                            )
                         })
                     })
                     .collect();
                 // Keep media browser in sync with timeline clip sources after project open/load.
-                // Collect only unique source paths to avoid redundant work.
-                let mut media_seen: HashSet<&str> = HashSet::new();
-                let media: Vec<(String, u64, Option<u64>)> = proj
-                    .tracks
-                    .iter()
-                    .flat_map(|t| t.clips.iter())
-                    .filter(|c| media_seen.insert(c.source_path.as_str()))
-                    .map(|c| {
-                        (
-                            c.source_path.clone(),
-                            c.media_duration_ns.unwrap_or(0),
-                            c.source_timecode_base_ns,
-                        )
-                    })
-                    .collect();
+                // Source-backed clips still dedupe by source path, while sourceless timeline-native
+                // clips keep distinct clip-id keys so title cards don't collapse onto one
+                // empty-path browser item.
+                let media = collect_project_library_entries(&proj);
                 (
                     clips,
                     media,
@@ -6506,39 +9264,22 @@ pub fn build_window(
 
             {
                 let mut lib = library.borrow_mut();
-                let seen: HashSet<String> = lib.iter().map(|i| i.source_path.clone()).collect();
-                for (path, dur, source_timecode_base_ns) in &media_from_project {
-                    if let Some(item) = lib.iter_mut().find(|i| i.source_path == *path) {
-                        if item.duration_ns == 0 && *dur > 0 {
-                            item.duration_ns = *dur;
-                        }
-                        if item.source_timecode_base_ns.is_none()
-                            && source_timecode_base_ns.is_some()
-                        {
-                            item.source_timecode_base_ns = *source_timecode_base_ns;
-                        }
-                    }
-                }
-                let new_items: Vec<_> = media_from_project
-                    .into_iter()
-                    .filter(|(path, _, _)| !seen.contains(path))
-                    .collect();
-                for (path, dur, source_timecode_base_ns) in new_items {
-                    let mut item = MediaItem::new(path, dur);
-                    item.source_timecode_base_ns = source_timecode_base_ns;
-                    lib.push(item);
-                }
+                sync_library_with_project_entries(&mut lib, &media_from_project);
+                // Restore bin assignments from parsed FCPXML data.
+                let mut proj = project.borrow_mut();
+                crate::model::media_library::apply_bins_from_project(&mut lib, &mut proj);
+                drop(proj);
             }
 
             let missing_paths = {
                 let proj = project.borrow();
                 let mut lib = library.borrow_mut();
                 let mut st = timeline_state.borrow_mut();
-                let mp = refresh_media_availability_state(&proj, lib.as_mut_slice(), &mut st);
+                let mp = refresh_media_availability_state(&proj, lib.items.as_mut_slice(), &mut st);
                 log::debug!(
                     "[on_project_changed] missing_count={} lib_missing_count={}",
                     mp.len(),
-                    lib.iter().filter(|i| i.is_missing).count(),
+                    lib.items.iter().filter(|i| i.is_missing).count(),
                 );
                 mp
             };
@@ -6597,47 +9338,30 @@ pub fn build_window(
                         let manual_proxy_mode = proxy_mode.is_enabled();
                         if manual_proxy_mode {
                             let manual_scale = proxy_scale_for_mode(&proxy_mode);
-                            let near_playhead_sources: Vec<(String, Option<String>)> = {
+                            let near_playhead_variants = {
                                 let proj = project_reload.borrow();
-                                collect_near_playhead_clip_sources(
+                                collect_near_playhead_proxy_variants(
                                     &proj,
                                     prev_pos,
                                     NEAR_PLAYHEAD_PROXY_PRIME_WINDOW_NS,
                                     NEAR_PLAYHEAD_PROXY_PRIME_MAX_SOURCES,
+                                    manual_scale,
                                 )
                             };
-                            {
-                                let mut cache = proxy_cache_reload.borrow_mut();
-                                for (path, lut) in &near_playhead_sources {
-                                    cache.request(path, manual_scale, lut.as_deref());
-                                }
-                            }
-                            let clip_sources: Vec<(String, Option<String>)> = {
+                            let clip_variants = {
                                 let proj = project_reload.borrow();
-                                let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
-                                proj.tracks
-                                    .iter()
-                                    .flat_map(|t| t.clips.iter())
-                                    .filter_map(|c| {
-                                        let key = (c.source_path.clone(), c.lut_key());
-                                        if seen.insert(key.clone()) {
-                                            Some(key)
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                    .collect()
+                                collect_unique_proxy_variants(&proj, manual_scale)
                             };
                             {
                                 let mut cache = proxy_cache_reload.borrow_mut();
-                                for (path, lut) in &clip_sources {
-                                    cache.request(path, manual_scale, lut.as_deref());
-                                }
+                                cache.cleanup_stale_variants(&clip_variants);
+                                request_proxy_variants(&mut cache, &near_playhead_variants);
+                                request_proxy_variants(&mut cache, &clip_variants);
                             }
-                            if !near_playhead_sources.is_empty() {
+                            if !near_playhead_variants.is_empty() {
                                 log::debug!(
                                     "window:on_project_changed primed {} near-playhead proxy source(s) around {}ns",
-                                    near_playhead_sources.len(),
+                                    near_playhead_variants.len(),
                                     prev_pos
                                 );
                             }
@@ -6664,8 +9388,60 @@ pub fn build_window(
                     }
                 }
 
+                let animated_svg_paths = {
+                    let mut paths: HashMap<String, String> = HashMap::new();
+                    for clip in &clips {
+                        if !clip.animated_svg {
+                            continue;
+                        }
+                        let key = crate::media::animated_svg::animated_svg_render_key(
+                            &clip.source_path,
+                            clip.source_in_ns,
+                            clip.source_out_ns,
+                            clip.media_duration_ns,
+                            fr_num,
+                            fr_den,
+                        );
+                        if paths.contains_key(&key) {
+                            continue;
+                        }
+                        match crate::media::animated_svg::ensure_rendered_clip(
+                            &clip.source_path,
+                            clip.source_in_ns,
+                            clip.source_out_ns,
+                            clip.media_duration_ns,
+                            fr_num,
+                            fr_den,
+                        ) {
+                            Ok(render_path) => {
+                                paths.insert(key, render_path);
+                            }
+                            Err(err) => {
+                                log::warn!(
+                                    "window:on_project_changed failed to render animated SVG clip {} [{}..{}]: {}",
+                                    clip.source_path,
+                                    clip.source_in_ns,
+                                    clip.source_out_ns,
+                                    err
+                                );
+                            }
+                        }
+                    }
+                    paths
+                };
+                prog_player_reload
+                    .borrow_mut()
+                    .update_animated_svg_paths(animated_svg_paths);
+
+                let project_file_path = { project_reload.borrow().file_path.clone() };
                 {
                     let mut pp = prog_player_reload.borrow_mut();
+                    pp.set_prerender_project_path(
+                        project_file_path.as_deref(),
+                        preferences_state_reload
+                            .borrow()
+                            .persist_prerenders_next_to_project_file,
+                    );
                     pp.set_project_dimensions(proj_w, proj_h);
                     pp.set_frame_rate(fr_num, fr_den);
                     pp.load_clips(clips);
@@ -6741,6 +9517,8 @@ pub fn build_window(
     right_sidebar.set_margin_end(6);
     right_sidebar.set_margin_top(6);
     right_sidebar.set_margin_bottom(6);
+
+    right_sidebar.append(&multicam_panel);
 
     let inspector_scroll = ScrolledWindow::new();
     inspector_scroll.set_vexpand(true);
@@ -6874,6 +9652,8 @@ pub fn build_window(
     {
         let scroller = keyframe_scroller.clone();
         let paned = timeline_paned.clone();
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
         keyframes_toggle.connect_clicked(move |btn| {
             let visible = scroller.is_visible();
             scroller.set_visible(!visible);
@@ -6887,10 +9667,58 @@ pub fn build_window(
             } else {
                 btn.set_label("Show Keyframes");
             }
+            if !workspace_layouts_applying.get() {
+                sync_workspace_layout_state();
+            }
         });
     }
 
     root_hpaned.set_end_child(Some(&right_sidebar));
+    {
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
+        root_hpaned.connect_position_notify(move |_| {
+            if !workspace_layouts_applying.get() {
+                sync_workspace_layout_state();
+            }
+        });
+    }
+    {
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
+        root_vpaned.connect_position_notify(move |_| {
+            if !workspace_layouts_applying.get() {
+                sync_workspace_layout_state();
+            }
+        });
+    }
+    {
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
+        top_paned.connect_position_notify(move |_| {
+            if !workspace_layouts_applying.get() {
+                sync_workspace_layout_state();
+            }
+        });
+    }
+    {
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
+        left_vpaned.connect_position_notify(move |_| {
+            if !workspace_layouts_applying.get() {
+                sync_workspace_layout_state();
+            }
+        });
+    }
+    {
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
+        timeline_paned.connect_position_notify(move |_| {
+            if !workspace_layouts_applying.get() {
+                sync_workspace_layout_state();
+            }
+        });
+    }
 
     // ── Status bar (proxy progress) ───────────────────────────────────────
     let status_bar = gtk::Box::new(Orientation::Horizontal, 8);
@@ -6927,17 +9755,31 @@ pub fn build_window(
     let background_render_toggle = gtk::ToggleButton::new();
     background_render_toggle.set_active(initial_background_prerender);
     let background_render_row = gtk::Box::new(Orientation::Horizontal, 4);
+    let background_render_toggle_updating = Rc::new(Cell::new(false));
     let background_render_icon = gtk::Image::from_icon_name(if initial_background_prerender {
         "system-run-symbolic"
     } else {
         "process-stop-symbolic"
     });
-    let background_render_text = gtk::Label::new(Some("Background Render"));
+    let background_render_text =
+        gtk::Label::new(Some(background_render_label(initial_background_prerender)));
     background_render_row.append(&background_render_icon);
     background_render_row.append(&background_render_text);
     background_render_toggle.set_child(Some(&background_render_row));
     background_render_toggle.add_css_class("round");
     background_render_toggle.add_css_class("flat");
+    let proxy_quick_toggle = gtk::ToggleButton::with_label(proxy_toggle_label(&initial_proxy_mode));
+    proxy_quick_toggle.set_active(initial_proxy_mode.is_enabled());
+    proxy_quick_toggle.set_tooltip_text(Some(&proxy_toggle_tooltip(
+        &initial_proxy_mode,
+        &preferences_state.borrow().remembered_proxy_mode(),
+    )));
+    proxy_quick_toggle.add_css_class("round");
+    proxy_quick_toggle.add_css_class("flat");
+    {
+        let toggle_proxy_quick = toggle_proxy_quick.clone();
+        proxy_quick_toggle.connect_toggled(move |btn| toggle_proxy_quick(btn.is_active()));
+    }
     // ── Media Browser toggle ──
     let media_browser_toggle = gtk::ToggleButton::new();
     media_browser_toggle.set_active(true);
@@ -6952,6 +9794,8 @@ pub fn build_window(
     {
         let panel = left_vpaned.clone();
         let icon = media_browser_icon.clone();
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
         media_browser_toggle.connect_toggled(move |btn| {
             let show = btn.is_active();
             panel.set_visible(show);
@@ -6960,6 +9804,9 @@ pub fn build_window(
             } else {
                 "view-conceal-symbolic"
             }));
+            if !workspace_layouts_applying.get() {
+                sync_workspace_layout_state();
+            }
         });
     }
 
@@ -6977,6 +9824,8 @@ pub fn build_window(
     {
         let sidebar = right_sidebar.clone();
         let icon = inspector_toggle_icon.clone();
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
         inspector_toggle.connect_toggled(move |btn| {
             let show = btn.is_active();
             sidebar.set_visible(show);
@@ -6985,18 +9834,595 @@ pub fn build_window(
             } else {
                 "view-conceal-symbolic"
             }));
+            if !workspace_layouts_applying.get() {
+                sync_workspace_layout_state();
+            }
         });
     }
+
+    let workspace_layout_dropdown = gtk::DropDown::from_strings(&[]);
+    workspace_layout_dropdown.set_hexpand(true);
+    let workspace_apply_btn = gtk::Button::with_label("Apply");
+    let workspace_save_btn = gtk::Button::with_label("Save Current…");
+    let workspace_rename_btn = gtk::Button::with_label("Rename…");
+    let workspace_delete_btn = gtk::Button::with_label("Delete");
+    let workspace_reset_btn = gtk::Button::with_label("Reset");
+    let workspace_popover_box = gtk::Box::new(Orientation::Vertical, 8);
+    workspace_popover_box.set_margin_start(12);
+    workspace_popover_box.set_margin_end(12);
+    workspace_popover_box.set_margin_top(10);
+    workspace_popover_box.set_margin_bottom(10);
+    let workspace_title = gtk::Label::new(Some("Workspace Layouts"));
+    workspace_title.set_halign(gtk::Align::Start);
+    workspace_title.add_css_class("dim-label");
+    workspace_popover_box.append(&workspace_title);
+    workspace_popover_box.append(&workspace_layout_dropdown);
+    let workspace_actions_row = gtk::Box::new(Orientation::Horizontal, 4);
+    workspace_actions_row.append(&workspace_apply_btn);
+    workspace_actions_row.append(&workspace_reset_btn);
+    workspace_popover_box.append(&workspace_actions_row);
+    let workspace_manage_row = gtk::Box::new(Orientation::Horizontal, 4);
+    workspace_manage_row.append(&workspace_save_btn);
+    workspace_manage_row.append(&workspace_rename_btn);
+    workspace_manage_row.append(&workspace_delete_btn);
+    workspace_popover_box.append(&workspace_manage_row);
+    let workspace_popover = gtk::Popover::new();
+    workspace_popover.set_child(Some(&workspace_popover_box));
+    workspace_popover.set_autohide(true);
+    let workspace_menu_btn = gtk::MenuButton::new();
+    workspace_menu_btn.set_label("Workspace");
+    workspace_menu_btn.set_popover(Some(&workspace_popover));
+    workspace_menu_btn.set_tooltip_text(Some(
+        "Apply, save, rename, or delete saved workspace layouts",
+    ));
 
     status_bar.append(&media_browser_toggle);
     status_bar.append(&track_levels_toggle);
     status_bar.append(&background_render_toggle);
+    status_bar.append(&proxy_quick_toggle);
     status_bar.append(&status_label);
     status_bar.append(&status_progress);
     let status_spacer = gtk::Box::new(Orientation::Horizontal, 0);
     status_spacer.set_hexpand(true);
     status_bar.append(&status_spacer);
+    status_bar.append(&workspace_menu_btn);
     status_bar.append(&inspector_toggle);
+    *sync_background_render_toggle_impl.borrow_mut() = Some({
+        let background_render_toggle = background_render_toggle.clone();
+        let background_render_toggle_updating = background_render_toggle_updating.clone();
+        let background_render_icon = background_render_icon.clone();
+        let background_render_text = background_render_text.clone();
+        Rc::new(move |prefs: &crate::ui_state::PreferencesState| {
+            background_render_toggle_updating.set(true);
+            let enabled = prefs.background_prerender;
+            if background_render_toggle.is_active() != enabled {
+                background_render_toggle.set_active(enabled);
+            }
+            background_render_icon.set_icon_name(Some(if enabled {
+                "system-run-symbolic"
+            } else {
+                "process-stop-symbolic"
+            }));
+            background_render_text.set_text(background_render_label(enabled));
+            background_render_toggle_updating.set(false);
+        })
+    });
+    *sync_proxy_toggle_impl.borrow_mut() = Some({
+        let proxy_quick_toggle = proxy_quick_toggle.clone();
+        let proxy_toggle_updating = proxy_toggle_updating.clone();
+        Rc::new(move |prefs: &crate::ui_state::PreferencesState| {
+            proxy_toggle_updating.set(true);
+            let enabled = prefs.proxy_mode.is_enabled();
+            if proxy_quick_toggle.is_active() != enabled {
+                proxy_quick_toggle.set_active(enabled);
+            }
+            proxy_quick_toggle.set_label(proxy_toggle_label(&prefs.proxy_mode));
+            proxy_quick_toggle.set_tooltip_text(Some(&proxy_toggle_tooltip(
+                &prefs.proxy_mode,
+                &prefs.remembered_proxy_mode(),
+            )));
+            proxy_toggle_updating.set(false);
+        })
+    });
+    {
+        let workspace_apply_btn = workspace_apply_btn.clone();
+        let workspace_rename_btn = workspace_rename_btn.clone();
+        let workspace_delete_btn = workspace_delete_btn.clone();
+        let workspace_layout_controls_updating = workspace_layout_controls_updating.clone();
+        let workspace_layouts_state = workspace_layouts_state.clone();
+        workspace_layout_dropdown.connect_selected_notify(move |dropdown| {
+            if workspace_layout_controls_updating.get() {
+                return;
+            }
+            let selected = dropdown.selected();
+            workspace_apply_btn.set_sensitive(selected != 0);
+            let named_selected = selected >= 2
+                && ((selected - 2) as usize) < workspace_layouts_state.borrow().layouts.len();
+            workspace_rename_btn.set_sensitive(named_selected);
+            workspace_delete_btn.set_sensitive(named_selected);
+        });
+    }
+    *sync_workspace_layout_controls_impl.borrow_mut() = Some({
+        let workspace_layout_dropdown = workspace_layout_dropdown.clone();
+        let workspace_apply_btn = workspace_apply_btn.clone();
+        let workspace_rename_btn = workspace_rename_btn.clone();
+        let workspace_delete_btn = workspace_delete_btn.clone();
+        let workspace_layout_controls_updating = workspace_layout_controls_updating.clone();
+        let workspace_layouts_state = workspace_layouts_state.clone();
+        Rc::new(move || {
+            workspace_layout_controls_updating.set(true);
+            let (layout_names, active_layout) = {
+                let state = workspace_layouts_state.borrow();
+                (
+                    state
+                        .layouts
+                        .iter()
+                        .map(|layout| layout.name.clone())
+                        .collect::<Vec<_>>(),
+                    state.active_layout.clone(),
+                )
+            };
+            let model = gtk::StringList::new(&[]);
+            model.append("(Current)");
+            model.append("Default Layout");
+            for name in &layout_names {
+                model.append(name);
+            }
+            workspace_layout_dropdown.set_model(Some(&model));
+            let selected = active_layout
+                .as_ref()
+                .and_then(|name| {
+                    layout_names
+                        .iter()
+                        .position(|candidate| candidate.eq_ignore_ascii_case(name))
+                        .map(|idx| idx as u32 + 2)
+                })
+                .unwrap_or(0);
+            workspace_layout_dropdown.set_selected(selected);
+            workspace_apply_btn.set_sensitive(selected != 0);
+            let named_selected = selected >= 2 && ((selected - 2) as usize) < layout_names.len();
+            workspace_rename_btn.set_sensitive(named_selected);
+            workspace_delete_btn.set_sensitive(named_selected);
+            workspace_layout_controls_updating.set(false);
+        })
+    });
+    let capture_workspace_arrangement: Rc<dyn Fn() -> crate::ui_state::WorkspaceArrangement> = {
+        let root_hpaned = root_hpaned.clone();
+        let root_vpaned = root_vpaned.clone();
+        let top_paned = top_paned.clone();
+        let left_vpaned = left_vpaned.clone();
+        let timeline_paned = timeline_paned.clone();
+        let media_browser_toggle = media_browser_toggle.clone();
+        let inspector_toggle = inspector_toggle.clone();
+        let keyframe_scroller = keyframe_scroller.clone();
+        let scopes_btn = scopes_btn.clone();
+        let docked_scopes_paned = docked_scopes_paned.clone();
+        let monitor_state = monitor_state.clone();
+        let monitor_popped = monitor_popped.clone();
+        let popout_window_cell = popout_window_cell.clone();
+        let tb_media = tb_media.clone();
+        let tb_effects = tb_effects.clone();
+        let tb_audio_fx = tb_audio_fx.clone();
+        let tb_titles = tb_titles.clone();
+        let workspace_layouts_state = workspace_layouts_state.clone();
+        Rc::new(move || {
+            let previous_arrangement = workspace_layouts_state.borrow().current.clone();
+            let left_panel_tab = if tb_effects.is_active() {
+                crate::ui_state::WorkspaceLeftPanelTab::Effects
+            } else if tb_audio_fx.is_active() {
+                crate::ui_state::WorkspaceLeftPanelTab::AudioEffects
+            } else if tb_titles.is_active() {
+                crate::ui_state::WorkspaceLeftPanelTab::Titles
+            } else {
+                let _ = tb_media.is_active();
+                crate::ui_state::WorkspaceLeftPanelTab::Media
+            };
+            let monitor_snapshot = monitor_state.borrow().clone();
+            let (width, height) = if monitor_popped.get() {
+                if let Some(window) = popout_window_cell.borrow().as_ref() {
+                    (window.width().max(320), window.height().max(180))
+                } else {
+                    (
+                        monitor_snapshot.width.max(320),
+                        monitor_snapshot.height.max(180),
+                    )
+                }
+            } else {
+                (
+                    monitor_snapshot.width.max(320),
+                    monitor_snapshot.height.max(180),
+                )
+            };
+            let (root_hpaned_pos, root_hpaned_ratio_permille) = capture_workspace_paned_state(
+                &root_hpaned,
+                previous_arrangement.root_hpaned_pos,
+                previous_arrangement.root_hpaned_ratio_permille,
+            );
+            let (root_vpaned_pos, root_vpaned_ratio_permille) = capture_workspace_paned_state(
+                &root_vpaned,
+                previous_arrangement.root_vpaned_pos,
+                previous_arrangement.root_vpaned_ratio_permille,
+            );
+            let (top_paned_pos, top_paned_ratio_permille) = capture_workspace_paned_state(
+                &top_paned,
+                previous_arrangement.top_paned_pos,
+                previous_arrangement.top_paned_ratio_permille,
+            );
+            let (left_vpaned_pos, left_vpaned_ratio_permille) = capture_workspace_paned_state(
+                &left_vpaned,
+                previous_arrangement.left_vpaned_pos,
+                previous_arrangement.left_vpaned_ratio_permille,
+            );
+            let (timeline_paned_pos, timeline_paned_ratio_permille) = capture_workspace_paned_state(
+                &timeline_paned,
+                previous_arrangement.timeline_paned_pos,
+                previous_arrangement.timeline_paned_ratio_permille,
+            );
+            crate::ui_state::WorkspaceArrangement {
+                root_hpaned_pos,
+                root_hpaned_ratio_permille,
+                root_vpaned_pos,
+                root_vpaned_ratio_permille,
+                top_paned_pos,
+                top_paned_ratio_permille,
+                left_vpaned_pos,
+                left_vpaned_ratio_permille,
+                timeline_paned_pos,
+                timeline_paned_ratio_permille,
+                media_browser_visible: media_browser_toggle.is_active(),
+                inspector_visible: inspector_toggle.is_active(),
+                keyframe_editor_visible: keyframe_scroller.is_visible(),
+                left_panel_tab,
+                program_monitor: crate::ui_state::ProgramMonitorWorkspaceState {
+                    popped: monitor_popped.get(),
+                    width,
+                    height,
+                    docked_split_pos: if scopes_btn.is_active() {
+                        docked_scopes_paned.position().max(160)
+                    } else {
+                        monitor_snapshot.docked_split_pos.max(160)
+                    },
+                    scopes_visible: scopes_btn.is_active(),
+                },
+            }
+        })
+    };
+    *sync_workspace_layout_state_impl.borrow_mut() = Some({
+        let workspace_layouts_state = workspace_layouts_state.clone();
+        let capture_workspace_arrangement = capture_workspace_arrangement.clone();
+        let sync_workspace_layout_controls = sync_workspace_layout_controls.clone();
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let workspace_layout_pending_name = workspace_layout_pending_name.clone();
+        Rc::new(move || {
+            if workspace_layouts_applying.get() {
+                return;
+            }
+            let arrangement = capture_workspace_arrangement();
+            {
+                let pending_name = workspace_layout_pending_name.borrow_mut().take();
+                let mut state = workspace_layouts_state.borrow_mut();
+                if let Some(name) = pending_name {
+                    if state
+                        .upsert_layout(crate::ui_state::WorkspaceLayout {
+                            name,
+                            arrangement: arrangement.clone(),
+                        })
+                        .is_err()
+                    {
+                        state.set_current_arrangement(arrangement.clone());
+                    }
+                } else {
+                    state.set_current_arrangement(arrangement.clone());
+                }
+                crate::ui_state::save_workspace_layouts_state(&state);
+            }
+            sync_workspace_layout_controls();
+        })
+    });
+    *apply_workspace_arrangement_impl.borrow_mut() = Some({
+        let root_hpaned = root_hpaned.clone();
+        let root_vpaned = root_vpaned.clone();
+        let top_paned = top_paned.clone();
+        let left_vpaned = left_vpaned.clone();
+        let timeline_paned = timeline_paned.clone();
+        let media_browser_toggle = media_browser_toggle.clone();
+        let inspector_toggle = inspector_toggle.clone();
+        let keyframe_scroller = keyframe_scroller.clone();
+        let keyframes_toggle = keyframes_toggle.clone();
+        let scopes_btn = scopes_btn.clone();
+        let docked_scopes_paned = docked_scopes_paned.clone();
+        let monitor_state = monitor_state.clone();
+        let monitor_popped = monitor_popped.clone();
+        let popout_window_cell = popout_window_cell.clone();
+        let on_toggle_popout = on_toggle_popout.clone();
+        let tb_media = tb_media.clone();
+        let tb_effects = tb_effects.clone();
+        let tb_audio_fx = tb_audio_fx.clone();
+        let tb_titles = tb_titles.clone();
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let workspace_layout_apply_generation = workspace_layout_apply_generation.clone();
+        let workspace_layout_pending_name = workspace_layout_pending_name.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
+        Rc::new(move |arrangement: crate::ui_state::WorkspaceArrangement| {
+            workspace_layouts_applying.set(true);
+            let apply_generation = workspace_layout_apply_generation.get().wrapping_add(1);
+            workspace_layout_apply_generation.set(apply_generation);
+            {
+                let mut state = monitor_state.borrow_mut();
+                arrangement
+                    .program_monitor
+                    .apply_to_program_monitor_state(&mut state);
+                crate::ui_state::save_program_monitor_state(&state);
+            }
+            if media_browser_toggle.is_active() != arrangement.media_browser_visible {
+                media_browser_toggle.set_active(arrangement.media_browser_visible);
+            }
+            if inspector_toggle.is_active() != arrangement.inspector_visible {
+                inspector_toggle.set_active(arrangement.inspector_visible);
+            }
+            match arrangement.left_panel_tab {
+                crate::ui_state::WorkspaceLeftPanelTab::Media => tb_media.set_active(true),
+                crate::ui_state::WorkspaceLeftPanelTab::Effects => tb_effects.set_active(true),
+                crate::ui_state::WorkspaceLeftPanelTab::AudioEffects => {
+                    tb_audio_fx.set_active(true)
+                }
+                crate::ui_state::WorkspaceLeftPanelTab::Titles => tb_titles.set_active(true),
+            }
+            if keyframe_scroller.is_visible() != arrangement.keyframe_editor_visible {
+                keyframe_scroller.set_visible(arrangement.keyframe_editor_visible);
+            }
+            keyframes_toggle.set_label(if arrangement.keyframe_editor_visible {
+                "Hide Keyframes"
+            } else {
+                "Show Keyframes"
+            });
+            if scopes_btn.is_active() != arrangement.program_monitor.scopes_visible {
+                scopes_btn.set_active(arrangement.program_monitor.scopes_visible);
+            }
+            if monitor_popped.get() != arrangement.program_monitor.popped {
+                on_toggle_popout();
+            } else if arrangement.program_monitor.popped {
+                if let Some(window) = popout_window_cell.borrow().as_ref() {
+                    window.set_default_size(
+                        arrangement.program_monitor.width.max(320),
+                        arrangement.program_monitor.height.max(180),
+                    );
+                }
+            }
+            let apply_split_positions: Rc<dyn Fn()> = Rc::new({
+                let root_hpaned = root_hpaned.clone();
+                let root_vpaned = root_vpaned.clone();
+                let top_paned = top_paned.clone();
+                let left_vpaned = left_vpaned.clone();
+                let timeline_paned = timeline_paned.clone();
+                let docked_scopes_paned = docked_scopes_paned.clone();
+                let arrangement = arrangement.clone();
+                move || {
+                    if let Some(pos) = workspace_target_paned_position(
+                        &root_hpaned,
+                        arrangement.root_hpaned_pos,
+                        arrangement.root_hpaned_ratio_permille,
+                    ) {
+                        root_hpaned.set_position(pos);
+                    }
+                    if let Some(pos) = workspace_target_paned_position(
+                        &root_vpaned,
+                        arrangement.root_vpaned_pos,
+                        arrangement.root_vpaned_ratio_permille,
+                    ) {
+                        root_vpaned.set_position(pos);
+                    }
+                    if let Some(pos) = workspace_target_paned_position(
+                        &top_paned,
+                        arrangement.top_paned_pos,
+                        arrangement.top_paned_ratio_permille,
+                    ) {
+                        top_paned.set_position(pos);
+                    }
+                    if let Some(pos) = workspace_target_paned_position(
+                        &left_vpaned,
+                        arrangement.left_vpaned_pos,
+                        arrangement.left_vpaned_ratio_permille,
+                    ) {
+                        left_vpaned.set_position(pos);
+                    }
+                    if arrangement.keyframe_editor_visible {
+                        if let Some(pos) = workspace_target_paned_position(
+                            &timeline_paned,
+                            arrangement.timeline_paned_pos,
+                            arrangement.timeline_paned_ratio_permille,
+                        ) {
+                            timeline_paned.set_position(pos);
+                        } else {
+                            let total = timeline_paned.allocation().height();
+                            if total > 0 {
+                                timeline_paned.set_position((total as f64 * 0.7) as i32);
+                            }
+                        }
+                    }
+                    if arrangement.program_monitor.scopes_visible {
+                        docked_scopes_paned
+                            .set_position(arrangement.program_monitor.docked_split_pos.max(160));
+                    }
+                }
+            });
+            apply_split_positions();
+            let pane_positions_ready: Rc<dyn Fn() -> bool> = Rc::new({
+                let root_hpaned = root_hpaned.clone();
+                let root_vpaned = root_vpaned.clone();
+                let top_paned = top_paned.clone();
+                let left_vpaned = left_vpaned.clone();
+                let timeline_paned = timeline_paned.clone();
+                move || {
+                    workspace_paned_extent(&root_hpaned) > 0
+                        && workspace_paned_extent(&root_vpaned) > 0
+                        && workspace_paned_extent(&top_paned) > 0
+                        && workspace_paned_extent(&left_vpaned) > 0
+                        && workspace_paned_extent(&timeline_paned) > 0
+                }
+            });
+            schedule_workspace_layout_apply_completion(
+                apply_generation,
+                workspace_layout_apply_generation.clone(),
+                workspace_layouts_applying.clone(),
+                workspace_layout_pending_name.clone(),
+                sync_workspace_layout_state.clone(),
+                apply_split_positions.clone(),
+                pane_positions_ready,
+                20,
+            );
+        })
+    });
+    {
+        let workspace_layouts_state = workspace_layouts_state.clone();
+        let workspace_layout_dropdown = workspace_layout_dropdown.clone();
+        let workspace_popover = workspace_popover.clone();
+        let apply_workspace_arrangement = apply_workspace_arrangement.clone();
+        let workspace_layout_pending_name = workspace_layout_pending_name.clone();
+        workspace_apply_btn.connect_clicked(move |_| {
+            let selected = workspace_layout_dropdown.selected();
+            if selected == 0 {
+                return;
+            }
+            let (arrangement, pending_name) = if selected == 1 {
+                (crate::ui_state::WorkspaceArrangement::default(), None)
+            } else {
+                let state = workspace_layouts_state.borrow();
+                let Some(layout) = state.layouts.get((selected - 2) as usize) else {
+                    return;
+                };
+                (layout.arrangement.clone(), Some(layout.name.clone()))
+            };
+            *workspace_layout_pending_name.borrow_mut() = pending_name;
+            apply_workspace_arrangement(arrangement);
+            workspace_popover.popdown();
+        });
+    }
+    {
+        let apply_workspace_arrangement = apply_workspace_arrangement.clone();
+        let workspace_popover = workspace_popover.clone();
+        let workspace_layout_pending_name = workspace_layout_pending_name.clone();
+        workspace_reset_btn.connect_clicked(move |_| {
+            *workspace_layout_pending_name.borrow_mut() = None;
+            apply_workspace_arrangement(crate::ui_state::WorkspaceArrangement::default());
+            workspace_popover.popdown();
+        });
+    }
+    {
+        let window = window.clone();
+        let capture_workspace_arrangement = capture_workspace_arrangement.clone();
+        let workspace_layouts_state = workspace_layouts_state.clone();
+        let sync_workspace_layout_controls = sync_workspace_layout_controls.clone();
+        let workspace_popover = workspace_popover.clone();
+        workspace_save_btn.connect_clicked(move |_| {
+            present_text_entry_dialog(
+                &window,
+                "Save Workspace Layout",
+                "Save",
+                "Create or overwrite a named workspace layout.",
+                "",
+                Some("Editing"),
+                Rc::new({
+                    let capture_workspace_arrangement = capture_workspace_arrangement.clone();
+                    let workspace_layouts_state = workspace_layouts_state.clone();
+                    let sync_workspace_layout_controls = sync_workspace_layout_controls.clone();
+                    let workspace_popover = workspace_popover.clone();
+                    move |name| {
+                        let arrangement = capture_workspace_arrangement();
+                        {
+                            let mut state = workspace_layouts_state.borrow_mut();
+                            state.set_current_arrangement(arrangement.clone());
+                            state.upsert_layout(crate::ui_state::WorkspaceLayout {
+                                name,
+                                arrangement,
+                            })?;
+                            crate::ui_state::save_workspace_layouts_state(&state);
+                        }
+                        sync_workspace_layout_controls();
+                        workspace_popover.popdown();
+                        Ok(())
+                    }
+                }),
+            );
+        });
+    }
+    {
+        let window = window.clone();
+        let workspace_layouts_state = workspace_layouts_state.clone();
+        let workspace_layout_dropdown = workspace_layout_dropdown.clone();
+        let sync_workspace_layout_controls = sync_workspace_layout_controls.clone();
+        let workspace_popover = workspace_popover.clone();
+        workspace_rename_btn.connect_clicked(move |_| {
+            let selected = workspace_layout_dropdown.selected();
+            if selected < 2 {
+                return;
+            }
+            let current_name = {
+                let state = workspace_layouts_state.borrow();
+                state
+                    .layouts
+                    .get((selected - 2) as usize)
+                    .map(|layout| layout.name.clone())
+            };
+            let Some(current_name) = current_name else {
+                return;
+            };
+            let old_name_for_submit = current_name.clone();
+            present_text_entry_dialog(
+                &window,
+                "Rename Workspace Layout",
+                "Rename",
+                "Rename the selected saved workspace layout.",
+                &current_name,
+                Some("Workspace name"),
+                Rc::new({
+                    let workspace_layouts_state = workspace_layouts_state.clone();
+                    let sync_workspace_layout_controls = sync_workspace_layout_controls.clone();
+                    let workspace_popover = workspace_popover.clone();
+                    move |new_name| {
+                        {
+                            let mut state = workspace_layouts_state.borrow_mut();
+                            state.rename_layout(&old_name_for_submit, &new_name)?;
+                            crate::ui_state::save_workspace_layouts_state(&state);
+                        }
+                        sync_workspace_layout_controls();
+                        workspace_popover.popdown();
+                        Ok(())
+                    }
+                }),
+            );
+        });
+    }
+    {
+        let workspace_layouts_state = workspace_layouts_state.clone();
+        let workspace_layout_dropdown = workspace_layout_dropdown.clone();
+        let sync_workspace_layout_controls = sync_workspace_layout_controls.clone();
+        workspace_delete_btn.connect_clicked(move |_| {
+            let selected = workspace_layout_dropdown.selected();
+            if selected < 2 {
+                return;
+            }
+            let deleted = {
+                let mut state = workspace_layouts_state.borrow_mut();
+                let Some(name) = state
+                    .layouts
+                    .get((selected - 2) as usize)
+                    .map(|layout| layout.name.clone())
+                else {
+                    return;
+                };
+                let deleted = state.delete_layout(&name);
+                if deleted {
+                    crate::ui_state::save_workspace_layouts_state(&state);
+                }
+                deleted
+            };
+            if deleted {
+                sync_workspace_layout_controls();
+            }
+        });
+    }
+    sync_workspace_layout_controls();
 
     // Wrap main content + status bar in a vertical box
     let outer_vbox = gtk::Box::new(Orientation::Vertical, 0);
@@ -7007,6 +10433,12 @@ pub fn build_window(
     let main_stack = gtk::Stack::new();
     main_stack.set_transition_type(gtk::StackTransitionType::Crossfade);
     main_stack.set_transition_duration(200);
+    *on_show_editor_impl.borrow_mut() = Some({
+        let main_stack = main_stack.clone();
+        Rc::new(move || {
+            main_stack.set_visible_child_name("editor");
+        })
+    });
 
     let welcome_panel = {
         let project = project.clone();
@@ -7034,12 +10466,13 @@ pub fn build_window(
                 let stack = stack_for_open;
                 move || {
                     let dialog = gtk::FileDialog::new();
-                    dialog.set_title("Open Project XML");
+                    dialog.set_title("Open Project");
                     let filter = gtk::FileFilter::new();
                     filter.add_pattern("*.uspxml");
                     filter.add_pattern("*.fcpxml");
                     filter.add_pattern("*.xml");
-                    filter.set_name(Some("Project XML Files"));
+                    filter.add_pattern("*.otio");
+                    filter.set_name(Some("Project Files"));
                     let filters = gtk4::gio::ListStore::new::<gtk::FileFilter>();
                     filters.append(&filter);
                     dialog.set_filters(Some(&filters));
@@ -7048,71 +10481,56 @@ pub fn build_window(
                     let on_project_changed = on_project_changed.clone();
 
                     let stack = stack.clone();
-                    dialog.open(
-                        Some(&window),
-                        gtk4::gio::Cancellable::NONE,
-                        move |result| {
-                            if let Ok(file) = result {
-                                if let Some(path) = file.path() {
-                                    let path_str = path.to_string_lossy().to_string();
-                                    let (tx, rx) = std::sync::mpsc::sync_channel::<
-                                        Result<crate::model::project::Project, String>,
-                                    >(1);
-                                    let path_bg = path_str.clone();
-                                    std::thread::spawn(move || {
-                                        let result = std::fs::read_to_string(&path_bg)
-                                            .map_err(|e| format!("Failed to read file: {e}"))
-                                            .and_then(|xml| {
-                                                crate::fcpxml::parser::parse_fcpxml_with_path(
-                                                    &xml,
-                                                    Some(std::path::Path::new(&path_bg)),
-                                                )
-                                                .map_err(|e| format!("FCPXML parse error: {e}"))
-                                            });
-                                        let _ = tx.send(result);
-                                    });
-                                    let project = project.clone();
-                                    let on_project_changed = on_project_changed.clone();
-                
-                                    let timeline_state = timeline_state.clone();
-                                    let stack = stack.clone();
-                                    timeline_state.borrow_mut().loading = true;
-                                    glib::timeout_add_local(
-                                        std::time::Duration::from_millis(50),
-                                        move || match rx.try_recv() {
-                                            Ok(Ok(mut new_proj)) => {
-                                                new_proj.dirty = false;
-                                                crate::recent::push(
-                                                    &new_proj
-                                                        .file_path
-                                                        .clone()
-                                                        .unwrap_or_default(),
-                                                );
-                                                *project.borrow_mut() = new_proj;
-                                                timeline_state.borrow_mut().loading = false;
+                    dialog.open(Some(&window), gtk4::gio::Cancellable::NONE, move |result| {
+                        if let Ok(file) = result {
+                            if let Some(path) = file.path() {
+                                let path_str = path.to_string_lossy().to_string();
+                                let (tx, rx) = std::sync::mpsc::sync_channel::<
+                                    Result<crate::model::project::Project, String>,
+                                >(1);
+                                let path_bg = path.clone();
+                                std::thread::spawn(move || {
+                                    let result =
+                                        crate::ui::project_loader::load_project_from_path(&path_bg);
+                                    let _ = tx.send(result);
+                                });
+                                let project = project.clone();
+                                let on_project_changed = on_project_changed.clone();
 
-                                                on_project_changed();
-                                                stack.set_visible_child_name("editor");
-                                                glib::ControlFlow::Break
-                                            }
-                                            Ok(Err(e)) => {
-                                                log::error!("Failed to open project: {e}");
-                                                timeline_state.borrow_mut().loading = false;
-                                                glib::ControlFlow::Break
-                                            }
-                                            Err(std::sync::mpsc::TryRecvError::Empty) => {
-                                                glib::ControlFlow::Continue
-                                            }
-                                            Err(_) => {
-                                                timeline_state.borrow_mut().loading = false;
-                                                glib::ControlFlow::Break
-                                            }
-                                        },
-                                    );
-                                }
+                                let timeline_state = timeline_state.clone();
+                                let stack = stack.clone();
+                                timeline_state.borrow_mut().loading = true;
+                                glib::timeout_add_local(
+                                    std::time::Duration::from_millis(50),
+                                    move || match rx.try_recv() {
+                                        Ok(Ok(mut new_proj)) => {
+                                            new_proj.dirty = false;
+                                            new_proj.file_path = Some(path_str.clone());
+                                            crate::recent::push(&path_str);
+                                            *project.borrow_mut() = new_proj;
+                                            timeline_state.borrow_mut().loading = false;
+
+                                            on_project_changed();
+                                            stack.set_visible_child_name("editor");
+                                            glib::ControlFlow::Break
+                                        }
+                                        Ok(Err(e)) => {
+                                            log::error!("Failed to open project: {e}");
+                                            timeline_state.borrow_mut().loading = false;
+                                            glib::ControlFlow::Break
+                                        }
+                                        Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                            glib::ControlFlow::Continue
+                                        }
+                                        Err(_) => {
+                                            timeline_state.borrow_mut().loading = false;
+                                            glib::ControlFlow::Break
+                                        }
+                                    },
+                                );
                             }
-                        },
-                    );
+                        }
+                    });
                 }
             }),
             // on_open_recent
@@ -7126,17 +10544,10 @@ pub fn build_window(
                     let (tx, rx) = std::sync::mpsc::sync_channel::<
                         Result<crate::model::project::Project, String>,
                     >(1);
-                    let path_bg = path_str.clone();
+                    let path_bg = std::path::PathBuf::from(&path_str);
                     std::thread::spawn(move || {
-                        let result = std::fs::read_to_string(&path_bg)
-                            .map_err(|e| format!("Failed to open recent project: {e}"))
-                            .and_then(|xml| {
-                                crate::fcpxml::parser::parse_fcpxml_with_path(
-                                    &xml,
-                                    Some(std::path::Path::new(&path_bg)),
-                                )
-                                .map_err(|e| format!("FCPXML parse error: {e}"))
-                            });
+                        let result = crate::ui::project_loader::load_project_from_path(&path_bg)
+                            .map_err(|e| format!("Failed to open recent project: {e}"));
                         let _ = tx.send(result);
                     });
                     let project = project.clone();
@@ -7145,34 +10556,30 @@ pub fn build_window(
                     let timeline_state = timeline_state.clone();
                     let stack = stack.clone();
                     timeline_state.borrow_mut().loading = true;
-                    glib::timeout_add_local(
-                        std::time::Duration::from_millis(50),
-                        move || match rx.try_recv() {
-                            Ok(Ok(mut new_proj)) => {
-                                new_proj.dirty = false;
-                                crate::recent::push(
-                                    &new_proj.file_path.clone().unwrap_or_default(),
-                                );
-                                *project.borrow_mut() = new_proj;
-                                timeline_state.borrow_mut().loading = false;
-                                on_project_changed();
-                                stack.set_visible_child_name("editor");
-                                glib::ControlFlow::Break
-                            }
-                            Ok(Err(e)) => {
-                                log::error!("Failed to open recent project: {e}");
-                                timeline_state.borrow_mut().loading = false;
-                                glib::ControlFlow::Break
-                            }
-                            Err(std::sync::mpsc::TryRecvError::Empty) => {
-                                glib::ControlFlow::Continue
-                            }
-                            Err(_) => {
-                                timeline_state.borrow_mut().loading = false;
-                                glib::ControlFlow::Break
-                            }
-                        },
-                    );
+                    glib::timeout_add_local(std::time::Duration::from_millis(50), move || match rx
+                        .try_recv()
+                    {
+                        Ok(Ok(mut new_proj)) => {
+                            new_proj.dirty = false;
+                            new_proj.file_path = Some(path_str.clone());
+                            crate::recent::push(&path_str);
+                            *project.borrow_mut() = new_proj;
+                            timeline_state.borrow_mut().loading = false;
+                            on_project_changed();
+                            stack.set_visible_child_name("editor");
+                            glib::ControlFlow::Break
+                        }
+                        Ok(Err(e)) => {
+                            log::error!("Failed to open recent project: {e}");
+                            timeline_state.borrow_mut().loading = false;
+                            glib::ControlFlow::Break
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                        Err(_) => {
+                            timeline_state.borrow_mut().loading = false;
+                            glib::ControlFlow::Break
+                        }
+                    });
                 }
             }),
         )
@@ -7191,9 +10598,11 @@ pub fn build_window(
     // ── Plugin discovery (deferred to avoid blocking startup) ──────────
     glib::idle_add_local_once(move || {
         if gstreamer::init().is_ok() {
-            let registry = Rc::new(crate::media::frei0r_registry::Frei0rRegistry::get_or_discover().clone());
+            let registry =
+                Rc::new(crate::media::frei0r_registry::Frei0rRegistry::get_or_discover().clone());
             set_effects_registry(registry);
-            let ladspa_reg = Rc::new(crate::media::ladspa_registry::LadspaRegistry::get_or_discover().clone());
+            let ladspa_reg =
+                Rc::new(crate::media::ladspa_registry::LadspaRegistry::get_or_discover().clone());
             set_ladspa_registry(ladspa_reg);
         }
     });
@@ -7223,28 +10632,23 @@ pub fn build_window(
     }
     {
         let preferences_state = preferences_state.clone();
-        let prog_player = prog_player.clone();
-        let background_render_icon = background_render_icon.clone();
+        let apply_preferences_state = apply_preferences_state.clone();
+        let background_render_toggle_updating = background_render_toggle_updating.clone();
         background_render_toggle.connect_toggled(move |btn| {
-            let enabled = btn.is_active();
-            prog_player.borrow_mut().set_background_prerender(enabled);
-            background_render_icon.set_icon_name(Some(if enabled {
-                "system-run-symbolic"
-            } else {
-                "process-stop-symbolic"
-            }));
-            let new_state = {
-                let mut prefs = preferences_state.borrow_mut();
-                prefs.background_prerender = enabled;
-                prefs.clone()
-            };
-            crate::ui_state::save_preferences_state(&new_state);
+            if background_render_toggle_updating.get() {
+                return;
+            }
+            let mut new_state = preferences_state.borrow().clone();
+            new_state.background_prerender = btn.is_active();
+            apply_preferences_state(new_state);
         });
     }
 
     {
         let proxy_cache = proxy_cache.clone();
         let bg_removal_cache = bg_removal_cache.clone();
+        let stt_cache = stt_cache.clone();
+        let project_for_stt = project.clone();
         let prog_player = prog_player.clone();
         let effective_proxy_enabled = effective_proxy_enabled.clone();
         let status_label = status_label.clone();
@@ -7255,6 +10659,7 @@ pub fn build_window(
         let silence_detect_in_progress = silence_detect_in_progress.clone();
         let inspector_view = inspector_view.clone();
         let preferences_state = preferences_state.clone();
+        let timeline_state_stt = timeline_state.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
             let resolved = proxy_cache.borrow_mut().poll();
             // Always sync proxy paths when proxies are effectively enabled — disk-cached proxies
@@ -7295,16 +10700,91 @@ pub fn build_window(
                 inspector_view
                     .bg_removal_model_available
                     .set(bg_removal_cache.borrow().is_available());
+                inspector_view
+                    .stt_model_available
+                    .set(stt_cache.borrow().is_available());
+            }
+            // Poll STT cache — apply generated subtitles via undo system.
+            {
+                let stt_results = stt_cache.borrow_mut().poll();
+                if !stt_results.is_empty() {
+                    for result in stt_results {
+                        // Find the matching clip and push an undoable command.
+                        let proj = project_for_stt.borrow();
+                        let mut found = None;
+                        for track in &proj.tracks {
+                            for clip in &track.clips {
+                                if clip.source_path == result.source_path
+                                    && clip.source_in == result.source_in_ns
+                                    && clip.source_out == result.source_out_ns
+                                {
+                                    found = Some((
+                                        clip.id.clone(),
+                                        track.id.clone(),
+                                        clip.subtitle_segments.clone(),
+                                    ));
+                                    break;
+                                }
+                            }
+                            if found.is_some() {
+                                break;
+                            }
+                        }
+                        drop(proj);
+
+                        if let Some((clip_id, track_id, old_segments)) = found {
+                            let cmd = crate::undo::GenerateSubtitlesCommand {
+                                clip_id,
+                                track_id,
+                                old_segments,
+                                new_segments: result.segments,
+                            };
+                            cmd.execute(&mut project_for_stt.borrow_mut());
+                            timeline_state_stt
+                                .borrow_mut()
+                                .history
+                                .undo_stack
+                                .push(Box::new(cmd));
+                            timeline_state_stt.borrow_mut().history.redo_stack.clear();
+                        }
+                    }
+                    // Clear generating state and force segment list rebuild.
+                    inspector_view.stt_generating.set(false);
+                    inspector_view
+                        .subtitle_segments_snapshot
+                        .borrow_mut()
+                        .clear();
+                }
+                // Also clear if no jobs are pending (handles edge cases like failure).
+                if !stt_cache.borrow().progress().in_flight {
+                    inspector_view.stt_generating.set(false);
+                }
+                // Show/hide error label from last STT result.
+                let stt_err = stt_cache.borrow().last_error.clone();
+                if let Some(err) = stt_err {
+                    inspector_view.subtitle_error_label.set_text(&err);
+                    inspector_view.subtitle_error_label.set_visible(true);
+                } else {
+                    inspector_view.subtitle_error_label.set_visible(false);
+                }
             }
             let proxy_progress = proxy_cache.borrow().progress();
             let prerender_progress = prog_player.borrow().background_prerender_progress();
             let bg_progress = bg_removal_cache.borrow().progress();
+            let stt_progress = stt_cache.borrow().progress();
             let proxy_active = proxy_progress.in_flight;
             let prerender_active = prerender_progress.in_flight;
             let bg_active = bg_progress.in_flight;
+            let stt_active = stt_progress.in_flight;
             let syncing_audio = audio_sync_in_progress.get();
             let detecting_silence = silence_detect_in_progress.get();
-            if proxy_active || prerender_active || syncing_audio || detecting_silence || bg_active {
+            if proxy_active
+                || prerender_active
+                || syncing_audio
+                || detecting_silence
+                || bg_active
+                || stt_active
+            {
                 status_label.set_visible(true);
                 let mut parts = Vec::new();
                 if syncing_audio {
@@ -7330,6 +10810,9 @@ pub fn build_window(
                         "Removing backgrounds… {}/{}",
                         bg_progress.completed, bg_progress.total
                     ));
+                }
+                if stt_active {
+                    parts.push("Generating subtitles…".to_string());
                 }
                 status_label.set_text(&parts.join(" | "));
                 if proxy_active {
@@ -7398,11 +10881,16 @@ pub fn build_window(
         let prog_player = prog_player.clone();
         let timeline_state = timeline_state.clone();
         let preferences_state = preferences_state.clone();
+        let workspace_layouts_state = workspace_layouts_state.clone();
         let proxy_cache = proxy_cache.clone();
         let bg_removal_cache = bg_removal_cache.clone();
         let on_close_preview = on_close_preview.clone();
+        let source_marks = source_marks.clone();
         let on_source_selected = on_source_selected.clone();
         let on_project_changed = on_project_changed.clone();
+        let capture_workspace_arrangement = capture_workspace_arrangement.clone();
+        let apply_workspace_arrangement = apply_workspace_arrangement.clone();
+        let sync_workspace_layout_controls = sync_workspace_layout_controls.clone();
         let mcp_light_refresh_next = mcp_light_refresh_next.clone();
         let on_project_changed_mcp_debounced: Rc<dyn Fn()> = {
             let on_project_changed = on_project_changed.clone();
@@ -7437,25 +10925,37 @@ pub fn build_window(
         };
         let suppress_resume_on_next_reload = suppress_resume_on_next_reload.clone();
         let clear_media_browser_on_next_reload = clear_media_browser_on_next_reload.clone();
+        let stt_cache = stt_cache.clone();
+        let main_stack_for_mcp = main_stack.clone();
         let window_weak = window.downgrade();
+        let workspace_layout_pending_name_for_mcp = workspace_layout_pending_name.clone();
         MCP_MAIN_DISPATCH.with(|slot| {
             *slot.borrow_mut() = Some(Box::new(move |cmd| {
                 if let Some(win) = window_weak.upgrade() {
                     handle_mcp_command(
                         cmd,
                         &win,
+                        &main_stack_for_mcp,
                         &project,
                         &library,
                         &player,
                         &prog_player,
                         &timeline_state,
                         &preferences_state,
+                        &workspace_layouts_state,
                         &proxy_cache,
                         &bg_removal_cache,
+                        &stt_cache,
                         &on_close_preview,
+                        &source_marks,
                         &on_source_selected,
                         &on_project_changed_mcp_light,
                         &on_project_changed_mcp_full,
+                        &capture_workspace_arrangement,
+                        &apply_workspace_arrangement,
+                        &workspace_layout_pending_name_for_mcp,
+                        &sync_workspace_layout_controls,
+                        &apply_preferences_state,
                         &suppress_resume_on_next_reload,
                         &clear_media_browser_on_next_reload,
                     );
@@ -7481,11 +10981,17 @@ pub fn build_window(
     // Also creates a versioned backup in $XDG_DATA_HOME/ultimateslice/backups/.
     {
         let project = project.clone();
+        let library = library.clone();
         let window_weak = window.downgrade();
         let preferences_state = preferences_state.clone();
         glib::timeout_add_local(std::time::Duration::from_secs(60), move || {
             let is_dirty = project.borrow().dirty;
             if is_dirty {
+                // Sync bin data before autosave.
+                crate::model::media_library::sync_bins_to_project(
+                    &library.borrow(),
+                    &mut project.borrow_mut(),
+                );
                 let xml_result = {
                     let proj = project.borrow();
                     crate::fcpxml::writer::write_fcpxml(&proj)
@@ -7521,14 +11027,9 @@ pub fn build_window(
                             let proj_title = project.borrow().title.clone();
                             let title_sanitized = sanitize_backup_filename(&proj_title);
                             let ts = format_backup_timestamp();
-                            let backup_path =
-                                dir.join(format!("{title_sanitized}_{ts}.uspxml"));
+                            let backup_path = dir.join(format!("{title_sanitized}_{ts}.uspxml"));
                             let _ = std::fs::write(&backup_path, xml);
-                            prune_old_backups(
-                                &dir,
-                                &title_sanitized,
-                                prefs.backup_max_versions,
-                            );
+                            prune_old_backups(&dir, &title_sanitized, prefs.backup_max_versions);
                         }
                     }
                 }
@@ -7688,6 +11189,83 @@ pub fn build_window(
         });
         window.add_controller(key_ctrl);
     }
+    // ── Window-level Shift+P: toggle proxy playback ─────────────────────────
+    {
+        let toggle_proxy_quick = toggle_proxy_quick.clone();
+        let preferences_state = preferences_state.clone();
+        let key_ctrl = gtk4::EventControllerKey::new();
+        key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        key_ctrl.connect_key_pressed(move |ctrl, key, _, mods| {
+            use gtk4::gdk::{Key, ModifierType};
+            if !mods.contains(ModifierType::SHIFT_MASK)
+                || mods.contains(ModifierType::CONTROL_MASK)
+                || mods.contains(ModifierType::ALT_MASK)
+                || (key != Key::P && key != Key::p)
+            {
+                return glib::Propagation::Proceed;
+            }
+            if let Some(widget) = ctrl.widget() {
+                if let Some(focused) = widget.root().and_then(|r| r.focus()) {
+                    if is_text_input_focused(&focused) {
+                        return glib::Propagation::Proceed;
+                    }
+                }
+            }
+            let enabled = !preferences_state.borrow().proxy_mode.is_enabled();
+            toggle_proxy_quick(enabled);
+            glib::Propagation::Stop
+        });
+        window.add_controller(key_ctrl);
+    }
+    // ── Window-level Ctrl+Shift+T: generate subtitles for selected clip ──
+    {
+        let stt_cache = stt_cache.clone();
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let inspector_view = inspector_view.clone();
+        let key_ctrl = gtk4::EventControllerKey::new();
+        key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        key_ctrl.connect_key_pressed(move |ctrl, key, _, mods| {
+            use gtk4::gdk::{Key, ModifierType};
+            if mods.contains(ModifierType::CONTROL_MASK)
+                && mods.contains(ModifierType::SHIFT_MASK)
+                && key == Key::T
+            {
+                // Skip if a text input is focused.
+                if let Some(widget) = ctrl.widget() {
+                    if let Some(focused) = widget.root().and_then(|r| r.focus()) {
+                        if is_text_input_focused(&focused) {
+                            return glib::Propagation::Proceed;
+                        }
+                    }
+                }
+                if !stt_cache.borrow().is_available() {
+                    return glib::Propagation::Proceed;
+                }
+                let selected = timeline_state.borrow().selected_clip_id.clone();
+                if let Some(ref clip_id) = selected {
+                    let proj = project.borrow();
+                    for track in &proj.tracks {
+                        if let Some(clip) = track.clips.iter().find(|c| &c.id == clip_id) {
+                            if clip.subtitle_segments.is_empty() {
+                                stt_cache.borrow_mut().request(
+                                    &clip.source_path,
+                                    clip.source_in,
+                                    clip.source_out,
+                                    "auto",
+                                );
+                                inspector_view.stt_generating.set(true);
+                            }
+                            break;
+                        }
+                    }
+                }
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        window.add_controller(key_ctrl);
+    }
     // ── Window-level Alt+Left/Right: keyframe navigation ───────────────────
     {
         let project = project.clone();
@@ -7779,23 +11357,45 @@ pub fn build_window(
         window.add_controller(key_ctrl);
     }
 
-    if monitor_state.borrow().popped {
-        on_toggle_popout();
+    let startup_workspace_arrangement = {
+        let state = workspace_layouts_state.borrow();
+        state.current.clone()
+    };
+    let startup_workspace_layout_name = {
+        let state = workspace_layouts_state.borrow();
+        state.active_layout.clone()
+    };
+    workspace_layouts_applying.set(true);
+    {
+        let startup_workspace_restore_pending = Rc::new(Cell::new(true));
+        let apply_workspace_arrangement = apply_workspace_arrangement.clone();
+        let workspace_layout_pending_name = workspace_layout_pending_name.clone();
+        root_hpaned.connect_map(move |_| {
+            if !startup_workspace_restore_pending.replace(false) {
+                return;
+            }
+            *workspace_layout_pending_name.borrow_mut() = startup_workspace_layout_name.clone();
+            apply_workspace_arrangement(startup_workspace_arrangement.clone());
+        });
     }
 
     {
         let project = project.clone();
+        let library = library.clone();
         let on_project_changed = on_project_changed.clone();
         let proxy_cache = proxy_cache.clone();
         let preferences_state = preferences_state.clone();
         let close_approved = Rc::new(Cell::new(false));
         let close_approved_for_signal = close_approved.clone();
         window.connect_close_request(move |w| {
-            let proxy_mode_enabled = preferences_state.borrow().proxy_mode.is_enabled();
+            let preserve_sidecar_proxies = {
+                let prefs = preferences_state.borrow();
+                prefs.proxy_mode.is_enabled() && prefs.persist_proxies_next_to_original_media
+            };
             if close_approved_for_signal.get() {
                 proxy_cache
                     .borrow_mut()
-                    .cleanup_for_unload(proxy_mode_enabled);
+                    .cleanup_for_unload(preserve_sidecar_proxies);
                 return glib::Propagation::Proceed;
             }
             let close_approved_for_continue = close_approved.clone();
@@ -7804,13 +11404,13 @@ pub fn build_window(
             let weak = w.downgrade();
             let on_continue: Rc<dyn Fn()> = Rc::new(move || {
                 close_approved_for_continue.set(true);
-                let proxy_mode_enabled = preferences_state_for_continue
-                    .borrow()
-                    .proxy_mode
-                    .is_enabled();
+                let preserve_sidecar_proxies = {
+                    let prefs = preferences_state_for_continue.borrow();
+                    prefs.proxy_mode.is_enabled() && prefs.persist_proxies_next_to_original_media
+                };
                 proxy_cache_for_continue
                     .borrow_mut()
-                    .cleanup_for_unload(proxy_mode_enabled);
+                    .cleanup_for_unload(preserve_sidecar_proxies);
                 if let Some(win) = weak.upgrade() {
                     win.close();
                 }
@@ -7818,6 +11418,7 @@ pub fn build_window(
             crate::ui::toolbar::confirm_unsaved_then(
                 Some(w.clone().upcast::<gtk::Window>()),
                 project.clone(),
+                library.clone(),
                 on_project_changed.clone(),
                 on_continue,
             );
@@ -7827,17 +11428,10 @@ pub fn build_window(
 
     if let Some(path) = startup_project_path {
         let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Project, String>>(1);
-        let path_bg = path.clone();
+        let path_bg = std::path::PathBuf::from(&path);
         std::thread::spawn(move || {
-            let result = std::fs::read_to_string(&path_bg)
-                .map_err(|e| format!("Failed to read startup project file: {e}"))
-                .and_then(|xml| {
-                    crate::fcpxml::parser::parse_fcpxml_with_path(
-                        &xml,
-                        Some(std::path::Path::new(&path_bg)),
-                    )
-                    .map_err(|e| format!("FCPXML parse error: {e}"))
-                });
+            let result = crate::ui::project_loader::load_project_from_path(&path_bg)
+                .map_err(|e| format!("Failed to open startup project: {e}"));
             let _ = tx.send(result);
         });
         timeline_state.borrow_mut().loading = true;
@@ -7881,23 +11475,42 @@ pub fn build_window(
 fn handle_mcp_command(
     cmd: crate::mcp::McpCommand,
     window: &gtk::ApplicationWindow,
+    main_stack: &gtk::Stack,
     project: &Rc<RefCell<Project>>,
-    library: &Rc<RefCell<Vec<MediaItem>>>,
+    library: &Rc<RefCell<MediaLibrary>>,
     player: &Rc<RefCell<Player>>,
     prog_player: &Rc<RefCell<ProgramPlayer>>,
     timeline_state: &Rc<RefCell<TimelineState>>,
     preferences_state: &Rc<RefCell<crate::ui_state::PreferencesState>>,
+    workspace_layouts_state: &Rc<RefCell<crate::ui_state::WorkspaceLayoutsState>>,
     proxy_cache: &Rc<RefCell<crate::media::proxy_cache::ProxyCache>>,
     bg_removal_cache: &Rc<RefCell<crate::media::bg_removal_cache::BgRemovalCache>>,
+    stt_cache: &Rc<RefCell<crate::media::stt_cache::SttCache>>,
     on_close_preview: &Rc<dyn Fn()>,
+    source_marks: &Rc<RefCell<crate::model::media_library::SourceMarks>>,
     on_source_selected: &Rc<dyn Fn(String, u64)>,
     on_project_changed: &Rc<dyn Fn()>,
     on_project_changed_full: &Rc<dyn Fn()>,
+    capture_workspace_arrangement: &Rc<dyn Fn() -> crate::ui_state::WorkspaceArrangement>,
+    apply_workspace_arrangement: &Rc<dyn Fn(crate::ui_state::WorkspaceArrangement)>,
+    workspace_layout_pending_name: &Rc<RefCell<Option<String>>>,
+    sync_workspace_layout_controls: &Rc<dyn Fn()>,
+    apply_preferences_state: &Rc<dyn Fn(crate::ui_state::PreferencesState)>,
     suppress_resume_on_next_reload: &Rc<Cell<bool>>,
     clear_media_browser_on_next_reload: &Rc<Cell<bool>>,
 ) {
     use crate::mcp::McpCommand;
     use serde_json::{json, Value};
+
+    let sync_library_change = || {
+        {
+            let lib = library.borrow();
+            let mut proj = project.borrow_mut();
+            crate::model::media_library::sync_bins_to_project(&lib, &mut proj);
+            proj.dirty = true;
+        }
+        on_project_changed_full();
+    };
 
     match cmd {
         McpCommand::GetProject { reply } => {
@@ -8281,7 +11894,9 @@ fn handle_mcp_command(
                     on_project_changed();
                 }
                 Err(message) => {
-                    reply.send(serde_json::json!({"success": false, "error": message})).ok();
+                    reply
+                        .send(serde_json::json!({"success": false, "error": message}))
+                        .ok();
                 }
             }
         }
@@ -8309,7 +11924,9 @@ fn handle_mcp_command(
                     on_project_changed();
                 }
                 Err(message) => {
-                    reply.send(serde_json::json!({"success": false, "error": message})).ok();
+                    reply
+                        .send(serde_json::json!({"success": false, "error": message}))
+                        .ok();
                 }
             }
         }
@@ -8367,6 +11984,8 @@ fn handle_mcp_command(
                     "playback_priority": prefs.playback_priority.as_str(),
                     "source_playback_priority": prefs.source_playback_priority.as_str(),
                     "proxy_mode": prefs.proxy_mode.as_str(),
+                    "last_non_off_proxy_mode": prefs.remembered_proxy_mode().as_str(),
+                    "persist_proxies_next_to_original_media": prefs.persist_proxies_next_to_original_media,
                     "show_timeline_preview": prefs.show_timeline_preview,
                     "show_track_audio_levels": prefs.show_track_audio_levels,
                     "gsk_renderer": prefs.gsk_renderer.as_str(),
@@ -8374,6 +11993,9 @@ fn handle_mcp_command(
                     "experimental_preview_optimizations": prefs.experimental_preview_optimizations,
                     "realtime_preview": prefs.realtime_preview,
                     "background_prerender": prefs.background_prerender,
+                    "prerender_preset": prefs.prerender_preset.as_str(),
+                    "prerender_crf": prefs.prerender_crf,
+                    "persist_prerenders_next_to_project_file": prefs.persist_prerenders_next_to_project_file,
                     "preview_luts": prefs.preview_luts,
                     "crossfade_enabled": prefs.crossfade_enabled,
                     "crossfade_curve": prefs.crossfade_curve.as_str(),
@@ -8500,86 +12122,26 @@ fn handle_mcp_command(
 
         McpCommand::SetProxyMode { mode, reply } => {
             let parsed = crate::ui_state::ProxyMode::from_str(&mode);
-            let enabled = parsed.is_enabled();
-            let new_state = {
-                let mut prefs = preferences_state.borrow_mut();
-                prefs.proxy_mode = parsed;
-                prefs.clone()
-            };
-            crate::ui_state::save_preferences_state(&new_state);
-            proxy_cache.borrow_mut().set_sidecar_mirror_enabled(enabled);
-            prog_player.borrow_mut().set_proxy_enabled(enabled);
-            prog_player
-                .borrow_mut()
-                .set_preview_luts(new_state.preview_luts);
-            prog_player
-                .borrow_mut()
-                .set_proxy_scale_divisor(match new_state.proxy_mode {
-                    crate::ui_state::ProxyMode::QuarterRes => 4,
-                    _ => 2,
-                });
-            if enabled {
-                let scale = match new_state.proxy_mode {
-                    crate::ui_state::ProxyMode::QuarterRes => {
-                        crate::media::proxy_cache::ProxyScale::Quarter
-                    }
-                    _ => crate::media::proxy_cache::ProxyScale::Half,
-                };
-                let clip_sources: Vec<(String, Option<String>)> = {
-                    let proj = project.borrow();
-                    let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
-                    proj.tracks
-                        .iter()
-                        .flat_map(|t| t.clips.iter())
-                        .filter_map(|c| {
-                            let key = (c.source_path.clone(), c.lut_key());
-                            if seen.insert(key.clone()) {
-                                Some(key)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect()
-                };
-                {
-                    let mut cache = proxy_cache.borrow_mut();
-                    cache.invalidate_all();
-                    for (path, lut) in &clip_sources {
-                        cache.request(path, scale, lut.as_deref());
-                    }
-                }
-                let paths = proxy_cache.borrow().proxies.clone();
-                prog_player.borrow_mut().update_proxy_paths(paths);
-            } else if new_state.preview_luts {
-                let (project_w, project_h, lut_sources): (u32, u32, Vec<(String, Option<String>)>) = {
-                    let proj = project.borrow();
-                    (
-                        proj.width,
-                        proj.height,
-                        collect_unique_lut_clip_sources(&proj),
-                    )
-                };
-                {
-                    let mut cache = proxy_cache.borrow_mut();
-                    cache.invalidate_all();
-                    for (path, lut) in &lut_sources {
-                        cache.request(
-                            path,
-                            crate::media::proxy_cache::ProxyScale::Project {
-                                width: project_w,
-                                height: project_h,
-                            },
-                            lut.as_deref(),
-                        );
-                    }
-                }
-                let paths = proxy_cache.borrow().proxies.clone();
-                prog_player.borrow_mut().update_proxy_paths(paths);
-            }
+            let mut new_state = preferences_state.borrow().clone();
+            new_state.set_proxy_mode(parsed);
+            apply_preferences_state(new_state.clone());
             reply
                 .send(json!({
                     "success": true,
-                    "proxy_mode": new_state.proxy_mode.as_str()
+                    "proxy_mode": new_state.proxy_mode.as_str(),
+                    "last_non_off_proxy_mode": new_state.remembered_proxy_mode().as_str()
+                }))
+                .ok();
+        }
+
+        McpCommand::SetProxySidecarPersistence { enabled, reply } => {
+            let mut new_state = preferences_state.borrow().clone();
+            new_state.persist_proxies_next_to_original_media = enabled;
+            apply_preferences_state(new_state.clone());
+            reply
+                .send(json!({
+                    "success": true,
+                    "persist_proxies_next_to_original_media": enabled
                 }))
                 .ok();
         }
@@ -8655,13 +12217,9 @@ fn handle_mcp_command(
         }
 
         McpCommand::SetBackgroundPrerender { enabled, reply } => {
-            prog_player.borrow_mut().set_background_prerender(enabled);
-            let new_state = {
-                let mut prefs = preferences_state.borrow_mut();
-                prefs.background_prerender = enabled;
-                prefs.clone()
-            };
-            crate::ui_state::save_preferences_state(&new_state);
+            let mut new_state = preferences_state.borrow().clone();
+            new_state.background_prerender = enabled;
+            apply_preferences_state(new_state.clone());
             reply
                 .send(json!({
                     "success": true,
@@ -8670,42 +12228,71 @@ fn handle_mcp_command(
                 .ok();
         }
 
-        McpCommand::SetPreviewLuts { enabled, reply } => {
-            prog_player.borrow_mut().set_preview_luts(enabled);
+        McpCommand::SetPrerenderQuality { preset, crf, reply } => {
+            let parsed_preset = match preset.as_str() {
+                "ultrafast" => crate::ui_state::PrerenderEncodingPreset::Ultrafast,
+                "superfast" => crate::ui_state::PrerenderEncodingPreset::Superfast,
+                "veryfast" => crate::ui_state::PrerenderEncodingPreset::Veryfast,
+                "faster" => crate::ui_state::PrerenderEncodingPreset::Faster,
+                "fast" => crate::ui_state::PrerenderEncodingPreset::Fast,
+                "medium" => crate::ui_state::PrerenderEncodingPreset::Medium,
+                _ => {
+                    reply
+                        .send(json!({
+                            "success": false,
+                            "error": "preset must be one of: ultrafast, superfast, veryfast, faster, fast, medium"
+                        }))
+                        .ok();
+                    return;
+                }
+            };
+            if crf > crate::ui_state::MAX_PRERENDER_CRF {
+                reply
+                    .send(json!({
+                        "success": false,
+                        "error": format!(
+                            "crf must be between {} and {}",
+                            crate::ui_state::MIN_PRERENDER_CRF,
+                            crate::ui_state::MAX_PRERENDER_CRF
+                        )
+                    }))
+                    .ok();
+                return;
+            }
+            prog_player
+                .borrow_mut()
+                .set_prerender_quality(parsed_preset.clone(), crf);
             let new_state = {
                 let mut prefs = preferences_state.borrow_mut();
-                prefs.preview_luts = enabled;
+                prefs.set_prerender_quality(parsed_preset, crf);
                 prefs.clone()
             };
             crate::ui_state::save_preferences_state(&new_state);
-            if !new_state.proxy_mode.is_enabled() && enabled {
-                let (project_w, project_h, lut_sources): (u32, u32, Vec<(String, Option<String>)>) = {
-                    let proj = project.borrow();
-                    (
-                        proj.width,
-                        proj.height,
-                        collect_unique_lut_clip_sources(&proj),
-                    )
-                };
-                {
-                    let mut cache = proxy_cache.borrow_mut();
-                    cache.invalidate_all();
-                    for (path, lut) in &lut_sources {
-                        cache.request(
-                            path,
-                            crate::media::proxy_cache::ProxyScale::Project {
-                                width: project_w,
-                                height: project_h,
-                            },
-                            lut.as_deref(),
-                        );
-                    }
-                }
-                let paths = proxy_cache.borrow().proxies.clone();
-                prog_player.borrow_mut().update_proxy_paths(paths);
-            } else if !enabled && !new_state.proxy_mode.is_enabled() {
-                prog_player.borrow_mut().update_proxy_paths(HashMap::new());
-            }
+            reply
+                .send(json!({
+                    "success": true,
+                    "prerender_preset": new_state.prerender_preset.as_str(),
+                    "prerender_crf": new_state.prerender_crf
+                }))
+                .ok();
+        }
+
+        McpCommand::SetPrerenderProjectPersistence { enabled, reply } => {
+            let mut new_state = preferences_state.borrow().clone();
+            new_state.persist_prerenders_next_to_project_file = enabled;
+            apply_preferences_state(new_state.clone());
+            reply
+                .send(json!({
+                    "success": true,
+                    "persist_prerenders_next_to_project_file": enabled
+                }))
+                .ok();
+        }
+
+        McpCommand::SetPreviewLuts { enabled, reply } => {
+            let mut new_state = preferences_state.borrow().clone();
+            new_state.preview_luts = enabled;
+            apply_preferences_state(new_state.clone());
             reply
                 .send(json!({
                     "success": true,
@@ -8728,7 +12315,7 @@ fn handle_mcp_command(
             let source_info = {
                 let lib = library.borrow();
                 let proj = project.borrow();
-                lookup_source_placement_info(&lib, &proj, &source_path)
+                lookup_source_placement_info(&lib.items, &proj, &source_path)
             };
             let created = {
                 let mut proj = project.borrow_mut();
@@ -8752,6 +12339,7 @@ fn handle_mcp_command(
                         timeline_start_ns,
                         source_info.source_timecode_base_ns,
                         None,
+                        source_info.is_animated_svg,
                     ) {
                         created_clip_ids.push(clip.id.clone());
                         let _ = add_clip_to_track(
@@ -9004,7 +12592,11 @@ fn handle_mcp_command(
             }
         }
 
-        McpCommand::SyncClipsByAudio { clip_ids, replace_audio, reply } => {
+        McpCommand::SyncClipsByAudio {
+            clip_ids,
+            replace_audio,
+            reply,
+        } => {
             if clip_ids.len() < 2 {
                 reply
                     .send(json!({"success": false, "error": "Need at least 2 clip ids"}))
@@ -9148,8 +12740,13 @@ fn handle_mcp_command(
         } => {
             // Collect clip info from project.
             let clip_info: Option<(
-                String, u64, u64, String,  // source: path, in, out, track_id
-                String, u64, u64,          // ref: path, in, out
+                String,
+                u64,
+                u64,
+                String, // source: path, in, out, track_id
+                String,
+                u64,
+                u64, // ref: path, in, out
                 Option<crate::media::color_match::ReferenceGrading>,
             )> = {
                 let proj = project.borrow();
@@ -9166,7 +12763,9 @@ fn handle_mcp_command(
                     }
                     None
                 };
-                let ref_grading = proj.tracks.iter()
+                let ref_grading = proj
+                    .tracks
+                    .iter()
                     .flat_map(|t| t.clips.iter())
                     .find(|c| c.id == reference_clip_id)
                     .map(crate::media::color_match::ReferenceGrading::from_clip);
@@ -9178,8 +12777,16 @@ fn handle_mcp_command(
                 }
             };
 
-            let Some((src_path, src_in, src_out, src_track_id, ref_path, ref_in, ref_out, ref_grading)) =
-                clip_info
+            let Some((
+                src_path,
+                src_in,
+                src_out,
+                src_track_id,
+                ref_path,
+                ref_in,
+                ref_out,
+                ref_grading,
+            )) = clip_info
             else {
                 reply
                     .send(json!({"success": false, "error": "Could not find source and/or reference clip"}))
@@ -9608,6 +13215,100 @@ fn handle_mcp_command(
             }
         }
 
+        McpCommand::SetClipMask {
+            clip_id,
+            enabled,
+            shape,
+            center_x,
+            center_y,
+            width,
+            height,
+            rotation,
+            feather,
+            expansion,
+            invert,
+            path,
+            reply,
+        } => {
+            let mut proj = project.borrow_mut();
+            let mut found = false;
+            'outer: for track in proj.tracks.iter_mut() {
+                for clip in track.clips.iter_mut() {
+                    if clip.id == clip_id {
+                        // Create mask[0] if absent
+                        if clip.masks.is_empty() {
+                            clip.masks.push(crate::model::clip::ClipMask::new(
+                                crate::model::clip::MaskShape::Rectangle,
+                            ));
+                        }
+                        if let Some(mask) = clip.masks.first_mut() {
+                            if let Some(v) = enabled {
+                                mask.enabled = v;
+                            }
+                            if let Some(ref s) = shape {
+                                mask.shape = match s.as_str() {
+                                    "ellipse" => crate::model::clip::MaskShape::Ellipse,
+                                    "path" => crate::model::clip::MaskShape::Path,
+                                    _ => crate::model::clip::MaskShape::Rectangle,
+                                };
+                            }
+                            // Handle path data for bezier path masks
+                            if let Some(ref s) = shape {
+                                if s == "path" {
+                                    if let Some(ref path_val) = path {
+                                        if let Ok(points) = serde_json::from_value::<
+                                            Vec<crate::model::clip::BezierPoint>,
+                                        >(
+                                            path_val.clone()
+                                        ) {
+                                            mask.path =
+                                                Some(crate::model::clip::MaskPath { points });
+                                        }
+                                    }
+                                    if mask.path.is_none() {
+                                        mask.path =
+                                            Some(crate::model::clip::default_diamond_path());
+                                    }
+                                }
+                            }
+                            if let Some(v) = center_x {
+                                mask.center_x = v.clamp(0.0, 1.0);
+                            }
+                            if let Some(v) = center_y {
+                                mask.center_y = v.clamp(0.0, 1.0);
+                            }
+                            if let Some(v) = width {
+                                mask.width = v.clamp(0.01, 0.5);
+                            }
+                            if let Some(v) = height {
+                                mask.height = v.clamp(0.01, 0.5);
+                            }
+                            if let Some(v) = rotation {
+                                mask.rotation = v.clamp(-180.0, 180.0);
+                            }
+                            if let Some(v) = feather {
+                                mask.feather = v.clamp(0.0, 0.5);
+                            }
+                            if let Some(v) = expansion {
+                                mask.expansion = v.clamp(-0.5, 0.5);
+                            }
+                            if let Some(v) = invert {
+                                mask.invert = v;
+                            }
+                        }
+                        proj.dirty = true;
+                        found = true;
+                        break 'outer;
+                    }
+                }
+            }
+            drop(proj);
+            reply.send(json!({"success": found})).ok();
+            if found {
+                on_project_changed();
+            }
+        }
+
         McpCommand::SetClipBgRemoval {
             clip_id,
             enabled,
@@ -9724,9 +13425,15 @@ fn handle_mcp_command(
 
         McpCommand::SetClipEq {
             clip_id,
-            low_freq, low_gain, low_q,
-            mid_freq, mid_gain, mid_q,
-            high_freq, high_gain, high_q,
+            low_freq,
+            low_gain,
+            low_q,
+            mid_freq,
+            mid_gain,
+            mid_q,
+            high_freq,
+            high_gain,
+            high_q,
             reply,
         } => {
             let mut proj = project.borrow_mut();
@@ -9735,15 +13442,33 @@ fn handle_mcp_command(
             'eq_outer: for track in proj.tracks.iter_mut() {
                 for clip in track.clips.iter_mut() {
                     if clip.id == clip_id {
-                        if let Some(v) = low_freq { clip.eq_bands[0].freq = v.clamp(20.0, 20000.0); }
-                        if let Some(v) = low_gain { clip.eq_bands[0].gain = v.clamp(-24.0, 12.0); }
-                        if let Some(v) = low_q { clip.eq_bands[0].q = v.clamp(0.1, 10.0); }
-                        if let Some(v) = mid_freq { clip.eq_bands[1].freq = v.clamp(20.0, 20000.0); }
-                        if let Some(v) = mid_gain { clip.eq_bands[1].gain = v.clamp(-24.0, 12.0); }
-                        if let Some(v) = mid_q { clip.eq_bands[1].q = v.clamp(0.1, 10.0); }
-                        if let Some(v) = high_freq { clip.eq_bands[2].freq = v.clamp(20.0, 20000.0); }
-                        if let Some(v) = high_gain { clip.eq_bands[2].gain = v.clamp(-24.0, 12.0); }
-                        if let Some(v) = high_q { clip.eq_bands[2].q = v.clamp(0.1, 10.0); }
+                        if let Some(v) = low_freq {
+                            clip.eq_bands[0].freq = v.clamp(20.0, 20000.0);
+                        }
+                        if let Some(v) = low_gain {
+                            clip.eq_bands[0].gain = v.clamp(-24.0, 12.0);
+                        }
+                        if let Some(v) = low_q {
+                            clip.eq_bands[0].q = v.clamp(0.1, 10.0);
+                        }
+                        if let Some(v) = mid_freq {
+                            clip.eq_bands[1].freq = v.clamp(20.0, 20000.0);
+                        }
+                        if let Some(v) = mid_gain {
+                            clip.eq_bands[1].gain = v.clamp(-24.0, 12.0);
+                        }
+                        if let Some(v) = mid_q {
+                            clip.eq_bands[1].q = v.clamp(0.1, 10.0);
+                        }
+                        if let Some(v) = high_freq {
+                            clip.eq_bands[2].freq = v.clamp(20.0, 20000.0);
+                        }
+                        if let Some(v) = high_gain {
+                            clip.eq_bands[2].gain = v.clamp(-24.0, 12.0);
+                        }
+                        if let Some(v) = high_q {
+                            clip.eq_bands[2].q = v.clamp(0.1, 10.0);
+                        }
                         result_bands = clip.eq_bands;
                         proj.dirty = true;
                         found = true;
@@ -9753,7 +13478,9 @@ fn handle_mcp_command(
             }
             drop(proj);
             if found {
-                prog_player.borrow_mut().update_eq_for_clip(&clip_id, result_bands);
+                prog_player
+                    .borrow_mut()
+                    .update_eq_for_clip(&clip_id, result_bands);
             }
             reply.send(json!({
                 "success": found,
@@ -9793,21 +13520,30 @@ fn handle_mcp_command(
                 }
                 info
             };
-            if let Some((source_path, source_in, source_out, old_volume, _old_measured, _track_id)) =
-                clip_info
+            if let Some((
+                source_path,
+                source_in,
+                source_out,
+                old_volume,
+                _old_measured,
+                _track_id,
+            )) = clip_info
             {
                 // Run analysis synchronously (blocks GTK main loop for a few seconds,
                 // acceptable for MCP tool calls — same pattern as export_mp4).
                 let result = match mode.as_str() {
-                    "peak" => crate::media::export::analyze_peak_db(
-                        &source_path, source_in, source_out,
-                    )
-                    .map(|peak| {
-                        let gain = crate::media::export::compute_peak_gain(peak, target_level);
-                        (peak, gain)
-                    }),
+                    "peak" => {
+                        crate::media::export::analyze_peak_db(&source_path, source_in, source_out)
+                            .map(|peak| {
+                                let gain =
+                                    crate::media::export::compute_peak_gain(peak, target_level);
+                                (peak, gain)
+                            })
+                    }
                     _ => crate::media::export::analyze_loudness_lufs(
-                        &source_path, source_in, source_out,
+                        &source_path,
+                        source_in,
+                        source_out,
                     )
                     .map(|lufs| {
                         let gain = crate::media::export::compute_lufs_gain(lufs, target_level);
@@ -9833,24 +13569,26 @@ fn handle_mcp_command(
                             }
                             proj.dirty = true;
                         }
-                        reply.send(serde_json::json!({
-                            "success": true,
-                            "mode": mode,
-                            "measured": measured,
-                            "target": target_level,
-                            "gain_linear": gain,
-                            "old_volume": old_volume,
-                            "new_volume": new_volume,
-                        }))
-                        .ok();
+                        reply
+                            .send(serde_json::json!({
+                                "success": true,
+                                "mode": mode,
+                                "measured": measured,
+                                "target": target_level,
+                                "gain_linear": gain,
+                                "old_volume": old_volume,
+                                "new_volume": new_volume,
+                            }))
+                            .ok();
                         on_project_changed();
                     }
                     Err(e) => {
-                        reply.send(serde_json::json!({
-                            "success": false,
-                            "error": e.to_string(),
-                        }))
-                        .ok();
+                        reply
+                            .send(serde_json::json!({
+                                "success": false,
+                                "error": e.to_string(),
+                            }))
+                            .ok();
                     }
                 }
             } else {
@@ -9866,7 +13604,9 @@ fn handle_mcp_command(
             reply,
         } => {
             if duration_ns == 0 {
-                reply.send(serde_json::json!({"success": false, "error": "duration_ns must be > 0"})).ok();
+                reply
+                    .send(serde_json::json!({"success": false, "error": "duration_ns must be > 0"}))
+                    .ok();
             } else {
                 let playhead_ns = timeline_state.borrow().playhead_ns;
                 // Find or create target audio track.
@@ -9888,52 +13628,58 @@ fn handle_mcp_command(
                     }
                 };
                 if track_id.is_none() {
-                    reply.send(serde_json::json!({"success": false, "error": "Invalid track_index"})).ok();
+                    reply
+                        .send(serde_json::json!({"success": false, "error": "Invalid track_index"}))
+                        .ok();
                 } else {
-                let track_id = track_id.unwrap();
-                // Record synchronously (blocks MCP thread for duration_ns).
-                let mut rec = crate::media::voiceover::VoiceoverRecorder::new();
-                match rec.start_recording(playhead_ns, None, true) {
-                    Ok(file_path) => {
-                        let dur_ms = duration_ns / 1_000_000;
-                        std::thread::sleep(std::time::Duration::from_millis(dur_ms));
-                        match rec.stop_recording() {
-                            Ok((path, actual_dur_ns, start_ns)) => {
-                                let clip = crate::model::clip::Clip::new(
-                                    &path,
-                                    actual_dur_ns,
-                                    start_ns,
-                                    crate::model::clip::ClipKind::Audio,
-                                );
-                                let clip_id = clip.id.clone();
-                                {
-                                    let mut proj = project.borrow_mut();
-                                    if let Some(track) =
-                                        proj.tracks.iter_mut().find(|t| t.id == track_id)
+                    let track_id = track_id.unwrap();
+                    // Record synchronously (blocks MCP thread for duration_ns).
+                    let mut rec = crate::media::voiceover::VoiceoverRecorder::new();
+                    match rec.start_recording(playhead_ns, None, true) {
+                        Ok(file_path) => {
+                            let dur_ms = duration_ns / 1_000_000;
+                            std::thread::sleep(std::time::Duration::from_millis(dur_ms));
+                            match rec.stop_recording() {
+                                Ok((path, actual_dur_ns, start_ns)) => {
+                                    let clip = crate::model::clip::Clip::new(
+                                        &path,
+                                        actual_dur_ns,
+                                        start_ns,
+                                        crate::model::clip::ClipKind::Audio,
+                                    );
+                                    let clip_id = clip.id.clone();
                                     {
-                                        track.add_clip(clip);
+                                        let mut proj = project.borrow_mut();
+                                        if let Some(track) =
+                                            proj.tracks.iter_mut().find(|t| t.id == track_id)
+                                        {
+                                            track.add_clip(clip);
+                                        }
+                                        proj.dirty = true;
                                     }
-                                    proj.dirty = true;
+                                    on_project_changed();
+                                    reply
+                                        .send(serde_json::json!({
+                                            "success": true,
+                                            "clip_id": clip_id,
+                                            "file_path": path,
+                                            "duration_ns": actual_dur_ns,
+                                            "timeline_start_ns": start_ns,
+                                        }))
+                                        .ok();
                                 }
-                                on_project_changed();
-                                reply.send(serde_json::json!({
-                                    "success": true,
-                                    "clip_id": clip_id,
-                                    "file_path": path,
-                                    "duration_ns": actual_dur_ns,
-                                    "timeline_start_ns": start_ns,
-                                })).ok();
-                            }
-                            Err(e) => {
-                                reply.send(serde_json::json!({"success": false, "error": e.to_string()})).ok();
+                                Err(e) => {
+                                    reply.send(serde_json::json!({"success": false, "error": e.to_string()})).ok();
+                                }
                             }
                         }
+                        Err(e) => {
+                            reply
+                                .send(serde_json::json!({"success": false, "error": e.to_string()}))
+                                .ok();
+                        }
                     }
-                    Err(e) => {
-                        reply.send(serde_json::json!({"success": false, "error": e.to_string()})).ok();
-                    }
-                }
-            } // else (track_id found)
+                } // else (track_id found)
             }
         }
 
@@ -10025,7 +13771,8 @@ fn handle_mcp_command(
                                 (keyframe_time_ns, bezier_controls)
                             {
                                 let keyframes = clip.keyframes_for_phase1_property_mut(property);
-                                if let Some(kf) = keyframes.iter_mut().find(|kf| kf.time_ns == local_ns)
+                                if let Some(kf) =
+                                    keyframes.iter_mut().find(|kf| kf.time_ns == local_ns)
                                 {
                                     kf.bezier_controls = Some(crate::model::clip::BezierControls {
                                         x1: x1.clamp(0.0, 1.0),
@@ -10116,6 +13863,11 @@ fn handle_mcp_command(
         }
 
         McpCommand::SaveFcpxml { path, reply } => {
+            // Sync bin data before save.
+            crate::model::media_library::sync_bins_to_project(
+                &library.borrow(),
+                &mut project.borrow_mut(),
+            );
             let result = {
                 let proj = project.borrow();
                 crate::fcpxml::writer::write_fcpxml_for_path(&proj, std::path::Path::new(&path))
@@ -10137,7 +13889,63 @@ fn handle_mcp_command(
             };
         }
 
+        McpCommand::SaveEdl { path, reply } => {
+            let result = {
+                let proj = project.borrow();
+                let edl_content = crate::edl::writer::write_edl(&proj);
+                std::fs::write(&path, edl_content).map_err(|e| anyhow::anyhow!(e))
+            };
+            match result {
+                Ok(_) => {
+                    let _ = reply.send(json!({"success": true, "path": path}));
+                }
+                Err(e) => {
+                    let _ = reply.send(json!({"success": false, "error": e.to_string()}));
+                }
+            }
+        }
+
+        McpCommand::SaveOtio {
+            path,
+            path_mode,
+            reply,
+        } => {
+            let Some(path_mode) = crate::otio::writer::OtioMediaPathMode::from_str(&path_mode)
+            else {
+                let _ = reply.send(json!({
+                    "success": false,
+                    "error": "path_mode must be one of: absolute, relative"
+                }));
+                return;
+            };
+            let result = {
+                let proj = project.borrow();
+                crate::otio::writer::write_otio_to_path(
+                    &proj,
+                    std::path::Path::new(&path),
+                    path_mode,
+                )
+                .and_then(|json| std::fs::write(&path, json).map_err(|e| anyhow::anyhow!(e)))
+            };
+            match result {
+                Ok(_) => {
+                    let _ = reply.send(json!({
+                        "success": true,
+                        "path": path,
+                        "path_mode": path_mode.as_str()
+                    }));
+                }
+                Err(e) => {
+                    let _ = reply.send(json!({"success": false, "error": e.to_string()}));
+                }
+            }
+        }
+
         McpCommand::SaveProjectWithMedia { path, reply } => {
+            crate::model::media_library::sync_bins_to_project(
+                &library.borrow(),
+                &mut project.borrow_mut(),
+            );
             let result = {
                 let proj = project.borrow();
                 crate::fcpxml::writer::export_project_with_media(&proj, std::path::Path::new(&path))
@@ -10164,6 +13972,64 @@ fn handle_mcp_command(
             };
         }
 
+        McpCommand::CollectProjectFiles {
+            directory_path,
+            mode,
+            use_collected_locations_on_next_save,
+            reply,
+        } => {
+            let proj_snapshot = project.borrow().clone();
+            let library_snapshot = library.borrow().items.clone();
+            let result = crate::fcpxml::writer::collect_files_with_manifest(
+                &proj_snapshot,
+                &library_snapshot,
+                std::path::Path::new(&directory_path),
+                mode,
+                |_| {},
+            );
+            match result {
+                Ok(manifest) => {
+                    let summary = manifest.result.clone();
+                    let apply_summary = if use_collected_locations_on_next_save {
+                        apply_collected_files_manifest_to_project_state(
+                            project,
+                            library,
+                            source_marks,
+                            on_source_selected,
+                            on_project_changed_full,
+                            &manifest,
+                        )
+                    } else {
+                        crate::fcpxml::writer::ApplyCollectedFilesResult {
+                            project_media_references_updated: 0,
+                            project_lut_references_updated: 0,
+                            library_items_updated: 0,
+                        }
+                    };
+                    reply
+                        .send(json!({
+                            "success": true,
+                            "directory_path": summary.destination_dir.to_string_lossy(),
+                            "mode": mode.as_str(),
+                            "use_collected_locations_on_next_save": use_collected_locations_on_next_save,
+                            "project_paths_updated": apply_summary.updated_any(),
+                            "project_media_references_updated": apply_summary.project_media_references_updated,
+                            "project_lut_references_updated": apply_summary.project_lut_references_updated,
+                            "library_items_updated": apply_summary.library_items_updated,
+                            "media_files": summary.media_files_copied,
+                            "lut_files": summary.lut_files_copied,
+                            "total_files": summary.total_files_copied()
+                        }))
+                        .ok();
+                }
+                Err(e) => {
+                    reply
+                        .send(json!({"success": false, "error": e.to_string()}))
+                        .ok();
+                }
+            }
+        }
+
         McpCommand::OpenFcpxml { path, reply } => {
             let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Project, String>>(1);
             let path_bg = path.clone();
@@ -10182,6 +14048,7 @@ fn handle_mcp_command(
             timeline_state.borrow_mut().loading = true;
             let project = project.clone();
             let timeline_state = timeline_state.clone();
+            let main_stack = main_stack.clone();
             let on_project_changed = on_project_changed_full.clone();
             let suppress_resume_on_next_reload = suppress_resume_on_next_reload.clone();
             let clear_media_browser_on_next_reload = clear_media_browser_on_next_reload.clone();
@@ -10193,6 +14060,7 @@ fn handle_mcp_command(
                         let clip_count: usize = new_proj.tracks.iter().map(|t| t.clips.len()).sum();
                         *project.borrow_mut() = new_proj;
                         timeline_state.borrow_mut().loading = false;
+                        main_stack.set_visible_child_name("editor");
                         reply.send(json!({"success": true, "path": path, "tracks": track_count, "clips": clip_count})).ok();
                         suppress_resume_on_next_reload.set(true);
                         clear_media_browser_on_next_reload.set(true);
@@ -10214,6 +14082,60 @@ fn handle_mcp_command(
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         timeline_state.borrow_mut().loading = false;
                         reply.send(json!({"success": false, "error": "open_fcpxml worker disconnected"})).ok();
+                        glib::ControlFlow::Break
+                    }
+                }
+            });
+        }
+
+        McpCommand::OpenOtio { path, reply } => {
+            let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Project, String>>(1);
+            let path_bg = std::path::PathBuf::from(&path);
+            std::thread::spawn(move || {
+                let result = crate::ui::project_loader::load_project_from_path(&path_bg);
+                let _ = tx.send(result);
+            });
+            timeline_state.borrow_mut().loading = true;
+            let project = project.clone();
+            let timeline_state = timeline_state.clone();
+            let main_stack = main_stack.clone();
+            let on_project_changed = on_project_changed_full.clone();
+            let suppress_resume_on_next_reload = suppress_resume_on_next_reload.clone();
+            let clear_media_browser_on_next_reload = clear_media_browser_on_next_reload.clone();
+            glib::timeout_add_local(std::time::Duration::from_millis(10), move || {
+                match rx.try_recv() {
+                    Ok(Ok(mut new_proj)) => {
+                        new_proj.file_path = Some(path.clone());
+                        let track_count = new_proj.tracks.len();
+                        let clip_count: usize = new_proj.tracks.iter().map(|t| t.clips.len()).sum();
+                        *project.borrow_mut() = new_proj;
+                        timeline_state.borrow_mut().loading = false;
+                        main_stack.set_visible_child_name("editor");
+                        reply.send(json!({"success": true, "path": path, "tracks": track_count, "clips": clip_count})).ok();
+                        suppress_resume_on_next_reload.set(true);
+                        clear_media_browser_on_next_reload.set(true);
+                        let on_project_changed = on_project_changed.clone();
+                        glib::timeout_add_local_once(
+                            std::time::Duration::from_millis(0),
+                            move || {
+                                on_project_changed();
+                            },
+                        );
+                        glib::ControlFlow::Break
+                    }
+                    Ok(Err(e)) => {
+                        timeline_state.borrow_mut().loading = false;
+                        reply.send(json!({"success": false, "error": e})).ok();
+                        glib::ControlFlow::Break
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        timeline_state.borrow_mut().loading = false;
+                        reply
+                            .send(
+                                json!({"success": false, "error": "open_otio worker disconnected"}),
+                            )
+                            .ok();
                         glib::ControlFlow::Break
                     }
                 }
@@ -10280,6 +14202,7 @@ fn handle_mcp_command(
                             crate::media::export::Container::Mov => "mov",
                             crate::media::export::Container::WebM => "webm",
                             crate::media::export::Container::Mkv => "mkv",
+                            crate::media::export::Container::Gif => "gif",
                         },
                         "output_width": options.output_width,
                         "output_height": options.output_height,
@@ -10328,9 +14251,10 @@ fn handle_mcp_command(
                 "mov" => crate::media::export::Container::Mov,
                 "webm" => crate::media::export::Container::WebM,
                 "mkv" => crate::media::export::Container::Mkv,
+                "gif" => crate::media::export::Container::Gif,
                 _ => {
                     reply
-                        .send(json!({"success": false, "error": "container must be one of: mp4, mov, webm, mkv"}))
+                        .send(json!({"success": false, "error": "container must be one of: mp4, mov, webm, mkv, gif"}))
                         .ok();
                     return;
                 }
@@ -10361,6 +14285,7 @@ fn handle_mcp_command(
                 crf,
                 audio_codec,
                 audio_bitrate_kbps,
+                gif_fps: None,
             };
             let mut state = crate::ui_state::load_export_presets_state();
             match state.upsert_preset(crate::ui_state::ExportPreset::from_export_options(
@@ -10386,6 +14311,108 @@ fn handle_mcp_command(
                 crate::ui_state::save_export_presets_state(&state);
             }
             reply.send(json!({"success": removed, "name": name})).ok();
+        }
+
+        McpCommand::ListWorkspaceLayouts { reply } => {
+            let state = workspace_layouts_state.borrow().clone();
+            let current = serde_json::to_value(&state.current).unwrap_or(json!(null));
+            let layouts = serde_json::to_value(&state.layouts).unwrap_or(json!([]));
+            reply
+                .send(json!({
+                    "current": current,
+                    "layouts": layouts,
+                    "active_layout": state.active_layout
+                }))
+                .ok();
+        }
+
+        McpCommand::SaveWorkspaceLayout { name, reply } => {
+            let arrangement = capture_workspace_arrangement();
+            let result = {
+                let mut state = workspace_layouts_state.borrow_mut();
+                state.set_current_arrangement(arrangement.clone());
+                state.upsert_layout(crate::ui_state::WorkspaceLayout { name, arrangement })
+            };
+            match result {
+                Ok(()) => {
+                    let state = workspace_layouts_state.borrow();
+                    crate::ui_state::save_workspace_layouts_state(&state);
+                    drop(state);
+                    sync_workspace_layout_controls();
+                    reply
+                        .send(json!({
+                            "success": true,
+                            "name": workspace_layouts_state.borrow().active_layout.clone()
+                        }))
+                        .ok();
+                }
+                Err(error) => {
+                    reply.send(json!({"success": false, "error": error})).ok();
+                }
+            }
+        }
+
+        McpCommand::ApplyWorkspaceLayout { name, reply } => {
+            let arrangement = {
+                let state = workspace_layouts_state.borrow();
+                state
+                    .get_layout(&name)
+                    .map(|layout| layout.arrangement.clone())
+            };
+            let Some(arrangement) = arrangement else {
+                reply
+                    .send(json!({"success": false, "error": format!("Workspace layout not found: {name}")}))
+                    .ok();
+                return;
+            };
+            *workspace_layout_pending_name.borrow_mut() = Some(name.clone());
+            apply_workspace_arrangement(arrangement);
+            reply.send(json!({"success": true, "name": name})).ok();
+        }
+
+        McpCommand::RenameWorkspaceLayout {
+            old_name,
+            new_name,
+            reply,
+        } => {
+            let result = {
+                let mut state = workspace_layouts_state.borrow_mut();
+                state.rename_layout(&old_name, &new_name)
+            };
+            match result {
+                Ok(saved_name) => {
+                    let state = workspace_layouts_state.borrow();
+                    crate::ui_state::save_workspace_layouts_state(&state);
+                    drop(state);
+                    sync_workspace_layout_controls();
+                    reply
+                        .send(json!({"success": true, "name": saved_name}))
+                        .ok();
+                }
+                Err(error) => {
+                    reply.send(json!({"success": false, "error": error})).ok();
+                }
+            }
+        }
+
+        McpCommand::DeleteWorkspaceLayout { name, reply } => {
+            let deleted = {
+                let mut state = workspace_layouts_state.borrow_mut();
+                state.delete_layout(&name)
+            };
+            if deleted {
+                let state = workspace_layouts_state.borrow();
+                crate::ui_state::save_workspace_layouts_state(&state);
+                drop(state);
+                sync_workspace_layout_controls();
+            }
+            reply.send(json!({"success": deleted, "name": name})).ok();
+        }
+
+        McpCommand::ResetWorkspaceLayout { reply } => {
+            *workspace_layout_pending_name.borrow_mut() = None;
+            apply_workspace_arrangement(crate::ui_state::WorkspaceArrangement::default());
+            reply.send(json!({"success": true})).ok();
         }
 
         McpCommand::ExportWithPreset {
@@ -10442,18 +14469,53 @@ fn handle_mcp_command(
         }
 
         McpCommand::ListLibrary { reply } => {
+            fn library_clip_kind_id(kind: &ClipKind) -> &'static str {
+                match kind {
+                    ClipKind::Video => "video",
+                    ClipKind::Audio => "audio",
+                    ClipKind::Image => "image",
+                    ClipKind::Title => "title",
+                    ClipKind::Adjustment => "adjustment",
+                    ClipKind::Compound => "compound",
+                    ClipKind::Multicam => "multicam",
+                }
+            }
+
             let lib = library.borrow();
             let items: Vec<_> = lib
+                .items
                 .iter()
                 .map(|item| {
                     json!({
+                        "id":          item.id,
+                        "library_key": item.library_key(),
                         "label":       item.label,
                         "source_path": item.source_path,
                         "duration_ns": item.duration_ns,
                         "duration_s":  item.duration_ns as f64 / 1_000_000_000.0,
                         "is_audio_only": item.is_audio_only,
                         "has_audio": item.has_audio,
+                        "is_image": item.is_image,
+                        "is_animated_svg": item.is_animated_svg,
+                        "video_width": item.video_width,
+                        "video_height": item.video_height,
+                        "frame_rate_num": item.frame_rate_num,
+                        "frame_rate_den": item.frame_rate_den,
+                        "codec_summary": item.codec_summary,
+                        "file_size_bytes": item.file_size_bytes,
+                        "clip_kind": item.clip_kind.as_ref().map(library_clip_kind_id),
+                        "title_text": item.title_text,
                         "is_missing": item.is_missing,
+                        "bin_id": item.bin_id,
+                        "rating": media_rating_id(item.rating),
+                        "keyword_ranges": item.keyword_ranges.iter().map(|range| json!({
+                            "id": range.id,
+                            "label": range.label,
+                            "start_ns": range.start_ns,
+                            "end_ns": range.end_ns,
+                            "start_s": range.start_ns as f64 / 1_000_000_000.0,
+                            "end_s": range.end_ns as f64 / 1_000_000_000.0,
+                        })).collect::<Vec<_>>(),
                     })
                 })
                 .collect();
@@ -10461,27 +14523,34 @@ fn handle_mcp_command(
         }
 
         McpCommand::ImportMedia { path, reply } => {
-            let uri = format!("file://{path}");
-            let metadata = crate::ui::media_browser::probe_media_metadata(&uri);
+            let metadata = crate::media::probe_cache::probe_media_metadata(&path);
             let duration_ns = metadata.duration_ns.unwrap_or(10 * 1_000_000_000);
             let audio_only = metadata.is_audio_only;
             let has_audio = metadata.has_audio;
-            let source_timecode_base_ns = {
+            let source_timecode_base_ns = metadata.source_timecode_base_ns.or_else(|| {
                 let lib = library.borrow();
                 let proj = project.borrow();
-                lookup_source_timecode_base_ns(&lib, &proj, &path)
-            };
+                lookup_source_timecode_base_ns(&lib.items, &proj, &path)
+            });
             let mut item = MediaItem::new(path.clone(), duration_ns);
             item.is_audio_only = audio_only;
             item.has_audio = has_audio;
             item.source_timecode_base_ns = source_timecode_base_ns;
+            item.is_image = metadata.is_image;
+            item.is_animated_svg = metadata.is_animated_svg;
+            item.video_width = metadata.video_width;
+            item.video_height = metadata.video_height;
+            item.frame_rate_num = metadata.frame_rate_num;
+            item.frame_rate_den = metadata.frame_rate_den;
+            item.codec_summary = metadata.codec_summary.clone();
+            item.file_size_bytes = metadata.file_size_bytes;
             let label = item.label.clone();
-            library.borrow_mut().push(item);
+            library.borrow_mut().items.push(item);
             {
                 let proj = project.borrow();
                 let mut lib = library.borrow_mut();
                 let mut st = timeline_state.borrow_mut();
-                refresh_media_availability_state(&proj, lib.as_mut_slice(), &mut st);
+                refresh_media_availability_state(&proj, lib.items.as_mut_slice(), &mut st);
             }
             reply
                 .send(json!({
@@ -10491,9 +14560,16 @@ fn handle_mcp_command(
                     "is_audio_only": audio_only,
                     "has_audio": has_audio,
                     "source_timecode_base_ns": source_timecode_base_ns,
+                    "video_width": metadata.video_width,
+                    "video_height": metadata.video_height,
+                    "frame_rate_num": metadata.frame_rate_num,
+                    "frame_rate_den": metadata.frame_rate_den,
+                    "codec_summary": metadata.codec_summary,
+                    "file_size_bytes": metadata.file_size_bytes,
                     "is_missing": !crate::model::media_library::source_path_exists(&path)
                 }))
                 .ok();
+            sync_library_change();
         }
 
         McpCommand::RelinkMedia { root_path, reply } => {
@@ -10507,13 +14583,13 @@ fn handle_mcp_command(
             let summary = {
                 let mut proj = project.borrow_mut();
                 let mut lib = library.borrow_mut();
-                relink_missing_media_under_root(&mut proj, lib.as_mut_slice(), &root)
+                relink_missing_media_under_root(&mut proj, lib.items.as_mut_slice(), &root)
             };
             {
                 let proj = project.borrow();
                 let mut lib = library.borrow_mut();
                 let mut st = timeline_state.borrow_mut();
-                refresh_media_availability_state(&proj, lib.as_mut_slice(), &mut st);
+                refresh_media_availability_state(&proj, lib.items.as_mut_slice(), &mut st);
             }
             reply
                 .send(json!({
@@ -10530,8 +14606,480 @@ fn handle_mcp_command(
                 }))
                 .ok();
             if summary.updated_clip_count > 0 || summary.updated_library_count > 0 {
-                on_project_changed_full();
+                sync_library_change();
             }
+        }
+
+        McpCommand::CreateBin {
+            name,
+            parent_id,
+            reply,
+        } => {
+            use crate::model::media_library::MediaBin;
+            let mut lib = library.borrow_mut();
+            // Enforce max depth of 2
+            if let Some(ref pid) = parent_id {
+                let parent_depth = lib
+                    .bins
+                    .iter()
+                    .find(|b| &b.id == pid)
+                    .map(|b| b.depth(&lib.bins))
+                    .unwrap_or(0);
+                if parent_depth >= 2 {
+                    reply
+                        .send(json!({"error": "Maximum bin nesting depth (2) reached"}))
+                        .ok();
+                    return;
+                }
+                if !lib.bins.iter().any(|b| &b.id == pid) {
+                    reply.send(json!({"error": "Parent bin not found"})).ok();
+                    return;
+                }
+            }
+            let bin = MediaBin::new(&name, parent_id.clone());
+            let id = bin.id.clone();
+            lib.bins.push(bin);
+            drop(lib);
+            reply
+                .send(json!({"success": true, "id": id, "name": name, "parent_id": parent_id}))
+                .ok();
+            sync_library_change();
+        }
+
+        McpCommand::DeleteBin { bin_id, reply } => {
+            let mut lib = library.borrow_mut();
+            let bin = lib.bins.iter().find(|b| b.id == bin_id);
+            if bin.is_none() {
+                reply.send(json!({"error": "Bin not found"})).ok();
+                return;
+            }
+            let parent_id = bin.unwrap().parent_id.clone();
+            // Move items to parent/root
+            for item in lib.items.iter_mut() {
+                if item.bin_id.as_deref() == Some(&bin_id) {
+                    item.bin_id = parent_id.clone();
+                }
+            }
+            // Reparent child bins
+            let child_ids: Vec<String> = lib
+                .bins
+                .iter()
+                .filter(|b| b.parent_id.as_deref() == Some(&bin_id))
+                .map(|b| b.id.clone())
+                .collect();
+            for cid in child_ids {
+                if let Some(cb) = lib.bins.iter_mut().find(|b| b.id == cid) {
+                    cb.parent_id = parent_id.clone();
+                }
+            }
+            lib.bins.retain(|b| b.id != bin_id);
+            drop(lib);
+            reply.send(json!({"success": true})).ok();
+            sync_library_change();
+        }
+
+        McpCommand::RenameBin {
+            bin_id,
+            name,
+            reply,
+        } => {
+            let mut lib = library.borrow_mut();
+            if let Some(bin) = lib.bins.iter_mut().find(|b| b.id == bin_id) {
+                bin.name = name.clone();
+                drop(lib);
+                reply
+                    .send(json!({"success": true, "bin_id": bin_id, "name": name}))
+                    .ok();
+                sync_library_change();
+            } else {
+                reply.send(json!({"error": "Bin not found"})).ok();
+            }
+        }
+
+        McpCommand::ListBins { reply } => {
+            let lib = library.borrow();
+            let bins: Vec<_> = lib
+                .bins
+                .iter()
+                .map(|b| {
+                    let item_count = lib
+                        .items
+                        .iter()
+                        .filter(|i| i.bin_id.as_deref() == Some(&b.id))
+                        .count();
+                    json!({
+                        "id": b.id,
+                        "name": b.name,
+                        "parent_id": b.parent_id,
+                        "item_count": item_count,
+                    })
+                })
+                .collect();
+            reply.send(json!(bins)).ok();
+        }
+
+        McpCommand::MoveToBin {
+            source_paths,
+            bin_id,
+            reply,
+        } => {
+            let mut lib = library.borrow_mut();
+            // Validate bin exists if specified
+            if let Some(ref bid) = bin_id {
+                if !lib.bins.iter().any(|b| &b.id == bid) {
+                    reply.send(json!({"error": "Target bin not found"})).ok();
+                    return;
+                }
+            }
+            let mut moved = 0usize;
+            for item in lib.items.iter_mut() {
+                if source_paths.contains(&item.source_path) {
+                    item.bin_id = bin_id.clone();
+                    moved += 1;
+                }
+            }
+            drop(lib);
+            reply
+                .send(json!({"success": true, "moved_count": moved}))
+                .ok();
+            sync_library_change();
+        }
+
+        McpCommand::ListCollections { reply } => {
+            let lib = library.borrow();
+            let collections: Vec<_> = lib
+                .collections
+                .iter()
+                .map(|collection| {
+                    json!({
+                        "id": collection.id,
+                        "name": collection.name,
+                        "criteria": {
+                            "search_text": collection.criteria.search_text,
+                            "kind": media_kind_filter_id(collection.criteria.kind),
+                            "resolution": resolution_filter_id(collection.criteria.resolution),
+                            "frame_rate": frame_rate_filter_id(collection.criteria.frame_rate),
+                            "rating": media_rating_filter_id(collection.criteria.rating),
+                        },
+                        "item_count": lib.items_in_collection(&collection.id).len(),
+                    })
+                })
+                .collect();
+            reply.send(json!(collections)).ok();
+        }
+
+        McpCommand::CreateCollection {
+            name,
+            search_text,
+            kind,
+            resolution,
+            frame_rate,
+            rating,
+            reply,
+        } => {
+            let criteria = match collection_criteria_from_mcp(
+                search_text,
+                kind,
+                resolution,
+                frame_rate,
+                rating,
+            ) {
+                Ok(criteria) => criteria,
+                Err(error) => {
+                    reply.send(json!({"error": error})).ok();
+                    return;
+                }
+            };
+            let mut lib = library.borrow_mut();
+            let collection = MediaCollection::new(name.clone(), criteria);
+            let id = collection.id.clone();
+            lib.collections.push(collection);
+            drop(lib);
+            reply
+                .send(json!({"success": true, "id": id, "name": name}))
+                .ok();
+            sync_library_change();
+        }
+
+        McpCommand::UpdateCollection {
+            collection_id,
+            name,
+            search_text,
+            kind,
+            resolution,
+            frame_rate,
+            rating,
+            reply,
+        } => {
+            let mut lib = library.borrow_mut();
+            let Some(collection) = lib
+                .collections
+                .iter_mut()
+                .find(|collection| collection.id == collection_id)
+            else {
+                reply.send(json!({"error": "Collection not found"})).ok();
+                return;
+            };
+            if let Some(name) = name {
+                let trimmed = name.trim();
+                if trimmed.is_empty() {
+                    reply
+                        .send(json!({"error": "Collection name cannot be empty"}))
+                        .ok();
+                    return;
+                }
+                collection.name = trimmed.to_string();
+            }
+            let mut criteria = collection.criteria.clone();
+            if let Some(search_text) = search_text {
+                criteria.search_text = search_text;
+            }
+            if let Some(kind) = kind {
+                let Some(parsed) = parse_media_kind_filter(Some(kind.as_str())) else {
+                    reply.send(json!({"error": "invalid kind filter"})).ok();
+                    return;
+                };
+                criteria.kind = parsed;
+            }
+            if let Some(resolution) = resolution {
+                let Some(parsed) = parse_resolution_filter(Some(resolution.as_str())) else {
+                    reply
+                        .send(json!({"error": "invalid resolution filter"}))
+                        .ok();
+                    return;
+                };
+                criteria.resolution = parsed;
+            }
+            if let Some(frame_rate) = frame_rate {
+                let Some(parsed) = parse_frame_rate_filter(Some(frame_rate.as_str())) else {
+                    reply
+                        .send(json!({"error": "invalid frame_rate filter"}))
+                        .ok();
+                    return;
+                };
+                criteria.frame_rate = parsed;
+            }
+            if let Some(rating) = rating {
+                let Some(parsed) = parse_media_rating_filter(Some(rating.as_str())) else {
+                    reply.send(json!({"error": "invalid rating filter"})).ok();
+                    return;
+                };
+                criteria.rating = parsed;
+            }
+            collection.criteria = criteria;
+            let name = collection.name.clone();
+            drop(lib);
+            reply
+                .send(json!({"success": true, "collection_id": collection_id, "name": name}))
+                .ok();
+            sync_library_change();
+        }
+
+        McpCommand::DeleteCollection {
+            collection_id,
+            reply,
+        } => {
+            let mut lib = library.borrow_mut();
+            let initial_len = lib.collections.len();
+            lib.collections
+                .retain(|collection| collection.id != collection_id);
+            if lib.collections.len() == initial_len {
+                reply.send(json!({"error": "Collection not found"})).ok();
+                return;
+            }
+            drop(lib);
+            reply.send(json!({"success": true})).ok();
+            sync_library_change();
+        }
+
+        McpCommand::SetMediaRating {
+            library_key,
+            rating,
+            reply,
+        } => {
+            let parsed_rating = match rating.as_str() {
+                "none" => MediaRating::None,
+                "favorite" => MediaRating::Favorite,
+                "reject" => MediaRating::Reject,
+                _ => {
+                    reply
+                        .send(json!({"success": false, "error": "rating must be one of: none, favorite, reject"}))
+                        .ok();
+                    return;
+                }
+            };
+            let updated = {
+                let mut lib = library.borrow_mut();
+                lib.items
+                    .iter_mut()
+                    .find(|item| item.matches_library_key(&library_key))
+                    .map(|item| {
+                        item.rating = parsed_rating;
+                    })
+                    .is_some()
+            };
+            if !updated {
+                reply
+                    .send(json!({"success": false, "error": "Library item not found"}))
+                    .ok();
+                return;
+            }
+            reply
+                .send(json!({
+                    "success": true,
+                    "library_key": library_key,
+                    "rating": media_rating_id(parsed_rating),
+                }))
+                .ok();
+            sync_library_change();
+        }
+
+        McpCommand::AddMediaKeywordRange {
+            library_key,
+            label,
+            start_ns,
+            end_ns,
+            reply,
+        } => {
+            let trimmed_label = label.trim().to_string();
+            if trimmed_label.is_empty() {
+                reply
+                    .send(json!({"success": false, "error": "label cannot be empty"}))
+                    .ok();
+                return;
+            }
+            if end_ns <= start_ns {
+                reply
+                    .send(
+                        json!({"success": false, "error": "end_ns must be greater than start_ns"}),
+                    )
+                    .ok();
+                return;
+            }
+            let added_range = {
+                let mut lib = library.borrow_mut();
+                lib.items
+                    .iter_mut()
+                    .find(|item| item.matches_library_key(&library_key))
+                    .map(|item| {
+                        let range = MediaKeywordRange::new(trimmed_label.clone(), start_ns, end_ns);
+                        item.keyword_ranges.push(range.clone());
+                        range
+                    })
+            };
+            let Some(added_range) = added_range else {
+                reply
+                    .send(json!({"success": false, "error": "Library item not found"}))
+                    .ok();
+                return;
+            };
+            reply
+                .send(json!({
+                    "success": true,
+                    "library_key": library_key,
+                    "range": {
+                        "id": added_range.id,
+                        "label": added_range.label,
+                        "start_ns": added_range.start_ns,
+                        "end_ns": added_range.end_ns,
+                    }
+                }))
+                .ok();
+            sync_library_change();
+        }
+
+        McpCommand::UpdateMediaKeywordRange {
+            library_key,
+            range_id,
+            label,
+            start_ns,
+            end_ns,
+            reply,
+        } => {
+            let trimmed_label = label.trim().to_string();
+            if trimmed_label.is_empty() {
+                reply
+                    .send(json!({"success": false, "error": "label cannot be empty"}))
+                    .ok();
+                return;
+            }
+            if end_ns <= start_ns {
+                reply
+                    .send(
+                        json!({"success": false, "error": "end_ns must be greater than start_ns"}),
+                    )
+                    .ok();
+                return;
+            }
+            let updated = {
+                let mut lib = library.borrow_mut();
+                lib.items
+                    .iter_mut()
+                    .find(|item| item.matches_library_key(&library_key))
+                    .and_then(|item| {
+                        item.keyword_ranges
+                            .iter_mut()
+                            .find(|range| range.id == range_id)
+                    })
+                    .map(|range| {
+                        range.label = trimmed_label.clone();
+                        range.start_ns = start_ns;
+                        range.end_ns = end_ns;
+                    })
+                    .is_some()
+            };
+            if !updated {
+                reply
+                    .send(json!({"success": false, "error": "Keyword range not found"}))
+                    .ok();
+                return;
+            }
+            reply
+                .send(json!({
+                    "success": true,
+                    "library_key": library_key,
+                    "range_id": range_id,
+                    "label": trimmed_label,
+                    "start_ns": start_ns,
+                    "end_ns": end_ns,
+                }))
+                .ok();
+            sync_library_change();
+        }
+
+        McpCommand::DeleteMediaKeywordRange {
+            library_key,
+            range_id,
+            reply,
+        } => {
+            let deleted = {
+                let mut lib = library.borrow_mut();
+                if let Some(item) = lib
+                    .items
+                    .iter_mut()
+                    .find(|item| item.matches_library_key(&library_key))
+                {
+                    let before = item.keyword_ranges.len();
+                    item.keyword_ranges.retain(|range| range.id != range_id);
+                    item.keyword_ranges.len() != before
+                } else {
+                    false
+                }
+            };
+            if !deleted {
+                reply
+                    .send(json!({"success": false, "error": "Keyword range not found"}))
+                    .ok();
+                return;
+            }
+            reply
+                .send(json!({
+                    "success": true,
+                    "library_key": library_key,
+                    "range_id": range_id,
+                }))
+                .ok();
+            sync_library_change();
         }
 
         McpCommand::ReorderTrack {
@@ -10656,6 +15204,7 @@ fn handle_mcp_command(
                 st.selected_track_id = None;
                 st.history = crate::undo::EditHistory::new();
             }
+            main_stack.set_visible_child_name("editor");
             reply.send(json!({"success": true, "title": title})).ok();
             suppress_resume_on_next_reload.set(true);
             clear_media_browser_on_next_reload.set(true);
@@ -10684,7 +15233,7 @@ fn handle_mcp_command(
             let source_info = {
                 let lib = library.borrow();
                 let proj = project.borrow();
-                lookup_source_placement_info(&lib, &proj, &source_path)
+                lookup_source_placement_info(&lib.items, &proj, &source_path)
             };
             let result = {
                 let mut proj = project.borrow_mut();
@@ -10706,6 +15255,7 @@ fn handle_mcp_command(
                     playhead,
                     source_info.source_timecode_base_ns,
                     None,
+                    source_info.is_animated_svg,
                 ) {
                     created_clip_ids.push(clip.id.clone());
                     track_changes.push(insert_clip_at_playhead_on_track(
@@ -10791,7 +15341,7 @@ fn handle_mcp_command(
             let source_info = {
                 let lib = library.borrow();
                 let proj = project.borrow();
-                lookup_source_placement_info(&lib, &proj, &source_path)
+                lookup_source_placement_info(&lib.items, &proj, &source_path)
             };
             let result = {
                 let mut proj = project.borrow_mut();
@@ -10813,6 +15363,7 @@ fn handle_mcp_command(
                     playhead,
                     source_info.source_timecode_base_ns,
                     None,
+                    source_info.is_animated_svg,
                 ) {
                     created_clip_ids.push(clip.id.clone());
                     track_changes.push(overwrite_clip_range_on_track(
@@ -11019,19 +15570,29 @@ fn handle_mcp_command(
         McpCommand::SelectLibraryItem { path, reply } => {
             let item = library
                 .borrow()
+                .items
                 .iter()
                 .find(|i| i.source_path == path)
                 .cloned();
             match item {
                 Some(media_item) => {
-                    on_source_selected(media_item.source_path.clone(), media_item.duration_ns);
-                    reply
-                        .send(json!({
-                            "ok": true,
-                            "label": media_item.label,
-                            "duration_ns": media_item.duration_ns,
-                        }))
-                        .ok();
+                    if media_item.has_backing_file() {
+                        on_source_selected(media_item.source_path.clone(), media_item.duration_ns);
+                        reply
+                            .send(json!({
+                                "ok": true,
+                                "label": media_item.label,
+                                "duration_ns": media_item.duration_ns,
+                            }))
+                            .ok();
+                    } else {
+                        reply
+                            .send(json!({
+                                "ok": false,
+                                "error": "Library item has no source media to preview",
+                            }))
+                            .ok();
+                    }
                 }
                 None => {
                     reply
@@ -11082,7 +15643,9 @@ fn handle_mcp_command(
                     match clip_info {
                         None => {
                             reply
-                                .send(json!({"ok": false, "error": format!("Clip not found: {cid}")}))
+                                .send(
+                                    json!({"ok": false, "error": format!("Clip not found: {cid}")}),
+                                )
                                 .ok();
                         }
                         Some((source_path, source_in, source_out, timeline_start)) => {
@@ -11093,14 +15656,16 @@ fn handle_mcp_command(
                             } else {
                                 let duration_ns = library
                                     .borrow()
+                                    .items
                                     .iter()
                                     .find(|item| item.source_path == source_path)
                                     .map(|item| item.duration_ns)
                                     .unwrap_or(source_out);
                                 on_source_selected(source_path.clone(), duration_ns);
-                                let source_pos = (source_in + playhead_ns.saturating_sub(timeline_start))
-                                    .min(source_out)
-                                    .max(source_in);
+                                let source_pos = (source_in
+                                    + playhead_ns.saturating_sub(timeline_start))
+                                .min(source_out)
+                                .max(source_in);
                                 let _ = player.borrow().seek(source_pos);
                                 reply
                                     .send(json!({
@@ -11209,7 +15774,9 @@ fn handle_mcp_command(
                     })
                 })
                 .collect();
-            reply.send(json!({"plugins": plugins, "count": plugins.len()})).ok();
+            reply
+                .send(json!({"plugins": plugins, "count": plugins.len()}))
+                .ok();
         }
 
         McpCommand::ListClipFrei0rEffects { clip_id, reply } => {
@@ -11385,8 +15952,7 @@ fn handle_mcp_command(
                         // Build new order from effect_ids.
                         let mut reordered = Vec::with_capacity(effect_ids.len());
                         for eid in &effect_ids {
-                            if let Some(pos) =
-                                clip.frei0r_effects.iter().position(|e| &e.id == eid)
+                            if let Some(pos) = clip.frei0r_effects.iter().position(|e| &e.id == eid)
                             {
                                 reordered.push(clip.frei0r_effects[pos].clone());
                             }
@@ -11421,7 +15987,9 @@ fn handle_mcp_command(
         } => {
             let template = crate::ui::title_templates::find_template(&template_id);
             if template.is_none() {
-                reply.send(json!({"error": format!("Unknown template: {template_id}")})).ok();
+                reply
+                    .send(json!({"error": format!("Unknown template: {template_id}")}))
+                    .ok();
             } else {
                 let template = template.unwrap();
                 let playhead = timeline_state.borrow().playhead_ns;
@@ -11437,12 +16005,18 @@ fn handle_mcp_command(
                 let clip_id = clip.id.clone();
                 let mut proj = project.borrow_mut();
                 let ti = track_index.unwrap_or_else(|| {
-                    proj.tracks.iter().position(|t| t.kind == TrackKind::Video).unwrap_or(0)
+                    proj.tracks
+                        .iter()
+                        .position(|t| t.kind == TrackKind::Video)
+                        .unwrap_or(0)
                 });
                 if ti < proj.tracks.len() {
                     let magnetic_mode = timeline_state.borrow().magnetic_mode;
                     let change = insert_clip_at_playhead_on_track(
-                        &mut proj.tracks[ti], clip, start, magnetic_mode,
+                        &mut proj.tracks[ti],
+                        clip,
+                        start,
+                        magnetic_mode,
                     );
                     let cmd = crate::undo::SetTrackClipsCommand {
                         track_id: change.track_id,
@@ -11460,7 +16034,9 @@ fn handle_mcp_command(
                     reply.send(json!({"clip_id": clip_id})).ok();
                 } else {
                     drop(proj);
-                    reply.send(json!({"error": "track_index out of range"})).ok();
+                    reply
+                        .send(json!({"error": "track_index out of range"}))
+                        .ok();
                 }
             }
         }
@@ -11477,10 +16053,7 @@ fn handle_mcp_command(
             if track_index < proj_ref.tracks.len() {
                 let track_id = proj_ref.tracks[track_index].id.clone();
                 drop(proj_ref);
-                let cmd = crate::undo::AddAdjustmentLayerCommand {
-                    clip,
-                    track_id,
-                };
+                let cmd = crate::undo::AddAdjustmentLayerCommand { clip, track_id };
                 {
                     let mut st = timeline_state.borrow_mut();
                     let mut proj = project.borrow_mut();
@@ -11490,7 +16063,9 @@ fn handle_mcp_command(
                 reply.send(json!({"clip_id": clip_id})).ok();
             } else {
                 drop(proj_ref);
-                reply.send(json!({"error": "track_index out of range"})).ok();
+                reply
+                    .send(json!({"error": "track_index out of range"}))
+                    .ok();
             }
         }
 
@@ -11515,26 +16090,60 @@ fn handle_mcp_command(
             reply,
         } => {
             let mut proj = project.borrow_mut();
-            let found = if let Some(clip) = proj.tracks.iter_mut()
+            let found = if let Some(clip) = proj
+                .tracks
+                .iter_mut()
                 .flat_map(|t| t.clips.iter_mut())
                 .find(|c| c.id == clip_id)
             {
-                if let Some(v) = title_text { clip.title_text = v; }
-                if let Some(v) = title_font { clip.title_font = v; }
-                if let Some(v) = title_color { clip.title_color = v; }
-                if let Some(v) = title_x { clip.title_x = v; }
-                if let Some(v) = title_y { clip.title_y = v; }
-                if let Some(v) = title_outline_width { clip.title_outline_width = v; }
-                if let Some(v) = title_outline_color { clip.title_outline_color = v; }
-                if let Some(v) = title_shadow { clip.title_shadow = v; }
-                if let Some(v) = title_shadow_color { clip.title_shadow_color = v; }
-                if let Some(v) = title_shadow_offset_x { clip.title_shadow_offset_x = v; }
-                if let Some(v) = title_shadow_offset_y { clip.title_shadow_offset_y = v; }
-                if let Some(v) = title_bg_box { clip.title_bg_box = v; }
-                if let Some(v) = title_bg_box_color { clip.title_bg_box_color = v; }
-                if let Some(v) = title_bg_box_padding { clip.title_bg_box_padding = v; }
-                if let Some(v) = title_clip_bg_color { clip.title_clip_bg_color = v; }
-                if let Some(v) = title_secondary_text { clip.title_secondary_text = v; }
+                if let Some(v) = title_text {
+                    clip.title_text = v;
+                }
+                if let Some(v) = title_font {
+                    clip.title_font = v;
+                }
+                if let Some(v) = title_color {
+                    clip.title_color = v;
+                }
+                if let Some(v) = title_x {
+                    clip.title_x = v;
+                }
+                if let Some(v) = title_y {
+                    clip.title_y = v;
+                }
+                if let Some(v) = title_outline_width {
+                    clip.title_outline_width = v;
+                }
+                if let Some(v) = title_outline_color {
+                    clip.title_outline_color = v;
+                }
+                if let Some(v) = title_shadow {
+                    clip.title_shadow = v;
+                }
+                if let Some(v) = title_shadow_color {
+                    clip.title_shadow_color = v;
+                }
+                if let Some(v) = title_shadow_offset_x {
+                    clip.title_shadow_offset_x = v;
+                }
+                if let Some(v) = title_shadow_offset_y {
+                    clip.title_shadow_offset_y = v;
+                }
+                if let Some(v) = title_bg_box {
+                    clip.title_bg_box = v;
+                }
+                if let Some(v) = title_bg_box_color {
+                    clip.title_bg_box_color = v;
+                }
+                if let Some(v) = title_bg_box_padding {
+                    clip.title_bg_box_padding = v;
+                }
+                if let Some(v) = title_clip_bg_color {
+                    clip.title_clip_bg_color = v;
+                }
+                if let Some(v) = title_secondary_text {
+                    clip.title_secondary_text = v;
+                }
                 proj.dirty = true;
                 true
             } else {
@@ -11543,20 +16152,23 @@ fn handle_mcp_command(
             // Lightweight live update: read the final clip values while we
             // still hold borrow_mut, then drop the borrow and push to player.
             let title_vals = if found {
-                proj.tracks.iter()
+                proj.tracks
+                    .iter()
                     .flat_map(|t| t.clips.iter())
                     .find(|c| c.id == clip_id)
-                    .map(|clip| (
-                        clip.title_text.clone(),
-                        clip.title_font.clone(),
-                        clip.title_color,
-                        clip.title_x,
-                        clip.title_y,
-                        clip.title_outline_width,
-                        clip.title_outline_color,
-                        clip.title_shadow,
-                        clip.title_bg_box,
-                    ))
+                    .map(|clip| {
+                        (
+                            clip.title_text.clone(),
+                            clip.title_font.clone(),
+                            clip.title_color,
+                            clip.title_x,
+                            clip.title_y,
+                            clip.title_outline_width,
+                            clip.title_outline_color,
+                            clip.title_shadow,
+                            clip.title_bg_box,
+                        )
+                    })
             } else {
                 None
             };
@@ -11568,6 +16180,676 @@ fn handle_mcp_command(
                 pp.flush_compositor_for_title_update();
             }
             reply.send(json!({"success": found})).ok();
+        }
+        McpCommand::AddToExportQueue {
+            output_path,
+            preset_name,
+            reply,
+        } => {
+            if output_path.is_empty() {
+                reply
+                    .send(json!({"success": false, "error": "output_path is required"}))
+                    .ok();
+                return;
+            }
+            let preset = if let Some(name) = preset_name {
+                let state = crate::ui_state::load_export_presets_state();
+                if let Some(p) = state
+                    .presets
+                    .iter()
+                    .find(|p| p.name.eq_ignore_ascii_case(&name))
+                {
+                    p.clone()
+                } else {
+                    reply.send(json!({"success": false, "error": format!("preset '{name}' not found")})).ok();
+                    return;
+                }
+            } else {
+                let state = crate::ui_state::load_export_presets_state();
+                let last = state.last_used_preset.clone();
+                state
+                    .presets
+                    .into_iter()
+                    .find(|p| Some(&p.name) == last.as_ref())
+                    .or_else(|| {
+                        let defaults = crate::ui_state::load_export_presets_state().presets;
+                        defaults.into_iter().next()
+                    })
+                    .unwrap_or_else(|| crate::ui_state::ExportPreset {
+                        name: "default".to_string(),
+                        video_codec: crate::ui_state::ExportVideoCodec::H264,
+                        container: crate::ui_state::ExportContainer::Mp4,
+                        output_width: 1920,
+                        output_height: 1080,
+                        crf: 23,
+                        audio_codec: crate::ui_state::ExportAudioCodec::Aac,
+                        audio_bitrate_kbps: 192,
+                        gif_fps: None,
+                    })
+            };
+            let job = crate::ui_state::ExportQueueJob::new(&output_path, preset);
+            let job_id = job.id.clone();
+            let job_label = job.label.clone();
+            let mut queue = crate::ui_state::load_export_queue_state();
+            queue.jobs.push(job);
+            crate::ui_state::save_export_queue_state(&queue);
+            reply
+                .send(json!({"success": true, "id": job_id, "label": job_label}))
+                .ok();
+        }
+        McpCommand::ListExportQueue { reply } => {
+            let queue = crate::ui_state::load_export_queue_state();
+            let jobs: Vec<serde_json::Value> = queue
+                .jobs
+                .iter()
+                .map(|j| {
+                    json!({
+                        "id": j.id,
+                        "label": j.label,
+                        "output_path": j.output_path,
+                        "status": format!("{:?}", j.status).to_lowercase(),
+                        "error": j.error
+                    })
+                })
+                .collect();
+            let count = jobs.len();
+            reply.send(json!({"jobs": jobs, "count": count})).ok();
+        }
+        McpCommand::ClearExportQueue {
+            status_filter,
+            reply,
+        } => {
+            let mut queue = crate::ui_state::load_export_queue_state();
+            let filter = status_filter.as_deref().unwrap_or("all");
+            let before = queue.jobs.len();
+            queue.jobs.retain(|j| match filter {
+                "done" => j.status != crate::ui_state::ExportQueueJobStatus::Done,
+                "error" => j.status != crate::ui_state::ExportQueueJobStatus::Error,
+                _ => false, // "all" removes everything, so retain nothing
+            });
+            crate::ui_state::save_export_queue_state(&queue);
+            let removed = before - queue.jobs.len();
+            reply
+                .send(json!({"success": true, "removed": removed}))
+                .ok();
+        }
+        McpCommand::RunExportQueue { reply } => {
+            let queue = crate::ui_state::load_export_queue_state();
+            let pending: Vec<crate::ui_state::ExportQueueJob> = queue
+                .jobs
+                .iter()
+                .filter(|j| j.status == crate::ui_state::ExportQueueJobStatus::Pending)
+                .cloned()
+                .collect();
+            if pending.is_empty() {
+                reply
+                    .send(json!({"success": true, "message": "No pending jobs.", "results": []}))
+                    .ok();
+                return;
+            }
+            let proj_snapshot = project.borrow().clone();
+            let bg_paths = bg_removal_cache.borrow().paths.clone();
+            std::thread::spawn(move || {
+                let mut results = vec![];
+                for job in &pending {
+                    {
+                        let mut q = crate::ui_state::load_export_queue_state();
+                        if let Some(j) = q.jobs.iter_mut().find(|j| j.id == job.id) {
+                            j.status = crate::ui_state::ExportQueueJobStatus::Running;
+                        }
+                        crate::ui_state::save_export_queue_state(&q);
+                    }
+                    let opts = job.options.to_export_options();
+                    let (ptx, _prx) =
+                        std::sync::mpsc::channel::<crate::media::export::ExportProgress>();
+                    let export_result = crate::media::export::export_project(
+                        &proj_snapshot,
+                        &job.output_path,
+                        opts,
+                        None,
+                        &bg_paths,
+                        ptx,
+                    );
+                    let (new_status, err_msg) = match export_result {
+                        Ok(()) => (crate::ui_state::ExportQueueJobStatus::Done, None),
+                        Err(e) => (
+                            crate::ui_state::ExportQueueJobStatus::Error,
+                            Some(e.to_string()),
+                        ),
+                    };
+                    {
+                        let mut q = crate::ui_state::load_export_queue_state();
+                        if let Some(j) = q.jobs.iter_mut().find(|j| j.id == job.id) {
+                            j.status = new_status.clone();
+                            j.error = err_msg.clone();
+                        }
+                        crate::ui_state::save_export_queue_state(&q);
+                    }
+                    results.push(json!({
+                        "id": job.id,
+                        "label": job.label,
+                        "output_path": job.output_path,
+                        "status": format!("{:?}", new_status).to_lowercase(),
+                        "error": err_msg
+                    }));
+                }
+                reply
+                    .send(json!({"success": true, "results": results}))
+                    .ok();
+            });
+        }
+        McpCommand::CreateCompoundClip { clip_ids, reply } => {
+            if clip_ids.len() < 2 {
+                reply
+                    .send(json!({"error": "At least 2 clip IDs required"}))
+                    .ok();
+                return;
+            }
+            // Select the specified clips in the timeline state, then create compound
+            {
+                let mut st = timeline_state.borrow_mut();
+                st.set_selected_clip_ids(clip_ids.iter().cloned().collect());
+                let changed = st.create_compound_from_selection();
+                let proj_cb = st.on_project_changed.clone();
+                drop(st);
+                if changed {
+                    if let Some(cb) = proj_cb {
+                        cb();
+                    }
+                    // Find the compound clip ID (most recently added compound clip)
+                    let proj = project.borrow();
+                    let compound_id = proj
+                        .tracks
+                        .iter()
+                        .flat_map(|t| t.clips.iter())
+                        .find(|c| c.is_compound())
+                        .map(|c| c.id.clone())
+                        .unwrap_or_default();
+                    reply
+                        .send(json!({"success": true, "compound_clip_id": compound_id}))
+                        .ok();
+                } else {
+                    reply
+                        .send(json!({"error": "Failed to create compound clip"}))
+                        .ok();
+                }
+            }
+        }
+        McpCommand::BreakApartCompoundClip { clip_id, reply } => {
+            let mut st = timeline_state.borrow_mut();
+            st.set_selected_clip_ids([clip_id.clone()].into_iter().collect());
+            let changed = st.break_apart_compound();
+            let proj_cb = st.on_project_changed.clone();
+            drop(st);
+            if changed {
+                if let Some(cb) = proj_cb {
+                    cb();
+                }
+                reply.send(json!({"success": true})).ok();
+            } else {
+                reply
+                    .send(json!({"error": "Failed to break apart compound clip (not a compound clip or not found)"}))
+                    .ok();
+            }
+        }
+        McpCommand::CreateMulticamClip { clip_ids, reply } => {
+            if clip_ids.len() < 2 {
+                reply
+                    .send(json!({"error": "At least 2 clip IDs required"}))
+                    .ok();
+                return;
+            }
+            // Collect clip info for audio sync
+            let clip_infos: Vec<(String, String, u64, u64, u64, String)> = {
+                let proj = project.borrow();
+                clip_ids
+                    .iter()
+                    .filter_map(|id| {
+                        proj.tracks
+                            .iter()
+                            .flat_map(|t| t.clips.iter().map(move |c| (t.id.clone(), c)))
+                            .find(|(_, c)| &c.id == id)
+                            .map(|(track_id, c)| {
+                                (
+                                    c.id.clone(),
+                                    c.source_path.clone(),
+                                    c.source_in,
+                                    c.source_out,
+                                    c.timeline_start,
+                                    track_id,
+                                )
+                            })
+                    })
+                    .collect()
+            };
+            if clip_infos.len() < 2 {
+                reply
+                    .send(json!({"error": "Could not find 2+ clips with the provided IDs"}))
+                    .ok();
+                return;
+            }
+            // Run audio sync synchronously (MCP is blocking)
+            let sync_clips: Vec<(String, String, u64, u64)> = clip_infos
+                .iter()
+                .map(|(id, path, src_in, src_out, _, _)| {
+                    (id.clone(), path.clone(), *src_in, *src_out)
+                })
+                .collect();
+            let sync_results = crate::media::audio_sync::sync_clips_by_audio(&sync_clips);
+            let anchor_id = clip_infos[0].0.clone();
+            let anchor_start = clip_infos[0].4;
+            // Build multicam angles from sync results
+            let mut angles: Vec<crate::model::clip::MulticamAngle> = Vec::new();
+            for (i, (id, path, src_in, src_out, _tl_start, _track_id)) in
+                clip_infos.iter().enumerate()
+            {
+                let offset_ns = if *id == anchor_id {
+                    0i64
+                } else {
+                    sync_results
+                        .iter()
+                        .find(|r| r.clip_id == *id)
+                        .map(|r| r.offset_ns)
+                        .unwrap_or(0)
+                };
+                let label = format!("Angle {}", i + 1);
+                let synced_in = (*src_in as i64 + offset_ns).max(0) as u64;
+                let synced_out = *src_out;
+                angles.push(crate::model::clip::MulticamAngle {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    label,
+                    source_path: path.clone(),
+                    source_in: synced_in,
+                    source_out: synced_out,
+                    sync_offset_ns: offset_ns,
+                    source_timecode_base_ns: None,
+                    media_duration_ns: None,
+                    volume: if i == 0 { 1.0 } else { 0.0 },
+                    muted: i != 0,
+                });
+            }
+            if angles.len() >= 2 {
+                let multicam = crate::model::clip::Clip::new_multicam(anchor_start, angles);
+                let multicam_id = multicam.id.clone();
+                let selected_ids: std::collections::HashSet<String> =
+                    clip_infos.iter().map(|(id, ..)| id.clone()).collect();
+                let mut proj = project.borrow_mut();
+                let mut changes = Vec::new();
+                let mut placement_track_id: Option<String> = None;
+                for track in &proj.tracks {
+                    if track.clips.iter().any(|c| selected_ids.contains(&c.id)) {
+                        let old_clips = track.clips.clone();
+                        let mut new_clips: Vec<crate::model::clip::Clip> = track
+                            .clips
+                            .iter()
+                            .filter(|c| !selected_ids.contains(&c.id))
+                            .cloned()
+                            .collect();
+                        if placement_track_id.is_none() {
+                            new_clips.push(multicam.clone());
+                            new_clips.sort_by_key(|c| c.timeline_start);
+                            placement_track_id = Some(track.id.clone());
+                        }
+                        changes.push(crate::undo::TrackClipsChange {
+                            track_id: track.id.clone(),
+                            old_clips,
+                            new_clips,
+                        });
+                    }
+                }
+                let cmd = Box::new(crate::undo::SetMultipleTracksClipsCommand {
+                    changes,
+                    label: "Create Multicam Clip".to_string(),
+                });
+                {
+                    let mut st = timeline_state.borrow_mut();
+                    st.history.execute(cmd, &mut proj);
+                }
+                drop(proj);
+                on_project_changed();
+                reply
+                    .send(json!({"success": true, "multicam_clip_id": multicam_id}))
+                    .ok();
+            } else {
+                reply
+                    .send(json!({"error": "Failed to create multicam clip (audio sync produced fewer than 2 angles)"}))
+                    .ok();
+            }
+        }
+        McpCommand::AddAngleSwitch {
+            clip_id,
+            position_ns,
+            angle_index,
+            reply,
+        } => {
+            let mut proj = project.borrow_mut();
+            let clip = proj
+                .tracks
+                .iter_mut()
+                .flat_map(|t| t.clips.iter_mut())
+                .find(|c| c.id == clip_id);
+            if let Some(clip) = clip {
+                if clip.kind != crate::model::clip::ClipKind::Multicam {
+                    reply
+                        .send(json!({"error": "Clip is not a multicam clip"}))
+                        .ok();
+                } else {
+                    let num_angles = clip.multicam_angles.as_ref().map(|a| a.len()).unwrap_or(0);
+                    if angle_index >= num_angles {
+                        reply
+                            .send(json!({"error": format!("angle_index {} out of range (clip has {} angles)", angle_index, num_angles)}))
+                            .ok();
+                    } else {
+                        clip.insert_angle_switch(position_ns, angle_index);
+                        drop(proj);
+                        on_project_changed();
+                        reply.send(json!({"success": true})).ok();
+                    }
+                }
+            } else {
+                reply
+                    .send(json!({"error": format!("Clip not found: {clip_id}")}))
+                    .ok();
+            }
+        }
+        McpCommand::ListMulticamAngles { clip_id, reply } => {
+            let proj = project.borrow();
+            let clip = proj
+                .tracks
+                .iter()
+                .flat_map(|t| t.clips.iter())
+                .find(|c| c.id == clip_id);
+            if let Some(clip) = clip {
+                if clip.kind != crate::model::clip::ClipKind::Multicam {
+                    reply
+                        .send(json!({"error": "Clip is not a multicam clip"}))
+                        .ok();
+                } else {
+                    let angles: Vec<serde_json::Value> = clip
+                        .multicam_angles
+                        .as_ref()
+                        .map(|a| {
+                            a.iter()
+                                .enumerate()
+                                .map(|(i, angle)| {
+                                    json!({
+                                        "index": i,
+                                        "id": angle.id,
+                                        "label": angle.label,
+                                        "source_path": angle.source_path,
+                                        "source_in": angle.source_in,
+                                        "source_out": angle.source_out,
+                                        "sync_offset_ns": angle.sync_offset_ns,
+                                        "volume": angle.volume,
+                                        "muted": angle.muted,
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let switches: Vec<serde_json::Value> = clip
+                        .multicam_switches
+                        .as_ref()
+                        .map(|s| {
+                            s.iter()
+                                .map(|sw| {
+                                    json!({
+                                        "position_ns": sw.position_ns,
+                                        "angle_index": sw.angle_index,
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    reply
+                        .send(json!({
+                            "clip_id": clip_id,
+                            "angles": angles,
+                            "switches": switches,
+                        }))
+                        .ok();
+                }
+            } else {
+                reply
+                    .send(json!({"error": format!("Clip not found: {clip_id}")}))
+                    .ok();
+            }
+        }
+        McpCommand::SetMulticamAngleAudio {
+            clip_id,
+            angle_index,
+            volume,
+            muted,
+            reply,
+        } => {
+            let mut proj = project.borrow_mut();
+            if let Some(clip) = proj.clip_mut(&clip_id) {
+                if !clip.is_multicam() {
+                    reply
+                        .send(json!({"error": "Clip is not a multicam clip"}))
+                        .ok();
+                    return;
+                }
+                if let Some(ref mut angles) = clip.multicam_angles {
+                    if angle_index >= angles.len() {
+                        reply.send(json!({"error": format!("Angle index {} out of range (0..{})", angle_index, angles.len())})).ok();
+                        return;
+                    }
+                    if let Some(v) = volume {
+                        angles[angle_index].volume = v.clamp(0.0, 2.0);
+                    }
+                    if let Some(m) = muted {
+                        angles[angle_index].muted = m;
+                    }
+                    proj.dirty = true;
+                    drop(proj);
+                    on_project_changed();
+                    reply.send(json!({"success": true})).ok();
+                } else {
+                    reply
+                        .send(json!({"error": "Multicam clip has no angles"}))
+                        .ok();
+                }
+            } else {
+                reply
+                    .send(json!({"error": format!("Clip not found: {clip_id}")}))
+                    .ok();
+            }
+        }
+        // ── Subtitle / STT commands ────────────────────────────────────────
+        McpCommand::GenerateSubtitles {
+            clip_id,
+            language,
+            reply,
+        } => {
+            let proj = project.borrow();
+            let clip_info = proj
+                .tracks
+                .iter()
+                .flat_map(|t| t.clips.iter())
+                .find(|c| c.id == clip_id)
+                .map(|c| (c.source_path.clone(), c.source_in, c.source_out));
+            drop(proj);
+            if let Some((source_path, source_in, source_out)) = clip_info {
+                stt_cache
+                    .borrow_mut()
+                    .request(&source_path, source_in, source_out, &language);
+                reply
+                    .send(json!({"success": true, "status": "queued"}))
+                    .ok();
+            } else {
+                reply
+                    .send(json!({"error": format!("Clip not found: {clip_id}")}))
+                    .ok();
+            }
+        }
+        McpCommand::GetClipSubtitles { clip_id, reply } => {
+            let proj = project.borrow();
+            if let Some(clip) = proj
+                .tracks
+                .iter()
+                .flat_map(|t| t.clips.iter())
+                .find(|c| c.id == clip_id)
+            {
+                reply
+                    .send(json!({
+                        "clip_id": clip_id,
+                        "language": &clip.subtitles_language,
+                        "segments": clip.subtitle_segments.iter().map(|s| json!({
+                            "id": s.id,
+                            "start_ns": s.start_ns,
+                            "end_ns": s.end_ns,
+                            "text": s.text,
+                            "words": s.words.iter().map(|w| json!({
+                                "start_ns": w.start_ns,
+                                "end_ns": w.end_ns,
+                                "text": w.text,
+                            })).collect::<Vec<_>>(),
+                        })).collect::<Vec<_>>(),
+                    }))
+                    .ok();
+            } else {
+                reply
+                    .send(json!({"error": format!("Clip not found: {clip_id}")}))
+                    .ok();
+            }
+        }
+        McpCommand::EditSubtitleText {
+            clip_id,
+            segment_id,
+            text,
+            reply,
+        } => {
+            let mut proj = project.borrow_mut();
+            if let Some(clip) = proj.clip_mut(&clip_id) {
+                if let Some(seg) = clip
+                    .subtitle_segments
+                    .iter_mut()
+                    .find(|s| s.id == segment_id)
+                {
+                    seg.text = text;
+                    proj.dirty = true;
+                    drop(proj);
+                    on_project_changed();
+                    reply.send(json!({"success": true})).ok();
+                } else {
+                    reply
+                        .send(json!({"error": format!("Segment not found: {segment_id}")}))
+                        .ok();
+                }
+            } else {
+                reply
+                    .send(json!({"error": format!("Clip not found: {clip_id}")}))
+                    .ok();
+            }
+        }
+        McpCommand::EditSubtitleTiming {
+            clip_id,
+            segment_id,
+            start_ns,
+            end_ns,
+            reply,
+        } => {
+            let mut proj = project.borrow_mut();
+            if let Some(clip) = proj.clip_mut(&clip_id) {
+                if let Some(seg) = clip
+                    .subtitle_segments
+                    .iter_mut()
+                    .find(|s| s.id == segment_id)
+                {
+                    seg.start_ns = start_ns;
+                    seg.end_ns = end_ns;
+                    proj.dirty = true;
+                    drop(proj);
+                    on_project_changed();
+                    reply.send(json!({"success": true})).ok();
+                } else {
+                    reply
+                        .send(json!({"error": format!("Segment not found: {segment_id}")}))
+                        .ok();
+                }
+            } else {
+                reply
+                    .send(json!({"error": format!("Clip not found: {clip_id}")}))
+                    .ok();
+            }
+        }
+        McpCommand::ClearSubtitles { clip_id, reply } => {
+            let mut proj = project.borrow_mut();
+            if let Some(clip) = proj.clip_mut(&clip_id) {
+                clip.subtitle_segments.clear();
+                proj.dirty = true;
+                drop(proj);
+                on_project_changed();
+                reply.send(json!({"success": true})).ok();
+            } else {
+                reply
+                    .send(json!({"error": format!("Clip not found: {clip_id}")}))
+                    .ok();
+            }
+        }
+        McpCommand::SetSubtitleStyle {
+            clip_id,
+            font,
+            color,
+            outline_color,
+            outline_width,
+            bg_box,
+            bg_box_color,
+            highlight_mode,
+            highlight_color,
+            reply,
+        } => {
+            let mut proj = project.borrow_mut();
+            if let Some(clip) = proj.clip_mut(&clip_id) {
+                if let Some(f) = font {
+                    clip.subtitle_font = f;
+                }
+                if let Some(c) = color {
+                    clip.subtitle_color = c;
+                }
+                if let Some(c) = outline_color {
+                    clip.subtitle_outline_color = c;
+                }
+                if let Some(w) = outline_width {
+                    clip.subtitle_outline_width = w;
+                }
+                if let Some(b) = bg_box {
+                    clip.subtitle_bg_box = b;
+                }
+                if let Some(c) = bg_box_color {
+                    clip.subtitle_bg_box_color = c;
+                }
+                if let Some(mode) = highlight_mode {
+                    clip.subtitle_highlight_mode = match mode.as_str() {
+                        "bold" => crate::model::clip::SubtitleHighlightMode::Bold,
+                        "color" => crate::model::clip::SubtitleHighlightMode::Color,
+                        "underline" => crate::model::clip::SubtitleHighlightMode::Underline,
+                        "stroke" => crate::model::clip::SubtitleHighlightMode::Stroke,
+                        _ => crate::model::clip::SubtitleHighlightMode::None,
+                    };
+                }
+                if let Some(c) = highlight_color {
+                    clip.subtitle_highlight_color = c;
+                }
+                proj.dirty = true;
+                drop(proj);
+                on_project_changed();
+                reply.send(json!({"success": true})).ok();
+            } else {
+                reply
+                    .send(json!({"error": format!("Clip not found: {clip_id}")}))
+                    .ok();
+            }
+        }
+        McpCommand::ExportSrt { path, reply } => {
+            let proj = project.borrow();
+            match crate::media::export::export_srt(&proj, &path) {
+                Ok(()) => reply.send(json!({"success": true, "path": path})).ok(),
+                Err(e) => reply
+                    .send(json!({"error": format!("SRT export failed: {e}")}))
+                    .ok(),
+            };
         }
     }
 }

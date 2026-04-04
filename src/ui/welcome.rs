@@ -87,10 +87,7 @@ pub fn build_welcome_panel(
                 .and_then(|m| m.modified())
                 .ok()
                 .and_then(|t| {
-                    let secs = t
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .ok()?
-                        .as_secs();
+                    let secs = t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
                     let days = secs / 86400;
                     let (y, m, d) = crate::ui::window::days_to_ymd(days);
                     Some(format!("{y:04}-{m:02}-{d:02}"))

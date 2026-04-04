@@ -563,6 +563,28 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_clip_mask",
+            "description": "Set shape mask on a clip (rectangle, ellipse, or bezier path) to restrict visible area. Creates mask if absent.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id":   { "type": "string",  "description": "Clip id" },
+                    "enabled":   { "type": "boolean", "description": "Enable/disable mask" },
+                    "shape":     { "type": "string",  "enum": ["rectangle", "ellipse", "path"], "description": "Mask shape type" },
+                    "center_x":  { "type": "number",  "description": "Mask center X (0.0-1.0, default 0.5)" },
+                    "center_y":  { "type": "number",  "description": "Mask center Y (0.0-1.0, default 0.5)" },
+                    "width":     { "type": "number",  "description": "Mask half-width (0.01-0.5, default 0.25)" },
+                    "height":    { "type": "number",  "description": "Mask half-height (0.01-0.5, default 0.25)" },
+                    "rotation":  { "type": "number",  "description": "Mask rotation in degrees (-180 to 180)" },
+                    "feather":   { "type": "number",  "description": "Edge feather (0.0-0.5, default 0.0)" },
+                    "expansion": { "type": "number",  "description": "Expand/contract mask (-0.5 to 0.5)" },
+                    "invert":    { "type": "boolean", "description": "Invert mask (show outside, hide inside)" },
+                    "path":      { "type": "array",   "description": "Bezier path points (for shape='path'). Each: {x, y, handle_in_x, handle_in_y, handle_out_x, handle_out_y}", "items": {"type": "object"} }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
             "name": "set_project_title",
             "description": "Rename the project.",
             "inputSchema": {
@@ -585,6 +607,33 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "save_edl",
+            "description": "Export timeline to CMX 3600 EDL (.edl) file for color grading handoff and broadcast",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path for output .edl file" }
+                },
+                "required": ["path"]
+            }
+        },
+        {
+            "name": "save_otio",
+            "description": "Export the current project to an OpenTimelineIO (.otio) JSON file for interchange with DaVinci Resolve, Premiere, Nuke, etc.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path for the output .otio file." },
+                    "path_mode": {
+                        "type": "string",
+                        "enum": ["absolute", "relative"],
+                        "description": "How media references are written inside the OTIO file. Defaults to absolute. Relative paths are resolved against the exported .otio file location."
+                    }
+                },
+                "required": ["path"]
+            }
+        },
+        {
             "name": "save_project_with_media",
             "description": "Export a packaged project: write .uspxml plus copy all timeline-used media into a sibling ProjectName.Library directory, with XML media paths rewritten to the packaged copies.",
             "inputSchema": {
@@ -596,12 +645,43 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "collect_project_files",
+            "description": "Copy referenced project media into a destination directory for archival or transfer, without writing project XML. Supports timeline-used-only or entire-library collection modes and also copies clip LUT files that exist on disk.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "directory_path": { "type": "string", "description": "Absolute path of the destination directory for collected files." },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["timeline_used", "entire_library"],
+                        "description": "Collection scope. Defaults to timeline_used."
+                    },
+                    "use_collected_locations_on_next_save": {
+                        "type": "boolean",
+                        "description": "When true, update the in-memory project to point at the collected media and LUT files so the next project save/export writes those collected paths."
+                    }
+                },
+                "required": ["directory_path"]
+            }
+        },
+        {
             "name": "open_fcpxml",
             "description": "Load a project from a Final Cut Pro XML (.fcpxml) file (supports versions up to 1.14), replacing the current project.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Absolute path to the .fcpxml file to open." }
+                },
+                "required": ["path"]
+            }
+        },
+        {
+            "name": "open_otio",
+            "description": "Load a project from an OpenTimelineIO (.otio) JSON file, replacing the current project.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path to the .otio file to open." }
                 },
                 "required": ["path"]
             }
@@ -652,6 +732,61 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "list_workspace_layouts",
+            "description": "List saved workspace layouts plus the current arrangement state from local UI state.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "save_workspace_layout",
+            "description": "Create or overwrite a named workspace layout using the current window arrangement.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Workspace layout name." }
+                },
+                "required": ["name"]
+            }
+        },
+        {
+            "name": "apply_workspace_layout",
+            "description": "Apply a saved named workspace layout to the current window.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Saved workspace layout name." }
+                },
+                "required": ["name"]
+            }
+        },
+        {
+            "name": "rename_workspace_layout",
+            "description": "Rename a saved workspace layout.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "old_name": { "type": "string", "description": "Existing workspace layout name." },
+                    "new_name": { "type": "string", "description": "New workspace layout name." }
+                },
+                "required": ["old_name", "new_name"]
+            }
+        },
+        {
+            "name": "delete_workspace_layout",
+            "description": "Delete a saved workspace layout by name.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Saved workspace layout name." }
+                },
+                "required": ["name"]
+            }
+        },
+        {
+            "name": "reset_workspace_layout",
+            "description": "Restore the built-in default workspace arrangement in the current window.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
             "name": "export_with_preset",
             "description": "Export the current project to a path using a named saved export preset.",
             "inputSchema": {
@@ -665,7 +800,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "list_library",
-            "description": "List all items currently in the media library (imported but not necessarily on the timeline).",
+            "description": "List all items currently in the media library, including stable library keys plus resolved browser metadata such as duration, codec, resolution, frame rate, file size, rating, keyword ranges, and non-file clip kind/title text when available.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -688,6 +823,167 @@ fn tools_list() -> Value {
                     "root_path": { "type": "string", "description": "Absolute folder path to scan for replacement media files." }
                 },
                 "required": ["root_path"]
+            }
+        },
+        {
+            "name": "create_bin",
+            "description": "Create a media library bin (folder) for organizing media items",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name for the new bin" },
+                    "parent_id": { "type": "string", "description": "Parent bin ID for nesting (omit for root-level bin)" }
+                },
+                "required": ["name"]
+            }
+        },
+        {
+            "name": "delete_bin",
+            "description": "Delete a media library bin; items and child bins are moved to the parent (or root)",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "bin_id": { "type": "string", "description": "ID of the bin to delete" }
+                },
+                "required": ["bin_id"]
+            }
+        },
+        {
+            "name": "rename_bin",
+            "description": "Rename a media library bin",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "bin_id": { "type": "string", "description": "ID of the bin to rename" },
+                    "name": { "type": "string", "description": "New name for the bin" }
+                },
+                "required": ["bin_id", "name"]
+            }
+        },
+        {
+            "name": "list_bins",
+            "description": "List all media library bins with hierarchy and item counts",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        },
+        {
+            "name": "move_to_bin",
+            "description": "Move media items to a bin (or root if bin_id is null/omitted)",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source_paths": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Source paths of media items to move"
+                    },
+                    "bin_id": { "type": "string", "description": "Target bin ID, or omit/null to move to root" }
+                },
+                "required": ["source_paths"]
+            }
+        },
+        {
+            "name": "list_collections",
+            "description": "List saved smart collections and their metadata filter criteria.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "create_collection",
+            "description": "Create a project-wide smart collection from saved media-browser filters.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Collection name." },
+                    "search_text": { "type": "string", "description": "Optional text match against clip name, title text, path, or codec." },
+                    "kind": { "type": "string", "enum": ["all", "video", "audio", "image", "offline"], "description": "Optional media kind filter." },
+                    "resolution": { "type": "string", "enum": ["all", "sd", "hd", "fhd", "uhd"], "description": "Optional resolution bucket." },
+                    "frame_rate": { "type": "string", "enum": ["all", "fps24", "fps25_30", "fps31_59", "fps60"], "description": "Optional frame-rate bucket." },
+                    "rating": { "type": "string", "enum": ["all", "favorite", "reject", "unrated"], "description": "Optional rating filter." }
+                },
+                "required": ["name"]
+            }
+        },
+        {
+            "name": "update_collection",
+            "description": "Rename a smart collection or replace any of its saved filter criteria.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "collection_id": { "type": "string", "description": "Collection id from list_collections." },
+                    "name": { "type": "string", "description": "Optional new collection name." },
+                    "search_text": { "type": "string", "description": "Optional replacement search text." },
+                    "kind": { "type": "string", "enum": ["all", "video", "audio", "image", "offline"], "description": "Optional replacement media kind filter." },
+                    "resolution": { "type": "string", "enum": ["all", "sd", "hd", "fhd", "uhd"], "description": "Optional replacement resolution bucket." },
+                    "frame_rate": { "type": "string", "enum": ["all", "fps24", "fps25_30", "fps31_59", "fps60"], "description": "Optional replacement frame-rate bucket." },
+                    "rating": { "type": "string", "enum": ["all", "favorite", "reject", "unrated"], "description": "Optional replacement rating filter." }
+                },
+                "required": ["collection_id"]
+            }
+        },
+        {
+            "name": "delete_collection",
+            "description": "Delete a smart collection by id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "collection_id": { "type": "string", "description": "Collection id from list_collections." }
+                },
+                "required": ["collection_id"]
+            }
+        },
+        {
+            "name": "set_media_rating",
+            "description": "Set a media-browser rating on a library item identified by library_key.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "library_key": { "type": "string", "description": "Stable media library key from list_library." },
+                    "rating": { "type": "string", "enum": ["none", "favorite", "reject"], "description": "Rating to apply." }
+                },
+                "required": ["library_key", "rating"]
+            }
+        },
+        {
+            "name": "add_media_keyword_range",
+            "description": "Add a named keyword range to a library item using source-relative nanosecond positions.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "library_key": { "type": "string", "description": "Stable media library key from list_library." },
+                    "label": { "type": "string", "description": "Keyword label." },
+                    "start_ns": { "type": "integer", "description": "Range start in nanoseconds." },
+                    "end_ns": { "type": "integer", "description": "Range end in nanoseconds." }
+                },
+                "required": ["library_key", "label", "start_ns", "end_ns"]
+            }
+        },
+        {
+            "name": "update_media_keyword_range",
+            "description": "Replace an existing keyword range's label and bounds.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "library_key": { "type": "string", "description": "Stable media library key from list_library." },
+                    "range_id": { "type": "string", "description": "Keyword range id from list_library." },
+                    "label": { "type": "string", "description": "Updated keyword label." },
+                    "start_ns": { "type": "integer", "description": "Updated range start in nanoseconds." },
+                    "end_ns": { "type": "integer", "description": "Updated range end in nanoseconds." }
+                },
+                "required": ["library_key", "range_id", "label", "start_ns", "end_ns"]
+            }
+        },
+        {
+            "name": "delete_media_keyword_range",
+            "description": "Delete a keyword range from a library item.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "library_key": { "type": "string", "description": "Stable media library key from list_library." },
+                    "range_id": { "type": "string", "description": "Keyword range id from list_library." }
+                },
+                "required": ["library_key", "range_id"]
             }
         },
         {
@@ -725,6 +1021,17 @@ fn tools_list() -> Value {
                     "mode": { "type": "string", "enum": ["off", "half_res", "quarter_res"], "description": "Proxy preview mode." }
                 },
                 "required": ["mode"]
+            }
+        },
+        {
+            "name": "set_proxy_sidecar_persistence",
+            "description": "Control whether proxy files are mirrored into UltimateSlice.cache directories beside original media for reuse after reopen.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "enabled": { "type": "boolean", "description": "true to enable, false to disable." }
+                },
+                "required": ["enabled"]
             }
         },
         {
@@ -919,6 +1226,38 @@ fn tools_list() -> Value {
         {
             "name": "set_background_prerender",
             "description": "Enable or disable background disk prerender for upcoming complex overlap playback sections.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "enabled": { "type": "boolean", "description": "true to enable, false to disable." }
+                },
+                "required": ["enabled"]
+            }
+        },
+        {
+            "name": "set_prerender_quality",
+            "description": "Set the x264 preset and CRF used for background prerendered overlap segments. Lower CRF improves fidelity but increases cache size and render time; slower presets improve compression efficiency at higher CPU cost.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "preset": {
+                        "type": "string",
+                        "enum": ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium"],
+                        "description": "x264 preset used for background prerender video segments."
+                    },
+                    "crf": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 51,
+                        "description": "x264 CRF used for background prerender video segments. Lower values improve quality and increase size. Default is 20."
+                    }
+                },
+                "required": ["preset", "crf"]
+            }
+        },
+        {
+            "name": "set_prerender_project_persistence",
+            "description": "Control whether saved projects keep reusable prerender cache files beside the project file instead of using only the temporary cache root.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1279,6 +1618,215 @@ fn tools_list() -> Value {
                 },
                 "required": ["clip_id"]
             }
+        },
+        {
+            "name": "add_to_export_queue",
+            "description": "Add an export job to the batch queue. Optionally load settings from a named preset.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "output_path": { "type": "string", "description": "Full output file path (e.g. /home/user/output.gif)" },
+                    "preset_name": { "type": "string", "description": "Name of a saved export preset to use. If omitted, uses last-used preset." }
+                },
+                "required": ["output_path"]
+            }
+        },
+        {
+            "name": "list_export_queue",
+            "description": "List all jobs in the batch export queue with their current status.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        },
+        {
+            "name": "clear_export_queue",
+            "description": "Remove jobs from the batch export queue. Use status_filter to only remove done or error jobs.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "status_filter": { "type": "string", "description": "Which jobs to remove: 'all' (default), 'done', or 'error'" }
+                }
+            }
+        },
+        {
+            "name": "run_export_queue",
+            "description": "Run all pending jobs in the batch export queue sequentially. Blocks until complete.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        },
+        {
+            "name": "create_compound_clip",
+            "description": "Create a compound (nested timeline) clip from the specified clip IDs. The selected clips are replaced by a single compound clip that contains them as an internal sub-timeline.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Array of clip IDs to nest into a compound clip (minimum 2)"
+                    }
+                },
+                "required": ["clip_ids"]
+            }
+        },
+        {
+            "name": "break_apart_compound_clip",
+            "description": "Break apart a compound clip, restoring its internal clips to the timeline.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "ID of the compound clip to break apart" }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "create_multicam_clip",
+            "description": "Create a multicam clip from 2+ video clip IDs. Clips are synced by audio cross-correlation and combined into a single multicam clip with per-angle source data.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Array of clip IDs to combine into a multicam clip (minimum 2)"
+                    }
+                },
+                "required": ["clip_ids"]
+            }
+        },
+        {
+            "name": "add_angle_switch",
+            "description": "Insert an angle switch at a position within a multicam clip. If a switch already exists at that position, its angle is updated.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "ID of the multicam clip" },
+                    "position_ns": { "type": "integer", "description": "Position within the clip (nanoseconds from clip start)" },
+                    "angle_index": { "type": "integer", "description": "Zero-based index of the angle to switch to" }
+                },
+                "required": ["clip_id", "position_ns", "angle_index"]
+            }
+        },
+        {
+            "name": "list_multicam_angles",
+            "description": "List the angles and switch points of a multicam clip.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "ID of the multicam clip" }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "set_multicam_angle_audio",
+            "description": "Set volume and/or mute state for a multicam angle's audio. Unmuted angles with volume > 0 are mixed together in the audio output.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "ID of the multicam clip" },
+                    "angle_index": { "type": "integer", "description": "0-based angle index" },
+                    "volume": { "type": "number", "description": "Volume level 0.0 (silent) to 1.0 (full); omit to keep current" },
+                    "muted": { "type": "boolean", "description": "Whether to mute this angle's audio; omit to keep current" }
+                },
+                "required": ["clip_id", "angle_index"]
+            }
+        },
+        // ── Subtitle / STT tools ──────────────────────────────────────────
+        {
+            "name": "generate_subtitles",
+            "description": "Run speech-to-text on a clip to generate subtitle segments. Returns immediately; poll get_clip_subtitles for results.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "ID of the clip to transcribe" },
+                    "language": { "type": "string", "description": "Language code (en, es, fr, de, ja, zh, auto). Default: auto" }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "get_clip_subtitles",
+            "description": "Get all subtitle segments for a clip, including word-level timestamps.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "ID of the clip" }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "edit_subtitle_text",
+            "description": "Edit the text of a subtitle segment.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "ID of the clip" },
+                    "segment_id": { "type": "string", "description": "ID of the subtitle segment" },
+                    "text": { "type": "string", "description": "New text for the segment" }
+                },
+                "required": ["clip_id", "segment_id", "text"]
+            }
+        },
+        {
+            "name": "edit_subtitle_timing",
+            "description": "Edit the start/end timing of a subtitle segment.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "ID of the clip" },
+                    "segment_id": { "type": "string", "description": "ID of the subtitle segment" },
+                    "start_ns": { "type": "integer", "description": "New start time in nanoseconds (source-relative)" },
+                    "end_ns": { "type": "integer", "description": "New end time in nanoseconds (source-relative)" }
+                },
+                "required": ["clip_id", "segment_id", "start_ns", "end_ns"]
+            }
+        },
+        {
+            "name": "clear_subtitles",
+            "description": "Remove all subtitle segments from a clip.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "ID of the clip" }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "set_subtitle_style",
+            "description": "Set subtitle display style for a clip (font, colors, highlight mode).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "ID of the clip" },
+                    "font": { "type": "string", "description": "Font descriptor e.g. 'Sans Bold 24'" },
+                    "color": { "type": "integer", "description": "Text color as 0xRRGGBBAA" },
+                    "outline_color": { "type": "integer", "description": "Outline color as 0xRRGGBBAA" },
+                    "outline_width": { "type": "number", "description": "Outline width in pts" },
+                    "bg_box": { "type": "boolean", "description": "Enable background box" },
+                    "bg_box_color": { "type": "integer", "description": "Background box color as 0xRRGGBBAA" },
+                    "highlight_mode": { "type": "string", "enum": ["none", "bold", "color", "underline", "stroke"], "description": "Word highlight mode" },
+                    "highlight_color": { "type": "integer", "description": "Highlight color as 0xRRGGBBAA" }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "export_srt",
+            "description": "Export all subtitles in the project as an SRT file.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Output file path for the .srt file" }
+                },
+                "required": ["path"]
+            }
         }
     ]})
 }
@@ -1300,7 +1848,9 @@ fn is_cacheable_read_tool(name: &str) -> bool {
             | "get_performance_snapshot"
             | "get_preferences"
             | "list_export_presets"
+            | "list_workspace_layouts"
             | "list_library"
+            | "list_collections"
             | "list_frei0r_plugins"
     )
 }
@@ -1358,9 +1908,14 @@ fn dispatch_tool_payload(
         "set_clip_ladspa_effect_params" => McpCommand::SetClipLadspaEffectParams {
             clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
             effect_id: args["effect_id"].as_str().unwrap_or("").to_string(),
-            params: args.get("params")
+            params: args
+                .get("params")
                 .and_then(|v| v.as_object())
-                .map(|obj| obj.iter().filter_map(|(k, v)| v.as_f64().map(|val| (k.clone(), val))).collect())
+                .map(|obj| {
+                    obj.iter()
+                        .filter_map(|(k, v)| v.as_f64().map(|val| (k.clone(), val)))
+                        .collect()
+                })
                 .unwrap_or_default(),
             reply: tx,
         },
@@ -1405,6 +1960,17 @@ fn dispatch_tool_payload(
                 enabled,
                 curve: curve.to_string(),
                 duration_ns,
+                reply: tx,
+            }
+        }
+        "set_prerender_quality" => {
+            let (preset, crf) = match parse_prerender_quality_args(&args) {
+                Ok(parsed) => parsed,
+                Err(message) => return Err(tool_error_payload(-32602, message)),
+            };
+            McpCommand::SetPrerenderQuality {
+                preset: preset.to_string(),
+                crf,
                 reply: tx,
             }
         }
@@ -1526,6 +2092,25 @@ fn dispatch_tool_payload(
             reply: tx,
         },
 
+        "set_clip_mask" => McpCommand::SetClipMask {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            enabled: args.get("enabled").and_then(|v| v.as_bool()),
+            shape: args
+                .get("shape")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            center_x: args.get("center_x").and_then(|v| v.as_f64()),
+            center_y: args.get("center_y").and_then(|v| v.as_f64()),
+            width: args.get("width").and_then(|v| v.as_f64()),
+            height: args.get("height").and_then(|v| v.as_f64()),
+            rotation: args.get("rotation").and_then(|v| v.as_f64()),
+            feather: args.get("feather").and_then(|v| v.as_f64()),
+            expansion: args.get("expansion").and_then(|v| v.as_f64()),
+            invert: args.get("invert").and_then(|v| v.as_bool()),
+            path: args.get("path").cloned(),
+            reply: tx,
+        },
+
         "set_project_title" => McpCommand::SetTitle {
             title: args["title"].as_str().unwrap_or("").to_string(),
             reply: tx,
@@ -1536,12 +2121,61 @@ fn dispatch_tool_payload(
             reply: tx,
         },
 
+        "save_edl" => McpCommand::SaveEdl {
+            path: args["path"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+
+        "save_otio" => McpCommand::SaveOtio {
+            path: args["path"].as_str().unwrap_or("").to_string(),
+            path_mode: args
+                .get("path_mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("absolute")
+                .to_string(),
+            reply: tx,
+        },
+
         "save_project_with_media" => McpCommand::SaveProjectWithMedia {
             path: args["path"].as_str().unwrap_or("").to_string(),
             reply: tx,
         },
 
+        "collect_project_files" => {
+            let directory_path = args["directory_path"].as_str().unwrap_or("").to_string();
+            if directory_path.is_empty() {
+                return Err(tool_error_payload(-32602, "directory_path is required"));
+            }
+            let mode = match args.get("mode").and_then(|v| v.as_str()) {
+                None => crate::fcpxml::writer::CollectFilesMode::TimelineUsedOnly,
+                Some(value) => match crate::fcpxml::writer::CollectFilesMode::from_str(value) {
+                    Some(mode) => mode,
+                    None => {
+                        return Err(tool_error_payload(
+                            -32602,
+                            "mode must be 'timeline_used' or 'entire_library'",
+                        ));
+                    }
+                },
+            };
+            let use_collected_locations_on_next_save = args
+                .get("use_collected_locations_on_next_save")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            McpCommand::CollectProjectFiles {
+                directory_path,
+                mode,
+                use_collected_locations_on_next_save,
+                reply: tx,
+            }
+        }
+
         "open_fcpxml" => McpCommand::OpenFcpxml {
+            path: args["path"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+
+        "open_otio" => McpCommand::OpenOtio {
             path: args["path"].as_str().unwrap_or("").to_string(),
             reply: tx,
         },
@@ -1570,6 +2204,31 @@ fn dispatch_tool_payload(
             reply: tx,
         },
 
+        "list_workspace_layouts" => McpCommand::ListWorkspaceLayouts { reply: tx },
+
+        "save_workspace_layout" => McpCommand::SaveWorkspaceLayout {
+            name: args["name"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+
+        "apply_workspace_layout" => McpCommand::ApplyWorkspaceLayout {
+            name: args["name"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+
+        "rename_workspace_layout" => McpCommand::RenameWorkspaceLayout {
+            old_name: args["old_name"].as_str().unwrap_or("").to_string(),
+            new_name: args["new_name"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+
+        "delete_workspace_layout" => McpCommand::DeleteWorkspaceLayout {
+            name: args["name"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+
+        "reset_workspace_layout" => McpCommand::ResetWorkspaceLayout { reply: tx },
+
         "export_with_preset" => McpCommand::ExportWithPreset {
             path: args["path"].as_str().unwrap_or("").to_string(),
             preset_name: args["preset_name"].as_str().unwrap_or("").to_string(),
@@ -1587,6 +2246,282 @@ fn dispatch_tool_payload(
             reply: tx,
         },
 
+        "create_bin" => {
+            let name = args
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let parent_id = args
+                .get("parent_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            if name.is_empty() {
+                return Err(tool_error_payload(-32602, "name is required"));
+            }
+            McpCommand::CreateBin {
+                name,
+                parent_id,
+                reply: tx,
+            }
+        }
+        "delete_bin" => {
+            let bin_id = args
+                .get("bin_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if bin_id.is_empty() {
+                return Err(tool_error_payload(-32602, "bin_id is required"));
+            }
+            McpCommand::DeleteBin { bin_id, reply: tx }
+        }
+        "rename_bin" => {
+            let bin_id = args
+                .get("bin_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let name = args
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if bin_id.is_empty() || name.is_empty() {
+                return Err(tool_error_payload(-32602, "bin_id and name are required"));
+            }
+            McpCommand::RenameBin {
+                bin_id,
+                name,
+                reply: tx,
+            }
+        }
+        "list_bins" => McpCommand::ListBins { reply: tx },
+        "move_to_bin" => {
+            let source_paths: Vec<String> = args
+                .get("source_paths")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if source_paths.is_empty() {
+                return Err(tool_error_payload(-32602, "source_paths is required"));
+            }
+            let bin_id = args
+                .get("bin_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            McpCommand::MoveToBin {
+                source_paths,
+                bin_id,
+                reply: tx,
+            }
+        }
+        "list_collections" => McpCommand::ListCollections { reply: tx },
+        "create_collection" => {
+            let name = args
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if name.is_empty() {
+                return Err(tool_error_payload(-32602, "name is required"));
+            }
+            McpCommand::CreateCollection {
+                name,
+                search_text: args
+                    .get("search_text")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                kind: args
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                resolution: args
+                    .get("resolution")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                frame_rate: args
+                    .get("frame_rate")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                rating: args
+                    .get("rating")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                reply: tx,
+            }
+        }
+        "update_collection" => {
+            let collection_id = args
+                .get("collection_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if collection_id.is_empty() {
+                return Err(tool_error_payload(-32602, "collection_id is required"));
+            }
+            McpCommand::UpdateCollection {
+                collection_id,
+                name: args
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                search_text: args
+                    .get("search_text")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                kind: args
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                resolution: args
+                    .get("resolution")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                frame_rate: args
+                    .get("frame_rate")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                rating: args
+                    .get("rating")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                reply: tx,
+            }
+        }
+        "delete_collection" => {
+            let collection_id = args
+                .get("collection_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if collection_id.is_empty() {
+                return Err(tool_error_payload(-32602, "collection_id is required"));
+            }
+            McpCommand::DeleteCollection {
+                collection_id,
+                reply: tx,
+            }
+        }
+        "set_media_rating" => {
+            let library_key = args
+                .get("library_key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let rating = args
+                .get("rating")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if library_key.is_empty() || rating.is_empty() {
+                return Err(tool_error_payload(
+                    -32602,
+                    "library_key and rating are required",
+                ));
+            }
+            McpCommand::SetMediaRating {
+                library_key,
+                rating,
+                reply: tx,
+            }
+        }
+        "add_media_keyword_range" => {
+            let library_key = args
+                .get("library_key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let label = args
+                .get("label")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if library_key.is_empty() || label.is_empty() {
+                return Err(tool_error_payload(
+                    -32602,
+                    "library_key and label are required",
+                ));
+            }
+            McpCommand::AddMediaKeywordRange {
+                library_key,
+                label,
+                start_ns: args.get("start_ns").and_then(|v| v.as_u64()).unwrap_or(0),
+                end_ns: args.get("end_ns").and_then(|v| v.as_u64()).unwrap_or(0),
+                reply: tx,
+            }
+        }
+        "update_media_keyword_range" => {
+            let library_key = args
+                .get("library_key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let range_id = args
+                .get("range_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let label = args
+                .get("label")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if library_key.is_empty() || range_id.is_empty() || label.is_empty() {
+                return Err(tool_error_payload(
+                    -32602,
+                    "library_key, range_id, and label are required",
+                ));
+            }
+            McpCommand::UpdateMediaKeywordRange {
+                library_key,
+                range_id,
+                label,
+                start_ns: args.get("start_ns").and_then(|v| v.as_u64()).unwrap_or(0),
+                end_ns: args.get("end_ns").and_then(|v| v.as_u64()).unwrap_or(0),
+                reply: tx,
+            }
+        }
+        "delete_media_keyword_range" => {
+            let library_key = args
+                .get("library_key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let range_id = args
+                .get("range_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if library_key.is_empty() || range_id.is_empty() {
+                return Err(tool_error_payload(
+                    -32602,
+                    "library_key and range_id are required",
+                ));
+            }
+            McpCommand::DeleteMediaKeywordRange {
+                library_key,
+                range_id,
+                reply: tx,
+            }
+        }
+
         "reorder_track" => McpCommand::ReorderTrack {
             from_index: args["from_index"].as_u64().unwrap_or(0) as usize,
             to_index: args["to_index"].as_u64().unwrap_or(0) as usize,
@@ -1603,6 +2538,10 @@ fn dispatch_tool_payload(
             mode: args["mode"].as_str().unwrap_or("off").to_string(),
             reply: tx,
         },
+        "set_proxy_sidecar_persistence" => McpCommand::SetProxySidecarPersistence {
+            enabled: args["enabled"].as_bool().unwrap_or(false),
+            reply: tx,
+        },
         "set_clip_lut" => McpCommand::SetClipLut {
             clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
             lut_paths: {
@@ -1613,7 +2552,10 @@ fn dispatch_tool_payload(
                     &args["lut_path"]
                 };
                 match raw {
-                    Value::Array(arr) => arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect(),
+                    Value::Array(arr) => arr
+                        .iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect(),
                     Value::String(s) => vec![s.clone()],
                     _ => Vec::new(),
                 }
@@ -1649,13 +2591,23 @@ fn dispatch_tool_payload(
         },
         "normalize_clip_audio" => McpCommand::NormalizeClipAudio {
             clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
-            mode: args.get("mode").and_then(|v| v.as_str()).unwrap_or("lufs").to_string(),
-            target_level: args.get("target_level").and_then(|v| v.as_f64()).unwrap_or(-14.0),
+            mode: args
+                .get("mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("lufs")
+                .to_string(),
+            target_level: args
+                .get("target_level")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(-14.0),
             reply: tx,
         },
         "record_voiceover" => McpCommand::RecordVoiceover {
             duration_ns: args["duration_ns"].as_u64().unwrap_or(0),
-            track_index: args.get("track_index").and_then(|v| v.as_u64()).map(|v| v as usize),
+            track_index: args
+                .get("track_index")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize),
             reply: tx,
         },
         "set_clip_blend_mode" => McpCommand::SetClipBlendMode {
@@ -1720,6 +2672,21 @@ fn dispatch_tool_payload(
             enabled: args["enabled"].as_bool().unwrap_or(false),
             reply: tx,
         },
+        "set_prerender_quality" => {
+            let (preset, crf) = match parse_prerender_quality_args(&args) {
+                Ok(parsed) => parsed,
+                Err(message) => return Err(tool_error_payload(-32602, message)),
+            };
+            McpCommand::SetPrerenderQuality {
+                preset: preset.to_string(),
+                crf,
+                reply: tx,
+            }
+        }
+        "set_prerender_project_persistence" => McpCommand::SetPrerenderProjectPersistence {
+            enabled: args["enabled"].as_bool().unwrap_or(false),
+            reply: tx,
+        },
         "set_preview_luts" => McpCommand::SetPreviewLuts {
             enabled: args["enabled"].as_bool().unwrap_or(false),
             reply: tx,
@@ -1768,14 +2735,23 @@ fn dispatch_tool_payload(
         "source_play" => McpCommand::SourcePlay { reply: tx },
         "source_pause" => McpCommand::SourcePause { reply: tx },
         "match_frame" => McpCommand::MatchFrame {
-            clip_id: args.get("clip_id").and_then(|v| v.as_str()).map(str::to_string),
+            clip_id: args
+                .get("clip_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
             reply: tx,
         },
         "list_backups" => McpCommand::ListBackups { reply: tx },
         "set_clip_stabilization" => McpCommand::SetClipStabilization {
             clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
-            enabled: args.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
-            smoothing: args.get("smoothing").and_then(|v| v.as_f64()).unwrap_or(0.5),
+            enabled: args
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            smoothing: args
+                .get("smoothing")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.5),
             reply: tx,
         },
         "sync_clips_by_audio" => McpCommand::SyncClipsByAudio {
@@ -1787,7 +2763,10 @@ fn dispatch_tool_payload(
                         .collect()
                 })
                 .unwrap_or_default(),
-            replace_audio: args.get("replace_audio").and_then(|v| v.as_bool()).unwrap_or(false),
+            replace_audio: args
+                .get("replace_audio")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             reply: tx,
         },
         "copy_clip_color_grade" => McpCommand::CopyClipColorGrade {
@@ -1801,7 +2780,10 @@ fn dispatch_tool_payload(
         "match_clip_colors" => McpCommand::MatchClipColors {
             source_clip_id: args["source_clip_id"].as_str().unwrap_or("").to_string(),
             reference_clip_id: args["reference_clip_id"].as_str().unwrap_or("").to_string(),
-            generate_lut: args.get("generate_lut").and_then(|v| v.as_bool()).unwrap_or(false),
+            generate_lut: args
+                .get("generate_lut")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             reply: tx,
         },
         "list_frei0r_plugins" => McpCommand::ListFrei0rPlugins { reply: tx },
@@ -1858,7 +2840,11 @@ fn dispatch_tool_payload(
             clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
             effect_ids: args["effect_ids"]
                 .as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default(),
             reply: tx,
         },
@@ -1894,6 +2880,109 @@ fn dispatch_tool_payload(
             title_bg_box_padding: args["title_bg_box_padding"].as_f64(),
             title_clip_bg_color: args["title_clip_bg_color"].as_u64().map(|v| v as u32),
             title_secondary_text: args["title_secondary_text"].as_str().map(String::from),
+            reply: tx,
+        },
+        "add_to_export_queue" => McpCommand::AddToExportQueue {
+            output_path: args["output_path"].as_str().unwrap_or("").to_string(),
+            preset_name: args["preset_name"].as_str().map(String::from),
+            reply: tx,
+        },
+        "list_export_queue" => McpCommand::ListExportQueue { reply: tx },
+        "clear_export_queue" => McpCommand::ClearExportQueue {
+            status_filter: args["status_filter"].as_str().map(String::from),
+            reply: tx,
+        },
+        "run_export_queue" => McpCommand::RunExportQueue { reply: tx },
+        "create_compound_clip" => {
+            let clip_ids: Vec<String> = args["clip_ids"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            McpCommand::CreateCompoundClip {
+                clip_ids,
+                reply: tx,
+            }
+        }
+        "break_apart_compound_clip" => McpCommand::BreakApartCompoundClip {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+        "create_multicam_clip" => {
+            let clip_ids: Vec<String> = args["clip_ids"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            McpCommand::CreateMulticamClip {
+                clip_ids,
+                reply: tx,
+            }
+        }
+        "add_angle_switch" => McpCommand::AddAngleSwitch {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            position_ns: args["position_ns"].as_u64().unwrap_or(0),
+            angle_index: args["angle_index"].as_u64().unwrap_or(0) as usize,
+            reply: tx,
+        },
+        "list_multicam_angles" => McpCommand::ListMulticamAngles {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+        "set_multicam_angle_audio" => McpCommand::SetMulticamAngleAudio {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            angle_index: args["angle_index"].as_u64().unwrap_or(0) as usize,
+            volume: args["volume"].as_f64().map(|v| v as f32),
+            muted: args["muted"].as_bool(),
+            reply: tx,
+        },
+        // ── Subtitle / STT tools ──────────────────────────────────────────
+        "generate_subtitles" => McpCommand::GenerateSubtitles {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            language: args["language"].as_str().unwrap_or("auto").to_string(),
+            reply: tx,
+        },
+        "get_clip_subtitles" => McpCommand::GetClipSubtitles {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+        "edit_subtitle_text" => McpCommand::EditSubtitleText {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            segment_id: args["segment_id"].as_str().unwrap_or("").to_string(),
+            text: args["text"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+        "edit_subtitle_timing" => McpCommand::EditSubtitleTiming {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            segment_id: args["segment_id"].as_str().unwrap_or("").to_string(),
+            start_ns: args["start_ns"].as_u64().unwrap_or(0),
+            end_ns: args["end_ns"].as_u64().unwrap_or(0),
+            reply: tx,
+        },
+        "clear_subtitles" => McpCommand::ClearSubtitles {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+        "set_subtitle_style" => McpCommand::SetSubtitleStyle {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            font: args["font"].as_str().map(String::from),
+            color: args["color"].as_u64().map(|v| v as u32),
+            outline_color: args["outline_color"].as_u64().map(|v| v as u32),
+            outline_width: args["outline_width"].as_f64(),
+            bg_box: args["bg_box"].as_bool(),
+            bg_box_color: args["bg_box_color"].as_u64().map(|v| v as u32),
+            highlight_mode: args["highlight_mode"].as_str().map(String::from),
+            highlight_color: args["highlight_color"].as_u64().map(|v| v as u32),
+            reply: tx,
+        },
+        "export_srt" => McpCommand::ExportSrt {
+            path: args["path"].as_str().unwrap_or("").to_string(),
             reply: tx,
         },
 
@@ -2143,9 +3232,34 @@ fn parse_crossfade_settings_args(args: &Value) -> Result<(bool, &'static str, u6
     Ok((enabled, curve, duration_ns))
 }
 
+fn parse_prerender_quality_args(args: &Value) -> Result<(&'static str, u32), &'static str> {
+    let preset = match args.get("preset").and_then(Value::as_str) {
+        Some("ultrafast") => "ultrafast",
+        Some("superfast") => "superfast",
+        Some("veryfast") => "veryfast",
+        Some("faster") => "faster",
+        Some("fast") => "fast",
+        Some("medium") => "medium",
+        Some(_) => {
+            return Err(
+                "preset must be one of: ultrafast, superfast, veryfast, faster, fast, medium",
+            );
+        }
+        None => return Err("preset is required"),
+    };
+    let crf_u64 = match args.get("crf").and_then(Value::as_u64) {
+        Some(crf) => crf,
+        None => return Err("crf must be an integer"),
+    };
+    if crf_u64 > crate::ui_state::MAX_PRERENDER_CRF as u64 {
+        return Err("crf must be between 0 and 51");
+    }
+    Ok((preset, crf_u64 as u32))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{call_tool, parse_crossfade_settings_args};
+    use super::{call_tool, parse_crossfade_settings_args, parse_prerender_quality_args};
     use crate::mcp::McpCommand;
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2196,6 +3310,28 @@ mod tests {
         assert_eq!(
             parse_crossfade_settings_args(&args),
             Err("duration_ns must be an integer")
+        );
+    }
+
+    #[test]
+    fn parse_prerender_quality_accepts_valid_args() {
+        let args = json!({"preset": "fast", "crf": 18});
+        assert_eq!(parse_prerender_quality_args(&args), Ok(("fast", 18)));
+    }
+
+    #[test]
+    fn parse_prerender_quality_rejects_invalid_args() {
+        assert_eq!(
+            parse_prerender_quality_args(&json!({"preset": "turbo", "crf": 20})),
+            Err("preset must be one of: ultrafast, superfast, veryfast, faster, fast, medium")
+        );
+        assert_eq!(
+            parse_prerender_quality_args(&json!({"preset": "fast", "crf": 52})),
+            Err("crf must be between 0 and 51")
+        );
+        assert_eq!(
+            parse_prerender_quality_args(&json!({"preset": "fast", "crf": 19.5})),
+            Err("crf must be an integer")
         );
     }
 
@@ -2277,6 +3413,55 @@ mod tests {
         let params = json!({
             "name": "save_project_with_media",
             "arguments": { "path": "/tmp/packaged.uspxml" }
+        });
+        let mut cache = std::collections::HashMap::new();
+        let response = call_tool(&id, &params, &sender, &mut cache);
+        assert_eq!(response["id"], id);
+        assert_eq!(response["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn call_tool_dispatches_collect_project_files() {
+        let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
+        std::thread::spawn(move || {
+            let cmd = receiver.recv().expect("expected command");
+            match cmd {
+                McpCommand::CollectProjectFiles {
+                    directory_path,
+                    mode,
+                    use_collected_locations_on_next_save,
+                    reply,
+                } => {
+                    assert_eq!(directory_path, "/tmp/collected");
+                    assert_eq!(mode, crate::fcpxml::writer::CollectFilesMode::EntireLibrary);
+                    assert!(use_collected_locations_on_next_save);
+                    reply
+                        .send(json!({
+                            "success": true,
+                            "directory_path": directory_path,
+                            "mode": mode.as_str(),
+                            "use_collected_locations_on_next_save": true,
+                            "project_paths_updated": true,
+                            "project_media_references_updated": 3,
+                            "project_lut_references_updated": 1,
+                            "library_items_updated": 2,
+                            "media_files": 3,
+                            "lut_files": 1,
+                            "total_files": 4
+                        }))
+                        .ok();
+                }
+                _ => panic!("unexpected MCP command"),
+            }
+        });
+        let id = json!(10);
+        let params = json!({
+            "name": "collect_project_files",
+            "arguments": {
+                "directory_path": "/tmp/collected",
+                "mode": "entire_library",
+                "use_collected_locations_on_next_save": true
+            }
         });
         let mut cache = std::collections::HashMap::new();
         let response = call_tool(&id, &params, &sender, &mut cache);
@@ -2513,5 +3698,76 @@ mod tests {
         worker.join().expect("worker join");
         // One dispatch for initial read, one for mutation, one for read after mutation.
         assert_eq!(command_count.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn call_tool_dispatches_save_workspace_layout() {
+        let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
+        std::thread::spawn(move || {
+            let cmd = receiver.recv().expect("expected command");
+            match cmd {
+                McpCommand::SaveWorkspaceLayout { name, reply } => {
+                    assert_eq!(name, "Color");
+                    reply.send(json!({"success": true, "name": name})).ok();
+                }
+                _ => panic!("unexpected MCP command"),
+            }
+        });
+        let id = json!(401);
+        let params = json!({
+            "name": "save_workspace_layout",
+            "arguments": { "name": "Color" }
+        });
+        let mut cache = std::collections::HashMap::new();
+        let response = call_tool(&id, &params, &sender, &mut cache);
+        assert_eq!(response["id"], id);
+        assert_eq!(response["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn call_tool_dispatches_apply_workspace_layout() {
+        let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
+        std::thread::spawn(move || {
+            let cmd = receiver.recv().expect("expected command");
+            match cmd {
+                McpCommand::ApplyWorkspaceLayout { name, reply } => {
+                    assert_eq!(name, "Edit");
+                    reply.send(json!({"success": true, "name": name})).ok();
+                }
+                _ => panic!("unexpected MCP command"),
+            }
+        });
+        let id = json!(402);
+        let params = json!({
+            "name": "apply_workspace_layout",
+            "arguments": { "name": "Edit" }
+        });
+        let mut cache = std::collections::HashMap::new();
+        let response = call_tool(&id, &params, &sender, &mut cache);
+        assert_eq!(response["id"], id);
+        assert_eq!(response["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn call_tool_dispatches_reset_workspace_layout() {
+        let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
+        std::thread::spawn(move || {
+            let cmd = receiver.recv().expect("expected command");
+            match cmd {
+                McpCommand::ResetWorkspaceLayout { reply } => {
+                    reply.send(json!({"success": true})).ok();
+                }
+                _ => panic!("unexpected MCP command"),
+            }
+        });
+        let id = json!(403);
+        let params = json!({
+            "name": "reset_workspace_layout",
+            "arguments": {}
+        });
+        let mut cache = std::collections::HashMap::new();
+        let response = call_tool(&id, &params, &sender, &mut cache);
+        assert_eq!(response["id"], id);
+        assert_eq!(response["error"], serde_json::Value::Null);
     }
 }

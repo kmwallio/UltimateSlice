@@ -34,6 +34,12 @@ enum Handle {
     CropBottom,
     /// Drag inside the bounding box → pan.
     Pan,
+    /// Drag a bezier path anchor point (index into path.points).
+    MaskPathAnchor(usize),
+    /// Drag the incoming tangent handle of a path point.
+    MaskPathHandleIn(usize),
+    /// Drag the outgoing tangent handle of a path point.
+    MaskPathHandleOut(usize),
 }
 
 struct DragState {
@@ -54,6 +60,8 @@ struct DragState {
     vy: f64,
     vw: f64,
     vh: f64,
+    /// Snapshot of the dragged path point at drag start.
+    start_path_point: Option<crate::model::clip::BezierPoint>,
 }
 
 pub struct TransformOverlay {
@@ -77,6 +85,17 @@ pub struct TransformOverlay {
     /// canvas (e.g. when the outer overlay covers the full scroll viewport and the
     /// canvas_frame is smaller due to zoom < 1.0).
     canvas_widget: Rc<RefCell<Option<gtk4::Widget>>>,
+    // Shape mask state for overlay drawing.
+    mask_enabled: Rc<Cell<bool>>,
+    mask_shape: Rc<Cell<u8>>, // 0=rect, 1=ellipse
+    mask_cx: Rc<Cell<f64>>,
+    mask_cy: Rc<Cell<f64>>,
+    mask_hw: Rc<Cell<f64>>,
+    mask_hh: Rc<Cell<f64>>,
+    mask_rotation: Rc<Cell<f64>>,
+    mask_path_points: Rc<RefCell<Vec<crate::model::clip::BezierPoint>>>,
+    content_inset_x: Rc<Cell<f64>>,
+    content_inset_y: Rc<Cell<f64>>,
 }
 
 impl TransformOverlay {
@@ -88,6 +107,8 @@ impl TransformOverlay {
         on_crop_change: impl Fn(i32, i32, i32, i32) + 'static,
         on_drag_begin: impl Fn() + 'static,
         on_drag_end: impl Fn() + 'static,
+        on_mask_path_change: impl Fn(&[crate::model::clip::BezierPoint]) + 'static,
+        on_mask_path_dbl_click: impl Fn(&[crate::model::clip::BezierPoint]) + 'static,
     ) -> Self {
         let scale = Rc::new(Cell::new(1.0_f64));
         let position_x = Rc::new(Cell::new(0.0_f64));
@@ -100,8 +121,21 @@ impl TransformOverlay {
         let selected = Rc::new(Cell::new(false));
         let proj_w = Rc::new(Cell::new(1920_u32));
         let proj_h = Rc::new(Cell::new(1080_u32));
+        /// Letterbox inset fractions (0.0–0.5) for each side.
+        /// Used to shrink the clip bounding box to the video content area.
+        let content_inset_x = Rc::new(Cell::new(0.0_f64));
+        let content_inset_y = Rc::new(Cell::new(0.0_f64));
         let picture: Rc<RefCell<Option<gtk4::Picture>>> = Rc::new(RefCell::new(None));
         let canvas_widget: Rc<RefCell<Option<gtk4::Widget>>> = Rc::new(RefCell::new(None));
+        let mask_enabled = Rc::new(Cell::new(false));
+        let mask_shape = Rc::new(Cell::new(0u8));
+        let mask_cx = Rc::new(Cell::new(0.5f64));
+        let mask_cy = Rc::new(Cell::new(0.5f64));
+        let mask_hw = Rc::new(Cell::new(0.25f64));
+        let mask_hh = Rc::new(Cell::new(0.25f64));
+        let mask_rotation = Rc::new(Cell::new(0.0f64));
+        let mask_path_points: Rc<RefCell<Vec<crate::model::clip::BezierPoint>>> =
+            Rc::new(RefCell::new(Vec::new()));
 
         let da = DrawingArea::new();
         da.set_hexpand(true);
@@ -122,8 +156,18 @@ impl TransformOverlay {
             let selected = selected.clone();
             let proj_w = proj_w.clone();
             let proj_h = proj_h.clone();
+            let content_inset_x = content_inset_x.clone();
+            let content_inset_y = content_inset_y.clone();
             let picture = picture.clone();
             let canvas_widget = canvas_widget.clone();
+            let mask_enabled = mask_enabled.clone();
+            let mask_shape = mask_shape.clone();
+            let mask_cx = mask_cx.clone();
+            let mask_cy = mask_cy.clone();
+            let mask_hw = mask_hw.clone();
+            let mask_hh = mask_hh.clone();
+            let mask_rotation_d = mask_rotation.clone();
+            let mask_path_points_clone = mask_path_points.clone();
 
             da.set_draw_func(move |da, cr, ww, wh| {
                 if !selected.get() {
@@ -157,7 +201,30 @@ impl TransformOverlay {
                     crop_bottom.get(),
                     proj_w.get(),
                     proj_h.get(),
+                    content_inset_x.get(),
+                    content_inset_y.get(),
                 );
+                // Draw mask outline if mask is enabled.
+                if mask_enabled.get() {
+                    draw_mask_outline(
+                        cr,
+                        vx,
+                        vy,
+                        vw,
+                        vh,
+                        s,
+                        px,
+                        py,
+                        rotation.get(),
+                        mask_shape.get(),
+                        mask_cx.get(),
+                        mask_cy.get(),
+                        mask_hw.get(),
+                        mask_hh.get(),
+                        mask_rotation_d.get(),
+                        &mask_path_points_clone.borrow(),
+                    );
+                }
             });
         }
 
@@ -167,6 +234,7 @@ impl TransformOverlay {
         let on_rotate_change = Rc::new(on_rotate_change);
         let on_crop_change = Rc::new(on_crop_change);
         let on_drag_begin = Rc::new(on_drag_begin);
+        let on_mask_path_change = Rc::new(on_mask_path_change);
 
         let gesture = gtk::GestureDrag::new();
         gesture.set_button(1); // left button only
@@ -184,11 +252,16 @@ impl TransformOverlay {
             let selected = selected.clone();
             let proj_w = proj_w.clone();
             let proj_h = proj_h.clone();
+            let content_inset_x = content_inset_x.clone();
+            let content_inset_y = content_inset_y.clone();
             let picture = picture.clone();
             let drag_state = drag_state.clone();
             let on_drag_begin = on_drag_begin.clone();
             let da_ref = da.clone();
             let canvas_widget = canvas_widget.clone();
+            let mask_enabled_d = mask_enabled.clone();
+            let mask_shape_d = mask_shape.clone();
+            let mask_path_points_d = mask_path_points.clone();
 
             gesture.connect_drag_begin(move |_g, sx, sy| {
                 if !selected.get() {
@@ -198,8 +271,15 @@ impl TransformOverlay {
                 let ww = da_ref.width();
                 let wh = da_ref.height();
                 let _ = &picture; // kept for potential future use
-                let (vx, vy, vw, vh) =
+                let (vx_full, vy_full, vw_full, vh_full) =
                     canvas_video_rect(&da_ref, &canvas_widget, ww, wh, proj_w.get(), proj_h.get());
+                // Shrink to content area (excluding letterbox)
+                let ix = content_inset_x.get();
+                let iy = content_inset_y.get();
+                let vx = vx_full + vw_full * ix;
+                let vy = vy_full + vh_full * iy;
+                let vw = vw_full * (1.0 - 2.0 * ix);
+                let vh = vh_full * (1.0 - 2.0 * iy);
                 let s = scale.get();
                 let px = position_x.get();
                 let py = position_y.get();
@@ -326,39 +406,98 @@ impl TransformOverlay {
                 ];
 
                 let mut handle = Handle::None;
-                {
-                    let d =
-                        ((sx - rotate_handle.0).powi(2) + (sy - rotate_handle.1).powi(2)).sqrt();
-                    if d <= HANDLE_HIT {
-                        handle = rotate_handle.2;
-                    }
-                }
-                if handle == Handle::None {
-                    for (hx, hy, h) in &corners {
-                        let d = ((sx - hx).powi(2) + (sy - hy).powi(2)).sqrt();
-                        if d <= HANDLE_HIT {
-                            handle = *h;
-                            break;
+                let mut start_path_point: Option<crate::model::clip::BezierPoint> = None;
+
+                // Path mask point hit-test (highest priority when path mask is active).
+                if mask_enabled_d.get() && mask_shape_d.get() == 2 {
+                    let pts = mask_path_points_d.borrow();
+                    if pts.len() >= 3 {
+                        // Compute clip region for mapping normalized→widget coords.
+                        let clip_cx_w = vx + vw / 2.0 + px * vw * (1.0 - s) / 2.0;
+                        let clip_cy_w = vy + vh / 2.0 + py * vh * (1.0 - s) / 2.0;
+                        let clip_w = vw * s;
+                        let clip_h = vh * s;
+                        let clip_left_w = clip_cx_w - clip_w / 2.0;
+                        let clip_top_w = clip_cy_w - clip_h / 2.0;
+                        // The drawing applies clip rotation around clip_cx_w/clip_cy_w,
+                        // so drawn positions are rotated.  Map normalized→widget using
+                        // the same rotation so hit-test matches drawn positions.
+                        let clip_rot = (-rotation.get()).to_radians();
+                        let map_pt = |nx: f64, ny: f64| -> (f64, f64) {
+                            let wx = clip_left_w + nx * clip_w;
+                            let wy = clip_top_w + ny * clip_h;
+                            rotate_point_about(wx, wy, clip_cx_w, clip_cy_w, clip_rot)
+                        };
+
+                        // Check handles first (they are smaller targets, test first).
+                        for (i, p) in pts.iter().enumerate() {
+                            if p.handle_in_x.abs() > 1e-6 || p.handle_in_y.abs() > 1e-6 {
+                                let (hx, hy) = map_pt(p.x + p.handle_in_x, p.y + p.handle_in_y);
+                                if ((sx - hx).powi(2) + (sy - hy).powi(2)).sqrt() <= HANDLE_HIT {
+                                    handle = Handle::MaskPathHandleIn(i);
+                                    start_path_point = Some(p.clone());
+                                    break;
+                                }
+                            }
+                            if p.handle_out_x.abs() > 1e-6 || p.handle_out_y.abs() > 1e-6 {
+                                let (hx, hy) = map_pt(p.x + p.handle_out_x, p.y + p.handle_out_y);
+                                if ((sx - hx).powi(2) + (sy - hy).powi(2)).sqrt() <= HANDLE_HIT {
+                                    handle = Handle::MaskPathHandleOut(i);
+                                    start_path_point = Some(p.clone());
+                                    break;
+                                }
+                            }
                         }
-                    }
-                }
-                if handle == Handle::None {
-                    for (hx, hy, h) in &crop_edges {
-                        let d = ((sx - hx).powi(2) + (sy - hy).powi(2)).sqrt();
-                        if d <= HANDLE_HIT {
-                            handle = *h;
-                            break;
+                        // Then check anchor points.
+                        if handle == Handle::None {
+                            for (i, p) in pts.iter().enumerate() {
+                                let (ax, ay) = map_pt(p.x, p.y);
+                                if ((sx - ax).powi(2) + (sy - ay).powi(2)).sqrt() <= HANDLE_HIT {
+                                    handle = Handle::MaskPathAnchor(i);
+                                    start_path_point = Some(p.clone());
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
 
+                // Transform handle hit-tests (only if no path handle was hit).
                 if handle == Handle::None {
-                    // Inside the clip bounds → pan
-                    let (lx, ly) = unrotate_point_about(sx, sy, cx, cy, rot_rad);
-                    if lx >= left && lx <= right && ly >= top && ly <= bottom {
-                        handle = Handle::Pan;
+                    {
+                        let d = ((sx - rotate_handle.0).powi(2) + (sy - rotate_handle.1).powi(2))
+                            .sqrt();
+                        if d <= HANDLE_HIT {
+                            handle = rotate_handle.2;
+                        }
                     }
-                }
+                    if handle == Handle::None {
+                        for (hx, hy, h) in &corners {
+                            let d = ((sx - hx).powi(2) + (sy - hy).powi(2)).sqrt();
+                            if d <= HANDLE_HIT {
+                                handle = *h;
+                                break;
+                            }
+                        }
+                    }
+                    if handle == Handle::None {
+                        for (hx, hy, h) in &crop_edges {
+                            let d = ((sx - hx).powi(2) + (sy - hy).powi(2)).sqrt();
+                            if d <= HANDLE_HIT {
+                                handle = *h;
+                                break;
+                            }
+                        }
+                    }
+
+                    if handle == Handle::None {
+                        // Inside the clip bounds → pan
+                        let (lx, ly) = unrotate_point_about(sx, sy, cx, cy, rot_rad);
+                        if lx >= left && lx <= right && ly >= top && ly <= bottom {
+                            handle = Handle::Pan;
+                        }
+                    }
+                } // end: if handle == Handle::None (path mask guard)
 
                 if handle != Handle::None {
                     on_drag_begin();
@@ -379,6 +518,7 @@ impl TransformOverlay {
                         vy,
                         vw,
                         vh,
+                        start_path_point,
                     });
                 }
             });
@@ -398,6 +538,9 @@ impl TransformOverlay {
             let on_change = on_change.clone();
             let on_rotate_change = on_rotate_change.clone();
             let on_crop_change = on_crop_change.clone();
+            let on_mask_path_change = on_mask_path_change.clone();
+            let mask_path_points_drag = mask_path_points.clone();
+            let mask_enabled_drag = mask_enabled.clone();
             let da_ref = da.clone();
 
             gesture.connect_drag_update(move |g, off_x, off_y| {
@@ -538,6 +681,41 @@ impl TransformOverlay {
                             new_bottom,
                         );
                     }
+                    Handle::MaskPathAnchor(idx)
+                    | Handle::MaskPathHandleIn(idx)
+                    | Handle::MaskPathHandleOut(idx) => {
+                        if let Some(ref start_pt) = ds.start_path_point {
+                            // Convert pixel offset to normalized coords, accounting for
+                            // clip rotation by using rotation-adjusted local deltas.
+                            let clip_w = ds.vw * ds.start_scale;
+                            let clip_h = ds.vh * ds.start_scale;
+                            if clip_w > 1.0 && clip_h > 1.0 {
+                                let dnx = local_dx / clip_w;
+                                let dny = local_dy / clip_h;
+                                let mut pts = mask_path_points_drag.borrow_mut();
+                                if idx < pts.len() {
+                                    match ds.handle {
+                                        Handle::MaskPathAnchor(_) => {
+                                            pts[idx].x = (start_pt.x + dnx).clamp(0.0, 1.0);
+                                            pts[idx].y = (start_pt.y + dny).clamp(0.0, 1.0);
+                                        }
+                                        Handle::MaskPathHandleIn(_) => {
+                                            pts[idx].handle_in_x = start_pt.handle_in_x + dnx;
+                                            pts[idx].handle_in_y = start_pt.handle_in_y + dny;
+                                        }
+                                        Handle::MaskPathHandleOut(_) => {
+                                            pts[idx].handle_out_x = start_pt.handle_out_x + dnx;
+                                            pts[idx].handle_out_y = start_pt.handle_out_y + dny;
+                                        }
+                                        _ => {}
+                                    }
+                                    let pts_clone = pts.clone();
+                                    drop(pts);
+                                    on_mask_path_change(&pts_clone);
+                                }
+                            }
+                        }
+                    }
                     Handle::None => {}
                 }
                 drop(ds_borrow);
@@ -556,6 +734,155 @@ impl TransformOverlay {
         }
 
         da.add_controller(gesture);
+
+        // Double-click gesture for path point add/delete.
+        {
+            let mask_enabled_dc = mask_enabled.clone();
+            let mask_shape_dc = mask_shape.clone();
+            let mask_path_points_dc = mask_path_points.clone();
+            let selected_dc = selected.clone();
+            let scale_dc = scale.clone();
+            let position_x_dc = position_x.clone();
+            let position_y_dc = position_y.clone();
+            let proj_w_dc = proj_w.clone();
+            let proj_h_dc = proj_h.clone();
+            let rotation_dc = rotation.clone();
+            let da_dc = da.clone();
+            let canvas_widget_dc = canvas_widget.clone();
+            let on_mask_path_dbl_click = Rc::new(on_mask_path_dbl_click);
+
+            let dbl_click = gtk::GestureClick::new();
+            dbl_click.set_button(1);
+            dbl_click.connect_pressed(move |_g, n_press, cx, cy| {
+                if n_press != 2 {
+                    return;
+                }
+                if !selected_dc.get() || !mask_enabled_dc.get() || mask_shape_dc.get() != 2 {
+                    return;
+                }
+
+                let ww = da_dc.width();
+                let wh = da_dc.height();
+                let (vx, vy, vw, vh) = canvas_video_rect(
+                    &da_dc,
+                    &canvas_widget_dc,
+                    ww,
+                    wh,
+                    proj_w_dc.get(),
+                    proj_h_dc.get(),
+                );
+                let s = scale_dc.get();
+                let px = position_x_dc.get();
+                let py = position_y_dc.get();
+
+                // Compute clip region — same formulas as draw_mask_outline.
+                let clip_cx_w = vx + vw / 2.0 + px * vw * (1.0 - s) / 2.0;
+                let clip_cy_w = vy + vh / 2.0 + py * vh * (1.0 - s) / 2.0;
+                let clip_w = vw * s;
+                let clip_h = vh * s;
+                let clip_left_w = clip_cx_w - clip_w / 2.0;
+                let clip_top_w = clip_cy_w - clip_h / 2.0;
+                let clip_rot = (-rotation_dc.get()).to_radians();
+
+                // Forward transform: normalized → widget (matches draw_mask_outline).
+                // draw_mask_outline does: translate(clip_cx, clip_cy) → rotate → translate(-clip_cx, -clip_cy)
+                // then map_x = clip_left + nx * clip_w.
+                // Net effect: rotate(clip_left + nx*clip_w, clip_top + ny*clip_h) around (clip_cx, clip_cy).
+                let map_pt = |nx: f64, ny: f64| -> (f64, f64) {
+                    let wx = clip_left_w + nx * clip_w;
+                    let wy = clip_top_w + ny * clip_h;
+                    rotate_point_about(wx, wy, clip_cx_w, clip_cy_w, clip_rot)
+                };
+
+                // Inverse transform: widget → normalized.
+                // Unrotate click around clip center, then reverse the linear mapping.
+                let (ucx, ucy) = unrotate_point_about(cx, cy, clip_cx_w, clip_cy_w, clip_rot);
+                let unmap_x = (ucx - clip_left_w) / clip_w;
+                let unmap_y = (ucy - clip_top_w) / clip_h;
+
+                let mut pts = mask_path_points_dc.borrow_mut();
+                if pts.len() < 3 {
+                    return;
+                }
+
+                // Check if double-click is on an existing anchor → delete it.
+                let mut delete_idx = None;
+                for (i, p) in pts.iter().enumerate() {
+                    let (ax, ay) = map_pt(p.x, p.y);
+                    if ((cx - ax).powi(2) + (cy - ay).powi(2)).sqrt() <= HANDLE_HIT {
+                        delete_idx = Some(i);
+                        break;
+                    }
+                }
+
+                if let Some(idx) = delete_idx {
+                    if pts.len() > 3 {
+                        pts.remove(idx);
+                        let pts_clone = pts.clone();
+                        drop(pts);
+                        on_mask_path_dbl_click(&pts_clone);
+                        da_dc.queue_draw();
+                    }
+                } else {
+                    // Not on an anchor → insert a new point on the nearest path segment.
+                    let nx = unmap_x.clamp(0.0, 1.0);
+                    let ny = unmap_y.clamp(0.0, 1.0);
+
+                    // Find the segment closest to the click in normalized space.
+                    // For each segment (i → i+1), subdivide the bezier curve and
+                    // compute the minimum distance from the click to the polyline.
+                    let n = pts.len();
+                    let mut best_seg = n - 1; // default: insert before closure segment
+                    let mut best_dist = f64::MAX;
+                    for i in 0..n {
+                        let a = &pts[i];
+                        let b = &pts[(i + 1) % n];
+                        let p0 = (a.x, a.y);
+                        let cp1 = (a.x + a.handle_out_x, a.y + a.handle_out_y);
+                        let cp2 = (b.x + b.handle_in_x, b.y + b.handle_in_y);
+                        let p3 = (b.x, b.y);
+                        // Sample a few points along the bezier segment.
+                        for step in 0..=10 {
+                            let t = step as f64 / 10.0;
+                            let mt = 1.0 - t;
+                            let sx = mt * mt * mt * p0.0
+                                + 3.0 * mt * mt * t * cp1.0
+                                + 3.0 * mt * t * t * cp2.0
+                                + t * t * t * p3.0;
+                            let sy = mt * mt * mt * p0.1
+                                + 3.0 * mt * mt * t * cp1.1
+                                + 3.0 * mt * t * t * cp2.1
+                                + t * t * t * p3.1;
+                            let d = (nx - sx).powi(2) + (ny - sy).powi(2);
+                            if d < best_dist {
+                                best_dist = d;
+                                best_seg = i;
+                            }
+                        }
+                    }
+
+                    // Insert after the start anchor of the closest segment.
+                    let insert_idx = best_seg + 1;
+                    pts.insert(
+                        insert_idx,
+                        crate::model::clip::BezierPoint {
+                            x: nx,
+                            y: ny,
+                            handle_in_x: 0.0,
+                            handle_in_y: 0.0,
+                            handle_out_x: 0.0,
+                            handle_out_y: 0.0,
+                        },
+                    );
+                    let pts_clone = pts.clone();
+                    drop(pts);
+                    on_mask_path_dbl_click(&pts_clone);
+                    da_dc.queue_draw();
+                }
+            });
+            da.add_controller(dbl_click);
+        }
+
         {
             let scale = scale.clone();
             let position_x = position_x.clone();
@@ -632,6 +959,16 @@ impl TransformOverlay {
             proj_h,
             picture,
             canvas_widget,
+            mask_enabled,
+            mask_shape,
+            mask_cx,
+            mask_cy,
+            mask_hw,
+            mask_hh,
+            mask_rotation,
+            mask_path_points,
+            content_inset_x,
+            content_inset_y,
         }
     }
 
@@ -681,6 +1018,41 @@ impl TransformOverlay {
     pub fn set_project_dimensions(&self, w: u32, h: u32) {
         self.proj_w.set(w);
         self.proj_h.set(h);
+    }
+
+    /// Set letterbox inset fractions (0.0–0.5 per side).
+    /// Used to shrink the clip bounding box to the actual video content area
+    /// when the source aspect ratio differs from the project.
+    pub fn set_content_inset(&self, inset_x: f64, inset_y: f64) {
+        self.content_inset_x.set(inset_x);
+        self.content_inset_y.set(inset_y);
+    }
+
+    /// Update mask overlay state.
+    pub fn set_mask(
+        &self,
+        enabled: bool,
+        shape: u8,
+        cx: f64,
+        cy: f64,
+        hw: f64,
+        hh: f64,
+        rotation: f64,
+        path_points: Option<&[crate::model::clip::BezierPoint]>,
+    ) {
+        self.mask_enabled.set(enabled);
+        self.mask_shape.set(shape);
+        self.mask_cx.set(cx);
+        self.mask_cy.set(cy);
+        self.mask_hw.set(hw);
+        self.mask_hh.set(hh);
+        self.mask_rotation.set(rotation);
+        if let Some(pts) = path_points {
+            *self.mask_path_points.borrow_mut() = pts.to_vec();
+        } else {
+            self.mask_path_points.borrow_mut().clear();
+        }
+        self.drawing_area.queue_draw();
     }
 }
 
@@ -890,10 +1262,10 @@ fn unrotate_point_about(x: f64, y: f64, cx: f64, cy: f64, rad: f64) -> (f64, f64
 
 fn draw_overlay(
     cr: &gtk4::cairo::Context,
-    vx: f64,
-    vy: f64,
-    vw: f64,
-    vh: f64,
+    vx_full: f64,
+    vy_full: f64,
+    vw_full: f64,
+    vh_full: f64,
     scale: f64,
     pos_x: f64,
     pos_y: f64,
@@ -904,7 +1276,15 @@ fn draw_overlay(
     crop_bottom: i32,
     proj_w: u32,
     proj_h: u32,
+    content_inset_x: f64,
+    content_inset_y: f64,
 ) {
+    // Shrink the video rect to the content area (excluding letterbox).
+    let vx = vx_full + vw_full * content_inset_x;
+    let vy = vy_full + vh_full * content_inset_y;
+    let vw = vw_full * (1.0 - 2.0 * content_inset_x);
+    let vh = vh_full * (1.0 - 2.0 * content_inset_y);
+
     // Clip centre and half-extents in widget coords.
     // GStreamer's videobox pads/crops (1-scale)*pw*(1+pos_x)/2 on the left, so the
     // clip centre = canvas_centre + pos_x * canvas_half * (1-scale).
@@ -1045,5 +1425,154 @@ fn draw_overlay(
     cr.set_source_rgba(1.0, 0.95, 0.3, 1.0);
     cr.move_to(tx, ty + te.height() + 1.0);
     cr.show_text(&label).ok();
+    cr.restore().ok();
+}
+
+/// Draw a dashed cyan outline for the mask shape.
+///
+/// The mask is defined in clip-local normalized coordinates (0..1).
+/// The mask probe runs before zoom/position in the GStreamer pipeline,
+/// so we must map through the clip's transform to get canvas-space
+/// coordinates for the overlay.
+fn draw_mask_outline(
+    cr: &gtk4::cairo::Context,
+    vx: f64,
+    vy: f64,
+    vw: f64,
+    vh: f64,
+    clip_scale: f64,
+    clip_px: f64,
+    clip_py: f64,
+    clip_rotation_deg: f64,
+    shape: u8,
+    mask_cx: f64,
+    mask_cy: f64,
+    mask_hw: f64,
+    mask_hh: f64,
+    mask_rotation_deg: f64,
+    path_points: &[crate::model::clip::BezierPoint],
+) {
+    // The clip occupies a region within the canvas defined by its scale/position.
+    // Clip centre in widget coords (same formula as draw_overlay):
+    let clip_cx = vx + vw / 2.0 + clip_px * vw * (1.0 - clip_scale) / 2.0;
+    let clip_cy = vy + vh / 2.0 + clip_py * vh * (1.0 - clip_scale) / 2.0;
+    let clip_w = vw * clip_scale;
+    let clip_h = vh * clip_scale;
+    let clip_left = clip_cx - clip_w / 2.0;
+    let clip_top = clip_cy - clip_h / 2.0;
+
+    // Map mask normalized coords (0..1 within the clip frame) to widget coords.
+    let cx = clip_left + mask_cx * clip_w;
+    let cy = clip_top + mask_cy * clip_h;
+    let hw = mask_hw * clip_w;
+    let hh = mask_hh * clip_h;
+
+    let clip_rot_rad = (-clip_rotation_deg).to_radians();
+    let mask_rot_rad = mask_rotation_deg.to_radians();
+
+    cr.save().ok();
+    cr.set_source_rgba(0.0, 0.85, 0.95, 0.9); // cyan
+    cr.set_line_width(2.0);
+    cr.set_dash(&[8.0, 4.0], 0.0);
+
+    // First apply clip rotation around clip centre, then mask rotation around mask centre.
+    // We combine by translating to clip centre, rotating by clip rotation,
+    // then translating to mask centre offset, then rotating by mask rotation.
+    cr.translate(clip_cx, clip_cy);
+    cr.rotate(clip_rot_rad);
+
+    if shape == 2 && path_points.len() >= 3 {
+        // Bezier path: draw in clip-local space (no mask rotation/centre offset needed).
+        // Undo the centre offset — path points are in clip-local 0..1 coords.
+        cr.translate(-clip_cx, -clip_cy);
+
+        let map_x = |nx: f64| -> f64 { clip_left + nx * clip_w };
+        let map_y = |ny: f64| -> f64 { clip_top + ny * clip_h };
+
+        let p0 = &path_points[0];
+        cr.move_to(map_x(p0.x), map_y(p0.y));
+
+        for i in 0..path_points.len() {
+            let a = &path_points[i];
+            let b = &path_points[(i + 1) % path_points.len()];
+            cr.curve_to(
+                map_x(a.x + a.handle_out_x),
+                map_y(a.y + a.handle_out_y),
+                map_x(b.x + b.handle_in_x),
+                map_y(b.y + b.handle_in_y),
+                map_x(b.x),
+                map_y(b.y),
+            );
+        }
+        cr.close_path();
+        cr.stroke().ok();
+
+        // Draw anchor points as small cyan filled squares
+        for p in path_points {
+            let px = map_x(p.x);
+            let py = map_y(p.y);
+            cr.rectangle(px - 4.0, py - 4.0, 8.0, 8.0);
+            cr.fill().ok();
+
+            // Draw handle lines if non-zero
+            if p.handle_in_x.abs() > 1e-6 || p.handle_in_y.abs() > 1e-6 {
+                cr.set_dash(&[], 0.0);
+                cr.move_to(px, py);
+                cr.line_to(map_x(p.x + p.handle_in_x), map_y(p.y + p.handle_in_y));
+                cr.stroke().ok();
+                cr.arc(
+                    map_x(p.x + p.handle_in_x),
+                    map_y(p.y + p.handle_in_y),
+                    3.0,
+                    0.0,
+                    std::f64::consts::TAU,
+                );
+                cr.fill().ok();
+                cr.set_dash(&[8.0, 4.0], 0.0);
+            }
+            if p.handle_out_x.abs() > 1e-6 || p.handle_out_y.abs() > 1e-6 {
+                cr.set_dash(&[], 0.0);
+                cr.move_to(px, py);
+                cr.line_to(map_x(p.x + p.handle_out_x), map_y(p.y + p.handle_out_y));
+                cr.stroke().ok();
+                cr.arc(
+                    map_x(p.x + p.handle_out_x),
+                    map_y(p.y + p.handle_out_y),
+                    3.0,
+                    0.0,
+                    std::f64::consts::TAU,
+                );
+                cr.fill().ok();
+                cr.set_dash(&[8.0, 4.0], 0.0);
+            }
+        }
+    } else {
+        cr.translate(cx - clip_cx, cy - clip_cy);
+        cr.rotate(mask_rot_rad);
+
+        if shape == 1 {
+            // Ellipse
+            cr.save().ok();
+            cr.scale(hw.max(0.1), hh.max(0.1));
+            cr.arc(0.0, 0.0, 1.0, 0.0, std::f64::consts::TAU);
+            cr.restore().ok();
+            cr.stroke().ok();
+        } else {
+            // Rectangle
+            cr.rectangle(-hw, -hh, hw * 2.0, hh * 2.0);
+            cr.stroke().ok();
+        }
+
+        // Draw center crosshair.
+        cr.set_dash(&[], 0.0);
+        cr.set_line_width(1.0);
+        let ch = 8.0;
+        cr.move_to(-ch, 0.0);
+        cr.line_to(ch, 0.0);
+        cr.move_to(0.0, -ch);
+        cr.line_to(0.0, ch);
+        cr.stroke().ok();
+    }
+
     cr.restore().ok();
 }

@@ -12,7 +12,6 @@
 
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
 
 /// A parsed 3D LUT.
 #[derive(Debug, Clone)]
@@ -30,8 +29,8 @@ pub struct CubeLut {
 impl CubeLut {
     /// Parse a `.cube` file from disk.
     pub fn from_file(path: &Path) -> Result<Self, String> {
-        let contents =
-            fs::read_to_string(path).map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+        let contents = fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
         Self::parse(&contents)
     }
 
@@ -79,7 +78,11 @@ impl CubeLut {
                 continue;
             }
             // Skip any other keyword lines (e.g. LUT_1D_SIZE, LUT_1D_INPUT_RANGE).
-            if trimmed.chars().next().map_or(true, |c| c.is_ascii_alphabetic()) {
+            if trimmed
+                .chars()
+                .next()
+                .map_or(true, |c| c.is_ascii_alphabetic())
+            {
                 // If we haven't started reading data yet, treat as keyword.
                 if data.is_empty() {
                     continue;
@@ -184,7 +187,10 @@ impl CubeLut {
     /// `data` must have length divisible by 4 (R, G, B, A bytes).
     /// Alpha channel is preserved unchanged.
     pub fn apply_to_rgba_buffer(&self, data: &mut [u8]) {
-        debug_assert!(data.len() % 4 == 0, "RGBA buffer length must be multiple of 4");
+        debug_assert!(
+            data.len() % 4 == 0,
+            "RGBA buffer length must be multiple of 4"
+        );
         for pixel in data.chunks_exact_mut(4) {
             let (r_out, g_out, b_out) = self.interpolate(pixel[0], pixel[1], pixel[2]);
             pixel[0] = r_out;
@@ -192,6 +198,11 @@ impl CubeLut {
             pixel[2] = b_out;
             // pixel[3] (alpha) unchanged.
         }
+    }
+
+    /// Apply this LUT to a single RGB pixel and return the transformed values.
+    pub fn apply_rgb(&self, r: u8, g: u8, b: u8) -> (u8, u8, u8) {
+        self.interpolate(r, g, b)
     }
 
     /// Write this LUT to a `.cube` file at the given path.

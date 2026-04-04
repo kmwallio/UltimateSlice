@@ -2,19 +2,27 @@
   "sheet-order" : [
     "ROADMAP.md",
     "CHANGELOG.md",
-    "README.md"
+    "README.md",
+    "PERFSUMMARY.md",
+    "PERFLIVE.md",
+    "PROXYPERF.md",
+    "SPEEDRAMPCRASH.md",
+    "GEMINI.md"
   ],
   "hidden-folders" : [
     "target",
     "Sample-Media",
-    "src"
+    "src",
+    "flatpak-build"
   ],
   "folder-order" : [
     "target",
     "Sample-Media",
     "src",
     "docs",
-    "data"
+    "data",
+    "tools",
+    "flatpak-build"
   ],
   "notes" : "",
   "icon" : ""

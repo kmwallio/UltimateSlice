@@ -1,4 +1,7 @@
-use crate::model::project::{FrameRate, Project};
+use crate::model::{
+    media_library::MediaItem,
+    project::{FrameRate, Project},
+};
 use anyhow::Result;
 use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::Writer;
@@ -138,7 +141,13 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
     };
 
     // <resources>
-    write_resources(project, &mut writer, options, export_ctx.as_ref(), &asset_id_by_source)?;
+    write_resources(
+        project,
+        &mut writer,
+        options,
+        export_ctx.as_ref(),
+        &asset_id_by_source,
+    )?;
 
     // <library>
     let mut library = BytesStart::new("library");
@@ -156,6 +165,32 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
         for (k, v) in &project.fcpxml_unknown_event.attrs {
             if !is_writer_managed_event_attr(k) {
                 event.push_attribute((k.as_str(), v.as_str()));
+            }
+        }
+        // Emit bin persistence attributes when present.
+        if let Some(ref bins_json) = project.parsed_bins_json {
+            if bins_json != "[]" {
+                event.push_attribute(("us:bins", bins_json.as_str()));
+            }
+        }
+        if let Some(ref media_bins_json) = project.parsed_media_bins_json {
+            if media_bins_json != "{}" {
+                event.push_attribute(("us:media-bins", media_bins_json.as_str()));
+            }
+        }
+        if let Some(ref collections_json) = project.parsed_collections_json {
+            if collections_json != "[]" {
+                event.push_attribute(("us:smart-collections", collections_json.as_str()));
+            }
+        }
+        if let Some(ref library_items_json) = project.parsed_library_items_json {
+            if library_items_json != "[]" {
+                event.push_attribute(("us:library-items", library_items_json.as_str()));
+            }
+        }
+        if let Some(ref annotations_json) = project.parsed_media_annotations_json {
+            if annotations_json != "{}" {
+                event.push_attribute(("us:media-annotations", annotations_json.as_str()));
             }
         }
     }
@@ -421,7 +456,12 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                                 Some(ct.lane),
                                 Some(clip),
                             )?;
-                            write_strict_clip_body(&mut writer, conn_clip, project, conn_source_start)?;
+                            write_strict_clip_body(
+                                &mut writer,
+                                conn_clip,
+                                project,
+                                conn_source_start,
+                            )?;
                             // audio-channel-source after connected clip's own anchors (none here)
                             write_strict_audio_channel_sources(
                                 &mut writer,
@@ -541,8 +581,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     .unwrap_or_else(|| format!("a_{}", sanitize_id(&clip.id)));
                 let offset = ns_to_fcpxml_time(clip.timeline_start, &project.frame_rate);
                 let duration = ns_to_fcpxml_time(clip.duration(), &project.frame_rate);
-                let source_start_ns =
-                    clip.source_timecode_start_ns().unwrap_or(clip.source_in);
+                let source_start_ns = clip.source_timecode_start_ns().unwrap_or(clip.source_in);
                 let start = ns_to_fcpxml_time(source_start_ns, &project.frame_rate);
 
                 let mut asset_clip = BytesStart::new("asset-clip");
@@ -562,10 +601,8 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     asset_clip
                         .push_attribute(("us:track-soloed", track.soloed.to_string().as_str()));
                     if track.audio_role != crate::model::track::AudioRole::None {
-                        asset_clip.push_attribute((
-                            "us:track-audio-role",
-                            track.audio_role.as_str(),
-                        ));
+                        asset_clip
+                            .push_attribute(("us:track-audio-role", track.audio_role.as_str()));
                     }
                     if track.duck {
                         asset_clip.push_attribute(("us:track-duck", "true"));
@@ -663,8 +700,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     asset_clip.push_attribute(("us:denoise", clip.denoise.to_string().as_str()));
                     asset_clip
                         .push_attribute(("us:sharpness", clip.sharpness.to_string().as_str()));
-                    asset_clip
-                        .push_attribute(("us:blur", clip.blur.to_string().as_str()));
+                    asset_clip.push_attribute(("us:blur", clip.blur.to_string().as_str()));
                     if !clip.blur_keyframes.is_empty() {
                         if let Ok(json) = serde_json::to_string(&clip.blur_keyframes) {
                             asset_clip.push_attribute(("us:blur-keyframes", json.as_str()));
@@ -681,6 +717,84 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                         if let Ok(json) = serde_json::to_string(&clip.frei0r_effects) {
                             asset_clip.push_attribute(("us:frei0r-effects", json.as_str()));
                         }
+                    }
+                    if !clip.masks.is_empty() {
+                        if let Ok(json) = serde_json::to_string(&clip.masks) {
+                            asset_clip.push_attribute(("us:masks", json.as_str()));
+                        }
+                    }
+                    // Subtitle segments + style
+                    if !clip.subtitle_segments.is_empty() {
+                        if let Ok(json) = serde_json::to_string(&clip.subtitle_segments) {
+                            asset_clip.push_attribute(("us:subtitle-segments", json.as_str()));
+                        }
+                    }
+                    if !clip.subtitles_language.is_empty() {
+                        asset_clip.push_attribute((
+                            "us:subtitles-language",
+                            clip.subtitles_language.as_str(),
+                        ));
+                    }
+                    if clip.subtitle_font != "Sans Bold 24" {
+                        asset_clip
+                            .push_attribute(("us:subtitle-font", clip.subtitle_font.as_str()));
+                    }
+                    if clip.subtitle_color != 0xFFFFFFFF {
+                        asset_clip.push_attribute((
+                            "us:subtitle-color",
+                            clip.subtitle_color.to_string().as_str(),
+                        ));
+                    }
+                    if clip.subtitle_outline_color != 0x000000FF {
+                        asset_clip.push_attribute((
+                            "us:subtitle-outline-color",
+                            clip.subtitle_outline_color.to_string().as_str(),
+                        ));
+                    }
+                    if (clip.subtitle_outline_width - 2.0).abs() > 0.001 {
+                        asset_clip.push_attribute((
+                            "us:subtitle-outline-width",
+                            clip.subtitle_outline_width.to_string().as_str(),
+                        ));
+                    }
+                    if !clip.subtitle_bg_box {
+                        asset_clip.push_attribute(("us:subtitle-bg-box", "false"));
+                    }
+                    if clip.subtitle_bg_box_color != 0x00000099 {
+                        asset_clip.push_attribute((
+                            "us:subtitle-bg-box-color",
+                            clip.subtitle_bg_box_color.to_string().as_str(),
+                        ));
+                    }
+                    if clip.subtitle_highlight_mode
+                        != crate::model::clip::SubtitleHighlightMode::None
+                    {
+                        let mode_str = match clip.subtitle_highlight_mode {
+                            crate::model::clip::SubtitleHighlightMode::Bold => "bold",
+                            crate::model::clip::SubtitleHighlightMode::Color => "color",
+                            crate::model::clip::SubtitleHighlightMode::Underline => "underline",
+                            crate::model::clip::SubtitleHighlightMode::Stroke => "stroke",
+                            _ => "none",
+                        };
+                        asset_clip.push_attribute(("us:subtitle-highlight-mode", mode_str));
+                    }
+                    if clip.subtitle_highlight_color != 0xFFFF00FF {
+                        asset_clip.push_attribute((
+                            "us:subtitle-highlight-color",
+                            clip.subtitle_highlight_color.to_string().as_str(),
+                        ));
+                    }
+                    if (clip.subtitle_word_window_secs - 2.0).abs() > 0.001 {
+                        asset_clip.push_attribute((
+                            "us:subtitle-word-window-secs",
+                            clip.subtitle_word_window_secs.to_string().as_str(),
+                        ));
+                    }
+                    if (clip.subtitle_position_y - 0.85).abs() > 0.001 {
+                        asset_clip.push_attribute((
+                            "us:subtitle-position-y",
+                            clip.subtitle_position_y.to_string().as_str(),
+                        ));
                     }
                     if !clip.ladspa_effects.is_empty() {
                         if let Ok(json) = serde_json::to_string(&clip.ladspa_effects) {
@@ -720,20 +834,17 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     }
                     if !clip.eq_low_gain_keyframes.is_empty() {
                         if let Ok(json) = serde_json::to_string(&clip.eq_low_gain_keyframes) {
-                            asset_clip
-                                .push_attribute(("us:eq-low-gain-keyframes", json.as_str()));
+                            asset_clip.push_attribute(("us:eq-low-gain-keyframes", json.as_str()));
                         }
                     }
                     if !clip.eq_mid_gain_keyframes.is_empty() {
                         if let Ok(json) = serde_json::to_string(&clip.eq_mid_gain_keyframes) {
-                            asset_clip
-                                .push_attribute(("us:eq-mid-gain-keyframes", json.as_str()));
+                            asset_clip.push_attribute(("us:eq-mid-gain-keyframes", json.as_str()));
                         }
                     }
                     if !clip.eq_high_gain_keyframes.is_empty() {
                         if let Ok(json) = serde_json::to_string(&clip.eq_high_gain_keyframes) {
-                            asset_clip
-                                .push_attribute(("us:eq-high-gain-keyframes", json.as_str()));
+                            asset_clip.push_attribute(("us:eq-high-gain-keyframes", json.as_str()));
                         }
                     }
                     if clip.pitch_shift_semitones.abs() > 0.001 {
@@ -808,7 +919,10 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     asset_clip.push_attribute(("us:flip-h", clip.flip_h.to_string().as_str()));
                     asset_clip.push_attribute(("us:flip-v", clip.flip_v.to_string().as_str()));
                     if (clip.anamorphic_desqueeze - 1.0).abs() > 0.001 {
-                        asset_clip.push_attribute(("us:anamorphic-desqueeze", clip.anamorphic_desqueeze.to_string().as_str()));
+                        asset_clip.push_attribute((
+                            "us:anamorphic-desqueeze",
+                            clip.anamorphic_desqueeze.to_string().as_str(),
+                        ));
                     }
                     asset_clip.push_attribute(("us:scale", clip.scale.to_string().as_str()));
                     let scale_keyframes_json = if clip.scale_keyframes.is_empty() {
@@ -857,33 +971,84 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     asset_clip.push_attribute(("us:title-x", clip.title_x.to_string().as_str()));
                     asset_clip.push_attribute(("us:title-y", clip.title_y.to_string().as_str()));
                     if !clip.title_template.is_empty() {
-                        asset_clip.push_attribute(("us:title-template", clip.title_template.as_str()));
+                        asset_clip
+                            .push_attribute(("us:title-template", clip.title_template.as_str()));
                     }
                     if clip.title_outline_width > 0.0 {
-                        asset_clip.push_attribute(("us:title-outline-color", format!("{:08X}", clip.title_outline_color).as_str()));
-                        asset_clip.push_attribute(("us:title-outline-width", clip.title_outline_width.to_string().as_str()));
+                        asset_clip.push_attribute((
+                            "us:title-outline-color",
+                            format!("{:08X}", clip.title_outline_color).as_str(),
+                        ));
+                        asset_clip.push_attribute((
+                            "us:title-outline-width",
+                            clip.title_outline_width.to_string().as_str(),
+                        ));
                     }
                     if clip.title_shadow {
                         asset_clip.push_attribute(("us:title-shadow", "true"));
-                        asset_clip.push_attribute(("us:title-shadow-color", format!("{:08X}", clip.title_shadow_color).as_str()));
-                        asset_clip.push_attribute(("us:title-shadow-offset-x", clip.title_shadow_offset_x.to_string().as_str()));
-                        asset_clip.push_attribute(("us:title-shadow-offset-y", clip.title_shadow_offset_y.to_string().as_str()));
+                        asset_clip.push_attribute((
+                            "us:title-shadow-color",
+                            format!("{:08X}", clip.title_shadow_color).as_str(),
+                        ));
+                        asset_clip.push_attribute((
+                            "us:title-shadow-offset-x",
+                            clip.title_shadow_offset_x.to_string().as_str(),
+                        ));
+                        asset_clip.push_attribute((
+                            "us:title-shadow-offset-y",
+                            clip.title_shadow_offset_y.to_string().as_str(),
+                        ));
                     }
                     if clip.title_bg_box {
                         asset_clip.push_attribute(("us:title-bg-box", "true"));
-                        asset_clip.push_attribute(("us:title-bg-box-color", format!("{:08X}", clip.title_bg_box_color).as_str()));
-                        asset_clip.push_attribute(("us:title-bg-box-padding", clip.title_bg_box_padding.to_string().as_str()));
+                        asset_clip.push_attribute((
+                            "us:title-bg-box-color",
+                            format!("{:08X}", clip.title_bg_box_color).as_str(),
+                        ));
+                        asset_clip.push_attribute((
+                            "us:title-bg-box-padding",
+                            clip.title_bg_box_padding.to_string().as_str(),
+                        ));
                     }
                     if clip.title_clip_bg_color != 0 {
-                        asset_clip.push_attribute(("us:title-clip-bg-color", format!("{:08X}", clip.title_clip_bg_color).as_str()));
+                        asset_clip.push_attribute((
+                            "us:title-clip-bg-color",
+                            format!("{:08X}", clip.title_clip_bg_color).as_str(),
+                        ));
                     }
                     if !clip.title_secondary_text.is_empty() {
-                        asset_clip.push_attribute(("us:title-secondary-text", clip.title_secondary_text.as_str()));
+                        asset_clip.push_attribute((
+                            "us:title-secondary-text",
+                            clip.title_secondary_text.as_str(),
+                        ));
                     }
                     if clip.kind == crate::model::clip::ClipKind::Title {
                         asset_clip.push_attribute(("us:clip-kind", "title"));
                     } else if clip.kind == crate::model::clip::ClipKind::Adjustment {
                         asset_clip.push_attribute(("us:clip-kind", "adjustment"));
+                    } else if clip.kind == crate::model::clip::ClipKind::Compound {
+                        asset_clip.push_attribute(("us:clip-kind", "compound"));
+                        if let Some(ref tracks) = clip.compound_tracks {
+                            if let Ok(json) = serde_json::to_string(tracks) {
+                                let escaped = json.replace('"', "&quot;");
+                                asset_clip.push_attribute(("us:compound-tracks", escaped.as_str()));
+                            }
+                        }
+                    } else if clip.kind == crate::model::clip::ClipKind::Multicam {
+                        asset_clip.push_attribute(("us:clip-kind", "multicam"));
+                        if let Some(ref angles) = clip.multicam_angles {
+                            if let Ok(json) = serde_json::to_string(angles) {
+                                let escaped = json.replace('"', "&quot;");
+                                asset_clip.push_attribute(("us:multicam-angles", escaped.as_str()));
+                            }
+                        }
+                        if let Some(ref switches) = clip.multicam_switches {
+                            if let Ok(json) = serde_json::to_string(switches) {
+                                let escaped = json.replace('"', "&quot;");
+                                asset_clip
+                                    .push_attribute(("us:multicam-switches", escaped.as_str()));
+                            }
+                        }
                     }
                     asset_clip.push_attribute(("us:speed", clip.speed.to_string().as_str()));
                     let speed_keyframes_json = if clip.speed_keyframes.is_empty() {
@@ -1031,8 +1196,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                         || !clip.position_y_keyframes.is_empty();
                     let has_scale_kfs = !clip.scale_keyframes.is_empty();
                     let has_rotation_kfs = !clip.rotate_keyframes.is_empty();
-                    let has_transform_kfs =
-                        has_position_kfs || has_scale_kfs || has_rotation_kfs;
+                    let has_transform_kfs = has_position_kfs || has_scale_kfs || has_rotation_kfs;
                     // FCP omits inline attrs for properties that have keyframes
                     if !has_position_kfs {
                         adjust_transform.push_attribute((
@@ -1047,10 +1211,8 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                         ));
                     }
                     if !has_rotation_kfs {
-                        adjust_transform.push_attribute((
-                            "rotation",
-                            clip.rotate.to_string().as_str(),
-                        ));
+                        adjust_transform
+                            .push_attribute(("rotation", clip.rotate.to_string().as_str()));
                     }
                     if has_transform_kfs {
                         writer.write_event(Event::Start(adjust_transform))?;
@@ -1234,6 +1396,58 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
     Ok(String::from_utf8(result)?)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollectFilesMode {
+    TimelineUsedOnly,
+    EntireLibrary,
+}
+
+impl CollectFilesMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TimelineUsedOnly => "timeline_used",
+            Self::EntireLibrary => "entire_library",
+        }
+    }
+
+    pub fn ui_label(self) -> &'static str {
+        match self {
+            Self::TimelineUsedOnly => "Timeline-used only",
+            Self::EntireLibrary => "Entire library",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "timeline_used" | "timeline_used_only" => Some(Self::TimelineUsedOnly),
+            "entire_library" => Some(Self::EntireLibrary),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CollectFilesProgress {
+    Copying {
+        copied_files: usize,
+        total_files: usize,
+        current_file: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectFilesResult {
+    pub destination_dir: PathBuf,
+    pub media_files_copied: usize,
+    pub lut_files_copied: usize,
+}
+
+impl CollectFilesResult {
+    pub fn total_files_copied(&self) -> usize {
+        self.media_files_copied + self.lut_files_copied
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExportProjectWithMediaProgress {
     Copying {
@@ -1242,6 +1456,164 @@ pub enum ExportProjectWithMediaProgress {
         current_file: String,
     },
     WritingProjectXml,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectFilesManifest {
+    pub result: CollectFilesResult,
+    pub source_to_destination_path: HashMap<String, PathBuf>,
+    pub lut_source_to_destination_path: HashMap<String, PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyCollectedFilesResult {
+    pub project_media_references_updated: usize,
+    pub project_lut_references_updated: usize,
+    pub library_items_updated: usize,
+}
+
+impl ApplyCollectedFilesResult {
+    pub fn updated_any(&self) -> bool {
+        self.project_media_references_updated > 0
+            || self.project_lut_references_updated > 0
+            || self.library_items_updated > 0
+    }
+}
+
+/// Copy referenced project media into a destination directory without writing project XML.
+pub fn collect_files(
+    project: &Project,
+    library: &[MediaItem],
+    destination_dir: &Path,
+    mode: CollectFilesMode,
+) -> Result<CollectFilesResult> {
+    collect_files_with_progress(project, library, destination_dir, mode, |_| {})
+}
+
+pub fn collect_files_with_manifest<F>(
+    project: &Project,
+    library: &[MediaItem],
+    destination_dir: &Path,
+    mode: CollectFilesMode,
+    on_progress: F,
+) -> Result<CollectFilesManifest>
+where
+    F: FnMut(CollectFilesProgress),
+{
+    collect_files_internal(project, library, destination_dir, mode, true, on_progress)
+}
+
+pub fn collect_files_with_progress<F>(
+    project: &Project,
+    library: &[MediaItem],
+    destination_dir: &Path,
+    mode: CollectFilesMode,
+    on_progress: F,
+) -> Result<CollectFilesResult>
+where
+    F: FnMut(CollectFilesProgress),
+{
+    Ok(collect_files_with_manifest(project, library, destination_dir, mode, on_progress)?.result)
+}
+
+pub fn apply_collected_files_manifest(
+    project: &mut Project,
+    library: &mut [MediaItem],
+    manifest: &CollectFilesManifest,
+) -> ApplyCollectedFilesResult {
+    let (project_media_references_updated, project_lut_references_updated) =
+        apply_collected_files_to_tracks(
+            project.tracks.as_mut_slice(),
+            &manifest.source_to_destination_path,
+            &manifest.lut_source_to_destination_path,
+        );
+    let mut library_items_updated = 0usize;
+    for item in library.iter_mut() {
+        let Some(new_path) =
+            remapped_collect_path(&item.source_path, &manifest.source_to_destination_path)
+        else {
+            continue;
+        };
+        if item.source_path != new_path {
+            item.source_path = new_path;
+            library_items_updated += 1;
+        }
+    }
+    if project_media_references_updated > 0
+        || project_lut_references_updated > 0
+        || library_items_updated > 0
+    {
+        project.dirty = true;
+    }
+    ApplyCollectedFilesResult {
+        project_media_references_updated,
+        project_lut_references_updated,
+        library_items_updated,
+    }
+}
+
+fn apply_collected_files_to_tracks(
+    tracks: &mut [crate::model::track::Track],
+    source_to_destination_path: &HashMap<String, PathBuf>,
+    lut_source_to_destination_path: &HashMap<String, PathBuf>,
+) -> (usize, usize) {
+    let mut project_media_references_updated = 0usize;
+    let mut project_lut_references_updated = 0usize;
+    for track in tracks {
+        for clip in track.clips.iter_mut() {
+            if let Some(new_path) =
+                remapped_collect_path(&clip.source_path, source_to_destination_path)
+            {
+                if clip.source_path != new_path {
+                    clip.source_path = new_path;
+                    clip.fcpxml_original_source_path = None;
+                    project_media_references_updated += 1;
+                }
+            }
+            for lut_path in &mut clip.lut_paths {
+                let Some(new_path) =
+                    remapped_collect_path(lut_path, lut_source_to_destination_path)
+                else {
+                    continue;
+                };
+                if *lut_path != new_path {
+                    *lut_path = new_path;
+                    project_lut_references_updated += 1;
+                }
+            }
+            if let Some(angles) = clip.multicam_angles.as_mut() {
+                for angle in angles {
+                    if let Some(new_path) =
+                        remapped_collect_path(&angle.source_path, source_to_destination_path)
+                    {
+                        if angle.source_path != new_path {
+                            angle.source_path = new_path;
+                            project_media_references_updated += 1;
+                        }
+                    }
+                }
+            }
+            if let Some(compound_tracks) = clip.compound_tracks.as_mut() {
+                let (nested_media, nested_luts) = apply_collected_files_to_tracks(
+                    compound_tracks.as_mut_slice(),
+                    source_to_destination_path,
+                    lut_source_to_destination_path,
+                );
+                project_media_references_updated += nested_media;
+                project_lut_references_updated += nested_luts;
+            }
+        }
+    }
+    (
+        project_media_references_updated,
+        project_lut_references_updated,
+    )
+}
+
+fn remapped_collect_path(path: &str, path_map: &HashMap<String, PathBuf>) -> Option<String> {
+    path_map
+        .get(path)
+        .map(|mapped| mapped.to_string_lossy().to_string())
 }
 
 /// Export a packaged project: write `.uspxml` and copy referenced timeline media
@@ -1274,24 +1646,99 @@ where
         .filter(|s| !s.trim().is_empty())
         .unwrap_or("Project");
     let library_dir = parent.join(format!("{stem}.Library"));
-    std::fs::create_dir_all(&library_dir)?;
+    let collected = collect_files_internal(
+        project,
+        &[],
+        &library_dir,
+        CollectFilesMode::TimelineUsedOnly,
+        false,
+        |progress| match progress {
+            CollectFilesProgress::Copying {
+                copied_files,
+                total_files,
+                current_file,
+            } => on_progress(ExportProjectWithMediaProgress::Copying {
+                copied_files,
+                total_files,
+                current_file,
+            }),
+        },
+    )?;
+
+    let mut export_project = project.clone();
+    export_project.source_fcpxml = None;
+    export_project.file_path = None;
+    export_project.dirty = true;
+    for clip in export_project
+        .tracks
+        .iter_mut()
+        .flat_map(|track| track.clips.iter_mut())
+    {
+        if clip.source_path.is_empty() {
+            clip.fcpxml_original_source_path = None;
+            continue;
+        }
+        let mapped = collected
+            .source_to_destination_path
+            .get(&clip.source_path)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Missing packaged media mapping for source: {}",
+                    clip.source_path
+                )
+            })?;
+        let portable_path = normalize_packaged_path_for_portability(mapped);
+        clip.source_path = portable_path.to_string_lossy().to_string();
+        clip.fcpxml_original_source_path = None;
+    }
+
+    for clip in export_project
+        .tracks
+        .iter_mut()
+        .flat_map(|track| track.clips.iter_mut())
+    {
+        let mut rewritten: Vec<String> = Vec::new();
+        for lut_path in &clip.lut_paths {
+            let Some(mapped) = collected.lut_source_to_destination_path.get(lut_path) else {
+                continue;
+            };
+            let portable_path = normalize_packaged_path_for_portability(mapped);
+            rewritten.push(portable_path.to_string_lossy().to_string());
+        }
+        clip.lut_paths = rewritten;
+    }
+
+    on_progress(ExportProjectWithMediaProgress::WritingProjectXml);
+    let xml = write_fcpxml_for_path(&export_project, &output_fcpxml_path)?;
+    std::fs::write(&output_fcpxml_path, xml)?;
+    Ok(collected.result.destination_dir)
+}
+
+fn collect_files_internal<F>(
+    project: &Project,
+    library: &[MediaItem],
+    destination_dir: &Path,
+    mode: CollectFilesMode,
+    reserve_existing_names: bool,
+    mut on_progress: F,
+) -> Result<CollectFilesManifest>
+where
+    F: FnMut(CollectFilesProgress),
+{
+    let destination_dir = if destination_dir.is_absolute() {
+        destination_dir.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(destination_dir)
+    };
+    std::fs::create_dir_all(&destination_dir)?;
 
     let mut source_to_canonical_path: HashMap<String, PathBuf> = HashMap::new();
     let mut unique_canonical_sources: Vec<PathBuf> = Vec::new();
     let mut seen_canonical_sources: HashSet<PathBuf> = HashSet::new();
-    let mut used_file_names: HashSet<String> = HashSet::new();
-
-    for clip in project.tracks.iter().flat_map(|track| track.clips.iter()) {
-        if source_to_canonical_path.contains_key(&clip.source_path) {
-            continue;
-        }
-        let source_local_path = source_path_to_local_path(&clip.source_path)?;
+    for source_path in source_paths_for_collect_mode(project, library, mode) {
+        let source_local_path = source_path_to_local_path(&source_path)?;
         if !source_local_path.exists() {
-            anyhow::bail!(
-                "Source media not found for clip '{}': {}",
-                clip.label,
-                source_local_path.display()
-            );
+            anyhow::bail!("Source media not found: {}", source_local_path.display());
         }
         let canonical_source = std::fs::canonicalize(&source_local_path).map_err(|e| {
             anyhow::anyhow!(
@@ -1299,14 +1746,25 @@ where
                 source_local_path.display()
             )
         })?;
-
         if seen_canonical_sources.insert(canonical_source.clone()) {
             unique_canonical_sources.push(canonical_source.clone());
         }
-        source_to_canonical_path.insert(clip.source_path.clone(), canonical_source);
+        source_to_canonical_path.insert(source_path, canonical_source);
     }
 
-    let mut canonical_to_export_path: HashMap<PathBuf, PathBuf> = HashMap::new();
+    let mut used_file_names: HashSet<String> = HashSet::new();
+    if reserve_existing_names {
+        if let Ok(entries) = std::fs::read_dir(&destination_dir) {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if !name.is_empty() {
+                        used_file_names.insert(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    let mut canonical_to_destination_path: HashMap<PathBuf, PathBuf> = HashMap::new();
     for canonical_source in &unique_canonical_sources {
         let file_name = canonical_source
             .file_name()
@@ -1320,17 +1778,52 @@ where
             })?;
         let unique_name = unique_packaged_media_name(file_name, canonical_source, &used_file_names);
         used_file_names.insert(unique_name.clone());
-        canonical_to_export_path.insert(canonical_source.clone(), library_dir.join(unique_name));
+        canonical_to_destination_path
+            .insert(canonical_source.clone(), destination_dir.join(unique_name));
     }
 
-    let total_files = unique_canonical_sources.len();
-    for (index, canonical_source) in unique_canonical_sources.iter().enumerate() {
-        let destination = canonical_to_export_path
+    let mut lut_source_to_canonical_path: HashMap<String, PathBuf> = HashMap::new();
+    let mut unique_canonical_luts: Vec<PathBuf> = Vec::new();
+    let mut seen_canonical_luts: HashSet<PathBuf> = HashSet::new();
+    for lut_path in collect_clip_lut_paths(project) {
+        let lut_local = match source_path_to_local_path(&lut_path) {
+            Ok(path) => path,
+            Err(_) => continue,
+        };
+        if !lut_local.exists() {
+            continue;
+        }
+        let lut_canonical = std::fs::canonicalize(&lut_local).unwrap_or(lut_local);
+        if seen_canonical_luts.insert(lut_canonical.clone()) {
+            unique_canonical_luts.push(lut_canonical.clone());
+        }
+        lut_source_to_canonical_path.insert(lut_path, lut_canonical);
+    }
+
+    let mut lut_canonical_to_destination_path: HashMap<PathBuf, PathBuf> = HashMap::new();
+    for lut_canonical in &unique_canonical_luts {
+        let lut_file_name = lut_canonical
+            .file_name()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("lut.cube");
+        let unique_name =
+            unique_packaged_media_name(lut_file_name, lut_canonical, &used_file_names);
+        used_file_names.insert(unique_name.clone());
+        lut_canonical_to_destination_path
+            .insert(lut_canonical.clone(), destination_dir.join(unique_name));
+    }
+
+    let total_files = unique_canonical_sources.len() + unique_canonical_luts.len();
+    let mut copied_files = 0usize;
+
+    for canonical_source in &unique_canonical_sources {
+        let destination = canonical_to_destination_path
             .get(canonical_source)
             .cloned()
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "Missing packaged destination for source media: {}",
+                    "Missing destination for source media: {}",
                     canonical_source.display()
                 )
             })?;
@@ -1342,9 +1835,10 @@ where
             )
         })?;
         let resolved_destination = std::fs::canonicalize(&destination).unwrap_or(destination);
-        canonical_to_export_path.insert(canonical_source.clone(), resolved_destination);
-        on_progress(ExportProjectWithMediaProgress::Copying {
-            copied_files: index + 1,
+        canonical_to_destination_path.insert(canonical_source.clone(), resolved_destination);
+        copied_files += 1;
+        on_progress(CollectFilesProgress::Copying {
+            copied_files,
             total_files,
             current_file: canonical_source
                 .file_name()
@@ -1354,91 +1848,112 @@ where
         });
     }
 
-    let mut source_to_export_path: HashMap<String, String> = HashMap::new();
+    for lut_canonical in &unique_canonical_luts {
+        let destination = lut_canonical_to_destination_path
+            .get(lut_canonical)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!("Missing destination for LUT: {}", lut_canonical.display())
+            })?;
+        std::fs::copy(lut_canonical, &destination).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to copy LUT {} to {}: {e}",
+                lut_canonical.display(),
+                destination.display()
+            )
+        })?;
+        let resolved_destination = std::fs::canonicalize(&destination).unwrap_or(destination);
+        lut_canonical_to_destination_path.insert(lut_canonical.clone(), resolved_destination);
+        copied_files += 1;
+        on_progress(CollectFilesProgress::Copying {
+            copied_files,
+            total_files,
+            current_file: lut_canonical
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("lut")
+                .to_string(),
+        });
+    }
+
+    let mut source_to_destination_path: HashMap<String, PathBuf> = HashMap::new();
     for (source_path, canonical_source) in source_to_canonical_path {
-        let exported_path = canonical_to_export_path
+        let destination = canonical_to_destination_path
             .get(&canonical_source)
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "Missing exported media mapping for source: {}",
+                    "Missing collected media mapping for source: {}",
                     canonical_source.display()
                 )
-            })?;
-        let portable_path = normalize_packaged_path_for_portability(exported_path);
-        source_to_export_path.insert(source_path, portable_path.to_string_lossy().to_string());
+            })?
+            .clone();
+        source_to_destination_path.insert(source_path, destination);
     }
 
-    let mut export_project = project.clone();
-    export_project.source_fcpxml = None;
-    export_project.file_path = None;
-    export_project.dirty = true;
-    for clip in export_project
-        .tracks
-        .iter_mut()
-        .flat_map(|track| track.clips.iter_mut())
-    {
-        let mapped = source_to_export_path
-            .get(&clip.source_path)
+    let mut lut_source_to_destination_path: HashMap<String, PathBuf> = HashMap::new();
+    for (lut_path, lut_canonical) in lut_source_to_canonical_path {
+        let destination = lut_canonical_to_destination_path
+            .get(&lut_canonical)
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "Missing packaged media mapping for source: {}",
-                    clip.source_path
+                    "Missing collected LUT mapping for source: {}",
+                    lut_canonical.display()
                 )
-            })?;
-        clip.source_path = mapped.clone();
-        clip.fcpxml_original_source_path = None;
+            })?
+            .clone();
+        lut_source_to_destination_path.insert(lut_path, destination);
     }
 
-    // Copy LUT files into the Library directory and rewrite paths.
-    let mut lut_canonical_to_export: HashMap<PathBuf, PathBuf> = HashMap::new();
-    let mut lut_used_names: HashSet<String> = HashSet::new();
-    for clip in export_project
-        .tracks
-        .iter_mut()
-        .flat_map(|track| track.clips.iter_mut())
-    {
-        let mut rewritten: Vec<String> = Vec::new();
-        for lut_path_str in &clip.lut_paths {
-            let lut_local = match source_path_to_local_path(lut_path_str) {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-            if !lut_local.exists() {
-                continue;
-            }
-            let lut_canonical = std::fs::canonicalize(&lut_local).unwrap_or(lut_local);
-            if let Some(existing_export) = lut_canonical_to_export.get(&lut_canonical) {
-                let portable = normalize_packaged_path_for_portability(existing_export);
-                rewritten.push(portable.to_string_lossy().to_string());
-                continue;
-            }
-            let lut_file_name = lut_canonical
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("lut.cube");
-            let unique_lut_name =
-                unique_packaged_media_name(lut_file_name, &lut_canonical, &lut_used_names);
-            lut_used_names.insert(unique_lut_name.clone());
-            let lut_dest = library_dir.join(&unique_lut_name);
-            std::fs::copy(&lut_canonical, &lut_dest).map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to copy LUT {} to {}: {e}",
-                    lut_canonical.display(),
-                    lut_dest.display()
-                )
-            })?;
-            let resolved_dest = std::fs::canonicalize(&lut_dest).unwrap_or(lut_dest);
-            lut_canonical_to_export.insert(lut_canonical, resolved_dest.clone());
-            let portable = normalize_packaged_path_for_portability(&resolved_dest);
-            rewritten.push(portable.to_string_lossy().to_string());
+    Ok(CollectFilesManifest {
+        result: CollectFilesResult {
+            destination_dir,
+            media_files_copied: unique_canonical_sources.len(),
+            lut_files_copied: unique_canonical_luts.len(),
+        },
+        source_to_destination_path,
+        lut_source_to_destination_path,
+    })
+}
+
+fn source_paths_for_collect_mode(
+    project: &Project,
+    library: &[MediaItem],
+    mode: CollectFilesMode,
+) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut seen = HashSet::new();
+    for clip in project.tracks.iter().flat_map(|track| track.clips.iter()) {
+        push_unique_source_path(&mut paths, &mut seen, &clip.source_path);
+    }
+    if mode == CollectFilesMode::EntireLibrary {
+        for item in library.iter().filter(|item| item.has_backing_file()) {
+            push_unique_source_path(&mut paths, &mut seen, &item.source_path);
         }
-        clip.lut_paths = rewritten;
     }
+    paths
+}
 
-    on_progress(ExportProjectWithMediaProgress::WritingProjectXml);
-    let xml = write_fcpxml_for_path(&export_project, &output_fcpxml_path)?;
-    std::fs::write(&output_fcpxml_path, xml)?;
-    Ok(library_dir)
+fn collect_clip_lut_paths(project: &Project) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut seen = HashSet::new();
+    for lut_path in project
+        .tracks
+        .iter()
+        .flat_map(|track| track.clips.iter())
+        .flat_map(|clip| clip.lut_paths.iter())
+    {
+        push_unique_source_path(&mut paths, &mut seen, lut_path);
+    }
+    paths
+}
+
+fn push_unique_source_path(paths: &mut Vec<String>, seen: &mut HashSet<String>, source_path: &str) {
+    if source_path.trim().is_empty() {
+        return;
+    }
+    if seen.insert(source_path.to_string()) {
+        paths.push(source_path.to_string());
+    }
 }
 
 fn source_path_to_local_path(source_path: &str) -> Result<PathBuf> {
@@ -1673,8 +2188,8 @@ fn write_strict_clip_body(
 
         // adjust-transform
         let mut adjust_transform = BytesStart::new("adjust-transform");
-        let has_position_kfs = !clip.position_x_keyframes.is_empty()
-            || !clip.position_y_keyframes.is_empty();
+        let has_position_kfs =
+            !clip.position_x_keyframes.is_empty() || !clip.position_y_keyframes.is_empty();
         let has_scale_kfs = !clip.scale_keyframes.is_empty();
         let has_rotation_kfs = !clip.rotate_keyframes.is_empty();
         let has_transform_kfs = has_position_kfs || has_scale_kfs || has_rotation_kfs;
@@ -2012,7 +2527,10 @@ fn patch_asset_clip_block_transform(
         ("us:saturation", clip.saturation.to_string()),
         ("us:temperature", clip.temperature.to_string()),
         ("us:tint", clip.tint.to_string()),
-        ("us:anamorphic-desqueeze", clip.anamorphic_desqueeze.to_string()),
+        (
+            "us:anamorphic-desqueeze",
+            clip.anamorphic_desqueeze.to_string(),
+        ),
         ("us:scale", clip.scale.to_string()),
         ("us:position-x", clip.position_x.to_string()),
         ("us:position-y", clip.position_y.to_string()),
@@ -2184,23 +2702,145 @@ fn patch_asset_clip_block_transform(
     }
     // Conditional title attrs
     for (attr, value) in [
-        ("us:title-template", if clip.title_template.is_empty() { None } else { Some(clip.title_template.clone()) }),
-        ("us:title-outline-color", if clip.title_outline_width > 0.0 { Some(format!("{:08X}", clip.title_outline_color)) } else { None }),
-        ("us:title-outline-width", if clip.title_outline_width > 0.0 { Some(clip.title_outline_width.to_string()) } else { None }),
-        ("us:title-shadow", if clip.title_shadow { Some("true".to_string()) } else { None }),
-        ("us:title-shadow-color", if clip.title_shadow { Some(format!("{:08X}", clip.title_shadow_color)) } else { None }),
-        ("us:title-shadow-offset-x", if clip.title_shadow { Some(clip.title_shadow_offset_x.to_string()) } else { None }),
-        ("us:title-shadow-offset-y", if clip.title_shadow { Some(clip.title_shadow_offset_y.to_string()) } else { None }),
-        ("us:title-bg-box", if clip.title_bg_box { Some("true".to_string()) } else { None }),
-        ("us:title-bg-box-color", if clip.title_bg_box { Some(format!("{:08X}", clip.title_bg_box_color)) } else { None }),
-        ("us:title-bg-box-padding", if clip.title_bg_box { Some(clip.title_bg_box_padding.to_string()) } else { None }),
-        ("us:title-clip-bg-color", if clip.title_clip_bg_color != 0 { Some(format!("{:08X}", clip.title_clip_bg_color)) } else { None }),
-        ("us:title-secondary-text", if clip.title_secondary_text.is_empty() { None } else { Some(clip.title_secondary_text.clone()) }),
-        ("us:clip-kind", match clip.kind {
-            crate::model::clip::ClipKind::Title => Some("title".to_string()),
-            crate::model::clip::ClipKind::Adjustment => Some("adjustment".to_string()),
-            _ => None,
-        }),
+        (
+            "us:title-template",
+            if clip.title_template.is_empty() {
+                None
+            } else {
+                Some(clip.title_template.clone())
+            },
+        ),
+        (
+            "us:title-outline-color",
+            if clip.title_outline_width > 0.0 {
+                Some(format!("{:08X}", clip.title_outline_color))
+            } else {
+                None
+            },
+        ),
+        (
+            "us:title-outline-width",
+            if clip.title_outline_width > 0.0 {
+                Some(clip.title_outline_width.to_string())
+            } else {
+                None
+            },
+        ),
+        (
+            "us:title-shadow",
+            if clip.title_shadow {
+                Some("true".to_string())
+            } else {
+                None
+            },
+        ),
+        (
+            "us:title-shadow-color",
+            if clip.title_shadow {
+                Some(format!("{:08X}", clip.title_shadow_color))
+            } else {
+                None
+            },
+        ),
+        (
+            "us:title-shadow-offset-x",
+            if clip.title_shadow {
+                Some(clip.title_shadow_offset_x.to_string())
+            } else {
+                None
+            },
+        ),
+        (
+            "us:title-shadow-offset-y",
+            if clip.title_shadow {
+                Some(clip.title_shadow_offset_y.to_string())
+            } else {
+                None
+            },
+        ),
+        (
+            "us:title-bg-box",
+            if clip.title_bg_box {
+                Some("true".to_string())
+            } else {
+                None
+            },
+        ),
+        (
+            "us:title-bg-box-color",
+            if clip.title_bg_box {
+                Some(format!("{:08X}", clip.title_bg_box_color))
+            } else {
+                None
+            },
+        ),
+        (
+            "us:title-bg-box-padding",
+            if clip.title_bg_box {
+                Some(clip.title_bg_box_padding.to_string())
+            } else {
+                None
+            },
+        ),
+        (
+            "us:title-clip-bg-color",
+            if clip.title_clip_bg_color != 0 {
+                Some(format!("{:08X}", clip.title_clip_bg_color))
+            } else {
+                None
+            },
+        ),
+        (
+            "us:title-secondary-text",
+            if clip.title_secondary_text.is_empty() {
+                None
+            } else {
+                Some(clip.title_secondary_text.clone())
+            },
+        ),
+        (
+            "us:clip-kind",
+            match clip.kind {
+                crate::model::clip::ClipKind::Title => Some("title".to_string()),
+                crate::model::clip::ClipKind::Adjustment => Some("adjustment".to_string()),
+                crate::model::clip::ClipKind::Compound => Some("compound".to_string()),
+                crate::model::clip::ClipKind::Multicam => Some("multicam".to_string()),
+                _ => None,
+            },
+        ),
+        (
+            "us:compound-tracks",
+            if clip.kind == crate::model::clip::ClipKind::Compound {
+                clip.compound_tracks
+                    .as_ref()
+                    .and_then(|t| serde_json::to_string(t).ok())
+                    .map(|j| j.replace('"', "&quot;"))
+            } else {
+                None
+            },
+        ),
+        (
+            "us:multicam-angles",
+            if clip.kind == crate::model::clip::ClipKind::Multicam {
+                clip.multicam_angles
+                    .as_ref()
+                    .and_then(|a| serde_json::to_string(a).ok())
+                    .map(|j| j.replace('"', "&quot;"))
+            } else {
+                None
+            },
+        ),
+        (
+            "us:multicam-switches",
+            if clip.kind == crate::model::clip::ClipKind::Multicam {
+                clip.multicam_switches
+                    .as_ref()
+                    .and_then(|s| serde_json::to_string(s).ok())
+                    .map(|j| j.replace('"', "&quot;"))
+            } else {
+                None
+            },
+        ),
     ] {
         let next = if let Some(v) = value {
             replace_or_insert_attr(&updated_start, attr, &v)?
@@ -2226,6 +2866,26 @@ fn patch_asset_clip_block_transform(
             replace_or_insert_attr(&updated_start, "us:frei0r-effects", &v)?
         } else {
             remove_attr(&updated_start, "us:frei0r-effects")
+        };
+        if next != updated_start {
+            changed = true;
+        }
+        updated_start = next;
+    }
+
+    // Patch masks JSON attribute.
+    {
+        let masks_value = if clip.masks.is_empty() {
+            None
+        } else {
+            serde_json::to_string(&clip.masks)
+                .ok()
+                .map(|s| s.replace('"', "&quot;"))
+        };
+        let next = if let Some(v) = masks_value {
+            replace_or_insert_attr(&updated_start, "us:masks", &v)?
+        } else {
+            remove_attr(&updated_start, "us:masks")
         };
         if next != updated_start {
             changed = true;
@@ -2714,12 +3374,60 @@ fn write_resources(
 
     // Asset resources — deduplicated by source path so clips from the same
     // media file share a single <asset> element.
-    let mut written_asset_sources: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut written_asset_sources: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    // Write placeholder assets for sourceless clips (Title, Adjustment, etc.)
+    // so the parser can find them via their asset-clip ref attribute.
+    {
+        let mut written_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for track in project.video_tracks().chain(project.audio_tracks()) {
+            for clip in &track.clips {
+                if !matches!(
+                    clip.kind,
+                    crate::model::clip::ClipKind::Title | crate::model::clip::ClipKind::Adjustment
+                ) {
+                    continue;
+                }
+                let asset_id = asset_id_by_source
+                    .get(
+                        clip.fcpxml_original_source_path
+                            .as_deref()
+                            .unwrap_or(&clip.source_path),
+                    )
+                    .cloned()
+                    .unwrap_or_else(|| format!("a_{}", sanitize_id(&clip.id)));
+                if !written_ids.insert(asset_id.clone()) {
+                    continue;
+                }
+                let mut asset_elem = BytesStart::new("asset");
+                asset_elem.push_attribute(("id", asset_id.as_str()));
+                asset_elem.push_attribute(("src", ""));
+                asset_elem.push_attribute(("name", clip.label.as_str()));
+                asset_elem.push_attribute(("hasVideo", "1"));
+                asset_elem.push_attribute((
+                    "duration",
+                    format!(
+                        "{}/{}s",
+                        clip.source_out.saturating_sub(clip.source_in),
+                        1_000_000_000u64
+                    )
+                    .as_str(),
+                ));
+                asset_elem.push_attribute(("format", "r1"));
+                writer.write_event(Event::Empty(asset_elem))?;
+            }
+        }
+    }
     for track in project.video_tracks().chain(project.audio_tracks()) {
         for clip in &track.clips {
-            // Title clips have no source media — skip to avoid writing
-            // broken asset references with empty file:// URIs.
-            if clip.source_path.is_empty() || clip.kind == crate::model::clip::ClipKind::Title || clip.kind == crate::model::clip::ClipKind::Adjustment {
+            // Title/Adjustment clips handled above with placeholder assets.
+            // Compound/Multicam clips have no source media — skip.
+            if clip.source_path.is_empty()
+                || clip.kind == crate::model::clip::ClipKind::Title
+                || clip.kind == crate::model::clip::ClipKind::Adjustment
+                || clip.kind == crate::model::clip::ClipKind::Compound
+                || clip.kind == crate::model::clip::ClipKind::Multicam
+            {
                 continue;
             }
             let export_source_path = clip
@@ -3098,10 +3806,7 @@ fn write_transform_keyframe_params(
                 internal_position_to_fcpxml(ix, iy, project.width, project.height, scale_at_t);
             let mut kf_elem = BytesStart::new("keyframe");
             // Offset clip-local time back to absolute source time for FCP
-            kf_elem.push_attribute((
-                "time",
-                ns_to_fcpxml_time(t + source_start_ns, fps).as_str(),
-            ));
+            kf_elem.push_attribute(("time", ns_to_fcpxml_time(t + source_start_ns, fps).as_str()));
             kf_elem.push_attribute(("value", format!("{} {}", fx, fy).as_str()));
             let x_kf = clip.position_x_keyframes.iter().find(|kf| kf.time_ns == t);
             let y_kf = clip.position_y_keyframes.iter().find(|kf| kf.time_ns == t);
@@ -3381,7 +4086,14 @@ fn is_writer_managed_library_attr(_key: &str) -> bool {
 }
 
 fn is_writer_managed_event_attr(_key: &str) -> bool {
-    false
+    matches!(
+        _key,
+        "us:bins"
+            | "us:media-bins"
+            | "us:smart-collections"
+            | "us:library-items"
+            | "us:media-annotations"
+    )
 }
 
 fn is_writer_managed_project_attr(key: &str) -> bool {
@@ -3523,7 +4235,20 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:pitch-preserve"
             | "us:audio-channel-mode"
             | "us:ladspa-effects"
+            | "us:masks"
             | "us:measured-loudness-lufs"
+            | "us:subtitle-segments"
+            | "us:subtitles-language"
+            | "us:subtitle-font"
+            | "us:subtitle-color"
+            | "us:subtitle-outline-color"
+            | "us:subtitle-outline-width"
+            | "us:subtitle-bg-box"
+            | "us:subtitle-bg-box-color"
+            | "us:subtitle-highlight-mode"
+            | "us:subtitle-highlight-color"
+            | "us:subtitle-word-window-secs"
+            | "us:subtitle-position-y"
     )
 }
 
@@ -4092,6 +4817,26 @@ mod tests {
     }
 
     #[test]
+    fn test_write_fcpxml_emits_library_annotation_vendor_attrs() {
+        let mut project = Project::new("Annotations");
+        project.parsed_collections_json = Some(
+            r#"[{"id":"c1","name":"Favorites","criteria":{"rating":"favorite"}}]"#.to_string(),
+        );
+        project.parsed_library_items_json = Some(
+            r#"[{"library_key":"/tmp/clip.mov","label":"Clip","is_missing":false}]"#.to_string(),
+        );
+        project.parsed_media_annotations_json = Some(
+            r#"[{"library_key":"/tmp/clip.mov","rating":"favorite","keyword_ranges":[{"id":"k1","label":"B-roll","start_ns":100,"end_ns":200}]}]"#
+                .to_string(),
+        );
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(xml.contains("us:smart-collections="));
+        assert!(xml.contains("us:library-items="));
+        assert!(xml.contains("us:media-annotations="));
+    }
+
+    #[test]
     fn test_write_fcpxml_strict_emits_lane_mapping_for_multitrack() {
         let mut project = Project::new("StrictLanes");
         project.tracks.clear();
@@ -4562,13 +5307,34 @@ mod tests {
         assert!(written.contains("us:tint-keyframes="));
         // Verify round-trip: parse the written XML back and check data values.
         let reparsed = parse_fcpxml(&written).expect("round-trip parse should succeed");
-        let clip2 = reparsed.tracks.iter().flat_map(|t| t.clips.iter()).next()
+        let clip2 = reparsed
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .next()
             .expect("clip should survive round-trip");
-        assert!((clip2.scale - 1.75).abs() < 0.001, "scale should round-trip");
-        assert!((clip2.position_x - 0.25).abs() < 0.001, "position_x should round-trip");
-        assert!((clip2.position_y - (-0.5)).abs() < 0.001, "position_y should round-trip");
-        assert_eq!(clip2.scale_keyframes.len(), 2, "scale keyframes should round-trip");
-        assert_eq!(clip2.opacity_keyframes.len(), 1, "opacity keyframes should round-trip");
+        assert!(
+            (clip2.scale - 1.75).abs() < 0.001,
+            "scale should round-trip"
+        );
+        assert!(
+            (clip2.position_x - 0.25).abs() < 0.001,
+            "position_x should round-trip"
+        );
+        assert!(
+            (clip2.position_y - (-0.5)).abs() < 0.001,
+            "position_y should round-trip"
+        );
+        assert_eq!(
+            clip2.scale_keyframes.len(),
+            2,
+            "scale keyframes should round-trip"
+        );
+        assert_eq!(
+            clip2.opacity_keyframes.len(),
+            1,
+            "opacity keyframes should round-trip"
+        );
     }
 
     #[test]
@@ -4807,7 +5573,10 @@ mod tests {
         assert!(written.contains("us:track-idx="));
         // Round-trip: verify the written XML can be parsed back.
         let reparsed = parse_fcpxml(&written).expect("round-trip parse should succeed");
-        let overlay = reparsed.tracks.iter().flat_map(|t| t.clips.iter())
+        let overlay = reparsed
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
             .find(|c| c.label == "overlay")
             .expect("overlay clip should survive round-trip");
         assert!((overlay.scale - 0.75).abs() < 0.001);
@@ -5059,7 +5828,10 @@ mod tests {
         project.tracks.push(track);
 
         let xml = write_fcpxml_strict(&project).expect("strict write should succeed");
-        assert!(!xml.contains("xmlns:us="), "strict export should omit vendor ns");
+        assert!(
+            !xml.contains("xmlns:us="),
+            "strict export should omit vendor ns"
+        );
         assert!(xml.contains("<param name=\"scale\""), "missing scale param");
         assert!(
             xml.contains("curve=\"smooth\""),
@@ -5192,8 +5964,7 @@ mod tests {
         // The written FCPXML should NOT have keyframes at time="0s"
         // since source_in is 10s.
         assert!(
-            !xml.contains("time=\"0s\"")
-                && !xml.contains("time=\"0/24s\""),
+            !xml.contains("time=\"0s\"") && !xml.contains("time=\"0/24s\""),
             "keyframe times should be absolute, not clip-local: {xml}"
         );
 
@@ -5297,6 +6068,353 @@ mod tests {
         assert!(
             srcs.iter().all(|src| src.starts_with(&library_uri_prefix)),
             "all media-rep sources should point into packaged library: {srcs:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_collect_files_timeline_used_only_excludes_unused_library_media() {
+        let root = unique_test_dir("collect-timeline-only");
+        std::fs::create_dir_all(&root).expect("create root");
+        let used_source = root.join("used.mp4");
+        let unused_source = root.join("unused.mp4");
+        std::fs::write(&used_source, b"used-media").expect("write used source");
+        std::fs::write(&unused_source, b"unused-media").expect("write unused source");
+
+        let destination = root.join("Collected");
+        let mut project = Project::new("CollectTimelineOnly");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        track.add_clip(Clip::new(
+            used_source.to_string_lossy().to_string(),
+            1_000_000_000,
+            0,
+            ClipKind::Video,
+        ));
+        project.tracks.push(track);
+
+        let library = vec![
+            crate::model::media_library::MediaItem::new(
+                used_source.to_string_lossy().to_string(),
+                1_000_000_000,
+            ),
+            crate::model::media_library::MediaItem::new(
+                unused_source.to_string_lossy().to_string(),
+                1_000_000_000,
+            ),
+        ];
+
+        let summary = collect_files(
+            &project,
+            &library,
+            &destination,
+            CollectFilesMode::TimelineUsedOnly,
+        )
+        .expect("timeline-used collection should succeed");
+        assert_eq!(summary.media_files_copied, 1);
+        assert_eq!(summary.lut_files_copied, 0);
+        assert_eq!(summary.total_files_copied(), 1);
+        assert!(
+            destination.join("used.mp4").exists(),
+            "used media should be copied"
+        );
+        assert!(
+            !destination.join("unused.mp4").exists(),
+            "unused library media should not be copied in timeline-used mode"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_collect_files_entire_library_includes_unused_library_media() {
+        let root = unique_test_dir("collect-entire-library");
+        std::fs::create_dir_all(&root).expect("create root");
+        let used_source = root.join("used.mp4");
+        let unused_source = root.join("unused.mp4");
+        std::fs::write(&used_source, b"used-media").expect("write used source");
+        std::fs::write(&unused_source, b"unused-media").expect("write unused source");
+
+        let destination = root.join("Collected");
+        let mut project = Project::new("CollectEntireLibrary");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        track.add_clip(Clip::new(
+            used_source.to_string_lossy().to_string(),
+            1_000_000_000,
+            0,
+            ClipKind::Video,
+        ));
+        project.tracks.push(track);
+
+        let library = vec![
+            crate::model::media_library::MediaItem::new(
+                used_source.to_string_lossy().to_string(),
+                1_000_000_000,
+            ),
+            crate::model::media_library::MediaItem::new(
+                unused_source.to_string_lossy().to_string(),
+                1_000_000_000,
+            ),
+        ];
+
+        let summary = collect_files(
+            &project,
+            &library,
+            &destination,
+            CollectFilesMode::EntireLibrary,
+        )
+        .expect("entire-library collection should succeed");
+        assert_eq!(summary.media_files_copied, 2);
+        assert_eq!(summary.lut_files_copied, 0);
+        assert_eq!(summary.total_files_copied(), 2);
+        assert!(
+            destination.join("used.mp4").exists(),
+            "used media should be copied"
+        );
+        assert!(
+            destination.join("unused.mp4").exists(),
+            "unused library media should be copied in entire-library mode"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_collect_files_deduplicates_media_lut_name_collisions() {
+        let root = unique_test_dir("collect-lut-collision");
+        let media_dir = root.join("media");
+        let lut_dir = root.join("luts");
+        std::fs::create_dir_all(&media_dir).expect("create media dir");
+        std::fs::create_dir_all(&lut_dir).expect("create lut dir");
+
+        let media_path = media_dir.join("shared.bin");
+        let lut_path = lut_dir.join("shared.bin");
+        std::fs::write(&media_path, b"media-bytes").expect("write media file");
+        std::fs::write(&lut_path, b"lut-bytes").expect("write lut file");
+
+        let destination = root.join("Collected");
+        let mut project = Project::new("CollectCollision");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut clip = Clip::new(
+            media_path.to_string_lossy().to_string(),
+            1_000_000_000,
+            0,
+            ClipKind::Video,
+        );
+        clip.lut_paths.push(lut_path.to_string_lossy().to_string());
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let summary = collect_files(
+            &project,
+            &[],
+            &destination,
+            CollectFilesMode::TimelineUsedOnly,
+        )
+        .expect("collection should succeed");
+        assert_eq!(summary.media_files_copied, 1);
+        assert_eq!(summary.lut_files_copied, 1);
+        assert_eq!(summary.total_files_copied(), 2);
+
+        let mut collected: Vec<(String, Vec<u8>)> = std::fs::read_dir(&destination)
+            .expect("read destination")
+            .map(|entry| {
+                let path = entry.expect("entry").path();
+                let name = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .expect("utf8 file name")
+                    .to_string();
+                let bytes = std::fs::read(&path).expect("read collected file");
+                (name, bytes)
+            })
+            .collect();
+        collected.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(collected.len(), 2, "media and LUT should both be present");
+        assert_ne!(
+            collected[0].0, collected[1].0,
+            "collision handling should assign distinct destination names"
+        );
+        assert!(
+            collected
+                .iter()
+                .any(|(_, bytes)| bytes.as_slice() == b"media-bytes"),
+            "expected copied media file contents"
+        );
+        assert!(
+            collected
+                .iter()
+                .any(|(_, bytes)| bytes.as_slice() == b"lut-bytes"),
+            "expected copied LUT file contents"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_collect_files_preserves_existing_destination_files() {
+        let root = unique_test_dir("collect-existing-destination");
+        std::fs::create_dir_all(&root).expect("create root");
+        let source = root.join("clip.mp4");
+        std::fs::write(&source, b"new-media").expect("write source");
+
+        let destination = root.join("Collected");
+        std::fs::create_dir_all(&destination).expect("create destination");
+        std::fs::write(destination.join("clip.mp4"), b"existing-media")
+            .expect("write existing destination file");
+
+        let mut project = Project::new("CollectExistingDestination");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        track.add_clip(Clip::new(
+            source.to_string_lossy().to_string(),
+            1_000_000_000,
+            0,
+            ClipKind::Video,
+        ));
+        project.tracks.push(track);
+
+        let summary = collect_files(
+            &project,
+            &[],
+            &destination,
+            CollectFilesMode::TimelineUsedOnly,
+        )
+        .expect("collection should succeed");
+        assert_eq!(summary.media_files_copied, 1);
+
+        let mut collected: Vec<(String, Vec<u8>)> = std::fs::read_dir(&destination)
+            .expect("read destination")
+            .map(|entry| {
+                let path = entry.expect("entry").path();
+                let name = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .expect("utf8 file name")
+                    .to_string();
+                let bytes = std::fs::read(&path).expect("read collected file");
+                (name, bytes)
+            })
+            .collect();
+        collected.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(collected.len(), 2, "existing file should be preserved");
+        assert!(
+            collected
+                .iter()
+                .any(|(name, bytes)| name == "clip.mp4" && bytes.as_slice() == b"existing-media"),
+            "existing destination file should not be overwritten"
+        );
+        assert!(
+            collected
+                .iter()
+                .any(|(name, bytes)| name != "clip.mp4" && bytes.as_slice() == b"new-media"),
+            "newly collected file should be copied with a distinct name"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_apply_collected_files_manifest_updates_next_save_paths() {
+        let root = unique_test_dir("collect-apply-next-save");
+        std::fs::create_dir_all(&root).expect("create root");
+        let used_source = root.join("used.mp4");
+        let unused_source = root.join("unused.mp4");
+        let lut_path = root.join("look.cube");
+        std::fs::write(&used_source, b"used-media").expect("write used source");
+        std::fs::write(&unused_source, b"unused-media").expect("write unused source");
+        std::fs::write(&lut_path, b"lut-bytes").expect("write lut");
+
+        let destination = root.join("Collected");
+        let mut project = Project::new("CollectApplyNextSave");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut clip = Clip::new(
+            used_source.to_string_lossy().to_string(),
+            1_000_000_000,
+            0,
+            ClipKind::Video,
+        );
+        clip.fcpxml_original_source_path = Some("/Volumes/original/used.mp4".to_string());
+        clip.lut_paths.push(lut_path.to_string_lossy().to_string());
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let mut library = vec![
+            crate::model::media_library::MediaItem::new(
+                used_source.to_string_lossy().to_string(),
+                1_000_000_000,
+            ),
+            crate::model::media_library::MediaItem::new(
+                unused_source.to_string_lossy().to_string(),
+                1_000_000_000,
+            ),
+        ];
+
+        let manifest = collect_files_with_manifest(
+            &project,
+            &library,
+            &destination,
+            CollectFilesMode::EntireLibrary,
+            |_| {},
+        )
+        .expect("collection manifest should succeed");
+        let summary =
+            apply_collected_files_manifest(&mut project, library.as_mut_slice(), &manifest);
+        assert!(
+            summary.updated_any(),
+            "project/library references should update"
+        );
+        assert_eq!(summary.project_media_references_updated, 1);
+        assert_eq!(summary.project_lut_references_updated, 1);
+        assert_eq!(summary.library_items_updated, 2);
+        assert!(
+            project.dirty,
+            "relinking collected paths should dirty the project"
+        );
+
+        let collected_used = manifest
+            .source_to_destination_path
+            .get(&used_source.to_string_lossy().to_string())
+            .expect("collected used source")
+            .to_string_lossy()
+            .to_string();
+        let collected_unused = manifest
+            .source_to_destination_path
+            .get(&unused_source.to_string_lossy().to_string())
+            .expect("collected unused source")
+            .to_string_lossy()
+            .to_string();
+        let collected_lut = manifest
+            .lut_source_to_destination_path
+            .get(&lut_path.to_string_lossy().to_string())
+            .expect("collected lut")
+            .to_string_lossy()
+            .to_string();
+
+        let clip = &project.tracks[0].clips[0];
+        assert_eq!(clip.source_path, collected_used);
+        assert_eq!(clip.lut_paths, vec![collected_lut.clone()]);
+        assert_eq!(clip.fcpxml_original_source_path, None);
+        assert_eq!(library[0].source_path, collected_used);
+        assert_eq!(library[1].source_path, collected_unused);
+
+        let xml = write_fcpxml_for_path(&project, Path::new("/tmp/collect-apply.uspxml"))
+            .expect("write updated project xml");
+        assert!(
+            xml.contains(&collected_used),
+            "saved project should reference collected media path"
+        );
+        assert!(
+            xml.contains(&collected_lut),
+            "saved project should reference collected LUT path"
+        );
+        assert!(
+            !xml.contains("/Volumes/original/used.mp4"),
+            "saved project should stop using preserved original FCPXML source path"
         );
 
         let _ = std::fs::remove_dir_all(&root);

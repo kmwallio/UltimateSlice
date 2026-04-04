@@ -569,15 +569,22 @@ pub fn estimate_slider_adjustments_with_zones(
     let exposure = (l_delta / 50.0).clamp(-1.0, 1.0) as f32;
 
     // --- Zone-based grading ---
-    let (shadows, midtones, highlights, black_point,
-         shadows_warmth, shadows_tint_val,
-         midtones_warmth, midtones_tint_val,
-         highlights_warmth, highlights_tint_val) =
-        if let (Some(sz), Some(rz)) = (source_zones, reference_zones) {
-            estimate_zone_grading(sz, rz, l_delta, a_delta, b_delta)
-        } else {
-            (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-        };
+    let (
+        shadows,
+        midtones,
+        highlights,
+        black_point,
+        shadows_warmth,
+        shadows_tint_val,
+        midtones_warmth,
+        midtones_tint_val,
+        highlights_warmth,
+        highlights_tint_val,
+    ) = if let (Some(sz), Some(rz)) = (source_zones, reference_zones) {
+        estimate_zone_grading(sz, rz, l_delta, a_delta, b_delta)
+    } else {
+        (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    };
 
     MatchColorResult {
         brightness,
@@ -786,13 +793,7 @@ pub fn generate_match_lut(
 /// Single-channel Reinhard transfer: subtract source mean, scale by std ratio,
 /// add reference mean.
 #[inline]
-fn transfer_channel(
-    val: f64,
-    src_mean: f64,
-    src_std: f64,
-    ref_mean: f64,
-    ref_std: f64,
-) -> f64 {
+fn transfer_channel(val: f64, src_mean: f64, src_std: f64, ref_mean: f64, ref_std: f64) -> f64 {
     if src_std < 0.001 {
         // Source has near-zero variance — just shift to reference mean.
         val - src_mean + ref_mean
@@ -805,10 +806,7 @@ fn transfer_channel(
 /// `ColorStats`, returning adjusted stats. This represents what the source
 /// would look like after sliders are applied, so the LUT can be generated for
 /// only the non-linear residual.
-pub fn simulate_slider_adjusted_stats(
-    stats: &ColorStats,
-    result: &MatchColorResult,
-) -> ColorStats {
+pub fn simulate_slider_adjusted_stats(stats: &ColorStats, result: &MatchColorResult) -> ColorStats {
     // Brightness + exposure shift L* mean.
     let l_shift = result.brightness as f64 * 100.0 + result.exposure as f64 * 50.0;
 
@@ -1087,9 +1085,7 @@ pub fn run_match_color(params: &MatchColorParams) -> Result<MatchColorOutcome> {
         sample_count,
     )?;
     if reference_frames.is_empty() {
-        return Err(anyhow!(
-            "failed to sample any frames from reference clip"
-        ));
+        return Err(anyhow!("failed to sample any frames from reference clip"));
     }
 
     // Apply reference clip's grading to sampled frames so stats reflect the
@@ -1149,10 +1145,7 @@ pub fn run_match_color(params: &MatchColorParams) -> Result<MatchColorOutcome> {
     );
 
     let lut_path = if params.generate_lut {
-        let dir = params
-            .lut_output_dir
-            .as_deref()
-            .unwrap_or("/tmp");
+        let dir = params.lut_output_dir.as_deref().unwrap_or("/tmp");
         let filename = format!(
             "ultimateslice-color-match-{}.cube",
             std::time::SystemTime::now()
@@ -1237,7 +1230,12 @@ mod tests {
         let w = 4u32;
         let h = 4u32;
         let pixel = [128u8, 128, 128, 255];
-        let data: Vec<u8> = pixel.iter().copied().cycle().take((w * h * 4) as usize).collect();
+        let data: Vec<u8> = pixel
+            .iter()
+            .copied()
+            .cycle()
+            .take((w * h * 4) as usize)
+            .collect();
         let frame = SampledFrame {
             data,
             width: w,
@@ -1251,11 +1249,7 @@ mod tests {
         assert!(stats.std_b < 0.01, "uniform std_b={}", stats.std_b);
 
         // L* for (128,128,128) ≈ 53.6.
-        assert!(
-            (stats.mean_l - 53.6).abs() < 1.0,
-            "mean_l={}",
-            stats.mean_l
-        );
+        assert!((stats.mean_l - 53.6).abs() < 1.0, "mean_l={}", stats.mean_l);
     }
 
     #[test]
@@ -1445,7 +1439,12 @@ mod tests {
         let w = 4u32;
         let h = 4u32;
         let pixel = [128u8, 128, 128, 255];
-        let data: Vec<u8> = pixel.iter().copied().cycle().take((w * h * 4) as usize).collect();
+        let data: Vec<u8> = pixel
+            .iter()
+            .copied()
+            .cycle()
+            .take((w * h * 4) as usize)
+            .collect();
         let frame = SampledFrame {
             data,
             width: w,
@@ -1471,7 +1470,12 @@ mod tests {
         let w = 2u32;
         let h = 2u32;
         let pixel = [20u8, 20, 20, 255];
-        let data: Vec<u8> = pixel.iter().copied().cycle().take((w * h * 4) as usize).collect();
+        let data: Vec<u8> = pixel
+            .iter()
+            .copied()
+            .cycle()
+            .take((w * h * 4) as usize)
+            .collect();
         let frame = SampledFrame {
             data,
             width: w,
@@ -1491,7 +1495,12 @@ mod tests {
         let w = 2u32;
         let h = 2u32;
         let pixel = [240u8, 240, 240, 255];
-        let data: Vec<u8> = pixel.iter().copied().cycle().take((w * h * 4) as usize).collect();
+        let data: Vec<u8> = pixel
+            .iter()
+            .copied()
+            .cycle()
+            .take((w * h * 4) as usize)
+            .collect();
         let frame = SampledFrame {
             data,
             width: w,
@@ -1566,8 +1575,7 @@ mod tests {
             std_g: 0.1,
             std_b_ch: 0.1,
         };
-        let result =
-            estimate_slider_adjustments_with_zones(&stats, &stats, Some(&zs), Some(&zs));
+        let result = estimate_slider_adjustments_with_zones(&stats, &stats, Some(&zs), Some(&zs));
 
         // Identical stats+zones → all grading at 0.
         assert!(result.shadows.abs() < 0.01, "shadows={}", result.shadows);
@@ -1628,7 +1636,7 @@ mod tests {
             total_count: 400,
         };
         let ref_zones = ZoneColorStats {
-            shadow_mean_l: 25.0,  // brighter shadows
+            shadow_mean_l: 25.0, // brighter shadows
             shadow_mean_a: 0.0,
             shadow_mean_b: 0.0,
             shadow_count: 100,
@@ -1640,12 +1648,16 @@ mod tests {
             hi_mean_a: 0.0,
             hi_mean_b: 0.0,
             hi_count: 100,
-            percentile_5_l: 12.0,  // brighter blacks
+            percentile_5_l: 12.0, // brighter blacks
             total_count: 400,
         };
 
-        let result =
-            estimate_slider_adjustments_with_zones(&stats, &stats, Some(&src_zones), Some(&ref_zones));
+        let result = estimate_slider_adjustments_with_zones(
+            &stats,
+            &stats,
+            Some(&src_zones),
+            Some(&ref_zones),
+        );
 
         // Shadows should be lifted (positive).
         assert!(
@@ -1660,11 +1672,7 @@ mod tests {
             result.black_point
         );
         // Midtones and highlights should be near 0 (no zone difference).
-        assert!(
-            result.midtones.abs() < 0.01,
-            "midtones={}",
-            result.midtones
-        );
+        assert!(result.midtones.abs() < 0.01, "midtones={}", result.midtones);
         assert!(
             result.highlights.abs() < 0.01,
             "highlights={}",
@@ -1716,14 +1724,18 @@ mod tests {
             mid_count: 200,
             hi_mean_l: 80.0,
             hi_mean_a: 0.0,
-            hi_mean_b: 20.0,  // warmer highlights
+            hi_mean_b: 20.0, // warmer highlights
             hi_count: 100,
             percentile_5_l: 5.0,
             total_count: 400,
         };
 
-        let result =
-            estimate_slider_adjustments_with_zones(&stats, &stats, Some(&src_zones), Some(&ref_zones));
+        let result = estimate_slider_adjustments_with_zones(
+            &stats,
+            &stats,
+            Some(&src_zones),
+            Some(&ref_zones),
+        );
 
         // Highlights warmth should be positive (warmer).
         assert!(
@@ -1760,7 +1772,7 @@ mod tests {
             shadow_mean_l: 15.0,
             shadow_mean_a: 0.0,
             shadow_mean_b: 0.0,
-            shadow_count: 2,  // very few
+            shadow_count: 2, // very few
             mid_mean_l: 50.0,
             mid_mean_a: 0.0,
             mid_mean_b: 0.0,
@@ -1768,15 +1780,15 @@ mod tests {
             hi_mean_l: 80.0,
             hi_mean_a: 0.0,
             hi_mean_b: 0.0,
-            hi_count: 0,  // none
+            hi_count: 0, // none
             percentile_5_l: 45.0,
             total_count: 10000,
         };
         let ref_zones = ZoneColorStats {
-            shadow_mean_l: 30.0,  // very different shadows
+            shadow_mean_l: 30.0, // very different shadows
             shadow_mean_a: 20.0,
             shadow_mean_b: 20.0,
-            shadow_count: 2,  // also very few
+            shadow_count: 2, // also very few
             mid_mean_l: 50.0,
             mid_mean_a: 0.0,
             mid_mean_b: 0.0,
@@ -1789,8 +1801,12 @@ mod tests {
             total_count: 10000,
         };
 
-        let result =
-            estimate_slider_adjustments_with_zones(&stats, &stats, Some(&src_zones), Some(&ref_zones));
+        let result = estimate_slider_adjustments_with_zones(
+            &stats,
+            &stats,
+            Some(&src_zones),
+            Some(&ref_zones),
+        );
 
         // Shadow zone has < 1% pixels → should stay at 0.
         assert!(
@@ -1856,10 +1872,16 @@ mod tests {
             highlights_tint: 0.0,
             lut_paths: Vec::new(),
         };
-        assert!(!grading.is_neutral(), "brightness != 0 should be non-neutral");
+        assert!(
+            !grading.is_neutral(),
+            "brightness != 0 should be non-neutral"
+        );
         grading.brightness = 0.0;
         grading.lut_paths = vec!["/tmp/test.cube".to_string()];
-        assert!(!grading.is_neutral(), "lut_paths should make it non-neutral");
+        assert!(
+            !grading.is_neutral(),
+            "lut_paths should make it non-neutral"
+        );
     }
 
     #[test]
@@ -1900,10 +1922,8 @@ mod tests {
         apply_grading_to_frames(&mut frames, &grading);
 
         // Brightness > 0 should make pixels brighter.
-        let avg_orig: f64 =
-            original_data.chunks(4).map(|p| p[0] as f64).sum::<f64>() / 100.0;
-        let avg_new: f64 =
-            frames[0].data.chunks(4).map(|p| p[0] as f64).sum::<f64>() / 100.0;
+        let avg_orig: f64 = original_data.chunks(4).map(|p| p[0] as f64).sum::<f64>() / 100.0;
+        let avg_new: f64 = frames[0].data.chunks(4).map(|p| p[0] as f64).sum::<f64>() / 100.0;
         assert!(
             avg_new > avg_orig + 5.0,
             "positive brightness should increase luma: orig={avg_orig}, new={avg_new}"
@@ -1998,9 +2018,18 @@ mod tests {
             highlights_tint: 0.0,
         };
         let result = simulate_slider_adjusted_stats(&stats, &neutral);
-        assert!((result.mean_l - 50.0).abs() < 0.1, "neutral L mean should be unchanged");
-        assert!((result.mean_a - 5.0).abs() < 0.1, "neutral a mean should be unchanged");
-        assert!((result.mean_b - (-3.0)).abs() < 0.1, "neutral b mean should be unchanged");
+        assert!(
+            (result.mean_l - 50.0).abs() < 0.1,
+            "neutral L mean should be unchanged"
+        );
+        assert!(
+            (result.mean_a - 5.0).abs() < 0.1,
+            "neutral a mean should be unchanged"
+        );
+        assert!(
+            (result.mean_b - (-3.0)).abs() < 0.1,
+            "neutral b mean should be unchanged"
+        );
 
         // Positive brightness should increase L mean.
         let bright = MatchColorResult {

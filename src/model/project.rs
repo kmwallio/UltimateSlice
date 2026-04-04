@@ -123,6 +123,21 @@ pub struct Project {
     /// Unknown FCPXML selected `<spine>` attrs/children preserved for dirty-save regeneration.
     #[serde(skip)]
     pub fcpxml_unknown_spine: FcpxmlUnknownNode,
+    /// Transient: parsed bin definitions from `us:bins` FCPXML event attribute.
+    #[serde(skip)]
+    pub parsed_bins_json: Option<String>,
+    /// Transient: parsed media-to-bin mapping from `us:media-bins` FCPXML event attribute.
+    #[serde(skip)]
+    pub parsed_media_bins_json: Option<String>,
+    /// Transient: parsed smart collections from `us:smart-collections` FCPXML event attribute.
+    #[serde(skip)]
+    pub parsed_collections_json: Option<String>,
+    /// Transient: parsed file-backed media-library items from `us:library-items`.
+    #[serde(skip)]
+    pub parsed_library_items_json: Option<String>,
+    /// Transient: parsed ratings + keyword ranges from `us:media-annotations`.
+    #[serde(skip)]
+    pub parsed_media_annotations_json: Option<String>,
 }
 
 impl Project {
@@ -145,6 +160,11 @@ impl Project {
             fcpxml_unknown_project: FcpxmlUnknownNode::default(),
             fcpxml_unknown_sequence: FcpxmlUnknownNode::default(),
             fcpxml_unknown_spine: FcpxmlUnknownNode::default(),
+            parsed_bins_json: None,
+            parsed_media_bins_json: None,
+            parsed_collections_json: None,
+            parsed_library_items_json: None,
+            parsed_media_annotations_json: None,
         };
         // Default tracks like FCP
         project.tracks.push(Track::new_video("Video 1"));
@@ -190,8 +210,104 @@ impl Project {
         self.dirty = true;
     }
 
+    /// Find a track by ID, searching recursively through compound clip sub-timelines.
+    pub fn track_ref(&self, track_id: &str) -> Option<&Track> {
+        Self::find_track_ref_recursive(&self.tracks, track_id)
+    }
+
+    fn find_track_ref_recursive<'a>(tracks: &'a [Track], track_id: &str) -> Option<&'a Track> {
+        for t in tracks {
+            if t.id == track_id {
+                return Some(t);
+            }
+        }
+        for track in tracks {
+            for clip in &track.clips {
+                if let Some(ref compound_tracks) = clip.compound_tracks {
+                    if let Some(found) = Self::find_track_ref_recursive(compound_tracks, track_id) {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     pub fn track_mut(&mut self, track_id: &str) -> Option<&mut Track> {
-        self.tracks.iter_mut().find(|t| t.id == track_id)
+        // Search root tracks first, then recursively search inside compound clips.
+        Self::find_track_mut_recursive(&mut self.tracks, track_id)
+    }
+
+    fn find_track_mut_recursive<'a>(
+        tracks: &'a mut [Track],
+        track_id: &str,
+    ) -> Option<&'a mut Track> {
+        // First pass: check root level
+        for t in tracks.iter() {
+            if t.id == track_id {
+                // Re-borrow to satisfy borrow checker
+                return tracks.iter_mut().find(|t| t.id == track_id);
+            }
+        }
+        // Second pass: search inside compound clips
+        for track in tracks.iter_mut() {
+            for clip in &mut track.clips {
+                if let Some(ref mut compound_tracks) = clip.compound_tracks {
+                    if let Some(found) = Self::find_track_mut_recursive(compound_tracks, track_id) {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Find a clip by ID, searching recursively through all tracks and compound clips.
+    pub fn clip_ref(&self, clip_id: &str) -> Option<&super::clip::Clip> {
+        Self::find_clip_ref_recursive(&self.tracks, clip_id)
+    }
+
+    fn find_clip_ref_recursive<'a>(
+        tracks: &'a [Track],
+        clip_id: &str,
+    ) -> Option<&'a super::clip::Clip> {
+        for track in tracks {
+            for clip in &track.clips {
+                if clip.id == clip_id {
+                    return Some(clip);
+                }
+                if let Some(ref compound_tracks) = clip.compound_tracks {
+                    if let Some(found) = Self::find_clip_ref_recursive(compound_tracks, clip_id) {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Find a clip by ID mutably, searching recursively through all tracks and compound clips.
+    pub fn clip_mut(&mut self, clip_id: &str) -> Option<&mut super::clip::Clip> {
+        Self::find_clip_mut_recursive(&mut self.tracks, clip_id)
+    }
+
+    fn find_clip_mut_recursive<'a>(
+        tracks: &'a mut [Track],
+        clip_id: &str,
+    ) -> Option<&'a mut super::clip::Clip> {
+        for track in tracks.iter_mut() {
+            for clip in &mut track.clips {
+                if clip.id == clip_id {
+                    return Some(clip);
+                }
+                if let Some(ref mut compound_tracks) = clip.compound_tracks {
+                    if let Some(found) = Self::find_clip_mut_recursive(compound_tracks, clip_id) {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Add a marker at the given position. Returns the new marker's id.
@@ -347,5 +463,130 @@ mod tests {
     fn test_project_new_has_no_source_fcpxml() {
         let p = Project::new("Test");
         assert!(p.source_fcpxml.is_none());
+    }
+
+    // ── Compound clip recursive lookup tests ──────────────────────────
+
+    fn make_project_with_compound() -> Project {
+        let mut p = Project::new("Test");
+        p.tracks.clear();
+
+        // Root video track with a compound clip
+        let mut root_track = Track::new_video("Root V1");
+        let root_track_id = root_track.id.clone();
+
+        // Build compound clip with internal tracks
+        let mut inner_v = Track::new_video("Inner V1");
+        let inner_v_id = inner_v.id.clone();
+        let mut inner_clip = Clip::new("inner.mp4", 5_000_000_000, 0, ClipKind::Video);
+        inner_clip.id = "inner-clip-1".into();
+        inner_v.add_clip(inner_clip);
+
+        let mut inner_a = Track::new_audio("Inner A1");
+        let inner_a_id = inner_a.id.clone();
+        let mut audio_clip = Clip::new("audio.wav", 5_000_000_000, 0, ClipKind::Audio);
+        audio_clip.id = "inner-audio-1".into();
+        inner_a.add_clip(audio_clip);
+
+        let mut compound = Clip::new_compound(1_000_000_000, vec![inner_v, inner_a]);
+        compound.id = "compound-1".into();
+        root_track.add_clip(compound);
+
+        // Also add a regular clip on root
+        let mut regular = Clip::new("regular.mp4", 3_000_000_000, 0, ClipKind::Video);
+        regular.id = "regular-1".into();
+        root_track.add_clip(regular);
+
+        p.tracks.push(root_track);
+        // Store IDs for test assertions
+        let _ = (root_track_id, inner_v_id, inner_a_id);
+        p
+    }
+
+    #[test]
+    fn test_track_ref_finds_root_track() {
+        let p = make_project_with_compound();
+        let root_id = &p.tracks[0].id;
+        assert!(p.track_ref(root_id).is_some());
+    }
+
+    #[test]
+    fn test_track_ref_finds_nested_track() {
+        let p = make_project_with_compound();
+        let compound = p.tracks[0]
+            .clips
+            .iter()
+            .find(|c| c.id == "compound-1")
+            .unwrap();
+        let inner_tracks = compound.compound_tracks.as_ref().unwrap();
+        let inner_v_id = &inner_tracks[0].id;
+        let inner_a_id = &inner_tracks[1].id;
+
+        assert!(p.track_ref(inner_v_id).is_some());
+        assert!(p.track_ref(inner_a_id).is_some());
+        assert_eq!(p.track_ref(inner_v_id).unwrap().label, "Inner V1");
+    }
+
+    #[test]
+    fn test_track_ref_returns_none_for_missing() {
+        let p = make_project_with_compound();
+        assert!(p.track_ref("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_track_mut_finds_nested_track() {
+        let mut p = make_project_with_compound();
+        let compound = p.tracks[0]
+            .clips
+            .iter()
+            .find(|c| c.id == "compound-1")
+            .unwrap();
+        let inner_v_id = compound.compound_tracks.as_ref().unwrap()[0].id.clone();
+
+        let track = p.track_mut(&inner_v_id).unwrap();
+        assert_eq!(track.label, "Inner V1");
+        // Mutate
+        track.label = "Modified".into();
+        assert_eq!(p.track_ref(&inner_v_id).unwrap().label, "Modified");
+    }
+
+    #[test]
+    fn test_clip_ref_finds_root_clip() {
+        let p = make_project_with_compound();
+        assert!(p.clip_ref("regular-1").is_some());
+        assert_eq!(p.clip_ref("regular-1").unwrap().source_path, "regular.mp4");
+    }
+
+    #[test]
+    fn test_clip_ref_finds_nested_clip() {
+        let p = make_project_with_compound();
+        assert!(p.clip_ref("inner-clip-1").is_some());
+        assert_eq!(p.clip_ref("inner-clip-1").unwrap().source_path, "inner.mp4");
+        assert!(p.clip_ref("inner-audio-1").is_some());
+    }
+
+    #[test]
+    fn test_clip_ref_returns_none_for_missing() {
+        let p = make_project_with_compound();
+        assert!(p.clip_ref("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_clip_mut_modifies_nested_clip() {
+        let mut p = make_project_with_compound();
+        let clip = p.clip_mut("inner-clip-1").unwrap();
+        clip.source_path = "modified.mp4".into();
+        assert_eq!(
+            p.clip_ref("inner-clip-1").unwrap().source_path,
+            "modified.mp4"
+        );
+    }
+
+    #[test]
+    fn test_clip_ref_finds_compound_clip_itself() {
+        let p = make_project_with_compound();
+        let found = p.clip_ref("compound-1");
+        assert!(found.is_some());
+        assert!(found.unwrap().is_compound());
     }
 }

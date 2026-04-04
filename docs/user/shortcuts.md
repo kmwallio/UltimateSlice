@@ -12,6 +12,7 @@
 | `Ctrl+O` | Open project XML (`.uspxml` / `.fcpxml`) |
 | `Ctrl+S` | Save project XML (default `.uspxml`) |
 | `Ctrl+,` | Open Preferences |
+| `Shift+P` | Toggle proxy playback on/off (switches the bottom status bar between `Original Media` and `Using Proxies`, and restores the last non-Off proxy size) |
 | `Ctrl+J` | Go to timecode (jump playhead) |
 | `Ctrl+Z` | Undo |
 | `Ctrl+Y` / `Ctrl+Shift+Z` | Redo |
@@ -32,6 +33,8 @@
 | `→` | Step one frame forward |
 | `,` | Insert at playhead (shift subsequent clips) |
 | `.` | Overwrite at playhead (replace existing material) |
+
+The same **I / O** Source Monitor marks are also used by the keyword-range controls beneath the preview when you save or update Media Library keyword ranges.
 
 ---
 
@@ -66,6 +69,11 @@
 | `Ctrl+Alt+M` | Match selected clip's color to a reference clip |
 | `Ctrl+G` | Group selected clips |
 | `Ctrl+Shift+G` | Ungroup selected clips |
+| `Alt+G` | Create compound clip from selected clips |
+| `Alt+M` | Create multicam clip from selected clips |
+| `1`–`9` (multicam) | Switch to angle 1–9 at playhead (when multicam clip selected) |
+| `Double-click` (compound clip) | Drill into compound clip sub-timeline |
+| `Escape` (in compound) | Exit compound clip drill-down (go back one level) |
 | `Ctrl+L` | Link selected clips |
 | `Ctrl+Shift+L` | Unlink selected clips |
 | `Shift+Click` (timeline) | Add range selection (same-track span, or cross-track time-range select) |

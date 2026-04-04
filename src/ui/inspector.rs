@@ -1,6 +1,22 @@
 use crate::model::clip::{
     ClipColorLabel, KeyframeInterpolation, NumericKeyframe, Phase1KeyframeProperty,
+    SubtitleHighlightMode,
 };
+
+/// Clipboard for copy/paste subtitle style between clips.
+#[derive(Clone)]
+pub struct SubtitleStyleClipboard {
+    pub font: String,
+    pub color: u32,
+    pub outline_color: u32,
+    pub outline_width: f64,
+    pub bg_box: bool,
+    pub bg_box_color: u32,
+    pub highlight_mode: SubtitleHighlightMode,
+    pub highlight_color: u32,
+    pub position_y: f64,
+    pub word_window_secs: f64,
+}
 use crate::model::project::Project;
 use gdk4;
 use gio;
@@ -16,6 +32,24 @@ use std::rc::Rc;
 const VOLUME_DB_MIN: f64 = -100.0;
 const VOLUME_DB_MAX: f64 = 12.0;
 const VOLUME_LINEAR_MAX: f64 = 3.981_071_705_5; // +12 dB
+
+fn sync_title_font_button(button: &gtk4::Button, font_desc: &str) {
+    let normalized = crate::media::title_font::normalize_title_font_label(font_desc);
+    let tooltip =
+        crate::media::title_font::build_title_font_tooltip(font_desc, "Click to choose a font");
+    button.set_label(&normalized);
+    button.set_tooltip_text(Some(&tooltip));
+}
+
+fn sync_subtitle_font_button(button: &gtk4::Button, font_desc: &str) {
+    let normalized = crate::media::title_font::normalize_subtitle_font_label(font_desc);
+    let tooltip = crate::media::title_font::build_subtitle_font_tooltip(
+        font_desc,
+        "Click to choose a subtitle font",
+    );
+    button.set_label(&normalized);
+    button.set_tooltip_text(Some(&tooltip));
+}
 
 fn db_to_linear_volume(db: f64) -> f64 {
     (10.0f64)
@@ -165,6 +199,56 @@ pub struct InspectorView {
     pub bg_removal_threshold_slider: Scale,
     /// Set to `true` when the ONNX model is present; controls section visibility.
     pub bg_removal_model_available: Cell<bool>,
+    // Subtitles (speech-to-text)
+    pub subtitle_section: GBox,
+    pub subtitle_controls_box: GBox,
+    pub subtitle_no_model_box: GBox,
+    pub subtitle_generate_btn: Button,
+    pub subtitle_generate_spinner: gtk4::Spinner,
+    pub subtitle_generate_label: Label,
+    pub subtitle_language_dropdown: gtk4::DropDown,
+    pub subtitle_segments_section: GBox,
+    pub subtitle_segments_expander: Expander,
+    pub subtitle_list_box: GBox,
+    pub subtitle_scroll: gtk4::ScrolledWindow,
+    /// Tracks displayed segment IDs to avoid rebuilding on every update tick.
+    pub subtitle_segments_snapshot: Rc<RefCell<Vec<String>>>,
+    pub subtitle_clear_btn: Button,
+    pub subtitle_error_label: Label,
+    pub subtitle_font_btn: gtk4::Button,
+    pub subtitle_color_btn: gtk4::ColorDialogButton,
+    pub subtitle_highlight_dropdown: gtk4::DropDown,
+    pub subtitle_highlight_color_btn: gtk4::ColorDialogButton,
+    pub subtitle_highlight_color_row: GBox,
+    pub subtitle_word_window_slider: Scale,
+    pub subtitle_position_slider: Scale,
+    pub subtitle_outline_color_btn: gtk4::ColorDialogButton,
+    pub subtitle_bg_box_check: CheckButton,
+    pub subtitle_bg_color_btn: gtk4::ColorDialogButton,
+    pub subtitle_export_srt_btn: Button,
+    pub subtitle_import_srt_btn: Button,
+    pub subtitle_copy_style_btn: Button,
+    pub subtitle_paste_style_btn: Button,
+    pub subtitle_style_clipboard: Rc<RefCell<Option<SubtitleStyleClipboard>>>,
+    pub subtitle_style_box: GBox,
+    /// Set to `true` when the STT model is present; controls section content.
+    pub stt_model_available: Cell<bool>,
+    /// Set to `true` while an STT job is in flight for the selected clip.
+    pub stt_generating: Cell<bool>,
+    // Shape mask
+    pub mask_section: GBox,
+    pub mask_enable: CheckButton,
+    pub mask_shape_dropdown: gtk4::DropDown,
+    pub mask_center_x_slider: Scale,
+    pub mask_center_y_slider: Scale,
+    pub mask_width_slider: Scale,
+    pub mask_height_slider: Scale,
+    pub mask_rotation_spin: gtk4::SpinButton,
+    pub mask_feather_slider: Scale,
+    pub mask_expansion_slider: Scale,
+    pub mask_invert_check: CheckButton,
+    pub mask_path_editor_box: GBox,
+    pub mask_rect_ellipse_controls: GBox,
     // Applied frei0r effects
     pub frei0r_effects_section: GBox,
     pub frei0r_effects_list: GBox,
@@ -178,6 +262,8 @@ pub struct InspectorView {
     pub on_frei0r_changed: Rc<dyn Fn()>,
     /// Called after frei0r param slider changes — triggers live pipeline update without rebuild.
     pub on_frei0r_params_changed: Rc<dyn Fn()>,
+    /// Push an undoable command through the shared history (provided by window.rs).
+    pub on_execute_command: Rc<dyn Fn(Box<dyn crate::undo::EditCommand>)>,
     /// Tracks which effect IDs are currently displayed to avoid rebuilding on every update() tick.
     frei0r_displayed_snapshot: Rc<RefCell<Vec<(String, bool, usize)>>>,
     /// Cached frei0r registry for param type lookup in the inspector.
@@ -204,10 +290,7 @@ impl InspectorView {
     }
 
     /// Rebuild the applied frei0r effects list in the Inspector.
-    fn rebuild_frei0r_effects_list(
-        &self,
-        effects: &[crate::model::clip::Frei0rEffect],
-    ) {
+    fn rebuild_frei0r_effects_list(&self, effects: &[crate::model::clip::Frei0rEffect]) {
         // Skip rebuild if the displayed effects haven't changed (avoids destroying
         // slider widgets during playback ticks that call update() repeatedly).
         let snapshot: Vec<(String, bool, usize)> = effects
@@ -257,34 +340,28 @@ impl InspectorView {
                 let selected_clip_id = self.selected_clip_id.clone();
                 let effect_id = effect.id.clone();
                 let on_changed = self.on_frei0r_changed.clone();
+                let on_execute_command = self.on_execute_command.clone();
                 let updating = self.updating.clone();
                 enable_check.connect_toggled(move |btn| {
                     if *updating.borrow() {
                         return;
                     }
-                    let enabled = btn.is_active();
-                    // Clone clip_id and drop the borrow BEFORE calling on_changed,
-                    // which triggers inspector.update() → selected_clip_id.borrow_mut().
+                    // Clone clip_id and drop the borrow BEFORE calling on_changed.
                     let cid = selected_clip_id.borrow().clone();
                     if let Some(cid) = cid {
-                        {
-                            let mut proj = project.borrow_mut();
-                            for track in &mut proj.tracks {
-                                if let Some(clip) =
-                                    track.clips.iter_mut().find(|c| c.id == cid)
-                                {
-                                    if let Some(e) = clip
-                                        .frei0r_effects
-                                        .iter_mut()
-                                        .find(|e| e.id == effect_id)
-                                    {
-                                        e.enabled = enabled;
-                                    }
-                                    break;
-                                }
-                            }
-                            proj.dirty = true;
-                        }
+                        let track_id = {
+                            let proj = project.borrow();
+                            proj.tracks
+                                .iter()
+                                .find(|t| t.clips.iter().any(|c| c.id == cid))
+                                .map(|t| t.id.clone())
+                                .unwrap_or_default()
+                        };
+                        on_execute_command(Box::new(crate::undo::ToggleFrei0rEffectCommand {
+                            clip_id: cid,
+                            track_id,
+                            effect_id: effect_id.clone(),
+                        }));
                         on_changed();
                     }
                 });
@@ -307,23 +384,33 @@ impl InspectorView {
                 let project = self.project.clone();
                 let selected_clip_id = self.selected_clip_id.clone();
                 let on_changed = self.on_frei0r_changed.clone();
+                let on_execute_command = self.on_execute_command.clone();
                 let idx = i;
                 up_btn.connect_clicked(move |_| {
                     let cid = selected_clip_id.borrow().clone();
                     if let Some(cid) = cid {
-                        {
-                            let mut proj = project.borrow_mut();
-                            for track in &mut proj.tracks {
-                                if let Some(clip) =
-                                    track.clips.iter_mut().find(|c| c.id == cid)
-                                {
-                                    if idx > 0 && idx < clip.frei0r_effects.len() {
-                                        clip.frei0r_effects.swap(idx - 1, idx);
-                                    }
+                        let (track_id, valid) = {
+                            let proj = project.borrow();
+                            let mut tid = String::new();
+                            let mut found = false;
+                            for track in &proj.tracks {
+                                if track.clips.iter().any(|c| c.id == cid) && idx > 0 {
+                                    tid = track.id.clone();
+                                    found = true;
                                     break;
                                 }
                             }
-                            proj.dirty = true;
+                            (tid, found)
+                        };
+                        if valid {
+                            on_execute_command(Box::new(
+                                crate::undo::ReorderFrei0rEffectsCommand {
+                                    clip_id: cid,
+                                    track_id,
+                                    index_a: idx - 1,
+                                    index_b: idx,
+                                },
+                            ));
                         }
                         on_changed();
                     }
@@ -339,23 +426,35 @@ impl InspectorView {
                 let project = self.project.clone();
                 let selected_clip_id = self.selected_clip_id.clone();
                 let on_changed = self.on_frei0r_changed.clone();
+                let on_execute_command = self.on_execute_command.clone();
                 let idx = i;
                 down_btn.connect_clicked(move |_| {
                     let cid = selected_clip_id.borrow().clone();
                     if let Some(cid) = cid {
-                        {
-                            let mut proj = project.borrow_mut();
-                            for track in &mut proj.tracks {
-                                if let Some(clip) =
-                                    track.clips.iter_mut().find(|c| c.id == cid)
-                                {
+                        let (track_id, valid) = {
+                            let proj = project.borrow();
+                            let mut tid = String::new();
+                            let mut found = false;
+                            for track in &proj.tracks {
+                                if let Some(clip) = track.clips.iter().find(|c| c.id == cid) {
                                     if idx + 1 < clip.frei0r_effects.len() {
-                                        clip.frei0r_effects.swap(idx, idx + 1);
+                                        tid = track.id.clone();
+                                        found = true;
                                     }
                                     break;
                                 }
                             }
-                            proj.dirty = true;
+                            (tid, found)
+                        };
+                        if valid {
+                            on_execute_command(Box::new(
+                                crate::undo::ReorderFrei0rEffectsCommand {
+                                    clip_id: cid,
+                                    track_id,
+                                    index_a: idx,
+                                    index_b: idx + 1,
+                                },
+                            ));
                         }
                         on_changed();
                     }
@@ -371,22 +470,27 @@ impl InspectorView {
                 let project = self.project.clone();
                 let selected_clip_id = self.selected_clip_id.clone();
                 let effect_id = effect.id.clone();
+                let effect_clone = effect.clone();
+                let effect_idx = i;
                 let on_changed = self.on_frei0r_changed.clone();
+                let on_execute_command = self.on_execute_command.clone();
                 remove_btn.connect_clicked(move |_| {
                     let cid = selected_clip_id.borrow().clone();
                     if let Some(cid) = cid {
-                        {
-                            let mut proj = project.borrow_mut();
-                            for track in &mut proj.tracks {
-                                if let Some(clip) =
-                                    track.clips.iter_mut().find(|c| c.id == cid)
-                                {
-                                    clip.frei0r_effects.retain(|e| e.id != effect_id);
-                                    break;
-                                }
-                            }
-                            proj.dirty = true;
-                        }
+                        let track_id = {
+                            let proj = project.borrow();
+                            proj.tracks
+                                .iter()
+                                .find(|t| t.clips.iter().any(|c| c.id == cid))
+                                .map(|t| t.id.clone())
+                                .unwrap_or_default()
+                        };
+                        on_execute_command(Box::new(crate::undo::RemoveFrei0rEffectCommand {
+                            clip_id: cid,
+                            track_id,
+                            effect: effect_clone.clone(),
+                            index: effect_idx,
+                        }));
                         on_changed();
                     }
                 });
@@ -416,177 +520,384 @@ impl InspectorView {
             } else if is_levels {
                 self.build_levels_editor(effect, &params_box);
             } else {
-            for (param_name, &param_val) in &effect.params {
-                let param_type = plugin_info
-                    .as_ref()
-                    .and_then(|info| info.params.iter().find(|p| p.name == *param_name))
-                    .map(|p| p.param_type)
-                    .unwrap_or(crate::media::frei0r_registry::Frei0rParamType::Double);
+                for (param_name, &param_val) in &effect.params {
+                    let param_type = plugin_info
+                        .as_ref()
+                        .and_then(|info| info.params.iter().find(|p| p.name == *param_name))
+                        .map(|p| p.param_type)
+                        .unwrap_or(crate::media::frei0r_registry::Frei0rParamType::Double);
 
-                let param_row = GBox::new(Orientation::Horizontal, 4);
-                param_row.set_margin_start(24);
-                let plabel = Label::new(Some(param_name));
-                plabel.add_css_class("dim-label");
-                plabel.set_halign(gtk4::Align::Start);
-                plabel.set_width_chars(12);
-                param_row.append(&plabel);
+                    let param_row = GBox::new(Orientation::Horizontal, 4);
+                    param_row.set_margin_start(24);
+                    let plabel = Label::new(Some(param_name));
+                    plabel.add_css_class("dim-label");
+                    plabel.set_halign(gtk4::Align::Start);
+                    plabel.set_width_chars(12);
+                    param_row.append(&plabel);
 
-                match param_type {
-                    crate::media::frei0r_registry::Frei0rParamType::Bool => {
-                        let toggle = CheckButton::new();
-                        toggle.set_active(param_val > 0.5);
-                        toggle.set_hexpand(true);
-                        param_row.append(&toggle);
+                    match param_type {
+                        crate::media::frei0r_registry::Frei0rParamType::Bool => {
+                            let toggle = CheckButton::new();
+                            toggle.set_active(param_val > 0.5);
+                            toggle.set_hexpand(true);
+                            param_row.append(&toggle);
 
-                        let project = self.project.clone();
-                        let selected_clip_id = self.selected_clip_id.clone();
-                        let effect_id = effect.id.clone();
-                        let pname = param_name.clone();
-                        let on_params_changed = self.on_frei0r_params_changed.clone();
-                        let updating = self.updating.clone();
-                        toggle.connect_toggled(move |btn| {
-                            if *updating.borrow() {
-                                return;
-                            }
-                            let val = if btn.is_active() { 1.0 } else { 0.0 };
-                            let cid = selected_clip_id.borrow().clone();
-                            if let Some(cid) = cid {
-                                {
-                                    let mut proj = project.borrow_mut();
-                                    for track in &mut proj.tracks {
-                                        if let Some(clip) =
-                                            track.clips.iter_mut().find(|c| c.id == cid)
-                                        {
-                                            if let Some(e) = clip
-                                                .frei0r_effects
-                                                .iter_mut()
-                                                .find(|e| e.id == effect_id)
+                            let project = self.project.clone();
+                            let selected_clip_id = self.selected_clip_id.clone();
+                            let effect_id = effect.id.clone();
+                            let pname = param_name.clone();
+                            let on_params_changed = self.on_frei0r_params_changed.clone();
+                            let updating = self.updating.clone();
+                            let on_execute_command = self.on_execute_command.clone();
+                            toggle.connect_toggled(move |btn| {
+                                if *updating.borrow() {
+                                    return;
+                                }
+                                let val = if btn.is_active() { 1.0 } else { 0.0 };
+                                let cid = selected_clip_id.borrow().clone();
+                                if let Some(cid) = cid {
+                                    let (track_id, old_params) = {
+                                        let proj = project.borrow();
+                                        let mut tid = String::new();
+                                        let mut old = std::collections::HashMap::new();
+                                        for track in &proj.tracks {
+                                            if let Some(clip) =
+                                                track.clips.iter().find(|c| c.id == cid)
                                             {
-                                                e.params.insert(pname.clone(), val);
+                                                tid = track.id.clone();
+                                                if let Some(e) = clip
+                                                    .frei0r_effects
+                                                    .iter()
+                                                    .find(|e| e.id == effect_id)
+                                                {
+                                                    old = e.params.clone();
+                                                }
+                                                break;
                                             }
-                                            break;
+                                        }
+                                        (tid, old)
+                                    };
+                                    {
+                                        let mut proj = project.borrow_mut();
+                                        for track in &mut proj.tracks {
+                                            if let Some(clip) =
+                                                track.clips.iter_mut().find(|c| c.id == cid)
+                                            {
+                                                if let Some(e) = clip
+                                                    .frei0r_effects
+                                                    .iter_mut()
+                                                    .find(|e| e.id == effect_id)
+                                                {
+                                                    e.params.insert(pname.clone(), val);
+                                                }
+                                                break;
+                                            }
+                                        }
+                                        proj.dirty = true;
+                                    }
+                                    let new_params = {
+                                        let proj = project.borrow();
+                                        proj.tracks
+                                            .iter()
+                                            .find(|t| t.id == track_id)
+                                            .and_then(|t| t.clips.iter().find(|c| c.id == cid))
+                                            .and_then(|c| {
+                                                c.frei0r_effects.iter().find(|e| e.id == effect_id)
+                                            })
+                                            .map(|e| e.params.clone())
+                                            .unwrap_or_else(|| old_params.clone())
+                                    };
+                                    on_execute_command(Box::new(
+                                        crate::undo::SetFrei0rEffectParamsCommand {
+                                            clip_id: cid.clone(),
+                                            track_id,
+                                            effect_id: effect_id.clone(),
+                                            old_params,
+                                            new_params,
+                                        },
+                                    ));
+                                    on_params_changed();
+                                }
+                            });
+                        }
+                        crate::media::frei0r_registry::Frei0rParamType::String => {
+                            // String params are now handled in the string_params loop below.
+                            // If somehow a string param is in the f64 map, show value.
+                            let hint = Label::new(Some(&format!("{param_val}")));
+                            hint.add_css_class("dim-label");
+                            hint.set_hexpand(true);
+                            param_row.append(&hint);
+                        }
+                        _ => {
+                            // Double — use a slider.
+                            let (mut min, mut max) = plugin_info
+                                .as_ref()
+                                .and_then(|info| {
+                                    info.params
+                                        .iter()
+                                        .find(|p| p.name == *param_name)
+                                        .map(|p| (p.min, p.max))
+                                })
+                                .unwrap_or((0.0, 1.0));
+                            // Safety: ensure finite, sane bounds for GTK Scale.
+                            if !min.is_finite() || min < -1e6 {
+                                min = 0.0;
+                            }
+                            if !max.is_finite() || max > 1e6 {
+                                max = 1.0;
+                            }
+                            if min >= max {
+                                min = 0.0;
+                                max = 1.0;
+                            }
+                            let step = ((max - min) / 100.0).max(f64::MIN_POSITIVE);
+                            let slider = Scale::with_range(Orientation::Horizontal, min, max, step);
+                            slider.set_value(param_val);
+                            slider.set_draw_value(true);
+                            slider.set_digits(2);
+                            slider.set_hexpand(true);
+                            param_row.append(&slider);
+
+                            let project = self.project.clone();
+                            let selected_clip_id = self.selected_clip_id.clone();
+                            let effect_id = effect.id.clone();
+                            let pname = param_name.clone();
+                            let on_params_changed = self.on_frei0r_params_changed.clone();
+                            let updating = self.updating.clone();
+                            slider.connect_value_changed(move |s| {
+                                if *updating.borrow() {
+                                    return;
+                                }
+                                let val = s.value();
+                                let cid = selected_clip_id.borrow().clone();
+                                if let Some(cid) = cid {
+                                    {
+                                        let mut proj = project.borrow_mut();
+                                        for track in &mut proj.tracks {
+                                            if let Some(clip) =
+                                                track.clips.iter_mut().find(|c| c.id == cid)
+                                            {
+                                                if let Some(e) = clip
+                                                    .frei0r_effects
+                                                    .iter_mut()
+                                                    .find(|e| e.id == effect_id)
+                                                {
+                                                    e.params.insert(pname.clone(), val);
+                                                }
+                                                break;
+                                            }
+                                        }
+                                        proj.dirty = true;
+                                    }
+                                    on_params_changed();
+                                }
+                            });
+
+                            // Undo: GestureClick + EventControllerFocus snapshot/commit.
+                            {
+                                type SnapCell = Rc<
+                                    RefCell<
+                                        Option<(
+                                            String,
+                                            String,
+                                            String,
+                                            std::collections::HashMap<String, f64>,
+                                        )>,
+                                    >,
+                                >;
+                                let snap: SnapCell = Rc::new(RefCell::new(None));
+                                let project = self.project.clone();
+                                let selected_clip_id = self.selected_clip_id.clone();
+                                let effect_id_u = effect.id.clone();
+                                let on_execute_command = self.on_execute_command.clone();
+
+                                let do_snapshot = {
+                                    let project = project.clone();
+                                    let selected_clip_id = selected_clip_id.clone();
+                                    let effect_id_u = effect_id_u.clone();
+                                    let snap = snap.clone();
+                                    move || {
+                                        let cid = selected_clip_id.borrow().clone();
+                                        if let Some(cid) = cid {
+                                            let proj = project.borrow();
+                                            for track in &proj.tracks {
+                                                if let Some(clip) =
+                                                    track.clips.iter().find(|c| c.id == cid)
+                                                {
+                                                    if let Some(e) = clip
+                                                        .frei0r_effects
+                                                        .iter()
+                                                        .find(|e| e.id == effect_id_u)
+                                                    {
+                                                        *snap.borrow_mut() = Some((
+                                                            cid.clone(),
+                                                            track.id.clone(),
+                                                            effect_id_u.clone(),
+                                                            e.params.clone(),
+                                                        ));
+                                                    }
+                                                    break;
+                                                }
+                                            }
                                         }
                                     }
-                                    proj.dirty = true;
-                                }
-                                on_params_changed();
-                            }
-                        });
-                    }
-                    crate::media::frei0r_registry::Frei0rParamType::String => {
-                        // String params are now handled in the string_params loop below.
-                        // If somehow a string param is in the f64 map, show value.
-                        let hint = Label::new(Some(&format!("{param_val}")));
-                        hint.add_css_class("dim-label");
-                        hint.set_hexpand(true);
-                        param_row.append(&hint);
-                    }
-                    _ => {
-                        // Double — use a slider.
-                        let (mut min, mut max) = plugin_info
-                            .as_ref()
-                            .and_then(|info| {
-                                info.params
-                                    .iter()
-                                    .find(|p| p.name == *param_name)
-                                    .map(|p| (p.min, p.max))
-                            })
-                            .unwrap_or((0.0, 1.0));
-                        // Safety: ensure finite, sane bounds for GTK Scale.
-                        if !min.is_finite() || min < -1e6 { min = 0.0; }
-                        if !max.is_finite() || max > 1e6 { max = 1.0; }
-                        if min >= max { min = 0.0; max = 1.0; }
-                        let step = ((max - min) / 100.0).max(f64::MIN_POSITIVE);
-                        let slider = Scale::with_range(
-                            Orientation::Horizontal,
-                            min,
-                            max,
-                            step,
-                        );
-                        slider.set_value(param_val);
-                        slider.set_draw_value(true);
-                        slider.set_digits(2);
-                        slider.set_hexpand(true);
-                        param_row.append(&slider);
+                                };
 
-                        let project = self.project.clone();
-                        let selected_clip_id = self.selected_clip_id.clone();
-                        let effect_id = effect.id.clone();
-                        let pname = param_name.clone();
-                        let on_params_changed = self.on_frei0r_params_changed.clone();
-                        let updating = self.updating.clone();
-                        slider.connect_value_changed(move |s| {
-                            if *updating.borrow() {
-                                return;
-                            }
-                            let val = s.value();
-                            let cid = selected_clip_id.borrow().clone();
-                            if let Some(cid) = cid {
-                                {
-                                    let mut proj = project.borrow_mut();
-                                    for track in &mut proj.tracks {
-                                        if let Some(clip) =
-                                            track.clips.iter_mut().find(|c| c.id == cid)
+                                let do_commit = {
+                                    let project = project.clone();
+                                    let snap = snap.clone();
+                                    let on_execute_command = on_execute_command.clone();
+                                    move || {
+                                        let entry = snap.borrow_mut().take();
+                                        if let Some((clip_id, track_id, eff_id, old_params)) = entry
                                         {
-                                            if let Some(e) = clip
-                                                .frei0r_effects
-                                                .iter_mut()
-                                                .find(|e| e.id == effect_id)
-                                            {
-                                                e.params.insert(pname.clone(), val);
-                                            }
-                                            break;
+                                            let new_params = {
+                                                let proj = project.borrow();
+                                                proj.tracks
+                                                    .iter()
+                                                    .find(|t| t.id == track_id)
+                                                    .and_then(|t| {
+                                                        t.clips.iter().find(|c| c.id == clip_id)
+                                                    })
+                                                    .and_then(|c| {
+                                                        c.frei0r_effects
+                                                            .iter()
+                                                            .find(|e| e.id == eff_id)
+                                                    })
+                                                    .map(|e| e.params.clone())
+                                                    .unwrap_or_else(|| old_params.clone())
+                                            };
+                                            on_execute_command(Box::new(
+                                                crate::undo::SetFrei0rEffectParamsCommand {
+                                                    clip_id,
+                                                    track_id,
+                                                    effect_id: eff_id,
+                                                    old_params,
+                                                    new_params,
+                                                },
+                                            ));
                                         }
                                     }
-                                    proj.dirty = true;
+                                };
+
+                                let ges = gtk4::GestureClick::new();
+                                {
+                                    let do_snapshot = do_snapshot.clone();
+                                    ges.connect_pressed(move |_, _, _, _| {
+                                        do_snapshot();
+                                    });
                                 }
-                                on_params_changed();
+                                {
+                                    let do_commit = do_commit.clone();
+                                    ges.connect_released(move |_, _, _, _| {
+                                        do_commit();
+                                    });
+                                }
+                                slider.add_controller(ges);
+
+                                let focus_ctrl = gtk4::EventControllerFocus::new();
+                                {
+                                    let do_snapshot = do_snapshot.clone();
+                                    focus_ctrl.connect_enter(move |_| {
+                                        do_snapshot();
+                                    });
+                                }
+                                {
+                                    let do_commit = do_commit.clone();
+                                    focus_ctrl.connect_leave(move |_| {
+                                        do_commit();
+                                    });
+                                }
+                                slider.add_controller(focus_ctrl);
                             }
-                        });
+                        }
                     }
+
+                    params_box.append(&param_row);
                 }
 
-                params_box.append(&param_row);
-            }
+                // String parameter controls — DropDown for enums, Entry for free-form.
+                for (param_name, param_val) in &effect.string_params {
+                    let enum_values = plugin_info
+                        .as_ref()
+                        .and_then(|info| info.params.iter().find(|p| p.name == *param_name))
+                        .and_then(|p| p.enum_values.clone());
 
-            // String parameter controls — DropDown for enums, Entry for free-form.
-            for (param_name, param_val) in &effect.string_params {
-                let enum_values = plugin_info
-                    .as_ref()
-                    .and_then(|info| info.params.iter().find(|p| p.name == *param_name))
-                    .and_then(|p| p.enum_values.clone());
+                    let param_row = GBox::new(Orientation::Horizontal, 4);
+                    param_row.set_margin_start(24);
+                    let plabel = Label::new(Some(param_name));
+                    plabel.add_css_class("dim-label");
+                    plabel.set_halign(gtk4::Align::Start);
+                    plabel.set_width_chars(12);
+                    param_row.append(&plabel);
 
-                let param_row = GBox::new(Orientation::Horizontal, 4);
-                param_row.set_margin_start(24);
-                let plabel = Label::new(Some(param_name));
-                plabel.add_css_class("dim-label");
-                plabel.set_halign(gtk4::Align::Start);
-                plabel.set_width_chars(12);
-                param_row.append(&plabel);
-
-                if let Some(values) = enum_values {
-                    let str_list = StringList::new(&values.iter().map(|s| s.as_str()).collect::<Vec<_>>());
-                    let dropdown = DropDown::new(Some(str_list), gtk4::Expression::NONE);
-                    dropdown.set_hexpand(true);
-                    // Select the current value.
-                    if let Some(pos) = values.iter().position(|v| v == param_val) {
-                        dropdown.set_selected(pos as u32);
-                    }
-                    param_row.append(&dropdown);
-
-                    let project = self.project.clone();
-                    let selected_clip_id = self.selected_clip_id.clone();
-                    let effect_id = effect.id.clone();
-                    let pname = param_name.clone();
-                    let vals = values.clone();
-                    let on_params_changed = self.on_frei0r_params_changed.clone();
-                    let updating = self.updating.clone();
-                    dropdown.connect_selected_notify(move |dd| {
-                        if *updating.borrow() {
-                            return;
+                    if let Some(values) = enum_values {
+                        let str_list =
+                            StringList::new(&values.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+                        let dropdown = DropDown::new(Some(str_list), gtk4::Expression::NONE);
+                        dropdown.set_hexpand(true);
+                        // Select the current value.
+                        if let Some(pos) = values.iter().position(|v| v == param_val) {
+                            dropdown.set_selected(pos as u32);
                         }
-                        let idx = dd.selected() as usize;
-                        if let Some(new_val) = vals.get(idx) {
+                        param_row.append(&dropdown);
+
+                        let project = self.project.clone();
+                        let selected_clip_id = self.selected_clip_id.clone();
+                        let effect_id = effect.id.clone();
+                        let pname = param_name.clone();
+                        let vals = values.clone();
+                        let on_params_changed = self.on_frei0r_params_changed.clone();
+                        let updating = self.updating.clone();
+                        dropdown.connect_selected_notify(move |dd| {
+                            if *updating.borrow() {
+                                return;
+                            }
+                            let idx = dd.selected() as usize;
+                            if let Some(new_val) = vals.get(idx) {
+                                let cid = selected_clip_id.borrow().clone();
+                                if let Some(cid) = cid {
+                                    {
+                                        let mut proj = project.borrow_mut();
+                                        for track in &mut proj.tracks {
+                                            if let Some(clip) =
+                                                track.clips.iter_mut().find(|c| c.id == cid)
+                                            {
+                                                if let Some(e) = clip
+                                                    .frei0r_effects
+                                                    .iter_mut()
+                                                    .find(|e| e.id == effect_id)
+                                                {
+                                                    e.string_params
+                                                        .insert(pname.clone(), new_val.clone());
+                                                }
+                                                break;
+                                            }
+                                        }
+                                        proj.dirty = true;
+                                    }
+                                    on_params_changed();
+                                }
+                            }
+                        });
+                    } else {
+                        // Free-form string parameter — use an Entry.
+                        let entry = Entry::new();
+                        entry.set_text(param_val);
+                        entry.set_hexpand(true);
+                        param_row.append(&entry);
+
+                        let project = self.project.clone();
+                        let selected_clip_id = self.selected_clip_id.clone();
+                        let effect_id = effect.id.clone();
+                        let pname = param_name.clone();
+                        let on_params_changed = self.on_frei0r_params_changed.clone();
+                        let updating = self.updating.clone();
+                        entry.connect_changed(move |e| {
+                            if *updating.borrow() {
+                                return;
+                            }
+                            let new_val = e.text().to_string();
                             let cid = selected_clip_id.borrow().clone();
                             if let Some(cid) = cid {
                                 {
@@ -595,12 +906,12 @@ impl InspectorView {
                                         if let Some(clip) =
                                             track.clips.iter_mut().find(|c| c.id == cid)
                                         {
-                                            if let Some(e) = clip
+                                            if let Some(eff) = clip
                                                 .frei0r_effects
                                                 .iter_mut()
-                                                .find(|e| e.id == effect_id)
+                                                .find(|eff| eff.id == effect_id)
                                             {
-                                                e.string_params
+                                                eff.string_params
                                                     .insert(pname.clone(), new_val.clone());
                                             }
                                             break;
@@ -610,55 +921,11 @@ impl InspectorView {
                                 }
                                 on_params_changed();
                             }
-                        }
-                    });
-                } else {
-                    // Free-form string parameter — use an Entry.
-                    let entry = Entry::new();
-                    entry.set_text(param_val);
-                    entry.set_hexpand(true);
-                    param_row.append(&entry);
+                        });
+                    }
 
-                    let project = self.project.clone();
-                    let selected_clip_id = self.selected_clip_id.clone();
-                    let effect_id = effect.id.clone();
-                    let pname = param_name.clone();
-                    let on_params_changed = self.on_frei0r_params_changed.clone();
-                    let updating = self.updating.clone();
-                    entry.connect_changed(move |e| {
-                        if *updating.borrow() {
-                            return;
-                        }
-                        let new_val = e.text().to_string();
-                        let cid = selected_clip_id.borrow().clone();
-                        if let Some(cid) = cid {
-                            {
-                                let mut proj = project.borrow_mut();
-                                for track in &mut proj.tracks {
-                                    if let Some(clip) =
-                                        track.clips.iter_mut().find(|c| c.id == cid)
-                                    {
-                                        if let Some(eff) = clip
-                                            .frei0r_effects
-                                            .iter_mut()
-                                            .find(|eff| eff.id == effect_id)
-                                        {
-                                            eff.string_params
-                                                .insert(pname.clone(), new_val.clone());
-                                        }
-                                        break;
-                                    }
-                                }
-                                proj.dirty = true;
-                            }
-                            on_params_changed();
-                        }
-                    });
+                    params_box.append(&param_row);
                 }
-
-                params_box.append(&param_row);
-            }
-
             } // end else (non-special generic params)
 
             let is_special = is_3point || is_curves || is_levels;
@@ -699,9 +966,27 @@ impl InspectorView {
 
         // Zone definitions: (label, r_key, g_key, b_key, default_luminance)
         let zones: &[(&str, &str, &str, &str, f64)] = &[
-            ("Midtones", "gray-color-r", "gray-color-g", "gray-color-b", 0.5),
-            ("Shadows", "black-color-r", "black-color-g", "black-color-b", 0.0),
-            ("Highlights", "white-color-r", "white-color-g", "white-color-b", 1.0),
+            (
+                "Midtones",
+                "gray-color-r",
+                "gray-color-g",
+                "gray-color-b",
+                0.5,
+            ),
+            (
+                "Shadows",
+                "black-color-r",
+                "black-color-g",
+                "black-color-b",
+                0.0,
+            ),
+            (
+                "Highlights",
+                "white-color-r",
+                "white-color-g",
+                "white-color-b",
+                1.0,
+            ),
         ];
 
         // Large midtones wheel on top.
@@ -734,13 +1019,9 @@ impl InspectorView {
                     {
                         let mut proj = project.borrow_mut();
                         for track in &mut proj.tracks {
-                            if let Some(clip) =
-                                track.clips.iter_mut().find(|c| c.id == cid)
-                            {
-                                if let Some(e) = clip
-                                    .frei0r_effects
-                                    .iter_mut()
-                                    .find(|e| e.id == effect_id)
+                            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == cid) {
+                                if let Some(e) =
+                                    clip.frei0r_effects.iter_mut().find(|e| e.id == effect_id)
                                 {
                                     e.params.insert(rk.clone(), r);
                                     e.params.insert(gk.clone(), g);
@@ -791,13 +1072,9 @@ impl InspectorView {
                         {
                             let mut proj = project.borrow_mut();
                             for track in &mut proj.tracks {
-                                if let Some(clip) =
-                                    track.clips.iter_mut().find(|c| c.id == cid)
-                                {
-                                    if let Some(e) = clip
-                                        .frei0r_effects
-                                        .iter_mut()
-                                        .find(|e| e.id == effect_id)
+                                if let Some(clip) = track.clips.iter_mut().find(|c| c.id == cid) {
+                                    if let Some(e) =
+                                        clip.frei0r_effects.iter_mut().find(|e| e.id == effect_id)
                                     {
                                         e.params.insert(rk.clone(), r);
                                         e.params.insert(gk.clone(), g);
@@ -820,11 +1097,7 @@ impl InspectorView {
     }
 
     /// Build a graphical curve editor for the frei0r "curves" effect.
-    fn build_curves_editor(
-        &self,
-        effect: &crate::model::clip::Frei0rEffect,
-        container: &GBox,
-    ) {
+    fn build_curves_editor(&self, effect: &crate::model::clip::Frei0rEffect, container: &GBox) {
         use crate::ui::curves_editor;
 
         // Extract current state from effect params
@@ -875,21 +1148,14 @@ impl InspectorView {
                                     pts.len() as f64 / 10.0,
                                 );
                                 for (i, &(inp, out)) in pts.iter().enumerate() {
-                                    e.params.insert(
-                                        format!("point-{}-input-value", i + 1),
-                                        inp,
-                                    );
-                                    e.params.insert(
-                                        format!("point-{}-output-value", i + 1),
-                                        out,
-                                    );
+                                    e.params.insert(format!("point-{}-input-value", i + 1), inp);
+                                    e.params
+                                        .insert(format!("point-{}-output-value", i + 1), out);
                                 }
                                 // Clear unused point slots
                                 for i in (pts.len() + 1)..=5 {
-                                    e.params
-                                        .remove(&format!("point-{i}-input-value"));
-                                    e.params
-                                        .remove(&format!("point-{i}-output-value"));
+                                    e.params.remove(&format!("point-{i}-input-value"));
+                                    e.params.remove(&format!("point-{i}-output-value"));
                                 }
                             }
                             break;
@@ -904,11 +1170,7 @@ impl InspectorView {
     }
 
     /// Build a graphical levels editor for the frei0r "levels" effect.
-    fn build_levels_editor(
-        &self,
-        effect: &crate::model::clip::Frei0rEffect,
-        container: &GBox,
-    ) {
+    fn build_levels_editor(&self, effect: &crate::model::clip::Frei0rEffect, container: &GBox) {
         use crate::ui::levels_editor;
 
         let channel = *effect.params.get("channel").unwrap_or(&0.3);
@@ -1001,18 +1263,282 @@ impl InspectorView {
                 let is_image = c.kind == ClipKind::Image;
                 let is_title_clip = c.kind == ClipKind::Title;
                 let is_adjustment = c.kind == ClipKind::Adjustment;
-                let is_visual = is_video || is_image || is_title_clip || is_adjustment;
-                self.color_section.set_visible(is_video || is_image || is_adjustment);
+                let is_compound = c.kind == ClipKind::Compound;
+                let is_multicam = c.kind == ClipKind::Multicam;
+                let is_visual = is_video
+                    || is_image
+                    || is_title_clip
+                    || is_adjustment
+                    || is_compound
+                    || is_multicam;
+                self.color_section
+                    .set_visible(is_video || is_image || is_adjustment);
                 self.audio_section.set_visible(is_video || is_audio);
-                self.transform_section.set_visible(is_visual && !is_adjustment);
-                self.title_section_box.set_visible(is_visual && !is_adjustment);
-                self.speed_section_box.set_visible(!is_title_clip && !is_adjustment);
-                self.lut_section_box.set_visible(is_video || is_image || is_adjustment);
+                self.transform_section.set_visible(is_visual);
+                self.title_section_box
+                    .set_visible(is_visual && !is_adjustment && !is_compound && !is_multicam);
+                self.speed_section_box
+                    .set_visible(!is_title_clip && !is_adjustment && !is_compound && !is_multicam);
+                self.lut_section_box
+                    .set_visible(is_video || is_image || is_adjustment);
                 self.chroma_key_section.set_visible(is_video || is_image);
                 self.bg_removal_section
                     .set_visible((is_video || is_image) && self.bg_removal_model_available.get());
+                self.subtitle_section.set_visible(is_video || is_audio);
+                let has_stt_model = self.stt_model_available.get();
+                let generating = self.stt_generating.get();
+                self.subtitle_no_model_box
+                    .set_visible(!has_stt_model && !generating);
+                self.subtitle_controls_box
+                    .set_visible(has_stt_model || !c.subtitle_segments.is_empty() || generating);
+                self.subtitle_generate_btn
+                    .set_sensitive(has_stt_model && c.subtitle_segments.is_empty() && !generating);
+                self.subtitle_generate_spinner.set_visible(generating);
+                self.subtitle_generate_spinner.set_spinning(generating);
+                if generating {
+                    self.subtitle_generate_label.set_text("Generating\u{2026}");
+                } else {
+                    self.subtitle_generate_label.set_text("Generate Subtitles");
+                }
+                self.subtitle_clear_btn
+                    .set_sensitive(!c.subtitle_segments.is_empty() && !generating);
+                // Show segment list and style controls when subtitles exist.
+                // Filter to only show segments within the active source range (respects trim).
+                let visible_segments: Vec<crate::model::clip::SubtitleSegment> = c
+                    .subtitle_segments
+                    .iter()
+                    .filter(|s| s.start_ns < c.source_out && s.end_ns > c.source_in)
+                    .cloned()
+                    .collect();
+                let has_subtitles = !visible_segments.is_empty();
+                self.subtitle_segments_section.set_visible(has_subtitles);
+                if has_subtitles {
+                    self.subtitle_segments_expander.set_label(Some(&format!(
+                        "Subtitle Segments ({})",
+                        visible_segments.len()
+                    )));
+                }
+
+                // Only rebuild the segment list if the visible segment IDs changed.
+                let current_ids: Vec<String> =
+                    visible_segments.iter().map(|s| s.id.clone()).collect();
+                let needs_rebuild = *self.subtitle_segments_snapshot.borrow() != current_ids;
+                if needs_rebuild {
+                    while let Some(child) = self.subtitle_list_box.first_child() {
+                        self.subtitle_list_box.remove(&child);
+                    }
+                    if has_subtitles {
+                        let project = self.project.clone();
+                        let on_cmd = self.on_execute_command.clone();
+                        let clip_id = c.id.clone();
+
+                        for (i, seg) in visible_segments.iter().enumerate() {
+                            let row = GBox::new(Orientation::Vertical, 1);
+
+                            // Header row: timecode + delete button
+                            let header = GBox::new(Orientation::Horizontal, 4);
+                            let start_s = seg.start_ns as f64 / 1_000_000_000.0;
+                            let end_s = seg.end_ns as f64 / 1_000_000_000.0;
+                            let tc_label =
+                                Label::new(Some(&format!("{:.1}s – {:.1}s", start_s, end_s)));
+                            tc_label.set_halign(gtk::Align::Start);
+                            tc_label.set_hexpand(true);
+                            tc_label.add_css_class("dim-label");
+                            tc_label.set_margin_start(4);
+                            header.append(&tc_label);
+
+                            let del_btn = Button::new();
+                            del_btn.set_icon_name("edit-delete-symbolic");
+                            del_btn.add_css_class("flat");
+                            del_btn.add_css_class("circular");
+                            del_btn.set_tooltip_text(Some("Delete this segment"));
+                            {
+                                let seg_id = seg.id.clone();
+                                let seg_clone = seg.clone();
+                                let seg_idx = i;
+                                let clip_id_d = clip_id.clone();
+                                let project_d = project.clone();
+                                let on_cmd_d = on_cmd.clone();
+                                del_btn.connect_clicked(move |_| {
+                                    let track_id = {
+                                        let proj = project_d.borrow();
+                                        proj.tracks
+                                            .iter()
+                                            .find(|t| t.clips.iter().any(|c| c.id == clip_id_d))
+                                            .map(|t| t.id.clone())
+                                            .unwrap_or_default()
+                                    };
+                                    on_cmd_d(Box::new(crate::undo::DeleteSubtitleSegmentCommand {
+                                        clip_id: clip_id_d.clone(),
+                                        track_id,
+                                        segment_id: seg_id.clone(),
+                                        deleted_segment: seg_clone.clone(),
+                                        index: seg_idx,
+                                    }));
+                                });
+                            }
+                            header.append(&del_btn);
+                            row.append(&header);
+
+                            // Editable text entry
+                            let entry = gtk4::Entry::new();
+                            entry.set_text(&seg.text);
+                            entry.set_hexpand(true);
+                            entry.add_css_class("flat");
+
+                            let seg_id = seg.id.clone();
+                            let old_text = Rc::new(RefCell::new(seg.text.clone()));
+                            let clip_id_c = clip_id.clone();
+                            let project_c = project.clone();
+                            let on_cmd_c = on_cmd.clone();
+
+                            // Shared commit logic for both Enter and focus-out.
+                            let commit_edit = {
+                                let seg_id = seg_id.clone();
+                                let old_text = old_text.clone();
+                                let clip_id_c = clip_id_c.clone();
+                                let project_c = project_c.clone();
+                                let on_cmd_c = on_cmd_c.clone();
+                                Rc::new(move |new_text: String| {
+                                    let prev = old_text.borrow().clone();
+                                    if new_text == prev {
+                                        return;
+                                    }
+                                    let track_id = {
+                                        let proj = project_c.borrow();
+                                        proj.tracks
+                                            .iter()
+                                            .find(|t| t.clips.iter().any(|c| c.id == clip_id_c))
+                                            .map(|t| t.id.clone())
+                                            .unwrap_or_default()
+                                    };
+                                    on_cmd_c(Box::new(crate::undo::EditSubtitleTextCommand {
+                                        clip_id: clip_id_c.clone(),
+                                        track_id,
+                                        segment_id: seg_id.clone(),
+                                        old_text: prev.clone(),
+                                        new_text: new_text.clone(),
+                                    }));
+                                    *old_text.borrow_mut() = new_text;
+                                })
+                            };
+
+                            // Commit on Enter.
+                            {
+                                let commit = commit_edit.clone();
+                                entry.connect_activate(move |e| {
+                                    commit(e.text().to_string());
+                                });
+                            }
+                            // Commit on focus-out (Tab, click away).
+                            {
+                                let commit = commit_edit.clone();
+                                let focus = gtk4::EventControllerFocus::new();
+                                focus.connect_leave(move |ctl| {
+                                    if let Some(widget) = ctl.widget() {
+                                        if let Some(entry) = widget.downcast_ref::<gtk4::Entry>() {
+                                            commit(entry.text().to_string());
+                                        }
+                                    }
+                                });
+                                entry.add_controller(focus);
+                            }
+                            row.append(&entry);
+                            self.subtitle_list_box.append(&row);
+                        }
+                    }
+                    *self.subtitle_segments_snapshot.borrow_mut() = current_ids;
+                }
+                // Style controls are always visible so users can configure before generating.
+                self.subtitle_style_box.set_visible(true);
+                sync_subtitle_font_button(&self.subtitle_font_btn, &c.subtitle_font);
+                let rgba = c.subtitle_color;
+                let r = ((rgba >> 24) & 0xFF) as f32 / 255.0;
+                let g = ((rgba >> 16) & 0xFF) as f32 / 255.0;
+                let b = ((rgba >> 8) & 0xFF) as f32 / 255.0;
+                let a = (rgba & 0xFF) as f32 / 255.0;
+                self.subtitle_color_btn
+                    .set_rgba(&gdk4::RGBA::new(r, g, b, a));
+                let hl_idx = match c.subtitle_highlight_mode {
+                    crate::model::clip::SubtitleHighlightMode::None => 0,
+                    crate::model::clip::SubtitleHighlightMode::Bold => 1,
+                    crate::model::clip::SubtitleHighlightMode::Color => 2,
+                    crate::model::clip::SubtitleHighlightMode::Underline => 3,
+                    crate::model::clip::SubtitleHighlightMode::Stroke => 4,
+                };
+                self.subtitle_highlight_dropdown.set_selected(hl_idx);
+                self.subtitle_highlight_color_row
+                    .set_visible(hl_idx == 2 || hl_idx == 4);
+                self.subtitle_word_window_slider
+                    .set_value(c.subtitle_word_window_secs);
+                // Show word window slider only when a highlight mode is active.
+                self.subtitle_word_window_slider.set_visible(hl_idx != 0);
+                self.subtitle_position_slider
+                    .set_value(c.subtitle_position_y);
+                let oc = c.subtitle_outline_color;
+                self.subtitle_outline_color_btn.set_rgba(&gdk4::RGBA::new(
+                    ((oc >> 24) & 0xFF) as f32 / 255.0,
+                    ((oc >> 16) & 0xFF) as f32 / 255.0,
+                    ((oc >> 8) & 0xFF) as f32 / 255.0,
+                    (oc & 0xFF) as f32 / 255.0,
+                ));
+                self.subtitle_bg_box_check.set_active(c.subtitle_bg_box);
+                let bgc = c.subtitle_bg_box_color;
+                self.subtitle_bg_color_btn.set_rgba(&gdk4::RGBA::new(
+                    ((bgc >> 24) & 0xFF) as f32 / 255.0,
+                    ((bgc >> 16) & 0xFF) as f32 / 255.0,
+                    ((bgc >> 8) & 0xFF) as f32 / 255.0,
+                    (bgc & 0xFF) as f32 / 255.0,
+                ));
+                self.subtitle_export_srt_btn
+                    .set_sensitive(!c.subtitle_segments.is_empty());
+                if hl_idx == 2 || hl_idx == 4 {
+                    let hc = c.subtitle_highlight_color;
+                    let hr = ((hc >> 24) & 0xFF) as f32 / 255.0;
+                    let hg = ((hc >> 16) & 0xFF) as f32 / 255.0;
+                    let hb = ((hc >> 8) & 0xFF) as f32 / 255.0;
+                    let ha = (hc & 0xFF) as f32 / 255.0;
+                    self.subtitle_highlight_color_btn
+                        .set_rgba(&gdk4::RGBA::new(hr, hg, hb, ha));
+                }
+                self.mask_section
+                    .set_visible(is_video || is_image || is_title_clip);
                 self.frei0r_effects_section
-                    .set_visible(is_visual);
+                    .set_visible(is_visual && !is_compound && !is_multicam);
+
+                // Populate mask section from masks[0].
+                if let Some(mask) = c.masks.first() {
+                    self.mask_enable.set_active(mask.enabled);
+                    self.mask_shape_dropdown.set_selected(match mask.shape {
+                        crate::model::clip::MaskShape::Rectangle => 0,
+                        crate::model::clip::MaskShape::Ellipse => 1,
+                        crate::model::clip::MaskShape::Path => 2,
+                    });
+                    let is_path = matches!(mask.shape, crate::model::clip::MaskShape::Path);
+                    self.mask_rect_ellipse_controls.set_visible(!is_path);
+                    self.mask_path_editor_box.set_visible(is_path);
+                    self.mask_center_x_slider.set_value(mask.center_x);
+                    self.mask_center_y_slider.set_value(mask.center_y);
+                    self.mask_width_slider.set_value(mask.width);
+                    self.mask_height_slider.set_value(mask.height);
+                    self.mask_rotation_spin.set_value(mask.rotation);
+                    self.mask_feather_slider.set_value(mask.feather);
+                    self.mask_expansion_slider.set_value(mask.expansion);
+                    self.mask_invert_check.set_active(mask.invert);
+                } else {
+                    self.mask_enable.set_active(false);
+                    self.mask_shape_dropdown.set_selected(0);
+                    self.mask_rect_ellipse_controls.set_visible(true);
+                    self.mask_path_editor_box.set_visible(false);
+                    self.mask_center_x_slider.set_value(0.5);
+                    self.mask_center_y_slider.set_value(0.5);
+                    self.mask_width_slider.set_value(0.25);
+                    self.mask_height_slider.set_value(0.25);
+                    self.mask_rotation_spin.set_value(0.0);
+                    self.mask_feather_slider.set_value(0.0);
+                    self.mask_expansion_slider.set_value(0.0);
+                    self.mask_invert_check.set_active(false);
+                }
 
                 // Populate applied frei0r effects list.
                 self.rebuild_frei0r_effects_list(&c.frei0r_effects);
@@ -1023,16 +1549,20 @@ impl InspectorView {
                     self.path_value.set_text("(title clip — no source file)");
                     self.path_value.set_tooltip_text(None);
                 } else if is_adjustment {
-                    self.path_value.set_text("(adjustment layer — applies effects to tracks below)");
+                    self.path_value
+                        .set_text("(adjustment layer — applies effects to tracks below)");
                     self.path_value.set_tooltip_text(None);
                 } else {
                     self.path_value.set_text(&c.source_path);
                     self.path_value.set_tooltip_text(Some(&c.source_path));
                 }
-                let is_missing = !is_title && !is_adjustment
+                let is_missing = !is_title
+                    && !is_adjustment
                     && missing_media_paths
                         .map(|paths| paths.contains(&c.source_path))
-                        .unwrap_or_else(|| !crate::model::media_library::source_path_exists(&c.source_path));
+                        .unwrap_or_else(|| {
+                            !crate::model::media_library::source_path_exists(&c.source_path)
+                        });
                 if is_missing {
                     self.path_status_value
                         .set_text("Offline — source file is missing");
@@ -1060,7 +1590,8 @@ impl InspectorView {
                     x if (x - 2.0).abs() < 0.01 => 4,
                     _ => 0,
                 };
-                self.anamorphic_desqueeze_dropdown.set_selected(anamorphic_idx);
+                self.anamorphic_desqueeze_dropdown
+                    .set_selected(anamorphic_idx);
                 self.in_value.set_text(&ns_to_timecode(c.source_in));
                 self.out_value.set_text(&ns_to_timecode(c.source_out));
                 self.dur_value.set_text(&ns_to_timecode(c.duration()));
@@ -1165,8 +1696,14 @@ impl InspectorView {
                                 enable_check.connect_toggled(move |btn| {
                                     let mut proj = project.borrow_mut();
                                     for track in &mut proj.tracks {
-                                        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                                            if let Some(e) = clip.ladspa_effects.iter_mut().find(|e| e.id == effect_id) {
+                                        if let Some(clip) =
+                                            track.clips.iter_mut().find(|c| c.id == clip_id)
+                                        {
+                                            if let Some(e) = clip
+                                                .ladspa_effects
+                                                .iter_mut()
+                                                .find(|e| e.id == effect_id)
+                                            {
                                                 e.enabled = btn.is_active();
                                                 proj.dirty = true;
                                             }
@@ -1186,7 +1723,9 @@ impl InspectorView {
                                 btn_remove.connect_clicked(move |_| {
                                     let mut proj = project.borrow_mut();
                                     for track in &mut proj.tracks {
-                                        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                                        if let Some(clip) =
+                                            track.clips.iter_mut().find(|c| c.id == clip_id)
+                                        {
                                             clip.ladspa_effects.retain(|e| e.id != effect_id);
                                             proj.dirty = true;
                                             break;
@@ -1205,8 +1744,14 @@ impl InspectorView {
                                 btn_up.connect_clicked(move |_| {
                                     let mut proj = project.borrow_mut();
                                     for track in &mut proj.tracks {
-                                        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                                            if let Some(pos) = clip.ladspa_effects.iter().position(|e| e.id == effect_id) {
+                                        if let Some(clip) =
+                                            track.clips.iter_mut().find(|c| c.id == clip_id)
+                                        {
+                                            if let Some(pos) = clip
+                                                .ladspa_effects
+                                                .iter()
+                                                .position(|e| e.id == effect_id)
+                                            {
                                                 if pos > 0 {
                                                     clip.ladspa_effects.swap(pos, pos - 1);
                                                     proj.dirty = true;
@@ -1228,9 +1773,15 @@ impl InspectorView {
                                 btn_down.connect_clicked(move |_| {
                                     let mut proj = project.borrow_mut();
                                     for track in &mut proj.tracks {
-                                        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                                        if let Some(clip) =
+                                            track.clips.iter_mut().find(|c| c.id == clip_id)
+                                        {
                                             let len = clip.ladspa_effects.len();
-                                            if let Some(pos) = clip.ladspa_effects.iter().position(|e| e.id == effect_id) {
+                                            if let Some(pos) = clip
+                                                .ladspa_effects
+                                                .iter()
+                                                .position(|e| e.id == effect_id)
+                                            {
                                                 if pos + 1 < len {
                                                     clip.ladspa_effects.swap(pos, pos + 1);
                                                     proj.dirty = true;
@@ -1247,7 +1798,11 @@ impl InspectorView {
                             // Parameter sliders
                             if let Some(info) = reg.find_by_name(&effect.plugin_name) {
                                 for param_info in &info.params {
-                                    let val = effect.params.get(&param_info.name).copied().unwrap_or(param_info.default_value);
+                                    let val = effect
+                                        .params
+                                        .get(&param_info.name)
+                                        .copied()
+                                        .unwrap_or(param_info.default_value);
                                     let param_row = GBox::new(Orientation::Vertical, 1);
                                     let param_label = Label::new(Some(&param_info.display_name));
                                     param_label.set_halign(gtk4::Align::Start);
@@ -1266,7 +1821,11 @@ impl InspectorView {
                                     slider.set_value(val);
                                     slider.set_draw_value(true);
                                     slider.set_digits(2);
-                                    slider.add_mark(param_info.default_value, gtk4::PositionType::Bottom, None);
+                                    slider.add_mark(
+                                        param_info.default_value,
+                                        gtk4::PositionType::Bottom,
+                                        None,
+                                    );
                                     param_row.append(&slider);
 
                                     // Wire slider
@@ -1278,8 +1837,14 @@ impl InspectorView {
                                     slider.connect_value_changed(move |s| {
                                         let mut proj = project.borrow_mut();
                                         for track in &mut proj.tracks {
-                                            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                                                if let Some(e) = clip.ladspa_effects.iter_mut().find(|e| e.id == effect_id) {
+                                            if let Some(clip) =
+                                                track.clips.iter_mut().find(|c| c.id == clip_id)
+                                            {
+                                                if let Some(e) = clip
+                                                    .ladspa_effects
+                                                    .iter_mut()
+                                                    .find(|e| e.id == effect_id)
+                                                {
                                                     e.params.insert(param_name.clone(), s.value());
                                                     proj.dirty = true;
                                                 }
@@ -1306,13 +1871,17 @@ impl InspectorView {
                 self.channel_mode_dropdown
                     .set_active_id(Some(c.audio_channel_mode.as_str()));
                 // Pitch controls
-                self.pitch_shift_slider
-                    .set_value(c.pitch_shift_semitones);
+                self.pitch_shift_slider.set_value(c.pitch_shift_semitones);
                 self.pitch_preserve_check.set_active(c.pitch_preserve);
                 // Track audio controls — read from the clip's track.
-                if let Some(track) = project.tracks.iter().find(|t| t.clips.iter().any(|tc| tc.id == c.id)) {
+                if let Some(track) = project
+                    .tracks
+                    .iter()
+                    .find(|t| t.clips.iter().any(|tc| tc.id == c.id))
+                {
                     #[allow(deprecated)]
-                    self.role_dropdown.set_active_id(Some(track.audio_role.as_str()));
+                    self.role_dropdown
+                        .set_active_id(Some(track.audio_role.as_str()));
                     self.duck_check.set_active(track.duck);
                     self.duck_amount_slider.set_value(track.duck_amount_db);
                 }
@@ -1371,8 +1940,13 @@ impl InspectorView {
                         Phase1KeyframeProperty::PositionY,
                         playhead_ns,
                     ));
+                self.blend_mode_dropdown.set_sensitive(!is_adjustment);
+                self.anamorphic_desqueeze_dropdown
+                    .set_sensitive(!is_adjustment);
+                self.flip_h_btn.set_sensitive(!is_adjustment);
+                self.flip_v_btn.set_sensitive(!is_adjustment);
                 self.title_entry.set_text(&c.title_text);
-                self.title_font_btn.set_label(&c.title_font);
+                sync_title_font_button(&self.title_font_btn, &c.title_font);
                 {
                     let rgba = c.title_color;
                     let r = ((rgba >> 24) & 0xFF) as f32 / 255.0;
@@ -1383,14 +1957,16 @@ impl InspectorView {
                 }
                 self.title_x_slider.set_value(c.title_x);
                 self.title_y_slider.set_value(c.title_y);
-                self.title_outline_width_slider.set_value(c.title_outline_width);
+                self.title_outline_width_slider
+                    .set_value(c.title_outline_width);
                 {
                     let rgba = c.title_outline_color;
                     let r = ((rgba >> 24) & 0xFF) as f32 / 255.0;
                     let g = ((rgba >> 16) & 0xFF) as f32 / 255.0;
                     let b = ((rgba >> 8) & 0xFF) as f32 / 255.0;
                     let a = (rgba & 0xFF) as f32 / 255.0;
-                    self.title_outline_color_btn.set_rgba(&gdk4::RGBA::new(r, g, b, a));
+                    self.title_outline_color_btn
+                        .set_rgba(&gdk4::RGBA::new(r, g, b, a));
                 }
                 self.title_shadow_check.set_active(c.title_shadow);
                 {
@@ -1399,10 +1975,13 @@ impl InspectorView {
                     let g = ((rgba >> 16) & 0xFF) as f32 / 255.0;
                     let b = ((rgba >> 8) & 0xFF) as f32 / 255.0;
                     let a = (rgba & 0xFF) as f32 / 255.0;
-                    self.title_shadow_color_btn.set_rgba(&gdk4::RGBA::new(r, g, b, a));
+                    self.title_shadow_color_btn
+                        .set_rgba(&gdk4::RGBA::new(r, g, b, a));
                 }
-                self.title_shadow_x_slider.set_value(c.title_shadow_offset_x);
-                self.title_shadow_y_slider.set_value(c.title_shadow_offset_y);
+                self.title_shadow_x_slider
+                    .set_value(c.title_shadow_offset_x);
+                self.title_shadow_y_slider
+                    .set_value(c.title_shadow_offset_y);
                 self.title_bg_box_check.set_active(c.title_bg_box);
                 {
                     let rgba = c.title_bg_box_color;
@@ -1410,9 +1989,11 @@ impl InspectorView {
                     let g = ((rgba >> 16) & 0xFF) as f32 / 255.0;
                     let b = ((rgba >> 8) & 0xFF) as f32 / 255.0;
                     let a = (rgba & 0xFF) as f32 / 255.0;
-                    self.title_bg_box_color_btn.set_rgba(&gdk4::RGBA::new(r, g, b, a));
+                    self.title_bg_box_color_btn
+                        .set_rgba(&gdk4::RGBA::new(r, g, b, a));
                 }
-                self.title_bg_box_padding_slider.set_value(c.title_bg_box_padding);
+                self.title_bg_box_padding_slider
+                    .set_value(c.title_bg_box_padding);
                 // When speed keyframes are present, don't auto-update the slider —
                 // the user sets it to the desired value before clicking
                 // "Set Speed Keyframe". Auto-resetting would clobber their input.
@@ -1422,11 +2003,12 @@ impl InspectorView {
                     self.speed_slider.set_value(c.speed);
                 }
                 self.reverse_check.set_active(c.reverse);
-                self.slow_motion_dropdown.set_selected(match c.slow_motion_interp {
-                    crate::model::clip::SlowMotionInterp::Off => 0,
-                    crate::model::clip::SlowMotionInterp::Blend => 1,
-                    crate::model::clip::SlowMotionInterp::OpticalFlow => 2,
-                });
+                self.slow_motion_dropdown
+                    .set_selected(match c.slow_motion_interp {
+                        crate::model::clip::SlowMotionInterp::Off => 0,
+                        crate::model::clip::SlowMotionInterp::Blend => 1,
+                        crate::model::clip::SlowMotionInterp::OpticalFlow => 2,
+                    });
                 // LUT
                 // Rebuild LUT list display
                 while let Some(child) = self.lut_display_box.first_child() {
@@ -1538,19 +2120,27 @@ impl InspectorView {
                 self.anamorphic_desqueeze_dropdown.set_selected(0);
                 self.position_x_slider.set_value(0.0);
                 self.position_y_slider.set_value(0.0);
+                self.blend_mode_dropdown.set_sensitive(true);
+                self.anamorphic_desqueeze_dropdown.set_sensitive(true);
+                self.flip_h_btn.set_sensitive(true);
+                self.flip_v_btn.set_sensitive(true);
                 self.title_entry.set_text("");
-                self.title_font_btn.set_label("Sans Bold 36");
-                self.title_color_btn.set_rgba(&gdk4::RGBA::new(1.0, 1.0, 1.0, 1.0));
+                sync_title_font_button(&self.title_font_btn, "Sans Bold 36");
+                self.title_color_btn
+                    .set_rgba(&gdk4::RGBA::new(1.0, 1.0, 1.0, 1.0));
                 self.title_x_slider.set_value(0.5);
                 self.title_y_slider.set_value(0.9);
                 self.title_outline_width_slider.set_value(0.0);
-                self.title_outline_color_btn.set_rgba(&gdk4::RGBA::new(0.0, 0.0, 0.0, 1.0));
+                self.title_outline_color_btn
+                    .set_rgba(&gdk4::RGBA::new(0.0, 0.0, 0.0, 1.0));
                 self.title_shadow_check.set_active(false);
-                self.title_shadow_color_btn.set_rgba(&gdk4::RGBA::new(0.0, 0.0, 0.0, 0.67));
+                self.title_shadow_color_btn
+                    .set_rgba(&gdk4::RGBA::new(0.0, 0.0, 0.0, 0.67));
                 self.title_shadow_x_slider.set_value(2.0);
                 self.title_shadow_y_slider.set_value(2.0);
                 self.title_bg_box_check.set_active(false);
-                self.title_bg_box_color_btn.set_rgba(&gdk4::RGBA::new(0.0, 0.0, 0.0, 0.53));
+                self.title_bg_box_color_btn
+                    .set_rgba(&gdk4::RGBA::new(0.0, 0.0, 0.0, 0.53));
                 self.title_bg_box_padding_slider.set_value(8.0);
                 self.speed_slider.set_value(1.0);
                 self.reverse_check.set_active(false);
@@ -1734,8 +2324,27 @@ impl InspectorView {
 pub fn build_inspector(
     project: Rc<RefCell<Project>>,
     on_clip_changed: impl Fn() + 'static,
-    on_color_changed: impl Fn(f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32)
-        + 'static,
+    on_color_changed: impl Fn(
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+            f32,
+        ) + 'static,
     on_audio_changed: impl Fn(&str, f32, f32) + 'static,
     on_eq_changed: impl Fn(&str, [crate::model::clip::EqBand; 3]) + 'static,
     on_transform_changed: impl Fn(i32, i32, i32, i32, i32, bool, bool, f64, f64, f64) + 'static,
@@ -1758,11 +2367,14 @@ pub fn build_inspector(
     on_normalize_audio: impl Fn(&str) + 'static,
     on_duck_changed: impl Fn(&str, bool, f64) + 'static,
     on_role_changed: impl Fn(&str, &str) + 'static,
+    on_execute_command: impl Fn(Box<dyn crate::undo::EditCommand>) + 'static,
 ) -> (GBox, Rc<InspectorView>) {
     // Wrap frei0r callbacks in Rc so they can be cloned into multiple closures.
     let on_normalize_audio: Rc<dyn Fn(&str)> = Rc::new(on_normalize_audio);
     let on_duck_changed: Rc<dyn Fn(&str, bool, f64)> = Rc::new(on_duck_changed);
     let on_role_changed: Rc<dyn Fn(&str, &str)> = Rc::new(on_role_changed);
+    let on_execute_command: Rc<dyn Fn(Box<dyn crate::undo::EditCommand>)> =
+        Rc::new(on_execute_command);
     let on_vidstab_changed: Rc<dyn Fn()> = Rc::new(on_vidstab_changed);
     let on_frei0r_changed: Rc<dyn Fn()> = Rc::new(on_frei0r_changed);
     let on_frei0r_params_changed: Rc<dyn Fn()> = Rc::new(on_frei0r_params_changed);
@@ -2126,6 +2738,293 @@ pub fn build_inspector(
     bg_removal_threshold_slider.add_mark(0.5, gtk4::PositionType::Bottom, None);
     bg_removal_inner.append(&bg_removal_threshold_slider);
 
+    // ── Subtitles section (Video + Audio clips) ────────────────────────
+    let subtitle_section = GBox::new(Orientation::Vertical, 8);
+    content_box.append(&subtitle_section);
+
+    subtitle_section.append(&Separator::new(Orientation::Horizontal));
+    let subtitle_expander = Expander::new(Some("Subtitles"));
+    subtitle_expander.set_expanded(false);
+    subtitle_section.append(&subtitle_expander);
+    let subtitle_inner = GBox::new(Orientation::Vertical, 8);
+    subtitle_expander.set_child(Some(&subtitle_inner));
+
+    // "No model" warning box — shown when whisper model is not installed.
+    let subtitle_no_model_box = GBox::new(Orientation::Vertical, 6);
+    let no_model_icon_label = Label::new(Some("Speech-to-text model not installed"));
+    no_model_icon_label.set_halign(gtk::Align::Start);
+    no_model_icon_label.add_css_class("warning");
+    subtitle_no_model_box.append(&no_model_icon_label);
+    let no_model_hint = Label::new(Some(
+        "Download a Whisper GGML model (e.g. ggml-base.en.bin) and place it in the models directory. \
+         See Preferences \u{2192} Models for details.",
+    ));
+    no_model_hint.set_halign(gtk::Align::Start);
+    no_model_hint.add_css_class("dim-label");
+    no_model_hint.set_wrap(true);
+    no_model_hint.set_max_width_chars(40);
+    subtitle_no_model_box.append(&no_model_hint);
+    subtitle_inner.append(&subtitle_no_model_box);
+
+    // Controls box — shown when model IS installed.
+    let subtitle_controls_box = GBox::new(Orientation::Vertical, 8);
+    subtitle_inner.append(&subtitle_controls_box);
+
+    // Language selector
+    row_label(&subtitle_controls_box, "Language");
+    let lang_model = gtk4::StringList::new(&[
+        "auto", "en", "es", "fr", "de", "it", "pt", "ja", "zh", "ko", "ru", "ar", "hi",
+    ]);
+    let subtitle_language_dropdown =
+        gtk4::DropDown::new(Some(lang_model), Option::<gtk4::Expression>::None);
+    subtitle_language_dropdown.set_selected(0);
+    subtitle_controls_box.append(&subtitle_language_dropdown);
+
+    // Generate button with spinner
+    let subtitle_generate_btn = Button::new();
+    subtitle_generate_btn
+        .set_tooltip_text(Some("Run speech-to-text to generate subtitle segments"));
+    let gen_btn_box = GBox::new(Orientation::Horizontal, 6);
+    gen_btn_box.set_halign(gtk::Align::Center);
+    let subtitle_generate_spinner = gtk4::Spinner::new();
+    subtitle_generate_spinner.set_visible(false);
+    let subtitle_generate_label = Label::new(Some("Generate Subtitles"));
+    gen_btn_box.append(&subtitle_generate_spinner);
+    gen_btn_box.append(&subtitle_generate_label);
+    subtitle_generate_btn.set_child(Some(&gen_btn_box));
+    subtitle_controls_box.append(&subtitle_generate_btn);
+
+    // Error label (hidden by default)
+    let subtitle_error_label = Label::new(None);
+    subtitle_error_label.set_halign(gtk::Align::Start);
+    subtitle_error_label.add_css_class("error");
+    subtitle_error_label.set_wrap(true);
+    subtitle_error_label.set_max_width_chars(40);
+    subtitle_error_label.set_visible(false);
+    subtitle_controls_box.append(&subtitle_error_label);
+
+    // ── Style controls (visible when subtitles exist) ────────────────
+    let subtitle_style_box = GBox::new(Orientation::Vertical, 6);
+    subtitle_controls_box.append(&subtitle_style_box);
+
+    subtitle_style_box.append(&Separator::new(Orientation::Horizontal));
+    let style_label = Label::new(Some("Style"));
+    style_label.set_halign(gtk::Align::Start);
+    style_label.add_css_class("heading");
+    subtitle_style_box.append(&style_label);
+
+    row_label(&subtitle_style_box, "Font");
+    let subtitle_font_btn = gtk4::Button::with_label("Sans Bold 24");
+    sync_subtitle_font_button(&subtitle_font_btn, "Sans Bold 24");
+    subtitle_style_box.append(&subtitle_font_btn);
+
+    row_label(&subtitle_style_box, "Text Color");
+    let sub_color_dialog = gtk4::ColorDialog::new();
+    sub_color_dialog.set_with_alpha(true);
+    let subtitle_color_btn = gtk4::ColorDialogButton::new(Some(sub_color_dialog));
+    subtitle_color_btn.set_rgba(&gdk4::RGBA::new(1.0, 1.0, 1.0, 1.0));
+    subtitle_style_box.append(&subtitle_color_btn);
+
+    row_label(&subtitle_style_box, "Word Highlight");
+    let highlight_model = gtk4::StringList::new(&["None", "Bold", "Color", "Underline", "Stroke"]);
+    let subtitle_highlight_dropdown =
+        gtk4::DropDown::new(Some(highlight_model), Option::<gtk4::Expression>::None);
+    subtitle_highlight_dropdown.set_selected(0);
+    subtitle_style_box.append(&subtitle_highlight_dropdown);
+
+    let subtitle_highlight_color_row = GBox::new(Orientation::Vertical, 4);
+    row_label(&subtitle_highlight_color_row, "Highlight Color");
+    let sub_hl_color_dialog = gtk4::ColorDialog::new();
+    sub_hl_color_dialog.set_with_alpha(true);
+    let subtitle_highlight_color_btn = gtk4::ColorDialogButton::new(Some(sub_hl_color_dialog));
+    subtitle_highlight_color_btn.set_rgba(&gdk4::RGBA::new(1.0, 1.0, 0.0, 1.0));
+    subtitle_highlight_color_row.append(&subtitle_highlight_color_btn);
+    subtitle_style_box.append(&subtitle_highlight_color_row);
+
+    let subtitle_word_window_slider = Scale::with_range(Orientation::Horizontal, 2.0, 10.0, 1.0);
+    subtitle_word_window_slider.set_value(4.0);
+    subtitle_word_window_slider.set_draw_value(true);
+    subtitle_word_window_slider.set_digits(0);
+    subtitle_word_window_slider.add_mark(4.0, gtk4::PositionType::Bottom, None);
+    subtitle_word_window_slider
+        .set_tooltip_text(Some("Number of words shown per group in highlight mode"));
+    subtitle_style_box.append(&subtitle_word_window_slider);
+
+    row_label(&subtitle_style_box, "Vertical Position");
+    let subtitle_position_slider = Scale::with_range(Orientation::Horizontal, 0.05, 0.95, 0.05);
+    subtitle_position_slider.set_value(0.85);
+    subtitle_position_slider.set_draw_value(true);
+    subtitle_position_slider.set_digits(2);
+    subtitle_position_slider.add_mark(0.85, gtk4::PositionType::Bottom, None);
+    subtitle_position_slider.add_mark(0.10, gtk4::PositionType::Bottom, Some("Top"));
+    subtitle_position_slider.add_mark(0.50, gtk4::PositionType::Bottom, Some("Mid"));
+    subtitle_position_slider.set_tooltip_text(Some("Vertical position: 0 = top, 1 = bottom"));
+    subtitle_style_box.append(&subtitle_position_slider);
+
+    row_label(&subtitle_style_box, "Outline Color");
+    let sub_outline_color_dialog = gtk4::ColorDialog::new();
+    sub_outline_color_dialog.set_with_alpha(true);
+    let subtitle_outline_color_btn = gtk4::ColorDialogButton::new(Some(sub_outline_color_dialog));
+    subtitle_outline_color_btn.set_rgba(&gdk4::RGBA::new(0.0, 0.0, 0.0, 1.0));
+    subtitle_style_box.append(&subtitle_outline_color_btn);
+
+    let subtitle_bg_box_check = CheckButton::with_label("Background Box");
+    subtitle_bg_box_check.set_active(true);
+    subtitle_style_box.append(&subtitle_bg_box_check);
+
+    row_label(&subtitle_style_box, "Background Color");
+    let sub_bg_color_dialog = gtk4::ColorDialog::new();
+    sub_bg_color_dialog.set_with_alpha(true);
+    let subtitle_bg_color_btn = gtk4::ColorDialogButton::new(Some(sub_bg_color_dialog));
+    subtitle_bg_color_btn.set_rgba(&gdk4::RGBA::new(0.0, 0.0, 0.0, 0.6));
+    subtitle_style_box.append(&subtitle_bg_color_btn);
+
+    // Copy/Paste Style buttons
+    let style_clipboard: Rc<RefCell<Option<SubtitleStyleClipboard>>> = Rc::new(RefCell::new(None));
+    let subtitle_copy_paste_box = GBox::new(Orientation::Horizontal, 4);
+    let subtitle_copy_style_btn = Button::with_label("Copy Style");
+    subtitle_copy_style_btn.set_hexpand(true);
+    subtitle_copy_style_btn.set_tooltip_text(Some("Copy this clip's subtitle style"));
+    let subtitle_paste_style_btn = Button::with_label("Paste Style");
+    subtitle_paste_style_btn.set_hexpand(true);
+    subtitle_paste_style_btn.set_sensitive(false);
+    subtitle_paste_style_btn.set_tooltip_text(Some("Apply copied subtitle style to this clip"));
+    subtitle_copy_paste_box.append(&subtitle_copy_style_btn);
+    subtitle_copy_paste_box.append(&subtitle_paste_style_btn);
+    subtitle_style_box.append(&subtitle_copy_paste_box);
+
+    // Copy/Paste signal handlers are wired in window.rs where timeline_state is available.
+
+    // Action buttons row
+    let subtitle_actions_box = GBox::new(Orientation::Horizontal, 4);
+    subtitle_controls_box.append(&subtitle_actions_box);
+
+    let subtitle_clear_btn = Button::with_label("Clear Subtitles");
+    subtitle_clear_btn.add_css_class("destructive-action");
+    subtitle_clear_btn.set_hexpand(true);
+    subtitle_actions_box.append(&subtitle_clear_btn);
+
+    let subtitle_export_srt_btn = Button::with_label("Export SRT");
+    subtitle_export_srt_btn.set_hexpand(true);
+    subtitle_export_srt_btn.set_tooltip_text(Some("Export all subtitles as an SRT file"));
+    subtitle_actions_box.append(&subtitle_export_srt_btn);
+
+    let subtitle_import_srt_btn = Button::with_label("Import SRT");
+    subtitle_import_srt_btn.set_hexpand(true);
+    subtitle_import_srt_btn.set_tooltip_text(Some(
+        "Import an SRT file as subtitle segments for this clip",
+    ));
+    subtitle_actions_box.append(&subtitle_import_srt_btn);
+
+    // ── Subtitle Segments section (separate expander for editing) ─────
+    let subtitle_segments_section = GBox::new(Orientation::Vertical, 8);
+    content_box.append(&subtitle_segments_section);
+
+    subtitle_segments_section.append(&Separator::new(Orientation::Horizontal));
+    let segments_expander = Expander::new(Some("Subtitle Segments"));
+    segments_expander.set_expanded(false);
+    subtitle_segments_section.append(&segments_expander);
+
+    let subtitle_scroll = gtk4::ScrolledWindow::new();
+    subtitle_scroll.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
+    subtitle_scroll.set_max_content_height(300);
+    subtitle_scroll.set_propagate_natural_height(true);
+    let subtitle_list_box = GBox::new(Orientation::Vertical, 2);
+    subtitle_scroll.set_child(Some(&subtitle_list_box));
+    segments_expander.set_child(Some(&subtitle_scroll));
+
+    // ── Shape Mask section (Video + Image + Title only) ──────────────
+    let mask_section = GBox::new(Orientation::Vertical, 8);
+    content_box.append(&mask_section);
+
+    mask_section.append(&Separator::new(Orientation::Horizontal));
+    let mask_expander = Expander::new(Some("Shape Mask"));
+    mask_expander.set_expanded(false);
+    mask_section.append(&mask_expander);
+    let mask_inner = GBox::new(Orientation::Vertical, 8);
+    mask_expander.set_child(Some(&mask_inner));
+
+    let mask_enable = CheckButton::with_label("Enable Mask");
+    mask_inner.append(&mask_enable);
+
+    row_label(&mask_inner, "Shape");
+    let mask_shape_model = gtk4::StringList::new(&["Rectangle", "Ellipse", "Path"]);
+    let mask_shape_dropdown =
+        gtk4::DropDown::new(Some(mask_shape_model), Option::<gtk4::Expression>::None);
+    mask_shape_dropdown.set_selected(0);
+    mask_inner.append(&mask_shape_dropdown);
+
+    // Rect/Ellipse controls container
+    let mask_rect_ellipse_controls = GBox::new(Orientation::Vertical, 8);
+    mask_inner.append(&mask_rect_ellipse_controls);
+
+    row_label(&mask_rect_ellipse_controls, "Center X");
+    let mask_center_x_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    mask_center_x_slider.set_value(0.5);
+    mask_center_x_slider.set_draw_value(true);
+    mask_center_x_slider.set_digits(2);
+    mask_center_x_slider.add_mark(0.5, gtk4::PositionType::Bottom, None);
+    mask_rect_ellipse_controls.append(&mask_center_x_slider);
+
+    row_label(&mask_rect_ellipse_controls, "Center Y");
+    let mask_center_y_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    mask_center_y_slider.set_value(0.5);
+    mask_center_y_slider.set_draw_value(true);
+    mask_center_y_slider.set_digits(2);
+    mask_center_y_slider.add_mark(0.5, gtk4::PositionType::Bottom, None);
+    mask_rect_ellipse_controls.append(&mask_center_y_slider);
+
+    row_label(&mask_rect_ellipse_controls, "Width");
+    let mask_width_slider = Scale::with_range(Orientation::Horizontal, 0.01, 0.5, 0.01);
+    mask_width_slider.set_value(0.25);
+    mask_width_slider.set_draw_value(true);
+    mask_width_slider.set_digits(2);
+    mask_rect_ellipse_controls.append(&mask_width_slider);
+
+    row_label(&mask_rect_ellipse_controls, "Height");
+    let mask_height_slider = Scale::with_range(Orientation::Horizontal, 0.01, 0.5, 0.01);
+    mask_height_slider.set_value(0.25);
+    mask_height_slider.set_draw_value(true);
+    mask_height_slider.set_digits(2);
+    mask_rect_ellipse_controls.append(&mask_height_slider);
+
+    row_label(&mask_rect_ellipse_controls, "Rotation");
+    let mask_rotation_spin = gtk4::SpinButton::with_range(-180.0, 180.0, 1.0);
+    mask_rotation_spin.set_value(0.0);
+    mask_rotation_spin.set_digits(0);
+    mask_rect_ellipse_controls.append(&mask_rotation_spin);
+
+    row_label(&mask_rect_ellipse_controls, "Feather");
+    let mask_feather_slider = Scale::with_range(Orientation::Horizontal, 0.0, 0.5, 0.01);
+    mask_feather_slider.set_value(0.0);
+    mask_feather_slider.set_draw_value(true);
+    mask_feather_slider.set_digits(2);
+    mask_rect_ellipse_controls.append(&mask_feather_slider);
+
+    row_label(&mask_rect_ellipse_controls, "Expansion");
+    let mask_expansion_slider = Scale::with_range(Orientation::Horizontal, -0.5, 0.5, 0.01);
+    mask_expansion_slider.set_value(0.0);
+    mask_expansion_slider.set_draw_value(true);
+    mask_expansion_slider.set_digits(2);
+    mask_expansion_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
+    mask_rect_ellipse_controls.append(&mask_expansion_slider);
+
+    let mask_invert_check = CheckButton::with_label("Invert Mask");
+    mask_rect_ellipse_controls.append(&mask_invert_check);
+
+    // Path editor controls container (initially hidden)
+    let mask_path_editor_box = GBox::new(Orientation::Vertical, 8);
+    mask_path_editor_box.set_visible(false);
+    mask_inner.append(&mask_path_editor_box);
+
+    let path_points_label = Label::new(Some("Path Points"));
+    path_points_label.set_halign(gtk4::Align::Start);
+    path_points_label.add_css_class("clip-path");
+    mask_path_editor_box.append(&path_points_label);
+
+    let add_point_btn = Button::with_label("Add Point");
+    mask_path_editor_box.append(&add_point_btn);
+
     // Create shared state needed by effects and later sections.
     let selected_clip_id: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
@@ -2161,7 +3060,9 @@ pub fn build_inspector(
     let frei0r_effects_list = GBox::new(Orientation::Vertical, 4);
     frei0r_effects_expander.set_child(Some(&frei0r_effects_list));
 
-    let frei0r_empty_label = Label::new(Some("No effects applied.\nUse the Effects tab to add frei0r filters."));
+    let frei0r_empty_label = Label::new(Some(
+        "No effects applied.\nUse the Effects tab to add frei0r filters.",
+    ));
     frei0r_empty_label.set_wrap(true);
     frei0r_empty_label.add_css_class("panel-empty-state");
     frei0r_empty_label.set_margin_start(4);
@@ -2179,11 +3080,8 @@ pub fn build_inspector(
                 let proj = project.borrow();
                 for track in &proj.tracks {
                     if let Some(clip) = track.clips.iter().find(|c| c.id == cid) {
-                        let copied: Vec<crate::model::clip::Frei0rEffect> = clip
-                            .frei0r_effects
-                            .iter()
-                            .cloned()
-                            .collect();
+                        let copied: Vec<crate::model::clip::Frei0rEffect> =
+                            clip.frei0r_effects.iter().cloned().collect();
                         let has_effects = !copied.is_empty();
                         *clipboard.borrow_mut() = Some(copied);
                         paste_btn.set_sensitive(has_effects);
@@ -2200,8 +3098,9 @@ pub fn build_inspector(
         let selected_clip_id = selected_clip_id.clone();
         let project = project.clone();
         let on_frei0r_changed = on_frei0r_changed.clone();
+        let on_execute_command = on_execute_command.clone();
         frei0r_paste_btn.connect_clicked(move |_| {
-            let effects_to_paste = {
+            let effects_to_paste: Vec<_> = {
                 let cb = clipboard.borrow();
                 match cb.as_ref() {
                     Some(effects) if !effects.is_empty() => effects
@@ -2211,22 +3110,39 @@ pub fn build_inspector(
                             new_effect.id = uuid::Uuid::new_v4().to_string();
                             new_effect
                         })
-                        .collect::<Vec<_>>(),
+                        .collect(),
                     _ => return,
                 }
             };
             let cid = selected_clip_id.borrow().clone();
             if let Some(cid) = cid {
-                let mut proj = project.borrow_mut();
-                proj.dirty = true;
-                for track in &mut proj.tracks {
-                    if let Some(clip) = track.clips.iter_mut().find(|c| c.id == cid) {
-                        clip.frei0r_effects.extend(effects_to_paste);
-                        drop(proj);
-                        on_frei0r_changed();
-                        return;
-                    }
+                let track_id = {
+                    let proj = project.borrow();
+                    proj.tracks
+                        .iter()
+                        .find(|t| t.clips.iter().any(|c| c.id == cid))
+                        .map(|t| t.id.clone())
+                        .unwrap_or_default()
+                };
+                let insert_index = {
+                    let proj = project.borrow();
+                    proj.tracks
+                        .iter()
+                        .find(|t| t.id == track_id)
+                        .and_then(|t| t.clips.iter().find(|c| c.id == cid))
+                        .map(|c| c.frei0r_effects.len())
+                        .unwrap_or(0)
+                };
+                // Push one AddFrei0rEffectCommand per pasted effect so each can be undone.
+                for (offset, effect) in effects_to_paste.into_iter().enumerate() {
+                    on_execute_command(Box::new(crate::undo::AddFrei0rEffectCommand {
+                        clip_id: cid.clone(),
+                        track_id: track_id.clone(),
+                        effect,
+                        index: insert_index + offset,
+                    }));
                 }
+                on_frei0r_changed();
             }
         });
     }
@@ -2392,14 +3308,15 @@ pub fn build_inspector(
     pitch_shift_slider.add_mark(12.0, gtk4::PositionType::Bottom, Some("+12"));
     pitch_inner.append(&pitch_shift_slider);
 
-    let pitch_preserve_check =
-        gtk4::CheckButton::with_label("Preserve pitch during speed changes");
+    let pitch_preserve_check = gtk4::CheckButton::with_label("Preserve pitch during speed changes");
     pitch_preserve_check.set_tooltip_text(Some(
         "Use Rubberband time-stretch to keep audio pitch constant when clip speed is changed",
     ));
     pitch_inner.append(&pitch_preserve_check);
 
-    let pitch_hint = Label::new(Some("Pitch shift via Rubberband.\n0 = original pitch, \u{00b1}12 = \u{00b1}1 octave."));
+    let pitch_hint = Label::new(Some(
+        "Pitch shift via Rubberband.\n0 = original pitch, \u{00b1}12 = \u{00b1}1 octave.",
+    ));
     pitch_hint.set_halign(gtk4::Align::Start);
     pitch_hint.add_css_class("dim-label");
     pitch_inner.append(&pitch_hint);
@@ -2498,7 +3415,13 @@ pub fn build_inspector(
 
     row_label(&transform_inner, "Blend Mode");
     let blend_mode_dropdown = gtk4::DropDown::from_strings(&[
-        "Normal", "Multiply", "Screen", "Overlay", "Add", "Difference", "Soft Light",
+        "Normal",
+        "Multiply",
+        "Screen",
+        "Overlay",
+        "Add",
+        "Difference",
+        "Soft Light",
     ]);
     blend_mode_dropdown.set_selected(0);
     blend_mode_dropdown.set_halign(gtk4::Align::Start);
@@ -2507,9 +3430,8 @@ pub fn build_inspector(
     transform_inner.append(&blend_mode_dropdown);
 
     row_label(&transform_inner, "Anamorphic Desqueeze");
-    let anamorphic_desqueeze_dropdown = gtk4::DropDown::from_strings(&[
-        "None (1.0x)", "1.33x", "1.5x", "1.8x", "2.0x",
-    ]);
+    let anamorphic_desqueeze_dropdown =
+        gtk4::DropDown::from_strings(&["None (1.0x)", "1.33x", "1.5x", "1.8x", "2.0x"]);
     anamorphic_desqueeze_dropdown.set_selected(0);
     anamorphic_desqueeze_dropdown.set_halign(gtk4::Align::Start);
     anamorphic_desqueeze_dropdown.set_hexpand(true);
@@ -2724,7 +3646,7 @@ pub fn build_inspector(
 
     row_label(&title_inner, "Font");
     let title_font_btn = gtk4::Button::with_label("Sans Bold 36");
-    title_font_btn.set_tooltip_text(Some("Click to choose a font"));
+    sync_title_font_button(&title_font_btn, "Sans Bold 36");
     title_inner.append(&title_font_btn);
 
     row_label(&title_inner, "Text Color");
@@ -2859,7 +3781,9 @@ pub fn build_inspector(
         "Synthesizes intermediate frames on export for smooth slow-motion (clips with speed < 1.0 only)",
     ));
     speed_inner.append(&slow_motion_dropdown);
-    let smo_note = Label::new(Some("Synthesizes frames on export (slow-motion clips only)"));
+    let smo_note = Label::new(Some(
+        "Synthesizes frames on export (slow-motion clips only)",
+    ));
     smo_note.set_halign(gtk4::Align::Start);
     smo_note.add_css_class("clip-path");
     speed_inner.append(&smo_note);
@@ -2926,8 +3850,7 @@ pub fn build_inspector(
         ),
     > = Rc::new(on_color_changed);
     let on_audio_changed: Rc<dyn Fn(&str, f32, f32)> = Rc::new(on_audio_changed);
-    let on_eq_changed: Rc<dyn Fn(&str, [crate::model::clip::EqBand; 3])> =
-        Rc::new(on_eq_changed);
+    let on_eq_changed: Rc<dyn Fn(&str, [crate::model::clip::EqBand; 3])> = Rc::new(on_eq_changed);
     let on_transform_changed: Rc<dyn Fn(i32, i32, i32, i32, i32, bool, bool, f64, f64, f64)> =
         Rc::new(on_transform_changed);
     let on_title_changed: Rc<dyn Fn(String, f64, f64)> = Rc::new(on_title_changed);
@@ -2950,6 +3873,7 @@ pub fn build_inspector(
         let selected_clip_id = selected_clip_id.clone();
         let name_entry_cb = name_entry.clone();
         let on_clip_changed = on_clip_changed.clone();
+        let on_execute_command = on_execute_command.clone();
 
         apply_btn.connect_clicked(move |_| {
             let new_name = name_entry_cb.text().to_string();
@@ -2958,6 +3882,19 @@ pub fn build_inspector(
             }
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
+                let (old_label, track_id) = {
+                    let proj = project.borrow();
+                    let mut old = String::new();
+                    let mut tid = String::new();
+                    for track in &proj.tracks {
+                        if let Some(clip) = track.clips.iter().find(|c| &c.id == clip_id) {
+                            old = clip.label.clone();
+                            tid = track.id.clone();
+                            break;
+                        }
+                    }
+                    (old, tid)
+                };
                 {
                     let mut proj = project.borrow_mut();
                     for track in &mut proj.tracks {
@@ -2967,6 +3904,14 @@ pub fn build_inspector(
                             break;
                         }
                     }
+                }
+                if old_label != new_name {
+                    on_execute_command(Box::new(crate::undo::SetClipLabelCommand {
+                        clip_id: clip_id.clone(),
+                        track_id,
+                        old_label,
+                        new_label: new_name,
+                    }));
                 }
                 on_clip_changed();
             }
@@ -3176,6 +4121,124 @@ pub fn build_inspector(
     wire_color_slider!(shadows_warmth_slider, |clip, v| clip.shadows_warmth = v);
     wire_color_slider!(shadows_tint_slider, |clip, v| clip.shadows_tint = v);
 
+    // Undo support for color sliders: GestureClick + EventControllerFocus snapshot/commit.
+    fn attach_color_undo(
+        slider: &Scale,
+        project: Rc<RefCell<Project>>,
+        selected_clip_id: Rc<RefCell<Option<String>>>,
+        on_execute_command: Rc<dyn Fn(Box<dyn crate::undo::EditCommand>)>,
+    ) {
+        type SnapCell = Rc<RefCell<Option<(String, String, crate::undo::ClipColorSnapshot)>>>;
+        let snap: SnapCell = Rc::new(RefCell::new(None));
+
+        let do_snapshot = {
+            let project = project.clone();
+            let selected_clip_id = selected_clip_id.clone();
+            let snap = snap.clone();
+            move || {
+                let cid = selected_clip_id.borrow().clone();
+                if let Some(cid) = cid {
+                    let proj = project.borrow();
+                    for track in &proj.tracks {
+                        if let Some(clip) = track.clips.iter().find(|c| c.id == cid) {
+                            *snap.borrow_mut() = Some((
+                                cid.clone(),
+                                track.id.clone(),
+                                crate::undo::ClipColorSnapshot::from_clip(clip),
+                            ));
+                            break;
+                        }
+                    }
+                }
+            }
+        };
+
+        let do_commit = {
+            let project = project.clone();
+            let snap = snap.clone();
+            let on_execute_command = on_execute_command.clone();
+            move || {
+                let entry = snap.borrow_mut().take();
+                if let Some((clip_id, track_id, old_color)) = entry {
+                    let new_color = {
+                        let proj = project.borrow();
+                        proj.tracks
+                            .iter()
+                            .find(|t| t.id == track_id)
+                            .and_then(|t| t.clips.iter().find(|c| c.id == clip_id))
+                            .map(|clip| crate::undo::ClipColorSnapshot::from_clip(clip))
+                    };
+                    if let Some(new_color) = new_color {
+                        on_execute_command(Box::new(crate::undo::SetClipColorCommand {
+                            clip_id,
+                            track_id,
+                            old_color,
+                            new_color,
+                        }));
+                    }
+                }
+            }
+        };
+
+        let ges = gtk4::GestureClick::new();
+        {
+            let do_snapshot = do_snapshot.clone();
+            ges.connect_pressed(move |_, _, _, _| {
+                do_snapshot();
+            });
+        }
+        {
+            let do_commit = do_commit.clone();
+            ges.connect_released(move |_, _, _, _| {
+                do_commit();
+            });
+        }
+        slider.add_controller(ges);
+
+        let focus_ctrl = gtk4::EventControllerFocus::new();
+        {
+            let do_snapshot = do_snapshot.clone();
+            focus_ctrl.connect_enter(move |_| {
+                do_snapshot();
+            });
+        }
+        {
+            focus_ctrl.connect_leave(move |_| {
+                do_commit();
+            });
+        }
+        slider.add_controller(focus_ctrl);
+    }
+
+    for s in [
+        &brightness_slider,
+        &contrast_slider,
+        &saturation_slider,
+        &temperature_slider,
+        &tint_slider,
+        &denoise_slider,
+        &sharpness_slider,
+        &blur_slider,
+        &shadows_slider,
+        &midtones_slider,
+        &highlights_slider,
+        &exposure_slider,
+        &black_point_slider,
+        &highlights_warmth_slider,
+        &highlights_tint_slider,
+        &midtones_warmth_slider,
+        &midtones_tint_slider,
+        &shadows_warmth_slider,
+        &shadows_tint_slider,
+    ] {
+        attach_color_undo(
+            s,
+            project.clone(),
+            selected_clip_id.clone(),
+            on_execute_command.clone(),
+        );
+    }
+
     // Wire audio sliders
     {
         let project = project.clone();
@@ -3346,6 +4409,83 @@ pub fn build_inspector(
         });
     }
 
+    // Undo controllers for volume and pan sliders (shared snapshot).
+    {
+        type VolSnapCell = Rc<RefCell<Option<(String, String, f32, f32)>>>;
+        let vol_snap: VolSnapCell = Rc::new(RefCell::new(None));
+
+        let do_vol_snapshot = {
+            let project = project.clone();
+            let selected_clip_id = selected_clip_id.clone();
+            let vol_snap = vol_snap.clone();
+            move || {
+                let cid = selected_clip_id.borrow().clone();
+                if let Some(cid) = cid {
+                    let proj = project.borrow();
+                    for track in &proj.tracks {
+                        if let Some(clip) = track.clips.iter().find(|c| c.id == cid) {
+                            *vol_snap.borrow_mut() =
+                                Some((cid.clone(), track.id.clone(), clip.volume, clip.pan));
+                            break;
+                        }
+                    }
+                }
+            }
+        };
+
+        let do_vol_commit = {
+            let project = project.clone();
+            let vol_snap = vol_snap.clone();
+            let on_execute_command = on_execute_command.clone();
+            move || {
+                let entry = vol_snap.borrow_mut().take();
+                if let Some((clip_id, track_id, old_volume, old_pan)) = entry {
+                    let (new_volume, new_pan) = {
+                        let proj = project.borrow();
+                        proj.tracks
+                            .iter()
+                            .find(|t| t.id == track_id)
+                            .and_then(|t| t.clips.iter().find(|c| c.id == clip_id))
+                            .map(|c| (c.volume, c.pan))
+                            .unwrap_or((old_volume, old_pan))
+                    };
+                    on_execute_command(Box::new(crate::undo::SetClipVolumeCommand {
+                        clip_id,
+                        track_id,
+                        old_volume,
+                        new_volume,
+                        old_pan,
+                        new_pan,
+                    }));
+                }
+            }
+        };
+
+        for slider in [&volume_slider, &pan_slider] {
+            let ges = gtk4::GestureClick::new();
+            let snap_c = do_vol_snapshot.clone();
+            let commit_c = do_vol_commit.clone();
+            ges.connect_pressed(move |_, _, _, _| {
+                snap_c();
+            });
+            ges.connect_released(move |_, _, _, _| {
+                commit_c();
+            });
+            slider.add_controller(ges);
+
+            let focus_ctrl = gtk4::EventControllerFocus::new();
+            let snap_c = do_vol_snapshot.clone();
+            let commit_c = do_vol_commit.clone();
+            focus_ctrl.connect_enter(move |_| {
+                snap_c();
+            });
+            focus_ctrl.connect_leave(move |_| {
+                commit_c();
+            });
+            slider.add_controller(focus_ctrl);
+        }
+    }
+
     // Wire Normalize button
     {
         let selected_clip_id = selected_clip_id.clone();
@@ -3366,7 +4506,9 @@ pub fn build_inspector(
         let on_clip_changed = on_clip_changed.clone();
         #[allow(deprecated)]
         channel_mode_dropdown.connect_changed(move |combo| {
-            if *updating.borrow() { return; }
+            if *updating.borrow() {
+                return;
+            }
             let id = selected_clip_id.borrow().clone();
             #[allow(deprecated)]
             if let (Some(ref clip_id), Some(mode_id)) = (id, combo.active_id()) {
@@ -3394,7 +4536,9 @@ pub fn build_inspector(
         let on_clip_changed = on_clip_changed.clone();
         let pitch_preserve_check_cb = pitch_preserve_check.clone();
         pitch_shift_slider.connect_value_changed(move |s| {
-            if *updating.borrow() { return; }
+            if *updating.borrow() {
+                return;
+            }
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
                 {
@@ -3418,7 +4562,9 @@ pub fn build_inspector(
         let updating = updating.clone();
         let on_clip_changed = on_clip_changed.clone();
         pitch_preserve_check.connect_toggled(move |btn| {
-            if *updating.borrow() { return; }
+            if *updating.borrow() {
+                return;
+            }
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
                 {
@@ -3443,7 +4589,9 @@ pub fn build_inspector(
         let on_role_changed = on_role_changed.clone();
         #[allow(deprecated)]
         role_dropdown.connect_changed(move |combo| {
-            if *updating.borrow() { return; }
+            if *updating.borrow() {
+                return;
+            }
             let id = selected_clip_id.borrow().clone();
             #[allow(deprecated)]
             if let (Some(ref clip_id), Some(role_id)) = (id, combo.active_id()) {
@@ -3459,7 +4607,9 @@ pub fn build_inspector(
         let on_duck_changed = on_duck_changed.clone();
         let duck_amount_slider_cb = duck_amount_slider.clone();
         duck_check.connect_toggled(move |btn| {
-            if *updating.borrow() { return; }
+            if *updating.borrow() {
+                return;
+            }
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
                 on_duck_changed(clip_id, btn.is_active(), duck_amount_slider_cb.value());
@@ -3472,7 +4622,9 @@ pub fn build_inspector(
         let on_duck_changed = on_duck_changed.clone();
         let duck_check_cb = duck_check.clone();
         duck_amount_slider.connect_value_changed(move |s| {
-            if *updating.borrow() { return; }
+            if *updating.borrow() {
+                return;
+            }
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
                 on_duck_changed(clip_id, duck_check_cb.is_active(), s.value());
@@ -3492,15 +4644,38 @@ pub fn build_inspector(
             let gs: Vec<Scale> = eq_gain_sliders.iter().cloned().collect();
             let qs: Vec<Scale> = eq_q_sliders.iter().cloned().collect();
             eq_freq_sliders[bi].connect_value_changed(move |_| {
-                if *updating.borrow() { return; }
+                if *updating.borrow() {
+                    return;
+                }
                 let id = selected_clip_id.borrow().clone();
                 if let Some(ref clip_id) = id {
                     let bands = [
-                        crate::model::clip::EqBand { freq: fs[0].value(), gain: gs[0].value(), q: qs[0].value() },
-                        crate::model::clip::EqBand { freq: fs[1].value(), gain: gs[1].value(), q: qs[1].value() },
-                        crate::model::clip::EqBand { freq: fs[2].value(), gain: gs[2].value(), q: qs[2].value() },
+                        crate::model::clip::EqBand {
+                            freq: fs[0].value(),
+                            gain: gs[0].value(),
+                            q: qs[0].value(),
+                        },
+                        crate::model::clip::EqBand {
+                            freq: fs[1].value(),
+                            gain: gs[1].value(),
+                            q: qs[1].value(),
+                        },
+                        crate::model::clip::EqBand {
+                            freq: fs[2].value(),
+                            gain: gs[2].value(),
+                            q: qs[2].value(),
+                        },
                     ];
-                    { let mut proj = project.borrow_mut(); for track in &mut proj.tracks { if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) { clip.eq_bands = bands; proj.dirty = true; break; } } }
+                    {
+                        let mut proj = project.borrow_mut();
+                        for track in &mut proj.tracks {
+                            if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                                clip.eq_bands = bands;
+                                proj.dirty = true;
+                                break;
+                            }
+                        }
+                    }
                     on_eq_changed(clip_id, bands);
                 }
             });
@@ -3515,15 +4690,38 @@ pub fn build_inspector(
             let gs: Vec<Scale> = eq_gain_sliders.iter().cloned().collect();
             let qs: Vec<Scale> = eq_q_sliders.iter().cloned().collect();
             eq_gain_sliders[bi].connect_value_changed(move |_| {
-                if *updating.borrow() { return; }
+                if *updating.borrow() {
+                    return;
+                }
                 let id = selected_clip_id.borrow().clone();
                 if let Some(ref clip_id) = id {
                     let bands = [
-                        crate::model::clip::EqBand { freq: fs[0].value(), gain: gs[0].value(), q: qs[0].value() },
-                        crate::model::clip::EqBand { freq: fs[1].value(), gain: gs[1].value(), q: qs[1].value() },
-                        crate::model::clip::EqBand { freq: fs[2].value(), gain: gs[2].value(), q: qs[2].value() },
+                        crate::model::clip::EqBand {
+                            freq: fs[0].value(),
+                            gain: gs[0].value(),
+                            q: qs[0].value(),
+                        },
+                        crate::model::clip::EqBand {
+                            freq: fs[1].value(),
+                            gain: gs[1].value(),
+                            q: qs[1].value(),
+                        },
+                        crate::model::clip::EqBand {
+                            freq: fs[2].value(),
+                            gain: gs[2].value(),
+                            q: qs[2].value(),
+                        },
                     ];
-                    { let mut proj = project.borrow_mut(); for track in &mut proj.tracks { if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) { clip.eq_bands = bands; proj.dirty = true; break; } } }
+                    {
+                        let mut proj = project.borrow_mut();
+                        for track in &mut proj.tracks {
+                            if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                                clip.eq_bands = bands;
+                                proj.dirty = true;
+                                break;
+                            }
+                        }
+                    }
                     on_eq_changed(clip_id, bands);
                 }
             });
@@ -3538,18 +4736,123 @@ pub fn build_inspector(
             let gs: Vec<Scale> = eq_gain_sliders.iter().cloned().collect();
             let qs: Vec<Scale> = eq_q_sliders.iter().cloned().collect();
             eq_q_sliders[bi].connect_value_changed(move |_| {
-                if *updating.borrow() { return; }
+                if *updating.borrow() {
+                    return;
+                }
                 let id = selected_clip_id.borrow().clone();
                 if let Some(ref clip_id) = id {
                     let bands = [
-                        crate::model::clip::EqBand { freq: fs[0].value(), gain: gs[0].value(), q: qs[0].value() },
-                        crate::model::clip::EqBand { freq: fs[1].value(), gain: gs[1].value(), q: qs[1].value() },
-                        crate::model::clip::EqBand { freq: fs[2].value(), gain: gs[2].value(), q: qs[2].value() },
+                        crate::model::clip::EqBand {
+                            freq: fs[0].value(),
+                            gain: gs[0].value(),
+                            q: qs[0].value(),
+                        },
+                        crate::model::clip::EqBand {
+                            freq: fs[1].value(),
+                            gain: gs[1].value(),
+                            q: qs[1].value(),
+                        },
+                        crate::model::clip::EqBand {
+                            freq: fs[2].value(),
+                            gain: gs[2].value(),
+                            q: qs[2].value(),
+                        },
                     ];
-                    { let mut proj = project.borrow_mut(); for track in &mut proj.tracks { if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) { clip.eq_bands = bands; proj.dirty = true; break; } } }
+                    {
+                        let mut proj = project.borrow_mut();
+                        for track in &mut proj.tracks {
+                            if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                                clip.eq_bands = bands;
+                                proj.dirty = true;
+                                break;
+                            }
+                        }
+                    }
                     on_eq_changed(clip_id, bands);
                 }
             });
+        }
+    }
+
+    // Undo controllers for EQ sliders (shared snapshot for all 9 sliders).
+    {
+        type EqSnapCell = Rc<RefCell<Option<(String, String, [crate::model::clip::EqBand; 3])>>>;
+        let eq_snap: EqSnapCell = Rc::new(RefCell::new(None));
+
+        let do_eq_snapshot = {
+            let project = project.clone();
+            let selected_clip_id = selected_clip_id.clone();
+            let eq_snap = eq_snap.clone();
+            move || {
+                let cid = selected_clip_id.borrow().clone();
+                if let Some(cid) = cid {
+                    let proj = project.borrow();
+                    for track in &proj.tracks {
+                        if let Some(clip) = track.clips.iter().find(|c| c.id == cid) {
+                            *eq_snap.borrow_mut() =
+                                Some((cid.clone(), track.id.clone(), clip.eq_bands));
+                            break;
+                        }
+                    }
+                }
+            }
+        };
+
+        let do_eq_commit = {
+            let project = project.clone();
+            let eq_snap = eq_snap.clone();
+            let on_execute_command = on_execute_command.clone();
+            move || {
+                let entry = eq_snap.borrow_mut().take();
+                if let Some((clip_id, track_id, old_eq_bands)) = entry {
+                    let new_eq_bands = {
+                        let proj = project.borrow();
+                        proj.tracks
+                            .iter()
+                            .find(|t| t.id == track_id)
+                            .and_then(|t| t.clips.iter().find(|c| c.id == clip_id))
+                            .map(|c| c.eq_bands)
+                            .unwrap_or(old_eq_bands)
+                    };
+                    on_execute_command(Box::new(crate::undo::SetClipEqCommand {
+                        clip_id,
+                        track_id,
+                        old_eq_bands,
+                        new_eq_bands,
+                    }));
+                }
+            }
+        };
+
+        let all_eq: Vec<Scale> = eq_freq_sliders
+            .iter()
+            .chain(eq_gain_sliders.iter())
+            .chain(eq_q_sliders.iter())
+            .cloned()
+            .collect();
+
+        for s in &all_eq {
+            let ges = gtk4::GestureClick::new();
+            let snap_c = do_eq_snapshot.clone();
+            let commit_c = do_eq_commit.clone();
+            ges.connect_pressed(move |_, _, _, _| {
+                snap_c();
+            });
+            ges.connect_released(move |_, _, _, _| {
+                commit_c();
+            });
+            s.add_controller(ges);
+
+            let focus_ctrl = gtk4::EventControllerFocus::new();
+            let snap_c = do_eq_snapshot.clone();
+            let commit_c = do_eq_commit.clone();
+            focus_ctrl.connect_enter(move |_| {
+                snap_c();
+            });
+            focus_ctrl.connect_leave(move |_| {
+                commit_c();
+            });
+            s.add_controller(focus_ctrl);
         }
     }
 
@@ -4625,8 +5928,8 @@ pub fn build_inspector(
             for track in &proj.tracks {
                 if let Some(clip) = track.clips.iter().find(|c| c.id == clip_id) {
                     let local = clip.local_timeline_position_ns(playhead);
-                    if let Some(prev_local) =
-                        clip.prev_keyframe_local_ns_for_property(Phase1KeyframeProperty::Speed, local)
+                    if let Some(prev_local) = clip
+                        .prev_keyframe_local_ns_for_property(Phase1KeyframeProperty::Speed, local)
                     {
                         let timeline_ns = clip.timeline_start.saturating_add(prev_local);
                         let speed_at_kf = clip.speed_at_local_timeline_ns(prev_local);
@@ -4657,8 +5960,8 @@ pub fn build_inspector(
             for track in &proj.tracks {
                 if let Some(clip) = track.clips.iter().find(|c| c.id == clip_id) {
                     let local = clip.local_timeline_position_ns(playhead);
-                    if let Some(next_local) =
-                        clip.next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Speed, local)
+                    if let Some(next_local) = clip
+                        .next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Speed, local)
                     {
                         let timeline_ns = clip.timeline_start.saturating_add(next_local);
                         let speed_at_kf = clip.speed_at_local_timeline_ns(next_local);
@@ -4881,27 +6184,34 @@ pub fn build_inspector(
             let te = title_entry_font.clone();
             let fb = font_btn.clone();
             let parent: Option<&gtk4::Window> = None;
-            dialog.choose_font(parent, initial.as_ref(), None::<&gio::Cancellable>, move |result| {
-                if let Ok(desc) = result {
-                    let font_str = desc.to_string();
-                    fb.set_label(&font_str);
-                    let id = id_c.borrow().clone();
-                    if let Some(ref clip_id) = id {
-                        {
-                            let mut proj = project_c.borrow_mut();
-                            for track in &mut proj.tracks {
-                                if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                                    clip.title_font = font_str.clone();
-                                    proj.dirty = true;
-                                    break;
+            dialog.choose_font(
+                parent,
+                initial.as_ref(),
+                None::<&gio::Cancellable>,
+                move |result| {
+                    if let Ok(desc) = result {
+                        let font_str = desc.to_string();
+                        sync_title_font_button(&fb, &font_str);
+                        let id = id_c.borrow().clone();
+                        if let Some(ref clip_id) = id {
+                            {
+                                let mut proj = project_c.borrow_mut();
+                                for track in &mut proj.tracks {
+                                    if let Some(clip) =
+                                        track.clips.iter_mut().find(|c| &c.id == clip_id)
+                                    {
+                                        clip.title_font = font_str.clone();
+                                        proj.dirty = true;
+                                        break;
+                                    }
                                 }
                             }
+                            on_title(te.text().to_string(), tx.value(), ty.value());
+                            on_style();
                         }
-                        on_title(te.text().to_string(), tx.value(), ty.value());
-                        on_style();
                     }
-                }
-            });
+                },
+            );
         });
     }
 
@@ -4936,7 +6246,11 @@ pub fn build_inspector(
                         }
                     }
                 }
-                on_title_changed(title_entry_c.text().to_string(), title_x.value(), title_y.value());
+                on_title_changed(
+                    title_entry_c.text().to_string(),
+                    title_x.value(),
+                    title_y.value(),
+                );
             }
         });
     }
@@ -5278,6 +6592,88 @@ pub fn build_inspector(
         });
     }
 
+    // Undo controller for speed slider.
+    {
+        type SpeedSnapCell = Rc<RefCell<Option<(String, String, f64)>>>;
+        let speed_snap: SpeedSnapCell = Rc::new(RefCell::new(None));
+
+        let do_speed_snapshot = {
+            let project = project.clone();
+            let selected_clip_id = selected_clip_id.clone();
+            let speed_snap = speed_snap.clone();
+            move || {
+                let cid = selected_clip_id.borrow().clone();
+                if let Some(cid) = cid {
+                    let proj = project.borrow();
+                    for track in &proj.tracks {
+                        if let Some(clip) = track.clips.iter().find(|c| c.id == cid) {
+                            *speed_snap.borrow_mut() =
+                                Some((cid.clone(), track.id.clone(), clip.speed));
+                            break;
+                        }
+                    }
+                }
+            }
+        };
+
+        let do_speed_commit = {
+            let project = project.clone();
+            let speed_snap = speed_snap.clone();
+            let on_execute_command = on_execute_command.clone();
+            move || {
+                let entry = speed_snap.borrow_mut().take();
+                if let Some((clip_id, track_id, old_speed)) = entry {
+                    let new_speed = {
+                        let proj = project.borrow();
+                        proj.tracks
+                            .iter()
+                            .find(|t| t.id == track_id)
+                            .and_then(|t| t.clips.iter().find(|c| c.id == clip_id))
+                            .map(|c| c.speed)
+                            .unwrap_or(old_speed)
+                    };
+                    if (new_speed - old_speed).abs() > 1e-9 {
+                        on_execute_command(Box::new(crate::undo::SetClipSpeedCommand {
+                            clip_id,
+                            track_id,
+                            old_speed,
+                            new_speed,
+                        }));
+                    }
+                }
+            }
+        };
+
+        let ges = gtk4::GestureClick::new();
+        {
+            let do_speed_snapshot = do_speed_snapshot.clone();
+            ges.connect_pressed(move |_, _, _, _| {
+                do_speed_snapshot();
+            });
+        }
+        {
+            let do_speed_commit = do_speed_commit.clone();
+            ges.connect_released(move |_, _, _, _| {
+                do_speed_commit();
+            });
+        }
+        speed_slider.add_controller(ges);
+
+        let focus_ctrl = gtk4::EventControllerFocus::new();
+        {
+            let do_speed_snapshot = do_speed_snapshot.clone();
+            focus_ctrl.connect_enter(move |_| {
+                do_speed_snapshot();
+            });
+        }
+        {
+            focus_ctrl.connect_leave(move |_| {
+                do_speed_commit();
+            });
+        }
+        speed_slider.add_controller(focus_ctrl);
+    }
+
     // Reverse checkbox
     {
         let project = project.clone();
@@ -5394,12 +6790,15 @@ pub fn build_inspector(
                             let id = selected_clip_id.borrow();
                             let proj = project.borrow();
                             if let Some(ref clip_id) = *id {
-                                proj.tracks.iter()
+                                proj.tracks
+                                    .iter()
                                     .flat_map(|t| t.clips.iter())
                                     .find(|c| &c.id == clip_id)
                                     .map(|c| c.lut_paths.clone())
                                     .unwrap_or_default()
-                            } else { Vec::new() }
+                            } else {
+                                Vec::new()
+                            }
                         };
                         for (i, p) in lut_paths.iter().enumerate() {
                             let name = std::path::Path::new(p)
@@ -5495,11 +6894,7 @@ pub fn build_inspector(
                         && (clip.kind == crate::model::clip::ClipKind::Video
                             || clip.kind == crate::model::clip::ClipKind::Image)
                     {
-                        candidates.push((
-                            clip.id.clone(),
-                            clip.label.clone(),
-                            track.id.clone(),
-                        ));
+                        candidates.push((clip.id.clone(), clip.label.clone(), track.id.clone()));
                     }
                 }
             }
@@ -5533,7 +6928,8 @@ pub fn build_inspector(
             vbox.append(&label);
 
             let labels: Vec<String> = candidates.iter().map(|(_, l, _)| l.clone()).collect();
-            let string_list = gtk4::StringList::new(&labels.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+            let string_list =
+                gtk4::StringList::new(&labels.iter().map(|s| s.as_str()).collect::<Vec<_>>());
             let dropdown = gtk4::DropDown::new(Some(string_list), gtk4::Expression::NONE);
             dropdown.set_selected(0);
             vbox.append(&dropdown);
@@ -5606,7 +7002,9 @@ pub fn build_inspector(
                         }
                         None
                     };
-                    let ref_grading = proj.tracks.iter()
+                    let ref_grading = proj
+                        .tracks
+                        .iter()
                         .flat_map(|t| t.clips.iter())
                         .find(|c| c.id == ref_clip_id)
                         .map(crate::media::color_match::ReferenceGrading::from_clip);
@@ -5716,7 +7114,8 @@ pub fn build_inspector(
                             // Re-read and rebuild display from current clip state
                             let lut_paths: Vec<String> = {
                                 let proj = project.borrow();
-                                proj.tracks.iter()
+                                proj.tracks
+                                    .iter()
                                     .flat_map(|t| t.clips.iter())
                                     .find(|c| c.id == source_clip_id)
                                     .map(|c| c.lut_paths.clone())
@@ -5992,6 +7391,180 @@ pub fn build_inspector(
         });
     }
 
+    // ── Shape Mask signals ────────────────────────────────────────────────
+    // Enable/shape changes trigger a pipeline rebuild (adds/removes probe element).
+    // Slider changes use on_frei0r_params_changed for live updates (probe reads
+    // from shared Arc<Mutex> state without needing a rebuild).
+    {
+        let project = project.clone();
+        let updating = updating.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let on_mask_changed = on_frei0r_changed.clone();
+        mask_enable.connect_toggled(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let enabled = btn.is_active();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            if enabled && clip.masks.is_empty() {
+                                clip.masks.push(crate::model::clip::ClipMask::new(
+                                    crate::model::clip::MaskShape::Rectangle,
+                                ));
+                            } else if !enabled && !clip.masks.is_empty() {
+                                clip.masks[0].enabled = false;
+                            } else if enabled && !clip.masks.is_empty() {
+                                clip.masks[0].enabled = true;
+                            }
+                            proj.dirty = true;
+                            break;
+                        }
+                    }
+                }
+                on_mask_changed();
+            }
+        });
+    }
+    {
+        let project = project.clone();
+        let updating = updating.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let on_mask_changed = on_frei0r_changed.clone();
+        mask_shape_dropdown.connect_selected_notify(move |dd| {
+            if *updating.borrow() {
+                return;
+            }
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            if let Some(m) = clip.masks.first_mut() {
+                                match dd.selected() {
+                                    1 => {
+                                        m.shape = crate::model::clip::MaskShape::Ellipse;
+                                    }
+                                    2 => {
+                                        m.shape = crate::model::clip::MaskShape::Path;
+                                        if m.path.is_none() {
+                                            m.path =
+                                                Some(crate::model::clip::default_diamond_path());
+                                        }
+                                    }
+                                    _ => {
+                                        m.shape = crate::model::clip::MaskShape::Rectangle;
+                                    }
+                                }
+                                proj.dirty = true;
+                            }
+                            break;
+                        }
+                    }
+                }
+                on_mask_changed();
+            }
+        });
+    }
+    // Wire mask numeric sliders — use on_frei0r_params_changed (live update,
+    // no pipeline rebuild) since the probe reads from shared state.
+    macro_rules! wire_mask_slider {
+        ($slider:expr, $field:ident) => {{
+            let project = project.clone();
+            let updating = updating.clone();
+            let selected_clip_id = selected_clip_id.clone();
+            let on_mask_live = on_frei0r_params_changed.clone();
+            $slider.connect_value_changed(move |s| {
+                if *updating.borrow() {
+                    return;
+                }
+                let val = s.value();
+                let id = selected_clip_id.borrow().clone();
+                if let Some(ref clip_id) = id {
+                    {
+                        let mut proj = project.borrow_mut();
+                        for track in &mut proj.tracks {
+                            if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                                if let Some(m) = clip.masks.first_mut() {
+                                    m.$field = val;
+                                    proj.dirty = true;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    on_mask_live();
+                }
+            });
+        }};
+    }
+    wire_mask_slider!(mask_center_x_slider, center_x);
+    wire_mask_slider!(mask_center_y_slider, center_y);
+    wire_mask_slider!(mask_width_slider, width);
+    wire_mask_slider!(mask_height_slider, height);
+    wire_mask_slider!(mask_feather_slider, feather);
+    wire_mask_slider!(mask_expansion_slider, expansion);
+    {
+        let project = project.clone();
+        let updating = updating.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let on_mask_live = on_frei0r_params_changed.clone();
+        mask_rotation_spin.connect_value_changed(move |s| {
+            if *updating.borrow() {
+                return;
+            }
+            let val = s.value();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            if let Some(m) = clip.masks.first_mut() {
+                                m.rotation = val;
+                                proj.dirty = true;
+                            }
+                            break;
+                        }
+                    }
+                }
+                on_mask_live();
+            }
+        });
+    }
+    {
+        let project = project.clone();
+        let updating = updating.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let on_mask_live = on_frei0r_params_changed.clone();
+        mask_invert_check.connect_toggled(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let invert = btn.is_active();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    for track in &mut proj.tracks {
+                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                            if let Some(m) = clip.masks.first_mut() {
+                                m.invert = invert;
+                                proj.dirty = true;
+                            }
+                            break;
+                        }
+                    }
+                }
+                on_mask_live();
+            }
+        });
+    }
+
     let view = Rc::new(InspectorView {
         name_entry,
         path_value,
@@ -6093,6 +7666,51 @@ pub fn build_inspector(
         bg_removal_enable,
         bg_removal_threshold_slider,
         bg_removal_model_available: Cell::new(false),
+        subtitle_section,
+        subtitle_controls_box,
+        subtitle_no_model_box,
+        subtitle_generate_btn,
+        subtitle_generate_spinner,
+        subtitle_generate_label,
+        subtitle_language_dropdown,
+        subtitle_segments_section,
+        subtitle_segments_expander: segments_expander,
+        subtitle_list_box,
+        subtitle_scroll,
+        subtitle_segments_snapshot: Rc::new(RefCell::new(Vec::new())),
+        subtitle_clear_btn,
+        subtitle_error_label,
+        subtitle_font_btn,
+        subtitle_color_btn,
+        subtitle_highlight_dropdown,
+        subtitle_highlight_color_btn,
+        subtitle_highlight_color_row,
+        subtitle_word_window_slider,
+        subtitle_position_slider,
+        subtitle_outline_color_btn,
+        subtitle_bg_box_check,
+        subtitle_bg_color_btn,
+        subtitle_export_srt_btn,
+        subtitle_import_srt_btn,
+        subtitle_copy_style_btn,
+        subtitle_paste_style_btn,
+        subtitle_style_clipboard: style_clipboard,
+        subtitle_style_box,
+        stt_model_available: Cell::new(false),
+        stt_generating: Cell::new(false),
+        mask_section,
+        mask_enable,
+        mask_shape_dropdown,
+        mask_center_x_slider,
+        mask_center_y_slider,
+        mask_width_slider,
+        mask_height_slider,
+        mask_rotation_spin,
+        mask_feather_slider,
+        mask_expansion_slider,
+        mask_invert_check,
+        mask_path_editor_box,
+        mask_rect_ellipse_controls,
         frei0r_effects_section,
         frei0r_effects_list,
         frei0r_effects_clipboard: frei0r_effects_clipboard.clone(),
@@ -6100,6 +7718,7 @@ pub fn build_inspector(
         project,
         on_frei0r_changed,
         on_frei0r_params_changed,
+        on_execute_command,
         frei0r_displayed_snapshot: Rc::new(RefCell::new(Vec::new())),
         frei0r_registry: Rc::new(RefCell::new(None)),
         keyframe_indicator_label,

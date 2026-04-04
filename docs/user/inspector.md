@@ -130,6 +130,8 @@ Applied via GStreamer `videocrop`, `videoflip`, `videoscale`, and `videobox` (pr
 | **Flip H** | Toggle | Mirror horizontally |
 | **Flip V** | Toggle | Mirror vertically |
 
+> **Adjustment layers:** the same transform controls define the adjustment clip's scoped effect region in preview and export. **Scale, Position, Crop, Rotate, and Opacity** stay active; **Blend Mode**, **Anamorphic Desqueeze**, and **Flip H/V** are shown but disabled because adjustment clips do not create their own image layer.
+
 ### Transform keyframes (phase 1)
 
 - Transform controls include keyframe buttons for **Scale**, **Opacity**, **Position X**, and **Position Y**.
@@ -190,6 +192,30 @@ Program Monitor overlay integration:
 - Drag the **orange rotation handle** above the clip box to set rotation angle.
 - Drag **edge midpoint handles** to adjust crop left/right/top/bottom directly in preview.
 - Use keyboard nudges in the Program Monitor overlay for fine position/scale adjustments.
+
+---
+
+## Subtitles / Captions
+
+Clips with subtitle segments show subtitle style controls in the Inspector.
+
+| Field | Description |
+|---|---|
+| **Font** | Subtitle font description (Pango-style, e.g. `Sans Bold 24`) |
+| **Text Color** | Main subtitle text color |
+| **Word Highlight** | `None`, `Bold`, `Color`, `Underline`, or `Stroke` |
+| **Highlight Color** | Active-word color for `Color` / `Stroke` highlight modes |
+| **Word Window** | Number of nearby words grouped on screen around the active word |
+| **Vertical Position** | Subtitle placement from top (`0.0`) to bottom (`1.0`) |
+| **Outline Color** | Subtitle outline/stroke color |
+| **Background Box** | Toggle the subtitle background box |
+| **Background Color** | Background box color |
+| **Copy Style / Paste Style** | Reuse subtitle styling across clips |
+
+- Program Monitor preview renders subtitles in the monitor overlay.
+- Export burns subtitle styling above the composited video.
+- Subtitle font selection now uses the same normalized family/style/size parsing in preview and export, so descriptions like `Bold`, `Italic`, `Oblique`, and narrowed families stay closer between the Program Monitor and exported burn-in.
+- Preview and export still use different subtitle renderers, so very fine styling details can still vary slightly.
 
 ---
 
@@ -343,6 +369,46 @@ Removes a target color (green screen / blue screen) from the clip, making those 
 > **Pipeline placement** — Chroma key is applied after color correction (so you can white-balance a green screen clip before keying) but before crop/rotation. Preview uses GStreamer's `alpha` element; export uses FFmpeg's `colorkey` filter.
 
 Place the chroma-keyed clip on an upper video track with the background on a lower track. The compositor automatically composites transparent regions.
+
+---
+
+## Shape Mask
+
+Restricts the visible area of a clip using a geometric shape. Pixels outside the mask become transparent, revealing lower video tracks through the compositor.
+
+| Control | Range | Default | Description |
+|---|---|---|---|
+| **Enable Mask** | on/off | off | Activates/deactivates shape masking |
+| **Shape** | Rectangle / Ellipse / Path | Rectangle | Shape type for the mask region |
+| **Center X** | 0.0 → 1.0 | 0.5 | Horizontal mask center (0 = left, 1 = right) |
+| **Center Y** | 0.0 → 1.0 | 0.5 | Vertical mask center (0 = top, 1 = bottom) |
+| **Width** | 0.01 → 0.5 | 0.25 | Half-width of the mask (normalized) |
+| **Height** | 0.01 → 0.5 | 0.25 | Half-height of the mask (normalized) |
+| **Rotation** | −180° → 180° | 0° | Rotate the mask shape |
+| **Feather** | 0.0 → 0.5 | 0.0 | Edge softness (SDF-based smoothstep falloff) |
+| **Expansion** | −0.5 → 0.5 | 0.0 | Grow or shrink the mask boundary |
+| **Invert Mask** | on/off | off | Show area outside the mask instead of inside |
+
+> **Pipeline placement** — The mask is applied after crop and LUT but before color effects and chroma key. It operates in pre-transform clip space, so the mask moves with the clip's scale/position/rotation. Preview uses a GStreamer RGBA pad probe with SDF alpha computation; export uses FFmpeg `geq` expressions (rect/ellipse) or rasterized grayscale PGM with `movie`/`alphamerge` (path).
+
+All numeric mask properties (rect/ellipse) support keyframe animation via the Phase 1 keyframe system.
+
+The Program Monitor transform overlay shows a cyan dashed outline of the active mask shape with a center crosshair.
+
+### Path (Bezier) Masks
+
+When **Path** is selected, the Center/Width/Height/Rotation sliders are hidden and replaced by a **path point editor**:
+
+- Each point has X/Y coordinates (normalized 0.0–1.0) defining the anchor position
+- Each point has incoming and outgoing bezier tangent handles (relative offsets)
+- The path is always closed (last point connects back to first)
+- Minimum 3 points required for a valid path
+- **Add Point** button appends a new anchor at (0.5, 0.5)
+- **×** button on each point removes it (if more than 3 points remain)
+
+A default 4-point diamond shape is created when Path is first selected. Zero tangent handles produce straight line segments; drag handles in the overlay to add curvature.
+
+Feather, expansion, and invert controls apply to path masks the same as rect/ellipse masks.
 
 ---
 

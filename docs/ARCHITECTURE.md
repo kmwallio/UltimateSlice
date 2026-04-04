@@ -34,10 +34,10 @@ src/
   style.css                 Dark theme CSS for all GTK widgets
 
   model/
-    clip.rs                 Clip struct — source path, source_in/out (ns), timeline_start, label, ClipKind
+    clip.rs                 Clip struct — source path, source_in/out (ns), timeline_start, label, ClipKind (Video/Audio/Image/Title/Adjustment/Compound)
     track.rs                Track struct — id, TrackKind, Vec<Clip>, muted, locked
     project.rs              Project struct — title, FrameRate, resolution, Vec<Track>, dirty flag
-    media_library.rs        MediaItem (library entry) + SourceMarks (source in/out state)
+    media_library.rs        MediaItem (library entry), MediaBin (folder), MediaLibrary (items + bins) + SourceMarks (source in/out state)
 
   media/
     audio_sync.rs           FFT cross-correlation audio sync (rustfft, GStreamer raw audio extraction)
@@ -50,6 +50,11 @@ src/
     parser.rs               FCPXML 1.10-1.14 → Project (quick-xml; parses assets, spine, asset-clip,
                             native <param>/<keyframeAnimation>/<keyframe> elements for FCP interop)
     writer.rs               Project → FCPXML 1.14 (emits native keyframe elements + us:* vendor attrs)
+
+  otio/
+    schema.rs               OTIO JSON schema types (serde Serialize/Deserialize) + time conversion helpers
+    writer.rs               Project → OTIO JSON (implicit gaps → explicit, transitions, markers, metadata)
+    parser.rs               OTIO JSON → Project (explicit gaps → implicit, transitions, markers, metadata)
 
   undo.rs                   EditCommand trait + EditHistory (undo/redo stacks)
                             Commands: MoveClip, TrimIn, TrimOut, DeleteClip, SplitClip
@@ -259,7 +264,7 @@ cargo run -- --mcp
 # Attach to a running instance via Unix socket (stdio proxy):
 cargo run -- --mcp-attach
 # Via installed Flatpak (used by .mcp.json / AI agents):
-flatpak run io.github.ultimateslice --mcp
+flatpak run io.github.kmwallio.ultimateslice --mcp
 ```
 
 > **Flatpak build:** Run `python3 flatpak-cargo-generator.py Cargo.lock -o cargo-sources.json`
@@ -389,8 +394,12 @@ Before declaring a task finished, agents must verify via MCP:
 | `set_clip_keyframe` | Set/update a phase-1 keyframe (`scale`/`opacity`/`position_x`/`position_y`/`brightness`/`contrast`/`saturation`/`temperature`/`tint`/`volume`/`pan`/`rotate`/`crop_left`/`crop_right`/`crop_top`/`crop_bottom`/`eq_low_gain`/`eq_mid_gain`/`eq_high_gain`) at an absolute timeline position |
 | `remove_clip_keyframe` | Remove a phase-1 keyframe for a property at an absolute timeline position |
 | `set_clip_chroma_key` | Set chroma key (green/blue screen) params on a clip by id |
+| `set_clip_mask` | Set shape mask on a clip (rectangle or ellipse) to restrict visible area |
 | `set_project_title` | Rename the project |
 | `save_fcpxml` | Write FCPXML 1.14 to a file path |
+| `save_edl` | Export timeline to CMX 3600 EDL (.edl) file |
+| `save_otio` | Export the current project to OpenTimelineIO (.otio) JSON file |
+| `open_otio` | Load a project from an OpenTimelineIO (.otio) file, replacing the current project |
 | `export_mp4` | Encode timeline to MP4/H.264+AAC via ffmpeg (blocks until done, up to 11 min timeout) |
 | `list_export_presets` | List saved export presets from UI state |
 | `save_export_preset` | Create or overwrite a named export preset |
@@ -399,10 +408,21 @@ Before declaring a task finished, agents must verify via MCP:
 | `list_library` | Items in the media library (not yet on timeline), including missing/offline status |
 | `import_media` | Import a file into the library; probes duration via GStreamer Discoverer |
 | `relink_media` | Recursively scan a root folder and remap missing media paths to matching files |
+| `create_bin` | Create a media library bin (folder) with optional parent for nesting (max 2 levels) |
+| `delete_bin` | Delete a media library bin; items and child bins move to parent or root |
+| `rename_bin` | Rename a media library bin |
+| `list_bins` | List all bins with hierarchy and item counts |
+| `move_to_bin` | Move media items to a bin (or root if bin_id is null) |
 | `reorder_track` | Move a track from one index to another (undoable) |
 | `set_transition` | Set/clear clip-boundary transitions (e.g. `cross_dissolve`) by track/clip index |
 | `create_project` | Discard the current project and start a new empty one (optional title) |
 | `add_adjustment_layer` | Add an adjustment layer clip at a track index and timeline position; effects apply to composited result of all tracks below |
+| `create_compound_clip` | Create a compound (nested timeline) clip from specified clip IDs; replaces selected clips with a single compound clip |
+| `break_apart_compound_clip` | Break apart a compound clip, restoring its internal clips to the timeline |
+| `create_multicam_clip` | Create a multicam clip from 2+ clip IDs synced by audio cross-correlation |
+| `add_angle_switch` | Insert an angle switch at a position within a multicam clip |
+| `list_multicam_angles` | List angles and switch points of a multicam clip |
+| `set_multicam_angle_audio` | Set volume (0.0–2.0) and/or mute state for a multicam angle's audio; unmuted angles mix together |
 
 For automation-heavy loops, MCP keeps a short-lived per-session read cache for repeated `get_project`, `list_tracks`, and `list_clips` calls. Both direct tool calls and `batch_call_tools` can reuse this cache, and it is invalidated when a mutating tool runs so subsequent reads observe the updated state.
 

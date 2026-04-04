@@ -98,9 +98,11 @@ impl VoiceoverRecorder {
         let src_name = if let Some(dev) = device {
             // Device-specific: get the element factory name and device property.
             let props = dev.properties();
-            let device_path = props
-                .as_ref()
-                .and_then(|s| s.get::<String>("device.path").ok().or_else(|| s.get::<String>("object.path").ok()));
+            let device_path = props.as_ref().and_then(|s| {
+                s.get::<String>("device.path")
+                    .ok()
+                    .or_else(|| s.get::<String>("object.path").ok())
+            });
             if let Some(path) = device_path {
                 format!("pulsesrc device=\"{}\"", path.replace('"', "\\\""))
             } else {
@@ -192,10 +194,12 @@ impl VoiceoverRecorder {
         self.src_element = None;
 
         // Check the file was actually written.
-        let file_size = std::fs::metadata(&file_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
-        log::info!("Voiceover: WAV file size = {} bytes at {}", file_size, file_path);
+        let file_size = std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0);
+        log::info!(
+            "Voiceover: WAV file size = {} bytes at {}",
+            file_size,
+            file_path
+        );
 
         if file_size <= 44 {
             // 44 bytes is just the WAV header — no audio data was captured.
@@ -284,8 +288,7 @@ fn voiceover_cache_dir() -> PathBuf {
         .unwrap_or_else(|| {
             // Fallback: ~/.local/share/ultimateslice/voiceovers
             if let Some(home) = std::env::var("HOME").ok().filter(|v| !v.is_empty()) {
-                PathBuf::from(home)
-                    .join(".local/share/ultimateslice/voiceovers")
+                PathBuf::from(home).join(".local/share/ultimateslice/voiceovers")
             } else {
                 PathBuf::from("/tmp/ultimateslice/voiceovers")
             }

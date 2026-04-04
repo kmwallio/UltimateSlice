@@ -63,6 +63,61 @@ impl ProxyScale {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ProxyVariantSpec {
+    pub source_path: String,
+    pub scale: ProxyScale,
+    pub lut_path: Option<String>,
+    pub vidstab_enabled: bool,
+    vidstab_smoothing_hundredths: i32,
+}
+
+impl ProxyVariantSpec {
+    pub fn new(
+        source_path: impl Into<String>,
+        scale: ProxyScale,
+        lut_path: Option<String>,
+        vidstab_enabled: bool,
+        vidstab_smoothing: f32,
+    ) -> Self {
+        Self {
+            source_path: source_path.into(),
+            scale,
+            lut_path,
+            vidstab_enabled,
+            vidstab_smoothing_hundredths: normalized_vidstab_smoothing_hundredths(
+                vidstab_enabled,
+                vidstab_smoothing,
+            ),
+        }
+    }
+
+    pub fn lut_key(&self) -> Option<&str> {
+        self.lut_path.as_deref()
+    }
+
+    pub fn vidstab_smoothing(&self) -> f32 {
+        self.vidstab_smoothing_hundredths as f32 / 100.0
+    }
+
+    fn source_hash(&self) -> u64 {
+        source_path_hash(&self.source_path)
+    }
+}
+
+#[derive(Default)]
+pub struct ProxyCleanupSummary {
+    pub removed_local: usize,
+    pub removed_sidecar: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SourceSignature {
+    len: u64,
+    modified_secs: u64,
+    modified_nanos: u32,
+}
+
 /// Build the composite cache key used in `ProxyCache::proxies` and `pending`.
 /// Encodes the source path, any assigned LUT, and vidstab state so that a
 /// change to any of these produces a distinct key (and therefore a distinct proxy).
@@ -93,8 +148,8 @@ pub fn proxy_key_with_vidstab(
 /// into lightweight H.264 proxy files via ffmpeg. Follows the same
 /// request/poll/get pattern as `MediaProbeCache` and `ThumbnailCache`.
 ///
-/// Proxy files are stored in a `UltimateSlice.cache/` directory next to
-/// the source file.
+/// Proxy files can live either in the managed local cache root or in an
+/// `UltimateSlice.cache/` directory next to the source file.
 ///
 /// The map key is a composite of source path + optional LUT path (via
 /// `proxy_key()`), so changing the proxy scale or a clip's LUT assignment
@@ -138,7 +193,8 @@ impl ProxyCache {
         }
         let (result_tx, result_rx) = mpsc::sync_channel::<ProxyWorkerUpdate>(64);
         // (source_path, scale, lut_paths, sidecar_mirror, vidstab_enabled, vidstab_smoothing)
-        let (work_tx, work_rx) = mpsc::channel::<(String, ProxyScale, Vec<String>, bool, bool, f32)>();
+        let (work_tx, work_rx) =
+            mpsc::channel::<(String, ProxyScale, Vec<String>, bool, bool, f32)>();
 
         // Pool of worker threads to transcode proxies in parallel.
         let work_rx = std::sync::Arc::new(std::sync::Mutex::new(work_rx));
@@ -153,9 +209,25 @@ impl ProxyCache {
                     lock.recv()
                 };
                 match item {
-                    Ok((source_path, scale, lut_paths, sidecar_mirror_enabled, vidstab_enabled, vidstab_smoothing)) => {
-                        let lut_composite = if lut_paths.is_empty() { None } else { Some(lut_paths.join("|")) };
-                        let key = proxy_key_with_vidstab(&source_path, lut_composite.as_deref(), vidstab_enabled, vidstab_smoothing);
+                    Ok((
+                        source_path,
+                        scale,
+                        lut_paths,
+                        sidecar_mirror_enabled,
+                        vidstab_enabled,
+                        vidstab_smoothing,
+                    )) => {
+                        let lut_composite = if lut_paths.is_empty() {
+                            None
+                        } else {
+                            Some(lut_paths.join("|"))
+                        };
+                        let key = proxy_key_with_vidstab(
+                            &source_path,
+                            lut_composite.as_deref(),
+                            vidstab_enabled,
+                            vidstab_smoothing,
+                        );
                         let (proxy_path, success, owned_local) = transcode_proxy(
                             &source_path,
                             scale,
@@ -231,6 +303,8 @@ impl ProxyCache {
             source_path,
             scale,
             lut_path,
+            vidstab_enabled,
+            vidstab_smoothing,
             &self.local_cache_root,
             self.ffprobe_path.as_deref(),
         ) {
@@ -239,8 +313,15 @@ impl ProxyCache {
         }
         self.pending.insert(key);
         self.total_requested += 1;
-        self.written_bytes
-            .insert(proxy_key_with_vidstab(source_path, lut_path, vidstab_enabled, vidstab_smoothing), 0);
+        log::info!(
+            "ProxyCache: enqueuing proxy for {} (scale={:?})",
+            source_path,
+            scale
+        );
+        self.written_bytes.insert(
+            proxy_key_with_vidstab(source_path, lut_path, vidstab_enabled, vidstab_smoothing),
+            0,
+        );
         if let Some(ref tx) = self.work_tx {
             // Split composite key back into individual paths for the worker.
             let lut_paths: Vec<String> = match lut_path {
@@ -278,6 +359,7 @@ impl ProxyCache {
                 ProxyWorkerUpdate::Done(result) => {
                     self.pending.remove(&result.cache_key);
                     if result.success {
+                        log::info!("ProxyCache: proxy ready → {}", result.proxy_path);
                         self.proxies
                             .insert(result.cache_key.clone(), result.proxy_path.clone());
                         if let Some(estimate) = self.estimated_bytes.get(&result.cache_key).copied()
@@ -342,10 +424,12 @@ impl ProxyCache {
             }
             match std::fs::remove_file(path) {
                 Ok(_) => {
+                    remove_proxy_source_signature(path);
                     removed.insert(path.clone());
                 }
                 Err(_) => {
                     if !Path::new(path).exists() {
+                        remove_proxy_source_signature(path);
                         removed.insert(path.clone());
                     }
                 }
@@ -381,10 +465,12 @@ impl ProxyCache {
         for path in &candidates {
             match std::fs::remove_file(path) {
                 Ok(_) => {
+                    remove_proxy_source_signature(path);
                     removed.insert(path.clone());
                 }
                 Err(_) => {
                     if !Path::new(path).exists() {
+                        remove_proxy_source_signature(path);
                         removed.insert(path.clone());
                     }
                 }
@@ -408,17 +494,90 @@ impl ProxyCache {
 
     /// Cleanup policy for project unload/close:
     /// - always clear managed local/tmp cache files tracked by this session/project.
-    /// - when proxy mode is enabled, preserve alongside-media `UltimateSlice.cache` files.
-    /// - when proxy mode is disabled, clear alongside-media `UltimateSlice.cache` files too.
-    pub fn cleanup_for_unload(&mut self, proxy_mode_enabled: bool) {
+    /// - when `preserve_sidecar_proxies` is true, keep alongside-media
+    ///   `UltimateSlice.cache` files.
+    /// - otherwise, clear tracked alongside-media proxy files too.
+    pub fn cleanup_for_unload(&mut self, preserve_sidecar_proxies: bool) {
         self.cleanup_local_cache_for_unload();
-        if proxy_mode_enabled {
-            log::info!(
-                "ProxyCache: preserving alongside-media proxy cache on unload/close because proxy mode is enabled"
-            );
+        if preserve_sidecar_proxies {
+            log::info!("ProxyCache: preserving alongside-media proxy cache on unload/close");
             return;
         }
         self.cleanup_sidecar_cache_for_unload();
+    }
+
+    /// Remove invalid or superseded proxy variants for the current project's
+    /// desired proxy set. This only touches current-format proxy files that can
+    /// be matched back to one of the provided source paths.
+    pub fn cleanup_stale_variants(
+        &mut self,
+        desired_variants: &[ProxyVariantSpec],
+    ) -> ProxyCleanupSummary {
+        if desired_variants.is_empty() {
+            return ProxyCleanupSummary::default();
+        }
+        let desired_local_paths: HashSet<String> = desired_variants
+            .iter()
+            .filter_map(|spec| local_proxy_path_for_spec(spec, &self.local_cache_root))
+            .collect();
+        let desired_sidecar_paths: HashSet<String> = desired_variants
+            .iter()
+            .filter_map(alongside_proxy_path_for_spec)
+            .collect();
+        let local_source_hashes: HashSet<u64> = desired_variants
+            .iter()
+            .map(ProxyVariantSpec::source_hash)
+            .collect();
+        let mut sidecar_dirs: HashMap<PathBuf, HashSet<u64>> = HashMap::new();
+        for spec in desired_variants {
+            if let Some(dir) = sidecar_proxy_dir_for(&spec.source_path) {
+                sidecar_dirs
+                    .entry(dir)
+                    .or_default()
+                    .insert(spec.source_hash());
+            }
+        }
+
+        let removed_local = cleanup_proxy_dir_variants(
+            &self.local_cache_root,
+            &desired_local_paths,
+            &local_source_hashes,
+            self.ffprobe_path.as_deref(),
+            false,
+        );
+        if !removed_local.is_empty() {
+            remove_owned_entries(&self.local_cache_root, &removed_local);
+        }
+
+        let mut removed_sidecar: HashSet<String> = HashSet::new();
+        for (dir, source_hashes) in sidecar_dirs {
+            removed_sidecar.extend(cleanup_proxy_dir_variants(
+                &dir,
+                &desired_sidecar_paths,
+                &source_hashes,
+                self.ffprobe_path.as_deref(),
+                true,
+            ));
+        }
+
+        let mut removed_any = removed_local.clone();
+        removed_any.extend(removed_sidecar.iter().cloned());
+        if !removed_any.is_empty() {
+            self.runtime_owned_local_files
+                .retain(|path| !removed_local.contains(path));
+            self.proxies.retain(|_, path| !removed_any.contains(path));
+            log::info!(
+                "ProxyCache: removed {} stale/unneeded proxy file(s) for current project ({} local, {} sidecar)",
+                removed_any.len(),
+                removed_local.len(),
+                removed_sidecar.len()
+            );
+        }
+
+        ProxyCleanupSummary {
+            removed_local: removed_local.len(),
+            removed_sidecar: removed_sidecar.len(),
+        }
     }
 
     /// Current progress snapshot.
@@ -453,13 +612,6 @@ impl ProxyCache {
     }
 }
 
-/// Compute a short hash suffix for a LUT path to embed in the proxy filename.
-fn lut_hash(lut_path: &str) -> String {
-    let mut h = DefaultHasher::new();
-    lut_path.hash(&mut h);
-    format!("{:08x}", h.finish() as u32)
-}
-
 /// Compute local managed cache root for proxies.
 /// Prefers `$XDG_CACHE_HOME/ultimateslice/proxies`, falls back to `/tmp/ultimateslice/proxies`.
 fn local_proxy_root() -> PathBuf {
@@ -479,6 +631,98 @@ fn now_epoch_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+fn system_time_epoch_parts(time: SystemTime) -> Option<(u64, u32)> {
+    let duration = time.duration_since(UNIX_EPOCH).ok()?;
+    Some((duration.as_secs(), duration.subsec_nanos()))
+}
+
+fn path_modified_epoch_parts(path: &str) -> Option<(u64, u32)> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    system_time_epoch_parts(modified)
+}
+
+fn source_signature(source_path: &str) -> Option<SourceSignature> {
+    let meta = std::fs::metadata(source_path).ok()?;
+    let (modified_secs, modified_nanos) = system_time_epoch_parts(meta.modified().ok()?)?;
+    Some(SourceSignature {
+        len: meta.len(),
+        modified_secs,
+        modified_nanos,
+    })
+}
+
+fn proxy_source_signature_path(proxy_path: &str) -> String {
+    format!("{proxy_path}.source-meta")
+}
+
+fn read_proxy_source_signature(proxy_path: &str) -> Option<SourceSignature> {
+    let payload = std::fs::read_to_string(proxy_source_signature_path(proxy_path)).ok()?;
+    let mut parts = payload.trim().split('|');
+    Some(SourceSignature {
+        len: parts.next()?.parse().ok()?,
+        modified_secs: parts.next()?.parse().ok()?,
+        modified_nanos: parts.next()?.parse().ok()?,
+    })
+}
+
+fn finalize_output_file(temp_path: &str, final_path: &str) -> bool {
+    if std::fs::rename(temp_path, final_path).is_ok() {
+        return true;
+    }
+    if Path::new(final_path).exists() {
+        let _ = std::fs::remove_file(final_path);
+        if std::fs::rename(temp_path, final_path).is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
+fn remove_proxy_source_signature(proxy_path: &str) {
+    let signature_path = proxy_source_signature_path(proxy_path);
+    let _ = std::fs::remove_file(&signature_path);
+    let _ = std::fs::remove_file(format!("{signature_path}.partial"));
+}
+
+fn write_proxy_source_signature(proxy_path: &str, source_path: &str) -> bool {
+    let Some(signature) = source_signature(source_path) else {
+        return false;
+    };
+    let signature_path = proxy_source_signature_path(proxy_path);
+    let temp_signature_path = format!("{signature_path}.partial");
+    let _ = std::fs::remove_file(&temp_signature_path);
+    let payload = format!(
+        "{}|{}|{}\n",
+        signature.len, signature.modified_secs, signature.modified_nanos
+    );
+    if std::fs::write(&temp_signature_path, payload).is_err() {
+        let _ = std::fs::remove_file(&temp_signature_path);
+        return false;
+    }
+    if !finalize_output_file(&temp_signature_path, &signature_path) {
+        let _ = std::fs::remove_file(&temp_signature_path);
+        return false;
+    }
+    true
+}
+
+fn proxy_matches_current_source(proxy_path: &str, source_path: &str) -> bool {
+    let Some(current_signature) = source_signature(source_path) else {
+        return true;
+    };
+    if let Some(stored_signature) = read_proxy_source_signature(proxy_path) {
+        return stored_signature == current_signature;
+    }
+    path_modified_epoch_parts(proxy_path)
+        .map(|proxy_modified| {
+            (
+                current_signature.modified_secs,
+                current_signature.modified_nanos,
+            ) <= proxy_modified
+        })
+        .unwrap_or(true)
 }
 
 fn is_path_within_root(path: &str, root: &Path) -> bool {
@@ -549,6 +793,7 @@ fn prune_stale_owned_entries(root: &Path, max_age_secs: u64) -> usize {
         let stale = now.saturating_sub(created_at) > max_age_secs;
         if stale && is_path_within_root(&path, root) {
             let _ = std::fs::remove_file(&path);
+            remove_proxy_source_signature(&path);
             removed_count += 1;
             continue;
         }
@@ -560,21 +805,145 @@ fn prune_stale_owned_entries(root: &Path, max_age_secs: u64) -> usize {
     removed_count
 }
 
-fn source_identity_hash(source_path: &str, scale: ProxyScale, lut_path: Option<&str>) -> u64 {
+fn proxy_source_hash_from_path(path: &Path) -> Option<u64> {
+    let file_name = path.file_name()?.to_str()?;
+    let base_name = file_name.strip_suffix(".partial").unwrap_or(file_name);
+    let no_ext = base_name.strip_suffix(".mp4")?;
+    let (prefix, _) = no_ext.rsplit_once(".proxy_")?;
+    let (stem_and_source, _) = prefix.rsplit_once("-v")?;
+    let (_, source_hash_hex) = stem_and_source.rsplit_once("-s")?;
+    u64::from_str_radix(source_hash_hex, 16).ok()
+}
+
+fn cleanup_proxy_dir_variants(
+    dir: &Path,
+    desired_paths: &HashSet<String>,
+    relevant_source_hashes: &HashSet<u64>,
+    ffprobe_path: Option<&str>,
+    prune_dir_when_empty: bool,
+) -> HashSet<String> {
+    let mut removed: HashSet<String> = HashSet::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return removed;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            continue;
+        }
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if file_name == "ownership-index-v1.txt" {
+            continue;
+        }
+        let path_str = path.to_string_lossy().to_string();
+        if file_name.ends_with(".partial") {
+            let _ = std::fs::remove_file(&path);
+            removed.insert(path_str);
+            continue;
+        }
+        if !file_name.contains(".proxy_") || !file_name.ends_with(".mp4") {
+            continue;
+        }
+        let Some(source_hash) = proxy_source_hash_from_path(&path) else {
+            continue;
+        };
+        if !relevant_source_hashes.contains(&source_hash) {
+            continue;
+        }
+        let should_remove =
+            !proxy_file_is_ready(&path_str, ffprobe_path) || !desired_paths.contains(&path_str);
+        if should_remove {
+            let _ = std::fs::remove_file(&path);
+            remove_proxy_source_signature(&path_str);
+            removed.insert(path_str);
+        }
+    }
+    if prune_dir_when_empty {
+        let dir_empty = std::fs::read_dir(dir)
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(false);
+        if dir_empty {
+            let _ = std::fs::remove_dir(dir);
+        }
+    }
+    removed
+}
+
+fn normalized_vidstab_smoothing_hundredths(vidstab_enabled: bool, vidstab_smoothing: f32) -> i32 {
+    if !vidstab_enabled {
+        0
+    } else {
+        (vidstab_smoothing.clamp(0.0, 1.0) * 100.0).round() as i32
+    }
+}
+
+fn source_path_hash(source_path: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    source_path.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn legacy_lut_hash(lut_path: &str) -> u32 {
+    let mut hasher = DefaultHasher::new();
+    lut_path.hash(&mut hasher);
+    hasher.finish() as u32
+}
+
+fn source_variant_hash(
+    source_path: &str,
+    scale: ProxyScale,
+    lut_path: Option<&str>,
+    vidstab_enabled: bool,
+    vidstab_smoothing: f32,
+) -> u64 {
     let mut hasher = DefaultHasher::new();
     source_path.hash(&mut hasher);
     scale.hash(&mut hasher);
     lut_path.unwrap_or("").hash(&mut hasher);
-    if let Ok(meta) = std::fs::metadata(source_path) {
-        meta.len().hash(&mut hasher);
-        if let Ok(modified) = meta.modified() {
-            if let Ok(ts) = modified.duration_since(UNIX_EPOCH) {
-                ts.as_secs().hash(&mut hasher);
-                ts.subsec_nanos().hash(&mut hasher);
-            }
-        }
-    }
+    vidstab_enabled.hash(&mut hasher);
+    normalized_vidstab_smoothing_hundredths(vidstab_enabled, vidstab_smoothing).hash(&mut hasher);
     hasher.finish()
+}
+
+fn proxy_filename_for_variant(
+    source_path: &str,
+    scale: ProxyScale,
+    lut_path: Option<&str>,
+    vidstab_enabled: bool,
+    vidstab_smoothing: f32,
+) -> Option<String> {
+    let stem = Path::new(source_path).file_stem()?.to_str()?;
+    let source_hash = source_path_hash(source_path);
+    let variant_hash = source_variant_hash(
+        source_path,
+        scale,
+        lut_path,
+        vidstab_enabled,
+        vidstab_smoothing,
+    );
+    Some(format!(
+        "{stem}-s{source_hash:016x}-v{variant_hash:016x}.proxy_{}.mp4",
+        scale.suffix()
+    ))
+}
+
+fn legacy_proxy_filename_for_variant(
+    source_path: &str,
+    scale: ProxyScale,
+    lut_path: Option<&str>,
+) -> Option<String> {
+    let stem = Path::new(source_path).file_stem()?.to_str()?;
+    let scale_suffix = scale.suffix();
+    match lut_path {
+        Some(lut) if !lut.is_empty() => Some(format!(
+            "{stem}.proxy_{scale_suffix}_lut{:08x}.mp4",
+            legacy_lut_hash(lut)
+        )),
+        _ => Some(format!("{stem}.proxy_{scale_suffix}.mp4")),
+    }
 }
 
 /// Compute the proxy output path for a given source path, scale, and optional LUT,
@@ -583,48 +952,126 @@ fn local_proxy_path_for(
     source_path: &str,
     scale: ProxyScale,
     lut_path: Option<&str>,
+    vidstab_enabled: bool,
+    vidstab_smoothing: f32,
     local_root: &Path,
 ) -> Option<String> {
-    let stem = Path::new(source_path).file_stem()?.to_str()?;
-    let fp = source_identity_hash(source_path, scale, lut_path);
-    let filename = format!("{stem}-{fp:016x}.proxy_{}.mp4", scale.suffix());
+    let filename = proxy_filename_for_variant(
+        source_path,
+        scale,
+        lut_path,
+        vidstab_enabled,
+        vidstab_smoothing,
+    )?;
+    Some(local_root.join(filename).to_string_lossy().into_owned())
+}
+
+fn legacy_local_proxy_path_for(
+    source_path: &str,
+    scale: ProxyScale,
+    lut_path: Option<&str>,
+    local_root: &Path,
+) -> Option<String> {
+    let filename = legacy_proxy_filename_for_variant(source_path, scale, lut_path)?;
     Some(local_root.join(filename).to_string_lossy().into_owned())
 }
 
 /// Compute the proxy output path beside the source media.
-/// Pattern: `<parent>/UltimateSlice.cache/<stem>.proxy_<scale>[_lut<hash>].mp4`
+/// Pattern:
+/// `<parent>/UltimateSlice.cache/<stem>-s<sourcehash>-v<varianthash>.proxy_<scale>.mp4`
 fn alongside_proxy_path_for(
+    source_path: &str,
+    scale: ProxyScale,
+    lut_path: Option<&str>,
+    vidstab_enabled: bool,
+    vidstab_smoothing: f32,
+) -> Option<String> {
+    let src = Path::new(source_path);
+    let parent = src.parent()?;
+    let proxy_dir = parent.join("UltimateSlice.cache");
+    let filename = proxy_filename_for_variant(
+        source_path,
+        scale,
+        lut_path,
+        vidstab_enabled,
+        vidstab_smoothing,
+    )?;
+    Some(proxy_dir.join(filename).to_string_lossy().into_owned())
+}
+
+fn legacy_alongside_proxy_path_for(
     source_path: &str,
     scale: ProxyScale,
     lut_path: Option<&str>,
 ) -> Option<String> {
     let src = Path::new(source_path);
     let parent = src.parent()?;
-    let stem = src.file_stem()?.to_str()?;
     let proxy_dir = parent.join("UltimateSlice.cache");
-    let lut_suffix = match lut_path {
-        Some(lut) if !lut.is_empty() => format!("_lut{}", lut_hash(lut)),
-        _ => String::new(),
-    };
-    let filename = format!("{}.proxy_{}{}.mp4", stem, scale.suffix(), lut_suffix);
+    let filename = legacy_proxy_filename_for_variant(source_path, scale, lut_path)?;
     Some(proxy_dir.join(filename).to_string_lossy().into_owned())
+}
+
+fn local_proxy_path_for_spec(spec: &ProxyVariantSpec, local_root: &Path) -> Option<String> {
+    local_proxy_path_for(
+        &spec.source_path,
+        spec.scale,
+        spec.lut_key(),
+        spec.vidstab_enabled,
+        spec.vidstab_smoothing(),
+        local_root,
+    )
+}
+
+fn sidecar_proxy_dir_for(source_path: &str) -> Option<PathBuf> {
+    Path::new(source_path)
+        .parent()
+        .map(|parent| parent.join("UltimateSlice.cache"))
+}
+
+fn alongside_proxy_path_for_spec(spec: &ProxyVariantSpec) -> Option<String> {
+    alongside_proxy_path_for(
+        &spec.source_path,
+        spec.scale,
+        spec.lut_key(),
+        spec.vidstab_enabled,
+        spec.vidstab_smoothing(),
+    )
 }
 
 fn existing_proxy_path_for(
     source_path: &str,
     scale: ProxyScale,
     lut_path: Option<&str>,
+    vidstab_enabled: bool,
+    vidstab_smoothing: f32,
     local_root: &Path,
     ffprobe_path: Option<&str>,
 ) -> Option<String> {
-    if let Some(local) = local_proxy_path_for(source_path, scale, lut_path, local_root) {
-        if proxy_file_is_ready(&local, ffprobe_path) {
-            return Some(local);
-        }
-    }
-    if let Some(side) = alongside_proxy_path_for(source_path, scale, lut_path) {
-        if proxy_file_is_ready(&side, ffprobe_path) {
-            return Some(side);
+    let candidate_paths = [
+        local_proxy_path_for(
+            source_path,
+            scale,
+            lut_path,
+            vidstab_enabled,
+            vidstab_smoothing,
+            local_root,
+        ),
+        alongside_proxy_path_for(
+            source_path,
+            scale,
+            lut_path,
+            vidstab_enabled,
+            vidstab_smoothing,
+        ),
+        legacy_local_proxy_path_for(source_path, scale, lut_path, local_root),
+        legacy_alongside_proxy_path_for(source_path, scale, lut_path),
+    ];
+    for candidate in candidate_paths.into_iter().flatten() {
+        if proxy_file_is_ready(&candidate, ffprobe_path)
+            && proxy_matches_current_source(&candidate, source_path)
+        {
+            let _ = write_proxy_source_signature(&candidate, source_path);
+            return Some(candidate);
         }
     }
     None
@@ -808,7 +1255,12 @@ fn estimate_proxy_size_bytes(
     Some(((bitrate_bps as f64 * duration_secs) / 8.0).round() as u64)
 }
 
-fn mirror_local_proxy_to_sidecar(local_proxy_path: &str, sidecar_path: &str, ffprobe: &str) {
+fn mirror_local_proxy_to_sidecar(
+    local_proxy_path: &str,
+    sidecar_path: &str,
+    source_path: &str,
+    ffprobe: &str,
+) {
     if sidecar_path == local_proxy_path {
         return;
     }
@@ -826,10 +1278,11 @@ fn mirror_local_proxy_to_sidecar(local_proxy_path: &str, sidecar_path: &str, ffp
         let _ = std::fs::remove_file(&temp_sidecar_path);
         return;
     }
-    if std::fs::rename(&temp_sidecar_path, sidecar_path).is_err() {
+    if !finalize_output_file(&temp_sidecar_path, sidecar_path) {
         let _ = std::fs::remove_file(&temp_sidecar_path);
         return;
     }
+    let _ = write_proxy_source_signature(sidecar_path, source_path);
     log::debug!(
         "ProxyCache: mirrored local proxy to alongside-media cache path={}",
         sidecar_path
@@ -849,13 +1302,30 @@ fn transcode_proxy(
     progress_tx: &mpsc::SyncSender<ProxyWorkerUpdate>,
     sidecar_mirror_enabled: bool,
 ) -> (String, bool, bool) {
-    let lut_composite = if lut_paths.is_empty() { None } else { Some(lut_paths.join("|")) };
+    let lut_composite = if lut_paths.is_empty() {
+        None
+    } else {
+        Some(lut_paths.join("|"))
+    };
     let lut_key = lut_composite.as_deref();
-    let local_proxy_path = match local_proxy_path_for(source_path, scale, lut_key, local_root) {
+    let local_proxy_path = match local_proxy_path_for(
+        source_path,
+        scale,
+        lut_key,
+        vidstab_enabled,
+        vidstab_smoothing,
+        local_root,
+    ) {
         Some(p) => p,
         None => return (String::new(), false, false),
     };
-    let sidecar_proxy_path = alongside_proxy_path_for(source_path, scale, lut_key);
+    let sidecar_proxy_path = alongside_proxy_path_for(
+        source_path,
+        scale,
+        lut_key,
+        vidstab_enabled,
+        vidstab_smoothing,
+    );
 
     let ffmpeg = match crate::media::export::find_ffmpeg() {
         Ok(f) => f,
@@ -870,23 +1340,30 @@ fn transcode_proxy(
     // Run vidstab two-pass analysis and add transform filter if successful.
     let mut vidstab_trf_path: Option<String> = None;
     if vidstab_enabled && vidstab_smoothing > 0.0 {
-        let trf = format!("/tmp/ultimateslice-proxy-vidstab-{:016x}.trf",
-            {
-                use std::hash::{Hash, Hasher};
-                let mut h = std::collections::hash_map::DefaultHasher::new();
-                source_path.hash(&mut h);
-                h.finish()
-            });
+        let trf = format!("/tmp/ultimateslice-proxy-vidstab-{:016x}.trf", {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            source_path.hash(&mut h);
+            h.finish()
+        });
         let shakiness = ((vidstab_smoothing * 10.0).round() as i32).clamp(1, 10);
-        log::info!("ProxyCache: running vidstab analysis for {} (shakiness={})", source_path, shakiness);
+        log::info!(
+            "ProxyCache: running vidstab analysis for {} (shakiness={})",
+            source_path,
+            shakiness
+        );
         let analysis_ok = std::process::Command::new(&ffmpeg)
             .arg("-y")
-            .arg("-i").arg(source_path)
-            .arg("-vf").arg(format!(
+            .arg("-i")
+            .arg(source_path)
+            .arg("-vf")
+            .arg(format!(
                 "{},vidstabdetect=shakiness={shakiness}:result={trf}",
                 scale.ffmpeg_scale_filter()
             ))
-            .arg("-f").arg("null").arg("-")
+            .arg("-f")
+            .arg("null")
+            .arg("-")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
@@ -899,7 +1376,10 @@ fn transcode_proxy(
             ));
             vidstab_trf_path = Some(trf);
         } else {
-            log::warn!("ProxyCache: vidstab analysis failed for {}, skipping stabilization", source_path);
+            log::warn!(
+                "ProxyCache: vidstab analysis failed for {}, skipping stabilization",
+                source_path
+            );
             let _ = std::fs::remove_file(&trf);
         }
     }
@@ -942,17 +1422,19 @@ fn transcode_proxy(
                 let _ = std::fs::remove_file(&temp_proxy_path);
                 continue;
             }
-            if std::fs::rename(&temp_proxy_path, &proxy_path).is_err() {
+            if !finalize_output_file(&temp_proxy_path, &proxy_path) {
                 let _ = std::fs::remove_file(&temp_proxy_path);
                 continue;
             }
             if !proxy_file_is_ready(&proxy_path, Some(&ffprobe)) {
                 let _ = std::fs::remove_file(&proxy_path);
+                remove_proxy_source_signature(&proxy_path);
                 continue;
             }
+            let _ = write_proxy_source_signature(&proxy_path, source_path);
             if owned_local && sidecar_mirror_enabled {
                 if let Some(sidecar_path) = sidecar_proxy_path.as_deref() {
-                    mirror_local_proxy_to_sidecar(&proxy_path, sidecar_path, &ffprobe);
+                    mirror_local_proxy_to_sidecar(&proxy_path, sidecar_path, source_path, &ffprobe);
                 }
             }
             if let Some(ref trf) = vidstab_trf_path {
@@ -979,6 +1461,34 @@ fn transcode_proxy(
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_local_proxy_root() -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!(
+            "ultimateslice-proxy-local-test-{}-{}",
+            std::process::id(),
+            nanos
+        ))
+    }
+
+    fn test_source_file(name: &str) -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "ultimateslice-proxy-source-test-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join(name);
+        let _ = std::fs::write(&path, b"source");
+        path.to_string_lossy().to_string()
+    }
 
     fn test_sidecar_file_path() -> String {
         let nanos = SystemTime::now()
@@ -1012,11 +1522,17 @@ mod tests {
     #[test]
     fn cleanup_for_unload_removes_sidecar_when_proxy_mode_disabled() {
         let sidecar_path = test_sidecar_file_path();
+        let source_path = test_source_file("clip-a.mp4");
+        assert!(write_proxy_source_signature(&sidecar_path, &source_path));
         let mut cache = ProxyCache::new();
         cache.proxies.insert("k".to_string(), sidecar_path.clone());
         cache.cleanup_for_unload(false);
         assert!(!Path::new(&sidecar_path).exists());
+        assert!(!Path::new(&proxy_source_signature_path(&sidecar_path)).exists());
         if let Some(parent) = Path::new(&sidecar_path).parent().and_then(|p| p.parent()) {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+        if let Some(parent) = Path::new(&source_path).parent() {
             let _ = std::fs::remove_dir_all(parent);
         }
     }
@@ -1032,6 +1548,9 @@ mod tests {
             .to_string();
         let _ = std::fs::create_dir_all(&cache.local_cache_root);
         let _ = std::fs::write(&local_path, b"test");
+        let source_path = test_source_file("clip-a.mp4");
+        assert!(write_proxy_source_signature(&sidecar_path, &source_path));
+        assert!(write_proxy_source_signature(&local_path, &source_path));
         cache
             .proxies
             .insert("side".to_string(), sidecar_path.clone());
@@ -1040,9 +1559,227 @@ mod tests {
             .insert("local".to_string(), local_path.clone());
         cache.cleanup_for_unload(true);
         assert!(Path::new(&sidecar_path).exists());
+        assert!(Path::new(&proxy_source_signature_path(&sidecar_path)).exists());
         assert!(!Path::new(&local_path).exists());
+        assert!(!Path::new(&proxy_source_signature_path(&local_path)).exists());
         if let Some(parent) = Path::new(&sidecar_path).parent().and_then(|p| p.parent()) {
             let _ = std::fs::remove_dir_all(parent);
         }
+        if let Some(parent) = Path::new(&source_path).parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+    }
+
+    #[test]
+    fn proxy_paths_stay_stable_for_source_edits_but_change_for_variant_state() {
+        let local_root = test_local_proxy_root();
+        let _ = std::fs::create_dir_all(&local_root);
+        let source_path = test_source_file("clip-a.mp4");
+        let other_source_path = test_source_file("clip-b.mp4");
+        let plain_local = local_proxy_path_for(
+            &source_path,
+            ProxyScale::Half,
+            None,
+            false,
+            0.0,
+            &local_root,
+        )
+        .unwrap();
+        let stabilized_local = local_proxy_path_for(
+            &source_path,
+            ProxyScale::Half,
+            None,
+            true,
+            0.45,
+            &local_root,
+        )
+        .unwrap();
+        let plain_sidecar =
+            alongside_proxy_path_for(&source_path, ProxyScale::Half, None, false, 0.0).unwrap();
+        let stabilized_sidecar =
+            alongside_proxy_path_for(&source_path, ProxyScale::Half, None, true, 0.45).unwrap();
+        let other_source_local = local_proxy_path_for(
+            &other_source_path,
+            ProxyScale::Half,
+            None,
+            false,
+            0.0,
+            &local_root,
+        )
+        .unwrap();
+        assert_ne!(plain_local, stabilized_local);
+        assert_ne!(plain_sidecar, stabilized_sidecar);
+        assert_ne!(plain_local, other_source_local);
+
+        let _ = std::fs::write(&source_path, b"source-modified-longer");
+        let updated_local = local_proxy_path_for(
+            &source_path,
+            ProxyScale::Half,
+            None,
+            false,
+            0.0,
+            &local_root,
+        )
+        .unwrap();
+        let updated_sidecar =
+            alongside_proxy_path_for(&source_path, ProxyScale::Half, None, false, 0.0).unwrap();
+        assert_eq!(plain_local, updated_local);
+        assert_eq!(plain_sidecar, updated_sidecar);
+
+        if let Some(parent) = Path::new(&source_path).parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+        if let Some(parent) = Path::new(&other_source_path).parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+        let _ = std::fs::remove_dir_all(&local_root);
+    }
+
+    #[test]
+    fn existing_proxy_path_uses_source_signature_to_reuse_or_invalidate() {
+        let local_root = test_local_proxy_root();
+        let _ = std::fs::create_dir_all(&local_root);
+        let source_path = test_source_file("clip-a.mp4");
+        let proxy_path = local_proxy_path_for(
+            &source_path,
+            ProxyScale::Half,
+            None,
+            false,
+            0.0,
+            &local_root,
+        )
+        .unwrap();
+        if let Some(parent) = Path::new(&proxy_path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&proxy_path, b"proxy");
+        assert!(write_proxy_source_signature(&proxy_path, &source_path));
+
+        let reused = existing_proxy_path_for(
+            &source_path,
+            ProxyScale::Half,
+            None,
+            false,
+            0.0,
+            &local_root,
+            None,
+        );
+        assert_eq!(reused.as_deref(), Some(proxy_path.as_str()));
+
+        let _ = std::fs::write(&source_path, b"source-modified-longer");
+        let stale = existing_proxy_path_for(
+            &source_path,
+            ProxyScale::Half,
+            None,
+            false,
+            0.0,
+            &local_root,
+            None,
+        );
+        assert!(stale.is_none());
+
+        if let Some(parent) = Path::new(&source_path).parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+        let _ = std::fs::remove_dir_all(&local_root);
+    }
+
+    #[test]
+    fn existing_proxy_path_reuses_legacy_sidecar_proxy_names() {
+        let local_root = test_local_proxy_root();
+        let _ = std::fs::create_dir_all(&local_root);
+        let source_path = test_source_file("clip-a.mp4");
+        let legacy_sidecar =
+            legacy_alongside_proxy_path_for(&source_path, ProxyScale::Half, None).unwrap();
+        if let Some(parent) = Path::new(&legacy_sidecar).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&legacy_sidecar, b"proxy");
+
+        let reused = existing_proxy_path_for(
+            &source_path,
+            ProxyScale::Half,
+            None,
+            false,
+            0.0,
+            &local_root,
+            None,
+        );
+        assert_eq!(reused.as_deref(), Some(legacy_sidecar.as_str()));
+        assert!(Path::new(&proxy_source_signature_path(&legacy_sidecar)).exists());
+
+        if let Some(parent) = Path::new(&source_path).parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+        let _ = std::fs::remove_dir_all(&local_root);
+    }
+
+    #[test]
+    fn cleanup_stale_variants_only_touches_current_source_hashes() {
+        let local_root = test_local_proxy_root();
+        let _ = std::fs::create_dir_all(&local_root);
+        let source_a = test_source_file("clip-a.mp4");
+        let source_b = test_source_file("clip-b.mp4");
+
+        let keep_spec = ProxyVariantSpec::new(source_a.clone(), ProxyScale::Half, None, false, 0.0);
+        let remove_spec =
+            ProxyVariantSpec::new(source_a.clone(), ProxyScale::Quarter, None, false, 0.0);
+        let unrelated_spec =
+            ProxyVariantSpec::new(source_b.clone(), ProxyScale::Quarter, None, false, 0.0);
+
+        let keep_local = local_proxy_path_for_spec(&keep_spec, &local_root).unwrap();
+        let remove_local = local_proxy_path_for_spec(&remove_spec, &local_root).unwrap();
+        let unrelated_local = local_proxy_path_for_spec(&unrelated_spec, &local_root).unwrap();
+        let keep_side = alongside_proxy_path_for_spec(&keep_spec).unwrap();
+        let remove_side = alongside_proxy_path_for_spec(&remove_spec).unwrap();
+        let unrelated_side = alongside_proxy_path_for_spec(&unrelated_spec).unwrap();
+
+        for path in [
+            &keep_local,
+            &remove_local,
+            &unrelated_local,
+            &keep_side,
+            &remove_side,
+            &unrelated_side,
+        ] {
+            if let Some(parent) = Path::new(path).parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(path, b"proxy");
+            let source_path = if path.contains("clip-a") {
+                &source_a
+            } else {
+                &source_b
+            };
+            let _ = write_proxy_source_signature(path, source_path);
+        }
+
+        let mut cache = ProxyCache::new();
+        cache.local_cache_root = local_root.clone();
+        cache.ffprobe_path = None;
+        let summary = cache.cleanup_stale_variants(&[keep_spec]);
+
+        assert_eq!(summary.removed_local, 1);
+        assert_eq!(summary.removed_sidecar, 1);
+        assert!(Path::new(&keep_local).exists());
+        assert!(!Path::new(&remove_local).exists());
+        assert!(Path::new(&unrelated_local).exists());
+        assert!(Path::new(&keep_side).exists());
+        assert!(!Path::new(&remove_side).exists());
+        assert!(Path::new(&unrelated_side).exists());
+        assert!(Path::new(&proxy_source_signature_path(&keep_local)).exists());
+        assert!(!Path::new(&proxy_source_signature_path(&remove_local)).exists());
+        assert!(Path::new(&proxy_source_signature_path(&unrelated_local)).exists());
+        assert!(Path::new(&proxy_source_signature_path(&keep_side)).exists());
+        assert!(!Path::new(&proxy_source_signature_path(&remove_side)).exists());
+        assert!(Path::new(&proxy_source_signature_path(&unrelated_side)).exists());
+
+        if let Some(parent) = Path::new(&source_a).parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+        if let Some(parent) = Path::new(&source_b).parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+        let _ = std::fs::remove_dir_all(&local_root);
     }
 }

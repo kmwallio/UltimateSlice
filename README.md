@@ -27,14 +27,16 @@ Built in MCP server allows for AI collaboration.
 
 UltimateSlice uses open-source crates and runtime libraries, including:
 
-- `gtk4-rs` / `gdk4` / `gio` / `glib` — LGPL-2.1-or-later
+- `gtk4-rs` / `gdk4` / `gio` / `glib` / `pango` — GTK/Pango runtime libraries LGPL-2.1-or-later
 - `gstreamer-rs` + GStreamer — LGPL-2.1-or-later
 - `quick-xml` — MIT
 - `serde` / `serde_json` — MIT OR Apache-2.0
 - `uuid` — MIT OR Apache-2.0
 - `anyhow` / `thiserror` / `log` / `env_logger` — MIT OR Apache-2.0
 - `rustfft` — MIT OR Apache-2.0
+- `whisper-rs` — Unlicense
 - `ort` (ONNX Runtime) / `ndarray` — MIT OR Apache-2.0
+- `resvg` / `usvg` / `tiny-skia` — MIT OR Apache-2.0
 - `tempfile` — MIT OR Apache-2.0
 - FFmpeg (tooling/runtime) — LGPL-2.1-or-later (Flatpak build enables GPL options)
 - x264 (Flatpak build dependency) — GPL-2.0-or-later
@@ -195,7 +197,7 @@ A Flatpak manifest is provided at `io.github.kmwallio.ultimateslice.yml`.
 
 ```/dev/null/bash#L1-3
 flatpak-builder build-dir io.github.kmwallio.ultimateslice.yml --user --install --force-clean
-flatpak run io.github.ultimateslice
+flatpak run io.github.kmwallio.ultimateslice
 ```
 
 ## Notes

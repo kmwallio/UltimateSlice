@@ -153,6 +153,24 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                         if !selected_event_seen {
                             selected_event_seen = true;
                             in_selected_event = true;
+                            // Extract bin persistence attrs before collecting unknowns
+                            if let Some(bins_json) = attrs.get("us:bins") {
+                                project.parsed_bins_json = Some(bins_json.clone());
+                            }
+                            if let Some(media_bins_json) = attrs.get("us:media-bins") {
+                                project.parsed_media_bins_json = Some(media_bins_json.clone());
+                            }
+                            if let Some(collections_json) = attrs.get("us:smart-collections") {
+                                project.parsed_collections_json = Some(collections_json.clone());
+                            }
+                            if let Some(library_items_json) = attrs.get("us:library-items") {
+                                project.parsed_library_items_json =
+                                    Some(library_items_json.clone());
+                            }
+                            if let Some(annotations_json) = attrs.get("us:media-annotations") {
+                                project.parsed_media_annotations_json =
+                                    Some(annotations_json.clone());
+                            }
                             project.fcpxml_unknown_event.attrs =
                                 collect_unknown_attrs(&attrs, is_known_event_attr);
                         } else {
@@ -819,9 +837,12 @@ fn parse_asset_clip(
                     .filter(|l| *l < 0)
                     .map(|l| (-l - 1) as usize)
                     .unwrap_or(0),
-                ClipKind::Video | ClipKind::Image | ClipKind::Title | ClipKind::Adjustment => {
-                    lane.filter(|l| *l > 0).map(|l| l as usize).unwrap_or(0)
-                }
+                ClipKind::Video
+                | ClipKind::Image
+                | ClipKind::Title
+                | ClipKind::Adjustment
+                | ClipKind::Compound
+                | ClipKind::Multicam => lane.filter(|l| *l > 0).map(|l| l as usize).unwrap_or(0),
             };
             let track_idx = explicit_track_idx.unwrap_or(inferred_track_idx);
             let track_name = attrs.get("us:track-name").cloned().unwrap_or_else(|| {
@@ -983,6 +1004,58 @@ fn parse_asset_clip(
             if let Some(v) = attrs.get("us:frei0r-effects") {
                 let json_str = v.replace("&quot;", "\"");
                 clip.frei0r_effects = serde_json::from_str(&json_str).unwrap_or_default();
+            }
+            if let Some(v) = attrs.get("us:masks") {
+                let json_str = v.replace("&quot;", "\"");
+                if let Ok(masks) =
+                    serde_json::from_str::<Vec<crate::model::clip::ClipMask>>(&json_str)
+                {
+                    clip.masks = masks;
+                }
+            }
+            // Subtitle segments + style
+            if let Some(v) = attrs.get("us:subtitle-segments") {
+                let json_str = v.replace("&quot;", "\"");
+                clip.subtitle_segments = serde_json::from_str(&json_str).unwrap_or_default();
+            }
+            if let Some(v) = attrs.get("us:subtitles-language") {
+                clip.subtitles_language = v.clone();
+            }
+            if let Some(v) = attrs.get("us:subtitle-font") {
+                clip.subtitle_font = v.clone();
+            }
+            if let Some(v) = attrs.get("us:subtitle-color") {
+                clip.subtitle_color = v.parse().unwrap_or(0xFFFFFFFF);
+            }
+            if let Some(v) = attrs.get("us:subtitle-outline-color") {
+                clip.subtitle_outline_color = v.parse().unwrap_or(0x000000FF);
+            }
+            if let Some(v) = attrs.get("us:subtitle-outline-width") {
+                clip.subtitle_outline_width = v.parse().unwrap_or(2.0);
+            }
+            if let Some(v) = attrs.get("us:subtitle-bg-box") {
+                clip.subtitle_bg_box = v != "false";
+            }
+            if let Some(v) = attrs.get("us:subtitle-bg-box-color") {
+                clip.subtitle_bg_box_color = v.parse().unwrap_or(0x00000099);
+            }
+            if let Some(v) = attrs.get("us:subtitle-highlight-mode") {
+                clip.subtitle_highlight_mode = match v.as_str() {
+                    "bold" => crate::model::clip::SubtitleHighlightMode::Bold,
+                    "color" => crate::model::clip::SubtitleHighlightMode::Color,
+                    "underline" => crate::model::clip::SubtitleHighlightMode::Underline,
+                    "stroke" => crate::model::clip::SubtitleHighlightMode::Stroke,
+                    _ => crate::model::clip::SubtitleHighlightMode::None,
+                };
+            }
+            if let Some(v) = attrs.get("us:subtitle-highlight-color") {
+                clip.subtitle_highlight_color = v.parse().unwrap_or(0xFFFF00FF);
+            }
+            if let Some(v) = attrs.get("us:subtitle-word-window-secs") {
+                clip.subtitle_word_window_secs = v.parse().unwrap_or(2.0);
+            }
+            if let Some(v) = attrs.get("us:subtitle-position-y") {
+                clip.subtitle_position_y = v.parse().unwrap_or(0.85);
             }
             if let Some(v) = attrs.get("us:ladspa-effects") {
                 let json_str = v.replace("&quot;", "\"");
@@ -1164,6 +1237,24 @@ fn parse_asset_clip(
                 match v.as_str() {
                     "title" => clip.kind = ClipKind::Title,
                     "adjustment" => clip.kind = ClipKind::Adjustment,
+                    "compound" => {
+                        clip.kind = ClipKind::Compound;
+                        if let Some(tracks_json) = attrs.get("us:compound-tracks") {
+                            let json_str = tracks_json.replace("&quot;", "\"");
+                            clip.compound_tracks = serde_json::from_str(&json_str).ok();
+                        }
+                    }
+                    "multicam" => {
+                        clip.kind = ClipKind::Multicam;
+                        if let Some(angles_json) = attrs.get("us:multicam-angles") {
+                            let json_str = angles_json.replace("&quot;", "\"");
+                            clip.multicam_angles = serde_json::from_str(&json_str).ok();
+                        }
+                        if let Some(switches_json) = attrs.get("us:multicam-switches") {
+                            let json_str = switches_json.replace("&quot;", "\"");
+                            clip.multicam_switches = serde_json::from_str(&json_str).ok();
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -1856,9 +1947,13 @@ fn parse_adjust_transform_children(reader: &mut Reader<&[u8]>) -> Result<NativeK
                         let kfs = parse_keyframe_animation_children(reader)?;
                         for (time_ns, val_str, interp, bezier_controls) in &kfs {
                             if let Some((x, y)) = parse_vec2(val_str) {
-                                result
-                                    .position_keyframes
-                                    .push((*time_ns, x, y, *interp, *bezier_controls));
+                                result.position_keyframes.push((
+                                    *time_ns,
+                                    x,
+                                    y,
+                                    *interp,
+                                    *bezier_controls,
+                                ));
                             }
                         }
                     } else if param_name_lower == "scale" {
@@ -2531,6 +2626,9 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:title-clip-bg-color"
             | "us:title-secondary-text"
             | "us:clip-kind"
+            | "us:compound-tracks"
+            | "us:multicam-angles"
+            | "us:multicam-switches"
             | "us:eq-bands"
             | "us:eq-low-gain-keyframes"
             | "us:eq-mid-gain-keyframes"
@@ -2539,7 +2637,20 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:pitch-preserve"
             | "us:audio-channel-mode"
             | "us:ladspa-effects"
+            | "us:masks"
             | "us:measured-loudness-lufs"
+            | "us:subtitle-segments"
+            | "us:subtitles-language"
+            | "us:subtitle-font"
+            | "us:subtitle-color"
+            | "us:subtitle-outline-color"
+            | "us:subtitle-outline-width"
+            | "us:subtitle-bg-box"
+            | "us:subtitle-bg-box-color"
+            | "us:subtitle-highlight-mode"
+            | "us:subtitle-highlight-color"
+            | "us:subtitle-word-window-secs"
+            | "us:subtitle-position-y"
     )
 }
 
@@ -2574,7 +2685,14 @@ fn is_known_library_attr(_key: &str) -> bool {
 }
 
 fn is_known_event_attr(_key: &str) -> bool {
-    false
+    matches!(
+        _key,
+        "us:bins"
+            | "us:media-bins"
+            | "us:smart-collections"
+            | "us:library-items"
+            | "us:media-annotations"
+    )
 }
 
 fn is_known_project_attr(key: &str) -> bool {
@@ -2942,7 +3060,7 @@ fn parse_attrs(e: &quick_xml::events::BytesStart) -> Result<HashMap<String, Stri
 }
 
 fn sanitize_unescaped_keyframe_attr_json(xml: &str) -> Cow<'_, str> {
-    const KEYFRAME_ATTR_PREFIXES: [&str; 17] = [
+    const KEYFRAME_ATTR_PREFIXES: [&str; 18] = [
         "us:brightness-keyframes=\"",
         "us:contrast-keyframes=\"",
         "us:saturation-keyframes=\"",
@@ -2960,6 +3078,7 @@ fn sanitize_unescaped_keyframe_attr_json(xml: &str) -> Cow<'_, str> {
         "us:crop-top-keyframes=\"",
         "us:crop-bottom-keyframes=\"",
         "us:frei0r-effects=\"",
+        "us:masks=\"",
     ];
 
     let mut cursor = 0usize;
@@ -4384,6 +4503,43 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_fcpxml_restores_library_annotation_vendor_attrs() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14" xmlns:us="urn:ultimateslice">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+  </resources>
+  <library>
+    <event us:smart-collections='[{"id":"c1","name":"Favorites","criteria":{"rating":"favorite"}}]'
+           us:library-items='[{"library_key":"/tmp/clip.mov","label":"Clip","is_missing":false}]'
+           us:media-annotations='[{"library_key":"/tmp/clip.mov","rating":"favorite","keyword_ranges":[{"id":"k1","label":"B-roll","start_ns":100,"end_ns":200}]}]'>
+      <project name="Annotations">
+        <sequence duration="0/24s" format="r1">
+          <spine/>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        assert_eq!(
+            project.parsed_collections_json.as_deref(),
+            Some(r#"[{"id":"c1","name":"Favorites","criteria":{"rating":"favorite"}}]"#)
+        );
+        assert_eq!(
+            project.parsed_library_items_json.as_deref(),
+            Some(r#"[{"library_key":"/tmp/clip.mov","label":"Clip","is_missing":false}]"#)
+        );
+        assert_eq!(
+            project.parsed_media_annotations_json.as_deref(),
+            Some(
+                r#"[{"library_key":"/tmp/clip.mov","rating":"favorite","keyword_ranges":[{"id":"k1","label":"B-roll","start_ns":100,"end_ns":200}]}]"#
+            )
+        );
+    }
+
+    #[test]
     fn test_parse_fcpxml_remaps_missing_volumes_to_fcpxml_mount_root() {
         let unique = format!("ultimateslice-remap-{}.mp4", uuid::Uuid::new_v4());
         let remapped_target = format!("/tmp/{unique}");
@@ -5007,19 +5163,25 @@ mod tests {
         // Rotation keyframes: clip-local times
         assert_eq!(clip.rotate_keyframes.len(), 2);
         assert!(clip.rotate_keyframes[0].time_ns <= 1);
-        let delta = clip.rotate_keyframes[1].time_ns.abs_diff(expected_offset_ns);
+        let delta = clip.rotate_keyframes[1]
+            .time_ns
+            .abs_diff(expected_offset_ns);
         assert!(delta <= 1, "second rotation kf off by {delta}ns");
 
         // Position keyframes: clip-local times
         assert_eq!(clip.position_x_keyframes.len(), 2);
         assert!(clip.position_x_keyframes[0].time_ns <= 1);
-        let delta = clip.position_x_keyframes[1].time_ns.abs_diff(expected_offset_ns);
+        let delta = clip.position_x_keyframes[1]
+            .time_ns
+            .abs_diff(expected_offset_ns);
         assert!(delta <= 1, "second position_x kf off by {delta}ns");
 
         // Opacity keyframes: clip-local times
         assert_eq!(clip.opacity_keyframes.len(), 2);
         assert!(clip.opacity_keyframes[0].time_ns <= 1);
-        let delta = clip.opacity_keyframes[1].time_ns.abs_diff(expected_offset_ns);
+        let delta = clip.opacity_keyframes[1]
+            .time_ns
+            .abs_diff(expected_offset_ns);
         assert!(delta <= 1, "second opacity kf off by {delta}ns");
 
         // Verify all keyframe times are < source_in (i.e. clip-local, not absolute)
@@ -5373,40 +5535,68 @@ mod tests {
 
         // Clip 1: start=1700856/24s, source_in should be 0 (start == base)
         let c1_expected_source_in = 0u64;
-        assert_eq!(clips[0].source_in, c1_expected_source_in,
-            "clip 1 source_in: {} != {}", clips[0].source_in, c1_expected_source_in);
+        assert_eq!(
+            clips[0].source_in, c1_expected_source_in,
+            "clip 1 source_in: {} != {}",
+            clips[0].source_in, c1_expected_source_in
+        );
         let c1_dur = parse_fcpxml_time("50/24s").unwrap();
-        assert_eq!(clips[0].source_out, c1_expected_source_in + c1_dur,
-            "clip 1 source_out");
+        assert_eq!(
+            clips[0].source_out,
+            c1_expected_source_in + c1_dur,
+            "clip 1 source_out"
+        );
         assert_eq!(clips[0].source_timecode_base_ns, Some(base_ns));
 
         // Clip 2: start=1700967/24s, source_in = (1700967/24 - 70869) seconds
         let c2_start_ns = parse_fcpxml_time("1700967/24s").unwrap();
         let c2_expected_source_in = c2_start_ns - base_ns;
-        assert_eq!(clips[1].source_in, c2_expected_source_in,
+        assert_eq!(
+            clips[1].source_in,
+            c2_expected_source_in,
             "clip 2 source_in: {} != {} ({:.6}s != {:.6}s)",
-            clips[1].source_in, c2_expected_source_in,
-            clips[1].source_in as f64 / 1e9, c2_expected_source_in as f64 / 1e9);
+            clips[1].source_in,
+            c2_expected_source_in,
+            clips[1].source_in as f64 / 1e9,
+            c2_expected_source_in as f64 / 1e9
+        );
         let c2_dur = parse_fcpxml_time("475/24s").unwrap();
-        assert_eq!(clips[1].source_out, c2_expected_source_in + c2_dur,
-            "clip 2 source_out");
+        assert_eq!(
+            clips[1].source_out,
+            c2_expected_source_in + c2_dur,
+            "clip 2 source_out"
+        );
 
         // Clip 3: start=1701495/24s
         let c3_start_ns = parse_fcpxml_time("1701495/24s").unwrap();
         let c3_expected_source_in = c3_start_ns - base_ns;
-        assert_eq!(clips[2].source_in, c3_expected_source_in,
+        assert_eq!(
+            clips[2].source_in,
+            c3_expected_source_in,
             "clip 3 source_in: {} != {} ({:.6}s != {:.6}s)",
-            clips[2].source_in, c3_expected_source_in,
-            clips[2].source_in as f64 / 1e9, c3_expected_source_in as f64 / 1e9);
+            clips[2].source_in,
+            c3_expected_source_in,
+            clips[2].source_in as f64 / 1e9,
+            c3_expected_source_in as f64 / 1e9
+        );
         let c3_dur = parse_fcpxml_time("21/24s").unwrap();
-        assert_eq!(clips[2].source_out, c3_expected_source_in + c3_dur,
-            "clip 3 source_out");
+        assert_eq!(
+            clips[2].source_out,
+            c3_expected_source_in + c3_dur,
+            "clip 3 source_out"
+        );
 
         // Verify source_in values are reasonable seconds into the file
         assert!(clips[0].source_in == 0, "clip 1 starts at file beginning");
-        assert!(clips[1].source_in > 4_000_000_000 && clips[1].source_in < 5_000_000_000,
-            "clip 2 source_in should be ~4.625s, got {}s", clips[1].source_in as f64 / 1e9);
-        assert!(clips[2].source_in > 26_000_000_000 && clips[2].source_in < 27_000_000_000,
-            "clip 3 source_in should be ~26.625s, got {}s", clips[2].source_in as f64 / 1e9);
+        assert!(
+            clips[1].source_in > 4_000_000_000 && clips[1].source_in < 5_000_000_000,
+            "clip 2 source_in should be ~4.625s, got {}s",
+            clips[1].source_in as f64 / 1e9
+        );
+        assert!(
+            clips[2].source_in > 26_000_000_000 && clips[2].source_in < 27_000_000_000,
+            "clip 3 source_in should be ~26.625s, got {}s",
+            clips[2].source_in as f64 / 1e9
+        );
     }
 }

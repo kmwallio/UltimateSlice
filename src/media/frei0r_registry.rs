@@ -175,9 +175,7 @@ impl Frei0rRegistry {
 
     /// Look up a plugin by its full GStreamer element name.
     pub fn find_by_gst_name(&self, gst_name: &str) -> Option<&Frei0rPluginInfo> {
-        self.plugins
-            .iter()
-            .find(|p| p.gst_element_name == gst_name)
+        self.plugins.iter().find(|p| p.gst_element_name == gst_name)
     }
 
     /// Returns sorted, deduplicated category names.
@@ -223,19 +221,14 @@ impl Frei0rRegistry {
             .unwrap_or_default()
             .to_string();
 
-        let klass = factory
-            .metadata("klass")
-            .unwrap_or_default()
-            .to_string();
+        let klass = factory.metadata("klass").unwrap_or_default().to_string();
         let category = simplify_category(&klass);
 
         let so_info = native_info_map.get(&frei0r_name);
         let ffmpeg_name = so_info
             .map(|i| i.so_name.clone())
             .unwrap_or_else(|| frei0r_name.clone());
-        let native_params = so_info
-            .map(|i| i.native_params.clone())
-            .unwrap_or_default();
+        let native_params = so_info.map(|i| i.native_params.clone()).unwrap_or_default();
 
         let mut params = Vec::new();
         for pspec in element.list_properties() {
@@ -269,8 +262,16 @@ impl Frei0rRegistry {
 /// Some plugins report NaN, Inf, or extreme bounds (f64::MIN/MAX, ±1e308)
 /// which crash GTK `Scale::with_range()` or produce unusable sliders.
 fn sanitize_param_bounds(raw_min: f64, raw_max: f64) -> (f64, f64) {
-    let min = if raw_min.is_finite() && raw_min > -1e6 { raw_min } else { 0.0 };
-    let max = if raw_max.is_finite() && raw_max < 1e6 { raw_max } else { 1.0 };
+    let min = if raw_min.is_finite() && raw_min > -1e6 {
+        raw_min
+    } else {
+        0.0
+    };
+    let max = if raw_max.is_finite() && raw_max < 1e6 {
+        raw_max
+    } else {
+        1.0
+    };
     if min >= max {
         (0.0, 1.0)
     } else {
@@ -278,22 +279,22 @@ fn sanitize_param_bounds(raw_min: f64, raw_max: f64) -> (f64, f64) {
     }
 }
 
-fn inspect_param(
-    element: &gstreamer::Element,
-    pspec: &glib::ParamSpec,
-) -> Option<Frei0rParamInfo> {
+fn inspect_param(element: &gstreamer::Element, pspec: &glib::ParamSpec) -> Option<Frei0rParamInfo> {
     let name = pspec.name().to_string();
     let display_name = pspec.nick().to_string();
 
     if let Some(pspec_double) = pspec.downcast_ref::<glib::ParamSpecDouble>() {
-        let default_val = element
-            .property::<f64>(&name);
+        let default_val = element.property::<f64>(&name);
         // Sanitize NaN/Inf defaults (e.g. defish0r's "non-linear-scale" defaults to NaN).
         let safe_default = if default_val.is_finite() {
             default_val
         } else {
             let mid = (pspec_double.minimum() + pspec_double.maximum()) / 2.0;
-            if mid.is_finite() { mid } else { 0.0 }
+            if mid.is_finite() {
+                mid
+            } else {
+                0.0
+            }
         };
         // Sanitize min/max: some frei0r plugins report NaN, Inf, or
         // extreme bounds (e.g. f64::MIN/MAX) which crash GTK sliders.
@@ -318,7 +319,11 @@ fn inspect_param(
             default_val
         } else {
             let mid = (pspec_float.minimum() as f64 + pspec_float.maximum() as f64) / 2.0;
-            if mid.is_finite() { mid } else { 0.0 }
+            if mid.is_finite() {
+                mid
+            } else {
+                0.0
+            }
         };
         let raw_min = pspec_float.minimum() as f64;
         let raw_max = pspec_float.maximum() as f64;
@@ -437,33 +442,20 @@ fn build_native_info_map() -> HashMap<String, Frei0rSoInfo> {
             };
             let so_name = so_name.to_string();
 
-            let c_path =
-                match std::ffi::CString::new(path.to_string_lossy().as_bytes().to_vec()) {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                };
+            let c_path = match std::ffi::CString::new(path.to_string_lossy().as_bytes().to_vec()) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
             unsafe {
                 let handle = libc::dlopen(c_path.as_ptr(), libc::RTLD_LAZY);
                 if handle.is_null() {
                     continue;
                 }
 
-                let info_sym = libc::dlsym(
-                    handle,
-                    b"f0r_get_plugin_info\0".as_ptr() as *const _,
-                );
-                let param_sym = libc::dlsym(
-                    handle,
-                    b"f0r_get_param_info\0".as_ptr() as *const _,
-                );
-                let init_sym = libc::dlsym(
-                    handle,
-                    b"f0r_init\0".as_ptr() as *const _,
-                );
-                let deinit_sym = libc::dlsym(
-                    handle,
-                    b"f0r_deinit\0".as_ptr() as *const _,
-                );
+                let info_sym = libc::dlsym(handle, b"f0r_get_plugin_info\0".as_ptr() as *const _);
+                let param_sym = libc::dlsym(handle, b"f0r_get_param_info\0".as_ptr() as *const _);
+                let init_sym = libc::dlsym(handle, b"f0r_init\0".as_ptr() as *const _);
+                let deinit_sym = libc::dlsym(handle, b"f0r_deinit\0".as_ptr() as *const _);
 
                 if !info_sym.is_null() && !param_sym.is_null() {
                     // Some plugins (e.g. curves) require f0r_init() before
@@ -474,8 +466,7 @@ fn build_native_info_map() -> HashMap<String, Frei0rSoInfo> {
                         f0r_init();
                     }
 
-                    let get_info: extern "C" fn(*mut F0rPluginInfo) =
-                        std::mem::transmute(info_sym);
+                    let get_info: extern "C" fn(*mut F0rPluginInfo) = std::mem::transmute(info_sym);
                     let get_param: extern "C" fn(*mut F0rParamInfo, std::os::raw::c_int) =
                         std::mem::transmute(param_sym);
 
@@ -483,8 +474,7 @@ fn build_native_info_map() -> HashMap<String, Frei0rSoInfo> {
                     get_info(&mut info);
 
                     if !info.name.is_null() && info.plugin_type == 0 {
-                        let real_name =
-                            std::ffi::CStr::from_ptr(info.name).to_string_lossy();
+                        let real_name = std::ffi::CStr::from_ptr(info.name).to_string_lossy();
                         let gst_name = normalize_frei0r_name(&real_name);
 
                         let mut native_params = Vec::new();
@@ -513,10 +503,9 @@ fn build_native_info_map() -> HashMap<String, Frei0rSoInfo> {
                                     format!("{base}-g"),
                                     format!("{base}-b"),
                                 ],
-                                Frei0rNativeType::Position => vec![
-                                    format!("{base}-x"),
-                                    format!("{base}-y"),
-                                ],
+                                Frei0rNativeType::Position => {
+                                    vec![format!("{base}-x"), format!("{base}-y")]
+                                }
                                 _ => vec![base],
                             };
                             native_params.push(Frei0rNativeParam {
@@ -536,8 +525,7 @@ fn build_native_info_map() -> HashMap<String, Frei0rSoInfo> {
                     }
                     // Clean up frei0r state.
                     if !deinit_sym.is_null() {
-                        let f0r_deinit: extern "C" fn() =
-                            std::mem::transmute(deinit_sym);
+                        let f0r_deinit: extern "C" fn() = std::mem::transmute(deinit_sym);
                         f0r_deinit();
                     }
                 }
@@ -601,9 +589,7 @@ fn known_string_param_values(factory_name: &str, property_name: &str) -> Option<
     let v = |vals: &[&str]| Some(vals.iter().map(|s| (*s).into()).collect());
     match (factory_name, property_name) {
         // cairogradient: "Linear or radial gradient"
-        ("frei0r-filter-cairogradient", "pattern") => {
-            v(&["gradient_linear", "gradient_radial"])
-        }
+        ("frei0r-filter-cairogradient", "pattern") => v(&["gradient_linear", "gradient_radial"]),
         // colortap: "One of: xpro, sepia, heat, red_green, old_photo, xray, esses, yellow_blue"
         ("frei0r-filter-colortap", "table") => v(&[
             "xpro",
@@ -635,9 +621,7 @@ fn known_string_param_values(factory_name: &str, property_name: &str) -> Option<
             "VarSize",
         ]),
         // ndvi-filter: five string params with "One of ..." blurbs
-        ("frei0r-filter-ndvi-filter", "color-map") => {
-            v(&["earth", "grayscale", "heat", "rainbow"])
-        }
+        ("frei0r-filter-ndvi-filter", "color-map") => v(&["earth", "grayscale", "heat", "rainbow"]),
         ("frei0r-filter-ndvi-filter", "index-calculation") => v(&["ndvi", "vi"]),
         ("frei0r-filter-ndvi-filter", "legend") => v(&["off", "bottom"]),
         ("frei0r-filter-ndvi-filter", "nir-channel") => v(&["r", "g", "b"]),
@@ -708,7 +692,10 @@ mod tests {
 
     #[test]
     fn test_normalize_frei0r_name() {
-        assert_eq!(normalize_frei0r_name("3 point color balance"), "3-point-color-balance");
+        assert_eq!(
+            normalize_frei0r_name("3 point color balance"),
+            "3-point-color-balance"
+        );
         assert_eq!(normalize_frei0r_name("coloradj_RGB"), "coloradj-rgb");
         assert_eq!(normalize_frei0r_name("B"), "b");
         assert_eq!(normalize_frei0r_name("Cartoon"), "cartoon");

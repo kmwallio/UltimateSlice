@@ -92,7 +92,7 @@ impl Default for TrackHeightPreset {
 }
 
 /// A single horizontal lane in the timeline
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Track {
     pub id: String,
     pub kind: TrackKind,

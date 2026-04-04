@@ -11,6 +11,8 @@ Use the toolbar linked split control **Export | ▼** (styled as one control):
 - Frame capture is written at the **project canvas resolution** (not reduced preview quality resolution).
 - If playback is active, UltimateSlice pauses internally for capture and then resumes playback.
 
+Animated SVG clips are rendered to cached silent video during export. Static image clips still use single-frame hold behavior, while animated SVG clips preserve authored motion and hold on the last frame if the clip was extended on the timeline.
+
 ## Export Dialog Options
 
 ### Video Codec
@@ -31,8 +33,11 @@ Use the toolbar linked split control **Export | ▼** (styled as one control):
 | **QuickTime** | `.mov` | ProRes, H.264 |
 | **WebM** | `.webm` | VP9, AV1 |
 | **Matroska** | `.mkv` | Any codec |
+| **Animated GIF** | `.gif` | Animation, social media (no audio) |
 
 MP4 and MOV containers get `-movflags +faststart` for web streaming compatibility.
+
+> **Animated GIF**: Selecting this container hides the Video Codec and Audio settings (not applicable). A **GIF Frame Rate** spinner (1–30 fps, default 15) appears instead. GIF export uses FFmpeg's two-step `palettegen` → `paletteuse` pipeline with Bayer dithering for optimal color quality. The output loops infinitely (`-loop 0`). GIF files are significantly larger than video formats — use short clips or reduce the frame rate for smaller files.
 
 ### Output Resolution
 
@@ -88,6 +93,14 @@ When enabled, export applies automatic fades at adjacent same-track audio edit p
 
 Fade lengths are clamped safely for very short clips and overlap boundaries so exports remain stable.
 
+### Frei0r effect export compatibility
+
+When UltimateSlice cannot discover native frei0r plugin metadata on the local system, export falls back to built-in native parameter schemas for supported plugins instead of guessing from unordered numeric parameters.
+
+This keeps FFmpeg frei0r exports more consistent across machines for effects such as **3-point color balance**, including correct bool formatting and grouped color values.
+
+Title text export also resolves the selected Pango font into structured fontconfig selectors (family plus weight/slant/width), which keeps bold and italic title faces closer to the live Program Monitor preview.
+
 ## Export Presets
 
 Use the **Preset** row in the Export dialog to save and reuse named export configurations:
@@ -97,7 +110,7 @@ Use the **Preset** row in the Export dialog to save and reuse named export confi
 - **Delete** removes the selected preset.
 - Selecting a preset immediately applies its codec/container/resolution/CRF/audio settings.
 - **(Custom)** means no saved preset is currently selected.
-- New installs (and older UI-state files missing export preset config) start with bundled defaults: **Web H.264 1080p**, **High Quality H.264 4K**, **Archive ProRes 4K**, and **WebM VP9 1080p**.
+- New installs (and older UI-state files missing export preset config) start with bundled defaults: **Web H.264 1080p**, **High Quality H.264 4K**, **Archive ProRes 4K**, **WebM VP9 1080p**, and **Animated GIF**.
 
 Preset data is stored in local UI state and persists across app restarts.
 
@@ -117,6 +130,40 @@ After choosing the output file, an export progress dialog shows:
 - Progress is capped at **99%** while encoding/muxing is still running, then switches to **100%** only after export completes successfully.
 - A status label showing the output path.
 - A **Close** button (available once export completes or errors).
+
+## Batch Export Queue
+
+Queue multiple exports to run sequentially — useful for overnight renders, social media variants, or outputting the same project in multiple formats.
+
+### Adding jobs to the queue
+
+In the Export Settings dialog, configure your options as usual, then click **Add to Queue** instead of **Export Now**. A file chooser prompts for the output path. The job is added to the queue immediately (no export starts yet).
+
+### Opening the queue
+
+Click the **▼** dropdown next to the Export button and choose **Export Queue…**.
+
+### Queue window
+
+| Control | Description |
+|---|---|
+| Job list | Shows each job: file name, output path, and status badge |
+| **✕** (per job) | Remove a Pending or Error job |
+| **Run Queue** | Export all Pending jobs in order (background thread, live status updates) |
+| **Clear Done/Error** | Remove all completed and failed jobs from the list |
+
+Status badges: `Pending` → `Running…` → `Done ✓` or `Error ✗`
+
+The queue persists across application restarts.
+
+### MCP queue tools
+
+| Tool | Description |
+|---|---|
+| `add_to_export_queue` | Add an export job; optionally specify `preset_name` |
+| `list_export_queue` | List all jobs with status |
+| `clear_export_queue` | Remove jobs; optional `status_filter`: `"all"`, `"done"`, `"error"` |
+| `run_export_queue` | Run all pending jobs and block until complete |
 
 ## Speed-Changed Clips
 
@@ -153,6 +200,13 @@ Export evaluates phase-1 clip keyframes with interpolation-aware curves:
 
 Keyframes are evaluated in clip-local timeline time and rendered directly into ffmpeg filter chains so exported animation follows the same keyframe timing model used by Program Monitor preview. Dopesheet custom Bezier handle shapes are exported through a piecewise cubic-bezier approximation.
 
+## Adjustment Layers
+
+- Adjustment layers export as post-compositor effect passes over the assembled timeline image.
+- The exported effect region uses the same **scale / position / crop / rotate / opacity** scope model as the Program Monitor overlay for adjustment clips.
+- Each adjustment layer is trimmed to its own clip-local time before FFmpeg evaluates keyframed effect expressions, so adjustment-layer keyframes animate relative to the adjustment clip instead of the global timeline.
+- Overlapping adjustment layers stack in track order, matching Program Monitor preview.
+
 ## Freeze-Frame Clips
 
 - Freeze-frame clips export as video-only holds: ffmpeg samples the resolved freeze source frame and clones it for the resolved hold duration.
@@ -166,6 +220,49 @@ Keyframes are evaluated in clip-local timeline time and rendered directly into f
 - Chapters appear in media players that support them (VLC chapter nav, YouTube chapter timestamps, MKV chapter menus, etc.).
 - Projects with no markers produce export output with no chapter metadata (no change in behavior).
 - Verify chapters with: `ffprobe -show_chapters output.mp4`
+
+## EDL Export (CMX 3600)
+
+Export the timeline as a standard CMX 3600 Edit Decision List for handoff to color grading systems (DaVinci Resolve, Baselight) or broadcast.
+
+**Export → Export EDL...** opens a file dialog to save the `.edl` file.
+
+Features:
+- Non-drop frame timecode for most frame rates; drop-frame (`;` separator) for 29.97fps
+- Record timecodes start at 01:00:00:00 (broadcast standard)
+- Source timecodes reflect clip in/out points
+- Dissolve and wipe transitions preserved
+- Speed effects noted via M2 comments
+- Multi-track support (V, A, A2, A3...)
+- Source file paths in comments for relinking
+- Title and adjustment clips excluded (no source media)
+
+Also available via MCP: `save_edl` tool with `path` parameter.
+
+## OpenTimelineIO (OTIO) Export
+
+Export the timeline as an OpenTimelineIO JSON file (`.otio`) for interchange with DaVinci Resolve, Premiere (via adapter), Nuke, RV, and other OTIO-compatible tools.
+
+**Export → Export OTIO...** first lets you choose whether media references inside the OTIO file should be written as **absolute paths** or **paths relative to the exported `.otio` file**, then opens the save dialog.
+
+Features:
+- Clips with source media references (`file://` URLs)
+- Absolute or relative media references inside the OTIO file (relative paths are resolved from the OTIO file's folder on import/open)
+- Explicit gaps between clips
+- Transitions (cross dissolve mapped to `SMPTE_Dissolve`)
+- Speed effects stored as `LinearTimeWarp` OTIO effects
+- Project markers attached to the first video track
+- Track metadata (muted, locked, soloed, audio role, ducking)
+- UltimateSlice OTIO metadata currently preserves the supported clip metadata set, including core clip settings (`speed`, `reverse`, `opacity`, `volume`, `pan`, `brightness`, `contrast`, `saturation`), transform/compositing settings (`scale`, `position_x`, `position_y`, `rotate`, `flip_h`, `flip_v`, `crop_left`, `crop_right`, `crop_top`, `crop_bottom`, `blend_mode`), and core animated lanes (`opacity_keyframes`, `scale_keyframes`, `position_x_keyframes`, `position_y_keyframes`, `rotate_keyframes`)
+- Title clips exported with `MissingReference`, plus title styling metadata (text, font, colors, outline, shadow, box, template, secondary text, and clip background color)
+- Subtitle-bearing clips preserve subtitle segments/word timing plus subtitle styling metadata (language, font/colors, outline, background box, highlight mode/color, word window, and vertical position)
+- Adjustment clips also export as `MissingReference`
+
+**Import:** Open `.otio` files via the main **Open…** action in the header bar or Welcome screen (or MCP `open_otio` tool). OTIO files from other tools are imported with default clip properties; UltimateSlice metadata is restored when present. Relative OTIO media references are resolved against the opened `.otio` file location. UltimateSlice also accepts older flat OTIO metadata from previous app builds and upgrades it to the current versioned OTIO metadata contract on save.
+
+Current limitation: OTIO round-trip is still partial for some UltimateSlice-only features. Advanced effect stacks, mask payloads/animation, secondary keyframe lanes such as crop animation, and nested clip internals are not fully preserved yet, so `.uspxml` remains the highest-fidelity interchange/save format for complete UltimateSlice projects.
+
+Also available via MCP: `save_otio` and `open_otio` tools. `save_otio` accepts `path` plus optional `path_mode` (`absolute` or `relative`), and `open_otio` resolves relative media references from the OTIO file location.
 
 ## Notes
 

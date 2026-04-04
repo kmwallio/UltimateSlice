@@ -13,7 +13,10 @@ Preferences are grouped by category in a sidebar:
 
 - **General** — application information and credits.
 - **Playback** — performance-related settings.
+- **Proxies** — proxy generation, preview LUTs, background prerender, and cache persistence.
 - **Timeline** — timeline display and analysis overlays.
+- **Integration** — MCP socket-server connectivity.
+- **Models** — downloadable AI model assets when the build includes AI inference support.
 
 ## About & Open-source Credits (General)
 
@@ -42,7 +45,7 @@ Backups are stored in `~/.local/share/ultimateslice/backups/` (or `$XDG_DATA_HOM
 ## Program Monitor Playback Priority
 
 - **Program monitor playback priority** controls how playback trades off smoothness vs precision:
-  - `Smooth` (default): favors continuity and lower stutter during active playback.
+  - `Smooth` (default): favors continuity and lower stutter during active playback. Under load, Program Monitor may drop late video frames to stay closer to the audio clock/playhead instead of building preview latency.
   - `Balanced`: middle ground.
   - `Accurate`: favors precise seeks/frame placement.
 - The setting is persisted across launches.
@@ -61,19 +64,25 @@ Backups are stored in `~/.local/share/ultimateslice/backups/` (or `$XDG_DATA_HOM
   - `get_preferences` returns `source_playback_priority`.
   - `set_source_playback_priority` updates the mode.
 
-## Proxy Preview Mode
+## Proxy Preview Mode (Proxies)
 
 - **Proxy preview mode** generates lightweight proxy files for smoother preview playback with large/high-bitrate media:
   - `Off` (default): uses original source media and does not request/generate proxy files.
   - `Half Res`: generates half-resolution H.264 proxies.
   - `Quarter Res`: generates quarter-resolution H.264 proxies.
+- The bottom status bar includes a proxy state toggle next to the render-mode toggle. It reads **Using Proxies** when proxy playback is active and **Original Media** when it is off, and **`Shift+P`** provides the same quick on/off action without opening Preferences.
+- Turning the quick toggle back on restores the last non-`Off` proxy size you chose here, so the fast toggle keeps using your preferred `Half Res` or `Quarter Res` setting.
 - Proxy files are transcoded in the background via ffmpeg and prefer a managed local cache root at `$XDG_CACHE_HOME/ultimateslice/proxies` (fallback `/tmp/ultimateslice/proxies`) for better external-drive playback.
 - While a proxy is still incomplete/unusable, UltimateSlice keeps playback on original media and switches to the proxy only after it is valid.
 - If local-cache writes/transcodes fail, UltimateSlice falls back to alongside-media `UltimateSlice.cache/` for that source.
-- When **Proxy mode is enabled**, successful local proxy transcodes are also mirrored into alongside-media `UltimateSlice.cache/` for reuse.
+- When **Persist proxies next to original media** is enabled and Proxy mode is on, successful local proxy transcodes are mirrored into alongside-media `UltimateSlice.cache/` for reuse.
 - Managed local proxy cache entries are pruned at startup when stale (older than 24h by ownership index).
+- Proxy file names stay stable for the same source path and proxy-affecting variant state (resolution, LUT, stabilization), so reopening a project can reuse an existing proxy instead of regenerating it unnecessarily.
+- UltimateSlice stores source-signature metadata beside each proxy and automatically regenerates it when the source media at that path changes on disk.
+- When older `UltimateSlice.cache/<stem>.proxy_*` sidecar files already exist, UltimateSlice reuses those legacy proxy names too instead of needlessly re-encoding them.
+- When the current project's proxy expectations change, UltimateSlice automatically removes stale/superseded current-format proxy variants and leftover `.partial` files from the managed local cache and the matching `UltimateSlice.cache/` directories for that project's sources.
 - On project unload/app close, UltimateSlice always cleans tracked proxy files from managed local cache (`$XDG_CACHE_HOME`/`/tmp`).
-- Alongside-media `UltimateSlice.cache/` proxies are preserved only when **Proxy mode is enabled** (for reopen/reuse); if **Proxy mode is disabled**, those tracked sidecar proxies are cleaned too.
+- Alongside-media `UltimateSlice.cache/` proxies are preserved only when both **Proxy mode** and **Persist proxies next to original media** are enabled; otherwise those tracked sidecar proxies are cleaned on unload/close.
 - When Proxy mode is enabled, project reload eagerly primes a capped set of near-playhead proxy sources so first playback can pick up local proxies sooner on slower/external storage.
 - A yellow progress bar appears at the bottom of the window during proxy generation (and now also when background timeline prerender jobs are in flight).
 - Proxy percentage now uses ffmpeg bytes-written (`total_size`) versus a bitrate×duration estimate, and remains below 100% while jobs are still running.
@@ -84,10 +93,20 @@ Backups are stored in `~/.local/share/ultimateslice/backups/` (or `$XDG_DATA_HOM
 - Export always uses original full-resolution media regardless of proxy mode.
 - The setting is persisted across launches.
 - MCP automation:
-  - `get_preferences` returns `proxy_mode`.
-  - `set_proxy_mode` updates the mode and re-generates proxies as needed.
+  - `get_preferences` returns `proxy_mode`, `last_non_off_proxy_mode`, and `persist_proxies_next_to_original_media`.
+  - `set_proxy_mode` updates the mode, preserves the last non-`Off` proxy size for quick restore, and re-generates proxies as needed.
 
-## Preview LUTs (Playback)
+## Proxy Sidecar Persistence (Proxies)
+
+- **Persist proxies next to original media** controls whether reusable proxy files are mirrored into `UltimateSlice.cache/` beside the source media.
+- Enabled (default): keep proxy sidecars next to the source media so reopened projects can reuse them from the media drive.
+- Disabled: prefer the managed local cache only, and clean tracked proxy sidecars on unload/close.
+- Local-cache failure fallback still uses alongside-media cache paths when needed for reliability.
+- MCP automation:
+  - `get_preferences` returns `persist_proxies_next_to_original_media`.
+  - `set_proxy_sidecar_persistence` toggles the setting.
+
+## Preview LUTs (Proxies)
 
 - **Preview LUTs (Proxy Off mode)** pre-renders project-resolution preview media for clips that have a LUT assigned when Proxy mode is `Off`.
 - This keeps LUT-heavy timelines smoother without requiring global proxy mode.
@@ -127,19 +146,21 @@ Backups are stored in `~/.local/share/ultimateslice/backups/` (or `$XDG_DATA_HOM
 
 - **Real-time preview** pre-builds upcoming decoder slots so boundary transitions are faster.
 - This can improve responsiveness at clip boundaries but may increase CPU/memory usage.
+- **Enabled by default.** Disabling it forces full pipeline teardown/rebuild at every clip boundary, which can cause ~500ms stutter per transition.
 - The setting is persisted across launches.
 - MCP automation:
   - `get_preferences` returns `realtime_preview`.
   - `set_realtime_preview` toggles the setting.
 
-## Background Prerender (Playback)
+## Background Prerender (Proxies)
 
-- **Background prerender** pre-renders complex upcoming overlap sections (3+ active video tracks) to temporary disk clips in the background.
-- You can quickly toggle it from the bottom status bar via **Background Render** (next to **Track Audio Levels**) without opening Preferences.
+- **Background prerender** pre-renders complex upcoming overlap sections (3+ active video tracks) to disk clips in the background.
+- You can quickly toggle it from the bottom status bar next to **Track Audio Levels** without opening Preferences. The button reads **Background Render** when prerendering is enabled and **Live Rendering** when it is disabled.
 - The toggle uses run/stop symbolic icons (`process-stop-symbolic` when off, `system-run-symbolic` when on) to make state visible at a glance.
 - When available, Program Monitor playback can use the prerendered section clip instead of rebuilding all video layers live for that segment.
 - If both **Real-time preview** and **Background prerender** are enabled, 3+ track overlap boundaries now prefer the prerender-capable path so prerender clips are still used during full playthrough.
 - Prerender playback uses the same preview-processing dimensions as live playback, so reduced Preview Quality modes do not crop prerender output to a top-left region.
+- Animated **brightness / contrast / saturation / temperature / tint** keyframes are now preserved in prerendered overlap segments, keeping heavy-overlap preview closer to export when those color controls are animated.
 - If a prerender segment finishes while playback is already inside that overlap region, UltimateSlice can now switch into the prerender path mid-segment (via a short rebuild) instead of waiting for the next boundary.
 - While paused or stopped, UltimateSlice also schedules nearby prerender jobs around the current playhead so heavy sections can be ready before playback starts.
 - While playing, background prerender scheduling is bounded to upcoming boundaries (not every playhead tick) to reduce job churn and keep readiness stable.
@@ -147,15 +168,34 @@ Backups are stored in `~/.local/share/ultimateslice/backups/` (or `$XDG_DATA_HOM
 - Prototype path: prerender segments currently include mixed audio, and prerender playback can run as a single prerender decoder branch (video + audio) during heavy overlap sections.
 - Prerender segment duration now covers the full overlap span to the next boundary (not a fixed ~4s chunk), reducing black tails when long overlap regions are active.
 - When Proxy mode is enabled, background prerender segments render at the active proxy scale (Half/Quarter) for faster prerender generation.
+- Prerender quality is configurable from the **Proxies** page: choose an x264 preset from `Ultrafast` through `Medium`, plus a CRF value from `0` to `51` (default `Veryfast` + `20`).
+- Lower CRF improves prerender fidelity but increases cache size and render time; slower presets spend more CPU to improve compression efficiency.
 - Prerender activity is surfaced in the existing bottom status/progress bar used for proxy generation.
 - Only active when enabled in Preferences.
-- Prerender cache files are temporary and are cleaned up when the project/player is closed.
+- When **Persist prerenders next to project file** is enabled, saved projects keep prerender cache files in a sibling `UltimateSlice.cache/prerender-vN/<project-hash>/` directory and startup/open preserves that saved-project cache root so reopening the same project can reuse compatible prerender segments.
+- Completed prerender jobs are written atomically through a temporary MP4 file before the final rename into the cache, so successful overlap renders now actually land in the prerender cache instead of failing on the temporary filename.
+- Unsaved/new projects still use the temporary prerender cache root until the project has a stable save path, and disabling the persistence setting keeps saved projects on that temporary-only path too.
+- Reuse is validated with a prerender manifest that records the contributing source/proxy files and their size/mtime signatures; changed inputs invalidate the cached segment automatically.
+- Disabling **Background prerender** clears the current project's prerender cache files.
 - If a prerender boundary clip fails to link reliably, UltimateSlice automatically falls back to the normal live rebuild path for stability.
+- Animated transform/mask properties, speed/reverse/freeze timing, and advanced clip-audio animation still fall back to the normal live path when prerender cannot reproduce them safely.
+- Prerender preset/CRF are part of the prerender cache identity, so changing them causes future prerender reuse to target only matching-quality cached segments.
 - When a boundary is not warm, playback falls back to the normal live rebuild path.
 - Uses more CPU/memory while playing and is disabled by default.
 - MCP automation:
-  - `get_preferences` returns `background_prerender`.
+  - `get_preferences` returns `background_prerender`, `prerender_preset`, `prerender_crf`, and `persist_prerenders_next_to_project_file`.
   - `set_background_prerender` toggles the setting.
+  - `set_prerender_quality` updates the background-prerender x264 preset and CRF.
+
+## Prerender Cache Persistence (Proxies)
+
+- **Persist prerenders next to project file** controls whether saved projects keep reusable prerender segments in a sibling `UltimateSlice.cache/prerender-vN/` directory.
+- Enabled (default): saved projects can reuse compatible prerenders after reopen.
+- Disabled: prerender output stays in the temporary cache root and is treated as session-local scratch data.
+- Unsaved projects always use the temporary cache root until they have a stable file path.
+- MCP automation:
+  - `get_preferences` returns `persist_prerenders_next_to_project_file`.
+  - `set_prerender_project_persistence` toggles the setting.
 
 ## Saving
 

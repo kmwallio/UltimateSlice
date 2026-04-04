@@ -4,7 +4,7 @@ use glib;
 use gtk4::prelude::*;
 use gtk4::{
     self as gtk, Box as GBox, Button, DrawingArea, EventControllerKey, GestureDrag, Label,
-    Orientation, Picture, Separator,
+    Orientation, Picture, Popover, Separator, Stack,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -13,11 +13,16 @@ const NS_PER_SECOND: f64 = 1_000_000_000.0;
 /// Default frame duration at 24 fps (nanoseconds)
 const DEFAULT_FRAME_NS: u64 = 41_666_667;
 
-/// Builds the source-preview panel: video display + in/out scrubber + transport.
-///
-/// Returns `(widget, source_marks)` — callers read `source_marks` to get the
-/// current in/out selection when appending to the timeline.
-/// Returns `(widget, source_marks, clip_name_label)`.
+/// Which "add to timeline" action the split button currently performs.
+#[derive(Clone, Copy, PartialEq)]
+enum AddMode {
+    Append,
+    Insert,
+    Overwrite,
+}
+
+/// Returns `(widget, source_marks, clip_name_label, set_audio_only)`.
+/// `set_audio_only(true)` shows the audio-only banner in place of the video display.
 pub fn build_preview(
     player: Rc<RefCell<Player>>,
     paintable: gdk4::Paintable,
@@ -25,7 +30,7 @@ pub fn build_preview(
     on_insert: Rc<dyn Fn()>,
     on_overwrite: Rc<dyn Fn()>,
     on_close_preview: Rc<dyn Fn()>,
-) -> (GBox, Rc<RefCell<SourceMarks>>, Label) {
+) -> (GBox, Rc<RefCell<SourceMarks>>, Label, Rc<dyn Fn(bool)>) {
     let source_marks = Rc::new(RefCell::new(SourceMarks::default()));
 
     let vbox = GBox::new(Orientation::Vertical, 0);
@@ -67,7 +72,30 @@ pub fn build_preview(
     picture.set_hexpand(true);
     picture.set_content_fit(gtk::ContentFit::Contain);
     picture.add_css_class("preview-picture");
-    vbox.append(&picture);
+
+    // Audio-only banner page: shown when selected clip has no video stream.
+    let audio_banner = GBox::new(Orientation::Vertical, 8);
+    audio_banner.set_vexpand(true);
+    audio_banner.set_hexpand(true);
+    audio_banner.set_valign(gtk::Align::Center);
+    audio_banner.set_halign(gtk::Align::Center);
+    audio_banner.add_css_class("audio-only-banner");
+    let note_label = Label::new(Some("♪"));
+    note_label.add_css_class("audio-only-note");
+    audio_banner.append(&note_label);
+    let audio_label = Label::new(Some("Audio only"));
+    audio_label.add_css_class("audio-only-subtitle");
+    audio_banner.append(&audio_label);
+
+    // Stack: "video" page is the Picture; "audio" page is the banner.
+    let preview_stack = Stack::new();
+    preview_stack.set_vexpand(true);
+    preview_stack.set_hexpand(true);
+    preview_stack.set_transition_type(gtk::StackTransitionType::Crossfade);
+    preview_stack.add_named(&picture, Some("video"));
+    preview_stack.add_named(&audio_banner, Some("audio"));
+    preview_stack.set_visible_child_name("video");
+    vbox.append(&preview_stack);
 
     // DragSource on the video display so users can drag the current
     // clip selection (in/out range) directly to the timeline.
@@ -420,22 +448,62 @@ pub fn build_preview(
     let btn_set_in = Button::with_label("Set In (I)");
     let btn_set_out = Button::with_label("Set Out (O)");
     let btn_prev_frame = Button::with_label("◀▮");
+    btn_prev_frame.set_tooltip_text(Some("Step back one frame (←)"));
     let btn_stop = Button::with_label("⏹");
     let btn_play_pause = Button::with_label("▶");
     let btn_next_frame = Button::with_label("▮▶");
-    let btn_append = Button::with_label("⬇ Append");
-    let btn_insert = Button::with_label("⤵ Insert");
-    let btn_overwrite = Button::with_label("⏺ Overwrite");
-    btn_prev_frame.set_tooltip_text(Some("Step back one frame (←)"));
     btn_next_frame.set_tooltip_text(Some("Step forward one frame (→)"));
-    btn_append.set_tooltip_text(Some("Append selection to timeline"));
-    btn_insert.set_tooltip_text(Some("Insert at playhead, shifting subsequent clips (,)"));
-    btn_overwrite.set_tooltip_text(Some(
+    // "Add to Timeline" split button — primary action (Append) + ▼ dropdown.
+    let btn_add = Button::with_label("⬇ Add");
+    btn_add.set_tooltip_text(Some("Append clip selection to the timeline"));
+    btn_add.set_sensitive(false);
+
+    let btn_add_more = Button::with_label("▼");
+    btn_add_more.set_tooltip_text(Some("More add options: Append, Insert, Overwrite"));
+    btn_add_more.set_sensitive(false);
+
+    // Popover for the ▼ side of the split button.
+    let add_pop = Popover::new();
+    let add_pop_box = GBox::new(Orientation::Vertical, 2);
+    add_pop_box.set_margin_start(4);
+    add_pop_box.set_margin_end(4);
+    add_pop_box.set_margin_top(4);
+    add_pop_box.set_margin_bottom(4);
+
+    let btn_pop_append = Button::with_label("⬇ Append");
+    btn_pop_append.add_css_class("flat");
+    btn_pop_append.set_tooltip_text(Some("Append selection to end of timeline"));
+
+    let btn_pop_insert = Button::with_label("⤵ Insert");
+    btn_pop_insert.add_css_class("flat");
+    btn_pop_insert.set_tooltip_text(Some("Insert at playhead, shifting subsequent clips (,)"));
+
+    let btn_pop_overwrite = Button::with_label("⏺ Overwrite");
+    btn_pop_overwrite.add_css_class("flat");
+    btn_pop_overwrite.set_tooltip_text(Some(
         "Overwrite at playhead, replacing existing material (.)",
     ));
-    btn_append.set_sensitive(false); // enabled once a source is loaded
-    btn_insert.set_sensitive(false);
-    btn_overwrite.set_sensitive(false);
+
+    add_pop_box.append(&btn_pop_append);
+    add_pop_box.append(&btn_pop_insert);
+    add_pop_box.append(&btn_pop_overwrite);
+    add_pop.set_child(Some(&add_pop_box));
+    add_pop.set_parent(&btn_add_more);
+    {
+        let add_pop = add_pop.clone();
+        btn_add_more.connect_clicked(move |_| {
+            if add_pop.is_visible() {
+                add_pop.popdown();
+            } else {
+                add_pop.popup();
+            }
+        });
+    }
+
+    let add_group = GBox::new(Orientation::Horizontal, 0);
+    add_group.add_css_class("linked");
+    add_group.append(&btn_add);
+    add_group.append(&btn_add_more);
 
     controls.append(&btn_set_in);
     controls.append(&btn_prev_frame);
@@ -443,9 +511,7 @@ pub fn build_preview(
     controls.append(&btn_play_pause);
     controls.append(&btn_next_frame);
     controls.append(&btn_set_out);
-    controls.append(&btn_append);
-    controls.append(&btn_insert);
-    controls.append(&btn_overwrite);
+    controls.append(&add_group);
     vbox.append(&controls);
 
     // Shuttle speed state for J/K/L: negative = reverse, 0 = paused, positive = forward.
@@ -503,23 +569,58 @@ pub fn build_preview(
         });
     }
 
-    // Append
+    // Primary "Add" button: dispatches to whichever mode was last used.
+    let add_mode: Rc<Cell<AddMode>> = Rc::new(Cell::new(AddMode::Append));
     {
-        btn_append.connect_clicked(move |_| {
+        let on_append = on_append.clone();
+        let on_insert = on_insert.clone();
+        let on_overwrite = on_overwrite.clone();
+        let add_mode = add_mode.clone();
+        btn_add.connect_clicked(move |_| match add_mode.get() {
+            AddMode::Append => on_append(),
+            AddMode::Insert => on_insert(),
+            AddMode::Overwrite => on_overwrite(),
+        });
+    }
+
+    // Popover: Append — updates the primary button label and mode.
+    {
+        let on_append = on_append.clone();
+        let add_pop = add_pop.clone();
+        let add_mode = add_mode.clone();
+        let btn_add = btn_add.clone();
+        btn_pop_append.connect_clicked(move |_| {
+            add_pop.popdown();
+            add_mode.set(AddMode::Append);
+            btn_add.set_label("⬇ Append");
             on_append();
         });
     }
 
-    // Insert at playhead
+    // Popover: Insert — updates the primary button label and mode.
     {
-        btn_insert.connect_clicked(move |_| {
+        let on_insert = on_insert.clone();
+        let add_pop = add_pop.clone();
+        let add_mode = add_mode.clone();
+        let btn_add = btn_add.clone();
+        btn_pop_insert.connect_clicked(move |_| {
+            add_pop.popdown();
+            add_mode.set(AddMode::Insert);
+            btn_add.set_label("⤵ Insert");
             on_insert();
         });
     }
 
-    // Overwrite at playhead
+    // Popover: Overwrite — updates the primary button label and mode.
     {
-        btn_overwrite.connect_clicked(move |_| {
+        let on_overwrite = on_overwrite.clone();
+        let add_pop = add_pop.clone();
+        let add_mode = add_mode.clone();
+        let btn_add = btn_add.clone();
+        btn_pop_overwrite.connect_clicked(move |_| {
+            add_pop.popdown();
+            add_mode.set(AddMode::Overwrite);
+            btn_add.set_label("⏺ Overwrite");
             on_overwrite();
         });
     }
@@ -725,14 +826,13 @@ pub fn build_preview(
         let shuttle_speed = shuttle_speed.clone();
         let frame_ns = frame_ns.clone();
         let update_marks_bar = update_marks_bar.clone();
-        let btn_append = btn_append.clone();
-        let btn_insert = btn_insert.clone();
-        let btn_overwrite = btn_overwrite.clone();
+        let btn_add = btn_add.clone();
+        let btn_add_more = btn_add_more.clone();
         let btn_close_preview = btn_close_preview.clone();
         let picture_weak = picture.downgrade();
         // Track last prescale size to avoid redundant updates
-        let last_prescale_w: Rc<Cell<i32>> = Rc::new(Cell::new(640));
-        let last_prescale_h: Rc<Cell<i32>> = Rc::new(Cell::new(360));
+        let last_prescale_w: Rc<Cell<i32>> = Rc::new(Cell::new(320));
+        let last_prescale_h: Rc<Cell<i32>> = Rc::new(Cell::new(180));
         glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
             let p = player.borrow();
             let pos = p.position();
@@ -743,9 +843,14 @@ pub fn build_preview(
                 let pw = pic.width();
                 let ph = pic.height();
                 if pw > 0 && ph > 0 {
-                    // 2× widget size for slight supersample, capped at 1920×1080
-                    let target_w = (pw * 2).min(1920);
-                    let target_h = (ph * 2).min(1080);
+                    // Target exactly the widget size (no supersample): the
+                    // safe_sink's own videoconvertscale would rescale a 2×
+                    // supersample back down to widget size anyway, wasting two
+                    // scale passes per frame.  1× keeps buffer sizes minimal
+                    // through the effects chain and eliminates the redundant
+                    // second scale.  Cap at 1920×1080 to bound worst-case cost.
+                    let target_w = pw.min(1920);
+                    let target_h = ph.min(1080);
                     let prev_w = last_prescale_w.get();
                     let prev_h = last_prescale_h.get();
                     // Only update if size changed by >10% to avoid thrashing
@@ -816,9 +921,8 @@ pub fn build_preview(
             {
                 let m = source_marks.borrow();
                 // Enable append once a source is loaded
-                btn_append.set_sensitive(!m.path.is_empty());
-                btn_insert.set_sensitive(!m.path.is_empty());
-                btn_overwrite.set_sensitive(!m.path.is_empty());
+                btn_add.set_sensitive(!m.path.is_empty());
+                btn_add_more.set_sensitive(!m.path.is_empty());
                 btn_close_preview.set_sensitive(!m.path.is_empty());
                 update_marks_bar(&m);
             }
@@ -830,7 +934,15 @@ pub fn build_preview(
         });
     }
 
-    (vbox, source_marks, clip_name_label)
+    // set_audio_only: switches between the video picture and the audio-only banner.
+    let set_audio_only: Rc<dyn Fn(bool)> = {
+        let stack = preview_stack.clone();
+        Rc::new(move |audio_only: bool| {
+            stack.set_visible_child_name(if audio_only { "audio" } else { "video" });
+        })
+    };
+
+    (vbox, source_marks, clip_name_label, set_audio_only)
 }
 
 fn draw_scrubber(cr: &gtk::cairo::Context, width: f64, marks: &SourceMarks) {

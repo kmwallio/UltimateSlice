@@ -104,10 +104,133 @@ Useful playback-tuning toggles:
 - `python3 tools/mcp_call.py set_realtime_preview '{"enabled":true}'`
 - `python3 tools/mcp_call.py set_experimental_preview_optimizations '{"enabled":true}'`
 - `python3 tools/mcp_call.py set_background_prerender '{"enabled":true}'`
+- `python3 tools/mcp_call.py set_prerender_quality '{"preset":"fast","crf":18}'`
+- `python3 tools/mcp_call.py set_proxy_sidecar_persistence '{"enabled":true}'`
+- `python3 tools/mcp_call.py set_prerender_project_persistence '{"enabled":true}'`
 - `python3 tools/mcp_call.py get_performance_snapshot '{}'`
 - `python3 tools/mcp_call.py save_project_with_media '{"path":"/absolute/path/MyProject.uspxml"}'`
+- `python3 tools/mcp_call.py collect_project_files '{"directory_path":"/absolute/path/CollectedMedia","mode":"entire_library"}'`
+- `python3 tools/mcp_call.py collect_project_files '{"directory_path":"/absolute/path/CollectedMedia","mode":"entire_library","use_collected_locations_on_next_save":true}'`
 
-`set_background_prerender` enables temporary disk prerender of complex upcoming overlap sections (cleaned when the app/player closes).
+`set_background_prerender` enables disk prerender of complex upcoming overlap sections. `set_prerender_quality` changes the x264 preset/CRF used for those prerender segments (default `veryfast` + `20`); lower CRF improves fidelity but increases cache size and render time. `set_prerender_project_persistence` controls whether saved projects keep those prerender segments in a project-scoped sibling `UltimateSlice.cache/prerender-vN/<project-hash>/` cache or stay on the temporary cache root.
+
+`set_proxy_sidecar_persistence` controls whether proxy files are mirrored into `UltimateSlice.cache/` beside the original media for reuse after reopen.
+
+`collect_project_files` leaves the current project paths unchanged by default; set `use_collected_locations_on_next_save` to `true` when you want the next project save/export to use the copied media paths.
+
+## Workspace layout MCP examples
+
+List the live arrangement plus saved layouts:
+
+```bash
+python3 tools/mcp_call.py list_workspace_layouts '{}'
+```
+
+Save the current arrangement as `Editing`:
+
+```bash
+python3 tools/mcp_call.py save_workspace_layout '{"name":"Editing"}'
+```
+
+Apply a saved layout:
+
+```bash
+python3 tools/mcp_call.py apply_workspace_layout '{"name":"Editing"}'
+```
+
+Rename a saved layout:
+
+```bash
+python3 tools/mcp_call.py rename_workspace_layout '{"old_name":"Editing","new_name":"Color"}'
+```
+
+Delete a saved layout:
+
+```bash
+python3 tools/mcp_call.py delete_workspace_layout '{"name":"Color"}'
+```
+
+Reset the window to the built-in default arrangement:
+
+```bash
+python3 tools/mcp_call.py reset_workspace_layout '{}'
+```
+
+`list_workspace_layouts` returns the current live arrangement in `current`, saved presets in `layouts`, and the exact-matching saved preset name (if any) in `active_layout`. Saved layout names are app-global UI state, not project data.
+
+## Project management examples
+
+Create a new empty project:
+
+```bash
+python3 tools/mcp_call.py create_project '{"title":"Automation Draft"}'
+```
+
+Open an FCPXML project:
+
+```bash
+python3 tools/mcp_call.py open_fcpxml '{"path":"/absolute/path/project.fcpxml"}'
+```
+
+Open an OTIO project:
+
+```bash
+python3 tools/mcp_call.py open_otio '{"path":"/absolute/path/project.otio"}'
+```
+
+Export the current project as OTIO with relative media references:
+
+```bash
+python3 tools/mcp_call.py save_otio '{"path":"/absolute/path/project.otio","path_mode":"relative"}'
+```
+
+`create_project`, `open_fcpxml`, and `open_otio` replace the current project and switch the visible window from the Welcome screen to the editor view, so screenshots and subsequent UI-driven automation land on the active project.
+
+Collect media files into a folder without writing project XML:
+
+```bash
+python3 tools/mcp_call.py collect_project_files '{"directory_path":"/absolute/path/CollectedMedia","mode":"timeline_used"}'
+```
+
+Use `mode:"entire_library"` to include imported-but-unused library media too. If omitted, the MCP tool defaults to `timeline_used`.
+
+## Media Library annotation MCP examples
+
+List library items, including each item's stable `library_key`, rating, and keyword ranges:
+
+```bash
+python3 tools/mcp_call.py list_library '{}'
+```
+
+Mark a clip as a favorite:
+
+```bash
+python3 tools/mcp_call.py set_media_rating '{"library_key":"/absolute/path/clip.mov","rating":"favorite"}'
+```
+
+Add a keyword range using source-relative nanoseconds:
+
+```bash
+python3 tools/mcp_call.py add_media_keyword_range '{"library_key":"/absolute/path/clip.mov","label":"B-roll","start_ns":250000000,"end_ns":1250000000}'
+```
+
+Update an existing keyword range:
+
+```bash
+python3 tools/mcp_call.py update_media_keyword_range '{"library_key":"/absolute/path/clip.mov","range_id":"<range-id>","label":"Close Up","start_ns":500000000,"end_ns":1500000000}'
+```
+
+Delete a keyword range:
+
+```bash
+python3 tools/mcp_call.py delete_media_keyword_range '{"library_key":"/absolute/path/clip.mov","range_id":"<range-id>"}'
+```
+
+Smart collections can now also save a rating filter:
+
+```bash
+python3 tools/mcp_call.py create_collection '{"name":"Favorite selects","rating":"favorite"}'
+```
 
 ## Transform MCP examples
 

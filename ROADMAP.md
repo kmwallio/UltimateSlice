@@ -33,6 +33,7 @@ Tracking docs:
 ### Media Library Browser
 - [x] Import media via file chooser (video/audio/image MIME filter)
 - [x] Still-image detection by extension (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC, SVG) with 4-second default duration
+- [x] Animated SVG detection with authored duration and cached silent-video rendering for preview/export
 - [x] GStreamer Discoverer probes duration and source timecode on import (background thread via `MediaProbeCache`)
 - [x] Library list with clip name + filename display
 - [x] Thumbnails auto-refresh when extraction completes (debounced batch redraw) without requiring manual panel/window redraw
@@ -178,6 +179,7 @@ Tracking docs:
 - [x] Unix domain socket transport (Preferences → Integration toggle) for connecting to a running instance
 - [x] `--mcp-attach` stdio-to-socket proxy so standard MCP clients can use `.mcp.json` to attach
 - [x] Python stdio-to-socket MCP bridge script (`tools/mcp_socket_client.py`) with `.mcp.json` server entry (`ultimate-slice-python-socket`)
+- [x] MCP project replacement actions (`create_project`, `open_fcpxml`, `open_otio`) switch the window from Welcome to Editor when they apply a new project
 - [x] Local perf tooling scripts: `tools/mcp_call.py`, `tools/proxy_perf_matrix.sh`, and `tools/proxy_fps_regression.py`
 - [x] MCP color parity calibration script: `tools/calibrate_mcp_color_match.py` (slider sweeps + preview/export RMSE report + frei0r cross-runtime probe)
 - [x] `take_screenshot` tool — captures a PNG of the full application window via GTK snapshot + GSK CairoRenderer, written to the current working directory
@@ -323,11 +325,13 @@ Tracking docs:
           - [x] Apply adaptive per-slot queue drop-late policy during heavy-overlap playback to reduce compositor-branch backpressure at handoff
           - [x] Re-sync/pause audio-only preview pipeline around video boundary rebuilds so transition stalls do not let audio run ahead and end early versus video
            - [x] Add short look-ahead boundary prewarm (next active clip-set probe/path warm-up) to reduce synchronous work at transition handoff
-           - [x] Optional background prerender mode: render upcoming complex overlap windows (3+ active video tracks) to temporary disk clips and use them at boundary rebuilds when available
-           - [x] Background prerender boundary correctness hardening: track prerender-active clip sets for boundary transitions and normalize prerender segment timestamps to avoid freeze/black handoff regressions
-           - [x] Background prerender safety fallback: when a prerender video slot fails to link at boundary rebuild, immediately rebuild with normal live slots; cache keys are versioned with timeline/track identity to prevent stale segment reuse
-           - [x] Background prerender link-race guard: allow a short post-preroll link grace for prerender slots, then force live fallback + segment invalidation when still unlinked to prevent unstable playback states
-           - [x] Background prerender priority over realtime boundary path for 3+ overlaps: when both settings are enabled, boundary handling now chooses prerender-capable rebuilds so prerender clips are consumed during full playthrough
+            - [x] Optional background prerender mode: render upcoming complex overlap windows (3+ active video tracks) to project-scoped disk clips beside saved projects (with temp fallback for unsaved projects), preserve those saved-project cache roots across startup/open, and reuse them at boundary rebuilds when available
+            - [x] Prerender cache persistence preference: Preferences now let users keep saved-project prerenders beside the project file or force temporary-only prerender scratch storage
+            - [x] Background prerender boundary correctness hardening: track prerender-active clip sets for boundary transitions and normalize prerender segment timestamps to avoid freeze/black handoff regressions
+            - [x] Background prerender safety fallback: when a prerender video slot fails to link at boundary rebuild, immediately rebuild with normal live slots; cache keys plus manifest-validated source/proxy signatures prevent stale segment reuse
+            - [x] Background prerender link-race guard: allow a short post-preroll link grace for prerender slots, then force live fallback + segment invalidation when still unlinked to prevent unstable playback states
+            - [x] Background prerender atomic cache writes: FFmpeg temp outputs now declare MP4 muxing explicitly so `.partial` cache files still render successfully before the final rename into the prerender cache
+            - [x] Background prerender priority over realtime boundary path for 3+ overlaps: when both settings are enabled, boundary handling now chooses prerender-capable rebuilds so prerender clips are consumed during full playthrough
            - [x] Background prerender scheduling bounded during playback: queue by upcoming boundaries only (not moving playhead ticks) to avoid excessive in-flight segment churn
            - [x] Background prerender slot sizing parity: prerender decode branch now scales to current preview-processing dimensions before compositor to avoid top-left crop artifacts at reduced preview quality
            - [x] Background prerender A/V prototype: prerender segments now include mixed audio and prerender playback uses a single prerender decoder branch for both video and audio
@@ -359,6 +363,10 @@ Tracking docs:
            - [x] Debounce duplicate playback boundary rebuild attempts (same desired clip set within ~120ms) to reduce transient rebuild thrash
            - [x] Tighter post-seek budgets after prewarm: reduce arrival wait when sidecar proved file decodable
            - [x] Skip preroll for already-settled decoders: avoid redundant blocking in wait_for_paused_preroll
+           - [x] Fix Smooth-mode single-slot drop-late removing backpressure (compositor spun at 11K fps, QoS dropped 99.99% → 1-2 displayed fps); now only enables drop-late for transition overlaps or 3+ tracks
+           - [x] Enable `realtime_preview` by default for out-of-box boundary stutter reduction
+           - [x] Reduce teardown state-query timeout from 100ms to 10ms per element (10x faster teardown)
+           - [x] Lower adaptive arrival wait floor from 200ms to 100ms for faster single-track boundary transitions
           - [ ] Remove-only incremental boundary path — BLOCKED: same GstVideoAggregator limitation as add-only; aggregator timing/segment state goes stale after pad removal without compositor.seek_simple reset, causing ≤1 frame/sec on retained decoders
           - [ ] Add-only incremental boundary path — BLOCKED: GstVideoAggregator requires compositor.seek_simple to reset aggregation state, which propagates upstream corrupting retained decoders. Future approach: gst_pad_set_offset() for running-time alignment
            - [x] Pre-preroll incoming boundary clips before switch so decoder/link work is shifted earlier than the handoff tick
@@ -369,13 +377,16 @@ Tracking docs:
               - [x] Boundary audio-drop guard: when overlap rebuilds encounter delayed video-pad linking, keep already-linked slot audio active (do not EOS the audio pad solely because video linking is late)
               - [x] Boundary pre-link EOS deferral for active handoffs: when playback is already running across a boundary, avoid forcing early pre-link EOS on newly added overlap slots so late pad-added links can settle before post-seek arrival checks
               - [x] Audiomixer flush parity: flush the audiomixer alongside the compositor during boundary rebuilds so their output running-times stay in sync, preventing audio buffer late-drop after a video-path flush
+              - [x] Normalize Program Monitor mixer-bound clip audio to 48 kHz stereo before `audiomixer`, preventing `qtdemux ... not-negotiated` preview failures on 16 kHz mono AAC camera clips (for example Ring MP4 media)
               - [x] Continuing decoders fast path: reuse existing decoder slots at boundary crossings when adjacent clips share the same source file, avoiding teardown/rebuild overhead (~60-75% boundary latency reduction for same-source transitions)
-            - [x] Fix paused-seek preview: scrubbing within the same clip now seeks decoders in-place (no pipeline teardown/rebuild), eliminating the black-screen and first-frame flash caused by the pipeline going through `Ready` state and decoders prerolling at position 0
+             - [x] Fix paused-seek preview: scrubbing within the same clip now seeks decoders in-place (no pipeline teardown/rebuild), eliminating the black-screen and first-frame flash caused by the pipeline going through `Ready` state and decoders prerolling at position 0
     - [x] Regenerate proxies when proxy size changes in Preferences (was reusing old-resolution file)
    - [x] LUT-baked proxies: clip proxy re-generated when a LUT is assigned/cleared, enabling grade preview
    - [x] Proxy shutdown cleanup policy: always clean managed local/tmp proxies on unload/close; preserve tracked `UltimateSlice.cache` proxies only when Proxy mode is enabled (clean sidecar proxies too when disabled)
    - [x] Enabled-mode sidecar proxy mirroring: when Proxy mode is enabled, local proxy transcodes are mirrored to alongside-media `UltimateSlice.cache` as well
+   - [x] Proxy sidecar persistence preference: Preferences now let users decide whether proxies are persisted beside original media or kept in the managed local cache only
    - [x] Preview LUTs preference: when Proxy mode is Off, generate/use project-resolution LUT-baked preview media for LUT-assigned clips
+   - [x] Stable proxy reuse + stale cleanup: proxy paths now stay stable for the same source path and proxy-affecting variant state, changed source media invalidates proxies via explicit source-signature checks, older legacy `UltimateSlice.cache/<stem>.proxy_*` sidecars are reused when still valid, and current-project stale/superseded proxy variants are pruned automatically from managed local and matching sidecar cache dirs
    - [x] Export/proxy progress percentage now uses bitrate×duration size estimates with ffmpeg `total_size` tracking, capped below 100% until ffmpeg completion
    - [x] Parallel proxy transcoding: 4 worker threads process ffmpeg transcodes concurrently instead of sequentially
   - [x] Optimized effects pipeline: single-pass `videoconvertscale` for decode→RGBA downscale, early downscale before effects, conditional element creation for no-op effects, leaky scope queue to prevent display backpressure
@@ -408,8 +419,8 @@ Tracking docs:
 - [x] Color scopes (waveform, vectorscope, RGB parade, histogram)
 - [ ] Preview/Export color parity improvements
   - [x] GStreamer real-time LUT element — apply LUTs in the GStreamer preview pipeline via CPU-based trilinear 3D LUT pad probe at preview resolution, with parsed-LUT caching and automatic double-apply prevention when source is already LUT-baked
-  - [ ] Prerender keyframe interpolation — support brightness/contrast/saturation/temperature/tint keyframes in the prerender pipeline (currently only static values are applied; animated color adjustments are not visible in proxy mode)
-  - [ ] Configurable prerender quality — expose CRF / encoding preset in Preferences (currently CRF 20 veryfast) to let users trade cache size and prerender speed for higher color fidelity
+  - [x] Prerender keyframe interpolation — background prerender now carries brightness/contrast/saturation/temperature/tint keyframes so animated color adjustments remain visible during prerender-backed preview
+  - [x] Configurable prerender quality — Preferences now expose background-prerender x264 preset + CRF controls (default `veryfast` / `20`), MCP `get_preferences` / `set_prerender_quality` surface the same settings, and prerender cache identity now includes them so stale mismatched-quality segments are not reused
   - [ ] Preview/export comparison overlay — a split-screen or A/B toggle in the Program Monitor that shows the prerender frame beside a single-frame export render, allowing direct visual parity inspection without a full export cycle
 - [x] Advanced color grading
   - [x] Match Clip Colors — automatic Reinhard-style color transfer: analyzes source and reference clip frames in CIE L\*a\*b\* space to compute slider adjustments (brightness, contrast, saturation, temperature, tint) and optional 17³ 3D LUT for fine-grained matching. Inspector "Match Color…" button, `Ctrl+Alt+M` shortcut, and `match_clip_colors` MCP tool with full undo support.
@@ -449,7 +460,12 @@ Tracking docs:
 - [x] Debounced title reseek — compositor-only flush during title edits (avoids expensive all-slot decoder re-seek)
 - [x] Velocity-adaptive scrub waits — 30ms arrival/pulse budgets during rapid scrubbing (2.6× faster)
 - [x] Title clips in background prerender — lavfi color + drawtext source for title overlay clips
+- [x] Transparent title backgrounds preserved in background prerender — zero-alpha title clip backgrounds now use alpha-capable lavfi sources so prerendered title overlays do not cover lower video tracks with black
 - [x] Frei0r effects in background prerender — applied in ffmpeg filter chain, hashed in signature
+- [x] Quiet optional frei0r capability probes for prerender/export — unsupported FFmpeg frei0r modules are now detected silently so title-bearing prerender jobs fall back cleanly instead of logging misleading module-not-found errors
+- [x] Clip-local masks/blur/flip/anamorphic in background prerender — prerender FFmpeg graph now applies shape masks plus the remaining static visual clip transforms/effects that were missing from overlap caches
+- [x] Correctness-first prerender fallback for unsupported clip cases — animated clip/mask properties, speed/reverse/freeze timing, and advanced clip-audio effects now stay on the live path instead of producing incorrect cached prerenders
+- [x] Title font-face parity across preview/prerender/export — title font parsing is now shared, FFmpeg resolves title fonts to concrete `fontfile` matches via `fc-match`, and the Inspector surfaces fallback matches so preview/prerender/export no longer silently collapse distinct faces onto one export font
 - [x] MCP tools: `add_title_clip`, `set_clip_title_style`
 - [x] Transition effects (fade to black, wipe right, wipe left)
 - [x] Transition preview matching — program monitor now previews cross-dissolve, fade-to-black, wipe-right, and wipe-left transitions using compositor alpha animation and videocrop, matching FFmpeg `xfade` export output
@@ -462,8 +478,10 @@ Tracking docs:
 - [x] Adjustment layers / adjustment tracks — a special clip (or dedicated track) whose filters and color corrections apply to all clips/tracks below it in the composite stack; the adjustment only affects the region covered by the adjustment clip's bounding box (position, scale, crop) so effects can be scoped to a portion of the frame or a time range on the timeline
   - [x] Phase 1: Full-frame adjustment layers with `ClipKind::Adjustment`. Color grading (brightness, contrast, saturation) applied to composited output via permanent GStreamer videobalance element (real-time preview). Frei0r user effects, LUTs, temperature/tint, blur applied on export via time-gated FFmpeg filter chain. Purple hatched timeline rendering, inspector visibility, FCPXML round-trip, MCP tool, undo support, right-click context menu.
   - [x] Phase 1b: Background prerender support for adjustment layer frei0r effects — when Background Render is enabled, prerender the adjustment frei0r/LUT/blur effects into temporary clips so the Program Monitor shows the full effect chain without real-time GStreamer topology changes
-  - [ ] Phase 2: Bounding box scoping (position, scale, crop constraints on adjustment layer effect region)
-- [ ] Shape / freeform masking — rectangle, ellipse, bezier path masks with feathering for selective effects
+  - [x] Phase 2: Bounding box scoping (position, scale, crop, and rotate constrain the adjustment effect region in both preview and export; overlapping scoped adjustments stack by track order)
+- [x] Shape / freeform masking — rectangle, ellipse, bezier path masks with feathering for selective effects
+  - [x] Phase 1: Rectangle & ellipse masks with feathering — per-clip mask model (`Vec<ClipMask>`), SDF-based alpha computation, GStreamer preview pad probe, FFmpeg `geq` export, Inspector UI with all controls, transform overlay mask outline, keyframe property support, FCPXML round-trip, MCP `set_clip_mask` tool, full undo/redo
+  - [x] Phase 2: Bezier/freeform path masks — `MaskShape::Path` with `Vec<BezierPoint>` (anchor + in/out bezier handles), closed-path SDF via polyline subdivision + winding number, feathered edges via distance-to-polyline, AABB early-out optimization, export via rasterized grayscale PGM + FFmpeg `movie`/`alphamerge`, Cairo bezier curve overlay drawing with control point visualization, Inspector point list editor, MCP `set_clip_mask` path support, serde backward-compatible persistence
 
 ### Video Transform (per clip)
 - [x] Scale / resize clip (zoom in/out within frame) via GStreamer `videoscale` + `videobox`
@@ -506,23 +524,28 @@ Tracking docs:
 
 ### Monitoring
 - [x] Safe area overlays (title safe 80%, action safe 90%) — Program Monitor "Safe Areas" toggle with persisted state
-- [ ] False color overlay — map luminance to color spectrum for exposure evaluation
-- [ ] Zebra stripes — diagonal lines on areas exceeding configurable IRE threshold
-- [ ] Focus peaking — highlight in-focus edges with colored overlay
+- [x] False color overlay — map luminance to color spectrum for exposure evaluation
+- [x] Zebra stripes — diagonal lines on areas exceeding configurable IRE threshold
+- [x] Focus peaking — highlight in-focus edges with colored overlay
 
 ### Project Management
 - [x] Project save / load as FCPXML (wired to New/Open/Save buttons in toolbar)
 - [x] Recent projects list
 - [x] Auto-save (60s timer, writes to /tmp/ultimateslice-autosave.fcpxml when project is dirty)
-- [ ] Proxy media generation and management
+- [x] Proxy media generation and management
 - [x] Auto-backup with versioned history (timestamped backups to `$XDG_DATA_HOME/ultimateslice/backups/`, per-project pruning, restore UI, configurable in Preferences, MCP `list_backups` tool)
 
 ### Media Management
 - [x] Relink dialog — general-purpose UI to find and repoint all offline/missing media
-- [ ] Bins / folders — hierarchical media browser organization for large projects
+- [x] Bins / folders — hierarchical media browser organization for large projects
+  - [x] `MediaBin` data model with nesting (max 2 levels), `bin_id` on `MediaItem`, `MediaLibrary` wrapper struct
+  - [x] Breadcrumb navigation bar, folder-icon bin cells in FlowBox, double-click to enter, "All Media" toggle
+  - [x] Right-click context menu: New Bin, Rename, Delete, New Sub-bin, Move to Bin
+  - [x] FCPXML persistence via `us:bins`/`us:media-bins` vendor attributes on `<event>`
+  - [x] MCP tools: `create_bin`, `delete_bin`, `rename_bin`, `list_bins`, `move_to_bin`; `list_library` includes `bin_id`
 - [x] Offline / missing media indicators — visual badge on clips when source_path doesn't exist
-- [ ] Consolidate / collect files — copy all referenced media into one directory for archival or transfer
-- [ ] Metadata display & filtering — show resolution, codec, frame rate, duration, file size in media browser
+- [x] Consolidate / collect files — copy project media into a chosen folder for archival or transfer, with **Timeline-used only** and **Entire library** modes in the UI plus MCP `collect_project_files` automation
+- [x] Metadata display & filtering — media browser cards now surface resolution, codec, frame rate, duration, and file size with search/type/resolution filters and expanded `list_library` metadata
 
 ### Canvas / Sequence Settings
 - [x] Canvas size dialog (project resolution: 1080p, 4K, custom W×H)
@@ -539,11 +562,11 @@ Tracking docs:
   - Audio codec: AAC, Opus, FLAC, PCM
   - Audio sample rate and channel layout (stereo / mono)
 - [x] Export presets: save/load named configurations (e.g. "Twitter 720p", "Archive ProRes")
-- [ ] ProRes / WebM / GIF export options
-- [ ] Batch export / render queue (queue multiple export jobs to run sequentially)
+- [x] ProRes / WebM / GIF export options
+- [x] Batch export / render queue (queue multiple export jobs to run sequentially)
 - [x] Chapter markers in export (embed project markers as MP4/MKV chapter metadata via ffmpeg FFMETADATA)
 - [x] Still frame export (GUI menu/button to export current Program Monitor frame as PNG/JPEG/PPM via toolbar Export dropdown)
-- [ ] EDL export (CMX 3600) — for online editing, color grading handoff, broadcast
+- [x] EDL export (CMX 3600) — for online editing, color grading handoff, broadcast
 - [ ] AAF export — standard interchange for audio post-production (Pro Tools)
 - [x] Export progress dialog with cancel (ProgressBar + status label)
 
@@ -560,20 +583,28 @@ Tracking docs:
 - [ ] Customizable keyboard shortcuts (shortcut config file + preferences UI)
 - [x] Timecode entry / go-to timecode (HH:MM:SS:FF to jump playhead)
 - [x] Drag-and-drop from file manager (import by dragging files into media browser or timeline)
-- [ ] Customizable workspace layouts (save/restore panel arrangements for different tasks)
+- [x] Customizable workspace layouts (save/restore panel arrangements for different tasks)
 - [ ] Named project snapshots (create named versions at milestones without separate files)
 
 ### Professional Workflow (The "Pro" Edge)
-- [ ] Multicam editing (sync by audio or timecode)
+- [x] Multicam editing (sync by audio or timecode)
   - [x] Audio cross-correlation sync for selected clips (FFT-based, background thread, MCP tool)
   - [x] Automatic timecode extraction from media files on import (GST_TAG_DATE_TIME)
+  - [x] Phase 1a: Multicam data model (`ClipKind::Multicam`, `MulticamAngle`, `AngleSwitch`) and ClipKind propagation (EDL/FCPXML/inspector/timeline/through-edit parity with Compound)
+  - [x] Phase 1b: Create Multicam Clip action (Alt+M / right-click menu, audio sync, undo/redo)
+  - [x] Phase 2: Timeline visualization (orange fill, segment labels, switch markers) + preview/export flattening
+  - [x] Phase 3: Angle switching (1-9 keys at playhead, insert_angle_switch, undo/redo)
+  - [x] Phase 4: Angle viewer sidebar panel (angle buttons, active highlight)
+  - [x] Phase 5: FCPXML round-trip (us:multicam-angles, us:multicam-switches), MCP tools (create_multicam_clip, add_angle_switch, list_multicam_angles), documentation
 - [x] Remove Silent Parts: right-click context menu action to detect and remove silent segments via ffmpeg `silencedetect`, with configurable threshold/duration and single-undo support
-- [ ] Nested Timelines / Compound Clips
+- [x] Nested Timelines / Compound Clips
+  - [x] Phase 1: Compound clip model (`ClipKind::Compound`, `compound_tracks`), create/break-apart from selection (`Alt+G`), context menu, preview/export flattening, FCPXML round-trip, MCP tools (`create_compound_clip`, `break_apart_compound_clip`), full undo/redo
+  - [x] Phase 2: Drill-down sub-timeline editing (double-click to enter compound, teal breadcrumb bar with path labels, Escape to go back, hit-test and drawing resolve to compound's internal tracks)
 - [x] 3-Point and 4-Point editing (Insert/Overwrite from Source)
 - [x] J/K/L scrubbing (shuttle control in program monitor; pitch-corrected audio via Rubberband is a planned enhancement)
 - [x] Match Frame (`F` shortcut to find timeline clip in media library, load in source monitor, seek to matching frame; MCP `match_frame` tool)
-- [ ] Proxy Workflow: One-click toggle between original and proxy media
-- [ ] Keyword ranges + favorite/reject ratings in browser
+- [x] Proxy Workflow: One-click toggle between original and proxy media
+- [x] Keyword ranges + favorite/reject ratings in browser
 - [ ] Auditions / clip versions (swap alternate takes nondestructively)
 - [ ] Plugin architecture for third-party video effects (e.g. OFX/LV2 bridge)
 
@@ -583,7 +614,7 @@ Tracking docs:
   - [x] FFmpeg rubberband filter for export (pitch + tempo with formant preservation)
   - [x] Pitch-preserved speed changes (clip.pitch_preserve flag bypasses atempo, uses rubberband tempo=)
   - [x] Pitch-shift effect per clip (±12 semitones via inspector slider)
-  - [ ] Pitch-preserved J/K/L shuttle (apply Rubberband to main pipeline during shuttle)
+  - [x] Pitch-preserved J/K/L shuttle (scaletempo in main pipeline + rate-based decoder seeks for hot rate changes)
 - [x] Audio Roles (Dialogue, Effects, Music) with submixing — per-track `AudioRole` enum, inspector dropdown, timeline color-coded labels, MCP `set_track_role` tool, FCPXML persistence, export per-role submix routing
 - [x] LADSPA audio plugin support — Audio FX browser tab, inspector effect display, discovery via GStreamer registry, per-clip effect chain, parameter control, GStreamer preview + FFmpeg export via native `ladspa` filter, FCPXML persistence, MCP tools (list/add/remove/set params)
 - [x] Voiceover recording tool with countdown and punch-in (toolbar Record button, 3s countdown, GStreamer `autoaudiosrc` capture to WAV, clip placed at playhead on first audio track, undo support, MCP `record_voiceover` tool)
@@ -594,9 +625,21 @@ Tracking docs:
 
 ### AI & Automation
 - [ ] Custom background removal model — train/export a self-hosted segmentation model with secure distribution and in-app download (Preferences → Models); replace third-party MODNet dependency
-- [ ] Speech-to-Text: Automatic subtitle generation and transcription
+- [x] Speech-to-Text: Automatic subtitle generation and transcription
+  - [x] Local Whisper model inference via `whisper-rs` (GGML models, auto-discovery)
+  - [x] Per-clip subtitle segments with word-level timestamps
+  - [x] Subtitle styling: font, color, outline, background box, vertical position
+  - [x] Word highlight modes: None, Bold, Color, Underline, Stroke (karaoke-style)
+  - [x] Time-based word window (configurable seconds around active word)
+  - [x] Multi-track subtitle support with independent per-clip positioning/styling
+- [x] Program Monitor overlay with real-time word highlighting
+- [x] Export burn-in via ASS/SRT subtitle filter (post-compositing, above all tracks)
+- [x] Shared subtitle font parsing/alignment: Program Monitor preview and export now derive subtitle family/style/size from the same normalized font description for better bold/italic/fallback consistency
+- [x] Subtitle renderer-detail parity cleanup: Program Monitor subtitle outline, box, underline, and stroke metrics now scale from the same 1080-based sizing model used by export, and subtitle vertical positioning now uses the same normalized top/center/bottom anchoring model as export, reducing visible preview-vs-export styling drift without changing the separate GTK-overlay vs libass renderer architecture
+  - [x] SRT file export, 7 MCP tools, FCPXML round-trip, timeline CC badge
+  - [x] Whisper output cleanup (contraction merging, punctuation spacing)
 - [ ] AI Scene Cut Detection for long source files
-- [ ] Smart Collections based on metadata (keywords, resolution, frame rate)
+- [x] Smart Collections based on metadata — save project-wide media-browser queries by search text, kind, resolution, and frame rate; manage them from the browser; persist via FCPXML vendor metadata; automate with MCP `list_collections` / `create_collection` / `update_collection` / `delete_collection`
 - [ ] Optical Flow slow-motion (AI frame interpolation)
 - [ ] AI Music Generation (MusicGen / MusicGPT)
   - [ ] Phase 1 — Draw-region UX: draw a time-range box on an audio track to define a generated-audio region (reusable for silence/tone generation too)
@@ -619,7 +662,8 @@ Tracking docs:
 ### Performance & Integration
 - [ ] Hardware-accelerated decoding/encoding (VA-API, NVENC)
 - [ ] Background rendering for complex effect stacks
-- [ ] OpenTimelineIO (OTIO) import/export
+- [x] OpenTimelineIO (OTIO) import/export (native Rust JSON serializer via serde_json; clips/tracks/gaps/transitions/markers/speed plus current OTIO metadata round-trip; versioned `metadata.ultimateslice` contract; title/subtitle metadata, track audio-role metadata, transform/crop/blend metadata, and core transform/opacity keyframe round-trip; absolute/relative OTIO media-reference export with base-path-aware reimport; MCP `save_otio`/`open_otio` tools; Export dropdown + File Open dialog)
+- [ ] Full OTIO metadata parity for UltimateSlice-specific features not yet covered by OTIO round-trip (remaining advanced effects, mask payloads/animation, secondary keyframe lanes such as crop animation, and nested clip internals)
 - [ ] Shared Project/Library support for collaborative editing
 
 ---

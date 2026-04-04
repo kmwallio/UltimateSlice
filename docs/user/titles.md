@@ -50,6 +50,8 @@ The Inspector's **Title Overlay** section provides full control over title text 
 ### Text & Position
 - **Text entry** -- the title text to display
 - **Font** -- click to choose a font (Pango font description)
+  - The button tooltip shows which font export/prerender will actually use.
+  - If the requested face is missing or only partially available, the tooltip calls out the fallback instead of failing silently.
 - **Text Color** -- color picker with alpha support
 - **Position X/Y** -- relative position (0.0--1.0)
 
@@ -74,7 +76,9 @@ Title text renders in both the GStreamer preview pipeline and FFmpeg export. The
 - Shadow offset is fixed in preview (configurable in export)
 - Background box color is fixed dark in preview (exact color in export)
 
-Export uses FFmpeg's `drawtext` filter which supports all styling options at full fidelity.
+Export/background prerender now resolve the chosen Pango description to a concrete font file before building FFmpeg `drawtext`, which keeps font-family/style selection more consistent than best-effort family matching alone.
+
+If a requested font face is unavailable, UltimateSlice keeps preview closer to the resolved export/prerender match and shows that fallback in the Font button tooltip.
 
 ## MCP Tools
 

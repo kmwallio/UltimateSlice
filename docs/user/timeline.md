@@ -121,14 +121,15 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 
 ## Image Clips
 
-Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC) can be placed on the timeline like video clips.
+Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC, SVG) can be placed on the timeline like video clips.
 
-- **Default duration**: Images are imported with a **4-second** default duration.
+- **Default duration**: Static images are imported with a **4-second** default duration.
+- **Animated SVG duration**: Animated SVG clips use their authored animation duration by default.
 - **Placement**: Images are always placed on a **Video track** as `ClipKind::Image`. No linked audio clip is created.
-- **Extending duration**: Drag the right edge (trim-out handle) of an image clip to extend it to any length — there is no upper limit.
+- **Extending duration**: Drag the right edge (trim-out handle) of an image clip to extend it to any length — there is no upper limit. Animated SVG clips hold on their last rendered frame when extended past the authored animation duration.
 - **Shortening duration**: Drag the right edge inward to shorten the clip.
 - **Color/effects**: All color correction, grading, LUT, transform, title, and chroma key controls work on image clips, just as they do on video clips.
-- **Export**: Image clips are exported with the correct duration using the FFmpeg `tpad` hold filter, consistent with freeze-frame video clips.
+- **Export**: Static image clips are exported with the FFmpeg `tpad` hold filter, consistent with freeze-frame video clips. Animated SVG clips are exported from their cached rendered video.
 
 ### Multi-Select (staged rollout)
 
@@ -166,6 +167,29 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC) can be placed on the timeli
 - Right-clicking a grouped clip can now run **Align Grouped Clips by Timecode** when that clip group carries stored source-time metadata; the selected clip acts as the anchor when possible.
 - Source timecode metadata is automatically extracted from media files on import (camera creation timestamps) and also preserved for FCPXML-imported clips and UltimateSlice-saved projects.
 - First pass scope: grouped trim behavior is not yet enabled.
+
+### Compound Clips (Nested Timelines)
+
+- **Create Compound Clip (`Alt+G`)** — select 2+ clips, then press `Alt+G` or right-click → "Create Compound Clip". The selected clips are replaced by a single compound clip containing them as an internal sub-timeline.
+- **Break Apart Compound Clip** — right-click a compound clip → "Break Apart Compound Clip" to restore the internal clips to the timeline.
+- **Drill-down editing** — double-click a compound clip to enter its sub-timeline. A teal breadcrumb bar shows your navigation path (e.g. "Project > Compound Clip 1"). Press `Escape` to go back one level.
+- Compound clips render with a teal fill color and a stacked-layers badge.
+- Preview and export correctly flatten compound clips, rendering all internal clips at the right timeline positions.
+- Compound clips are saved/loaded via FCPXML (`us:clip-kind="compound"` + `us:compound-tracks` vendor attribute).
+- MCP tools: `create_compound_clip` (takes `clip_ids` array), `break_apart_compound_clip` (takes `clip_id`).
+- Full undo/redo support.
+
+### Multicam Editing
+
+- **Create Multicam Clip (`Alt+M`)** — select 2+ video clips on the timeline, then press `Alt+M` or right-click → "Create Multicam Clip". Alternatively, select 2+ items in the **Media Library** (Ctrl+click) and click the "Create Multicam Clip" button — the clips are placed on the timeline and converted in one step. The clips are synced by audio cross-correlation and combined into a single multicam clip with per-angle source data.
+- Multicam clips render with an **orange fill** on the timeline, showing segment labels and switch markers at each angle change.
+- **Switch angles (1-9)** — with a multicam clip selected, press `1`–`9` to switch to the corresponding angle at the current playhead position. A switch point is inserted (or updated) at the playhead.
+- **Angle viewer panel** — when a multicam clip is selected, the sidebar shows an angle viewer with buttons for each angle. The active angle at the playhead is highlighted. Click a button to switch angles.
+- **Audio mixing** — each angle has independent volume and mute controls. By default, only the first angle's audio plays; unmute additional angles to mix them together. Audio from all unmuted angles plays continuously regardless of which video angle is active. Control via MCP `set_multicam_angle_audio` or the angle viewer panel (audio status shown per angle).
+- Preview and export flatten multicam segments to the active angle's source media at each point in time, with audio mixed from all unmuted angles.
+- Multicam clips are saved/loaded via FCPXML (`us:clip-kind="multicam"` + `us:multicam-angles` and `us:multicam-switches` vendor attributes).
+- MCP tools: `create_multicam_clip`, `add_angle_switch`, `list_multicam_angles`, `set_multicam_angle_audio`.
+- Full undo/redo support.
 
 ### Sync Selected Clips by Audio (right-click menu)
 
@@ -317,6 +341,6 @@ The undo history is per-session (not persisted in the FCPXML).
 - Linked clips show a `LINK` badge whenever they belong to a clip link group.
 - Non-primary linked peers in the current linked selection show a cyan inset border.
 - **Adjustment layers** appear as purple hatched clips with an "ADJ" badge. They have no source media — their effects (color grading, LUTs, frei0r, blur) apply to the composited result of all tracks below. Add one by right-clicking a video track label and choosing "Add Adjustment Layer". Use the Inspector to set effects. Opacity controls effect intensity (0.0 = no effect, 1.0 = full effect).
-  - **Preview**: Brightness, contrast, and saturation are shown in real-time. Frei0r user effects (e.g. vignette), LUTs, temperature/tint, and blur require **Background Render** to be visible in the Program Monitor — enable it in the status bar. Without Background Render, these effects are applied on **export only**.
+  - **Preview**: Brightness, contrast, and saturation are shown in real-time. Frei0r user effects (e.g. vignette), LUTs, temperature/tint, and blur require **Background Render** to be visible in the Program Monitor — enable it in the status bar (the toggle reads **Live Rendering** while prerendering is off). Without Background Render, these effects are applied on **export only**.
   - **Export**: All adjustment layer effects (including frei0r plugins) are fully applied in the exported file.
 - Title text positioning in the preview may differ from the export when large text extends beyond frame edges at reduced preview quality (Half/Quarter). This is because text clipping at lower resolutions produces different visible bounds than at full resolution. The export is always correct. Setting preview quality to **Full** eliminates this difference.

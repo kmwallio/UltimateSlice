@@ -3,7 +3,6 @@
 /// Renders a transfer function visualization with input/output level sliders
 /// and gamma adjustment. Used by the inspector to replace raw numeric sliders
 /// with an intuitive levels editor.
-
 use gtk4::prelude::*;
 use gtk4::{self as gtk, DrawingArea, Label, Orientation, Scale};
 use std::cell::RefCell;

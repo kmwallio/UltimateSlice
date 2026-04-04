@@ -13,7 +13,22 @@ pub struct ProgramMonitorState {
     #[serde(default = "default_docked_split_pos")]
     pub docked_split_pos: i32,
     #[serde(default)]
+    pub scopes_visible: bool,
+    #[serde(default)]
     pub show_safe_areas: bool,
+    /// Show false-color luminance overlay on the Program Monitor.
+    #[serde(default)]
+    pub show_false_color: bool,
+    /// Show zebra-stripe overexposure overlay on the Program Monitor.
+    #[serde(default)]
+    pub show_zebra: bool,
+    /// Luminance threshold for zebra stripes (0.0–1.0, default 0.90 = 90 IRE).
+    #[serde(default = "default_zebra_threshold")]
+    pub zebra_threshold: f64,
+}
+
+fn default_zebra_threshold() -> f64 {
+    0.90
 }
 
 fn default_width() -> i32 {
@@ -26,6 +41,60 @@ fn default_docked_split_pos() -> i32 {
     420
 }
 
+fn default_root_hpaned_pos() -> i32 {
+    1120
+}
+
+fn default_root_vpaned_pos() -> i32 {
+    520
+}
+
+fn default_top_paned_pos() -> i32 {
+    320
+}
+
+fn default_left_vpaned_pos() -> i32 {
+    320
+}
+
+fn default_timeline_paned_pos() -> i32 {
+    0
+}
+
+const WORKSPACE_SPLIT_RATIO_SCALE: i32 = 1000;
+
+fn default_workspace_panel_visible() -> bool {
+    true
+}
+
+pub fn workspace_split_ratio_from_pixels(position: i32, total: i32) -> Option<u16> {
+    if total <= 0 {
+        return None;
+    }
+    let clamped = position.clamp(0, total) as i64;
+    let scaled =
+        ((clamped * WORKSPACE_SPLIT_RATIO_SCALE as i64) + (total as i64 / 2)) / total as i64;
+    Some(scaled.clamp(0, WORKSPACE_SPLIT_RATIO_SCALE as i64) as u16)
+}
+
+pub fn workspace_split_position_from_ratio(
+    ratio_permille: Option<u16>,
+    total: i32,
+    fallback_position: i32,
+) -> i32 {
+    if total <= 0 {
+        return fallback_position.max(0);
+    }
+    match ratio_permille {
+        Some(ratio) => {
+            let scaled = ((ratio as i64 * total as i64) + (WORKSPACE_SPLIT_RATIO_SCALE as i64 / 2))
+                / WORKSPACE_SPLIT_RATIO_SCALE as i64;
+            scaled.clamp(0, total as i64) as i32
+        }
+        None => fallback_position.max(0),
+    }
+}
+
 impl Default for ProgramMonitorState {
     fn default() -> Self {
         Self {
@@ -33,8 +102,272 @@ impl Default for ProgramMonitorState {
             width: default_width(),
             height: default_height(),
             docked_split_pos: default_docked_split_pos(),
+            scopes_visible: false,
             show_safe_areas: false,
+            show_false_color: false,
+            show_zebra: false,
+            zebra_threshold: default_zebra_threshold(),
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceLeftPanelTab {
+    Media,
+    Effects,
+    AudioEffects,
+    Titles,
+}
+
+impl Default for WorkspaceLeftPanelTab {
+    fn default() -> Self {
+        Self::Media
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProgramMonitorWorkspaceState {
+    #[serde(default)]
+    pub popped: bool,
+    #[serde(default = "default_width")]
+    pub width: i32,
+    #[serde(default = "default_height")]
+    pub height: i32,
+    #[serde(default = "default_docked_split_pos")]
+    pub docked_split_pos: i32,
+    #[serde(default)]
+    pub scopes_visible: bool,
+}
+
+impl Default for ProgramMonitorWorkspaceState {
+    fn default() -> Self {
+        Self {
+            popped: false,
+            width: default_width(),
+            height: default_height(),
+            docked_split_pos: default_docked_split_pos(),
+            scopes_visible: false,
+        }
+    }
+}
+
+impl ProgramMonitorWorkspaceState {
+    pub fn from_program_monitor_state(state: &ProgramMonitorState) -> Self {
+        Self {
+            popped: state.popped,
+            width: state.width,
+            height: state.height,
+            docked_split_pos: state.docked_split_pos,
+            scopes_visible: state.scopes_visible,
+        }
+    }
+
+    pub fn apply_to_program_monitor_state(&self, state: &mut ProgramMonitorState) {
+        state.popped = self.popped;
+        state.width = self.width;
+        state.height = self.height;
+        state.docked_split_pos = self.docked_split_pos;
+        state.scopes_visible = self.scopes_visible;
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceArrangement {
+    #[serde(default = "default_root_hpaned_pos")]
+    pub root_hpaned_pos: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_hpaned_ratio_permille: Option<u16>,
+    #[serde(default = "default_root_vpaned_pos")]
+    pub root_vpaned_pos: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_vpaned_ratio_permille: Option<u16>,
+    #[serde(default = "default_top_paned_pos")]
+    pub top_paned_pos: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_paned_ratio_permille: Option<u16>,
+    #[serde(default = "default_left_vpaned_pos")]
+    pub left_vpaned_pos: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left_vpaned_ratio_permille: Option<u16>,
+    #[serde(default = "default_timeline_paned_pos")]
+    pub timeline_paned_pos: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline_paned_ratio_permille: Option<u16>,
+    #[serde(default = "default_workspace_panel_visible")]
+    pub media_browser_visible: bool,
+    #[serde(default = "default_workspace_panel_visible")]
+    pub inspector_visible: bool,
+    #[serde(default)]
+    pub keyframe_editor_visible: bool,
+    #[serde(default)]
+    pub left_panel_tab: WorkspaceLeftPanelTab,
+    #[serde(default)]
+    pub program_monitor: ProgramMonitorWorkspaceState,
+}
+
+impl Default for WorkspaceArrangement {
+    fn default() -> Self {
+        Self {
+            root_hpaned_pos: default_root_hpaned_pos(),
+            root_hpaned_ratio_permille: None,
+            root_vpaned_pos: default_root_vpaned_pos(),
+            root_vpaned_ratio_permille: None,
+            top_paned_pos: default_top_paned_pos(),
+            top_paned_ratio_permille: None,
+            left_vpaned_pos: default_left_vpaned_pos(),
+            left_vpaned_ratio_permille: None,
+            timeline_paned_pos: default_timeline_paned_pos(),
+            timeline_paned_ratio_permille: None,
+            media_browser_visible: default_workspace_panel_visible(),
+            inspector_visible: default_workspace_panel_visible(),
+            keyframe_editor_visible: false,
+            left_panel_tab: WorkspaceLeftPanelTab::default(),
+            program_monitor: ProgramMonitorWorkspaceState::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceLayout {
+    pub name: String,
+    #[serde(default)]
+    pub arrangement: WorkspaceArrangement,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorkspaceLayoutsState {
+    #[serde(default)]
+    pub current: WorkspaceArrangement,
+    #[serde(default)]
+    pub layouts: Vec<WorkspaceLayout>,
+    #[serde(default)]
+    pub active_layout: Option<String>,
+}
+
+impl Default for WorkspaceLayoutsState {
+    fn default() -> Self {
+        Self {
+            current: WorkspaceArrangement::default(),
+            layouts: Vec::new(),
+            active_layout: None,
+        }
+    }
+}
+
+impl WorkspaceLayoutsState {
+    fn normalize_name(name: &str) -> Option<String> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }
+
+    fn is_reserved_name(name: &str) -> bool {
+        matches!(
+            name.to_ascii_lowercase().as_str(),
+            "current" | "(current)" | "default" | "default layout"
+        )
+    }
+
+    fn matching_layout_name_for(&self, arrangement: &WorkspaceArrangement) -> Option<String> {
+        self.layouts
+            .iter()
+            .find(|layout| layout.arrangement == *arrangement)
+            .map(|layout| layout.name.clone())
+    }
+
+    pub fn set_current_arrangement(&mut self, arrangement: WorkspaceArrangement) {
+        self.current = arrangement;
+        self.active_layout = self.matching_layout_name_for(&self.current);
+    }
+
+    pub fn upsert_layout(&mut self, mut layout: WorkspaceLayout) -> Result<(), String> {
+        let normalized = Self::normalize_name(&layout.name)
+            .ok_or_else(|| "Layout name cannot be empty".to_string())?;
+        if Self::is_reserved_name(&normalized) {
+            return Err(format!("Layout name is reserved: {normalized}"));
+        }
+        layout.name = normalized.clone();
+        if let Some(existing) = self
+            .layouts
+            .iter_mut()
+            .find(|entry| entry.name.eq_ignore_ascii_case(&normalized))
+        {
+            *existing = layout.clone();
+        } else {
+            self.layouts.push(layout.clone());
+            self.layouts.sort_by(|a, b| {
+                a.name
+                    .to_ascii_lowercase()
+                    .cmp(&b.name.to_ascii_lowercase())
+            });
+        }
+        self.current = layout.arrangement;
+        self.active_layout = Some(normalized);
+        Ok(())
+    }
+
+    pub fn rename_layout(&mut self, old_name: &str, new_name: &str) -> Result<String, String> {
+        let old_normalized = Self::normalize_name(old_name)
+            .ok_or_else(|| "Existing layout name cannot be empty".to_string())?;
+        let new_normalized = Self::normalize_name(new_name)
+            .ok_or_else(|| "New layout name cannot be empty".to_string())?;
+        if Self::is_reserved_name(&new_normalized) {
+            return Err(format!("Layout name is reserved: {new_normalized}"));
+        }
+        if self.layouts.iter().any(|layout| {
+            layout.name.eq_ignore_ascii_case(&new_normalized)
+                && !layout.name.eq_ignore_ascii_case(&old_normalized)
+        }) {
+            return Err(format!("Layout already exists: {new_normalized}"));
+        }
+        let Some(existing) = self
+            .layouts
+            .iter_mut()
+            .find(|layout| layout.name.eq_ignore_ascii_case(&old_normalized))
+        else {
+            return Err(format!("Workspace layout not found: {old_normalized}"));
+        };
+        existing.name = new_normalized.clone();
+        self.layouts.sort_by(|a, b| {
+            a.name
+                .to_ascii_lowercase()
+                .cmp(&b.name.to_ascii_lowercase())
+        });
+        if self
+            .active_layout
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case(&old_normalized))
+        {
+            self.active_layout = Some(new_normalized.clone());
+        } else {
+            self.active_layout = self.matching_layout_name_for(&self.current);
+        }
+        Ok(new_normalized)
+    }
+
+    pub fn delete_layout(&mut self, name: &str) -> bool {
+        let Some(normalized) = Self::normalize_name(name) else {
+            return false;
+        };
+        let before = self.layouts.len();
+        self.layouts
+            .retain(|layout| !layout.name.eq_ignore_ascii_case(&normalized));
+        let removed = self.layouts.len() != before;
+        if removed {
+            self.active_layout = self.matching_layout_name_for(&self.current);
+        }
+        removed
+    }
+
+    pub fn get_layout(&self, name: &str) -> Option<&WorkspaceLayout> {
+        let normalized = Self::normalize_name(name)?;
+        self.layouts
+            .iter()
+            .find(|layout| layout.name.eq_ignore_ascii_case(&normalized))
     }
 }
 
@@ -163,6 +496,55 @@ impl PreviewQuality {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrerenderEncodingPreset {
+    Ultrafast,
+    Superfast,
+    Veryfast,
+    Faster,
+    Fast,
+    Medium,
+}
+
+impl Default for PrerenderEncodingPreset {
+    fn default() -> Self {
+        Self::Veryfast
+    }
+}
+
+impl PrerenderEncodingPreset {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ultrafast => "ultrafast",
+            Self::Superfast => "superfast",
+            Self::Veryfast => "veryfast",
+            Self::Faster => "faster",
+            Self::Fast => "fast",
+            Self::Medium => "medium",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "ultrafast" => Self::Ultrafast,
+            "superfast" => Self::Superfast,
+            "faster" => Self::Faster,
+            "fast" => Self::Fast,
+            "medium" => Self::Medium,
+            _ => Self::Veryfast,
+        }
+    }
+}
+
+pub const MIN_PRERENDER_CRF: u32 = 0;
+pub const MAX_PRERENDER_CRF: u32 = 51;
+pub const DEFAULT_PRERENDER_CRF: u32 = 20;
+
+pub fn clamp_prerender_crf(value: u32) -> u32 {
+    value.clamp(MIN_PRERENDER_CRF, MAX_PRERENDER_CRF)
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProxyMode {
@@ -197,6 +579,10 @@ impl ProxyMode {
     pub fn is_enabled(&self) -> bool {
         !matches!(self, Self::Off)
     }
+}
+
+fn default_last_non_off_proxy_mode() -> ProxyMode {
+    ProxyMode::HalfRes
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -273,6 +659,7 @@ pub enum ExportContainer {
     Mov,
     WebM,
     Mkv,
+    Gif,
 }
 
 impl Default for ExportContainer {
@@ -288,6 +675,7 @@ impl ExportContainer {
             Container::Mov => Self::Mov,
             Container::WebM => Self::WebM,
             Container::Mkv => Self::Mkv,
+            Container::Gif => Self::Gif,
         }
     }
 
@@ -297,6 +685,7 @@ impl ExportContainer {
             Self::Mov => Container::Mov,
             Self::WebM => Container::WebM,
             Self::Mkv => Container::Mkv,
+            Self::Gif => Container::Gif,
         }
     }
 }
@@ -355,6 +744,9 @@ pub struct ExportPreset {
     pub audio_codec: ExportAudioCodec,
     #[serde(default = "default_export_audio_bitrate_kbps")]
     pub audio_bitrate_kbps: u32,
+    /// Frames per second override for GIF output. None = use project frame rate.
+    #[serde(default)]
+    pub gif_fps: Option<u32>,
 }
 
 impl ExportPreset {
@@ -368,6 +760,7 @@ impl ExportPreset {
             crf: options.crf,
             audio_codec: ExportAudioCodec::from_audio_codec(&options.audio_codec),
             audio_bitrate_kbps: options.audio_bitrate_kbps,
+            gif_fps: options.gif_fps,
         }
     }
 
@@ -380,6 +773,7 @@ impl ExportPreset {
             crf: self.crf,
             audio_codec: self.audio_codec.to_audio_codec(),
             audio_bitrate_kbps: self.audio_bitrate_kbps,
+            gif_fps: self.gif_fps,
         }
     }
 }
@@ -477,6 +871,7 @@ fn default_export_presets() -> Vec<ExportPreset> {
             crf: 23,
             audio_codec: ExportAudioCodec::Aac,
             audio_bitrate_kbps: 192,
+            gif_fps: None,
         },
         ExportPreset {
             name: "High Quality H.264 4K".to_string(),
@@ -487,6 +882,7 @@ fn default_export_presets() -> Vec<ExportPreset> {
             crf: 18,
             audio_codec: ExportAudioCodec::Aac,
             audio_bitrate_kbps: 320,
+            gif_fps: None,
         },
         ExportPreset {
             name: "Archive ProRes 4K".to_string(),
@@ -497,6 +893,7 @@ fn default_export_presets() -> Vec<ExportPreset> {
             crf: 18,
             audio_codec: ExportAudioCodec::Pcm,
             audio_bitrate_kbps: 320,
+            gif_fps: None,
         },
         ExportPreset {
             name: "WebM VP9 1080p".to_string(),
@@ -507,8 +904,87 @@ fn default_export_presets() -> Vec<ExportPreset> {
             crf: 30,
             audio_codec: ExportAudioCodec::Opus,
             audio_bitrate_kbps: 160,
+            gif_fps: None,
+        },
+        ExportPreset {
+            name: "Animated GIF".to_string(),
+            video_codec: ExportVideoCodec::H264,
+            container: ExportContainer::Gif,
+            output_width: 640,
+            output_height: 0,
+            crf: 23,
+            audio_codec: ExportAudioCodec::Aac,
+            audio_bitrate_kbps: 128,
+            gif_fps: Some(15),
         },
     ]
+}
+
+// ── Batch Export Queue ─────────────────────────────────────────────────────
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportQueueJobStatus {
+    Pending,
+    Running,
+    Done,
+    Error,
+}
+
+impl Default for ExportQueueJobStatus {
+    fn default() -> Self {
+        Self::Pending
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExportQueueJob {
+    /// Unique identifier for the job (random hex string).
+    pub id: String,
+    /// Human-readable label derived from the output file name.
+    pub label: String,
+    /// Absolute path for the output file.
+    pub output_path: String,
+    /// Export settings snapshot.
+    pub options: ExportPreset,
+    #[serde(default)]
+    pub status: ExportQueueJobStatus,
+    /// Error message when status == Error.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+impl ExportQueueJob {
+    /// Create a new pending job, deriving the label from the output file name.
+    pub fn new(output_path: impl Into<String>, options: ExportPreset) -> Self {
+        let output_path = output_path.into();
+        let label = std::path::Path::new(&output_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&output_path)
+            .to_string();
+        let id = format!(
+            "{:x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos()
+        );
+        Self {
+            id,
+            label,
+            output_path,
+            options,
+            status: ExportQueueJobStatus::Pending,
+            error: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ExportQueueState {
+    #[serde(default)]
+    pub jobs: Vec<ExportQueueJob>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -521,6 +997,13 @@ pub struct PreferencesState {
     pub source_playback_priority: PlaybackPriority,
     #[serde(default)]
     pub proxy_mode: ProxyMode,
+    /// Last non-Off proxy mode, used by the quick proxy toggle to restore the
+    /// user's preferred proxy quality.
+    #[serde(default = "default_last_non_off_proxy_mode")]
+    pub last_non_off_proxy_mode: ProxyMode,
+    /// Mirror/preserve proxy files in `UltimateSlice.cache/` next to source media.
+    #[serde(default = "default_persist_proxies_next_to_original_media")]
+    pub persist_proxies_next_to_original_media: bool,
     /// Show audio waveforms overlaid on video clips in the timeline.
     #[serde(default)]
     pub show_waveform_on_video: bool,
@@ -553,6 +1036,16 @@ pub struct PreferencesState {
     /// Uses more CPU and memory during playback.
     #[serde(default)]
     pub background_prerender: bool,
+    /// FFmpeg x264 preset used for background prerender video segments.
+    #[serde(default)]
+    pub prerender_preset: PrerenderEncodingPreset,
+    /// FFmpeg x264 CRF used for background prerender video segments.
+    #[serde(default = "default_prerender_crf")]
+    pub prerender_crf: u32,
+    /// Preserve prerender cache files beside saved project files instead of using
+    /// a temporary-only cache root.
+    #[serde(default = "default_persist_prerenders_next_to_project_file")]
+    pub persist_prerenders_next_to_project_file: bool,
     /// Pre-render LUT-assigned clips at project resolution for preview use when proxy mode is Off.
     #[serde(default)]
     pub preview_luts: bool,
@@ -586,6 +1079,9 @@ impl Default for PreferencesState {
             playback_priority: PlaybackPriority::default(),
             source_playback_priority: PlaybackPriority::default(),
             proxy_mode: ProxyMode::default(),
+            last_non_off_proxy_mode: default_last_non_off_proxy_mode(),
+            persist_proxies_next_to_original_media: default_persist_proxies_next_to_original_media(
+            ),
             show_waveform_on_video: false,
             show_timeline_preview: default_show_timeline_preview(),
             source_monitor_auto_link_av: default_source_monitor_auto_link_av(),
@@ -594,8 +1090,12 @@ impl Default for PreferencesState {
             gsk_renderer: GskRenderer::default(),
             preview_quality: PreviewQuality::default(),
             experimental_preview_optimizations: false,
-            realtime_preview: false,
+            realtime_preview: true,
             background_prerender: false,
+            prerender_preset: PrerenderEncodingPreset::default(),
+            prerender_crf: default_prerender_crf(),
+            persist_prerenders_next_to_project_file:
+                default_persist_prerenders_next_to_project_file(),
             preview_luts: false,
             crossfade_enabled: false,
             crossfade_curve: CrossfadeCurve::default(),
@@ -608,8 +1108,53 @@ impl Default for PreferencesState {
     }
 }
 
+impl PreferencesState {
+    pub fn remembered_proxy_mode(&self) -> ProxyMode {
+        if self.last_non_off_proxy_mode.is_enabled() {
+            self.last_non_off_proxy_mode.clone()
+        } else {
+            default_last_non_off_proxy_mode()
+        }
+    }
+
+    pub fn set_proxy_mode(&mut self, mode: ProxyMode) {
+        if mode.is_enabled() {
+            self.last_non_off_proxy_mode = mode.clone();
+        } else if !self.last_non_off_proxy_mode.is_enabled() {
+            self.last_non_off_proxy_mode = default_last_non_off_proxy_mode();
+        }
+        self.proxy_mode = mode;
+    }
+
+    pub fn set_proxy_enabled(&mut self, enabled: bool) {
+        let mode = if enabled {
+            self.remembered_proxy_mode()
+        } else {
+            ProxyMode::Off
+        };
+        self.set_proxy_mode(mode);
+    }
+
+    pub fn set_prerender_quality(&mut self, preset: PrerenderEncodingPreset, crf: u32) {
+        self.prerender_preset = preset;
+        self.prerender_crf = clamp_prerender_crf(crf);
+    }
+}
+
 fn default_show_timeline_preview() -> bool {
     true
+}
+
+fn default_persist_proxies_next_to_original_media() -> bool {
+    true
+}
+
+fn default_persist_prerenders_next_to_project_file() -> bool {
+    true
+}
+
+fn default_prerender_crf() -> u32 {
+    DEFAULT_PRERENDER_CRF
 }
 
 fn default_show_track_audio_levels() -> bool {
@@ -641,6 +1186,10 @@ struct UiState {
     preferences: PreferencesState,
     #[serde(default)]
     export_presets: ExportPresetsState,
+    #[serde(default)]
+    export_queue: ExportQueueState,
+    #[serde(default)]
+    workspace_layouts: WorkspaceLayoutsState,
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -705,6 +1254,35 @@ pub fn save_export_presets_state(state: &ExportPresetsState) {
     save_ui_state(&ui);
 }
 
+pub fn load_export_queue_state() -> ExportQueueState {
+    load_ui_state().export_queue
+}
+
+pub fn save_export_queue_state(state: &ExportQueueState) {
+    let mut ui = load_ui_state();
+    ui.export_queue = state.clone();
+    save_ui_state(&ui);
+}
+
+pub fn load_workspace_layouts_state() -> WorkspaceLayoutsState {
+    let ui = load_ui_state();
+    let mut state = ui.workspace_layouts;
+    if state.layouts.is_empty()
+        && state.active_layout.is_none()
+        && state.current == WorkspaceArrangement::default()
+    {
+        state.current.program_monitor =
+            ProgramMonitorWorkspaceState::from_program_monitor_state(&ui.program_monitor);
+    }
+    state
+}
+
+pub fn save_workspace_layouts_state(state: &WorkspaceLayoutsState) {
+    let mut ui = load_ui_state();
+    ui.workspace_layouts = state.clone();
+    save_ui_state(&ui);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -719,6 +1297,7 @@ mod tests {
             crf: 18,
             audio_codec: AudioCodec::Opus,
             audio_bitrate_kbps: 256,
+            gif_fps: None,
         };
         let preset = ExportPreset::from_export_options("High Quality", &options);
         assert_eq!(preset.name, "High Quality");
@@ -771,6 +1350,7 @@ mod tests {
                 "High Quality H.264 4K",
                 "Archive ProRes 4K",
                 "WebM VP9 1080p",
+                "Animated GIF",
             ]
         );
         assert!(parsed.export_presets.last_used_preset.is_none());
@@ -796,6 +1376,13 @@ mod tests {
             parsed.preferences.crossfade_curve,
             CrossfadeCurve::EqualPower
         );
+        assert!(parsed.preferences.persist_proxies_next_to_original_media);
+        assert!(parsed.preferences.persist_prerenders_next_to_project_file);
+        assert_eq!(
+            parsed.preferences.prerender_preset,
+            PrerenderEncodingPreset::Veryfast
+        );
+        assert_eq!(parsed.preferences.prerender_crf, DEFAULT_PRERENDER_CRF);
         assert_eq!(
             parsed.preferences.crossfade_duration_ns,
             default_crossfade_duration_ns()
@@ -829,6 +1416,36 @@ mod tests {
     }
 
     #[test]
+    fn preferences_prerender_quality_round_trip() {
+        let mut prefs = PreferencesState::default();
+        prefs.set_prerender_quality(PrerenderEncodingPreset::Fast, 17);
+        let json = serde_json::to_string(&prefs).unwrap();
+        let decoded: PreferencesState = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.prerender_preset, PrerenderEncodingPreset::Fast);
+        assert_eq!(decoded.prerender_crf, 17);
+    }
+
+    #[test]
+    fn preferences_set_prerender_quality_clamps_crf() {
+        let mut prefs = PreferencesState::default();
+        prefs.set_prerender_quality(
+            PrerenderEncodingPreset::Ultrafast,
+            MAX_PRERENDER_CRF.saturating_add(10),
+        );
+        assert_eq!(prefs.prerender_preset, PrerenderEncodingPreset::Ultrafast);
+        assert_eq!(prefs.prerender_crf, MAX_PRERENDER_CRF);
+    }
+
+    #[test]
+    fn prerender_preset_serde_uses_snake_case_values() {
+        let decoded: PreferencesState =
+            serde_json::from_str(r#"{"prerender_preset":"superfast","prerender_crf":21}"#).unwrap();
+        assert_eq!(decoded.prerender_preset, PrerenderEncodingPreset::Superfast);
+        let encoded = serde_json::to_string(&decoded).unwrap();
+        assert!(encoded.contains(r#""prerender_preset":"superfast""#));
+    }
+
+    #[test]
     fn preferences_crossfade_curve_serde_uses_snake_case_values() {
         let decoded: PreferencesState = serde_json::from_str(
             r#"{"crossfade_enabled":true,"crossfade_curve":"equal_power","crossfade_duration_ns":220000000}"#,
@@ -837,5 +1454,164 @@ mod tests {
         assert_eq!(decoded.crossfade_curve, CrossfadeCurve::EqualPower);
         let encoded = serde_json::to_string(&decoded).unwrap();
         assert!(encoded.contains(r#""crossfade_curve":"equal_power""#));
+    }
+
+    #[test]
+    fn preferences_default_missing_proxy_restore_mode_to_half_res() {
+        let parsed: UiState =
+            serde_json::from_str(r#"{"preferences":{"proxy_mode":"off"}}"#).unwrap();
+        assert_eq!(parsed.preferences.proxy_mode, ProxyMode::Off);
+        assert_eq!(
+            parsed.preferences.remembered_proxy_mode(),
+            ProxyMode::HalfRes
+        );
+    }
+
+    #[test]
+    fn preferences_set_proxy_mode_remembers_last_enabled_mode() {
+        let mut prefs = PreferencesState::default();
+        prefs.set_proxy_mode(ProxyMode::QuarterRes);
+        prefs.set_proxy_mode(ProxyMode::Off);
+        assert_eq!(prefs.proxy_mode, ProxyMode::Off);
+        assert_eq!(prefs.remembered_proxy_mode(), ProxyMode::QuarterRes);
+    }
+
+    #[test]
+    fn preferences_set_proxy_enabled_restores_last_enabled_mode() {
+        let mut prefs = PreferencesState::default();
+        prefs.set_proxy_mode(ProxyMode::QuarterRes);
+        prefs.set_proxy_enabled(false);
+        prefs.set_proxy_enabled(true);
+        assert_eq!(prefs.proxy_mode, ProxyMode::QuarterRes);
+        assert_eq!(prefs.remembered_proxy_mode(), ProxyMode::QuarterRes);
+    }
+
+    #[test]
+    fn workspace_layouts_upsert_rename_delete_tracks_active_layout() {
+        let arrangement = WorkspaceArrangement {
+            root_hpaned_pos: 980,
+            inspector_visible: false,
+            left_panel_tab: WorkspaceLeftPanelTab::Effects,
+            program_monitor: ProgramMonitorWorkspaceState {
+                popped: true,
+                width: 1280,
+                height: 720,
+                docked_split_pos: 480,
+                scopes_visible: true,
+            },
+            ..WorkspaceArrangement::default()
+        };
+        let mut state = WorkspaceLayoutsState::default();
+        state.set_current_arrangement(arrangement.clone());
+        state
+            .upsert_layout(WorkspaceLayout {
+                name: " Color ".to_string(),
+                arrangement: arrangement.clone(),
+            })
+            .unwrap();
+        assert_eq!(state.layouts.len(), 1);
+        assert_eq!(state.layouts[0].name, "Color");
+        assert_eq!(state.current, arrangement);
+        assert_eq!(state.active_layout.as_deref(), Some("Color"));
+
+        let renamed = state.rename_layout("color", "Review").unwrap();
+        assert_eq!(renamed, "Review");
+        assert_eq!(state.layouts[0].name, "Review");
+        assert_eq!(state.active_layout.as_deref(), Some("Review"));
+
+        assert!(state.delete_layout("review"));
+        assert!(state.layouts.is_empty());
+        assert!(state.active_layout.is_none());
+    }
+
+    #[test]
+    fn workspace_layouts_recompute_active_layout_from_current_arrangement() {
+        let mut state = WorkspaceLayoutsState::default();
+        state
+            .upsert_layout(WorkspaceLayout {
+                name: "Edit".to_string(),
+                arrangement: WorkspaceArrangement::default(),
+            })
+            .unwrap();
+        assert_eq!(state.active_layout.as_deref(), Some("Edit"));
+
+        let mut changed = state.current.clone();
+        changed.media_browser_visible = false;
+        state.set_current_arrangement(changed);
+        assert!(state.active_layout.is_none());
+
+        state.set_current_arrangement(WorkspaceArrangement::default());
+        assert_eq!(state.active_layout.as_deref(), Some("Edit"));
+    }
+
+    #[test]
+    fn program_monitor_workspace_state_copies_geometry_only() {
+        let monitor = ProgramMonitorState {
+            popped: true,
+            width: 1111,
+            height: 777,
+            docked_split_pos: 512,
+            scopes_visible: true,
+            show_safe_areas: true,
+            show_false_color: true,
+            show_zebra: true,
+            zebra_threshold: 0.95,
+        };
+        let workspace = ProgramMonitorWorkspaceState::from_program_monitor_state(&monitor);
+        assert!(workspace.popped);
+        assert_eq!(workspace.width, 1111);
+        assert_eq!(workspace.height, 777);
+        assert_eq!(workspace.docked_split_pos, 512);
+        assert!(workspace.scopes_visible);
+    }
+
+    #[test]
+    fn workspace_left_panel_tab_serde_uses_snake_case_values() {
+        let arrangement: WorkspaceArrangement =
+            serde_json::from_str(r#"{"left_panel_tab":"audio_effects"}"#).unwrap();
+        assert_eq!(
+            arrangement.left_panel_tab,
+            WorkspaceLeftPanelTab::AudioEffects
+        );
+        let encoded = serde_json::to_string(&arrangement).unwrap();
+        assert!(encoded.contains(r#""left_panel_tab":"audio_effects""#));
+    }
+
+    #[test]
+    fn workspace_split_ratio_scales_between_window_sizes() {
+        let ratio = workspace_split_ratio_from_pixels(1596, 2200);
+        assert_eq!(ratio, Some(725));
+        let scaled = workspace_split_position_from_ratio(ratio, 1440, 1596);
+        assert_eq!(scaled, 1044);
+        assert_eq!(workspace_split_ratio_from_pixels(scaled, 1440), ratio);
+    }
+
+    #[test]
+    fn workspace_arrangement_serde_keeps_split_ratio_fields_optional() {
+        let arrangement = WorkspaceArrangement::default();
+        let encoded = serde_json::to_string(&arrangement).unwrap();
+        assert!(!encoded.contains("ratio_permille"));
+
+        let decoded: WorkspaceArrangement =
+            serde_json::from_str(r#"{"root_hpaned_pos":1596}"#).unwrap();
+        assert_eq!(decoded.root_hpaned_pos, 1596);
+        assert!(decoded.root_hpaned_ratio_permille.is_none());
+        assert!(decoded.root_vpaned_ratio_permille.is_none());
+    }
+
+    #[test]
+    fn ui_state_defaults_missing_workspace_layouts_field() {
+        let parsed: UiState = serde_json::from_str(
+            r#"{"program_monitor":{"popped":true,"width":1111,"height":777,"docked_split_pos":512,"scopes_visible":true}}"#,
+        )
+        .unwrap();
+        assert!(parsed.workspace_layouts.layouts.is_empty());
+        assert!(parsed.workspace_layouts.active_layout.is_none());
+        assert_eq!(
+            parsed.workspace_layouts.current,
+            WorkspaceArrangement::default()
+        );
+        assert!(parsed.program_monitor.popped);
+        assert!(parsed.program_monitor.scopes_visible);
     }
 }
