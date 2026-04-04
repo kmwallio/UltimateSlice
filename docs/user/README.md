@@ -19,7 +19,7 @@ Welcome to UltimateSlice, a Final Cut Pro–inspired non-linear video editor bui
 | [preferences.md](preferences.md) | Application-level settings and performance preferences |
 | [python-mcp.md](python-mcp.md) | Python socket client commands for MCP |
 | [program-monitor.md](program-monitor.md) | Previewing the assembled timeline |
-| [export.md](export.md) | Advanced export: codecs, resolution, audio options |
+| [export.md](export.md) | Advanced export and interchange: codecs, resolution, audio options, OTIO/EDL |
 | [project-settings.md](project-settings.md) | Canvas size, frame rate, FCPXML save/load |
 | [shortcuts.md](shortcuts.md) | Complete keyboard shortcut reference |
 

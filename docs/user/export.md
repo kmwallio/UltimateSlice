@@ -243,25 +243,26 @@ Also available via MCP: `save_edl` tool with `path` parameter.
 
 Export the timeline as an OpenTimelineIO JSON file (`.otio`) for interchange with DaVinci Resolve, Premiere (via adapter), Nuke, RV, and other OTIO-compatible tools.
 
-**Export → Export OTIO...** opens a file dialog to save the `.otio` file.
+**Export → Export OTIO...** first lets you choose whether media references inside the OTIO file should be written as **absolute paths** or **paths relative to the exported `.otio` file**, then opens the save dialog.
 
 Features:
 - Clips with source media references (`file://` URLs)
+- Absolute or relative media references inside the OTIO file (relative paths are resolved from the OTIO file's folder on import/open)
 - Explicit gaps between clips
 - Transitions (cross dissolve mapped to `SMPTE_Dissolve`)
 - Speed effects stored as `LinearTimeWarp` OTIO effects
 - Project markers attached to the first video track
 - Track metadata (muted, locked, soloed, audio role, ducking)
-- UltimateSlice OTIO metadata currently preserves the supported clip metadata set, including core clip settings (`speed`, `reverse`, `opacity`, `volume`, `pan`, `brightness`, `contrast`, `saturation`)
+- UltimateSlice OTIO metadata currently preserves the supported clip metadata set, including core clip settings (`speed`, `reverse`, `opacity`, `volume`, `pan`, `brightness`, `contrast`, `saturation`), transform/compositing settings (`scale`, `position_x`, `position_y`, `rotate`, `flip_h`, `flip_v`, `crop_left`, `crop_right`, `crop_top`, `crop_bottom`, `blend_mode`), and core animated lanes (`opacity_keyframes`, `scale_keyframes`, `position_x_keyframes`, `position_y_keyframes`, `rotate_keyframes`)
 - Title clips exported with `MissingReference`, plus title styling metadata (text, font, colors, outline, shadow, box, template, secondary text, and clip background color)
 - Subtitle-bearing clips preserve subtitle segments/word timing plus subtitle styling metadata (language, font/colors, outline, background box, highlight mode/color, word window, and vertical position)
 - Adjustment clips also export as `MissingReference`
 
-**Import:** Open `.otio` files via **File → Open** (or MCP `open_otio` tool). OTIO files from other tools are imported with default clip properties; UltimateSlice metadata is restored when present. UltimateSlice also accepts older flat OTIO metadata from previous app builds and upgrades it to the current versioned OTIO metadata contract on save.
+**Import:** Open `.otio` files via the main **Open…** action in the header bar or Welcome screen (or MCP `open_otio` tool). OTIO files from other tools are imported with default clip properties; UltimateSlice metadata is restored when present. Relative OTIO media references are resolved against the opened `.otio` file location. UltimateSlice also accepts older flat OTIO metadata from previous app builds and upgrades it to the current versioned OTIO metadata contract on save.
 
-Current limitation: OTIO round-trip is still partial for some UltimateSlice-only features. Some advanced transforms/effects/keyframes/masks and nested clip internals are not fully preserved yet, so `.uspxml` remains the highest-fidelity interchange/save format for complete UltimateSlice projects.
+Current limitation: OTIO round-trip is still partial for some UltimateSlice-only features. Advanced effect stacks, mask payloads/animation, secondary keyframe lanes such as crop animation, and nested clip internals are not fully preserved yet, so `.uspxml` remains the highest-fidelity interchange/save format for complete UltimateSlice projects.
 
-Also available via MCP: `save_otio` and `open_otio` tools with `path` parameter.
+Also available via MCP: `save_otio` and `open_otio` tools. `save_otio` accepts `path` plus optional `path_mode` (`absolute` or `relative`), and `open_otio` resolves relative media references from the OTIO file location.
 
 ## Notes
 

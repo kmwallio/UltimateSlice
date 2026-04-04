@@ -74,7 +74,9 @@ Backups are stored in `~/.local/share/ultimateslice/backups/` (or `$XDG_DATA_HOM
 - If local-cache writes/transcodes fail, UltimateSlice falls back to alongside-media `UltimateSlice.cache/` for that source.
 - When **Proxy mode is enabled**, successful local proxy transcodes are also mirrored into alongside-media `UltimateSlice.cache/` for reuse.
 - Managed local proxy cache entries are pruned at startup when stale (older than 24h by ownership index).
-- Proxy file names now encode the current source identity and proxy-affecting variant state (resolution, LUT, stabilization), so changed media/settings regenerate a distinct proxy instead of silently reusing a stale file.
+- Proxy file names stay stable for the same source path and proxy-affecting variant state (resolution, LUT, stabilization), so reopening a project can reuse an existing proxy instead of regenerating it unnecessarily.
+- UltimateSlice stores source-signature metadata beside each proxy and automatically regenerates it when the source media at that path changes on disk.
+- When older `UltimateSlice.cache/<stem>.proxy_*` sidecar files already exist, UltimateSlice reuses those legacy proxy names too instead of needlessly re-encoding them.
 - When the current project's proxy expectations change, UltimateSlice automatically removes stale/superseded current-format proxy variants and leftover `.partial` files from the managed local cache and the matching `UltimateSlice.cache/` directories for that project's sources.
 - On project unload/app close, UltimateSlice always cleans tracked proxy files from managed local cache (`$XDG_CACHE_HOME`/`/tmp`).
 - Alongside-media `UltimateSlice.cache/` proxies are preserved only when **Proxy mode is enabled** (for reopen/reuse); if **Proxy mode is disabled**, those tracked sidecar proxies are cleaned too.
@@ -139,7 +141,7 @@ Backups are stored in `~/.local/share/ultimateslice/backups/` (or `$XDG_DATA_HOM
 
 ## Background Prerender (Playback)
 
-- **Background prerender** pre-renders complex upcoming overlap sections (3+ active video tracks) to temporary disk clips in the background.
+- **Background prerender** pre-renders complex upcoming overlap sections (3+ active video tracks) to disk clips in the background.
 - You can quickly toggle it from the bottom status bar next to **Track Audio Levels** without opening Preferences. The button reads **Background Render** when prerendering is enabled and **Live Rendering** when it is disabled.
 - The toggle uses run/stop symbolic icons (`process-stop-symbolic` when off, `system-run-symbolic` when on) to make state visible at a glance.
 - When available, Program Monitor playback can use the prerendered section clip instead of rebuilding all video layers live for that segment.
@@ -155,7 +157,11 @@ Backups are stored in `~/.local/share/ultimateslice/backups/` (or `$XDG_DATA_HOM
 - When Proxy mode is enabled, background prerender segments render at the active proxy scale (Half/Quarter) for faster prerender generation.
 - Prerender activity is surfaced in the existing bottom status/progress bar used for proxy generation.
 - Only active when enabled in Preferences.
-- Prerender cache files are temporary and are cleaned up when the project/player is closed.
+- Saved projects keep prerender cache files in a sibling `UltimateSlice.cache/prerender-vN/<project-hash>/` directory, and startup/open now preserves that saved-project cache root so reopening the same project can reuse compatible prerender segments.
+- Completed prerender jobs are written atomically through a temporary MP4 file before the final rename into the cache, so successful overlap renders now actually land in the prerender cache instead of failing on the temporary filename.
+- Unsaved/new projects still use the temporary prerender cache root until the project has a stable save path.
+- Reuse is validated with a prerender manifest that records the contributing source/proxy files and their size/mtime signatures; changed inputs invalidate the cached segment automatically.
+- Disabling **Background prerender** clears the current project's prerender cache files.
 - If a prerender boundary clip fails to link reliably, UltimateSlice automatically falls back to the normal live rebuild path for stability.
 - Animated transform/mask properties, speed/reverse/freeze timing, and advanced clip-audio animation still fall back to the normal live path when prerender cannot reproduce them safely.
 - When a boundary is not warm, playback falls back to the normal live rebuild path.

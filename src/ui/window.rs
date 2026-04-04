@@ -3154,6 +3154,10 @@ pub fn build_window(
     );
     prog_player_raw.set_realtime_preview(preferences_state.borrow().realtime_preview);
     prog_player_raw.set_background_prerender(initial_background_prerender);
+    {
+        let p = project.borrow();
+        prog_player_raw.set_prerender_project_path(p.file_path.as_deref());
+    }
     prog_player_raw.set_audio_crossfade_preview(
         preferences_state.borrow().crossfade_enabled,
         preferences_state.borrow().crossfade_curve.clone(),
@@ -5030,6 +5034,16 @@ pub fn build_window(
             }
         })
     };
+    let on_show_editor_impl: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    let on_show_editor_gui: Rc<dyn Fn()> = {
+        let cb = on_show_editor_impl.clone();
+        Rc::new(move || {
+            let callback = cb.borrow().as_ref().cloned();
+            if let Some(f) = callback {
+                f();
+            }
+        })
+    };
 
     let (header, btn_record) = toolbar::build_toolbar(
         project.clone(),
@@ -5047,6 +5061,10 @@ pub fn build_window(
                 suppress_resume_on_next_reload.set(true);
                 clear_media_browser_on_next_reload.set(true);
             }
+        },
+        {
+            let cb = on_show_editor_gui.clone();
+            move || cb()
         },
         {
             let cb = on_apply_collected_files_gui.clone();
@@ -8724,8 +8742,10 @@ pub fn build_window(
                     .borrow_mut()
                     .update_animated_svg_paths(animated_svg_paths);
 
+                let project_file_path = { project_reload.borrow().file_path.clone() };
                 {
                     let mut pp = prog_player_reload.borrow_mut();
+                    pp.set_prerender_project_path(project_file_path.as_deref());
                     pp.set_project_dimensions(proj_w, proj_h);
                     pp.set_frame_rate(fr_num, fr_den);
                     pp.load_clips(clips);
@@ -9121,6 +9141,12 @@ pub fn build_window(
     let main_stack = gtk::Stack::new();
     main_stack.set_transition_type(gtk::StackTransitionType::Crossfade);
     main_stack.set_transition_duration(200);
+    *on_show_editor_impl.borrow_mut() = Some({
+        let main_stack = main_stack.clone();
+        Rc::new(move || {
+            main_stack.set_visible_child_name("editor");
+        })
+    });
 
     let welcome_panel = {
         let project = project.clone();
@@ -9148,12 +9174,13 @@ pub fn build_window(
                 let stack = stack_for_open;
                 move || {
                     let dialog = gtk::FileDialog::new();
-                    dialog.set_title("Open Project XML");
+                    dialog.set_title("Open Project");
                     let filter = gtk::FileFilter::new();
                     filter.add_pattern("*.uspxml");
                     filter.add_pattern("*.fcpxml");
                     filter.add_pattern("*.xml");
-                    filter.set_name(Some("Project XML Files"));
+                    filter.add_pattern("*.otio");
+                    filter.set_name(Some("Project Files"));
                     let filters = gtk4::gio::ListStore::new::<gtk::FileFilter>();
                     filters.append(&filter);
                     dialog.set_filters(Some(&filters));
@@ -9169,17 +9196,10 @@ pub fn build_window(
                                 let (tx, rx) = std::sync::mpsc::sync_channel::<
                                     Result<crate::model::project::Project, String>,
                                 >(1);
-                                let path_bg = path_str.clone();
+                                let path_bg = path.clone();
                                 std::thread::spawn(move || {
-                                    let result = std::fs::read_to_string(&path_bg)
-                                        .map_err(|e| format!("Failed to read file: {e}"))
-                                        .and_then(|xml| {
-                                            crate::fcpxml::parser::parse_fcpxml_with_path(
-                                                &xml,
-                                                Some(std::path::Path::new(&path_bg)),
-                                            )
-                                            .map_err(|e| format!("FCPXML parse error: {e}"))
-                                        });
+                                    let result =
+                                        crate::ui::project_loader::load_project_from_path(&path_bg);
                                     let _ = tx.send(result);
                                 });
                                 let project = project.clone();
@@ -9193,9 +9213,8 @@ pub fn build_window(
                                     move || match rx.try_recv() {
                                         Ok(Ok(mut new_proj)) => {
                                             new_proj.dirty = false;
-                                            crate::recent::push(
-                                                &new_proj.file_path.clone().unwrap_or_default(),
-                                            );
+                                            new_proj.file_path = Some(path_str.clone());
+                                            crate::recent::push(&path_str);
                                             *project.borrow_mut() = new_proj;
                                             timeline_state.borrow_mut().loading = false;
 
@@ -9233,17 +9252,10 @@ pub fn build_window(
                     let (tx, rx) = std::sync::mpsc::sync_channel::<
                         Result<crate::model::project::Project, String>,
                     >(1);
-                    let path_bg = path_str.clone();
+                    let path_bg = std::path::PathBuf::from(&path_str);
                     std::thread::spawn(move || {
-                        let result = std::fs::read_to_string(&path_bg)
-                            .map_err(|e| format!("Failed to open recent project: {e}"))
-                            .and_then(|xml| {
-                                crate::fcpxml::parser::parse_fcpxml_with_path(
-                                    &xml,
-                                    Some(std::path::Path::new(&path_bg)),
-                                )
-                                .map_err(|e| format!("FCPXML parse error: {e}"))
-                            });
+                        let result = crate::ui::project_loader::load_project_from_path(&path_bg)
+                            .map_err(|e| format!("Failed to open recent project: {e}"));
                         let _ = tx.send(result);
                     });
                     let project = project.clone();
@@ -9257,7 +9269,8 @@ pub fn build_window(
                     {
                         Ok(Ok(mut new_proj)) => {
                             new_proj.dirty = false;
-                            crate::recent::push(&new_proj.file_path.clone().unwrap_or_default());
+                            new_proj.file_path = Some(path_str.clone());
+                            crate::recent::push(&path_str);
                             *project.borrow_mut() = new_proj;
                             timeline_state.borrow_mut().loading = false;
                             on_project_changed();
@@ -10092,17 +10105,10 @@ pub fn build_window(
 
     if let Some(path) = startup_project_path {
         let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Project, String>>(1);
-        let path_bg = path.clone();
+        let path_bg = std::path::PathBuf::from(&path);
         std::thread::spawn(move || {
-            let result = std::fs::read_to_string(&path_bg)
-                .map_err(|e| format!("Failed to read startup project file: {e}"))
-                .and_then(|xml| {
-                    crate::fcpxml::parser::parse_fcpxml_with_path(
-                        &xml,
-                        Some(std::path::Path::new(&path_bg)),
-                    )
-                    .map_err(|e| format!("FCPXML parse error: {e}"))
-                });
+            let result = crate::ui::project_loader::load_project_from_path(&path_bg)
+                .map_err(|e| format!("Failed to open startup project: {e}"));
             let _ = tx.send(result);
         });
         timeline_state.borrow_mut().loading = true;
@@ -12484,15 +12490,35 @@ fn handle_mcp_command(
             }
         }
 
-        McpCommand::SaveOtio { path, reply } => {
+        McpCommand::SaveOtio {
+            path,
+            path_mode,
+            reply,
+        } => {
+            let Some(path_mode) = crate::otio::writer::OtioMediaPathMode::from_str(&path_mode)
+            else {
+                let _ = reply.send(json!({
+                    "success": false,
+                    "error": "path_mode must be one of: absolute, relative"
+                }));
+                return;
+            };
             let result = {
                 let proj = project.borrow();
-                crate::otio::writer::write_otio(&proj)
-                    .and_then(|json| std::fs::write(&path, json).map_err(|e| anyhow::anyhow!(e)))
+                crate::otio::writer::write_otio_to_path(
+                    &proj,
+                    std::path::Path::new(&path),
+                    path_mode,
+                )
+                .and_then(|json| std::fs::write(&path, json).map_err(|e| anyhow::anyhow!(e)))
             };
             match result {
                 Ok(_) => {
-                    let _ = reply.send(json!({"success": true, "path": path}));
+                    let _ = reply.send(json!({
+                        "success": true,
+                        "path": path,
+                        "path_mode": path_mode.as_str()
+                    }));
                 }
                 Err(e) => {
                     let _ = reply.send(json!({"success": false, "error": e.to_string()}));
@@ -12649,13 +12675,9 @@ fn handle_mcp_command(
 
         McpCommand::OpenOtio { path, reply } => {
             let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Project, String>>(1);
-            let path_bg = path.clone();
+            let path_bg = std::path::PathBuf::from(&path);
             std::thread::spawn(move || {
-                let result = std::fs::read_to_string(&path_bg)
-                    .map_err(|e| e.to_string())
-                    .and_then(|json| {
-                        crate::otio::parser::parse_otio(&json).map_err(|e| e.to_string())
-                    });
+                let result = crate::ui::project_loader::load_project_from_path(&path_bg);
                 let _ = tx.send(result);
             });
             timeline_state.borrow_mut().loading = true;

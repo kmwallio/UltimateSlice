@@ -325,11 +325,12 @@ Tracking docs:
           - [x] Apply adaptive per-slot queue drop-late policy during heavy-overlap playback to reduce compositor-branch backpressure at handoff
           - [x] Re-sync/pause audio-only preview pipeline around video boundary rebuilds so transition stalls do not let audio run ahead and end early versus video
            - [x] Add short look-ahead boundary prewarm (next active clip-set probe/path warm-up) to reduce synchronous work at transition handoff
-           - [x] Optional background prerender mode: render upcoming complex overlap windows (3+ active video tracks) to temporary disk clips and use them at boundary rebuilds when available
-           - [x] Background prerender boundary correctness hardening: track prerender-active clip sets for boundary transitions and normalize prerender segment timestamps to avoid freeze/black handoff regressions
-           - [x] Background prerender safety fallback: when a prerender video slot fails to link at boundary rebuild, immediately rebuild with normal live slots; cache keys are versioned with timeline/track identity to prevent stale segment reuse
-           - [x] Background prerender link-race guard: allow a short post-preroll link grace for prerender slots, then force live fallback + segment invalidation when still unlinked to prevent unstable playback states
-           - [x] Background prerender priority over realtime boundary path for 3+ overlaps: when both settings are enabled, boundary handling now chooses prerender-capable rebuilds so prerender clips are consumed during full playthrough
+           - [x] Optional background prerender mode: render upcoming complex overlap windows (3+ active video tracks) to project-scoped disk clips beside saved projects (with temp fallback for unsaved projects), preserve those saved-project cache roots across startup/open, and reuse them at boundary rebuilds when available
+            - [x] Background prerender boundary correctness hardening: track prerender-active clip sets for boundary transitions and normalize prerender segment timestamps to avoid freeze/black handoff regressions
+            - [x] Background prerender safety fallback: when a prerender video slot fails to link at boundary rebuild, immediately rebuild with normal live slots; cache keys plus manifest-validated source/proxy signatures prevent stale segment reuse
+            - [x] Background prerender link-race guard: allow a short post-preroll link grace for prerender slots, then force live fallback + segment invalidation when still unlinked to prevent unstable playback states
+            - [x] Background prerender atomic cache writes: FFmpeg temp outputs now declare MP4 muxing explicitly so `.partial` cache files still render successfully before the final rename into the prerender cache
+            - [x] Background prerender priority over realtime boundary path for 3+ overlaps: when both settings are enabled, boundary handling now chooses prerender-capable rebuilds so prerender clips are consumed during full playthrough
            - [x] Background prerender scheduling bounded during playback: queue by upcoming boundaries only (not moving playhead ticks) to avoid excessive in-flight segment churn
            - [x] Background prerender slot sizing parity: prerender decode branch now scales to current preview-processing dimensions before compositor to avoid top-left crop artifacts at reduced preview quality
            - [x] Background prerender A/V prototype: prerender segments now include mixed audio and prerender playback uses a single prerender decoder branch for both video and audio
@@ -383,7 +384,7 @@ Tracking docs:
    - [x] Proxy shutdown cleanup policy: always clean managed local/tmp proxies on unload/close; preserve tracked `UltimateSlice.cache` proxies only when Proxy mode is enabled (clean sidecar proxies too when disabled)
    - [x] Enabled-mode sidecar proxy mirroring: when Proxy mode is enabled, local proxy transcodes are mirrored to alongside-media `UltimateSlice.cache` as well
    - [x] Preview LUTs preference: when Proxy mode is Off, generate/use project-resolution LUT-baked preview media for LUT-assigned clips
-   - [x] Automatic stale proxy cleanup: proxy paths now fingerprint source identity and proxy-affecting variant state, and current-project stale/superseded proxy variants are pruned automatically from managed local and matching sidecar cache dirs
+   - [x] Stable proxy reuse + stale cleanup: proxy paths now stay stable for the same source path and proxy-affecting variant state, changed source media invalidates proxies via explicit source-signature checks, older legacy `UltimateSlice.cache/<stem>.proxy_*` sidecars are reused when still valid, and current-project stale/superseded proxy variants are pruned automatically from managed local and matching sidecar cache dirs
    - [x] Export/proxy progress percentage now uses bitrate×duration size estimates with ffmpeg `total_size` tracking, capped below 100% until ffmpeg completion
    - [x] Parallel proxy transcoding: 4 worker threads process ffmpeg transcodes concurrently instead of sequentially
   - [x] Optimized effects pipeline: single-pass `videoconvertscale` for decode→RGBA downscale, early downscale before effects, conditional element creation for no-op effects, leaky scope queue to prevent display backpressure
@@ -659,8 +660,8 @@ Tracking docs:
 ### Performance & Integration
 - [ ] Hardware-accelerated decoding/encoding (VA-API, NVENC)
 - [ ] Background rendering for complex effect stacks
-- [x] OpenTimelineIO (OTIO) import/export (native Rust JSON serializer via serde_json; clips/tracks/gaps/transitions/markers/speed plus current OTIO metadata round-trip; versioned `metadata.ultimateslice` contract; title/subtitle metadata and track audio-role round-trip; MCP `save_otio`/`open_otio` tools; Export dropdown + File Open dialog)
-- [ ] Full OTIO metadata parity for UltimateSlice-specific features not yet covered by OTIO round-trip (remaining transforms/effects/keyframes/masks/nested clip internals)
+- [x] OpenTimelineIO (OTIO) import/export (native Rust JSON serializer via serde_json; clips/tracks/gaps/transitions/markers/speed plus current OTIO metadata round-trip; versioned `metadata.ultimateslice` contract; title/subtitle metadata, track audio-role metadata, transform/crop/blend metadata, and core transform/opacity keyframe round-trip; absolute/relative OTIO media-reference export with base-path-aware reimport; MCP `save_otio`/`open_otio` tools; Export dropdown + File Open dialog)
+- [ ] Full OTIO metadata parity for UltimateSlice-specific features not yet covered by OTIO round-trip (remaining advanced effects, mask payloads/animation, secondary keyframe lanes such as crop animation, and nested clip internals)
 - [ ] Shared Project/Library support for collaborative editing
 
 ---

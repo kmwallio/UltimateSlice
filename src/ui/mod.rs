@@ -12,6 +12,7 @@ pub mod multicam_viewer;
 pub mod preferences;
 pub mod preview;
 pub mod program_monitor;
+pub mod project_loader;
 pub mod timecode;
 pub mod timeline;
 pub mod title_templates;

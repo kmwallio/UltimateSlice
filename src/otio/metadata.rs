@@ -1,7 +1,7 @@
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::model::clip::{SubtitleHighlightMode, SubtitleSegment};
+use crate::model::clip::{BlendMode, NumericKeyframe, SubtitleHighlightMode, SubtitleSegment};
 
 pub(crate) const ULTIMATESLICE_OTIO_METADATA_VERSION: u32 = 1;
 
@@ -25,6 +25,38 @@ pub(crate) struct UltimateSliceClipOtioMetadata {
     pub(crate) saturation: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) opacity: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) scale: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) position_x: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) position_y: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rotate: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) flip_h: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) flip_v: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) crop_left: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) crop_right: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) crop_top: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) crop_bottom: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) blend_mode: Option<BlendMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) opacity_keyframes: Option<Vec<NumericKeyframe>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) scale_keyframes: Option<Vec<NumericKeyframe>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) position_x_keyframes: Option<Vec<NumericKeyframe>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) position_y_keyframes: Option<Vec<NumericKeyframe>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rotate_keyframes: Option<Vec<NumericKeyframe>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) title_text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -209,6 +241,7 @@ mod tests {
         let value = wrap_clip_metadata(&UltimateSliceClipOtioMetadata {
             kind: Some("Title".to_string()),
             speed: Some(1.25),
+            scale: Some(1.5),
             ..UltimateSliceClipOtioMetadata::default()
         });
 
@@ -218,6 +251,7 @@ mod tests {
         );
         assert_eq!(value["ultimateslice"]["clip"]["kind"], "Title");
         assert_eq!(value["ultimateslice"]["clip"]["speed"], 1.25);
+        assert_eq!(value["ultimateslice"]["clip"]["scale"], 1.5);
     }
 
     #[test]
@@ -251,5 +285,36 @@ mod tests {
         let parsed = track_metadata_from_root(&value).expect("track metadata should parse");
         assert_eq!(parsed.muted, Some(true));
         assert_eq!(parsed.audio_role.as_deref(), Some("dialogue"));
+    }
+
+    #[test]
+    fn clip_metadata_roundtrips_transform_keyframes_and_blend_mode() {
+        let value = wrap_clip_metadata(&UltimateSliceClipOtioMetadata {
+            blend_mode: Some(BlendMode::Screen),
+            position_x: Some(0.25),
+            scale_keyframes: Some(vec![NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 1.35,
+                interpolation: crate::model::clip::KeyframeInterpolation::EaseInOut,
+                bezier_controls: Some(crate::model::clip::BezierControls {
+                    x1: 0.2,
+                    y1: 0.0,
+                    x2: 0.8,
+                    y2: 1.0,
+                }),
+            }]),
+            ..UltimateSliceClipOtioMetadata::default()
+        });
+
+        let parsed = clip_metadata_from_root(&value).expect("clip metadata should parse");
+        assert_eq!(parsed.blend_mode, Some(BlendMode::Screen));
+        assert_eq!(parsed.position_x, Some(0.25));
+        assert_eq!(
+            parsed
+                .scale_keyframes
+                .expect("scale keyframes should round-trip")[0]
+                .value,
+            1.35
+        );
     }
 }

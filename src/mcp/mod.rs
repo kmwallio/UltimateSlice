@@ -210,6 +210,7 @@ pub enum McpCommand {
     },
     SaveOtio {
         path: String,
+        path_mode: String,
         reply: SyncSender<Value>,
     },
     OpenOtio {

@@ -15,6 +15,7 @@ use glib;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app::AppSink;
+use serde::{Deserialize, Serialize};
 
 /// Access a child of a GStreamer ChildProxy element by index.
 /// Uses FFI because `gst::Element` doesn't statically implement `IsA<ChildProxy>`,
@@ -62,6 +63,7 @@ fn eq_set_band_gain(element: &gst::Element, band_idx: u32, gain: f64) {
         band.set_property("gain", gain.clamp(-24.0, 12.0));
     }
 }
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io::Write;
@@ -71,18 +73,113 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_PREVIEW_AUDIO_GAIN: f64 = 3.981_071_705_5; // +12 dB
-const BACKGROUND_PRERENDER_CACHE_VERSION: u32 = 3;
+const BACKGROUND_PRERENDER_CACHE_VERSION: u32 = 4;
 const PROGRAM_PREVIEW_AUDIO_RATE: i32 = 48_000;
 const PROGRAM_PREVIEW_AUDIO_CHANNELS: i32 = 2;
+const MAX_READY_PRERENDER_SEGMENTS: usize = 24;
 
 fn program_preview_audio_caps() -> gst::Caps {
     gst::Caps::builder("audio/x-raw")
         .field("rate", PROGRAM_PREVIEW_AUDIO_RATE)
         .field("channels", PROGRAM_PREVIEW_AUDIO_CHANNELS)
         .build()
+}
+
+fn default_prerender_cache_root() -> PathBuf {
+    std::env::temp_dir()
+        .join("ultimateslice")
+        .join(format!("prerender-v{}", BACKGROUND_PRERENDER_CACHE_VERSION))
+}
+
+fn prerender_cache_root_for_project_path(project_file_path: Option<&str>) -> (PathBuf, bool) {
+    match project_file_path {
+        Some(project_file_path) if !project_file_path.is_empty() => {
+            let project_path = Path::new(project_file_path);
+            let parent = project_path.parent().unwrap_or_else(|| Path::new("."));
+            let stem = project_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("project");
+            let stem = sanitize_prerender_cache_component(stem);
+            let mut hasher = DefaultHasher::new();
+            project_file_path.hash(&mut hasher);
+            let path_hash = hasher.finish();
+            (
+                parent
+                    .join("UltimateSlice.cache")
+                    .join(format!("prerender-v{}", BACKGROUND_PRERENDER_CACHE_VERSION))
+                    .join(format!("{stem}-p{path_hash:016x}")),
+                true,
+            )
+        }
+        _ => (default_prerender_cache_root(), false),
+    }
+}
+
+fn sanitize_prerender_cache_component(component: &str) -> String {
+    let sanitized: String = component
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => ch,
+            _ => '_',
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "project".to_string()
+    } else {
+        sanitized
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct PrerenderSourceSignature {
+    len: u64,
+    modified_secs: u64,
+    modified_nanos: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct PrerenderManifestInput {
+    path: String,
+    signature: PrerenderSourceSignature,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct PrerenderSegmentManifest {
+    key: String,
+    signature: u64,
+    start_ns: u64,
+    end_ns: u64,
+    inputs: Vec<PrerenderManifestInput>,
+}
+
+fn prerender_source_signature_for_path(path: &Path) -> Option<PrerenderSourceSignature> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata.modified().ok()?;
+    let since_epoch = modified.duration_since(UNIX_EPOCH).ok()?;
+    Some(PrerenderSourceSignature {
+        len: metadata.len(),
+        modified_secs: since_epoch.as_secs(),
+        modified_nanos: since_epoch.subsec_nanos(),
+    })
+}
+
+fn prerender_manifest_path(output_path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.manifest.json", output_path.to_string_lossy()))
+}
+
+fn prerender_partial_output_path(output_path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.partial", output_path.to_string_lossy()))
+}
+
+fn remove_prerender_segment_files(output_path: &Path) {
+    let _ = std::fs::remove_file(output_path);
+    let _ = std::fs::remove_file(prerender_manifest_path(output_path));
+    let _ = std::fs::remove_file(prerender_partial_output_path(output_path));
 }
 
 /// Normalize mixer-bound clip audio so camera AAC (e.g. 16 kHz mono Ring MP4s)
@@ -1054,6 +1151,8 @@ struct PrerenderJobResult {
     end_ns: u64,
     signature: u64,
     success: bool,
+    generation: u64,
+    cache_persistent: bool,
 }
 
 pub struct BackgroundPrerenderProgress {
@@ -1458,8 +1557,13 @@ pub struct ProgramPlayer {
     prerender_result_tx: mpsc::Sender<PrerenderJobResult>,
     /// Runtime cache root for temporary prerendered sections.
     prerender_cache_root: PathBuf,
+    /// Whether `prerender_cache_root` should survive project reloads/app restarts.
+    prerender_cache_persistent: bool,
     /// Files created during this runtime, removed on cleanup.
     prerender_runtime_files: HashSet<String>,
+    /// Monotonic token used to discard stale background prerender job results after
+    /// project reloads, cache-root switches, or preference toggles.
+    prerender_generation: u64,
     /// Active clip signature represented by the current prerender segment slot.
     prerender_active_clips: Option<Vec<usize>>,
     /// Current prerender segment key when a synthetic prerender slot is active.
@@ -2075,9 +2179,7 @@ impl ProgramPlayer {
                 .expect("paintable must implement Paintable")
         };
         let (prerender_result_tx, prerender_result_rx) = mpsc::channel::<PrerenderJobResult>();
-        let prerender_cache_root = std::env::temp_dir()
-            .join("ultimateslice")
-            .join(format!("prerender-v{}", BACKGROUND_PRERENDER_CACHE_VERSION));
+        let prerender_cache_root = default_prerender_cache_root();
         let _ = std::fs::create_dir_all(&prerender_cache_root);
 
         Ok((
@@ -2169,7 +2271,9 @@ impl ProgramPlayer {
                 prerender_result_rx,
                 prerender_result_tx,
                 prerender_cache_root,
+                prerender_cache_persistent: false,
                 prerender_runtime_files: HashSet::new(),
+                prerender_generation: 0,
                 prerender_active_clips: None,
                 current_prerender_segment_key: None,
                 prerender_total_requested: 0,
@@ -2242,7 +2346,9 @@ impl ProgramPlayer {
             if !self.realtime_preview {
                 self.teardown_prepreroll_sidecars();
             }
-            self.cleanup_background_prerender_cache();
+            self.cleanup_background_prerender_cache(true);
+        } else if self.prerender_cache_persistent {
+            self.prune_prerender_cache_root_files();
         }
     }
 
@@ -2267,18 +2373,12 @@ impl ProgramPlayer {
         };
     }
 
-    fn cleanup_background_prerender_cache(&mut self) {
-        for path in self.prerender_runtime_files.drain() {
-            let _ = std::fs::remove_file(path);
+    fn cleanup_background_prerender_cache(&mut self, purge_cache_files: bool) {
+        self.prerender_generation = self.prerender_generation.wrapping_add(1);
+        if purge_cache_files {
+            self.remove_all_prerender_cache_files_from_root();
         }
-        if let Ok(entries) = std::fs::read_dir(&self.prerender_cache_root) {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                if p.extension().and_then(|s| s.to_str()) == Some("mp4") {
-                    let _ = std::fs::remove_file(p);
-                }
-            }
-        }
+        self.prerender_runtime_files.clear();
         self.prerender_segments.clear();
         self.prerender_pending.clear();
         self.prerender_pending_priority.clear();
@@ -2294,6 +2394,133 @@ impl ProgramPlayer {
         self.last_idle_prerender_scan_at = None;
         self.pending_prerender_promote = false;
         while self.prerender_result_rx.try_recv().is_ok() {}
+    }
+
+    fn should_preserve_prerender_cache_files(&self) -> bool {
+        self.background_prerender && self.prerender_cache_persistent
+    }
+
+    fn remove_all_prerender_cache_files_from_root(&self) {
+        Self::clear_prerender_cache_root(&self.prerender_cache_root);
+    }
+
+    fn forget_prerender_segment_path(&mut self, path: &Path) {
+        let path_str = path.to_string_lossy().to_string();
+        self.prerender_runtime_files.remove(&path_str);
+        self.prerender_segments
+            .retain(|_, seg| seg.path != path_str);
+        if let Some(current_key) = self.current_prerender_segment_key.as_ref() {
+            if !self.prerender_segments.contains_key(current_key) {
+                self.current_prerender_segment_key = None;
+            }
+        }
+    }
+
+    fn load_prerender_manifest_for_path(path: &Path) -> Option<PrerenderSegmentManifest> {
+        let manifest_path = prerender_manifest_path(path);
+        let payload = std::fs::read(manifest_path).ok()?;
+        serde_json::from_slice(&payload).ok()
+    }
+
+    fn write_prerender_manifest_for_path(
+        path: &Path,
+        manifest: &PrerenderSegmentManifest,
+    ) -> Result<()> {
+        let manifest_path = prerender_manifest_path(path);
+        let payload = serde_json::to_vec_pretty(manifest)?;
+        std::fs::write(manifest_path, payload)?;
+        Ok(())
+    }
+
+    fn prerender_manifest_inputs_are_fresh(inputs: &[PrerenderManifestInput]) -> bool {
+        inputs.iter().all(|input| {
+            prerender_source_signature_for_path(Path::new(&input.path)) == Some(input.signature)
+        })
+    }
+
+    fn clear_prerender_cache_root(root: &Path) {
+        if let Ok(entries) = std::fs::read_dir(root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                if path.extension().and_then(|s| s.to_str()) == Some("mp4")
+                    || name.ends_with(".manifest.json")
+                    || name.ends_with(".partial")
+                {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+    }
+
+    fn prune_prerender_cache_root_files(&mut self) {
+        let mut kept: Vec<(PathBuf, SystemTime)> = Vec::new();
+        let mut manifest_paths: HashSet<PathBuf> = HashSet::new();
+        if let Ok(entries) = std::fs::read_dir(&self.prerender_cache_root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                if name.ends_with(".partial") {
+                    let _ = std::fs::remove_file(&path);
+                    continue;
+                }
+                if name.ends_with(".manifest.json") {
+                    manifest_paths.insert(path);
+                    continue;
+                }
+                if path.extension().and_then(|s| s.to_str()) != Some("mp4") {
+                    continue;
+                }
+                let Some(manifest) = Self::load_prerender_manifest_for_path(&path) else {
+                    remove_prerender_segment_files(&path);
+                    self.forget_prerender_segment_path(&path);
+                    continue;
+                };
+                if !Self::prerender_manifest_inputs_are_fresh(&manifest.inputs) {
+                    remove_prerender_segment_files(&path);
+                    self.forget_prerender_segment_path(&path);
+                    continue;
+                }
+                let modified = entry
+                    .metadata()
+                    .ok()
+                    .and_then(|metadata| metadata.modified().ok())
+                    .unwrap_or(UNIX_EPOCH);
+                kept.push((path, modified));
+            }
+        }
+
+        let kept_manifest_paths: HashSet<PathBuf> = kept
+            .iter()
+            .map(|(path, _)| prerender_manifest_path(path))
+            .collect();
+        for manifest_path in manifest_paths {
+            if !kept_manifest_paths.contains(&manifest_path) {
+                let _ = std::fs::remove_file(manifest_path);
+            }
+        }
+
+        if kept.len() <= MAX_READY_PRERENDER_SEGMENTS {
+            return;
+        }
+
+        let protected_paths: HashSet<String> = self
+            .prerender_segments
+            .values()
+            .map(|segment| segment.path.clone())
+            .collect();
+        kept.sort_by_key(|(_, modified)| *modified);
+        while kept.len() > MAX_READY_PRERENDER_SEGMENTS {
+            let victim_index = kept
+                .iter()
+                .position(|(path, _)| !protected_paths.contains(path.to_string_lossy().as_ref()));
+            let Some(victim_index) = victim_index else {
+                break;
+            };
+            let (victim_path, _) = kept.remove(victim_index);
+            remove_prerender_segment_files(&victim_path);
+            self.forget_prerender_segment_path(&victim_path);
+        }
     }
 
     pub fn background_prerender_progress(&self) -> BackgroundPrerenderProgress {
@@ -2360,6 +2587,29 @@ impl ProgramPlayer {
             self.frame_duration_ns = frame_duration_ns;
             self.frame_rate_num = numerator;
             self.frame_rate_den = denominator;
+        }
+    }
+
+    pub fn set_prerender_project_path(&mut self, project_file_path: Option<&str>) {
+        let (next_root, persistent) = prerender_cache_root_for_project_path(project_file_path);
+        if self.prerender_cache_root == next_root && self.prerender_cache_persistent == persistent {
+            if persistent {
+                self.prune_prerender_cache_root_files();
+            }
+            return;
+        }
+
+        let purge_old_root = !self.should_preserve_prerender_cache_files();
+        self.cleanup_background_prerender_cache(purge_old_root);
+        self.prerender_cache_root = next_root;
+        self.prerender_cache_persistent = persistent;
+        let _ = std::fs::create_dir_all(&self.prerender_cache_root);
+        // Saved-project roots must keep compatible prerenders even when this path is
+        // attached before the background-prerender preference has been restored.
+        if persistent {
+            self.prune_prerender_cache_root_files();
+        } else {
+            self.remove_all_prerender_cache_files_from_root();
         }
     }
 
@@ -2909,7 +3159,7 @@ impl ProgramPlayer {
         self.pending_prerender_promote = false;
         self.current_prerender_segment_key = None;
         self.teardown_prepreroll_sidecars();
-        self.cleanup_background_prerender_cache();
+        self.cleanup_background_prerender_cache(!self.should_preserve_prerender_cache_files());
 
         // Populate adjustment overlays from the loaded clips.
         self.rebuild_adjustment_overlays();
@@ -5567,6 +5817,133 @@ impl ProgramPlayer {
         }
     }
 
+    fn prerender_manifest_inputs_for_active(
+        &self,
+        active: &[usize],
+    ) -> Option<Vec<PrerenderManifestInput>> {
+        let mut signatures_by_path: HashMap<String, PrerenderSourceSignature> = HashMap::new();
+        for &idx in active {
+            let clip = self.clips.get(idx)?;
+            if clip.is_adjustment || clip.is_title {
+                continue;
+            }
+            let (path, _, _, _) = self.resolve_source_path_for_clip(clip);
+            let signature = prerender_source_signature_for_path(Path::new(&path))?;
+            signatures_by_path.entry(path).or_insert(signature);
+        }
+        let mut inputs: Vec<PrerenderManifestInput> = signatures_by_path
+            .into_iter()
+            .map(|(path, signature)| PrerenderManifestInput { path, signature })
+            .collect();
+        inputs.sort_by(|a, b| a.path.cmp(&b.path));
+        Some(inputs)
+    }
+
+    fn build_prerender_manifest_for_segment(
+        &self,
+        key: &str,
+        signature: u64,
+        start_ns: u64,
+        end_ns: u64,
+        active: &[usize],
+    ) -> Option<PrerenderSegmentManifest> {
+        Some(PrerenderSegmentManifest {
+            key: key.to_string(),
+            signature,
+            start_ns,
+            end_ns,
+            inputs: self.prerender_manifest_inputs_for_active(active)?,
+        })
+    }
+
+    fn cached_prerender_segment_matches_manifest(
+        &self,
+        path: &Path,
+        key: &str,
+        signature: u64,
+        start_ns: u64,
+        end_ns: u64,
+        expected_inputs: &[PrerenderManifestInput],
+    ) -> bool {
+        let Some(manifest) = Self::load_prerender_manifest_for_path(path) else {
+            return false;
+        };
+        manifest.key == key
+            && manifest.signature == signature
+            && manifest.start_ns == start_ns
+            && manifest.end_ns == end_ns
+            && manifest.inputs == expected_inputs
+            && Self::prerender_manifest_inputs_are_fresh(&manifest.inputs)
+    }
+
+    fn discover_prerender_segment_for(
+        &mut self,
+        timeline_pos: u64,
+        signature: u64,
+        expected_inputs: &[PrerenderManifestInput],
+    ) -> Option<PrerenderSegment> {
+        let best_match = Self::discover_prerender_segment_in_root(
+            &self.prerender_cache_root,
+            timeline_pos,
+            signature,
+            expected_inputs,
+        );
+        if let Some(segment) = best_match.clone() {
+            self.prerender_runtime_files.insert(segment.path.clone());
+            self.prerender_segments
+                .insert(segment.key.clone(), segment.clone());
+            self.prune_prerender_segment_cache();
+        }
+        best_match
+    }
+
+    fn discover_prerender_segment_in_root(
+        root: &Path,
+        timeline_pos: u64,
+        signature: u64,
+        expected_inputs: &[PrerenderManifestInput],
+    ) -> Option<PrerenderSegment> {
+        let mut best_match: Option<PrerenderSegment> = None;
+        if let Ok(entries) = std::fs::read_dir(root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) != Some("mp4") {
+                    continue;
+                }
+                let Some(manifest) = Self::load_prerender_manifest_for_path(&path) else {
+                    remove_prerender_segment_files(&path);
+                    continue;
+                };
+                if !Self::prerender_manifest_inputs_are_fresh(&manifest.inputs) {
+                    remove_prerender_segment_files(&path);
+                    continue;
+                }
+                if manifest.signature != signature
+                    || manifest.inputs != expected_inputs
+                    || timeline_pos < manifest.start_ns
+                    || timeline_pos >= manifest.end_ns
+                {
+                    continue;
+                }
+                let segment = PrerenderSegment {
+                    key: manifest.key,
+                    path: path.to_string_lossy().to_string(),
+                    start_ns: manifest.start_ns,
+                    end_ns: manifest.end_ns,
+                    signature: manifest.signature,
+                };
+                if best_match
+                    .as_ref()
+                    .map(|current| segment.start_ns > current.start_ns)
+                    .unwrap_or(true)
+                {
+                    best_match = Some(segment);
+                }
+            }
+        }
+        best_match
+    }
+
     /// Get or parse a `.cube` LUT file, caching the result for reuse.
     fn get_or_parse_lut(&mut self, path: &str) -> Option<Arc<CubeLut>> {
         if let Some(cached) = self.lut_cache.get(path) {
@@ -6161,6 +6538,14 @@ impl ProgramPlayer {
 
     fn poll_background_prerender_results(&mut self) {
         while let Ok(result) = self.prerender_result_rx.try_recv() {
+            if result.generation != self.prerender_generation {
+                if (!result.cache_persistent || !self.background_prerender)
+                    && Path::new(&result.path).exists()
+                {
+                    remove_prerender_segment_files(Path::new(&result.path));
+                }
+                continue;
+            }
             self.prerender_pending.remove(&result.key);
             self.prerender_pending_priority.remove(&result.key);
             // Discard results for superseded jobs — their output is stale.
@@ -6171,13 +6556,13 @@ impl ProgramPlayer {
                     result.path
                 );
                 if Path::new(&result.path).exists() {
-                    let _ = std::fs::remove_file(&result.path);
+                    remove_prerender_segment_files(Path::new(&result.path));
                 }
                 continue;
             }
             if !self.background_prerender {
                 if Path::new(&result.path).exists() {
-                    let _ = std::fs::remove_file(&result.path);
+                    remove_prerender_segment_files(Path::new(&result.path));
                 }
                 continue;
             }
@@ -6201,6 +6586,7 @@ impl ProgramPlayer {
                     },
                 );
                 self.prune_prerender_segment_cache();
+                self.prune_prerender_cache_root_files();
                 if self.state == PlayerState::Playing
                     && !self.slots.iter().any(|s| s.is_prerender_slot)
                 {
@@ -6233,17 +6619,141 @@ impl ProgramPlayer {
         }
     }
 
-    fn prerender_signature_for_active(&self, active: &[usize]) -> u64 {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        let hash_keyframes = |hasher: &mut std::collections::hash_map::DefaultHasher,
-                              kfs: &[NumericKeyframe]| {
-            kfs.len().hash(hasher);
-            for kf in kfs {
-                kf.time_ns.hash(hasher);
-                kf.value.to_bits().hash(hasher);
-                kf.interpolation.hash(hasher);
+    fn hash_prerender_keyframes(hasher: &mut DefaultHasher, keyframes: &[NumericKeyframe]) {
+        keyframes.len().hash(hasher);
+        for keyframe in keyframes {
+            keyframe.time_ns.hash(hasher);
+            keyframe.value.to_bits().hash(hasher);
+            keyframe.interpolation.hash(hasher);
+        }
+    }
+
+    fn hash_prerender_clip_state(
+        hasher: &mut DefaultHasher,
+        clip: &ProgramClip,
+        effective_source_path: &str,
+    ) {
+        clip.track_index.hash(hasher);
+        clip.timeline_start_ns.hash(hasher);
+        clip.timeline_end_ns().hash(hasher);
+        effective_source_path.hash(hasher);
+        clip.source_in_ns.hash(hasher);
+        clip.source_out_ns.hash(hasher);
+        clip.speed.to_bits().hash(hasher);
+        Self::hash_prerender_keyframes(hasher, &clip.speed_keyframes);
+        clip.reverse.hash(hasher);
+        clip.freeze_frame.hash(hasher);
+        clip.freeze_frame_source_ns.hash(hasher);
+        clip.freeze_frame_hold_duration_ns.hash(hasher);
+        clip.crop_left.hash(hasher);
+        Self::hash_prerender_keyframes(hasher, &clip.crop_left_keyframes);
+        clip.crop_right.hash(hasher);
+        Self::hash_prerender_keyframes(hasher, &clip.crop_right_keyframes);
+        clip.crop_top.hash(hasher);
+        Self::hash_prerender_keyframes(hasher, &clip.crop_top_keyframes);
+        clip.crop_bottom.hash(hasher);
+        Self::hash_prerender_keyframes(hasher, &clip.crop_bottom_keyframes);
+        clip.rotate.hash(hasher);
+        Self::hash_prerender_keyframes(hasher, &clip.rotate_keyframes);
+        clip.flip_h.hash(hasher);
+        clip.flip_v.hash(hasher);
+        clip.scale.to_bits().hash(hasher);
+        Self::hash_prerender_keyframes(hasher, &clip.scale_keyframes);
+        clip.position_x.to_bits().hash(hasher);
+        Self::hash_prerender_keyframes(hasher, &clip.position_x_keyframes);
+        clip.position_y.to_bits().hash(hasher);
+        Self::hash_prerender_keyframes(hasher, &clip.position_y_keyframes);
+        clip.opacity.to_bits().hash(hasher);
+        Self::hash_prerender_keyframes(hasher, &clip.opacity_keyframes);
+        clip.volume.to_bits().hash(hasher);
+        Self::hash_prerender_keyframes(hasher, &clip.volume_keyframes);
+        clip.brightness.to_bits().hash(hasher);
+        Self::hash_prerender_keyframes(hasher, &clip.brightness_keyframes);
+        clip.contrast.to_bits().hash(hasher);
+        Self::hash_prerender_keyframes(hasher, &clip.contrast_keyframes);
+        clip.saturation.to_bits().hash(hasher);
+        Self::hash_prerender_keyframes(hasher, &clip.saturation_keyframes);
+        clip.temperature.to_bits().hash(hasher);
+        Self::hash_prerender_keyframes(hasher, &clip.temperature_keyframes);
+        clip.tint.to_bits().hash(hasher);
+        Self::hash_prerender_keyframes(hasher, &clip.tint_keyframes);
+        clip.denoise.to_bits().hash(hasher);
+        clip.sharpness.to_bits().hash(hasher);
+        clip.blur.to_bits().hash(hasher);
+        Self::hash_prerender_keyframes(hasher, &clip.blur_keyframes);
+        clip.shadows.to_bits().hash(hasher);
+        clip.midtones.to_bits().hash(hasher);
+        clip.highlights.to_bits().hash(hasher);
+        clip.lut_paths.hash(hasher);
+        clip.exposure.to_bits().hash(hasher);
+        clip.black_point.to_bits().hash(hasher);
+        clip.highlights_warmth.to_bits().hash(hasher);
+        clip.highlights_tint.to_bits().hash(hasher);
+        clip.midtones_warmth.to_bits().hash(hasher);
+        clip.midtones_tint.to_bits().hash(hasher);
+        clip.shadows_warmth.to_bits().hash(hasher);
+        clip.shadows_tint.to_bits().hash(hasher);
+        clip.chroma_key_enabled.hash(hasher);
+        clip.chroma_key_color.hash(hasher);
+        clip.chroma_key_tolerance.to_bits().hash(hasher);
+        clip.chroma_key_softness.to_bits().hash(hasher);
+        clip.is_title.hash(hasher);
+        clip.title_text.hash(hasher);
+        clip.title_font.hash(hasher);
+        clip.title_color.hash(hasher);
+        clip.title_x.to_bits().hash(hasher);
+        clip.title_y.to_bits().hash(hasher);
+        clip.title_outline_width.to_bits().hash(hasher);
+        clip.title_outline_color.hash(hasher);
+        clip.title_shadow.hash(hasher);
+        clip.title_shadow_color.hash(hasher);
+        clip.title_shadow_offset_x.to_bits().hash(hasher);
+        clip.title_shadow_offset_y.to_bits().hash(hasher);
+        clip.title_bg_box.hash(hasher);
+        clip.title_bg_box_color.hash(hasher);
+        clip.title_bg_box_padding.to_bits().hash(hasher);
+        clip.title_clip_bg_color.hash(hasher);
+        clip.title_secondary_text.hash(hasher);
+        (clip.blend_mode as u8).hash(hasher);
+        clip.frei0r_effects.len().hash(hasher);
+        for effect in &clip.frei0r_effects {
+            effect.id.hash(hasher);
+            effect.plugin_name.hash(hasher);
+            effect.enabled.hash(hasher);
+            for (key, value) in &effect.params {
+                key.hash(hasher);
+                value.to_bits().hash(hasher);
             }
-        };
+            for (key, value) in &effect.string_params {
+                key.hash(hasher);
+                value.hash(hasher);
+            }
+        }
+        clip.slow_motion_interp.hash(hasher);
+        clip.masks.len().hash(hasher);
+        for mask in &clip.masks {
+            mask.enabled.hash(hasher);
+            (mask.shape as u8).hash(hasher);
+            mask.center_x.to_bits().hash(hasher);
+            mask.center_y.to_bits().hash(hasher);
+            mask.width.to_bits().hash(hasher);
+            mask.height.to_bits().hash(hasher);
+            mask.rotation.to_bits().hash(hasher);
+            mask.feather.to_bits().hash(hasher);
+            mask.expansion.to_bits().hash(hasher);
+            mask.invert.hash(hasher);
+            mask.center_x_keyframes.len().hash(hasher);
+            mask.center_y_keyframes.len().hash(hasher);
+            mask.width_keyframes.len().hash(hasher);
+            mask.height_keyframes.len().hash(hasher);
+            mask.rotation_keyframes.len().hash(hasher);
+            mask.feather_keyframes.len().hash(hasher);
+            mask.expansion_keyframes.len().hash(hasher);
+        }
+    }
+
+    fn prerender_signature_for_active(&self, active: &[usize]) -> u64 {
+        let mut hasher = DefaultHasher::new();
         BACKGROUND_PRERENDER_CACHE_VERSION.hash(&mut hasher);
         self.project_width.hash(&mut hasher);
         self.project_height.hash(&mut hasher);
@@ -6252,129 +6762,11 @@ impl ProgramPlayer {
         self.proxy_scale_divisor.hash(&mut hasher);
         for &idx in active {
             if let Some(c) = self.clips.get(idx) {
-                c.id.hash(&mut hasher);
-                c.track_index.hash(&mut hasher);
-                c.timeline_start_ns.hash(&mut hasher);
-                c.timeline_end_ns().hash(&mut hasher);
-                self.effective_source_path_for_clip(c).hash(&mut hasher);
-                c.source_in_ns.hash(&mut hasher);
-                c.source_out_ns.hash(&mut hasher);
-                c.speed.to_bits().hash(&mut hasher);
-                hash_keyframes(&mut hasher, &c.speed_keyframes);
-                c.reverse.hash(&mut hasher);
-                c.freeze_frame.hash(&mut hasher);
-                c.freeze_frame_source_ns.hash(&mut hasher);
-                c.freeze_frame_hold_duration_ns.hash(&mut hasher);
-                c.crop_left.hash(&mut hasher);
-                hash_keyframes(&mut hasher, &c.crop_left_keyframes);
-                c.crop_right.hash(&mut hasher);
-                hash_keyframes(&mut hasher, &c.crop_right_keyframes);
-                c.crop_top.hash(&mut hasher);
-                hash_keyframes(&mut hasher, &c.crop_top_keyframes);
-                c.crop_bottom.hash(&mut hasher);
-                hash_keyframes(&mut hasher, &c.crop_bottom_keyframes);
-                c.rotate.hash(&mut hasher);
-                hash_keyframes(&mut hasher, &c.rotate_keyframes);
-                c.flip_h.hash(&mut hasher);
-                c.flip_v.hash(&mut hasher);
-                c.scale.to_bits().hash(&mut hasher);
-                hash_keyframes(&mut hasher, &c.scale_keyframes);
-                c.position_x.to_bits().hash(&mut hasher);
-                hash_keyframes(&mut hasher, &c.position_x_keyframes);
-                c.position_y.to_bits().hash(&mut hasher);
-                hash_keyframes(&mut hasher, &c.position_y_keyframes);
-                c.opacity.to_bits().hash(&mut hasher);
-                hash_keyframes(&mut hasher, &c.opacity_keyframes);
-                c.volume.to_bits().hash(&mut hasher);
-                hash_keyframes(&mut hasher, &c.volume_keyframes);
-                c.brightness.to_bits().hash(&mut hasher);
-                hash_keyframes(&mut hasher, &c.brightness_keyframes);
-                c.contrast.to_bits().hash(&mut hasher);
-                hash_keyframes(&mut hasher, &c.contrast_keyframes);
-                c.saturation.to_bits().hash(&mut hasher);
-                hash_keyframes(&mut hasher, &c.saturation_keyframes);
-                c.temperature.to_bits().hash(&mut hasher);
-                hash_keyframes(&mut hasher, &c.temperature_keyframes);
-                c.tint.to_bits().hash(&mut hasher);
-                hash_keyframes(&mut hasher, &c.tint_keyframes);
-                c.denoise.to_bits().hash(&mut hasher);
-                c.sharpness.to_bits().hash(&mut hasher);
-                c.blur.to_bits().hash(&mut hasher);
-                hash_keyframes(&mut hasher, &c.blur_keyframes);
-                c.shadows.to_bits().hash(&mut hasher);
-                c.midtones.to_bits().hash(&mut hasher);
-                c.highlights.to_bits().hash(&mut hasher);
-                c.lut_paths.hash(&mut hasher);
-                c.exposure.to_bits().hash(&mut hasher);
-                c.black_point.to_bits().hash(&mut hasher);
-                c.highlights_warmth.to_bits().hash(&mut hasher);
-                c.highlights_tint.to_bits().hash(&mut hasher);
-                c.midtones_warmth.to_bits().hash(&mut hasher);
-                c.midtones_tint.to_bits().hash(&mut hasher);
-                c.shadows_warmth.to_bits().hash(&mut hasher);
-                c.shadows_tint.to_bits().hash(&mut hasher);
-                c.chroma_key_enabled.hash(&mut hasher);
-                c.chroma_key_color.hash(&mut hasher);
-                c.chroma_key_tolerance.to_bits().hash(&mut hasher);
-                c.chroma_key_softness.to_bits().hash(&mut hasher);
-                // Title overlay properties
-                c.is_title.hash(&mut hasher);
-                c.title_text.hash(&mut hasher);
-                c.title_font.hash(&mut hasher);
-                c.title_color.hash(&mut hasher);
-                c.title_x.to_bits().hash(&mut hasher);
-                c.title_y.to_bits().hash(&mut hasher);
-                c.title_outline_width.to_bits().hash(&mut hasher);
-                c.title_outline_color.hash(&mut hasher);
-                c.title_shadow.hash(&mut hasher);
-                c.title_shadow_color.hash(&mut hasher);
-                c.title_shadow_offset_x.to_bits().hash(&mut hasher);
-                c.title_shadow_offset_y.to_bits().hash(&mut hasher);
-                c.title_bg_box.hash(&mut hasher);
-                c.title_bg_box_color.hash(&mut hasher);
-                c.title_bg_box_padding.to_bits().hash(&mut hasher);
-                c.title_clip_bg_color.hash(&mut hasher);
-                c.title_secondary_text.hash(&mut hasher);
-                // Blend mode
-                (c.blend_mode as u8).hash(&mut hasher);
-                // Frei0r effects
-                c.frei0r_effects.len().hash(&mut hasher);
-                for fe in &c.frei0r_effects {
-                    fe.id.hash(&mut hasher);
-                    fe.plugin_name.hash(&mut hasher);
-                    fe.enabled.hash(&mut hasher);
-                    for (k, v) in &fe.params {
-                        k.hash(&mut hasher);
-                        v.to_bits().hash(&mut hasher);
-                    }
-                    for (k, v) in &fe.string_params {
-                        k.hash(&mut hasher);
-                        v.hash(&mut hasher);
-                    }
-                }
-                // Slow-motion interpolation mode
-                c.slow_motion_interp.hash(&mut hasher);
-                // Shape masks
-                c.masks.len().hash(&mut hasher);
-                for mask in &c.masks {
-                    mask.enabled.hash(&mut hasher);
-                    (mask.shape as u8).hash(&mut hasher);
-                    mask.center_x.to_bits().hash(&mut hasher);
-                    mask.center_y.to_bits().hash(&mut hasher);
-                    mask.width.to_bits().hash(&mut hasher);
-                    mask.height.to_bits().hash(&mut hasher);
-                    mask.rotation.to_bits().hash(&mut hasher);
-                    mask.feather.to_bits().hash(&mut hasher);
-                    mask.expansion.to_bits().hash(&mut hasher);
-                    mask.invert.hash(&mut hasher);
-                    mask.center_x_keyframes.len().hash(&mut hasher);
-                    mask.center_y_keyframes.len().hash(&mut hasher);
-                    mask.width_keyframes.len().hash(&mut hasher);
-                    mask.height_keyframes.len().hash(&mut hasher);
-                    mask.rotation_keyframes.len().hash(&mut hasher);
-                    mask.feather_keyframes.len().hash(&mut hasher);
-                    mask.expansion_keyframes.len().hash(&mut hasher);
-                }
+                Self::hash_prerender_clip_state(
+                    &mut hasher,
+                    c,
+                    &self.effective_source_path_for_clip(c),
+                );
             }
         }
         hasher.finish()
@@ -6428,6 +6820,15 @@ impl ProgramPlayer {
             "seg_v{}_{:016x}_{}_{}",
             BACKGROUND_PRERENDER_CACHE_VERSION, signature, segment_start_ns, segment_end_ns
         );
+        let Some(manifest) = self.build_prerender_manifest_for_segment(
+            &key,
+            signature,
+            segment_start_ns,
+            segment_end_ns,
+            active,
+        ) else {
+            return;
+        };
         if self.prerender_segments.contains_key(&key)
             || self.prerender_pending.contains(&key)
             || self.prerender_failed.contains(&key)
@@ -6454,18 +6855,31 @@ impl ProgramPlayer {
         }
         let path = self.prerender_cache_root.join(format!("{key}.mp4"));
         if path.exists() {
-            self.prerender_segments.insert(
-                key.clone(),
-                PrerenderSegment {
-                    key,
-                    path: path.to_string_lossy().to_string(),
-                    start_ns: segment_start_ns,
-                    end_ns: segment_end_ns,
-                    signature,
-                },
-            );
-            self.prune_prerender_segment_cache();
-            return;
+            if self.cached_prerender_segment_matches_manifest(
+                &path,
+                &key,
+                signature,
+                segment_start_ns,
+                segment_end_ns,
+                &manifest.inputs,
+            ) {
+                self.prerender_runtime_files
+                    .insert(path.to_string_lossy().to_string());
+                self.prerender_segments.insert(
+                    key.clone(),
+                    PrerenderSegment {
+                        key,
+                        path: path.to_string_lossy().to_string(),
+                        start_ns: segment_start_ns,
+                        end_ns: segment_end_ns,
+                        signature,
+                    },
+                );
+                self.prune_prerender_segment_cache();
+                return;
+            }
+            remove_prerender_segment_files(&path);
+            self.forget_prerender_segment_path(&path);
         }
         let duration_ns = segment_end_ns.saturating_sub(segment_start_ns);
         // Separate adjustment clips from regular inputs for prerender.
@@ -6537,8 +6951,12 @@ impl ProgramPlayer {
         let out_h = (self.project_height / prerender_divisor).max(2);
         let transition_spec_for_job = transition_spec.clone();
         let adj_clips_for_job = adjustment_clips_for_prerender;
+        let manifest_for_job = manifest;
+        let cache_persistent = self.prerender_cache_persistent;
+        let generation = self.prerender_generation;
         std::thread::spawn(move || {
-            let success = Self::render_prerender_segment_video_file(
+            let output_path_buf = PathBuf::from(&output_path);
+            let mut success = Self::render_prerender_segment_video_file(
                 &output_path,
                 &inputs,
                 &adj_clips_for_job,
@@ -6549,6 +6967,15 @@ impl ProgramPlayer {
                 transition_spec_for_job.as_ref(),
                 transition_offset_ns,
             );
+            if success
+                && Self::write_prerender_manifest_for_path(&output_path_buf, &manifest_for_job)
+                    .is_err()
+            {
+                success = false;
+            }
+            if !success {
+                remove_prerender_segment_files(&output_path_buf);
+            }
             let _ = tx.send(PrerenderJobResult {
                 key: key_for_job,
                 path: output_path,
@@ -6556,6 +6983,8 @@ impl ProgramPlayer {
                 end_ns: segment_end_ns,
                 signature,
                 success,
+                generation,
+                cache_persistent,
             });
         });
         self.prerender_pending.insert(key);
@@ -6584,7 +7013,6 @@ impl ProgramPlayer {
     }
 
     fn prune_prerender_segment_cache(&mut self) {
-        const MAX_READY_PRERENDER_SEGMENTS: usize = 24;
         if self.prerender_segments.len() <= MAX_READY_PRERENDER_SEGMENTS {
             return;
         }
@@ -6612,7 +7040,7 @@ impl ProgramPlayer {
                 break;
             };
             if let Some(victim) = self.prerender_segments.remove(&victim_key) {
-                let _ = std::fs::remove_file(&victim.path);
+                remove_prerender_segment_files(Path::new(&victim.path));
                 self.prerender_runtime_files.remove(&victim.path);
                 log::debug!(
                     "background_prerender: evicted key={} range={}..{} path={}",
@@ -6628,11 +7056,13 @@ impl ProgramPlayer {
     }
 
     fn find_prerender_segment_for(
-        &self,
+        &mut self,
         timeline_pos: u64,
+        active: &[usize],
         signature: u64,
     ) -> Option<PrerenderSegment> {
-        self.prerender_segments
+        let cached = self
+            .prerender_segments
             .values()
             .filter(|seg| {
                 seg.signature == signature
@@ -6640,9 +7070,13 @@ impl ProgramPlayer {
                     && timeline_pos < seg.end_ns
                     && Path::new(&seg.path).exists()
             })
-            // Prefer the nearest segment start at/behind the target timeline position.
             .max_by_key(|seg| seg.start_ns)
-            .cloned()
+            .cloned();
+        if cached.is_some() {
+            return cached;
+        }
+        let expected_inputs = self.prerender_manifest_inputs_for_active(active)?;
+        self.discover_prerender_segment_for(timeline_pos, signature, &expected_inputs)
     }
 
     fn prewarm_upcoming_boundary(&mut self, timeline_pos_ns: u64) {
@@ -10056,9 +10490,12 @@ impl ProgramPlayer {
             return false;
         };
         let color_caps = crate::media::export::detect_color_filter_capabilities(&ffmpeg);
-        if let Some(parent) = Path::new(output_path).parent() {
+        let output_path_buf = PathBuf::from(output_path);
+        if let Some(parent) = output_path_buf.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
+        let partial_output_path = prerender_partial_output_path(&output_path_buf);
+        let _ = std::fs::remove_file(&partial_output_path);
         let duration_s = duration_ns as f64 / 1_000_000_000.0;
         let mut cmd = Command::new(&ffmpeg);
         cmd.arg("-y")
@@ -10336,16 +10773,49 @@ impl ProgramPlayer {
             .arg("20")
             .arg("-pix_fmt")
             .arg("yuv420p")
+            .arg("-f")
+            .arg("mp4")
             .arg("-movflags")
             .arg("+faststart")
-            .arg(output_path)
+            .arg(&partial_output_path)
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let success = cmd.status().map(|s| s.success()).unwrap_or(false);
-        if !success {
-            let _ = std::fs::remove_file(output_path);
+            .stderr(Stdio::piped());
+        let output = match cmd.output() {
+            Ok(output) => output,
+            Err(err) => {
+                log::warn!(
+                    "background_prerender: failed to launch ffmpeg for {}: {}",
+                    output_path,
+                    err
+                );
+                let _ = std::fs::remove_file(&partial_output_path);
+                return false;
+            }
+        };
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            if stderr.is_empty() {
+                log::warn!(
+                    "background_prerender: ffmpeg render failed for {}",
+                    output_path
+                );
+            } else {
+                log::warn!(
+                    "background_prerender: ffmpeg render failed for {}: {}",
+                    output_path,
+                    stderr
+                );
+            }
+            let _ = std::fs::remove_file(&partial_output_path);
+            return false;
         }
-        success
+        let _ = std::fs::remove_file(&output_path_buf);
+        if std::fs::rename(&partial_output_path, &output_path_buf).is_err() {
+            let _ = std::fs::remove_file(&partial_output_path);
+            let _ = std::fs::remove_file(&output_path_buf);
+            return false;
+        }
+        true
     }
 
     /// Generate the lavfi color source string for a prerendered title clip.
@@ -13058,7 +13528,7 @@ impl ProgramPlayer {
         }
         self.poll_background_prerender_results();
         let signature = self.prerender_signature_for_active(active);
-        let segment = self.find_prerender_segment_for(timeline_pos, signature);
+        let segment = self.find_prerender_segment_for(timeline_pos, active, signature);
         self.record_prerender_cache_lookup(segment.is_some());
         let Some(segment) = segment else {
             let sig_hex = format!("{signature:016x}");
@@ -13178,7 +13648,7 @@ impl ProgramPlayer {
                 && !self.slots.iter().any(|s| s.is_prerender_slot)
             {
                 let signature = self.prerender_signature_for_active(&desired);
-                self.find_prerender_segment_for(timeline_pos, signature)
+                self.find_prerender_segment_for(timeline_pos, &desired, signature)
                     .is_some()
             } else {
                 false
@@ -14555,10 +15025,13 @@ mod tests {
     };
     use crate::model::clip::{KeyframeInterpolation, NumericKeyframe};
     use gstreamer as gst;
+    use std::collections::hash_map::DefaultHasher;
     use std::collections::HashMap;
+    use std::hash::Hasher;
     use std::sync::atomic::{AtomicBool, AtomicU64};
     use std::sync::Arc;
     use std::sync::Mutex;
+    use std::time::Duration;
 
     #[test]
     fn test_equalizer_nbands_child_proxy_ffi() {
@@ -15751,6 +16224,175 @@ mod tests {
             blend_alpha: Arc::new(Mutex::new(1.0)),
             mask_data: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    #[test]
+    fn prerender_signature_ignores_runtime_clip_id() {
+        let mut first_hasher = DefaultHasher::new();
+        let mut second_hasher = DefaultHasher::new();
+        let first_clip = make_clip();
+        let mut second_clip = make_clip();
+        second_clip.id = "different-runtime-id".to_string();
+        ProgramPlayer::hash_prerender_clip_state(
+            &mut first_hasher,
+            &first_clip,
+            &first_clip.source_path,
+        );
+        ProgramPlayer::hash_prerender_clip_state(
+            &mut second_hasher,
+            &second_clip,
+            &second_clip.source_path,
+        );
+        let first = first_hasher.finish();
+        let second = second_hasher.finish();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn project_prerender_cache_root_uses_sidecar_directory() {
+        let (root, persistent) =
+            super::prerender_cache_root_for_project_path(Some("/tmp/My Project.uspxml"));
+        assert!(persistent);
+        assert!(root.to_string_lossy().contains("UltimateSlice.cache"));
+        assert!(root.to_string_lossy().contains(&format!(
+            "prerender-v{}",
+            super::BACKGROUND_PRERENDER_CACHE_VERSION
+        )));
+        let leaf = root.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        assert!(leaf.starts_with("My_Project-p"));
+    }
+
+    #[test]
+    fn prerender_manifest_detects_source_changes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source_path = temp.path().join("clip.mp4");
+        let segment_path = temp.path().join("seg.mp4");
+        std::fs::write(&source_path, b"first-version").expect("write source");
+        std::fs::write(&segment_path, b"segment").expect("write segment");
+        let manifest = super::PrerenderSegmentManifest {
+            key: "seg".to_string(),
+            signature: 42,
+            start_ns: 0,
+            end_ns: 1_000_000_000,
+            inputs: vec![super::PrerenderManifestInput {
+                path: source_path.to_string_lossy().to_string(),
+                signature: super::prerender_source_signature_for_path(&source_path)
+                    .expect("source signature"),
+            }],
+        };
+        ProgramPlayer::write_prerender_manifest_for_path(&segment_path, &manifest)
+            .expect("write manifest");
+        assert!(ProgramPlayer::prerender_manifest_inputs_are_fresh(
+            &manifest.inputs
+        ));
+        std::thread::sleep(Duration::from_millis(5));
+        std::fs::write(&source_path, b"second-version-with-new-size").expect("rewrite source");
+        assert!(!ProgramPlayer::prerender_manifest_inputs_are_fresh(
+            &manifest.inputs
+        ));
+    }
+
+    #[test]
+    fn prerender_cache_cleanup_can_preserve_or_purge_project_segments() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source_path = temp.path().join("clip.mp4");
+        std::fs::write(&source_path, b"clip").expect("write source");
+        let segment_path = temp.path().join("seg.mp4");
+        std::fs::write(&segment_path, b"segment").expect("write segment");
+        let manifest = super::PrerenderSegmentManifest {
+            key: "seg".to_string(),
+            signature: 7,
+            start_ns: 0,
+            end_ns: 1_000_000_000,
+            inputs: vec![super::PrerenderManifestInput {
+                path: source_path.to_string_lossy().to_string(),
+                signature: super::prerender_source_signature_for_path(&source_path)
+                    .expect("source signature"),
+            }],
+        };
+        ProgramPlayer::write_prerender_manifest_for_path(&segment_path, &manifest)
+            .expect("write manifest");
+        assert!(segment_path.exists());
+        assert!(super::prerender_manifest_path(&segment_path).exists());
+        ProgramPlayer::clear_prerender_cache_root(temp.path());
+        assert!(!segment_path.exists());
+        assert!(!super::prerender_manifest_path(&segment_path).exists());
+    }
+
+    #[test]
+    fn persistent_prerender_segment_is_discovered_from_disk() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source_path = temp.path().join("clip.mp4");
+        std::fs::write(&source_path, b"clip").expect("write source");
+        let mut clip = make_clip();
+        clip.source_path = source_path.to_string_lossy().to_string();
+        let inputs = vec![super::PrerenderManifestInput {
+            path: clip.source_path.clone(),
+            signature: super::prerender_source_signature_for_path(&source_path)
+                .expect("source signature"),
+        }];
+        let mut signature_hasher = DefaultHasher::new();
+        ProgramPlayer::hash_prerender_clip_state(&mut signature_hasher, &clip, &clip.source_path);
+        let signature = signature_hasher.finish();
+        let key = format!(
+            "seg_v{}_{:016x}_{}_{}",
+            super::BACKGROUND_PRERENDER_CACHE_VERSION,
+            signature,
+            0,
+            1_000_000_000
+        );
+        let segment_path = temp.path().join(format!("{key}.mp4"));
+        std::fs::write(&segment_path, b"segment").expect("write segment");
+        let manifest = super::PrerenderSegmentManifest {
+            key: key.clone(),
+            signature,
+            start_ns: 0,
+            end_ns: 1_000_000_000,
+            inputs: inputs.clone(),
+        };
+        ProgramPlayer::write_prerender_manifest_for_path(&segment_path, &manifest)
+            .expect("write manifest");
+
+        let discovered = ProgramPlayer::discover_prerender_segment_in_root(
+            temp.path(),
+            100_000_000,
+            signature,
+            &inputs,
+        )
+        .expect("discover prerender");
+        assert_eq!(discovered.key, key);
+        assert_eq!(discovered.path, segment_path.to_string_lossy().to_string());
+    }
+
+    #[test]
+    fn prerender_render_writes_mp4_even_with_partial_filename() {
+        let mut title = make_clip();
+        title.id = "title".to_string();
+        title.source_path.clear();
+        title.source_out_ns = 1_000_000_000;
+        title.has_audio = false;
+        title.is_title = true;
+        title.title_clip_bg_color = 0x112233FF;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let output_path = temp.path().join("prerender-title.mp4");
+        let inputs = vec![(title, String::new(), 0, false, false)];
+
+        let ok = ProgramPlayer::render_prerender_segment_video_file(
+            output_path.to_str().expect("utf8 output path"),
+            &inputs,
+            &[],
+            500_000_000,
+            320,
+            180,
+            24,
+            None,
+            0,
+        );
+
+        assert!(ok, "expected prerender render to succeed");
+        assert!(output_path.exists());
+        assert!(!super::prerender_partial_output_path(&output_path).exists());
     }
 
     #[test]
@@ -16997,7 +17639,7 @@ mod tests {
 
 impl Drop for ProgramPlayer {
     fn drop(&mut self) {
-        self.cleanup_background_prerender_cache();
+        self.cleanup_background_prerender_cache(!self.should_preserve_prerender_cache_files());
         self.teardown_prepreroll_sidecars();
         self.teardown_slots();
         let _ = self.pipeline.set_state(gst::State::Null);

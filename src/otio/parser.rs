@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use serde_json::Value;
+use std::path::{Component, Path, PathBuf};
 
 use crate::model::clip::{Clip, ClipKind};
 use crate::model::project::{FrameRate, Marker, Project};
@@ -15,7 +16,12 @@ use super::schema::*;
 
 /// Parse an OTIO JSON string into a `Project`.
 pub fn parse_otio(json: &str) -> Result<Project> {
+    parse_otio_with_path(json, None)
+}
+
+pub fn parse_otio_with_path(json: &str, otio_path: Option<&Path>) -> Result<Project> {
     let timeline: OtioTimeline = serde_json::from_str(json).context("failed to parse OTIO JSON")?;
+    let otio_dir = otio_path.and_then(Path::parent);
 
     // -- Frame rate ---------------------------------------------------------
     let rate = timeline
@@ -85,7 +91,7 @@ pub fn parse_otio(json: &str) -> Result<Project> {
                 }
 
                 OtioTrackChild::Clip(otio_clip) => {
-                    let clip = otio_clip_to_clip(otio_clip, cursor_ns, kind, rate);
+                    let clip = otio_clip_to_clip(otio_clip, cursor_ns, kind, rate, otio_dir);
                     let dur = clip.duration();
                     track.clips.push(clip);
                     cursor_ns += dur;
@@ -136,6 +142,7 @@ fn otio_clip_to_clip(
     timeline_start_ns: u64,
     track_kind: TrackKind,
     _rate: f64,
+    otio_dir: Option<&Path>,
 ) -> Clip {
     // Source range.
     let (source_in, source_out) = otio_clip
@@ -150,7 +157,7 @@ fn otio_clip_to_clip(
 
     // Source path from media reference.
     let source_path = match &otio_clip.media_reference {
-        Some(OtioMediaReference::External(ext)) => url_to_path(&ext.target_url),
+        Some(OtioMediaReference::External(ext)) => url_to_path(&ext.target_url, otio_dir),
         _ => String::new(),
     };
 
@@ -206,6 +213,54 @@ fn otio_clip_to_clip(
         }
         if let Some(v) = us.opacity {
             clip.opacity = v;
+        }
+        if let Some(v) = us.scale {
+            clip.scale = v;
+        }
+        if let Some(v) = us.position_x {
+            clip.position_x = v;
+        }
+        if let Some(v) = us.position_y {
+            clip.position_y = v;
+        }
+        if let Some(v) = us.rotate {
+            clip.rotate = v;
+        }
+        if let Some(v) = us.flip_h {
+            clip.flip_h = v;
+        }
+        if let Some(v) = us.flip_v {
+            clip.flip_v = v;
+        }
+        if let Some(v) = us.crop_left {
+            clip.crop_left = v;
+        }
+        if let Some(v) = us.crop_right {
+            clip.crop_right = v;
+        }
+        if let Some(v) = us.crop_top {
+            clip.crop_top = v;
+        }
+        if let Some(v) = us.crop_bottom {
+            clip.crop_bottom = v;
+        }
+        if let Some(v) = us.blend_mode {
+            clip.blend_mode = v;
+        }
+        if let Some(v) = us.opacity_keyframes.as_ref() {
+            clip.opacity_keyframes = v.clone();
+        }
+        if let Some(v) = us.scale_keyframes.as_ref() {
+            clip.scale_keyframes = v.clone();
+        }
+        if let Some(v) = us.position_x_keyframes.as_ref() {
+            clip.position_x_keyframes = v.clone();
+        }
+        if let Some(v) = us.position_y_keyframes.as_ref() {
+            clip.position_y_keyframes = v.clone();
+        }
+        if let Some(v) = us.rotate_keyframes.as_ref() {
+            clip.rotate_keyframes = v.clone();
         }
         if let Some(v) = us.title_text.as_ref() {
             clip.title_text = v.clone();
@@ -310,11 +365,40 @@ fn otio_clip_to_clip(
     clip
 }
 
-/// Convert a `file://` URL to a local path.
-fn url_to_path(url: &str) -> String {
+/// Convert an OTIO media reference URL/path to a local path.
+fn url_to_path(url: &str, otio_dir: Option<&Path>) -> String {
+    if !url.is_empty() && url.contains("://") && !url.starts_with("file://") {
+        return url.to_string();
+    }
     let stripped = url.strip_prefix("file://").unwrap_or(url);
     // Decode percent-encoded characters.
-    percent_decode(stripped)
+    let decoded = percent_decode(stripped);
+    let decoded_path = Path::new(&decoded);
+    if decoded.is_empty() || decoded_path.is_absolute() || otio_dir.is_none() {
+        return decoded;
+    }
+    normalize_joined_path(otio_dir.expect("checked is_some above").join(decoded_path))
+        .to_string_lossy()
+        .to_string()
+}
+
+fn normalize_joined_path(path: PathBuf) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    let is_absolute = path.is_absolute();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() && !is_absolute {
+                    normalized.push("..");
+                }
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    normalized
 }
 
 /// Simple percent-decode (%20 → space, etc.).
@@ -784,16 +868,154 @@ mod tests {
     }
 
     #[test]
+    fn test_roundtrip_transform_and_keyframe_metadata() {
+        use crate::model::clip::{
+            BezierControls, BlendMode, KeyframeInterpolation, NumericKeyframe,
+        };
+        use crate::model::track::Track;
+
+        let mut p = Project::new("Transform Roundtrip");
+        p.frame_rate = FrameRate {
+            numerator: 24,
+            denominator: 1,
+        };
+        p.tracks.clear();
+
+        let mut track = Track::new_video("V1");
+        let mut clip = Clip::new(
+            "/footage/composite.mov",
+            4_000_000_000,
+            1_000_000_000,
+            ClipKind::Video,
+        );
+        clip.scale = 1.35;
+        clip.position_x = 0.15;
+        clip.position_y = -0.22;
+        clip.rotate = 27;
+        clip.flip_h = true;
+        clip.flip_v = true;
+        clip.crop_left = 14;
+        clip.crop_right = 6;
+        clip.crop_top = 9;
+        clip.crop_bottom = 3;
+        clip.blend_mode = BlendMode::Screen;
+        clip.scale_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: 1.0,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: Some(BezierControls {
+                    x1: 0.2,
+                    y1: 0.0,
+                    x2: 0.8,
+                    y2: 1.0,
+                }),
+            },
+            NumericKeyframe {
+                time_ns: 1_500_000_000,
+                value: 1.5,
+                interpolation: KeyframeInterpolation::EaseInOut,
+                bezier_controls: None,
+            },
+        ];
+        clip.position_x_keyframes = vec![NumericKeyframe {
+            time_ns: 750_000_000,
+            value: 0.35,
+            interpolation: KeyframeInterpolation::EaseOut,
+            bezier_controls: None,
+        }];
+        clip.position_y_keyframes = vec![NumericKeyframe {
+            time_ns: 500_000_000,
+            value: -0.4,
+            interpolation: KeyframeInterpolation::EaseIn,
+            bezier_controls: None,
+        }];
+        clip.rotate_keyframes = vec![NumericKeyframe {
+            time_ns: 1_000_000_000,
+            value: 42.0,
+            interpolation: KeyframeInterpolation::EaseInOut,
+            bezier_controls: None,
+        }];
+        clip.opacity_keyframes = vec![NumericKeyframe {
+            time_ns: 2_000_000_000,
+            value: 0.55,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        }];
+        track.add_clip(clip.clone());
+        p.tracks.push(track);
+
+        let json = crate::otio::writer::write_otio(&p).unwrap();
+        let p2 = parse_otio(&json).unwrap();
+
+        let clip2 = &p2.tracks[0].clips[0];
+        assert_eq!(clip2.scale, clip.scale);
+        assert_eq!(clip2.position_x, clip.position_x);
+        assert_eq!(clip2.position_y, clip.position_y);
+        assert_eq!(clip2.rotate, clip.rotate);
+        assert_eq!(clip2.flip_h, clip.flip_h);
+        assert_eq!(clip2.flip_v, clip.flip_v);
+        assert_eq!(clip2.crop_left, clip.crop_left);
+        assert_eq!(clip2.crop_right, clip.crop_right);
+        assert_eq!(clip2.crop_top, clip.crop_top);
+        assert_eq!(clip2.crop_bottom, clip.crop_bottom);
+        assert_eq!(clip2.blend_mode, clip.blend_mode);
+        assert_eq!(clip2.scale_keyframes, clip.scale_keyframes);
+        assert_eq!(clip2.position_x_keyframes, clip.position_x_keyframes);
+        assert_eq!(clip2.position_y_keyframes, clip.position_y_keyframes);
+        assert_eq!(clip2.rotate_keyframes, clip.rotate_keyframes);
+        assert_eq!(clip2.opacity_keyframes, clip.opacity_keyframes);
+    }
+
+    #[test]
     fn test_url_to_path() {
         assert_eq!(
-            url_to_path("file:///home/user/file.mp4"),
+            url_to_path("file:///home/user/file.mp4", None),
             "/home/user/file.mp4"
         );
         assert_eq!(
-            url_to_path("file:///home/user/my%20file.mp4"),
+            url_to_path("file:///home/user/my%20file.mp4", None),
             "/home/user/my file.mp4"
         );
-        assert_eq!(url_to_path("/direct/path.mp4"), "/direct/path.mp4");
+        assert_eq!(url_to_path("/direct/path.mp4", None), "/direct/path.mp4");
+    }
+
+    #[test]
+    fn test_parse_relative_media_reference_resolves_against_otio_file() {
+        let json = r#"{
+            "OTIO_SCHEMA": "Timeline.1",
+            "name": "Relative Paths",
+            "global_start_time": { "OTIO_SCHEMA": "RationalTime.1", "value": 0.0, "rate": 24.0 },
+            "tracks": {
+                "OTIO_SCHEMA": "Stack.1",
+                "name": "tracks",
+                "children": [{
+                    "OTIO_SCHEMA": "Track.1",
+                    "name": "V1",
+                    "kind": "Video",
+                    "children": [{
+                        "OTIO_SCHEMA": "Clip.1",
+                        "name": "shot_01",
+                        "source_range": {
+                            "OTIO_SCHEMA": "TimeRange.1",
+                            "start_time": { "OTIO_SCHEMA": "RationalTime.1", "value": 0.0, "rate": 24.0 },
+                            "duration": { "OTIO_SCHEMA": "RationalTime.1", "value": 48.0, "rate": 24.0 }
+                        },
+                        "media_reference": {
+                            "OTIO_SCHEMA": "ExternalReference.1",
+                            "target_url": "../media/clip%201.mp4"
+                        }
+                    }]
+                }]
+            }
+        }"#;
+
+        let project =
+            parse_otio_with_path(json, Some(Path::new("/show/interchange/timeline.otio"))).unwrap();
+        assert_eq!(
+            project.tracks[0].clips[0].source_path,
+            "/show/media/clip 1.mp4"
+        );
     }
 
     #[test]

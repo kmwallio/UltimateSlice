@@ -398,6 +398,7 @@ pub fn build_toolbar(
     bg_removal_cache: Rc<RefCell<crate::media::bg_removal_cache::BgRemovalCache>>,
     on_project_changed: impl Fn() + 'static + Clone,
     on_project_reloaded: impl Fn() + 'static + Clone,
+    on_show_editor: impl Fn() + 'static + Clone,
     on_use_collected_locations: impl Fn(fcpxml::writer::CollectFilesManifest) + 'static + Clone,
     on_export_frame: impl Fn() + 'static + Clone,
     on_record_voiceover: impl Fn() + 'static + Clone,
@@ -417,6 +418,7 @@ pub fn build_toolbar(
         let timeline_state = timeline_state.clone();
         let on_project_changed = on_project_changed.clone();
         let on_project_reloaded = on_project_reloaded.clone();
+        let on_show_editor = on_show_editor.clone();
         btn_new.connect_clicked(move |btn| {
             let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
             let on_project_changed_cb: Rc<dyn Fn()> = Rc::new(on_project_changed.clone());
@@ -425,6 +427,7 @@ pub fn build_toolbar(
                 let timeline_state = timeline_state.clone();
                 let on_project_changed = on_project_changed.clone();
                 let on_project_reloaded = on_project_reloaded.clone();
+                let on_show_editor = on_show_editor.clone();
                 move || {
                     *project.borrow_mut() = Project::new("Untitled");
                     {
@@ -437,6 +440,7 @@ pub fn build_toolbar(
                     }
                     on_project_reloaded();
                     on_project_changed();
+                    on_show_editor();
                 }
             });
             confirm_unsaved_then(
@@ -452,13 +456,14 @@ pub fn build_toolbar(
 
     // Open project XML
     let btn_open = Button::with_label("Open…");
-    btn_open.set_tooltip_text(Some("Open project XML (Ctrl+O)"));
+    btn_open.set_tooltip_text(Some("Open project file (Ctrl+O)"));
     {
         let project = project.clone();
         let library = library.clone();
         let timeline_state = timeline_state.clone();
         let on_project_changed = on_project_changed.clone();
         let on_project_reloaded = on_project_reloaded.clone();
+        let on_show_editor = on_show_editor.clone();
         btn_open.connect_clicked(move |btn| {
             let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
             let on_project_changed_cb: Rc<dyn Fn()> = Rc::new(on_project_changed.clone());
@@ -466,11 +471,12 @@ pub fn build_toolbar(
                 let project = project.clone();
                 let on_project_changed = on_project_changed.clone();
                 let on_project_reloaded = on_project_reloaded.clone();
+                let on_show_editor = on_show_editor.clone();
                 let timeline_state_cb = timeline_state.clone();
                 let window = window.clone();
                 move || {
                     let dialog = gtk::FileDialog::new();
-                    dialog.set_title("Open Project XML");
+                    dialog.set_title("Open Project");
 
                     let filter = gtk::FileFilter::new();
                     filter.add_pattern("*.uspxml");
@@ -485,6 +491,7 @@ pub fn build_toolbar(
                     let project = project.clone();
                     let on_project_changed = on_project_changed.clone();
                     let on_project_reloaded = on_project_reloaded.clone();
+                    let on_show_editor = on_show_editor.clone();
                     let timeline_state_cb = timeline_state_cb.clone();
                     let window = window.clone();
                     dialog.open(window.as_ref(), gio::Cancellable::NONE, move |result| {
@@ -494,27 +501,16 @@ pub fn build_toolbar(
                                 // Parse FCPXML on a background thread to avoid blocking the UI.
                                 let (tx, rx) =
                                     std::sync::mpsc::sync_channel::<Result<Project, String>>(1);
-                                let path_bg = path_str.clone();
+                                let path_bg = path.clone();
                                 std::thread::spawn(move || {
-                                    let result = std::fs::read_to_string(&path_bg)
-                                        .map_err(|e| format!("Failed to read file: {e}"))
-                                        .and_then(|content| {
-                                            if path_bg.ends_with(".otio") {
-                                                crate::otio::parser::parse_otio(&content)
-                                                    .map_err(|e| format!("OTIO parse error: {e}"))
-                                            } else {
-                                                fcpxml::parser::parse_fcpxml_with_path(
-                                                    &content,
-                                                    Some(std::path::Path::new(&path_bg)),
-                                                )
-                                                .map_err(|e| format!("FCPXML parse error: {e}"))
-                                            }
-                                        });
+                                    let result =
+                                        crate::ui::project_loader::load_project_from_path(&path_bg);
                                     let _ = tx.send(result);
                                 });
                                 let project = project.clone();
                                 let on_project_changed = on_project_changed.clone();
                                 let on_project_reloaded = on_project_reloaded.clone();
+                                let on_show_editor = on_show_editor.clone();
                                 let timeline_state_cb = timeline_state_cb.clone();
                                 // Suppress timeline interaction while loading.
                                 timeline_state_cb.borrow_mut().loading = true;
@@ -536,6 +532,7 @@ pub fn build_toolbar(
                                             }
                                             on_project_reloaded();
                                             on_project_changed();
+                                            on_show_editor();
                                             glib::ControlFlow::Break
                                         }
                                         Ok(Err(e)) => {
@@ -578,6 +575,7 @@ pub fn build_toolbar(
         let timeline_state = timeline_state.clone();
         let on_project_changed = on_project_changed.clone();
         let on_project_reloaded = on_project_reloaded.clone();
+        let on_show_editor = on_show_editor.clone();
 
         // Build the popover upfront so MenuButton can show it immediately.
         // Repopulate the inner box each time the popover opens (connect_show)
@@ -626,6 +624,7 @@ pub fn build_toolbar(
                     let timeline_state = timeline_state.clone();
                     let on_project_changed = on_project_changed.clone();
                     let on_project_reloaded = on_project_reloaded.clone();
+                    let on_show_editor = on_show_editor.clone();
                     let pop_weak = pop.downgrade();
                     let row_for_window = row.clone();
                     row.connect_clicked(move |_| {
@@ -636,6 +635,7 @@ pub fn build_toolbar(
                             let timeline_state = timeline_state.clone();
                             let on_project_changed = on_project_changed.clone();
                             let on_project_reloaded = on_project_reloaded.clone();
+                            let on_show_editor = on_show_editor.clone();
                             let path_owned = path_owned.clone();
                             let pop_weak = pop_weak.clone();
                             move || {
@@ -645,23 +645,20 @@ pub fn build_toolbar(
                                 // Parse FCPXML on a background thread to avoid blocking the UI.
                                 let (tx, rx) =
                                     std::sync::mpsc::sync_channel::<Result<Project, String>>(1);
-                                let path_bg = path_owned.clone();
+                                let path_bg = std::path::PathBuf::from(&path_owned);
                                 std::thread::spawn(move || {
-                                    let result = std::fs::read_to_string(&path_bg)
-                                        .map_err(|e| format!("Failed to open recent project: {e}"))
-                                        .and_then(|xml| {
-                                            fcpxml::parser::parse_fcpxml_with_path(
-                                                &xml,
-                                                Some(std::path::Path::new(&path_bg)),
-                                            )
-                                            .map_err(|e| format!("FCPXML parse error: {e}"))
-                                        });
+                                    let result =
+                                        crate::ui::project_loader::load_project_from_path(&path_bg)
+                                            .map_err(|e| {
+                                                format!("Failed to open recent project: {e}")
+                                            });
                                     let _ = tx.send(result);
                                 });
                                 let project = project.clone();
                                 let timeline_state = timeline_state.clone();
                                 let on_project_changed = on_project_changed.clone();
                                 let on_project_reloaded = on_project_reloaded.clone();
+                                let on_show_editor = on_show_editor.clone();
                                 let path_owned = path_owned.clone();
                                 // Suppress timeline interaction while loading.
                                 timeline_state.borrow_mut().loading = true;
@@ -683,6 +680,7 @@ pub fn build_toolbar(
                                             }
                                             on_project_reloaded();
                                             on_project_changed();
+                                            on_show_editor();
                                             glib::ControlFlow::Break
                                         }
                                         Ok(Err(e)) => {
@@ -2060,38 +2058,105 @@ pub fn build_toolbar(
                 pop.popdown();
             }
 
-            let dialog = gtk::FileDialog::new();
-            dialog.set_title("Export OTIO");
-            dialog.set_initial_name(Some("timeline.otio"));
-
-            let filter = gtk::FileFilter::new();
-            filter.add_pattern("*.otio");
-            filter.set_name(Some("OpenTimelineIO Files"));
-            let filters = gio::ListStore::new::<gtk::FileFilter>();
-            filters.append(&filter);
-            dialog.set_filters(Some(&filters));
-
             let project = project.clone();
             let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
-            dialog.save(window.as_ref(), gio::Cancellable::NONE, move |result| {
-                if let Ok(file) = result {
-                    if let Some(path) = file.path() {
-                        match crate::otio::writer::write_otio(&project.borrow()) {
-                            Ok(json) => match std::fs::write(&path, json) {
-                                Ok(_) => {
-                                    log::info!("OTIO exported to {}", path.display());
-                                }
+            let mode_dialog = gtk::Dialog::builder()
+                .title("Export OTIO")
+                .modal(true)
+                .default_width(460)
+                .build();
+            mode_dialog.set_transient_for(window.as_ref());
+            mode_dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+            mode_dialog.add_button("Continue…", gtk::ResponseType::Accept);
+
+            let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+            content.set_margin_start(16);
+            content.set_margin_end(16);
+            content.set_margin_top(16);
+            content.set_margin_bottom(16);
+
+            let description = gtk::Label::new(Some(
+                "Choose how UltimateSlice should write media references inside the exported OTIO file.",
+            ));
+            description.set_wrap(true);
+            description.set_xalign(0.0);
+
+            let absolute_paths = gtk::CheckButton::with_label(
+                crate::otio::writer::OtioMediaPathMode::Absolute.label(),
+            );
+            absolute_paths.set_active(true);
+            let relative_paths = gtk::CheckButton::with_label(
+                crate::otio::writer::OtioMediaPathMode::Relative.label(),
+            );
+            relative_paths.set_group(Some(&absolute_paths));
+
+            let hint = gtk::Label::new(Some(
+                "Absolute paths keep the current behavior. Relative paths are written relative to the exported .otio file location and are resolved from that folder when the OTIO file is opened again.",
+            ));
+            hint.set_wrap(true);
+            hint.set_xalign(0.0);
+            hint.add_css_class("dim-label");
+
+            content.append(&description);
+            content.append(&absolute_paths);
+            content.append(&relative_paths);
+            content.append(&hint);
+            mode_dialog.content_area().append(&content);
+
+            mode_dialog.connect_response(move |d, resp| {
+                if resp != gtk::ResponseType::Accept {
+                    d.close();
+                    return;
+                }
+                let path_mode = if relative_paths.is_active() {
+                    crate::otio::writer::OtioMediaPathMode::Relative
+                } else {
+                    crate::otio::writer::OtioMediaPathMode::Absolute
+                };
+                d.close();
+
+                let dialog = gtk::FileDialog::new();
+                dialog.set_title("Export OTIO");
+                dialog.set_initial_name(Some("timeline.otio"));
+
+                let filter = gtk::FileFilter::new();
+                filter.add_pattern("*.otio");
+                filter.set_name(Some("OpenTimelineIO Files"));
+                let filters = gio::ListStore::new::<gtk::FileFilter>();
+                filters.append(&filter);
+                dialog.set_filters(Some(&filters));
+
+                let project = project.clone();
+                let window = window.clone();
+                dialog.save(window.as_ref(), gio::Cancellable::NONE, move |result| {
+                    if let Ok(file) = result {
+                        if let Some(path) = file.path() {
+                            match crate::otio::writer::write_otio_to_path(
+                                &project.borrow(),
+                                &path,
+                                path_mode,
+                            ) {
+                                Ok(json) => match std::fs::write(&path, json) {
+                                    Ok(_) => {
+                                        log::info!(
+                                            "OTIO exported to {} with {} media references",
+                                            path.display(),
+                                            path_mode.as_str()
+                                        );
+                                    }
+                                    Err(e) => {
+                                        log::error!("Failed to write OTIO file: {e}");
+                                    }
+                                },
                                 Err(e) => {
-                                    log::error!("Failed to write OTIO file: {e}");
+                                    log::error!("Failed to generate OTIO: {e}");
                                 }
-                            },
-                            Err(e) => {
-                                log::error!("Failed to generate OTIO: {e}");
                             }
                         }
                     }
-                }
+                });
             });
+            mode_dialog.present();
         });
     }
 

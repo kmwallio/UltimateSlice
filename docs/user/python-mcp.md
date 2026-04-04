@@ -109,7 +109,7 @@ Useful playback-tuning toggles:
 - `python3 tools/mcp_call.py collect_project_files '{"directory_path":"/absolute/path/CollectedMedia","mode":"entire_library"}'`
 - `python3 tools/mcp_call.py collect_project_files '{"directory_path":"/absolute/path/CollectedMedia","mode":"entire_library","use_collected_locations_on_next_save":true}'`
 
-`set_background_prerender` enables temporary disk prerender of complex upcoming overlap sections (cleaned when the app/player closes).
+`set_background_prerender` enables disk prerender of complex upcoming overlap sections. Saved projects keep those prerender segments in a project-scoped sibling `UltimateSlice.cache/prerender-vN/<project-hash>/` cache, while unsaved projects still use the temporary cache root.
 
 `collect_project_files` leaves the current project paths unchanged by default; set `use_collected_locations_on_next_save` to `true` when you want the next project save/export to use the copied media paths.
 
@@ -131,6 +131,12 @@ Open an OTIO project:
 
 ```bash
 python3 tools/mcp_call.py open_otio '{"path":"/absolute/path/project.otio"}'
+```
+
+Export the current project as OTIO with relative media references:
+
+```bash
+python3 tools/mcp_call.py save_otio '{"path":"/absolute/path/project.otio","path_mode":"relative"}'
 ```
 
 `create_project`, `open_fcpxml`, and `open_otio` replace the current project and switch the visible window from the Welcome screen to the editor view, so screenshots and subsequent UI-driven automation land on the active project.

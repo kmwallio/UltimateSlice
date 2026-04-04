@@ -619,11 +619,16 @@ fn tools_list() -> Value {
         },
         {
             "name": "save_otio",
-            "description": "Export the current project to OpenTimelineIO (.otio) JSON file for interchange with DaVinci Resolve, Premiere, Nuke, etc.",
+            "description": "Export the current project to an OpenTimelineIO (.otio) JSON file for interchange with DaVinci Resolve, Premiere, Nuke, etc.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Absolute path for the output .otio file." }
+                    "path": { "type": "string", "description": "Absolute path for the output .otio file." },
+                    "path_mode": {
+                        "type": "string",
+                        "enum": ["absolute", "relative"],
+                        "description": "How media references are written inside the OTIO file. Defaults to absolute. Relative paths are resolved against the exported .otio file location."
+                    }
                 },
                 "required": ["path"]
             }
@@ -1958,6 +1963,11 @@ fn dispatch_tool_payload(
 
         "save_otio" => McpCommand::SaveOtio {
             path: args["path"].as_str().unwrap_or("").to_string(),
+            path_mode: args
+                .get("path_mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("absolute")
+                .to_string(),
             reply: tx,
         },
 
