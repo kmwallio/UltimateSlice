@@ -732,6 +732,61 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "list_workspace_layouts",
+            "description": "List saved workspace layouts plus the current arrangement state from local UI state.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "save_workspace_layout",
+            "description": "Create or overwrite a named workspace layout using the current window arrangement.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Workspace layout name." }
+                },
+                "required": ["name"]
+            }
+        },
+        {
+            "name": "apply_workspace_layout",
+            "description": "Apply a saved named workspace layout to the current window.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Saved workspace layout name." }
+                },
+                "required": ["name"]
+            }
+        },
+        {
+            "name": "rename_workspace_layout",
+            "description": "Rename a saved workspace layout.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "old_name": { "type": "string", "description": "Existing workspace layout name." },
+                    "new_name": { "type": "string", "description": "New workspace layout name." }
+                },
+                "required": ["old_name", "new_name"]
+            }
+        },
+        {
+            "name": "delete_workspace_layout",
+            "description": "Delete a saved workspace layout by name.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Saved workspace layout name." }
+                },
+                "required": ["name"]
+            }
+        },
+        {
+            "name": "reset_workspace_layout",
+            "description": "Restore the built-in default workspace arrangement in the current window.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
             "name": "export_with_preset",
             "description": "Export the current project to a path using a named saved export preset.",
             "inputSchema": {
@@ -1793,6 +1848,7 @@ fn is_cacheable_read_tool(name: &str) -> bool {
             | "get_performance_snapshot"
             | "get_preferences"
             | "list_export_presets"
+            | "list_workspace_layouts"
             | "list_library"
             | "list_collections"
             | "list_frei0r_plugins"
@@ -2147,6 +2203,31 @@ fn dispatch_tool_payload(
             name: args["name"].as_str().unwrap_or("").to_string(),
             reply: tx,
         },
+
+        "list_workspace_layouts" => McpCommand::ListWorkspaceLayouts { reply: tx },
+
+        "save_workspace_layout" => McpCommand::SaveWorkspaceLayout {
+            name: args["name"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+
+        "apply_workspace_layout" => McpCommand::ApplyWorkspaceLayout {
+            name: args["name"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+
+        "rename_workspace_layout" => McpCommand::RenameWorkspaceLayout {
+            old_name: args["old_name"].as_str().unwrap_or("").to_string(),
+            new_name: args["new_name"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+
+        "delete_workspace_layout" => McpCommand::DeleteWorkspaceLayout {
+            name: args["name"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+
+        "reset_workspace_layout" => McpCommand::ResetWorkspaceLayout { reply: tx },
 
         "export_with_preset" => McpCommand::ExportWithPreset {
             path: args["path"].as_str().unwrap_or("").to_string(),
@@ -3617,5 +3698,76 @@ mod tests {
         worker.join().expect("worker join");
         // One dispatch for initial read, one for mutation, one for read after mutation.
         assert_eq!(command_count.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn call_tool_dispatches_save_workspace_layout() {
+        let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
+        std::thread::spawn(move || {
+            let cmd = receiver.recv().expect("expected command");
+            match cmd {
+                McpCommand::SaveWorkspaceLayout { name, reply } => {
+                    assert_eq!(name, "Color");
+                    reply.send(json!({"success": true, "name": name})).ok();
+                }
+                _ => panic!("unexpected MCP command"),
+            }
+        });
+        let id = json!(401);
+        let params = json!({
+            "name": "save_workspace_layout",
+            "arguments": { "name": "Color" }
+        });
+        let mut cache = std::collections::HashMap::new();
+        let response = call_tool(&id, &params, &sender, &mut cache);
+        assert_eq!(response["id"], id);
+        assert_eq!(response["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn call_tool_dispatches_apply_workspace_layout() {
+        let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
+        std::thread::spawn(move || {
+            let cmd = receiver.recv().expect("expected command");
+            match cmd {
+                McpCommand::ApplyWorkspaceLayout { name, reply } => {
+                    assert_eq!(name, "Edit");
+                    reply.send(json!({"success": true, "name": name})).ok();
+                }
+                _ => panic!("unexpected MCP command"),
+            }
+        });
+        let id = json!(402);
+        let params = json!({
+            "name": "apply_workspace_layout",
+            "arguments": { "name": "Edit" }
+        });
+        let mut cache = std::collections::HashMap::new();
+        let response = call_tool(&id, &params, &sender, &mut cache);
+        assert_eq!(response["id"], id);
+        assert_eq!(response["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn call_tool_dispatches_reset_workspace_layout() {
+        let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
+        std::thread::spawn(move || {
+            let cmd = receiver.recv().expect("expected command");
+            match cmd {
+                McpCommand::ResetWorkspaceLayout { reply } => {
+                    reply.send(json!({"success": true})).ok();
+                }
+                _ => panic!("unexpected MCP command"),
+            }
+        });
+        let id = json!(403);
+        let params = json!({
+            "name": "reset_workspace_layout",
+            "arguments": {}
+        });
+        let mut cache = std::collections::HashMap::new();
+        let response = call_tool(&id, &params, &sender, &mut cache);
+        assert_eq!(response["id"], id);
+        assert_eq!(response["error"], serde_json::Value::Null);
     }
 }

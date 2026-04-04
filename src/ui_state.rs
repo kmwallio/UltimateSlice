@@ -13,6 +13,8 @@ pub struct ProgramMonitorState {
     #[serde(default = "default_docked_split_pos")]
     pub docked_split_pos: i32,
     #[serde(default)]
+    pub scopes_visible: bool,
+    #[serde(default)]
     pub show_safe_areas: bool,
     /// Show false-color luminance overlay on the Program Monitor.
     #[serde(default)]
@@ -39,6 +41,60 @@ fn default_docked_split_pos() -> i32 {
     420
 }
 
+fn default_root_hpaned_pos() -> i32 {
+    1120
+}
+
+fn default_root_vpaned_pos() -> i32 {
+    520
+}
+
+fn default_top_paned_pos() -> i32 {
+    320
+}
+
+fn default_left_vpaned_pos() -> i32 {
+    320
+}
+
+fn default_timeline_paned_pos() -> i32 {
+    0
+}
+
+const WORKSPACE_SPLIT_RATIO_SCALE: i32 = 1000;
+
+fn default_workspace_panel_visible() -> bool {
+    true
+}
+
+pub fn workspace_split_ratio_from_pixels(position: i32, total: i32) -> Option<u16> {
+    if total <= 0 {
+        return None;
+    }
+    let clamped = position.clamp(0, total) as i64;
+    let scaled =
+        ((clamped * WORKSPACE_SPLIT_RATIO_SCALE as i64) + (total as i64 / 2)) / total as i64;
+    Some(scaled.clamp(0, WORKSPACE_SPLIT_RATIO_SCALE as i64) as u16)
+}
+
+pub fn workspace_split_position_from_ratio(
+    ratio_permille: Option<u16>,
+    total: i32,
+    fallback_position: i32,
+) -> i32 {
+    if total <= 0 {
+        return fallback_position.max(0);
+    }
+    match ratio_permille {
+        Some(ratio) => {
+            let scaled = ((ratio as i64 * total as i64) + (WORKSPACE_SPLIT_RATIO_SCALE as i64 / 2))
+                / WORKSPACE_SPLIT_RATIO_SCALE as i64;
+            scaled.clamp(0, total as i64) as i32
+        }
+        None => fallback_position.max(0),
+    }
+}
+
 impl Default for ProgramMonitorState {
     fn default() -> Self {
         Self {
@@ -46,11 +102,272 @@ impl Default for ProgramMonitorState {
             width: default_width(),
             height: default_height(),
             docked_split_pos: default_docked_split_pos(),
+            scopes_visible: false,
             show_safe_areas: false,
             show_false_color: false,
             show_zebra: false,
             zebra_threshold: default_zebra_threshold(),
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceLeftPanelTab {
+    Media,
+    Effects,
+    AudioEffects,
+    Titles,
+}
+
+impl Default for WorkspaceLeftPanelTab {
+    fn default() -> Self {
+        Self::Media
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProgramMonitorWorkspaceState {
+    #[serde(default)]
+    pub popped: bool,
+    #[serde(default = "default_width")]
+    pub width: i32,
+    #[serde(default = "default_height")]
+    pub height: i32,
+    #[serde(default = "default_docked_split_pos")]
+    pub docked_split_pos: i32,
+    #[serde(default)]
+    pub scopes_visible: bool,
+}
+
+impl Default for ProgramMonitorWorkspaceState {
+    fn default() -> Self {
+        Self {
+            popped: false,
+            width: default_width(),
+            height: default_height(),
+            docked_split_pos: default_docked_split_pos(),
+            scopes_visible: false,
+        }
+    }
+}
+
+impl ProgramMonitorWorkspaceState {
+    pub fn from_program_monitor_state(state: &ProgramMonitorState) -> Self {
+        Self {
+            popped: state.popped,
+            width: state.width,
+            height: state.height,
+            docked_split_pos: state.docked_split_pos,
+            scopes_visible: state.scopes_visible,
+        }
+    }
+
+    pub fn apply_to_program_monitor_state(&self, state: &mut ProgramMonitorState) {
+        state.popped = self.popped;
+        state.width = self.width;
+        state.height = self.height;
+        state.docked_split_pos = self.docked_split_pos;
+        state.scopes_visible = self.scopes_visible;
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceArrangement {
+    #[serde(default = "default_root_hpaned_pos")]
+    pub root_hpaned_pos: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_hpaned_ratio_permille: Option<u16>,
+    #[serde(default = "default_root_vpaned_pos")]
+    pub root_vpaned_pos: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_vpaned_ratio_permille: Option<u16>,
+    #[serde(default = "default_top_paned_pos")]
+    pub top_paned_pos: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_paned_ratio_permille: Option<u16>,
+    #[serde(default = "default_left_vpaned_pos")]
+    pub left_vpaned_pos: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left_vpaned_ratio_permille: Option<u16>,
+    #[serde(default = "default_timeline_paned_pos")]
+    pub timeline_paned_pos: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline_paned_ratio_permille: Option<u16>,
+    #[serde(default = "default_workspace_panel_visible")]
+    pub media_browser_visible: bool,
+    #[serde(default = "default_workspace_panel_visible")]
+    pub inspector_visible: bool,
+    #[serde(default)]
+    pub keyframe_editor_visible: bool,
+    #[serde(default)]
+    pub left_panel_tab: WorkspaceLeftPanelTab,
+    #[serde(default)]
+    pub program_monitor: ProgramMonitorWorkspaceState,
+}
+
+impl Default for WorkspaceArrangement {
+    fn default() -> Self {
+        Self {
+            root_hpaned_pos: default_root_hpaned_pos(),
+            root_hpaned_ratio_permille: None,
+            root_vpaned_pos: default_root_vpaned_pos(),
+            root_vpaned_ratio_permille: None,
+            top_paned_pos: default_top_paned_pos(),
+            top_paned_ratio_permille: None,
+            left_vpaned_pos: default_left_vpaned_pos(),
+            left_vpaned_ratio_permille: None,
+            timeline_paned_pos: default_timeline_paned_pos(),
+            timeline_paned_ratio_permille: None,
+            media_browser_visible: default_workspace_panel_visible(),
+            inspector_visible: default_workspace_panel_visible(),
+            keyframe_editor_visible: false,
+            left_panel_tab: WorkspaceLeftPanelTab::default(),
+            program_monitor: ProgramMonitorWorkspaceState::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceLayout {
+    pub name: String,
+    #[serde(default)]
+    pub arrangement: WorkspaceArrangement,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorkspaceLayoutsState {
+    #[serde(default)]
+    pub current: WorkspaceArrangement,
+    #[serde(default)]
+    pub layouts: Vec<WorkspaceLayout>,
+    #[serde(default)]
+    pub active_layout: Option<String>,
+}
+
+impl Default for WorkspaceLayoutsState {
+    fn default() -> Self {
+        Self {
+            current: WorkspaceArrangement::default(),
+            layouts: Vec::new(),
+            active_layout: None,
+        }
+    }
+}
+
+impl WorkspaceLayoutsState {
+    fn normalize_name(name: &str) -> Option<String> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }
+
+    fn is_reserved_name(name: &str) -> bool {
+        matches!(
+            name.to_ascii_lowercase().as_str(),
+            "current" | "(current)" | "default" | "default layout"
+        )
+    }
+
+    fn matching_layout_name_for(&self, arrangement: &WorkspaceArrangement) -> Option<String> {
+        self.layouts
+            .iter()
+            .find(|layout| layout.arrangement == *arrangement)
+            .map(|layout| layout.name.clone())
+    }
+
+    pub fn set_current_arrangement(&mut self, arrangement: WorkspaceArrangement) {
+        self.current = arrangement;
+        self.active_layout = self.matching_layout_name_for(&self.current);
+    }
+
+    pub fn upsert_layout(&mut self, mut layout: WorkspaceLayout) -> Result<(), String> {
+        let normalized = Self::normalize_name(&layout.name)
+            .ok_or_else(|| "Layout name cannot be empty".to_string())?;
+        if Self::is_reserved_name(&normalized) {
+            return Err(format!("Layout name is reserved: {normalized}"));
+        }
+        layout.name = normalized.clone();
+        if let Some(existing) = self
+            .layouts
+            .iter_mut()
+            .find(|entry| entry.name.eq_ignore_ascii_case(&normalized))
+        {
+            *existing = layout.clone();
+        } else {
+            self.layouts.push(layout.clone());
+            self.layouts.sort_by(|a, b| {
+                a.name
+                    .to_ascii_lowercase()
+                    .cmp(&b.name.to_ascii_lowercase())
+            });
+        }
+        self.current = layout.arrangement;
+        self.active_layout = Some(normalized);
+        Ok(())
+    }
+
+    pub fn rename_layout(&mut self, old_name: &str, new_name: &str) -> Result<String, String> {
+        let old_normalized = Self::normalize_name(old_name)
+            .ok_or_else(|| "Existing layout name cannot be empty".to_string())?;
+        let new_normalized = Self::normalize_name(new_name)
+            .ok_or_else(|| "New layout name cannot be empty".to_string())?;
+        if Self::is_reserved_name(&new_normalized) {
+            return Err(format!("Layout name is reserved: {new_normalized}"));
+        }
+        if self.layouts.iter().any(|layout| {
+            layout.name.eq_ignore_ascii_case(&new_normalized)
+                && !layout.name.eq_ignore_ascii_case(&old_normalized)
+        }) {
+            return Err(format!("Layout already exists: {new_normalized}"));
+        }
+        let Some(existing) = self
+            .layouts
+            .iter_mut()
+            .find(|layout| layout.name.eq_ignore_ascii_case(&old_normalized))
+        else {
+            return Err(format!("Workspace layout not found: {old_normalized}"));
+        };
+        existing.name = new_normalized.clone();
+        self.layouts.sort_by(|a, b| {
+            a.name
+                .to_ascii_lowercase()
+                .cmp(&b.name.to_ascii_lowercase())
+        });
+        if self
+            .active_layout
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case(&old_normalized))
+        {
+            self.active_layout = Some(new_normalized.clone());
+        } else {
+            self.active_layout = self.matching_layout_name_for(&self.current);
+        }
+        Ok(new_normalized)
+    }
+
+    pub fn delete_layout(&mut self, name: &str) -> bool {
+        let Some(normalized) = Self::normalize_name(name) else {
+            return false;
+        };
+        let before = self.layouts.len();
+        self.layouts
+            .retain(|layout| !layout.name.eq_ignore_ascii_case(&normalized));
+        let removed = self.layouts.len() != before;
+        if removed {
+            self.active_layout = self.matching_layout_name_for(&self.current);
+        }
+        removed
+    }
+
+    pub fn get_layout(&self, name: &str) -> Option<&WorkspaceLayout> {
+        let normalized = Self::normalize_name(name)?;
+        self.layouts
+            .iter()
+            .find(|layout| layout.name.eq_ignore_ascii_case(&normalized))
     }
 }
 
@@ -871,6 +1188,8 @@ struct UiState {
     export_presets: ExportPresetsState,
     #[serde(default)]
     export_queue: ExportQueueState,
+    #[serde(default)]
+    workspace_layouts: WorkspaceLayoutsState,
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -942,6 +1261,25 @@ pub fn load_export_queue_state() -> ExportQueueState {
 pub fn save_export_queue_state(state: &ExportQueueState) {
     let mut ui = load_ui_state();
     ui.export_queue = state.clone();
+    save_ui_state(&ui);
+}
+
+pub fn load_workspace_layouts_state() -> WorkspaceLayoutsState {
+    let ui = load_ui_state();
+    let mut state = ui.workspace_layouts;
+    if state.layouts.is_empty()
+        && state.active_layout.is_none()
+        && state.current == WorkspaceArrangement::default()
+    {
+        state.current.program_monitor =
+            ProgramMonitorWorkspaceState::from_program_monitor_state(&ui.program_monitor);
+    }
+    state
+}
+
+pub fn save_workspace_layouts_state(state: &WorkspaceLayoutsState) {
+    let mut ui = load_ui_state();
+    ui.workspace_layouts = state.clone();
     save_ui_state(&ui);
 }
 
@@ -1146,5 +1484,134 @@ mod tests {
         prefs.set_proxy_enabled(true);
         assert_eq!(prefs.proxy_mode, ProxyMode::QuarterRes);
         assert_eq!(prefs.remembered_proxy_mode(), ProxyMode::QuarterRes);
+    }
+
+    #[test]
+    fn workspace_layouts_upsert_rename_delete_tracks_active_layout() {
+        let arrangement = WorkspaceArrangement {
+            root_hpaned_pos: 980,
+            inspector_visible: false,
+            left_panel_tab: WorkspaceLeftPanelTab::Effects,
+            program_monitor: ProgramMonitorWorkspaceState {
+                popped: true,
+                width: 1280,
+                height: 720,
+                docked_split_pos: 480,
+                scopes_visible: true,
+            },
+            ..WorkspaceArrangement::default()
+        };
+        let mut state = WorkspaceLayoutsState::default();
+        state.set_current_arrangement(arrangement.clone());
+        state
+            .upsert_layout(WorkspaceLayout {
+                name: " Color ".to_string(),
+                arrangement: arrangement.clone(),
+            })
+            .unwrap();
+        assert_eq!(state.layouts.len(), 1);
+        assert_eq!(state.layouts[0].name, "Color");
+        assert_eq!(state.current, arrangement);
+        assert_eq!(state.active_layout.as_deref(), Some("Color"));
+
+        let renamed = state.rename_layout("color", "Review").unwrap();
+        assert_eq!(renamed, "Review");
+        assert_eq!(state.layouts[0].name, "Review");
+        assert_eq!(state.active_layout.as_deref(), Some("Review"));
+
+        assert!(state.delete_layout("review"));
+        assert!(state.layouts.is_empty());
+        assert!(state.active_layout.is_none());
+    }
+
+    #[test]
+    fn workspace_layouts_recompute_active_layout_from_current_arrangement() {
+        let mut state = WorkspaceLayoutsState::default();
+        state
+            .upsert_layout(WorkspaceLayout {
+                name: "Edit".to_string(),
+                arrangement: WorkspaceArrangement::default(),
+            })
+            .unwrap();
+        assert_eq!(state.active_layout.as_deref(), Some("Edit"));
+
+        let mut changed = state.current.clone();
+        changed.media_browser_visible = false;
+        state.set_current_arrangement(changed);
+        assert!(state.active_layout.is_none());
+
+        state.set_current_arrangement(WorkspaceArrangement::default());
+        assert_eq!(state.active_layout.as_deref(), Some("Edit"));
+    }
+
+    #[test]
+    fn program_monitor_workspace_state_copies_geometry_only() {
+        let monitor = ProgramMonitorState {
+            popped: true,
+            width: 1111,
+            height: 777,
+            docked_split_pos: 512,
+            scopes_visible: true,
+            show_safe_areas: true,
+            show_false_color: true,
+            show_zebra: true,
+            zebra_threshold: 0.95,
+        };
+        let workspace = ProgramMonitorWorkspaceState::from_program_monitor_state(&monitor);
+        assert!(workspace.popped);
+        assert_eq!(workspace.width, 1111);
+        assert_eq!(workspace.height, 777);
+        assert_eq!(workspace.docked_split_pos, 512);
+        assert!(workspace.scopes_visible);
+    }
+
+    #[test]
+    fn workspace_left_panel_tab_serde_uses_snake_case_values() {
+        let arrangement: WorkspaceArrangement =
+            serde_json::from_str(r#"{"left_panel_tab":"audio_effects"}"#).unwrap();
+        assert_eq!(
+            arrangement.left_panel_tab,
+            WorkspaceLeftPanelTab::AudioEffects
+        );
+        let encoded = serde_json::to_string(&arrangement).unwrap();
+        assert!(encoded.contains(r#""left_panel_tab":"audio_effects""#));
+    }
+
+    #[test]
+    fn workspace_split_ratio_scales_between_window_sizes() {
+        let ratio = workspace_split_ratio_from_pixels(1596, 2200);
+        assert_eq!(ratio, Some(725));
+        let scaled = workspace_split_position_from_ratio(ratio, 1440, 1596);
+        assert_eq!(scaled, 1044);
+        assert_eq!(workspace_split_ratio_from_pixels(scaled, 1440), ratio);
+    }
+
+    #[test]
+    fn workspace_arrangement_serde_keeps_split_ratio_fields_optional() {
+        let arrangement = WorkspaceArrangement::default();
+        let encoded = serde_json::to_string(&arrangement).unwrap();
+        assert!(!encoded.contains("ratio_permille"));
+
+        let decoded: WorkspaceArrangement =
+            serde_json::from_str(r#"{"root_hpaned_pos":1596}"#).unwrap();
+        assert_eq!(decoded.root_hpaned_pos, 1596);
+        assert!(decoded.root_hpaned_ratio_permille.is_none());
+        assert!(decoded.root_vpaned_ratio_permille.is_none());
+    }
+
+    #[test]
+    fn ui_state_defaults_missing_workspace_layouts_field() {
+        let parsed: UiState = serde_json::from_str(
+            r#"{"program_monitor":{"popped":true,"width":1111,"height":777,"docked_split_pos":512,"scopes_visible":true}}"#,
+        )
+        .unwrap();
+        assert!(parsed.workspace_layouts.layouts.is_empty());
+        assert!(parsed.workspace_layouts.active_layout.is_none());
+        assert_eq!(
+            parsed.workspace_layouts.current,
+            WorkspaceArrangement::default()
+        );
+        assert!(parsed.program_monitor.popped);
+        assert!(parsed.program_monitor.scopes_visible);
     }
 }

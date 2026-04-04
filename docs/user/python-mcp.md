@@ -118,6 +118,46 @@ Useful playback-tuning toggles:
 
 `collect_project_files` leaves the current project paths unchanged by default; set `use_collected_locations_on_next_save` to `true` when you want the next project save/export to use the copied media paths.
 
+## Workspace layout MCP examples
+
+List the live arrangement plus saved layouts:
+
+```bash
+python3 tools/mcp_call.py list_workspace_layouts '{}'
+```
+
+Save the current arrangement as `Editing`:
+
+```bash
+python3 tools/mcp_call.py save_workspace_layout '{"name":"Editing"}'
+```
+
+Apply a saved layout:
+
+```bash
+python3 tools/mcp_call.py apply_workspace_layout '{"name":"Editing"}'
+```
+
+Rename a saved layout:
+
+```bash
+python3 tools/mcp_call.py rename_workspace_layout '{"old_name":"Editing","new_name":"Color"}'
+```
+
+Delete a saved layout:
+
+```bash
+python3 tools/mcp_call.py delete_workspace_layout '{"name":"Color"}'
+```
+
+Reset the window to the built-in default arrangement:
+
+```bash
+python3 tools/mcp_call.py reset_workspace_layout '{}'
+```
+
+`list_workspace_layouts` returns the current live arrangement in `current`, saved presets in `layouts`, and the exact-matching saved preset name (if any) in `active_layout`. Saved layout names are app-global UI state, not project data.
+
 ## Project management examples
 
 Create a new empty project:

@@ -583,7 +583,7 @@ Tracking docs:
 - [ ] Customizable keyboard shortcuts (shortcut config file + preferences UI)
 - [x] Timecode entry / go-to timecode (HH:MM:SS:FF to jump playhead)
 - [x] Drag-and-drop from file manager (import by dragging files into media browser or timeline)
-- [ ] Customizable workspace layouts (save/restore panel arrangements for different tasks)
+- [x] Customizable workspace layouts (save/restore panel arrangements for different tasks)
 - [ ] Named project snapshots (create named versions at milestones without separate files)
 
 ### Professional Workflow (The "Pro" Edge)

@@ -258,6 +258,29 @@ pub enum McpCommand {
         name: String,
         reply: SyncSender<Value>,
     },
+    ListWorkspaceLayouts {
+        reply: SyncSender<Value>,
+    },
+    SaveWorkspaceLayout {
+        name: String,
+        reply: SyncSender<Value>,
+    },
+    ApplyWorkspaceLayout {
+        name: String,
+        reply: SyncSender<Value>,
+    },
+    RenameWorkspaceLayout {
+        old_name: String,
+        new_name: String,
+        reply: SyncSender<Value>,
+    },
+    DeleteWorkspaceLayout {
+        name: String,
+        reply: SyncSender<Value>,
+    },
+    ResetWorkspaceLayout {
+        reply: SyncSender<Value>,
+    },
     ExportWithPreset {
         path: String,
         preset_name: String,

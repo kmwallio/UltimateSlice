@@ -43,6 +43,106 @@ fn is_text_input_focused(focused: &gtk4::Widget) -> bool {
         || focused.is::<gtk4::SpinButton>()
 }
 
+fn workspace_paned_extent(paned: &Paned) -> i32 {
+    match paned.orientation() {
+        Orientation::Horizontal => paned.allocation().width(),
+        Orientation::Vertical => paned.allocation().height(),
+        _ => 0,
+    }
+}
+
+fn workspace_paned_child_min_size(child: Option<gtk::Widget>, orientation: Orientation) -> i32 {
+    child
+        .map(|widget| widget.measure(orientation, -1).0.max(0))
+        .unwrap_or(0)
+}
+
+fn clamp_workspace_paned_position(paned: &Paned, desired: i32) -> i32 {
+    let desired = desired.max(0);
+    let total = workspace_paned_extent(paned);
+    if total <= 0 {
+        return desired;
+    }
+    let orientation = paned.orientation();
+    let min_start = workspace_paned_child_min_size(paned.start_child(), orientation);
+    let min_end = workspace_paned_child_min_size(paned.end_child(), orientation);
+    let min_bound = min_start.min(total);
+    let max_bound = total.saturating_sub(min_end);
+    if max_bound < min_bound {
+        desired.clamp(0, total)
+    } else {
+        desired.clamp(min_bound, max_bound)
+    }
+}
+
+fn capture_workspace_paned_state(
+    paned: &Paned,
+    fallback_position: i32,
+    fallback_ratio_permille: Option<u16>,
+) -> (i32, Option<u16>) {
+    let total = workspace_paned_extent(paned);
+    if total <= 0 {
+        return (fallback_position.max(0), fallback_ratio_permille);
+    }
+    let position = clamp_workspace_paned_position(paned, paned.position());
+    (
+        position,
+        crate::ui_state::workspace_split_ratio_from_pixels(position, total),
+    )
+}
+
+fn workspace_target_paned_position(
+    paned: &Paned,
+    position: i32,
+    ratio_permille: Option<u16>,
+) -> Option<i32> {
+    let total = workspace_paned_extent(paned);
+    if total <= 0 {
+        return None;
+    }
+    let scaled =
+        crate::ui_state::workspace_split_position_from_ratio(ratio_permille, total, position);
+    Some(clamp_workspace_paned_position(paned, scaled))
+}
+
+fn schedule_workspace_layout_apply_completion(
+    apply_generation: u64,
+    workspace_layout_apply_generation: Rc<Cell<u64>>,
+    workspace_layouts_applying: Rc<Cell<bool>>,
+    workspace_layout_pending_name: Rc<RefCell<Option<String>>>,
+    sync_workspace_layout_state: Rc<dyn Fn()>,
+    apply_split_positions: Rc<dyn Fn()>,
+    pane_positions_ready: Rc<dyn Fn() -> bool>,
+    remaining_attempts: u8,
+) {
+    glib::timeout_add_local_once(std::time::Duration::from_millis(16), move || {
+        if workspace_layout_apply_generation.get() != apply_generation {
+            return;
+        }
+        if !pane_positions_ready() {
+            if remaining_attempts > 0 {
+                schedule_workspace_layout_apply_completion(
+                    apply_generation,
+                    workspace_layout_apply_generation.clone(),
+                    workspace_layouts_applying.clone(),
+                    workspace_layout_pending_name.clone(),
+                    sync_workspace_layout_state.clone(),
+                    apply_split_positions.clone(),
+                    pane_positions_ready.clone(),
+                    remaining_attempts - 1,
+                );
+            } else {
+                workspace_layout_pending_name.borrow_mut().take();
+                workspace_layouts_applying.set(false);
+            }
+            return;
+        }
+        apply_split_positions();
+        workspace_layouts_applying.set(false);
+        sync_workspace_layout_state();
+    });
+}
+
 fn media_kind_filter_id(filter: MediaKindFilter) -> &'static str {
     match filter {
         MediaKindFilter::All => "all",
@@ -420,6 +520,73 @@ fn present_go_to_timecode_dialog(
                     error_label.set_text(&err);
                     error_label.set_visible(true);
                 }
+            }
+        }
+    });
+
+    dialog.present();
+    entry.grab_focus();
+    entry.select_region(0, -1);
+}
+
+#[allow(deprecated)]
+fn present_text_entry_dialog(
+    window: &gtk::ApplicationWindow,
+    title: &str,
+    accept_label: &str,
+    hint: &str,
+    initial_text: &str,
+    placeholder: Option<&str>,
+    on_accept: Rc<dyn Fn(String) -> Result<(), String>>,
+) {
+    let dialog = gtk::Dialog::builder()
+        .title(title)
+        .transient_for(window)
+        .modal(true)
+        .default_width(360)
+        .build();
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+    dialog.add_button(accept_label, gtk::ResponseType::Accept);
+    dialog.set_default_response(gtk::ResponseType::Accept);
+
+    let content = dialog.content_area();
+    if !hint.is_empty() {
+        let hint_label = gtk::Label::new(Some(hint));
+        hint_label.set_halign(gtk::Align::Start);
+        hint_label.add_css_class("dim-label");
+        hint_label.set_wrap(true);
+        content.append(&hint_label);
+    }
+
+    let entry = gtk::Entry::new();
+    entry.set_text(initial_text);
+    entry.set_placeholder_text(placeholder);
+    entry.set_activates_default(true);
+    content.append(&entry);
+
+    let error_label = gtk::Label::new(None);
+    error_label.set_halign(gtk::Align::Start);
+    error_label.set_wrap(true);
+    error_label.add_css_class("error");
+    error_label.set_visible(false);
+    content.append(&error_label);
+
+    entry.connect_changed({
+        let error_label = error_label.clone();
+        move |_| error_label.set_visible(false)
+    });
+
+    let entry_for_response = entry.clone();
+    dialog.connect_response(move |d, resp| {
+        if resp != gtk::ResponseType::Accept {
+            d.close();
+            return;
+        }
+        match on_accept(entry_for_response.text().to_string()) {
+            Ok(()) => d.close(),
+            Err(err) => {
+                error_label.set_text(&err);
+                error_label.set_visible(true);
             }
         }
     });
@@ -3061,6 +3228,8 @@ pub fn build_window(
     // Shared media library (items visible in the browser, not yet on timeline)
     let library: Rc<RefCell<MediaLibrary>> = Rc::new(RefCell::new(MediaLibrary::new()));
     let preferences_state = Rc::new(RefCell::new(crate::ui_state::load_preferences_state()));
+    let workspace_layouts_state =
+        Rc::new(RefCell::new(crate::ui_state::load_workspace_layouts_state()));
 
     // MCP command channel — created unconditionally so the socket transport can
     // be toggled at runtime via Preferences without restarting.
@@ -5485,6 +5654,41 @@ pub fn build_window(
     top_paned.set_hexpand(true);
     top_paned.set_vexpand(true);
     top_paned.set_position(320);
+    let workspace_layouts_applying = Rc::new(Cell::new(false));
+    let workspace_layout_pending_name: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let workspace_layout_apply_generation = Rc::new(Cell::new(0u64));
+    let workspace_layout_controls_updating = Rc::new(Cell::new(false));
+    let sync_workspace_layout_controls_impl: Rc<RefCell<Option<Rc<dyn Fn()>>>> =
+        Rc::new(RefCell::new(None));
+    let sync_workspace_layout_controls: Rc<dyn Fn()> = {
+        let cb = sync_workspace_layout_controls_impl.clone();
+        Rc::new(move || {
+            if let Some(f) = cb.borrow().as_ref() {
+                f();
+            }
+        })
+    };
+    let sync_workspace_layout_state_impl: Rc<RefCell<Option<Rc<dyn Fn()>>>> =
+        Rc::new(RefCell::new(None));
+    let sync_workspace_layout_state: Rc<dyn Fn()> = {
+        let cb = sync_workspace_layout_state_impl.clone();
+        Rc::new(move || {
+            if let Some(f) = cb.borrow().as_ref() {
+                f();
+            }
+        })
+    };
+    let apply_workspace_arrangement_impl: Rc<
+        RefCell<Option<Rc<dyn Fn(crate::ui_state::WorkspaceArrangement)>>>,
+    > = Rc::new(RefCell::new(None));
+    let apply_workspace_arrangement: Rc<dyn Fn(crate::ui_state::WorkspaceArrangement)> = {
+        let cb = apply_workspace_arrangement_impl.clone();
+        Rc::new(move |arrangement| {
+            if let Some(f) = cb.borrow().as_ref() {
+                f(arrangement);
+            }
+        })
+    };
 
     // ── Build preview first so we have source_marks ───────────────────────
     // on_append stub: real impl filled in below after source_marks is available.
@@ -7034,6 +7238,8 @@ pub fn build_window(
     {
         let monitor_state = monitor_state.clone();
         let monitor_popped = monitor_popped.clone();
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
         docked_scopes_paned.connect_position_notify(move |p| {
             if monitor_popped.get() {
                 return;
@@ -7043,6 +7249,9 @@ pub fn build_window(
             if state.docked_split_pos != pos {
                 state.docked_split_pos = pos;
                 crate::ui_state::save_program_monitor_state(&state);
+            }
+            if !workspace_layouts_applying.get() {
+                sync_workspace_layout_state();
             }
         });
     }
@@ -7374,40 +7583,52 @@ pub fn build_window(
     }
 
     // Scopes toggle for the docked monitor/scopes split.
+    let scopes_btn = gtk::ToggleButton::with_label("▾ Scopes");
+    scopes_btn.add_css_class("flat");
+    scopes_btn.set_halign(gtk::Align::Start);
+    scopes_btn.set_margin_start(4);
+    scopes_btn.set_active(monitor_state.borrow().scopes_visible);
     {
-        let scopes_btn = gtk::ToggleButton::with_label("▾ Scopes");
-        scopes_btn.add_css_class("flat");
-        scopes_btn.set_halign(gtk::Align::Start);
-        scopes_btn.set_margin_start(4);
         let rev = scopes_revealer.clone();
         let docked_paned = docked_scopes_paned.clone();
         let monitor_state = monitor_state.clone();
         let prog_player_scope = prog_player.clone();
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
         scopes_btn.connect_toggled(move |b| {
             let visible = b.is_active();
             prog_player_scope.borrow().set_scope_enabled(visible);
             if visible {
                 if docked_paned.end_child().is_none() {
                     docked_paned.set_end_child(Some(&rev));
-                    let pos = monitor_state.borrow().docked_split_pos.max(160);
-                    docked_paned.set_position(pos);
+                }
+                {
+                    let state = monitor_state.borrow();
+                    docked_paned.set_position(state.docked_split_pos.max(160));
                 }
                 rev.set_reveal_child(true);
             } else {
                 let pos = docked_paned.position().max(160);
-                {
-                    let mut state = monitor_state.borrow_mut();
-                    if state.docked_split_pos != pos {
-                        state.docked_split_pos = pos;
-                        crate::ui_state::save_program_monitor_state(&state);
-                    }
-                }
                 rev.set_reveal_child(false);
                 docked_paned.set_end_child(Option::<&gtk::Widget>::None);
+                {
+                    let mut state = monitor_state.borrow_mut();
+                    state.docked_split_pos = pos;
+                    state.scopes_visible = false;
+                    crate::ui_state::save_program_monitor_state(&state);
+                }
+            }
+            if visible {
+                let mut state = monitor_state.borrow_mut();
+                state.scopes_visible = true;
+                crate::ui_state::save_program_monitor_state(&state);
+            }
+            if !workspace_layouts_applying.get() {
+                sync_workspace_layout_state();
             }
         });
-        prog_monitor_host.append(&scopes_btn);
     }
+    prog_monitor_host.append(&scopes_btn);
     let program_empty_hint = gtk::Label::new(Some(
         "Import media, then append or insert a clip to preview your timeline here.",
     ));
@@ -7432,6 +7653,8 @@ pub fn build_window(
         let popped = monitor_popped.clone();
         let monitor_state = monitor_state.clone();
         let scopes_rev = scopes_revealer.clone();
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
         Rc::new(move || {
             if !popped.get() {
                 let state = monitor_state.borrow().clone();
@@ -7452,6 +7675,8 @@ pub fn build_window(
                 let popped_c = popped.clone();
                 let monitor_state_c = monitor_state.clone();
                 let scopes_rev_c = scopes_rev.clone();
+                let workspace_layouts_applying_c = workspace_layouts_applying.clone();
+                let sync_workspace_layout_state_c = sync_workspace_layout_state.clone();
                 pop_win.connect_close_request(move |w| {
                     let mut state = monitor_state_c.borrow_mut();
                     state.width = w.width().max(320);
@@ -7465,6 +7690,9 @@ pub fn build_window(
                     scopes_rev_c.set_vexpand(false);
                     popped_c.set(false);
                     *pop_cell_c.borrow_mut() = None;
+                    if !workspace_layouts_applying_c.get() {
+                        sync_workspace_layout_state_c();
+                    }
                     glib::Propagation::Proceed
                 });
 
@@ -7476,6 +7704,9 @@ pub fn build_window(
                     crate::ui_state::save_program_monitor_state(&state);
                 }
                 *pop_cell.borrow_mut() = Some(pop_win);
+                if !workspace_layouts_applying.get() {
+                    sync_workspace_layout_state();
+                }
             } else {
                 let win = pop_cell.borrow().as_ref().cloned();
                 if let Some(w) = win {
@@ -8749,33 +8980,53 @@ pub fn build_window(
     // Wire buttons → stack page switches
     {
         let s = left_stack.clone();
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
         tb_media.connect_toggled(move |b| {
             if b.is_active() {
                 s.set_visible_child_name("media");
+                if !workspace_layouts_applying.get() {
+                    sync_workspace_layout_state();
+                }
             }
         });
     }
     {
         let s = left_stack.clone();
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
         tb_effects.connect_toggled(move |b| {
             if b.is_active() {
                 s.set_visible_child_name("effects");
+                if !workspace_layouts_applying.get() {
+                    sync_workspace_layout_state();
+                }
             }
         });
     }
     {
         let s = left_stack.clone();
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
         tb_audio_fx.connect_toggled(move |b| {
             if b.is_active() {
                 s.set_visible_child_name("audio_effects");
+                if !workspace_layouts_applying.get() {
+                    sync_workspace_layout_state();
+                }
             }
         });
     }
     {
         let s = left_stack.clone();
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
         tb_titles.connect_toggled(move |b| {
             if b.is_active() {
                 s.set_visible_child_name("titles");
+                if !workspace_layouts_applying.get() {
+                    sync_workspace_layout_state();
+                }
             }
         });
     }
@@ -9401,6 +9652,8 @@ pub fn build_window(
     {
         let scroller = keyframe_scroller.clone();
         let paned = timeline_paned.clone();
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
         keyframes_toggle.connect_clicked(move |btn| {
             let visible = scroller.is_visible();
             scroller.set_visible(!visible);
@@ -9414,10 +9667,58 @@ pub fn build_window(
             } else {
                 btn.set_label("Show Keyframes");
             }
+            if !workspace_layouts_applying.get() {
+                sync_workspace_layout_state();
+            }
         });
     }
 
     root_hpaned.set_end_child(Some(&right_sidebar));
+    {
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
+        root_hpaned.connect_position_notify(move |_| {
+            if !workspace_layouts_applying.get() {
+                sync_workspace_layout_state();
+            }
+        });
+    }
+    {
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
+        root_vpaned.connect_position_notify(move |_| {
+            if !workspace_layouts_applying.get() {
+                sync_workspace_layout_state();
+            }
+        });
+    }
+    {
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
+        top_paned.connect_position_notify(move |_| {
+            if !workspace_layouts_applying.get() {
+                sync_workspace_layout_state();
+            }
+        });
+    }
+    {
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
+        left_vpaned.connect_position_notify(move |_| {
+            if !workspace_layouts_applying.get() {
+                sync_workspace_layout_state();
+            }
+        });
+    }
+    {
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
+        timeline_paned.connect_position_notify(move |_| {
+            if !workspace_layouts_applying.get() {
+                sync_workspace_layout_state();
+            }
+        });
+    }
 
     // ── Status bar (proxy progress) ───────────────────────────────────────
     let status_bar = gtk::Box::new(Orientation::Horizontal, 8);
@@ -9493,6 +9794,8 @@ pub fn build_window(
     {
         let panel = left_vpaned.clone();
         let icon = media_browser_icon.clone();
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
         media_browser_toggle.connect_toggled(move |btn| {
             let show = btn.is_active();
             panel.set_visible(show);
@@ -9501,6 +9804,9 @@ pub fn build_window(
             } else {
                 "view-conceal-symbolic"
             }));
+            if !workspace_layouts_applying.get() {
+                sync_workspace_layout_state();
+            }
         });
     }
 
@@ -9518,6 +9824,8 @@ pub fn build_window(
     {
         let sidebar = right_sidebar.clone();
         let icon = inspector_toggle_icon.clone();
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
         inspector_toggle.connect_toggled(move |btn| {
             let show = btn.is_active();
             sidebar.set_visible(show);
@@ -9526,8 +9834,47 @@ pub fn build_window(
             } else {
                 "view-conceal-symbolic"
             }));
+            if !workspace_layouts_applying.get() {
+                sync_workspace_layout_state();
+            }
         });
     }
+
+    let workspace_layout_dropdown = gtk::DropDown::from_strings(&[]);
+    workspace_layout_dropdown.set_hexpand(true);
+    let workspace_apply_btn = gtk::Button::with_label("Apply");
+    let workspace_save_btn = gtk::Button::with_label("Save Current…");
+    let workspace_rename_btn = gtk::Button::with_label("Rename…");
+    let workspace_delete_btn = gtk::Button::with_label("Delete");
+    let workspace_reset_btn = gtk::Button::with_label("Reset");
+    let workspace_popover_box = gtk::Box::new(Orientation::Vertical, 8);
+    workspace_popover_box.set_margin_start(12);
+    workspace_popover_box.set_margin_end(12);
+    workspace_popover_box.set_margin_top(10);
+    workspace_popover_box.set_margin_bottom(10);
+    let workspace_title = gtk::Label::new(Some("Workspace Layouts"));
+    workspace_title.set_halign(gtk::Align::Start);
+    workspace_title.add_css_class("dim-label");
+    workspace_popover_box.append(&workspace_title);
+    workspace_popover_box.append(&workspace_layout_dropdown);
+    let workspace_actions_row = gtk::Box::new(Orientation::Horizontal, 4);
+    workspace_actions_row.append(&workspace_apply_btn);
+    workspace_actions_row.append(&workspace_reset_btn);
+    workspace_popover_box.append(&workspace_actions_row);
+    let workspace_manage_row = gtk::Box::new(Orientation::Horizontal, 4);
+    workspace_manage_row.append(&workspace_save_btn);
+    workspace_manage_row.append(&workspace_rename_btn);
+    workspace_manage_row.append(&workspace_delete_btn);
+    workspace_popover_box.append(&workspace_manage_row);
+    let workspace_popover = gtk::Popover::new();
+    workspace_popover.set_child(Some(&workspace_popover_box));
+    workspace_popover.set_autohide(true);
+    let workspace_menu_btn = gtk::MenuButton::new();
+    workspace_menu_btn.set_label("Workspace");
+    workspace_menu_btn.set_popover(Some(&workspace_popover));
+    workspace_menu_btn.set_tooltip_text(Some(
+        "Apply, save, rename, or delete saved workspace layouts",
+    ));
 
     status_bar.append(&media_browser_toggle);
     status_bar.append(&track_levels_toggle);
@@ -9538,6 +9885,7 @@ pub fn build_window(
     let status_spacer = gtk::Box::new(Orientation::Horizontal, 0);
     status_spacer.set_hexpand(true);
     status_bar.append(&status_spacer);
+    status_bar.append(&workspace_menu_btn);
     status_bar.append(&inspector_toggle);
     *sync_background_render_toggle_impl.borrow_mut() = Some({
         let background_render_toggle = background_render_toggle.clone();
@@ -9576,6 +9924,505 @@ pub fn build_window(
             proxy_toggle_updating.set(false);
         })
     });
+    {
+        let workspace_apply_btn = workspace_apply_btn.clone();
+        let workspace_rename_btn = workspace_rename_btn.clone();
+        let workspace_delete_btn = workspace_delete_btn.clone();
+        let workspace_layout_controls_updating = workspace_layout_controls_updating.clone();
+        let workspace_layouts_state = workspace_layouts_state.clone();
+        workspace_layout_dropdown.connect_selected_notify(move |dropdown| {
+            if workspace_layout_controls_updating.get() {
+                return;
+            }
+            let selected = dropdown.selected();
+            workspace_apply_btn.set_sensitive(selected != 0);
+            let named_selected = selected >= 2
+                && ((selected - 2) as usize) < workspace_layouts_state.borrow().layouts.len();
+            workspace_rename_btn.set_sensitive(named_selected);
+            workspace_delete_btn.set_sensitive(named_selected);
+        });
+    }
+    *sync_workspace_layout_controls_impl.borrow_mut() = Some({
+        let workspace_layout_dropdown = workspace_layout_dropdown.clone();
+        let workspace_apply_btn = workspace_apply_btn.clone();
+        let workspace_rename_btn = workspace_rename_btn.clone();
+        let workspace_delete_btn = workspace_delete_btn.clone();
+        let workspace_layout_controls_updating = workspace_layout_controls_updating.clone();
+        let workspace_layouts_state = workspace_layouts_state.clone();
+        Rc::new(move || {
+            workspace_layout_controls_updating.set(true);
+            let (layout_names, active_layout) = {
+                let state = workspace_layouts_state.borrow();
+                (
+                    state
+                        .layouts
+                        .iter()
+                        .map(|layout| layout.name.clone())
+                        .collect::<Vec<_>>(),
+                    state.active_layout.clone(),
+                )
+            };
+            let model = gtk::StringList::new(&[]);
+            model.append("(Current)");
+            model.append("Default Layout");
+            for name in &layout_names {
+                model.append(name);
+            }
+            workspace_layout_dropdown.set_model(Some(&model));
+            let selected = active_layout
+                .as_ref()
+                .and_then(|name| {
+                    layout_names
+                        .iter()
+                        .position(|candidate| candidate.eq_ignore_ascii_case(name))
+                        .map(|idx| idx as u32 + 2)
+                })
+                .unwrap_or(0);
+            workspace_layout_dropdown.set_selected(selected);
+            workspace_apply_btn.set_sensitive(selected != 0);
+            let named_selected = selected >= 2 && ((selected - 2) as usize) < layout_names.len();
+            workspace_rename_btn.set_sensitive(named_selected);
+            workspace_delete_btn.set_sensitive(named_selected);
+            workspace_layout_controls_updating.set(false);
+        })
+    });
+    let capture_workspace_arrangement: Rc<dyn Fn() -> crate::ui_state::WorkspaceArrangement> = {
+        let root_hpaned = root_hpaned.clone();
+        let root_vpaned = root_vpaned.clone();
+        let top_paned = top_paned.clone();
+        let left_vpaned = left_vpaned.clone();
+        let timeline_paned = timeline_paned.clone();
+        let media_browser_toggle = media_browser_toggle.clone();
+        let inspector_toggle = inspector_toggle.clone();
+        let keyframe_scroller = keyframe_scroller.clone();
+        let scopes_btn = scopes_btn.clone();
+        let docked_scopes_paned = docked_scopes_paned.clone();
+        let monitor_state = monitor_state.clone();
+        let monitor_popped = monitor_popped.clone();
+        let popout_window_cell = popout_window_cell.clone();
+        let tb_media = tb_media.clone();
+        let tb_effects = tb_effects.clone();
+        let tb_audio_fx = tb_audio_fx.clone();
+        let tb_titles = tb_titles.clone();
+        let workspace_layouts_state = workspace_layouts_state.clone();
+        Rc::new(move || {
+            let previous_arrangement = workspace_layouts_state.borrow().current.clone();
+            let left_panel_tab = if tb_effects.is_active() {
+                crate::ui_state::WorkspaceLeftPanelTab::Effects
+            } else if tb_audio_fx.is_active() {
+                crate::ui_state::WorkspaceLeftPanelTab::AudioEffects
+            } else if tb_titles.is_active() {
+                crate::ui_state::WorkspaceLeftPanelTab::Titles
+            } else {
+                let _ = tb_media.is_active();
+                crate::ui_state::WorkspaceLeftPanelTab::Media
+            };
+            let monitor_snapshot = monitor_state.borrow().clone();
+            let (width, height) = if monitor_popped.get() {
+                if let Some(window) = popout_window_cell.borrow().as_ref() {
+                    (window.width().max(320), window.height().max(180))
+                } else {
+                    (
+                        monitor_snapshot.width.max(320),
+                        monitor_snapshot.height.max(180),
+                    )
+                }
+            } else {
+                (
+                    monitor_snapshot.width.max(320),
+                    monitor_snapshot.height.max(180),
+                )
+            };
+            let (root_hpaned_pos, root_hpaned_ratio_permille) = capture_workspace_paned_state(
+                &root_hpaned,
+                previous_arrangement.root_hpaned_pos,
+                previous_arrangement.root_hpaned_ratio_permille,
+            );
+            let (root_vpaned_pos, root_vpaned_ratio_permille) = capture_workspace_paned_state(
+                &root_vpaned,
+                previous_arrangement.root_vpaned_pos,
+                previous_arrangement.root_vpaned_ratio_permille,
+            );
+            let (top_paned_pos, top_paned_ratio_permille) = capture_workspace_paned_state(
+                &top_paned,
+                previous_arrangement.top_paned_pos,
+                previous_arrangement.top_paned_ratio_permille,
+            );
+            let (left_vpaned_pos, left_vpaned_ratio_permille) = capture_workspace_paned_state(
+                &left_vpaned,
+                previous_arrangement.left_vpaned_pos,
+                previous_arrangement.left_vpaned_ratio_permille,
+            );
+            let (timeline_paned_pos, timeline_paned_ratio_permille) = capture_workspace_paned_state(
+                &timeline_paned,
+                previous_arrangement.timeline_paned_pos,
+                previous_arrangement.timeline_paned_ratio_permille,
+            );
+            crate::ui_state::WorkspaceArrangement {
+                root_hpaned_pos,
+                root_hpaned_ratio_permille,
+                root_vpaned_pos,
+                root_vpaned_ratio_permille,
+                top_paned_pos,
+                top_paned_ratio_permille,
+                left_vpaned_pos,
+                left_vpaned_ratio_permille,
+                timeline_paned_pos,
+                timeline_paned_ratio_permille,
+                media_browser_visible: media_browser_toggle.is_active(),
+                inspector_visible: inspector_toggle.is_active(),
+                keyframe_editor_visible: keyframe_scroller.is_visible(),
+                left_panel_tab,
+                program_monitor: crate::ui_state::ProgramMonitorWorkspaceState {
+                    popped: monitor_popped.get(),
+                    width,
+                    height,
+                    docked_split_pos: if scopes_btn.is_active() {
+                        docked_scopes_paned.position().max(160)
+                    } else {
+                        monitor_snapshot.docked_split_pos.max(160)
+                    },
+                    scopes_visible: scopes_btn.is_active(),
+                },
+            }
+        })
+    };
+    *sync_workspace_layout_state_impl.borrow_mut() = Some({
+        let workspace_layouts_state = workspace_layouts_state.clone();
+        let capture_workspace_arrangement = capture_workspace_arrangement.clone();
+        let sync_workspace_layout_controls = sync_workspace_layout_controls.clone();
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let workspace_layout_pending_name = workspace_layout_pending_name.clone();
+        Rc::new(move || {
+            if workspace_layouts_applying.get() {
+                return;
+            }
+            let arrangement = capture_workspace_arrangement();
+            {
+                let pending_name = workspace_layout_pending_name.borrow_mut().take();
+                let mut state = workspace_layouts_state.borrow_mut();
+                if let Some(name) = pending_name {
+                    if state
+                        .upsert_layout(crate::ui_state::WorkspaceLayout {
+                            name,
+                            arrangement: arrangement.clone(),
+                        })
+                        .is_err()
+                    {
+                        state.set_current_arrangement(arrangement.clone());
+                    }
+                } else {
+                    state.set_current_arrangement(arrangement.clone());
+                }
+                crate::ui_state::save_workspace_layouts_state(&state);
+            }
+            sync_workspace_layout_controls();
+        })
+    });
+    *apply_workspace_arrangement_impl.borrow_mut() = Some({
+        let root_hpaned = root_hpaned.clone();
+        let root_vpaned = root_vpaned.clone();
+        let top_paned = top_paned.clone();
+        let left_vpaned = left_vpaned.clone();
+        let timeline_paned = timeline_paned.clone();
+        let media_browser_toggle = media_browser_toggle.clone();
+        let inspector_toggle = inspector_toggle.clone();
+        let keyframe_scroller = keyframe_scroller.clone();
+        let keyframes_toggle = keyframes_toggle.clone();
+        let scopes_btn = scopes_btn.clone();
+        let docked_scopes_paned = docked_scopes_paned.clone();
+        let monitor_state = monitor_state.clone();
+        let monitor_popped = monitor_popped.clone();
+        let popout_window_cell = popout_window_cell.clone();
+        let on_toggle_popout = on_toggle_popout.clone();
+        let tb_media = tb_media.clone();
+        let tb_effects = tb_effects.clone();
+        let tb_audio_fx = tb_audio_fx.clone();
+        let tb_titles = tb_titles.clone();
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let workspace_layout_apply_generation = workspace_layout_apply_generation.clone();
+        let workspace_layout_pending_name = workspace_layout_pending_name.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
+        Rc::new(move |arrangement: crate::ui_state::WorkspaceArrangement| {
+            workspace_layouts_applying.set(true);
+            let apply_generation = workspace_layout_apply_generation.get().wrapping_add(1);
+            workspace_layout_apply_generation.set(apply_generation);
+            {
+                let mut state = monitor_state.borrow_mut();
+                arrangement
+                    .program_monitor
+                    .apply_to_program_monitor_state(&mut state);
+                crate::ui_state::save_program_monitor_state(&state);
+            }
+            if media_browser_toggle.is_active() != arrangement.media_browser_visible {
+                media_browser_toggle.set_active(arrangement.media_browser_visible);
+            }
+            if inspector_toggle.is_active() != arrangement.inspector_visible {
+                inspector_toggle.set_active(arrangement.inspector_visible);
+            }
+            match arrangement.left_panel_tab {
+                crate::ui_state::WorkspaceLeftPanelTab::Media => tb_media.set_active(true),
+                crate::ui_state::WorkspaceLeftPanelTab::Effects => tb_effects.set_active(true),
+                crate::ui_state::WorkspaceLeftPanelTab::AudioEffects => {
+                    tb_audio_fx.set_active(true)
+                }
+                crate::ui_state::WorkspaceLeftPanelTab::Titles => tb_titles.set_active(true),
+            }
+            if keyframe_scroller.is_visible() != arrangement.keyframe_editor_visible {
+                keyframe_scroller.set_visible(arrangement.keyframe_editor_visible);
+            }
+            keyframes_toggle.set_label(if arrangement.keyframe_editor_visible {
+                "Hide Keyframes"
+            } else {
+                "Show Keyframes"
+            });
+            if scopes_btn.is_active() != arrangement.program_monitor.scopes_visible {
+                scopes_btn.set_active(arrangement.program_monitor.scopes_visible);
+            }
+            if monitor_popped.get() != arrangement.program_monitor.popped {
+                on_toggle_popout();
+            } else if arrangement.program_monitor.popped {
+                if let Some(window) = popout_window_cell.borrow().as_ref() {
+                    window.set_default_size(
+                        arrangement.program_monitor.width.max(320),
+                        arrangement.program_monitor.height.max(180),
+                    );
+                }
+            }
+            let apply_split_positions: Rc<dyn Fn()> = Rc::new({
+                let root_hpaned = root_hpaned.clone();
+                let root_vpaned = root_vpaned.clone();
+                let top_paned = top_paned.clone();
+                let left_vpaned = left_vpaned.clone();
+                let timeline_paned = timeline_paned.clone();
+                let docked_scopes_paned = docked_scopes_paned.clone();
+                let arrangement = arrangement.clone();
+                move || {
+                    if let Some(pos) = workspace_target_paned_position(
+                        &root_hpaned,
+                        arrangement.root_hpaned_pos,
+                        arrangement.root_hpaned_ratio_permille,
+                    ) {
+                        root_hpaned.set_position(pos);
+                    }
+                    if let Some(pos) = workspace_target_paned_position(
+                        &root_vpaned,
+                        arrangement.root_vpaned_pos,
+                        arrangement.root_vpaned_ratio_permille,
+                    ) {
+                        root_vpaned.set_position(pos);
+                    }
+                    if let Some(pos) = workspace_target_paned_position(
+                        &top_paned,
+                        arrangement.top_paned_pos,
+                        arrangement.top_paned_ratio_permille,
+                    ) {
+                        top_paned.set_position(pos);
+                    }
+                    if let Some(pos) = workspace_target_paned_position(
+                        &left_vpaned,
+                        arrangement.left_vpaned_pos,
+                        arrangement.left_vpaned_ratio_permille,
+                    ) {
+                        left_vpaned.set_position(pos);
+                    }
+                    if arrangement.keyframe_editor_visible {
+                        if let Some(pos) = workspace_target_paned_position(
+                            &timeline_paned,
+                            arrangement.timeline_paned_pos,
+                            arrangement.timeline_paned_ratio_permille,
+                        ) {
+                            timeline_paned.set_position(pos);
+                        } else {
+                            let total = timeline_paned.allocation().height();
+                            if total > 0 {
+                                timeline_paned.set_position((total as f64 * 0.7) as i32);
+                            }
+                        }
+                    }
+                    if arrangement.program_monitor.scopes_visible {
+                        docked_scopes_paned
+                            .set_position(arrangement.program_monitor.docked_split_pos.max(160));
+                    }
+                }
+            });
+            apply_split_positions();
+            let pane_positions_ready: Rc<dyn Fn() -> bool> = Rc::new({
+                let root_hpaned = root_hpaned.clone();
+                let root_vpaned = root_vpaned.clone();
+                let top_paned = top_paned.clone();
+                let left_vpaned = left_vpaned.clone();
+                let timeline_paned = timeline_paned.clone();
+                move || {
+                    workspace_paned_extent(&root_hpaned) > 0
+                        && workspace_paned_extent(&root_vpaned) > 0
+                        && workspace_paned_extent(&top_paned) > 0
+                        && workspace_paned_extent(&left_vpaned) > 0
+                        && workspace_paned_extent(&timeline_paned) > 0
+                }
+            });
+            schedule_workspace_layout_apply_completion(
+                apply_generation,
+                workspace_layout_apply_generation.clone(),
+                workspace_layouts_applying.clone(),
+                workspace_layout_pending_name.clone(),
+                sync_workspace_layout_state.clone(),
+                apply_split_positions.clone(),
+                pane_positions_ready,
+                20,
+            );
+        })
+    });
+    {
+        let workspace_layouts_state = workspace_layouts_state.clone();
+        let workspace_layout_dropdown = workspace_layout_dropdown.clone();
+        let workspace_popover = workspace_popover.clone();
+        let apply_workspace_arrangement = apply_workspace_arrangement.clone();
+        let workspace_layout_pending_name = workspace_layout_pending_name.clone();
+        workspace_apply_btn.connect_clicked(move |_| {
+            let selected = workspace_layout_dropdown.selected();
+            if selected == 0 {
+                return;
+            }
+            let (arrangement, pending_name) = if selected == 1 {
+                (crate::ui_state::WorkspaceArrangement::default(), None)
+            } else {
+                let state = workspace_layouts_state.borrow();
+                let Some(layout) = state.layouts.get((selected - 2) as usize) else {
+                    return;
+                };
+                (layout.arrangement.clone(), Some(layout.name.clone()))
+            };
+            *workspace_layout_pending_name.borrow_mut() = pending_name;
+            apply_workspace_arrangement(arrangement);
+            workspace_popover.popdown();
+        });
+    }
+    {
+        let apply_workspace_arrangement = apply_workspace_arrangement.clone();
+        let workspace_popover = workspace_popover.clone();
+        let workspace_layout_pending_name = workspace_layout_pending_name.clone();
+        workspace_reset_btn.connect_clicked(move |_| {
+            *workspace_layout_pending_name.borrow_mut() = None;
+            apply_workspace_arrangement(crate::ui_state::WorkspaceArrangement::default());
+            workspace_popover.popdown();
+        });
+    }
+    {
+        let window = window.clone();
+        let capture_workspace_arrangement = capture_workspace_arrangement.clone();
+        let workspace_layouts_state = workspace_layouts_state.clone();
+        let sync_workspace_layout_controls = sync_workspace_layout_controls.clone();
+        let workspace_popover = workspace_popover.clone();
+        workspace_save_btn.connect_clicked(move |_| {
+            present_text_entry_dialog(
+                &window,
+                "Save Workspace Layout",
+                "Save",
+                "Create or overwrite a named workspace layout.",
+                "",
+                Some("Editing"),
+                Rc::new({
+                    let capture_workspace_arrangement = capture_workspace_arrangement.clone();
+                    let workspace_layouts_state = workspace_layouts_state.clone();
+                    let sync_workspace_layout_controls = sync_workspace_layout_controls.clone();
+                    let workspace_popover = workspace_popover.clone();
+                    move |name| {
+                        let arrangement = capture_workspace_arrangement();
+                        {
+                            let mut state = workspace_layouts_state.borrow_mut();
+                            state.set_current_arrangement(arrangement.clone());
+                            state.upsert_layout(crate::ui_state::WorkspaceLayout {
+                                name,
+                                arrangement,
+                            })?;
+                            crate::ui_state::save_workspace_layouts_state(&state);
+                        }
+                        sync_workspace_layout_controls();
+                        workspace_popover.popdown();
+                        Ok(())
+                    }
+                }),
+            );
+        });
+    }
+    {
+        let window = window.clone();
+        let workspace_layouts_state = workspace_layouts_state.clone();
+        let workspace_layout_dropdown = workspace_layout_dropdown.clone();
+        let sync_workspace_layout_controls = sync_workspace_layout_controls.clone();
+        let workspace_popover = workspace_popover.clone();
+        workspace_rename_btn.connect_clicked(move |_| {
+            let selected = workspace_layout_dropdown.selected();
+            if selected < 2 {
+                return;
+            }
+            let current_name = {
+                let state = workspace_layouts_state.borrow();
+                state
+                    .layouts
+                    .get((selected - 2) as usize)
+                    .map(|layout| layout.name.clone())
+            };
+            let Some(current_name) = current_name else {
+                return;
+            };
+            let old_name_for_submit = current_name.clone();
+            present_text_entry_dialog(
+                &window,
+                "Rename Workspace Layout",
+                "Rename",
+                "Rename the selected saved workspace layout.",
+                &current_name,
+                Some("Workspace name"),
+                Rc::new({
+                    let workspace_layouts_state = workspace_layouts_state.clone();
+                    let sync_workspace_layout_controls = sync_workspace_layout_controls.clone();
+                    let workspace_popover = workspace_popover.clone();
+                    move |new_name| {
+                        {
+                            let mut state = workspace_layouts_state.borrow_mut();
+                            state.rename_layout(&old_name_for_submit, &new_name)?;
+                            crate::ui_state::save_workspace_layouts_state(&state);
+                        }
+                        sync_workspace_layout_controls();
+                        workspace_popover.popdown();
+                        Ok(())
+                    }
+                }),
+            );
+        });
+    }
+    {
+        let workspace_layouts_state = workspace_layouts_state.clone();
+        let workspace_layout_dropdown = workspace_layout_dropdown.clone();
+        let sync_workspace_layout_controls = sync_workspace_layout_controls.clone();
+        workspace_delete_btn.connect_clicked(move |_| {
+            let selected = workspace_layout_dropdown.selected();
+            if selected < 2 {
+                return;
+            }
+            let deleted = {
+                let mut state = workspace_layouts_state.borrow_mut();
+                let Some(name) = state
+                    .layouts
+                    .get((selected - 2) as usize)
+                    .map(|layout| layout.name.clone())
+                else {
+                    return;
+                };
+                let deleted = state.delete_layout(&name);
+                if deleted {
+                    crate::ui_state::save_workspace_layouts_state(&state);
+                }
+                deleted
+            };
+            if deleted {
+                sync_workspace_layout_controls();
+            }
+        });
+    }
+    sync_workspace_layout_controls();
 
     // Wrap main content + status bar in a vertical box
     let outer_vbox = gtk::Box::new(Orientation::Vertical, 0);
@@ -10034,12 +10881,16 @@ pub fn build_window(
         let prog_player = prog_player.clone();
         let timeline_state = timeline_state.clone();
         let preferences_state = preferences_state.clone();
+        let workspace_layouts_state = workspace_layouts_state.clone();
         let proxy_cache = proxy_cache.clone();
         let bg_removal_cache = bg_removal_cache.clone();
         let on_close_preview = on_close_preview.clone();
         let source_marks = source_marks.clone();
         let on_source_selected = on_source_selected.clone();
         let on_project_changed = on_project_changed.clone();
+        let capture_workspace_arrangement = capture_workspace_arrangement.clone();
+        let apply_workspace_arrangement = apply_workspace_arrangement.clone();
+        let sync_workspace_layout_controls = sync_workspace_layout_controls.clone();
         let mcp_light_refresh_next = mcp_light_refresh_next.clone();
         let on_project_changed_mcp_debounced: Rc<dyn Fn()> = {
             let on_project_changed = on_project_changed.clone();
@@ -10077,6 +10928,7 @@ pub fn build_window(
         let stt_cache = stt_cache.clone();
         let main_stack_for_mcp = main_stack.clone();
         let window_weak = window.downgrade();
+        let workspace_layout_pending_name_for_mcp = workspace_layout_pending_name.clone();
         MCP_MAIN_DISPATCH.with(|slot| {
             *slot.borrow_mut() = Some(Box::new(move |cmd| {
                 if let Some(win) = window_weak.upgrade() {
@@ -10090,6 +10942,7 @@ pub fn build_window(
                         &prog_player,
                         &timeline_state,
                         &preferences_state,
+                        &workspace_layouts_state,
                         &proxy_cache,
                         &bg_removal_cache,
                         &stt_cache,
@@ -10098,6 +10951,10 @@ pub fn build_window(
                         &on_source_selected,
                         &on_project_changed_mcp_light,
                         &on_project_changed_mcp_full,
+                        &capture_workspace_arrangement,
+                        &apply_workspace_arrangement,
+                        &workspace_layout_pending_name_for_mcp,
+                        &sync_workspace_layout_controls,
                         &apply_preferences_state,
                         &suppress_resume_on_next_reload,
                         &clear_media_browser_on_next_reload,
@@ -10500,8 +11357,26 @@ pub fn build_window(
         window.add_controller(key_ctrl);
     }
 
-    if monitor_state.borrow().popped {
-        on_toggle_popout();
+    let startup_workspace_arrangement = {
+        let state = workspace_layouts_state.borrow();
+        state.current.clone()
+    };
+    let startup_workspace_layout_name = {
+        let state = workspace_layouts_state.borrow();
+        state.active_layout.clone()
+    };
+    workspace_layouts_applying.set(true);
+    {
+        let startup_workspace_restore_pending = Rc::new(Cell::new(true));
+        let apply_workspace_arrangement = apply_workspace_arrangement.clone();
+        let workspace_layout_pending_name = workspace_layout_pending_name.clone();
+        root_hpaned.connect_map(move |_| {
+            if !startup_workspace_restore_pending.replace(false) {
+                return;
+            }
+            *workspace_layout_pending_name.borrow_mut() = startup_workspace_layout_name.clone();
+            apply_workspace_arrangement(startup_workspace_arrangement.clone());
+        });
     }
 
     {
@@ -10607,6 +11482,7 @@ fn handle_mcp_command(
     prog_player: &Rc<RefCell<ProgramPlayer>>,
     timeline_state: &Rc<RefCell<TimelineState>>,
     preferences_state: &Rc<RefCell<crate::ui_state::PreferencesState>>,
+    workspace_layouts_state: &Rc<RefCell<crate::ui_state::WorkspaceLayoutsState>>,
     proxy_cache: &Rc<RefCell<crate::media::proxy_cache::ProxyCache>>,
     bg_removal_cache: &Rc<RefCell<crate::media::bg_removal_cache::BgRemovalCache>>,
     stt_cache: &Rc<RefCell<crate::media::stt_cache::SttCache>>,
@@ -10615,6 +11491,10 @@ fn handle_mcp_command(
     on_source_selected: &Rc<dyn Fn(String, u64)>,
     on_project_changed: &Rc<dyn Fn()>,
     on_project_changed_full: &Rc<dyn Fn()>,
+    capture_workspace_arrangement: &Rc<dyn Fn() -> crate::ui_state::WorkspaceArrangement>,
+    apply_workspace_arrangement: &Rc<dyn Fn(crate::ui_state::WorkspaceArrangement)>,
+    workspace_layout_pending_name: &Rc<RefCell<Option<String>>>,
+    sync_workspace_layout_controls: &Rc<dyn Fn()>,
     apply_preferences_state: &Rc<dyn Fn(crate::ui_state::PreferencesState)>,
     suppress_resume_on_next_reload: &Rc<Cell<bool>>,
     clear_media_browser_on_next_reload: &Rc<Cell<bool>>,
@@ -13431,6 +14311,108 @@ fn handle_mcp_command(
                 crate::ui_state::save_export_presets_state(&state);
             }
             reply.send(json!({"success": removed, "name": name})).ok();
+        }
+
+        McpCommand::ListWorkspaceLayouts { reply } => {
+            let state = workspace_layouts_state.borrow().clone();
+            let current = serde_json::to_value(&state.current).unwrap_or(json!(null));
+            let layouts = serde_json::to_value(&state.layouts).unwrap_or(json!([]));
+            reply
+                .send(json!({
+                    "current": current,
+                    "layouts": layouts,
+                    "active_layout": state.active_layout
+                }))
+                .ok();
+        }
+
+        McpCommand::SaveWorkspaceLayout { name, reply } => {
+            let arrangement = capture_workspace_arrangement();
+            let result = {
+                let mut state = workspace_layouts_state.borrow_mut();
+                state.set_current_arrangement(arrangement.clone());
+                state.upsert_layout(crate::ui_state::WorkspaceLayout { name, arrangement })
+            };
+            match result {
+                Ok(()) => {
+                    let state = workspace_layouts_state.borrow();
+                    crate::ui_state::save_workspace_layouts_state(&state);
+                    drop(state);
+                    sync_workspace_layout_controls();
+                    reply
+                        .send(json!({
+                            "success": true,
+                            "name": workspace_layouts_state.borrow().active_layout.clone()
+                        }))
+                        .ok();
+                }
+                Err(error) => {
+                    reply.send(json!({"success": false, "error": error})).ok();
+                }
+            }
+        }
+
+        McpCommand::ApplyWorkspaceLayout { name, reply } => {
+            let arrangement = {
+                let state = workspace_layouts_state.borrow();
+                state
+                    .get_layout(&name)
+                    .map(|layout| layout.arrangement.clone())
+            };
+            let Some(arrangement) = arrangement else {
+                reply
+                    .send(json!({"success": false, "error": format!("Workspace layout not found: {name}")}))
+                    .ok();
+                return;
+            };
+            *workspace_layout_pending_name.borrow_mut() = Some(name.clone());
+            apply_workspace_arrangement(arrangement);
+            reply.send(json!({"success": true, "name": name})).ok();
+        }
+
+        McpCommand::RenameWorkspaceLayout {
+            old_name,
+            new_name,
+            reply,
+        } => {
+            let result = {
+                let mut state = workspace_layouts_state.borrow_mut();
+                state.rename_layout(&old_name, &new_name)
+            };
+            match result {
+                Ok(saved_name) => {
+                    let state = workspace_layouts_state.borrow();
+                    crate::ui_state::save_workspace_layouts_state(&state);
+                    drop(state);
+                    sync_workspace_layout_controls();
+                    reply
+                        .send(json!({"success": true, "name": saved_name}))
+                        .ok();
+                }
+                Err(error) => {
+                    reply.send(json!({"success": false, "error": error})).ok();
+                }
+            }
+        }
+
+        McpCommand::DeleteWorkspaceLayout { name, reply } => {
+            let deleted = {
+                let mut state = workspace_layouts_state.borrow_mut();
+                state.delete_layout(&name)
+            };
+            if deleted {
+                let state = workspace_layouts_state.borrow();
+                crate::ui_state::save_workspace_layouts_state(&state);
+                drop(state);
+                sync_workspace_layout_controls();
+            }
+            reply.send(json!({"success": deleted, "name": name})).ok();
+        }
+
+        McpCommand::ResetWorkspaceLayout { reply } => {
+            *workspace_layout_pending_name.borrow_mut() = None;
+            apply_workspace_arrangement(crate::ui_state::WorkspaceArrangement::default());
+            reply.send(json!({"success": true})).ok();
         }
 
         McpCommand::ExportWithPreset {

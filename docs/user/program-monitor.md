@@ -38,6 +38,11 @@ or outside the export frame.
 - If scopes are hidden, the scopes pane is fully collapsed (the splitter/pane disappears).
 - The docked splitter position is saved and restored on next launch.
 
+## Workspace Layout Integration
+
+- Workspace layouts also capture Program Monitor docked vs popped-out state, popped-window size, scopes visibility, and the docked scopes splitter position.
+- Use the **Workspace** button in the bottom status bar to save/apply those arrangements; see [workspace-layouts.md](workspace-layouts.md).
+
 ## Keyboard Shortcuts
 
 | Shortcut | Action |
