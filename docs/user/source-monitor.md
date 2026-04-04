@@ -11,6 +11,7 @@ The **Source Monitor** previews individual library clips before they are added t
 | Timecode label | Current position / total duration |
 | In/Out timecode bar | Shows the selected range (In → Out) |
 | Play / Pause / Stop | Transport buttons |
+| Keyword range controls | Save the current In/Out selection as a named keyword range, or update/remove an existing range |
 | Close (`✕`) | Deselect current media item and hide the Source Monitor |
 
 ## Keyboard Shortcuts
@@ -42,6 +43,24 @@ The selected region is highlighted in the scrubber bar.
 When dragging the green/orange In/Out markers directly on the scrubber, Source Monitor now seeks to the marker position continuously so the preview frame follows the marker being moved.
 
 Animated SVG sources render to a cached silent preview clip when selected. The current implementation supports the SMIL-style `<animate>` / `<animateTransform>` subset and falls back to the original SVG first frame if rendering fails.
+
+## Keyword Ranges
+
+The Source Monitor now uses the current **In/Out** marks to author reusable keyword ranges on the selected source media item.
+
+1. Load a source clip from the Media Library.
+2. Set **In** / **Out** to the range you want to tag.
+3. Enter a label in the **Keyword label** field.
+4. Click **Add** to create a new keyword range.
+
+You can also:
+
+- choose an existing range from the dropdown to load its label,
+- adjust the Source Monitor's In/Out marks,
+- click **Update** to replace that range's label/bounds,
+- or click **Remove** to delete it.
+
+Keyword ranges are saved with the project, appear as summaries in the Media Library, are searchable from the browser filter field, and are also available through MCP automation.
 
 ## Scrubbing
 

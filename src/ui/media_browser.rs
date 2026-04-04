@@ -3,9 +3,10 @@ use crate::media::proxy_cache::ProxyCache;
 use crate::media::thumb_cache::ThumbnailCache;
 use crate::model::clip::ClipKind;
 use crate::model::media_library::{
-    media_display_name, media_frame_rate_value, media_matches_filters, non_file_clip_kind_text,
-    normalized_media_text, FrameRateFilter, MediaCollection, MediaFilterCriteria, MediaItem,
-    MediaKindFilter, MediaLibrary, ResolutionFilter,
+    media_display_name, media_frame_rate_value, media_keyword_summary, media_matches_filters,
+    media_rating_text, non_file_clip_kind_text, normalized_media_text, FrameRateFilter,
+    MediaCollection, MediaFilterCriteria, MediaItem, MediaKindFilter, MediaLibrary, MediaRating,
+    MediaRatingFilter, ResolutionFilter,
 };
 use crate::ui_state::PreferencesState;
 use gdk4;
@@ -96,6 +97,24 @@ fn frame_rate_filter_active_id(filter: FrameRateFilter) -> &'static str {
     }
 }
 
+fn rating_filter_from_active_id(active_id: Option<glib::GString>) -> MediaRatingFilter {
+    match active_id.as_deref() {
+        Some("favorite") => MediaRatingFilter::Favorite,
+        Some("reject") => MediaRatingFilter::Reject,
+        Some("unrated") => MediaRatingFilter::Unrated,
+        _ => MediaRatingFilter::All,
+    }
+}
+
+fn rating_filter_active_id(filter: MediaRatingFilter) -> &'static str {
+    match filter {
+        MediaRatingFilter::All => "all",
+        MediaRatingFilter::Favorite => "favorite",
+        MediaRatingFilter::Reject => "reject",
+        MediaRatingFilter::Unrated => "unrated",
+    }
+}
+
 fn collection_display_label(collection: &MediaCollection) -> String {
     collection.name.clone()
 }
@@ -146,6 +165,7 @@ pub fn build_media_browser(
     on_source_selected: Rc<dyn Fn(String, u64)>,
     on_relink_media: Rc<dyn Fn()>,
     on_create_multicam_from_browser: Rc<dyn Fn(Vec<String>)>,
+    on_library_changed: Rc<dyn Fn()>,
     proxy_cache: Rc<RefCell<ProxyCache>>,
     preferences_state: Rc<RefCell<PreferencesState>>,
 ) -> (GBox, Rc<dyn Fn()>, Rc<dyn Fn()>) {
@@ -210,7 +230,7 @@ pub fn build_media_browser(
     filter_box.set_visible(!library.borrow().items.is_empty());
 
     let filter_search = gtk::SearchEntry::new();
-    filter_search.set_placeholder_text(Some("Filter name, path, or codec"));
+    filter_search.set_placeholder_text(Some("Filter name, path, codec, or keyword"));
     filter_search.add_css_class("media-filter-search");
     filter_box.append(&filter_search);
 
@@ -272,6 +292,15 @@ pub fn build_media_browser(
     frame_rate_filter.set_active_id(Some("all"));
     frame_rate_filter.set_hexpand(true);
     filter_row.append(&frame_rate_filter);
+
+    let rating_filter = gtk::ComboBoxText::new();
+    rating_filter.append(Some("all"), "All Ratings");
+    rating_filter.append(Some("favorite"), "Favorite");
+    rating_filter.append(Some("reject"), "Reject");
+    rating_filter.append(Some("unrated"), "Unrated");
+    rating_filter.set_active_id(Some("all"));
+    rating_filter.set_hexpand(true);
+    filter_row.append(&rating_filter);
 
     filter_box.append(&filter_row);
     vbox.append(&filter_box);
@@ -344,6 +373,7 @@ pub fn build_media_browser(
         let current_bin_id = current_bin_id.clone();
         let show_all_media = show_all_media.clone();
         let filters = filters.clone();
+        let on_library_changed = on_library_changed.clone();
         Rc::new(move || {
             let lib = library.borrow();
             let current_filters = filters.borrow().clone();
@@ -356,6 +386,7 @@ pub fn build_media_browser(
                 *show_all_media.borrow(),
                 &current_filters,
                 &library,
+                &on_library_changed,
             );
         })
     };
@@ -369,6 +400,7 @@ pub fn build_media_browser(
         let breadcrumb_bar = breadcrumb_bar.clone();
         let all_media_btn = all_media_btn.clone();
         let filters = filters.clone();
+        let on_library_changed = on_library_changed.clone();
         Rc::new(move || {
             refresh_bin_view(
                 &library,
@@ -380,6 +412,7 @@ pub fn build_media_browser(
                 &breadcrumb_bar,
                 &all_media_btn,
                 &filters,
+                &on_library_changed,
             );
         })
     };
@@ -437,6 +470,19 @@ pub fn build_media_browser(
         });
     }
     {
+        let filters = filters.clone();
+        let refresh_filtered_view = refresh_filtered_view.clone();
+        let collection_filter = collection_filter.clone();
+        let applying_collection = applying_collection.clone();
+        rating_filter.connect_changed(move |combo| {
+            filters.borrow_mut().rating = rating_filter_from_active_id(combo.active_id());
+            if !applying_collection.get() {
+                collection_filter.set_active_id(Some(COLLECTION_NONE_ID));
+            }
+            refresh_filtered_view();
+        });
+    }
+    {
         let library = library.clone();
         let filters = filters.clone();
         let applying_collection = applying_collection.clone();
@@ -444,6 +490,7 @@ pub fn build_media_browser(
         let kind_filter = kind_filter.clone();
         let resolution_filter = resolution_filter.clone();
         let frame_rate_filter = frame_rate_filter.clone();
+        let rating_filter = rating_filter.clone();
         let current_bin_id = current_bin_id.clone();
         let show_all_media = show_all_media.clone();
         let refresh_browser_view = refresh_browser_view.clone();
@@ -473,6 +520,7 @@ pub fn build_media_browser(
             frame_rate_filter.set_active_id(Some(frame_rate_filter_active_id(
                 collection.criteria.frame_rate,
             )));
+            rating_filter.set_active_id(Some(rating_filter_active_id(collection.criteria.rating)));
             applying_collection.set(false);
             *current_bin_id.borrow_mut() = None;
             *show_all_media.borrow_mut() = true;
@@ -485,6 +533,7 @@ pub fn build_media_browser(
         let collection_filter = collection_filter.clone();
         let refresh_browser_view = refresh_browser_view.clone();
         let refresh_collection_controls = refresh_collection_controls.clone();
+        let on_library_changed = on_library_changed.clone();
         save_collection_btn.connect_clicked(move |_| {
             show_new_collection_dialog(
                 &collection_filter,
@@ -492,6 +541,7 @@ pub fn build_media_browser(
                 filters.borrow().clone(),
                 &refresh_browser_view,
                 &refresh_collection_controls,
+                &on_library_changed,
             );
         });
     }
@@ -500,6 +550,7 @@ pub fn build_media_browser(
         let collection_filter = collection_filter.clone();
         let refresh_browser_view = refresh_browser_view.clone();
         let refresh_collection_controls = refresh_collection_controls.clone();
+        let on_library_changed = on_library_changed.clone();
         rename_collection_btn.connect_clicked(move |_| {
             if let Some(collection_id) = selected_collection_id(&collection_filter) {
                 show_rename_collection_dialog(
@@ -508,6 +559,7 @@ pub fn build_media_browser(
                     &library,
                     &refresh_browser_view,
                     &refresh_collection_controls,
+                    &on_library_changed,
                 );
             }
         });
@@ -517,6 +569,7 @@ pub fn build_media_browser(
         let collection_filter = collection_filter.clone();
         let refresh_browser_view = refresh_browser_view.clone();
         let refresh_collection_controls = refresh_collection_controls.clone();
+        let on_library_changed = on_library_changed.clone();
         delete_collection_btn.connect_clicked(move |_| {
             if let Some(collection_id) = selected_collection_id(&collection_filter) {
                 delete_collection(
@@ -525,6 +578,7 @@ pub fn build_media_browser(
                     &library,
                     &refresh_browser_view,
                     &refresh_collection_controls,
+                    &on_library_changed,
                 );
             }
         });
@@ -543,6 +597,7 @@ pub fn build_media_browser(
         let all_media_btn_click = all_media_btn.clone();
         let filters_click = filters.clone();
         let collection_filter_click = collection_filter.clone();
+        let on_library_changed_click = on_library_changed.clone();
         let dbl_click = gtk::GestureClick::new();
         dbl_click.set_button(1);
         dbl_click.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -588,6 +643,7 @@ pub fn build_media_browser(
                         false,
                         &filters_click.borrow(),
                         &library_click,
+                        &on_library_changed_click,
                     );
                     rebuild_breadcrumb(
                         &breadcrumb_bar_click,
@@ -601,6 +657,7 @@ pub fn build_media_browser(
                         &flow_box_paths_click,
                         &all_media_btn_click,
                         &filters_click,
+                        &on_library_changed_click,
                     );
                     gesture.set_state(gtk::EventSequenceState::Claimed);
                 }
@@ -685,6 +742,7 @@ pub fn build_media_browser(
         *show_all_media.borrow(),
         &filters.borrow(),
         &library,
+        &on_library_changed,
     );
 
     // Right-click context menu for bin operations.
@@ -698,6 +756,7 @@ pub fn build_media_browser(
         let breadcrumb_bar_ctx = breadcrumb_bar.clone();
         let all_media_btn_ctx = all_media_btn.clone();
         let filters_ctx = filters.clone();
+        let on_library_changed_ctx = on_library_changed.clone();
         let rclick = gtk::GestureClick::new();
         rclick.set_button(3); // right button
         rclick.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -764,6 +823,7 @@ pub fn build_media_browser(
                         let all_media_btn = all_media_btn_ctx.clone();
                         let filters = filters_ctx.clone();
                         let popover = popover.clone();
+                        let on_library_changed = on_library_changed_ctx.clone();
                         open_btn.connect_clicked(move |_| {
                             popover.popdown();
                             *current_bin_id.borrow_mut() = Some(bin_id.clone());
@@ -778,6 +838,7 @@ pub fn build_media_browser(
                                 false,
                                 &filters.borrow(),
                                 &library,
+                                &on_library_changed,
                             );
                             rebuild_breadcrumb(
                                 &breadcrumb_bar,
@@ -791,6 +852,7 @@ pub fn build_media_browser(
                                 &flow_box_paths,
                                 &all_media_btn,
                                 &filters,
+                                &on_library_changed,
                             );
                         });
                     }
@@ -808,6 +870,7 @@ pub fn build_media_browser(
                         let all_media_btn = all_media_btn_ctx.clone();
                         let filters = filters_ctx.clone();
                         let popover = popover.clone();
+                        let on_library_changed = on_library_changed_ctx.clone();
                         rename_btn.connect_clicked(move |btn| {
                             popover.popdown();
                             show_rename_dialog(
@@ -822,6 +885,7 @@ pub fn build_media_browser(
                                 &breadcrumb_bar,
                                 &all_media_btn,
                                 &filters,
+                                &on_library_changed,
                             );
                         });
                     }
@@ -839,6 +903,7 @@ pub fn build_media_browser(
                         let all_media_btn = all_media_btn_ctx.clone();
                         let filters = filters_ctx.clone();
                         let popover = popover.clone();
+                        let on_library_changed = on_library_changed_ctx.clone();
                         delete_btn.connect_clicked(move |_| {
                             popover.popdown();
                             delete_bin(
@@ -852,6 +917,7 @@ pub fn build_media_browser(
                                 &breadcrumb_bar,
                                 &all_media_btn,
                                 &filters,
+                                &on_library_changed,
                             );
                         });
                     }
@@ -875,6 +941,7 @@ pub fn build_media_browser(
                                 let all_media_btn = all_media_btn_ctx.clone();
                                 let filters = filters_ctx.clone();
                                 let popover = popover.clone();
+                                let on_library_changed = on_library_changed_ctx.clone();
                                 sub_btn.connect_clicked(move |btn| {
                                     popover.popdown();
                                     show_new_bin_dialog(
@@ -889,6 +956,7 @@ pub fn build_media_browser(
                                         &breadcrumb_bar,
                                         &all_media_btn,
                                         &filters,
+                                        &on_library_changed,
                                     );
                                 });
                             }
@@ -912,6 +980,105 @@ pub fn build_media_browser(
                     drop(entries);
 
                     if !selected_ids.is_empty() {
+                        let favorite_btn = add_menu_item(&menu_box, "Mark Favorite");
+                        {
+                            let item_ids = selected_ids.clone();
+                            let library = library_ctx.clone();
+                            let flow_box = flow_box_ctx.clone();
+                            let thumb_cache = thumb_cache_ctx.clone();
+                            let flow_box_paths = flow_box_paths_ctx.clone();
+                            let current_bin_id = current_bin_id_ctx.clone();
+                            let show_all_media = show_all_media_ctx.clone();
+                            let breadcrumb_bar = breadcrumb_bar_ctx.clone();
+                            let all_media_btn = all_media_btn_ctx.clone();
+                            let filters = filters_ctx.clone();
+                            let popover = popover.clone();
+                            let on_library_changed = on_library_changed_ctx.clone();
+                            favorite_btn.connect_clicked(move |_| {
+                                popover.popdown();
+                                set_items_rating(
+                                    &item_ids,
+                                    MediaRating::Favorite,
+                                    &library,
+                                    &flow_box,
+                                    &thumb_cache,
+                                    &flow_box_paths,
+                                    &current_bin_id,
+                                    &show_all_media,
+                                    &breadcrumb_bar,
+                                    &all_media_btn,
+                                    &filters,
+                                    &on_library_changed,
+                                );
+                            });
+                        }
+
+                        let reject_btn = add_menu_item(&menu_box, "Mark Reject");
+                        {
+                            let item_ids = selected_ids.clone();
+                            let library = library_ctx.clone();
+                            let flow_box = flow_box_ctx.clone();
+                            let thumb_cache = thumb_cache_ctx.clone();
+                            let flow_box_paths = flow_box_paths_ctx.clone();
+                            let current_bin_id = current_bin_id_ctx.clone();
+                            let show_all_media = show_all_media_ctx.clone();
+                            let breadcrumb_bar = breadcrumb_bar_ctx.clone();
+                            let all_media_btn = all_media_btn_ctx.clone();
+                            let filters = filters_ctx.clone();
+                            let popover = popover.clone();
+                            let on_library_changed = on_library_changed_ctx.clone();
+                            reject_btn.connect_clicked(move |_| {
+                                popover.popdown();
+                                set_items_rating(
+                                    &item_ids,
+                                    MediaRating::Reject,
+                                    &library,
+                                    &flow_box,
+                                    &thumb_cache,
+                                    &flow_box_paths,
+                                    &current_bin_id,
+                                    &show_all_media,
+                                    &breadcrumb_bar,
+                                    &all_media_btn,
+                                    &filters,
+                                    &on_library_changed,
+                                );
+                            });
+                        }
+
+                        let clear_rating_btn = add_menu_item(&menu_box, "Clear Rating");
+                        {
+                            let item_ids = selected_ids.clone();
+                            let library = library_ctx.clone();
+                            let flow_box = flow_box_ctx.clone();
+                            let thumb_cache = thumb_cache_ctx.clone();
+                            let flow_box_paths = flow_box_paths_ctx.clone();
+                            let current_bin_id = current_bin_id_ctx.clone();
+                            let show_all_media = show_all_media_ctx.clone();
+                            let breadcrumb_bar = breadcrumb_bar_ctx.clone();
+                            let all_media_btn = all_media_btn_ctx.clone();
+                            let filters = filters_ctx.clone();
+                            let popover = popover.clone();
+                            let on_library_changed = on_library_changed_ctx.clone();
+                            clear_rating_btn.connect_clicked(move |_| {
+                                popover.popdown();
+                                set_items_rating(
+                                    &item_ids,
+                                    MediaRating::None,
+                                    &library,
+                                    &flow_box,
+                                    &thumb_cache,
+                                    &flow_box_paths,
+                                    &current_bin_id,
+                                    &show_all_media,
+                                    &breadcrumb_bar,
+                                    &all_media_btn,
+                                    &filters,
+                                    &on_library_changed,
+                                );
+                            });
+                        }
+
                         let lib = library_ctx.borrow();
                         if !lib.bins.is_empty() {
                             // "Move to Root" option
@@ -928,6 +1095,7 @@ pub fn build_media_browser(
                                 let all_media_btn = all_media_btn_ctx.clone();
                                 let filters = filters_ctx.clone();
                                 let popover = popover.clone();
+                                let on_library_changed = on_library_changed_ctx.clone();
                                 root_btn.connect_clicked(move |_| {
                                     popover.popdown();
                                     move_items_to_bin(
@@ -942,6 +1110,7 @@ pub fn build_media_browser(
                                         &breadcrumb_bar,
                                         &all_media_btn,
                                         &filters,
+                                        &on_library_changed,
                                     );
                                 });
                             }
@@ -966,6 +1135,7 @@ pub fn build_media_browser(
                                 let all_media_btn = all_media_btn_ctx.clone();
                                 let filters = filters_ctx.clone();
                                 let popover = popover.clone();
+                                let on_library_changed = on_library_changed_ctx.clone();
                                 move_btn.connect_clicked(move |_| {
                                     popover.popdown();
                                     move_items_to_bin(
@@ -980,6 +1150,7 @@ pub fn build_media_browser(
                                         &breadcrumb_bar,
                                         &all_media_btn,
                                         &filters,
+                                        &on_library_changed,
                                     );
                                 });
                             }
@@ -1000,6 +1171,7 @@ pub fn build_media_browser(
                         let all_media_btn = all_media_btn_ctx.clone();
                         let filters = filters_ctx.clone();
                         let popover = popover.clone();
+                        let on_library_changed = on_library_changed_ctx.clone();
                         new_bin_btn.connect_clicked(move |btn| {
                             popover.popdown();
                             show_new_bin_dialog(
@@ -1014,6 +1186,7 @@ pub fn build_media_browser(
                                 &breadcrumb_bar,
                                 &all_media_btn,
                                 &filters,
+                                &on_library_changed,
                             );
                         });
                     }
@@ -1032,6 +1205,7 @@ pub fn build_media_browser(
                         let all_media_btn = all_media_btn_ctx.clone();
                         let filters = filters_ctx.clone();
                         let popover = popover.clone();
+                        let on_library_changed = on_library_changed_ctx.clone();
                         new_bin_btn.connect_clicked(move |btn| {
                             popover.popdown();
                             show_new_bin_dialog(
@@ -1046,6 +1220,7 @@ pub fn build_media_browser(
                                 &breadcrumb_bar,
                                 &all_media_btn,
                                 &filters,
+                                &on_library_changed,
                             );
                         });
                     }
@@ -1175,6 +1350,7 @@ pub fn build_media_browser(
         let all_media_btn = all_media_btn.clone();
         let filter_box = filter_box.clone();
         let filters = filters.clone();
+        let on_library_changed = on_library_changed.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
             // Drain completed probe results → update library items (lightweight).
             let resolved = probe_cache.borrow_mut().poll();
@@ -1217,6 +1393,7 @@ pub fn build_media_browser(
                         *show_all_media.borrow(),
                         &filters.borrow(),
                         &library,
+                        &on_library_changed,
                     );
                     rebuild_breadcrumb(
                         &breadcrumb_bar,
@@ -1230,6 +1407,7 @@ pub fn build_media_browser(
                         &flow_box_paths,
                         &all_media_btn,
                         &filters,
+                        &on_library_changed,
                     );
                 }
                 drop(lib);
@@ -1330,6 +1508,7 @@ pub fn build_media_browser(
                     *show_all_media.borrow(),
                     &filters.borrow(),
                     &library,
+                    &on_library_changed,
                 );
                 rebuild_breadcrumb(
                     &breadcrumb_bar,
@@ -1343,6 +1522,7 @@ pub fn build_media_browser(
                     &flow_box_paths,
                     &all_media_btn,
                     &filters,
+                    &on_library_changed,
                 );
             }
             // Start probes for all non-missing library items.
@@ -1406,6 +1586,7 @@ pub fn build_media_browser(
         let probe_cache = probe_cache.clone();
         let flow_box_paths = flow_box_paths.clone();
         let current_bin_id = current_bin_id.clone();
+        let on_library_changed = on_library_changed.clone();
 
         Rc::new(move |btn: &Button| {
             let dialog = gtk::FileDialog::new();
@@ -1427,18 +1608,20 @@ pub fn build_media_browser(
             let probe_cache = probe_cache.clone();
             let flow_box_paths = flow_box_paths.clone();
             let current_bin_id = current_bin_id.clone();
+            let on_library_changed = on_library_changed.clone();
 
             let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
 
             dialog.open_multiple(window.as_ref(), gio::Cancellable::NONE, move |result| {
                 if let Ok(files) = result {
+                    let mut imported_any = false;
                     for i in 0..files.n_items() {
                         let Some(obj) = files.item(i) else { continue };
                         let Ok(file) = obj.downcast::<gio::File>() else {
                             continue;
                         };
                         let Some(path) = file.path() else { continue };
-                        let _ = import_path_into_library(
+                        if import_path_into_library(
                             path.to_string_lossy().to_string(),
                             &library,
                             &flow_box,
@@ -1446,7 +1629,14 @@ pub fn build_media_browser(
                             &probe_cache,
                             &flow_box_paths,
                             &current_bin_id.borrow(),
-                        );
+                        )
+                        .is_some()
+                        {
+                            imported_any = true;
+                        }
+                    }
+                    if imported_any {
+                        on_library_changed();
                     }
                 }
             });
@@ -1470,6 +1660,7 @@ pub fn build_media_browser(
         let probe_cache = probe_cache.clone();
         let flow_box_paths = flow_box_paths.clone();
         let current_bin_id = current_bin_id.clone();
+        let on_library_changed = on_library_changed.clone();
         let drop_target = gtk::DropTarget::new(glib::Type::STRING, gdk4::DragAction::COPY);
         let flow_box_for_drop = flow_box.clone();
         drop_target.connect_drop(move |_target, value, _x, _y| {
@@ -1493,6 +1684,9 @@ pub fn build_media_browser(
                     imported_any = true;
                 }
             }
+            if imported_any {
+                on_library_changed();
+            }
             imported_any
         });
         flow_box.add_controller(drop_target);
@@ -1510,6 +1704,7 @@ pub fn build_media_browser(
         let all_media_btn_all = all_media_btn.clone();
         let filters_all = filters.clone();
         let collection_filter_all = collection_filter.clone();
+        let on_library_changed_all = on_library_changed.clone();
         all_media_btn.connect_clicked(move |_| {
             let is_all = *show_all_media_all.borrow();
             *show_all_media_all.borrow_mut() = !is_all;
@@ -1528,6 +1723,7 @@ pub fn build_media_browser(
                 *show_all_media_all.borrow(),
                 &filters_all.borrow(),
                 &library_all,
+                &on_library_changed_all,
             );
             rebuild_breadcrumb(
                 &breadcrumb_bar_all,
@@ -1541,6 +1737,7 @@ pub fn build_media_browser(
                 &flow_box_paths_all,
                 &all_media_btn_all,
                 &filters_all,
+                &on_library_changed_all,
             );
         });
     }
@@ -1562,6 +1759,7 @@ pub fn build_media_browser(
         let show_all_media = show_all_media.clone();
         let filters = filters.clone();
         let refresh_collection_controls = refresh_collection_controls.clone();
+        let on_library_changed = on_library_changed.clone();
         Rc::new(move || {
             let lib = library.borrow();
             rebuild_flowbox_binned(
@@ -1573,6 +1771,7 @@ pub fn build_media_browser(
                 *show_all_media.borrow(),
                 &filters.borrow(),
                 &library,
+                &on_library_changed,
             );
             header_relink_btn.set_visible(false);
             refresh_collection_controls();
@@ -1704,6 +1903,27 @@ fn make_grid_item(item: &MediaItem, thumb_cache: &Rc<RefCell<ThumbnailCache>>) -
         secondary_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
         secondary_label.add_css_class("media-meta-secondary");
         cell.append(&secondary_label);
+    }
+
+    if let Some(rating_text) = media_rating_text(item.rating) {
+        let rating_label = Label::new(Some(rating_text));
+        rating_label.set_halign(gtk::Align::Center);
+        rating_label.add_css_class("media-rating-badge");
+        match item.rating {
+            MediaRating::Favorite => rating_label.add_css_class("media-rating-favorite"),
+            MediaRating::Reject => rating_label.add_css_class("media-rating-reject"),
+            MediaRating::None => {}
+        }
+        cell.append(&rating_label);
+    }
+
+    if let Some(keyword_text) = media_keyword_card_text(item) {
+        let keyword_label = Label::new(Some(&keyword_text));
+        keyword_label.set_halign(gtk::Align::Center);
+        keyword_label.set_max_width_chars(26);
+        keyword_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        keyword_label.add_css_class("media-keyword-summary");
+        cell.append(&keyword_label);
     }
 
     let offline_label = Label::new(Some("OFFLINE"));
@@ -1852,13 +2072,15 @@ fn build_expected_entries(
 
 fn media_display_key(item: &MediaItem) -> String {
     format!(
-        "{}|{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}|{}",
         item.id,
         item.source_path,
         item.is_missing,
         media_display_name(item),
         media_primary_text(item).unwrap_or_default(),
         media_secondary_text(item).unwrap_or_default(),
+        media_rating_text(item.rating).unwrap_or_default(),
+        media_keyword_state_key(item),
     )
 }
 
@@ -1933,6 +2155,41 @@ fn media_secondary_text(item: &MediaItem) -> Option<String> {
     }
 }
 
+fn media_keyword_card_text(item: &MediaItem) -> Option<String> {
+    media_keyword_summary(item, 2).map(|summary| format!("Keywords: {summary}"))
+}
+
+fn media_keyword_state_key(item: &MediaItem) -> String {
+    item.keyword_ranges
+        .iter()
+        .map(|range| {
+            format!(
+                "{}:{}:{}:{}",
+                range.id, range.label, range.start_ns, range.end_ns
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+fn media_keyword_detail_lines(item: &MediaItem) -> Vec<String> {
+    item.keyword_ranges
+        .iter()
+        .map(|range| {
+            let label = normalized_media_text(Some(range.label.as_str()))
+                .unwrap_or_else(|| "Untitled".to_string());
+            let start = format_duration_short(range.start_ns);
+            let end_ns = range.end_ns.max(range.start_ns);
+            if end_ns == range.start_ns {
+                format!("Keyword: {label} @ {start}")
+            } else {
+                let end = format_duration_short(end_ns);
+                format!("Keyword: {label} ({start} - {end})")
+            }
+        })
+        .collect()
+}
+
 fn media_tooltip_text(item: &MediaItem) -> String {
     if let Some(kind) = item.clip_kind.as_ref() {
         let mut lines = vec![non_file_clip_kind_text(kind).to_string()];
@@ -1956,6 +2213,10 @@ fn media_tooltip_text(item: &MediaItem) -> String {
                 format_duration_short(item.duration_ns)
             ));
         }
+        if let Some(rating_text) = media_rating_text(item.rating) {
+            lines.push(format!("Rating: {rating_text}"));
+        }
+        lines.extend(media_keyword_detail_lines(item));
         return lines.join("\n");
     }
 
@@ -1981,6 +2242,10 @@ fn media_tooltip_text(item: &MediaItem) -> String {
     if let Some(file_size_bytes) = item.file_size_bytes {
         lines.push(format!("Size: {}", format_file_size(file_size_bytes)));
     }
+    if let Some(rating_text) = media_rating_text(item.rating) {
+        lines.push(format!("Rating: {rating_text}"));
+    }
+    lines.extend(media_keyword_detail_lines(item));
     lines.join("\n")
 }
 
@@ -2106,6 +2371,7 @@ fn rebuild_flowbox_binned(
     show_all: bool,
     filters: &MediaFilterCriteria,
     library_rc: &Rc<RefCell<MediaLibrary>>,
+    on_library_changed: &Rc<dyn Fn()>,
 ) {
     // Temporarily detach from ScrolledWindow parent to avoid GTK adjustment
     // warnings during bulk child removal/insertion.
@@ -2135,7 +2401,7 @@ fn rebuild_flowbox_binned(
     for entry in &entries {
         match entry {
             FlowBoxEntry::Bin { id, name } => {
-                let child = make_bin_item(name, id, library_rc);
+                let child = make_bin_item(name, id, library_rc, on_library_changed);
                 fb.insert(&child, -1);
             }
             FlowBoxEntry::Media { item_id, .. } => {
@@ -2156,7 +2422,12 @@ fn rebuild_flowbox_binned(
 }
 
 /// Build a folder icon cell for a bin in the FlowBox.
-fn make_bin_item(name: &str, id: &str, library: &Rc<RefCell<MediaLibrary>>) -> FlowBoxChild {
+fn make_bin_item(
+    name: &str,
+    id: &str,
+    library: &Rc<RefCell<MediaLibrary>>,
+    on_library_changed: &Rc<dyn Fn()>,
+) -> FlowBoxChild {
     let cell = GBox::new(Orientation::Vertical, 2);
     cell.set_margin_start(2);
     cell.set_margin_end(2);
@@ -2247,6 +2518,7 @@ fn make_bin_item(name: &str, id: &str, library: &Rc<RefCell<MediaLibrary>>) -> F
     let drop_target = gtk::DropTarget::new(glib::Type::STRING, gdk4::DragAction::COPY);
     let bin_id = id.to_string();
     let library = library.clone();
+    let on_library_changed = on_library_changed.clone();
     drop_target.connect_drop(move |_target, value, _x, _y| {
         let payload = match value.get::<String>() {
             Ok(s) => s,
@@ -2263,6 +2535,8 @@ fn make_bin_item(name: &str, id: &str, library: &Rc<RefCell<MediaLibrary>>) -> F
         let mut lib = library.borrow_mut();
         if let Some(item) = lib.items.iter_mut().find(|i| i.source_path == source_path) {
             item.bin_id = Some(bin_id.clone());
+            drop(lib);
+            on_library_changed();
             true
         } else {
             false
@@ -2285,6 +2559,7 @@ fn rebuild_breadcrumb(
     flow_box_paths: &Rc<RefCell<Vec<FlowBoxEntry>>>,
     all_media_btn: &Button,
     filters: &Rc<RefCell<MediaFilterCriteria>>,
+    on_library_changed: &Rc<dyn Fn()>,
 ) {
     // Remove all existing breadcrumb children.
     // Collect first to avoid infinite loop if remove() fails on a non-child.
@@ -2335,6 +2610,7 @@ fn rebuild_breadcrumb(
         let bar_for_closure = bar.clone();
         let all_media_btn = all_media_btn.clone();
         let filters = filters.clone();
+        let on_library_changed = on_library_changed.clone();
         btn.connect_clicked(move |_| {
             *current_bin_id_rc.borrow_mut() = None;
             let lib = library_rc.borrow();
@@ -2347,6 +2623,7 @@ fn rebuild_breadcrumb(
                 false,
                 &filters.borrow(),
                 &library_rc,
+                &on_library_changed,
             );
             rebuild_breadcrumb(
                 &bar_for_closure,
@@ -2360,6 +2637,7 @@ fn rebuild_breadcrumb(
                 &flow_box_paths,
                 &all_media_btn,
                 &filters,
+                &on_library_changed,
             );
         });
         bar.append(&btn);
@@ -2389,6 +2667,7 @@ fn rebuild_breadcrumb(
             let bar_for_closure = bar.clone();
             let all_media_btn = all_media_btn.clone();
             let filters = filters.clone();
+            let on_library_changed = on_library_changed.clone();
             btn.connect_clicked(move |_| {
                 *current_bin_id_rc.borrow_mut() = Some(target_id.clone());
                 let lib = library_rc.borrow();
@@ -2402,6 +2681,7 @@ fn rebuild_breadcrumb(
                     false,
                     &filters.borrow(),
                     &library_rc,
+                    &on_library_changed,
                 );
                 rebuild_breadcrumb(
                     &bar_for_closure,
@@ -2415,6 +2695,7 @@ fn rebuild_breadcrumb(
                     &flow_box_paths,
                     &all_media_btn,
                     &filters,
+                    &on_library_changed,
                 );
             });
             bar.append(&btn);
@@ -2433,6 +2714,7 @@ fn refresh_bin_view(
     breadcrumb_bar: &GBox,
     all_media_btn: &Button,
     filters: &Rc<RefCell<MediaFilterCriteria>>,
+    on_library_changed: &Rc<dyn Fn()>,
 ) {
     let lib = library.borrow();
     let cid = current_bin_id.borrow().clone();
@@ -2446,6 +2728,7 @@ fn refresh_bin_view(
         sa,
         &filters.borrow(),
         library,
+        on_library_changed,
     );
     rebuild_breadcrumb(
         breadcrumb_bar,
@@ -2459,6 +2742,7 @@ fn refresh_bin_view(
         flow_box_paths,
         all_media_btn,
         filters,
+        on_library_changed,
     );
 }
 
@@ -2476,6 +2760,7 @@ fn show_new_bin_dialog(
     breadcrumb_bar: &GBox,
     all_media_btn: &Button,
     filters: &Rc<RefCell<MediaFilterCriteria>>,
+    on_library_changed: &Rc<dyn Fn()>,
 ) {
     let window = flow_box
         .root()
@@ -2508,6 +2793,7 @@ fn show_new_bin_dialog(
     let breadcrumb_bar = breadcrumb_bar.clone();
     let all_media_btn = all_media_btn.clone();
     let filters = filters.clone();
+    let on_library_changed = on_library_changed.clone();
     dialog.connect_response(move |dlg, response| {
         if response == gtk::ResponseType::Accept {
             let name = entry.text().to_string();
@@ -2525,7 +2811,9 @@ fn show_new_bin_dialog(
                     &breadcrumb_bar,
                     &all_media_btn,
                     &filters,
+                    &on_library_changed,
                 );
+                on_library_changed();
             }
         }
         dlg.close();
@@ -2547,6 +2835,7 @@ fn show_rename_dialog(
     breadcrumb_bar: &GBox,
     all_media_btn: &Button,
     filters: &Rc<RefCell<MediaFilterCriteria>>,
+    on_library_changed: &Rc<dyn Fn()>,
 ) {
     let current_name = library
         .borrow()
@@ -2587,6 +2876,7 @@ fn show_rename_dialog(
     let breadcrumb_bar = breadcrumb_bar.clone();
     let all_media_btn = all_media_btn.clone();
     let filters = filters.clone();
+    let on_library_changed = on_library_changed.clone();
     dialog.connect_response(move |dlg, response| {
         if response == gtk::ResponseType::Accept {
             let name = entry.text().to_string();
@@ -2609,7 +2899,9 @@ fn show_rename_dialog(
                     &breadcrumb_bar,
                     &all_media_btn,
                     &filters,
+                    &on_library_changed,
                 );
+                on_library_changed();
             }
         }
         dlg.close();
@@ -2629,6 +2921,7 @@ fn delete_bin(
     breadcrumb_bar: &GBox,
     all_media_btn: &Button,
     filters: &Rc<RefCell<MediaFilterCriteria>>,
+    on_library_changed: &Rc<dyn Fn()>,
 ) {
     let mut lib = library.borrow_mut();
     let parent_id = lib
@@ -2676,7 +2969,9 @@ fn delete_bin(
         breadcrumb_bar,
         all_media_btn,
         filters,
+        on_library_changed,
     );
+    on_library_changed();
 }
 
 /// Move media items to a bin (or root if bin_id is None).
@@ -2692,6 +2987,7 @@ fn move_items_to_bin(
     breadcrumb_bar: &GBox,
     all_media_btn: &Button,
     filters: &Rc<RefCell<MediaFilterCriteria>>,
+    on_library_changed: &Rc<dyn Fn()>,
 ) {
     {
         let mut lib = library.borrow_mut();
@@ -2711,7 +3007,46 @@ fn move_items_to_bin(
         breadcrumb_bar,
         all_media_btn,
         filters,
+        on_library_changed,
     );
+    on_library_changed();
+}
+
+fn set_items_rating(
+    item_ids: &[String],
+    rating: MediaRating,
+    library: &Rc<RefCell<MediaLibrary>>,
+    flow_box: &FlowBox,
+    thumb_cache: &Rc<RefCell<ThumbnailCache>>,
+    flow_box_paths: &Rc<RefCell<Vec<FlowBoxEntry>>>,
+    current_bin_id: &Rc<RefCell<Option<String>>>,
+    show_all_media: &Rc<RefCell<bool>>,
+    breadcrumb_bar: &GBox,
+    all_media_btn: &Button,
+    filters: &Rc<RefCell<MediaFilterCriteria>>,
+    on_library_changed: &Rc<dyn Fn()>,
+) {
+    {
+        let mut lib = library.borrow_mut();
+        for item in lib.items.iter_mut() {
+            if item_ids.contains(&item.id) {
+                item.rating = rating;
+            }
+        }
+    }
+    refresh_bin_view(
+        library,
+        flow_box,
+        thumb_cache,
+        flow_box_paths,
+        current_bin_id,
+        show_all_media,
+        breadcrumb_bar,
+        all_media_btn,
+        filters,
+        on_library_changed,
+    );
+    on_library_changed();
 }
 
 #[allow(deprecated)]
@@ -2721,6 +3056,7 @@ fn show_new_collection_dialog(
     criteria: MediaFilterCriteria,
     refresh_browser_view: &Rc<dyn Fn()>,
     refresh_collection_controls: &Rc<dyn Fn()>,
+    on_library_changed: &Rc<dyn Fn()>,
 ) {
     let window = collection_filter
         .root()
@@ -2748,6 +3084,7 @@ fn show_new_collection_dialog(
     let collection_filter = collection_filter.clone();
     let refresh_browser_view = refresh_browser_view.clone();
     let refresh_collection_controls = refresh_collection_controls.clone();
+    let on_library_changed = on_library_changed.clone();
     dialog.connect_response(move |dlg, response| {
         if response == gtk::ResponseType::Accept {
             let name = entry.text().trim().to_string();
@@ -2760,6 +3097,7 @@ fn show_new_collection_dialog(
                 refresh_collection_controls();
                 collection_filter.set_active_id(Some(&collection_id));
                 refresh_browser_view();
+                on_library_changed();
             }
         }
         dlg.close();
@@ -2774,6 +3112,7 @@ fn show_rename_collection_dialog(
     library: &Rc<RefCell<MediaLibrary>>,
     refresh_browser_view: &Rc<dyn Fn()>,
     refresh_collection_controls: &Rc<dyn Fn()>,
+    on_library_changed: &Rc<dyn Fn()>,
 ) {
     let current_name = library
         .borrow()
@@ -2808,6 +3147,7 @@ fn show_rename_collection_dialog(
     let library = library.clone();
     let refresh_browser_view = refresh_browser_view.clone();
     let refresh_collection_controls = refresh_collection_controls.clone();
+    let on_library_changed = on_library_changed.clone();
     dialog.connect_response(move |dlg, response| {
         if response == gtk::ResponseType::Accept {
             let name = entry.text().trim().to_string();
@@ -2822,6 +3162,7 @@ fn show_rename_collection_dialog(
                 }
                 refresh_collection_controls();
                 refresh_browser_view();
+                on_library_changed();
             }
         }
         dlg.close();
@@ -2835,6 +3176,7 @@ fn delete_collection(
     library: &Rc<RefCell<MediaLibrary>>,
     refresh_browser_view: &Rc<dyn Fn()>,
     refresh_collection_controls: &Rc<dyn Fn()>,
+    on_library_changed: &Rc<dyn Fn()>,
 ) {
     {
         let mut lib = library.borrow_mut();
@@ -2844,12 +3186,13 @@ fn delete_collection(
     collection_filter.set_active_id(Some(COLLECTION_NONE_ID));
     refresh_collection_controls();
     refresh_browser_view();
+    on_library_changed();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::media_library::MediaBin;
+    use crate::model::media_library::{MediaBin, MediaKeywordRange};
 
     fn make_video_item(path: &str) -> MediaItem {
         let mut item = MediaItem::new(path, 83_000_000_000);
@@ -2885,6 +3228,35 @@ mod tests {
             media_secondary_text(&item).as_deref(),
             Some("H.264 / AAC • 1:23 • 5.0 MB")
         );
+    }
+
+    #[test]
+    fn media_display_key_tracks_rating_and_keywords() {
+        let mut item = make_video_item("/tmp/clip.mov");
+        let base_key = media_display_key(&item);
+
+        item.rating = MediaRating::Favorite;
+        assert_ne!(media_display_key(&item), base_key);
+
+        item.rating = MediaRating::None;
+        item.keyword_ranges
+            .push(MediaKeywordRange::new("B-roll", 250_000_000, 750_000_000));
+        assert_ne!(media_display_key(&item), base_key);
+    }
+
+    #[test]
+    fn media_tooltip_text_includes_rating_and_keywords() {
+        let mut item = make_video_item("/tmp/clip.mov");
+        item.rating = MediaRating::Favorite;
+        item.keyword_ranges.push(MediaKeywordRange::new(
+            "Close Up",
+            250_000_000,
+            1_250_000_000,
+        ));
+
+        let tooltip = media_tooltip_text(&item);
+        assert!(tooltip.contains("Rating: Favorite"));
+        assert!(tooltip.contains("Keyword: Close Up"));
     }
 
     #[test]

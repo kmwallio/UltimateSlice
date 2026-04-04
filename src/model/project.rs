@@ -132,6 +132,12 @@ pub struct Project {
     /// Transient: parsed smart collections from `us:smart-collections` FCPXML event attribute.
     #[serde(skip)]
     pub parsed_collections_json: Option<String>,
+    /// Transient: parsed file-backed media-library items from `us:library-items`.
+    #[serde(skip)]
+    pub parsed_library_items_json: Option<String>,
+    /// Transient: parsed ratings + keyword ranges from `us:media-annotations`.
+    #[serde(skip)]
+    pub parsed_media_annotations_json: Option<String>,
 }
 
 impl Project {
@@ -157,6 +163,8 @@ impl Project {
             parsed_bins_json: None,
             parsed_media_bins_json: None,
             parsed_collections_json: None,
+            parsed_library_items_json: None,
+            parsed_media_annotations_json: None,
         };
         // Default tracks like FCP
         project.tracks.push(Track::new_video("Video 1"));

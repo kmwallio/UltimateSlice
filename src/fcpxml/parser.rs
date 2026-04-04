@@ -163,6 +163,14 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                             if let Some(collections_json) = attrs.get("us:smart-collections") {
                                 project.parsed_collections_json = Some(collections_json.clone());
                             }
+                            if let Some(library_items_json) = attrs.get("us:library-items") {
+                                project.parsed_library_items_json =
+                                    Some(library_items_json.clone());
+                            }
+                            if let Some(annotations_json) = attrs.get("us:media-annotations") {
+                                project.parsed_media_annotations_json =
+                                    Some(annotations_json.clone());
+                            }
                             project.fcpxml_unknown_event.attrs =
                                 collect_unknown_attrs(&attrs, is_known_event_attr);
                         } else {
@@ -2677,7 +2685,14 @@ fn is_known_library_attr(_key: &str) -> bool {
 }
 
 fn is_known_event_attr(_key: &str) -> bool {
-    matches!(_key, "us:bins" | "us:media-bins" | "us:smart-collections")
+    matches!(
+        _key,
+        "us:bins"
+            | "us:media-bins"
+            | "us:smart-collections"
+            | "us:library-items"
+            | "us:media-annotations"
+    )
 }
 
 fn is_known_project_attr(key: &str) -> bool {
@@ -4485,6 +4500,43 @@ mod tests {
 
         let project = parse_fcpxml(xml).expect("parse should succeed");
         assert_eq!(project.source_fcpxml.as_deref(), Some(xml));
+    }
+
+    #[test]
+    fn test_parse_fcpxml_restores_library_annotation_vendor_attrs() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14" xmlns:us="urn:ultimateslice">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+  </resources>
+  <library>
+    <event us:smart-collections='[{"id":"c1","name":"Favorites","criteria":{"rating":"favorite"}}]'
+           us:library-items='[{"library_key":"/tmp/clip.mov","label":"Clip","is_missing":false}]'
+           us:media-annotations='[{"library_key":"/tmp/clip.mov","rating":"favorite","keyword_ranges":[{"id":"k1","label":"B-roll","start_ns":100,"end_ns":200}]}]'>
+      <project name="Annotations">
+        <sequence duration="0/24s" format="r1">
+          <spine/>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        assert_eq!(
+            project.parsed_collections_json.as_deref(),
+            Some(r#"[{"id":"c1","name":"Favorites","criteria":{"rating":"favorite"}}]"#)
+        );
+        assert_eq!(
+            project.parsed_library_items_json.as_deref(),
+            Some(r#"[{"library_key":"/tmp/clip.mov","label":"Clip","is_missing":false}]"#)
+        );
+        assert_eq!(
+            project.parsed_media_annotations_json.as_deref(),
+            Some(
+                r#"[{"library_key":"/tmp/clip.mov","rating":"favorite","keyword_ranges":[{"id":"k1","label":"B-roll","start_ns":100,"end_ns":200}]}]"#
+            )
+        );
     }
 
     #[test]

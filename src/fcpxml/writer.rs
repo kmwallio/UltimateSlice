@@ -183,6 +183,16 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                 event.push_attribute(("us:smart-collections", collections_json.as_str()));
             }
         }
+        if let Some(ref library_items_json) = project.parsed_library_items_json {
+            if library_items_json != "[]" {
+                event.push_attribute(("us:library-items", library_items_json.as_str()));
+            }
+        }
+        if let Some(ref annotations_json) = project.parsed_media_annotations_json {
+            if annotations_json != "{}" {
+                event.push_attribute(("us:media-annotations", annotations_json.as_str()));
+            }
+        }
     }
     writer.write_event(Event::Start(event))?;
 
@@ -4076,7 +4086,14 @@ fn is_writer_managed_library_attr(_key: &str) -> bool {
 }
 
 fn is_writer_managed_event_attr(_key: &str) -> bool {
-    matches!(_key, "us:bins" | "us:media-bins" | "us:smart-collections")
+    matches!(
+        _key,
+        "us:bins"
+            | "us:media-bins"
+            | "us:smart-collections"
+            | "us:library-items"
+            | "us:media-annotations"
+    )
 }
 
 fn is_writer_managed_project_attr(key: &str) -> bool {
@@ -4797,6 +4814,26 @@ mod tests {
             .expect("uspxml extension write should succeed");
         assert!(!strict.contains("xmlns:us=\"urn:ultimateslice\""));
         assert!(rich.contains("xmlns:us=\"urn:ultimateslice\""));
+    }
+
+    #[test]
+    fn test_write_fcpxml_emits_library_annotation_vendor_attrs() {
+        let mut project = Project::new("Annotations");
+        project.parsed_collections_json = Some(
+            r#"[{"id":"c1","name":"Favorites","criteria":{"rating":"favorite"}}]"#.to_string(),
+        );
+        project.parsed_library_items_json = Some(
+            r#"[{"library_key":"/tmp/clip.mov","label":"Clip","is_missing":false}]"#.to_string(),
+        );
+        project.parsed_media_annotations_json = Some(
+            r#"[{"library_key":"/tmp/clip.mov","rating":"favorite","keyword_ranges":[{"id":"k1","label":"B-roll","start_ns":100,"end_ns":200}]}]"#
+                .to_string(),
+        );
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(xml.contains("us:smart-collections="));
+        assert!(xml.contains("us:library-items="));
+        assert!(xml.contains("us:media-annotations="));
     }
 
     #[test]

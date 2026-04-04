@@ -110,6 +110,46 @@ impl MediaLibrary {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum MediaRating {
+    #[default]
+    None,
+    Favorite,
+    Reject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaRatingFilter {
+    #[default]
+    All,
+    Favorite,
+    Reject,
+    Unrated,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaKeywordRange {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub start_ns: u64,
+    #[serde(default)]
+    pub end_ns: u64,
+}
+
+impl MediaKeywordRange {
+    pub fn new(label: impl Into<String>, start_ns: u64, end_ns: u64) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            label: label.into(),
+            start_ns,
+            end_ns,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MediaKindFilter {
     #[default]
     All,
@@ -151,6 +191,8 @@ pub struct MediaFilterCriteria {
     pub resolution: ResolutionFilter,
     #[serde(default)]
     pub frame_rate: FrameRateFilter,
+    #[serde(default)]
+    pub rating: MediaRatingFilter,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -214,6 +256,10 @@ pub struct MediaItem {
     pub is_missing: bool,
     /// Bin this item belongs to (None = root level).
     pub bin_id: Option<String>,
+    /// Editorial triage rating shown in the media browser.
+    pub rating: MediaRating,
+    /// Named sub-ranges within the source media for browser triage.
+    pub keyword_ranges: Vec<MediaKeywordRange>,
 }
 
 impl MediaItem {
@@ -245,6 +291,8 @@ impl MediaItem {
             title_text: None,
             is_missing,
             bin_id: None,
+            rating: MediaRating::None,
+            keyword_ranges: Vec::new(),
         }
     }
 
@@ -322,6 +370,38 @@ pub fn media_frame_rate_value(item: &MediaItem) -> Option<f64> {
     Some(num as f64 / den as f64)
 }
 
+pub fn media_rating_text(rating: MediaRating) -> Option<&'static str> {
+    match rating {
+        MediaRating::None => None,
+        MediaRating::Favorite => Some("Favorite"),
+        MediaRating::Reject => Some("Reject"),
+    }
+}
+
+pub fn media_keyword_summary(item: &MediaItem, max_labels: usize) -> Option<String> {
+    if item.keyword_ranges.is_empty() || max_labels == 0 {
+        return None;
+    }
+    let mut labels: Vec<String> = item
+        .keyword_ranges
+        .iter()
+        .map(|range| range.label.trim())
+        .filter(|label| !label.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    labels.sort();
+    labels.dedup();
+    if labels.is_empty() {
+        return None;
+    }
+    let extra = labels.len().saturating_sub(max_labels);
+    labels.truncate(max_labels);
+    if extra > 0 {
+        labels.push(format!("+{extra}"));
+    }
+    Some(labels.join(" • "))
+}
+
 pub fn media_matches_filters(item: &MediaItem, filters: &MediaFilterCriteria) -> bool {
     if !matches_media_kind_filter(item, filters.kind) {
         return false;
@@ -330,6 +410,9 @@ pub fn media_matches_filters(item: &MediaItem, filters: &MediaFilterCriteria) ->
         return false;
     }
     if !matches_frame_rate_filter(item, filters.frame_rate) {
+        return false;
+    }
+    if !matches_media_rating_filter(item, filters.rating) {
         return false;
     }
     if filters.search_text.trim().is_empty() {
@@ -350,6 +433,10 @@ pub fn media_matches_filters(item: &MediaItem, filters: &MediaFilterCriteria) ->
             .codec_summary
             .as_ref()
             .is_some_and(|codec| codec.to_ascii_lowercase().contains(&needle))
+        || item
+            .keyword_ranges
+            .iter()
+            .any(|range| range.label.trim().to_ascii_lowercase().contains(&needle))
 }
 
 pub fn matches_media_kind_filter(item: &MediaItem, filter: MediaKindFilter) -> bool {
@@ -388,7 +475,117 @@ pub fn matches_frame_rate_filter(item: &MediaItem, filter: FrameRateFilter) -> b
     }
 }
 
-/// Serialize media-browser organization data from the library into the project's transient fields
+pub fn matches_media_rating_filter(item: &MediaItem, filter: MediaRatingFilter) -> bool {
+    match filter {
+        MediaRatingFilter::All => true,
+        MediaRatingFilter::Favorite => item.rating == MediaRating::Favorite,
+        MediaRatingFilter::Reject => item.rating == MediaRating::Reject,
+        MediaRatingFilter::Unrated => item.rating == MediaRating::None,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+struct SavedMediaAnnotations {
+    #[serde(default)]
+    rating: MediaRating,
+    #[serde(default)]
+    keyword_ranges: Vec<MediaKeywordRange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SavedLibraryItem {
+    pub source_path: String,
+    #[serde(default)]
+    pub duration_ns: u64,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub is_audio_only: bool,
+    #[serde(default)]
+    pub has_audio: bool,
+    #[serde(default)]
+    pub is_image: bool,
+    #[serde(default)]
+    pub is_animated_svg: bool,
+    #[serde(default)]
+    pub source_timecode_base_ns: Option<u64>,
+    #[serde(default)]
+    pub video_width: Option<u32>,
+    #[serde(default)]
+    pub video_height: Option<u32>,
+    #[serde(default)]
+    pub frame_rate_num: Option<u32>,
+    #[serde(default)]
+    pub frame_rate_den: Option<u32>,
+    #[serde(default)]
+    pub codec_summary: Option<String>,
+    #[serde(default)]
+    pub file_size_bytes: Option<u64>,
+}
+
+impl SavedLibraryItem {
+    fn from_media_item(item: &MediaItem) -> Option<Self> {
+        item.has_backing_file().then(|| Self {
+            source_path: item.source_path.clone(),
+            duration_ns: item.duration_ns,
+            label: item.label.clone(),
+            is_audio_only: item.is_audio_only,
+            has_audio: item.has_audio,
+            is_image: item.is_image,
+            is_animated_svg: item.is_animated_svg,
+            source_timecode_base_ns: item.source_timecode_base_ns,
+            video_width: item.video_width,
+            video_height: item.video_height,
+            frame_rate_num: item.frame_rate_num,
+            frame_rate_den: item.frame_rate_den,
+            codec_summary: item.codec_summary.clone(),
+            file_size_bytes: item.file_size_bytes,
+        })
+    }
+
+    fn apply_to_item(&self, item: &mut MediaItem) {
+        item.duration_ns = self.duration_ns;
+        item.label = if self.label.trim().is_empty() {
+            item.label.clone()
+        } else {
+            self.label.clone()
+        };
+        item.is_audio_only = self.is_audio_only;
+        item.has_audio = self.has_audio;
+        item.is_image = self.is_image;
+        item.is_animated_svg = self.is_animated_svg;
+        item.source_timecode_base_ns = self.source_timecode_base_ns;
+        item.video_width = self.video_width;
+        item.video_height = self.video_height;
+        item.frame_rate_num = self.frame_rate_num;
+        item.frame_rate_den = self.frame_rate_den;
+        item.codec_summary = self.codec_summary.clone();
+        item.file_size_bytes = self.file_size_bytes;
+        item.is_missing = source_path_exists(&item.source_path);
+        item.is_missing = !item.is_missing;
+    }
+
+    fn into_media_item(self) -> MediaItem {
+        let mut item = MediaItem::new(self.source_path, self.duration_ns);
+        if !self.label.trim().is_empty() {
+            item.label = self.label;
+        }
+        item.is_audio_only = self.is_audio_only;
+        item.has_audio = self.has_audio;
+        item.is_image = self.is_image;
+        item.is_animated_svg = self.is_animated_svg;
+        item.source_timecode_base_ns = self.source_timecode_base_ns;
+        item.video_width = self.video_width;
+        item.video_height = self.video_height;
+        item.frame_rate_num = self.frame_rate_num;
+        item.frame_rate_den = self.frame_rate_den;
+        item.codec_summary = self.codec_summary;
+        item.file_size_bytes = self.file_size_bytes;
+        item
+    }
+}
+
+/// Serialize media-browser state from the library into the project's transient fields
 /// (for FCPXML save).
 pub fn sync_bins_to_project(lib: &MediaLibrary, project: &mut crate::model::project::Project) {
     if lib.bins.is_empty() {
@@ -411,14 +608,59 @@ pub fn sync_bins_to_project(lib: &MediaLibrary, project: &mut crate::model::proj
     } else {
         project.parsed_collections_json = serde_json::to_string(&lib.collections).ok();
     }
+    let library_items: Vec<SavedLibraryItem> = lib
+        .items
+        .iter()
+        .filter_map(SavedLibraryItem::from_media_item)
+        .collect();
+    if library_items.is_empty() {
+        project.parsed_library_items_json = None;
+    } else {
+        project.parsed_library_items_json = serde_json::to_string(&library_items).ok();
+    }
+    let annotations: std::collections::HashMap<String, SavedMediaAnnotations> = lib
+        .items
+        .iter()
+        .filter_map(|item| {
+            ((item.rating != MediaRating::None) || !item.keyword_ranges.is_empty()).then(|| {
+                (
+                    item.library_key(),
+                    SavedMediaAnnotations {
+                        rating: item.rating,
+                        keyword_ranges: item.keyword_ranges.clone(),
+                    },
+                )
+            })
+        })
+        .collect();
+    if annotations.is_empty() {
+        project.parsed_media_annotations_json = None;
+    } else {
+        project.parsed_media_annotations_json = serde_json::to_string(&annotations).ok();
+    }
 }
 
-/// Restore media-browser organization data from the project's transient fields into the library
+/// Restore media-browser state from the project's transient fields into the library
 /// (after FCPXML load).
 pub fn apply_bins_from_project(
     lib: &mut MediaLibrary,
     project: &mut crate::model::project::Project,
 ) {
+    if let Some(ref library_items_json) = project.parsed_library_items_json {
+        if let Ok(saved_items) = serde_json::from_str::<Vec<SavedLibraryItem>>(library_items_json) {
+            for saved in saved_items {
+                if let Some(item) = lib
+                    .items
+                    .iter_mut()
+                    .find(|item| item.matches_library_key(&saved.source_path))
+                {
+                    saved.apply_to_item(item);
+                } else {
+                    lib.items.push(saved.into_media_item());
+                }
+            }
+        }
+    }
     if let Some(ref bins_json) = project.parsed_bins_json {
         if let Ok(bins) = serde_json::from_str::<Vec<MediaBin>>(bins_json) {
             lib.bins = bins;
@@ -447,10 +689,29 @@ pub fn apply_bins_from_project(
             lib.collections = collections;
         }
     }
+    if let Some(ref annotations_json) = project.parsed_media_annotations_json {
+        if let Ok(map) = serde_json::from_str::<
+            std::collections::HashMap<String, SavedMediaAnnotations>,
+        >(annotations_json)
+        {
+            for item in lib.items.iter_mut() {
+                let annotations = map.get(&item.library_key()).or_else(|| {
+                    map.iter()
+                        .find_map(|(key, value)| item.matches_library_key(key).then_some(value))
+                });
+                if let Some(annotations) = annotations {
+                    item.rating = annotations.rating;
+                    item.keyword_ranges = annotations.keyword_ranges.clone();
+                }
+            }
+        }
+    }
     // Clear transient fields
     project.parsed_bins_json = None;
     project.parsed_media_bins_json = None;
     project.parsed_collections_json = None;
+    project.parsed_library_items_json = None;
+    project.parsed_media_annotations_json = None;
 }
 
 /// In/out marks and current source for the source preview monitor.
@@ -529,6 +790,8 @@ mod tests {
             title_text: None,
             is_missing: true, // test paths don't exist
             bin_id,
+            rating: MediaRating::None,
+            keyword_ranges: Vec::new(),
         }
     }
 
@@ -703,6 +966,37 @@ mod tests {
     }
 
     #[test]
+    fn test_media_matches_filters_by_rating_and_keyword() {
+        let mut item = MediaItem::new("/tmp/clip.mov", 1_000_000_000);
+        item.is_missing = false;
+        item.rating = MediaRating::Favorite;
+        item.keyword_ranges
+            .push(MediaKeywordRange::new("Close Up", 100, 200));
+
+        assert!(media_matches_filters(
+            &item,
+            &MediaFilterCriteria {
+                rating: MediaRatingFilter::Favorite,
+                ..Default::default()
+            }
+        ));
+        assert!(!media_matches_filters(
+            &item,
+            &MediaFilterCriteria {
+                rating: MediaRatingFilter::Reject,
+                ..Default::default()
+            }
+        ));
+        assert!(media_matches_filters(
+            &item,
+            &MediaFilterCriteria {
+                search_text: "close".to_string(),
+                ..Default::default()
+            }
+        ));
+    }
+
+    #[test]
     fn test_sync_bins_round_trips_collections() {
         let mut lib = MediaLibrary::new();
         lib.collections.push(MediaCollection::new(
@@ -729,5 +1023,37 @@ mod tests {
             restored.collections[0].criteria.frame_rate,
             FrameRateFilter::Fps31To59
         );
+    }
+
+    #[test]
+    fn test_sync_bins_round_trips_library_items_and_annotations() {
+        let mut lib = MediaLibrary::new();
+        let mut item = MediaItem::new("/tmp/rated.mov", 2_000_000_000);
+        item.label = "Rated".to_string();
+        item.rating = MediaRating::Favorite;
+        item.keyword_ranges
+            .push(MediaKeywordRange::new("B-roll", 250_000_000, 900_000_000));
+        lib.items.push(item);
+
+        let mut project = crate::model::project::Project::new("Test");
+        sync_bins_to_project(&lib, &mut project);
+
+        assert!(project
+            .parsed_library_items_json
+            .as_ref()
+            .is_some_and(|json| json.contains("/tmp/rated.mov")));
+        assert!(project
+            .parsed_media_annotations_json
+            .as_ref()
+            .is_some_and(|json| json.contains("B-roll")));
+
+        let mut restored = MediaLibrary::new();
+        apply_bins_from_project(&mut restored, &mut project);
+
+        assert_eq!(restored.items.len(), 1);
+        assert_eq!(restored.items[0].source_path, "/tmp/rated.mov");
+        assert_eq!(restored.items[0].rating, MediaRating::Favorite);
+        assert_eq!(restored.items[0].keyword_ranges.len(), 1);
+        assert_eq!(restored.items[0].keyword_ranges[0].label, "B-roll");
     }
 }

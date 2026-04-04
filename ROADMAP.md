@@ -325,7 +325,8 @@ Tracking docs:
           - [x] Apply adaptive per-slot queue drop-late policy during heavy-overlap playback to reduce compositor-branch backpressure at handoff
           - [x] Re-sync/pause audio-only preview pipeline around video boundary rebuilds so transition stalls do not let audio run ahead and end early versus video
            - [x] Add short look-ahead boundary prewarm (next active clip-set probe/path warm-up) to reduce synchronous work at transition handoff
-           - [x] Optional background prerender mode: render upcoming complex overlap windows (3+ active video tracks) to project-scoped disk clips beside saved projects (with temp fallback for unsaved projects), preserve those saved-project cache roots across startup/open, and reuse them at boundary rebuilds when available
+            - [x] Optional background prerender mode: render upcoming complex overlap windows (3+ active video tracks) to project-scoped disk clips beside saved projects (with temp fallback for unsaved projects), preserve those saved-project cache roots across startup/open, and reuse them at boundary rebuilds when available
+            - [x] Prerender cache persistence preference: Preferences now let users keep saved-project prerenders beside the project file or force temporary-only prerender scratch storage
             - [x] Background prerender boundary correctness hardening: track prerender-active clip sets for boundary transitions and normalize prerender segment timestamps to avoid freeze/black handoff regressions
             - [x] Background prerender safety fallback: when a prerender video slot fails to link at boundary rebuild, immediately rebuild with normal live slots; cache keys plus manifest-validated source/proxy signatures prevent stale segment reuse
             - [x] Background prerender link-race guard: allow a short post-preroll link grace for prerender slots, then force live fallback + segment invalidation when still unlinked to prevent unstable playback states
@@ -383,6 +384,7 @@ Tracking docs:
    - [x] LUT-baked proxies: clip proxy re-generated when a LUT is assigned/cleared, enabling grade preview
    - [x] Proxy shutdown cleanup policy: always clean managed local/tmp proxies on unload/close; preserve tracked `UltimateSlice.cache` proxies only when Proxy mode is enabled (clean sidecar proxies too when disabled)
    - [x] Enabled-mode sidecar proxy mirroring: when Proxy mode is enabled, local proxy transcodes are mirrored to alongside-media `UltimateSlice.cache` as well
+   - [x] Proxy sidecar persistence preference: Preferences now let users decide whether proxies are persisted beside original media or kept in the managed local cache only
    - [x] Preview LUTs preference: when Proxy mode is Off, generate/use project-resolution LUT-baked preview media for LUT-assigned clips
    - [x] Stable proxy reuse + stale cleanup: proxy paths now stay stable for the same source path and proxy-affecting variant state, changed source media invalidates proxies via explicit source-signature checks, older legacy `UltimateSlice.cache/<stem>.proxy_*` sidecars are reused when still valid, and current-project stale/superseded proxy variants are pruned automatically from managed local and matching sidecar cache dirs
    - [x] Export/proxy progress percentage now uses bitrate×duration size estimates with ffmpeg `total_size` tracking, capped below 100% until ffmpeg completion
@@ -602,7 +604,7 @@ Tracking docs:
 - [x] J/K/L scrubbing (shuttle control in program monitor; pitch-corrected audio via Rubberband is a planned enhancement)
 - [x] Match Frame (`F` shortcut to find timeline clip in media library, load in source monitor, seek to matching frame; MCP `match_frame` tool)
 - [x] Proxy Workflow: One-click toggle between original and proxy media
-- [ ] Keyword ranges + favorite/reject ratings in browser
+- [x] Keyword ranges + favorite/reject ratings in browser
 - [ ] Auditions / clip versions (swap alternate takes nondestructively)
 - [ ] Plugin architecture for third-party video effects (e.g. OFX/LV2 bridge)
 

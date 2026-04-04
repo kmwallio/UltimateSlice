@@ -494,14 +494,13 @@ impl ProxyCache {
 
     /// Cleanup policy for project unload/close:
     /// - always clear managed local/tmp cache files tracked by this session/project.
-    /// - when proxy mode is enabled, preserve alongside-media `UltimateSlice.cache` files.
-    /// - when proxy mode is disabled, clear alongside-media `UltimateSlice.cache` files too.
-    pub fn cleanup_for_unload(&mut self, proxy_mode_enabled: bool) {
+    /// - when `preserve_sidecar_proxies` is true, keep alongside-media
+    ///   `UltimateSlice.cache` files.
+    /// - otherwise, clear tracked alongside-media proxy files too.
+    pub fn cleanup_for_unload(&mut self, preserve_sidecar_proxies: bool) {
         self.cleanup_local_cache_for_unload();
-        if proxy_mode_enabled {
-            log::info!(
-                "ProxyCache: preserving alongside-media proxy cache on unload/close because proxy mode is enabled"
-            );
+        if preserve_sidecar_proxies {
+            log::info!("ProxyCache: preserving alongside-media proxy cache on unload/close");
             return;
         }
         self.cleanup_sidecar_cache_for_unload();

@@ -165,34 +165,6 @@ pub fn show_preferences_dialog(
     playback_box.append(&Label::new(Some("Source monitor playback priority")));
     playback_box.append(&source_playback_priority);
 
-    let proxy_label = Label::new(Some("Proxy preview mode"));
-    proxy_label.set_halign(gtk::Align::Start);
-    let proxy_mode = gtk4::ComboBoxText::new();
-    proxy_mode.append(Some("off"), "Off (use original media)");
-    proxy_mode.append(Some("half_res"), "Half resolution");
-    proxy_mode.append(Some("quarter_res"), "Quarter resolution");
-    proxy_mode.set_active_id(Some(current.proxy_mode.as_str()));
-    proxy_mode.set_halign(gtk::Align::Start);
-    let proxy_hint = Label::new(Some("Generate lightweight proxy files for smoother preview playback. Export always uses original media."));
-    proxy_hint.set_halign(gtk::Align::Start);
-    proxy_hint.add_css_class("dim-label");
-    proxy_hint.set_wrap(true);
-    proxy_hint.set_max_width_chars(60);
-    playback_box.append(&proxy_label);
-    playback_box.append(&proxy_mode);
-    playback_box.append(&proxy_hint);
-
-    let preview_luts_check = CheckButton::with_label("Preview LUTs (Proxy Off mode)");
-    preview_luts_check.set_active(current.preview_luts);
-    preview_luts_check.set_halign(gtk::Align::Start);
-    let preview_luts_hint = Label::new(Some("When Proxy mode is Off, render project-size LUT-baked preview media for LUT-assigned clips."));
-    preview_luts_hint.set_halign(gtk::Align::Start);
-    preview_luts_hint.add_css_class("dim-label");
-    preview_luts_hint.set_wrap(true);
-    preview_luts_hint.set_max_width_chars(60);
-    playback_box.append(&preview_luts_check);
-    playback_box.append(&preview_luts_hint);
-
     let pq_label = Label::new(Some("Preview quality"));
     pq_label.set_halign(gtk::Align::Start);
     let preview_quality = gtk4::ComboBoxText::new();
@@ -251,18 +223,98 @@ pub fn show_preferences_dialog(
     playback_box.append(&realtime_check);
     playback_box.append(&realtime_hint);
 
+    stack.add_titled(&playback_box, Some("playback"), "Playback");
+
+    let proxies_box = GBox::new(Orientation::Vertical, 10);
+    proxies_box.set_margin_start(8);
+    proxies_box.set_margin_end(8);
+    proxies_box.set_margin_top(8);
+    let proxies_label = Label::new(Some("Proxies & Render Cache"));
+    proxies_label.set_halign(gtk::Align::Start);
+    proxies_label.add_css_class("title-4");
+    let proxies_intro = Label::new(Some(
+        "Configure proxy-generation quality plus where reusable proxy and prerender cache files live on disk.",
+    ));
+    proxies_intro.set_halign(gtk::Align::Start);
+    proxies_intro.add_css_class("dim-label");
+    proxies_intro.set_wrap(true);
+    proxies_intro.set_max_width_chars(60);
+    proxies_box.append(&proxies_label);
+    proxies_box.append(&proxies_intro);
+
+    let proxy_label = Label::new(Some("Proxy preview mode"));
+    proxy_label.set_halign(gtk::Align::Start);
+    let proxy_mode = gtk4::ComboBoxText::new();
+    proxy_mode.append(Some("off"), "Off (use original media)");
+    proxy_mode.append(Some("half_res"), "Half resolution");
+    proxy_mode.append(Some("quarter_res"), "Quarter resolution");
+    proxy_mode.set_active_id(Some(current.proxy_mode.as_str()));
+    proxy_mode.set_halign(gtk::Align::Start);
+    let proxy_hint = Label::new(Some(
+        "Generate lightweight proxy files for smoother preview playback. Export always uses original media.",
+    ));
+    proxy_hint.set_halign(gtk::Align::Start);
+    proxy_hint.add_css_class("dim-label");
+    proxy_hint.set_wrap(true);
+    proxy_hint.set_max_width_chars(60);
+    proxies_box.append(&proxy_label);
+    proxies_box.append(&proxy_mode);
+    proxies_box.append(&proxy_hint);
+
+    let persist_proxies_check = CheckButton::with_label("Persist proxies next to original media");
+    persist_proxies_check.set_active(current.persist_proxies_next_to_original_media);
+    persist_proxies_check.set_halign(gtk::Align::Start);
+    let persist_proxies_hint = Label::new(Some(
+        "When enabled, successful local proxy transcodes are mirrored into `UltimateSlice.cache/` beside the source file for reuse after reopen. If disabled, UltimateSlice prefers the managed local cache and only falls back beside media when needed.",
+    ));
+    persist_proxies_hint.set_halign(gtk::Align::Start);
+    persist_proxies_hint.add_css_class("dim-label");
+    persist_proxies_hint.set_wrap(true);
+    persist_proxies_hint.set_max_width_chars(60);
+    proxies_box.append(&persist_proxies_check);
+    proxies_box.append(&persist_proxies_hint);
+
+    let preview_luts_check = CheckButton::with_label("Preview LUTs (Proxy Off mode)");
+    preview_luts_check.set_active(current.preview_luts);
+    preview_luts_check.set_halign(gtk::Align::Start);
+    let preview_luts_hint = Label::new(Some(
+        "When Proxy mode is Off, render project-size LUT-baked preview media for LUT-assigned clips.",
+    ));
+    preview_luts_hint.set_halign(gtk::Align::Start);
+    preview_luts_hint.add_css_class("dim-label");
+    preview_luts_hint.set_wrap(true);
+    preview_luts_hint.set_max_width_chars(60);
+    proxies_box.append(&preview_luts_check);
+    proxies_box.append(&preview_luts_hint);
+
     let background_prerender_check = CheckButton::with_label("Background prerender");
     background_prerender_check.set_active(current.background_prerender);
     background_prerender_check.set_halign(gtk::Align::Start);
-    let background_prerender_hint = Label::new(Some("Renders upcoming complex overlap sections (3+ video tracks) to temporary disk clips in the background and uses them when available. Falls back to normal playback when unavailable."));
+    let background_prerender_hint = Label::new(Some(
+        "Renders upcoming complex overlap sections (3+ video tracks) to disk in the background and uses them when available. Falls back to normal playback when unavailable.",
+    ));
     background_prerender_hint.set_halign(gtk::Align::Start);
     background_prerender_hint.add_css_class("dim-label");
     background_prerender_hint.set_wrap(true);
     background_prerender_hint.set_max_width_chars(60);
-    playback_box.append(&background_prerender_check);
-    playback_box.append(&background_prerender_hint);
+    proxies_box.append(&background_prerender_check);
+    proxies_box.append(&background_prerender_hint);
 
-    stack.add_titled(&playback_box, Some("playback"), "Playback");
+    let persist_prerenders_check =
+        CheckButton::with_label("Persist prerenders next to project file");
+    persist_prerenders_check.set_active(current.persist_prerenders_next_to_project_file);
+    persist_prerenders_check.set_halign(gtk::Align::Start);
+    let persist_prerenders_hint = Label::new(Some(
+        "For saved projects, keep compatible prerender segments in a sibling `UltimateSlice.cache/prerender-vN/` directory beside the project file. If disabled, prerenders stay temporary and are not reused across restarts.",
+    ));
+    persist_prerenders_hint.set_halign(gtk::Align::Start);
+    persist_prerenders_hint.add_css_class("dim-label");
+    persist_prerenders_hint.set_wrap(true);
+    persist_prerenders_hint.set_max_width_chars(60);
+    proxies_box.append(&persist_prerenders_check);
+    proxies_box.append(&persist_prerenders_hint);
+
+    stack.add_titled(&proxies_box, Some("proxies"), "Proxies");
 
     // ── Timeline section ──────────────────────────────────────────────────
     let timeline_box = GBox::new(Orientation::Vertical, 10);
@@ -605,6 +657,7 @@ pub fn show_preferences_dialog(
                 ),
                 proxy_mode: current.proxy_mode.clone(),
                 last_non_off_proxy_mode: current.last_non_off_proxy_mode.clone(),
+                persist_proxies_next_to_original_media: persist_proxies_check.is_active(),
                 show_waveform_on_video: waveform_video_check.is_active(),
                 show_timeline_preview: timeline_preview_check.is_active(),
                 source_monitor_auto_link_av: source_monitor_auto_link_av_check.is_active(),
@@ -619,6 +672,7 @@ pub fn show_preferences_dialog(
                 experimental_preview_optimizations: experimental_check.is_active(),
                 realtime_preview: realtime_check.is_active(),
                 background_prerender: background_prerender_check.is_active(),
+                persist_prerenders_next_to_project_file: persist_prerenders_check.is_active(),
                 preview_luts: preview_luts_check.is_active(),
                 crossfade_enabled: crossfade_enabled_check.is_active(),
                 crossfade_curve: CrossfadeCurve::from_str(

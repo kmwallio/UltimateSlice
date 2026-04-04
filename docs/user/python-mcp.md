@@ -104,12 +104,16 @@ Useful playback-tuning toggles:
 - `python3 tools/mcp_call.py set_realtime_preview '{"enabled":true}'`
 - `python3 tools/mcp_call.py set_experimental_preview_optimizations '{"enabled":true}'`
 - `python3 tools/mcp_call.py set_background_prerender '{"enabled":true}'`
+- `python3 tools/mcp_call.py set_proxy_sidecar_persistence '{"enabled":true}'`
+- `python3 tools/mcp_call.py set_prerender_project_persistence '{"enabled":true}'`
 - `python3 tools/mcp_call.py get_performance_snapshot '{}'`
 - `python3 tools/mcp_call.py save_project_with_media '{"path":"/absolute/path/MyProject.uspxml"}'`
 - `python3 tools/mcp_call.py collect_project_files '{"directory_path":"/absolute/path/CollectedMedia","mode":"entire_library"}'`
 - `python3 tools/mcp_call.py collect_project_files '{"directory_path":"/absolute/path/CollectedMedia","mode":"entire_library","use_collected_locations_on_next_save":true}'`
 
-`set_background_prerender` enables disk prerender of complex upcoming overlap sections. Saved projects keep those prerender segments in a project-scoped sibling `UltimateSlice.cache/prerender-vN/<project-hash>/` cache, while unsaved projects still use the temporary cache root.
+`set_background_prerender` enables disk prerender of complex upcoming overlap sections. `set_prerender_project_persistence` controls whether saved projects keep those prerender segments in a project-scoped sibling `UltimateSlice.cache/prerender-vN/<project-hash>/` cache or stay on the temporary cache root.
+
+`set_proxy_sidecar_persistence` controls whether proxy files are mirrored into `UltimateSlice.cache/` beside the original media for reuse after reopen.
 
 `collect_project_files` leaves the current project paths unchanged by default; set `use_collected_locations_on_next_save` to `true` when you want the next project save/export to use the copied media paths.
 
@@ -148,6 +152,44 @@ python3 tools/mcp_call.py collect_project_files '{"directory_path":"/absolute/pa
 ```
 
 Use `mode:"entire_library"` to include imported-but-unused library media too. If omitted, the MCP tool defaults to `timeline_used`.
+
+## Media Library annotation MCP examples
+
+List library items, including each item's stable `library_key`, rating, and keyword ranges:
+
+```bash
+python3 tools/mcp_call.py list_library '{}'
+```
+
+Mark a clip as a favorite:
+
+```bash
+python3 tools/mcp_call.py set_media_rating '{"library_key":"/absolute/path/clip.mov","rating":"favorite"}'
+```
+
+Add a keyword range using source-relative nanoseconds:
+
+```bash
+python3 tools/mcp_call.py add_media_keyword_range '{"library_key":"/absolute/path/clip.mov","label":"B-roll","start_ns":250000000,"end_ns":1250000000}'
+```
+
+Update an existing keyword range:
+
+```bash
+python3 tools/mcp_call.py update_media_keyword_range '{"library_key":"/absolute/path/clip.mov","range_id":"<range-id>","label":"Close Up","start_ns":500000000,"end_ns":1500000000}'
+```
+
+Delete a keyword range:
+
+```bash
+python3 tools/mcp_call.py delete_media_keyword_range '{"library_key":"/absolute/path/clip.mov","range_id":"<range-id>"}'
+```
+
+Smart collections can now also save a rating filter:
+
+```bash
+python3 tools/mcp_call.py create_collection '{"name":"Favorite selects","rating":"favorite"}'
+```
 
 ## Transform MCP examples
 

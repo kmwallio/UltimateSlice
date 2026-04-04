@@ -56,23 +56,33 @@ Bins are saved with your project and restored when you reopen it.
   - **Audio-only**: audio-only indicator text, codec summary, duration, file size
   - **Still images**: resolution, image type, default duration, file size
 - Timeline-native cards with no backing file show their clip type instead of file metadata. Title cards use the current title text as the main card label and remain searchable by that text.
-- Hover a media card to see the full source path plus expanded metadata details in the tooltip.
-- Use the **filter search** field to match clip names, title text, file paths, or codec text.
+- Favorite/reject ratings appear directly on media cards, and keyword ranges show a compact summary line when the clip has saved ranges.
+- Hover a media card to see the full source path plus expanded metadata details in the tooltip, including rating and individual keyword ranges when present.
+- Use the **filter search** field to match clip names, title text, file paths, codec text, or keyword labels.
 - Use the **type** dropdown to focus on video, audio, images, or offline clips.
 - Use the **size** dropdown to narrow the current browser scope to SD-or-smaller, HD, Full HD, or 4K+ media.
 - Use the **FPS** dropdown to narrow the current browser scope to 24 fps-or-less, 25-30 fps, 31-59 fps, or 60+ fps clips.
+- Use the **Ratings** dropdown to narrow the current browser scope to Favorite, Reject, or Unrated clips.
 - Filters apply to the current browser scope:
   - inside a bin, they filter that bin's items
   - in **All Media**, they filter the flat project-wide media view
   - bins themselves remain visible so navigation still works while filters are active
 
+## Ratings and Keyword Ranges
+
+- **Right-click** one or more selected media items to **Mark Favorite**, **Mark Reject**, or **Clear Rating** in one step.
+- Ratings are editorial triage state only; they do not affect timeline playback or export.
+- Keyword ranges are authored from the **Source Monitor** using the current In/Out marks on the selected source clip.
+- Keyword summaries stay attached to the source media item, so the same ranges remain available anywhere that media appears in the project.
+
 ## Smart Collections
 
 - Use the **Collections** picker in the filter bar to recall saved project-wide media queries.
-- Click the **save** button next to the picker to store the current search/type/size/FPS filter combination as a smart collection.
+- Click the **save** button next to the picker to store the current search/type/size/FPS/rating filter combination as a smart collection.
 - Selecting a smart collection switches the browser to a flat **All Media**-style view across the whole project, even if you were previously inside a bin.
 - Use the **rename** and **delete** buttons next to the picker to manage the selected collection.
 - Smart collections are saved with your project, round-trip through UltimateSlice's FCPXML vendor metadata, and are available to automation through the MCP `list_collections`, `create_collection`, `update_collection`, and `delete_collection` tools.
+- MCP `list_library` now includes each item's stable `library_key`, rating, and keyword ranges, and browser annotations can be automated with `set_media_rating`, `add_media_keyword_range`, `update_media_keyword_range`, and `delete_media_keyword_range`.
 
 ## Adding Clips to the Timeline
 

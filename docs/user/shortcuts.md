@@ -34,6 +34,8 @@
 | `,` | Insert at playhead (shift subsequent clips) |
 | `.` | Overwrite at playhead (replace existing material) |
 
+The same **I / O** Source Monitor marks are also used by the keyword-range controls beneath the preview when you save or update Media Library keyword ranges.
+
 ---
 
 ## Timeline

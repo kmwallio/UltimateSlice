@@ -745,7 +745,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "list_library",
-            "description": "List all items currently in the media library, including stable item ids plus resolved browser metadata such as duration, codec, resolution, frame rate, file size, and non-file clip kind/title text when available.",
+            "description": "List all items currently in the media library, including stable library keys plus resolved browser metadata such as duration, codec, resolution, frame rate, file size, rating, keyword ranges, and non-file clip kind/title text when available.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -844,7 +844,8 @@ fn tools_list() -> Value {
                     "search_text": { "type": "string", "description": "Optional text match against clip name, title text, path, or codec." },
                     "kind": { "type": "string", "enum": ["all", "video", "audio", "image", "offline"], "description": "Optional media kind filter." },
                     "resolution": { "type": "string", "enum": ["all", "sd", "hd", "fhd", "uhd"], "description": "Optional resolution bucket." },
-                    "frame_rate": { "type": "string", "enum": ["all", "fps24", "fps25_30", "fps31_59", "fps60"], "description": "Optional frame-rate bucket." }
+                    "frame_rate": { "type": "string", "enum": ["all", "fps24", "fps25_30", "fps31_59", "fps60"], "description": "Optional frame-rate bucket." },
+                    "rating": { "type": "string", "enum": ["all", "favorite", "reject", "unrated"], "description": "Optional rating filter." }
                 },
                 "required": ["name"]
             }
@@ -860,7 +861,8 @@ fn tools_list() -> Value {
                     "search_text": { "type": "string", "description": "Optional replacement search text." },
                     "kind": { "type": "string", "enum": ["all", "video", "audio", "image", "offline"], "description": "Optional replacement media kind filter." },
                     "resolution": { "type": "string", "enum": ["all", "sd", "hd", "fhd", "uhd"], "description": "Optional replacement resolution bucket." },
-                    "frame_rate": { "type": "string", "enum": ["all", "fps24", "fps25_30", "fps31_59", "fps60"], "description": "Optional replacement frame-rate bucket." }
+                    "frame_rate": { "type": "string", "enum": ["all", "fps24", "fps25_30", "fps31_59", "fps60"], "description": "Optional replacement frame-rate bucket." },
+                    "rating": { "type": "string", "enum": ["all", "favorite", "reject", "unrated"], "description": "Optional replacement rating filter." }
                 },
                 "required": ["collection_id"]
             }
@@ -874,6 +876,59 @@ fn tools_list() -> Value {
                     "collection_id": { "type": "string", "description": "Collection id from list_collections." }
                 },
                 "required": ["collection_id"]
+            }
+        },
+        {
+            "name": "set_media_rating",
+            "description": "Set a media-browser rating on a library item identified by library_key.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "library_key": { "type": "string", "description": "Stable media library key from list_library." },
+                    "rating": { "type": "string", "enum": ["none", "favorite", "reject"], "description": "Rating to apply." }
+                },
+                "required": ["library_key", "rating"]
+            }
+        },
+        {
+            "name": "add_media_keyword_range",
+            "description": "Add a named keyword range to a library item using source-relative nanosecond positions.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "library_key": { "type": "string", "description": "Stable media library key from list_library." },
+                    "label": { "type": "string", "description": "Keyword label." },
+                    "start_ns": { "type": "integer", "description": "Range start in nanoseconds." },
+                    "end_ns": { "type": "integer", "description": "Range end in nanoseconds." }
+                },
+                "required": ["library_key", "label", "start_ns", "end_ns"]
+            }
+        },
+        {
+            "name": "update_media_keyword_range",
+            "description": "Replace an existing keyword range's label and bounds.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "library_key": { "type": "string", "description": "Stable media library key from list_library." },
+                    "range_id": { "type": "string", "description": "Keyword range id from list_library." },
+                    "label": { "type": "string", "description": "Updated keyword label." },
+                    "start_ns": { "type": "integer", "description": "Updated range start in nanoseconds." },
+                    "end_ns": { "type": "integer", "description": "Updated range end in nanoseconds." }
+                },
+                "required": ["library_key", "range_id", "label", "start_ns", "end_ns"]
+            }
+        },
+        {
+            "name": "delete_media_keyword_range",
+            "description": "Delete a keyword range from a library item.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "library_key": { "type": "string", "description": "Stable media library key from list_library." },
+                    "range_id": { "type": "string", "description": "Keyword range id from list_library." }
+                },
+                "required": ["library_key", "range_id"]
             }
         },
         {
@@ -911,6 +966,17 @@ fn tools_list() -> Value {
                     "mode": { "type": "string", "enum": ["off", "half_res", "quarter_res"], "description": "Proxy preview mode." }
                 },
                 "required": ["mode"]
+            }
+        },
+        {
+            "name": "set_proxy_sidecar_persistence",
+            "description": "Control whether proxy files are mirrored into UltimateSlice.cache directories beside original media for reuse after reopen.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "enabled": { "type": "boolean", "description": "true to enable, false to disable." }
+                },
+                "required": ["enabled"]
             }
         },
         {
@@ -1105,6 +1171,17 @@ fn tools_list() -> Value {
         {
             "name": "set_background_prerender",
             "description": "Enable or disable background disk prerender for upcoming complex overlap playback sections.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "enabled": { "type": "boolean", "description": "true to enable, false to disable." }
+                },
+                "required": ["enabled"]
+            }
+        },
+        {
+            "name": "set_prerender_project_persistence",
+            "description": "Control whether saved projects keep reusable prerender cache files beside the project file instead of using only the temporary cache root.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2159,6 +2236,10 @@ fn dispatch_tool_payload(
                     .get("frame_rate")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string()),
+                rating: args
+                    .get("rating")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
                 reply: tx,
             }
         }
@@ -2194,6 +2275,10 @@ fn dispatch_tool_payload(
                     .get("frame_rate")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string()),
+                rating: args
+                    .get("rating")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
                 reply: tx,
             }
         }
@@ -2212,6 +2297,117 @@ fn dispatch_tool_payload(
                 reply: tx,
             }
         }
+        "set_media_rating" => {
+            let library_key = args
+                .get("library_key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let rating = args
+                .get("rating")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if library_key.is_empty() || rating.is_empty() {
+                return Err(tool_error_payload(
+                    -32602,
+                    "library_key and rating are required",
+                ));
+            }
+            McpCommand::SetMediaRating {
+                library_key,
+                rating,
+                reply: tx,
+            }
+        }
+        "add_media_keyword_range" => {
+            let library_key = args
+                .get("library_key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let label = args
+                .get("label")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if library_key.is_empty() || label.is_empty() {
+                return Err(tool_error_payload(
+                    -32602,
+                    "library_key and label are required",
+                ));
+            }
+            McpCommand::AddMediaKeywordRange {
+                library_key,
+                label,
+                start_ns: args.get("start_ns").and_then(|v| v.as_u64()).unwrap_or(0),
+                end_ns: args.get("end_ns").and_then(|v| v.as_u64()).unwrap_or(0),
+                reply: tx,
+            }
+        }
+        "update_media_keyword_range" => {
+            let library_key = args
+                .get("library_key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let range_id = args
+                .get("range_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let label = args
+                .get("label")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if library_key.is_empty() || range_id.is_empty() || label.is_empty() {
+                return Err(tool_error_payload(
+                    -32602,
+                    "library_key, range_id, and label are required",
+                ));
+            }
+            McpCommand::UpdateMediaKeywordRange {
+                library_key,
+                range_id,
+                label,
+                start_ns: args.get("start_ns").and_then(|v| v.as_u64()).unwrap_or(0),
+                end_ns: args.get("end_ns").and_then(|v| v.as_u64()).unwrap_or(0),
+                reply: tx,
+            }
+        }
+        "delete_media_keyword_range" => {
+            let library_key = args
+                .get("library_key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let range_id = args
+                .get("range_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if library_key.is_empty() || range_id.is_empty() {
+                return Err(tool_error_payload(
+                    -32602,
+                    "library_key and range_id are required",
+                ));
+            }
+            McpCommand::DeleteMediaKeywordRange {
+                library_key,
+                range_id,
+                reply: tx,
+            }
+        }
 
         "reorder_track" => McpCommand::ReorderTrack {
             from_index: args["from_index"].as_u64().unwrap_or(0) as usize,
@@ -2227,6 +2423,10 @@ fn dispatch_tool_payload(
         },
         "set_proxy_mode" => McpCommand::SetProxyMode {
             mode: args["mode"].as_str().unwrap_or("off").to_string(),
+            reply: tx,
+        },
+        "set_proxy_sidecar_persistence" => McpCommand::SetProxySidecarPersistence {
+            enabled: args["enabled"].as_bool().unwrap_or(false),
             reply: tx,
         },
         "set_clip_lut" => McpCommand::SetClipLut {
@@ -2356,6 +2556,10 @@ fn dispatch_tool_payload(
         }
 
         "set_background_prerender" => McpCommand::SetBackgroundPrerender {
+            enabled: args["enabled"].as_bool().unwrap_or(false),
+            reply: tx,
+        },
+        "set_prerender_project_persistence" => McpCommand::SetPrerenderProjectPersistence {
             enabled: args["enabled"].as_bool().unwrap_or(false),
             reply: tx,
         },

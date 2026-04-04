@@ -28,7 +28,7 @@ Welcome to UltimateSlice, a Final Cut Pro–inspired non-linear video editor bui
 ## Quick-Start Summary
 
 1. **Import media** — click **Import Media** in the Media Library panel.
-2. **Mark your clip** — select it in the library; use **I** / **O** to set In/Out points in the Source Monitor.
+2. **Mark and triage your clip** — select it in the library; use **I** / **O** to set In/Out points in the Source Monitor, optionally add a keyword range, and use Favorite/Reject browser ratings while sorting selects.
 3. **Append to timeline** — click **Append to Timeline** or drag the clip from the library onto the timeline.
 4. **Arrange** — drag clips to reposition; drag their edges to trim; press **B** for the Razor tool to split.
 5. **Adjust** — select a clip and use the Inspector panel (right side) for color, audio, speed, and titles.

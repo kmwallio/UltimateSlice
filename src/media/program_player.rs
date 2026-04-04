@@ -94,7 +94,13 @@ fn default_prerender_cache_root() -> PathBuf {
         .join(format!("prerender-v{}", BACKGROUND_PRERENDER_CACHE_VERSION))
 }
 
-fn prerender_cache_root_for_project_path(project_file_path: Option<&str>) -> (PathBuf, bool) {
+fn prerender_cache_root_for_project_path(
+    project_file_path: Option<&str>,
+    persist_next_to_project_file: bool,
+) -> (PathBuf, bool) {
+    if !persist_next_to_project_file {
+        return (default_prerender_cache_root(), false);
+    }
     match project_file_path {
         Some(project_file_path) if !project_file_path.is_empty() => {
             let project_path = Path::new(project_file_path);
@@ -2590,8 +2596,13 @@ impl ProgramPlayer {
         }
     }
 
-    pub fn set_prerender_project_path(&mut self, project_file_path: Option<&str>) {
-        let (next_root, persistent) = prerender_cache_root_for_project_path(project_file_path);
+    pub fn set_prerender_project_path(
+        &mut self,
+        project_file_path: Option<&str>,
+        persist_next_to_project_file: bool,
+    ) {
+        let (next_root, persistent) =
+            prerender_cache_root_for_project_path(project_file_path, persist_next_to_project_file);
         if self.prerender_cache_root == next_root && self.prerender_cache_persistent == persistent {
             if persistent {
                 self.prune_prerender_cache_root_files();
@@ -2599,7 +2610,7 @@ impl ProgramPlayer {
             return;
         }
 
-        let purge_old_root = !self.should_preserve_prerender_cache_files();
+        let purge_old_root = !persistent || !self.should_preserve_prerender_cache_files();
         self.cleanup_background_prerender_cache(purge_old_root);
         self.prerender_cache_root = next_root;
         self.prerender_cache_persistent = persistent;
@@ -16251,7 +16262,7 @@ mod tests {
     #[test]
     fn project_prerender_cache_root_uses_sidecar_directory() {
         let (root, persistent) =
-            super::prerender_cache_root_for_project_path(Some("/tmp/My Project.uspxml"));
+            super::prerender_cache_root_for_project_path(Some("/tmp/My Project.uspxml"), true);
         assert!(persistent);
         assert!(root.to_string_lossy().contains("UltimateSlice.cache"));
         assert!(root.to_string_lossy().contains(&format!(
@@ -16260,6 +16271,15 @@ mod tests {
         )));
         let leaf = root.file_name().and_then(|s| s.to_str()).unwrap_or("");
         assert!(leaf.starts_with("My_Project-p"));
+    }
+
+    #[test]
+    fn project_prerender_cache_root_can_use_temporary_cache_only() {
+        let (root, persistent) =
+            super::prerender_cache_root_for_project_path(Some("/tmp/My Project.uspxml"), false);
+        assert!(!persistent);
+        assert_eq!(root, super::default_prerender_cache_root());
+        assert!(!root.to_string_lossy().contains("UltimateSlice.cache"));
     }
 
     #[test]

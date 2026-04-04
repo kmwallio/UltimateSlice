@@ -635,6 +635,9 @@ pub struct PreferencesState {
     /// user's preferred proxy quality.
     #[serde(default = "default_last_non_off_proxy_mode")]
     pub last_non_off_proxy_mode: ProxyMode,
+    /// Mirror/preserve proxy files in `UltimateSlice.cache/` next to source media.
+    #[serde(default = "default_persist_proxies_next_to_original_media")]
+    pub persist_proxies_next_to_original_media: bool,
     /// Show audio waveforms overlaid on video clips in the timeline.
     #[serde(default)]
     pub show_waveform_on_video: bool,
@@ -667,6 +670,10 @@ pub struct PreferencesState {
     /// Uses more CPU and memory during playback.
     #[serde(default)]
     pub background_prerender: bool,
+    /// Preserve prerender cache files beside saved project files instead of using
+    /// a temporary-only cache root.
+    #[serde(default = "default_persist_prerenders_next_to_project_file")]
+    pub persist_prerenders_next_to_project_file: bool,
     /// Pre-render LUT-assigned clips at project resolution for preview use when proxy mode is Off.
     #[serde(default)]
     pub preview_luts: bool,
@@ -701,6 +708,8 @@ impl Default for PreferencesState {
             source_playback_priority: PlaybackPriority::default(),
             proxy_mode: ProxyMode::default(),
             last_non_off_proxy_mode: default_last_non_off_proxy_mode(),
+            persist_proxies_next_to_original_media: default_persist_proxies_next_to_original_media(
+            ),
             show_waveform_on_video: false,
             show_timeline_preview: default_show_timeline_preview(),
             source_monitor_auto_link_av: default_source_monitor_auto_link_av(),
@@ -711,6 +720,8 @@ impl Default for PreferencesState {
             experimental_preview_optimizations: false,
             realtime_preview: true,
             background_prerender: false,
+            persist_prerenders_next_to_project_file:
+                default_persist_prerenders_next_to_project_file(),
             preview_luts: false,
             crossfade_enabled: false,
             crossfade_curve: CrossfadeCurve::default(),
@@ -752,6 +763,14 @@ impl PreferencesState {
 }
 
 fn default_show_timeline_preview() -> bool {
+    true
+}
+
+fn default_persist_proxies_next_to_original_media() -> bool {
+    true
+}
+
+fn default_persist_prerenders_next_to_project_file() -> bool {
     true
 }
 
@@ -953,6 +972,8 @@ mod tests {
             parsed.preferences.crossfade_curve,
             CrossfadeCurve::EqualPower
         );
+        assert!(parsed.preferences.persist_proxies_next_to_original_media);
+        assert!(parsed.preferences.persist_prerenders_next_to_project_file);
         assert_eq!(
             parsed.preferences.crossfade_duration_ns,
             default_crossfade_duration_ns()

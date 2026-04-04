@@ -2,8 +2,9 @@ use crate::media::player::Player;
 use crate::media::program_player::{ProgramClip, ProgramPlayer};
 use crate::model::clip::{Clip, ClipKind, Phase1KeyframeProperty};
 use crate::model::media_library::{
-    FrameRateFilter, MediaCollection, MediaFilterCriteria, MediaItem, MediaKindFilter,
-    MediaLibrary, ResolutionFilter,
+    media_keyword_summary, FrameRateFilter, MediaCollection, MediaFilterCriteria, MediaItem,
+    MediaKeywordRange, MediaKindFilter, MediaLibrary, MediaRating, MediaRatingFilter,
+    ResolutionFilter,
 };
 use crate::model::project::Project;
 use crate::model::track::TrackKind;
@@ -26,6 +27,8 @@ thread_local! {
     static MCP_MAIN_DISPATCH: RefCell<Option<Box<dyn FnMut(crate::mcp::McpCommand)>>> =
         RefCell::new(None);
 }
+
+const SOURCE_KEYWORD_NEW_ID: &str = "__new__";
 
 /// Check whether the focused widget is a text-input widget.
 /// In GTK4, `Entry` delegates keyboard focus to an internal `gtk4::Text`
@@ -70,6 +73,23 @@ fn frame_rate_filter_id(filter: FrameRateFilter) -> &'static str {
     }
 }
 
+fn media_rating_id(rating: MediaRating) -> &'static str {
+    match rating {
+        MediaRating::None => "none",
+        MediaRating::Favorite => "favorite",
+        MediaRating::Reject => "reject",
+    }
+}
+
+fn media_rating_filter_id(filter: MediaRatingFilter) -> &'static str {
+    match filter {
+        MediaRatingFilter::All => "all",
+        MediaRatingFilter::Favorite => "favorite",
+        MediaRatingFilter::Reject => "reject",
+        MediaRatingFilter::Unrated => "unrated",
+    }
+}
+
 fn parse_media_kind_filter(id: Option<&str>) -> Option<MediaKindFilter> {
     match id {
         Some("all") => Some(MediaKindFilter::All),
@@ -106,11 +126,23 @@ fn parse_frame_rate_filter(id: Option<&str>) -> Option<FrameRateFilter> {
     }
 }
 
+fn parse_media_rating_filter(id: Option<&str>) -> Option<MediaRatingFilter> {
+    match id {
+        Some("all") => Some(MediaRatingFilter::All),
+        Some("favorite") => Some(MediaRatingFilter::Favorite),
+        Some("reject") => Some(MediaRatingFilter::Reject),
+        Some("unrated") => Some(MediaRatingFilter::Unrated),
+        Some(_) => None,
+        None => Some(MediaRatingFilter::All),
+    }
+}
+
 fn collection_criteria_from_mcp(
     search_text: Option<String>,
     kind: Option<String>,
     resolution: Option<String>,
     frame_rate: Option<String>,
+    rating: Option<String>,
 ) -> Result<MediaFilterCriteria, String> {
     Ok(MediaFilterCriteria {
         search_text: search_text.unwrap_or_default(),
@@ -120,7 +152,34 @@ fn collection_criteria_from_mcp(
             .ok_or_else(|| "invalid resolution filter".to_string())?,
         frame_rate: parse_frame_rate_filter(frame_rate.as_deref())
             .ok_or_else(|| "invalid frame_rate filter".to_string())?,
+        rating: parse_media_rating_filter(rating.as_deref())
+            .ok_or_else(|| "invalid rating filter".to_string())?,
     })
+}
+
+fn format_source_keyword_time(ns: u64) -> String {
+    let total_seconds = ns / 1_000_000_000;
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
+fn format_source_keyword_range(range: &MediaKeywordRange) -> String {
+    let label = range.label.trim();
+    let label = if label.is_empty() { "Untitled" } else { label };
+    let start = format_source_keyword_time(range.start_ns);
+    let end_ns = range.end_ns.max(range.start_ns);
+    if end_ns == range.start_ns {
+        format!("{label} @ {start}")
+    } else {
+        let end = format_source_keyword_time(end_ns);
+        format!("{label} ({start} - {end})")
+    }
 }
 
 fn flash_window_status_title(
@@ -3017,6 +3076,12 @@ pub fn build_window(
         preferences_state.borrow().source_playback_priority.clone();
     let initial_proxy_mode = preferences_state.borrow().proxy_mode.clone();
     let initial_background_prerender = preferences_state.borrow().background_prerender;
+    let initial_persist_proxies_next_to_original_media = preferences_state
+        .borrow()
+        .persist_proxies_next_to_original_media;
+    let initial_persist_prerenders_next_to_project_file = preferences_state
+        .borrow()
+        .persist_prerenders_next_to_project_file;
     let initial_preview_luts = preferences_state.borrow().preview_luts;
     let initial_preview_quality = preferences_state.borrow().preview_quality.clone();
     let initial_show_waveform_on_video = preferences_state.borrow().show_waveform_on_video;
@@ -3156,7 +3221,10 @@ pub fn build_window(
     prog_player_raw.set_background_prerender(initial_background_prerender);
     {
         let p = project.borrow();
-        prog_player_raw.set_prerender_project_path(p.file_path.as_deref());
+        prog_player_raw.set_prerender_project_path(
+            p.file_path.as_deref(),
+            initial_persist_prerenders_next_to_project_file,
+        );
     }
     prog_player_raw.set_audio_crossfade_preview(
         preferences_state.borrow().crossfade_enabled,
@@ -3170,9 +3238,9 @@ pub fn build_window(
     let prog_player = Rc::new(RefCell::new(prog_player_raw));
 
     let proxy_cache = Rc::new(RefCell::new(crate::media::proxy_cache::ProxyCache::new()));
-    proxy_cache
-        .borrow_mut()
-        .set_sidecar_mirror_enabled(initial_proxy_mode.is_enabled());
+    proxy_cache.borrow_mut().set_sidecar_mirror_enabled(
+        initial_proxy_mode.is_enabled() && initial_persist_proxies_next_to_original_media,
+    );
     let bg_removal_cache = Rc::new(RefCell::new(
         crate::media::bg_removal_cache::BgRemovalCache::new(),
     ));
@@ -3256,9 +3324,10 @@ pub fn build_window(
             prog_player
                 .borrow_mut()
                 .set_proxy_enabled(new_state.proxy_mode.is_enabled());
-            proxy_cache
-                .borrow_mut()
-                .set_sidecar_mirror_enabled(new_state.proxy_mode.is_enabled());
+            proxy_cache.borrow_mut().set_sidecar_mirror_enabled(
+                new_state.proxy_mode.is_enabled()
+                    && new_state.persist_proxies_next_to_original_media,
+            );
             prog_player
                 .borrow_mut()
                 .set_proxy_scale_divisor(match new_state.proxy_mode {
@@ -3279,6 +3348,11 @@ pub fn build_window(
             prog_player
                 .borrow_mut()
                 .set_background_prerender(new_state.background_prerender);
+            let project_file_path = { project.borrow().file_path.clone() };
+            prog_player.borrow_mut().set_prerender_project_path(
+                project_file_path.as_deref(),
+                new_state.persist_prerenders_next_to_project_file,
+            );
             prog_player
                 .borrow_mut()
                 .set_preview_luts(new_state.preview_luts);
@@ -5452,6 +5526,181 @@ pub fn build_window(
         on_overwrite.clone(),
         on_close_preview.clone(),
     );
+    let source_monitor_panel = gtk::Box::new(Orientation::Vertical, 4);
+    source_monitor_panel.append(&preview_widget);
+
+    let source_keyword_controls = gtk::Box::new(Orientation::Vertical, 4);
+    source_keyword_controls.set_margin_start(8);
+    source_keyword_controls.set_margin_end(8);
+    source_keyword_controls.set_margin_bottom(8);
+
+    let source_keyword_row = gtk::Box::new(Orientation::Horizontal, 4);
+    let source_keyword_combo = gtk::ComboBoxText::new();
+    source_keyword_combo.append(Some(SOURCE_KEYWORD_NEW_ID), "New keyword range");
+    source_keyword_combo.set_active_id(Some(SOURCE_KEYWORD_NEW_ID));
+    source_keyword_combo.set_hexpand(true);
+    source_keyword_row.append(&source_keyword_combo);
+
+    let source_keyword_entry = gtk::Entry::new();
+    source_keyword_entry.set_hexpand(true);
+    source_keyword_entry.set_placeholder_text(Some("Keyword label"));
+    source_keyword_row.append(&source_keyword_entry);
+
+    let add_source_keyword_btn = gtk::Button::with_label("Add");
+    source_keyword_row.append(&add_source_keyword_btn);
+
+    let update_source_keyword_btn = gtk::Button::with_label("Update");
+    source_keyword_row.append(&update_source_keyword_btn);
+
+    let remove_source_keyword_btn = gtk::Button::with_label("Remove");
+    source_keyword_row.append(&remove_source_keyword_btn);
+
+    source_keyword_controls.append(&source_keyword_row);
+
+    let source_keyword_status_label =
+        gtk::Label::new(Some("Use source In/Out marks to define a keyword range."));
+    source_keyword_status_label.set_halign(gtk::Align::Start);
+    source_keyword_status_label.set_xalign(0.0);
+    source_keyword_status_label.set_wrap(true);
+    source_keyword_status_label.add_css_class("media-meta-secondary");
+    source_keyword_controls.append(&source_keyword_status_label);
+
+    source_monitor_panel.append(&source_keyword_controls);
+
+    let selected_source_keyword_id: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let refresh_source_keyword_actions: Rc<dyn Fn()> = {
+        let source_marks = source_marks.clone();
+        let library = library.clone();
+        let selected_source_keyword_id = selected_source_keyword_id.clone();
+        let source_keyword_entry = source_keyword_entry.clone();
+        let add_source_keyword_btn = add_source_keyword_btn.clone();
+        let update_source_keyword_btn = update_source_keyword_btn.clone();
+        let remove_source_keyword_btn = remove_source_keyword_btn.clone();
+        let source_keyword_status_label = source_keyword_status_label.clone();
+        Rc::new(move || {
+            let (path, in_ns, out_ns) = {
+                let marks = source_marks.borrow();
+                (marks.path.clone(), marks.in_ns, marks.out_ns)
+            };
+            let entry_text = source_keyword_entry.text().trim().to_string();
+            let selected_id = selected_source_keyword_id.borrow().clone();
+            let (has_item, selected_range_text, summary_text) = {
+                let lib = library.borrow();
+                let item = lib.items.iter().find(|item| item.source_path == path);
+                let selected_range_text = item.and_then(|item| {
+                    selected_id.as_deref().and_then(|range_id| {
+                        item.keyword_ranges
+                            .iter()
+                            .find(|range| range.id == range_id)
+                            .map(format_source_keyword_range)
+                    })
+                });
+                let summary_text = item.and_then(|item| media_keyword_summary(item, 3));
+                (item.is_some(), selected_range_text, summary_text)
+            };
+            let has_valid_range = !path.is_empty() && out_ns > in_ns;
+            let has_label = !entry_text.is_empty();
+            let has_selected_range = selected_range_text.is_some();
+
+            add_source_keyword_btn.set_sensitive(has_item && has_valid_range && has_label);
+            update_source_keyword_btn
+                .set_sensitive(has_item && has_valid_range && has_selected_range && has_label);
+            remove_source_keyword_btn.set_sensitive(has_item && has_selected_range);
+
+            let status = if path.is_empty() {
+                "Load a source clip to add keyword ranges.".to_string()
+            } else if !has_item {
+                "This source is not available in the media library.".to_string()
+            } else if !has_valid_range {
+                "Set source In and Out to define a keyword range.".to_string()
+            } else if let Some(selected_range_text) = selected_range_text {
+                format!("Selected: {selected_range_text}")
+            } else if let Some(summary_text) = summary_text {
+                format!("Current: {summary_text}")
+            } else {
+                "Use source In/Out marks to define a keyword range.".to_string()
+            };
+            source_keyword_status_label.set_text(&status);
+        })
+    };
+    let refresh_source_keyword_picker: Rc<dyn Fn()> = {
+        let source_marks = source_marks.clone();
+        let library = library.clone();
+        let selected_source_keyword_id = selected_source_keyword_id.clone();
+        let source_keyword_combo = source_keyword_combo.clone();
+        let refresh_source_keyword_actions = refresh_source_keyword_actions.clone();
+        Rc::new(move || {
+            let path = source_marks.borrow().path.clone();
+            let selected_id = selected_source_keyword_id.borrow().clone();
+            let ranges = {
+                let lib = library.borrow();
+                lib.items
+                    .iter()
+                    .find(|item| item.source_path == path)
+                    .map(|item| item.keyword_ranges.clone())
+                    .unwrap_or_default()
+            };
+            source_keyword_combo.remove_all();
+            source_keyword_combo.append(Some(SOURCE_KEYWORD_NEW_ID), "New keyword range");
+            let mut active_id = SOURCE_KEYWORD_NEW_ID.to_string();
+            for range in &ranges {
+                source_keyword_combo.append(
+                    Some(range.id.as_str()),
+                    format_source_keyword_range(range).as_str(),
+                );
+                if selected_id.as_deref() == Some(range.id.as_str()) {
+                    active_id = range.id.clone();
+                }
+            }
+            if active_id == SOURCE_KEYWORD_NEW_ID {
+                *selected_source_keyword_id.borrow_mut() = None;
+            }
+            source_keyword_combo.set_active_id(Some(&active_id));
+            refresh_source_keyword_actions();
+        })
+    };
+    {
+        let source_marks = source_marks.clone();
+        let library = library.clone();
+        let selected_source_keyword_id = selected_source_keyword_id.clone();
+        let source_keyword_entry = source_keyword_entry.clone();
+        let refresh_source_keyword_actions = refresh_source_keyword_actions.clone();
+        source_keyword_combo.connect_changed(move |combo| {
+            let path = source_marks.borrow().path.clone();
+            let selected_id = combo.active_id().and_then(|id| {
+                let id = id.to_string();
+                (id != SOURCE_KEYWORD_NEW_ID).then_some(id)
+            });
+            *selected_source_keyword_id.borrow_mut() = selected_id.clone();
+            let selected_label = {
+                let lib = library.borrow();
+                lib.items
+                    .iter()
+                    .find(|item| item.source_path == path)
+                    .and_then(|item| {
+                        selected_id.as_deref().and_then(|range_id| {
+                            item.keyword_ranges
+                                .iter()
+                                .find(|range| range.id == range_id)
+                                .map(|range| range.label.clone())
+                        })
+                    })
+            };
+            if let Some(selected_label) = selected_label {
+                source_keyword_entry.set_text(&selected_label);
+            } else {
+                source_keyword_entry.set_text("");
+            }
+            refresh_source_keyword_actions();
+        });
+    }
+    {
+        let refresh_source_keyword_actions = refresh_source_keyword_actions.clone();
+        source_keyword_entry.connect_changed(move |_| {
+            refresh_source_keyword_actions();
+        });
+    }
+    refresh_source_keyword_picker();
     *refresh_source_preview_preferences_impl.borrow_mut() = Some({
         let player = player.clone();
         let source_marks = source_marks.clone();
@@ -7526,7 +7775,7 @@ pub fn build_window(
     let on_source_selected: Rc<dyn Fn(String, u64)> = {
         let player = player.clone();
         let source_marks = source_marks.clone();
-        let preview_widget = preview_widget.clone();
+        let source_monitor_panel = source_monitor_panel.clone();
         let clip_name_label = clip_name_label.clone();
         let library = library.clone();
         let project = project.clone();
@@ -7534,9 +7783,12 @@ pub fn build_window(
         let preferences_state = preferences_state.clone();
         let source_original_uri_for_proxy_fallback = source_original_uri_for_proxy_fallback.clone();
         let set_audio_only = set_audio_only.clone();
+        let selected_source_keyword_id = selected_source_keyword_id.clone();
+        let source_keyword_entry = source_keyword_entry.clone();
+        let refresh_source_keyword_picker = refresh_source_keyword_picker.clone();
         Rc::new(move |path: String, duration_ns: u64| {
             // Show the source preview now that a clip is selected
-            preview_widget.set_visible(true);
+            source_monitor_panel.set_visible(true);
             // Update the clip name label
             let name = std::path::Path::new(&path)
                 .file_stem()
@@ -7582,6 +7834,10 @@ pub fn build_window(
             m.is_image = source_info.is_image;
             m.is_animated_svg = source_info.is_animated_svg;
             m.source_timecode_base_ns = source_info.source_timecode_base_ns;
+            drop(m);
+            *selected_source_keyword_id.borrow_mut() = None;
+            source_keyword_entry.set_text("");
+            refresh_source_keyword_picker();
         })
     };
     *on_apply_collected_files_impl.borrow_mut() = Some({
@@ -7611,6 +7867,7 @@ pub fn build_window(
         let source_marks = source_marks.clone();
         let on_source_selected = on_source_selected.clone();
         let timeline_state_for_mf = timeline_state.clone();
+        let refresh_source_keyword_actions = refresh_source_keyword_actions.clone();
         timeline_state.borrow_mut().on_match_frame = Some(Rc::new(move || {
             let (selected_id, playhead_ns) = {
                 let st = timeline_state_for_mf.borrow();
@@ -7660,6 +7917,8 @@ pub fn build_window(
             m.in_ns = source_in;
             m.out_ns = source_out;
             m.display_pos_ns = source_pos;
+            drop(m);
+            refresh_source_keyword_actions();
         }));
     }
 
@@ -7719,6 +7978,170 @@ pub fn build_window(
             on_project_changed();
         })
     };
+    let on_library_changed: Rc<dyn Fn()> = {
+        let project = project.clone();
+        let library = library.clone();
+        let on_project_changed = on_project_changed.clone();
+        let refresh_source_keyword_picker = refresh_source_keyword_picker.clone();
+        Rc::new(move || {
+            {
+                let lib = library.borrow();
+                let mut proj = project.borrow_mut();
+                crate::model::media_library::sync_bins_to_project(&lib, &mut proj);
+                proj.dirty = true;
+            }
+            on_project_changed();
+            refresh_source_keyword_picker();
+        })
+    };
+    {
+        let library = library.clone();
+        let source_marks = source_marks.clone();
+        let source_keyword_entry = source_keyword_entry.clone();
+        let selected_source_keyword_id = selected_source_keyword_id.clone();
+        let source_keyword_status_label = source_keyword_status_label.clone();
+        let refresh_source_keyword_picker = refresh_source_keyword_picker.clone();
+        let on_library_changed = on_library_changed.clone();
+        add_source_keyword_btn.connect_clicked(move |_| {
+            let label = source_keyword_entry.text().trim().to_string();
+            if label.is_empty() {
+                source_keyword_status_label.set_text("Enter a keyword label.");
+                return;
+            }
+            let (path, start_ns, end_ns) = {
+                let marks = source_marks.borrow();
+                (marks.path.clone(), marks.in_ns, marks.out_ns)
+            };
+            if path.is_empty() {
+                source_keyword_status_label.set_text("Load a source clip to add keyword ranges.");
+                return;
+            }
+            if end_ns <= start_ns {
+                source_keyword_status_label
+                    .set_text("Set source In and Out to define a keyword range.");
+                return;
+            }
+            let new_range_id = {
+                let mut lib = library.borrow_mut();
+                lib.items
+                    .iter_mut()
+                    .find(|item| item.source_path == path)
+                    .map(|item| {
+                        let range = MediaKeywordRange::new(label.clone(), start_ns, end_ns);
+                        let range_id = range.id.clone();
+                        item.keyword_ranges.push(range);
+                        range_id
+                    })
+            };
+            let Some(new_range_id) = new_range_id else {
+                source_keyword_status_label
+                    .set_text("This source is not available in the media library.");
+                return;
+            };
+            *selected_source_keyword_id.borrow_mut() = Some(new_range_id);
+            on_library_changed();
+            refresh_source_keyword_picker();
+        });
+    }
+    {
+        let library = library.clone();
+        let source_marks = source_marks.clone();
+        let source_keyword_entry = source_keyword_entry.clone();
+        let selected_source_keyword_id = selected_source_keyword_id.clone();
+        let source_keyword_status_label = source_keyword_status_label.clone();
+        let refresh_source_keyword_picker = refresh_source_keyword_picker.clone();
+        let on_library_changed = on_library_changed.clone();
+        update_source_keyword_btn.connect_clicked(move |_| {
+            let Some(selected_range_id) = selected_source_keyword_id.borrow().clone() else {
+                source_keyword_status_label.set_text("Select a keyword range to update.");
+                return;
+            };
+            let label = source_keyword_entry.text().trim().to_string();
+            if label.is_empty() {
+                source_keyword_status_label.set_text("Enter a keyword label.");
+                return;
+            }
+            let (path, start_ns, end_ns) = {
+                let marks = source_marks.borrow();
+                (marks.path.clone(), marks.in_ns, marks.out_ns)
+            };
+            if path.is_empty() {
+                source_keyword_status_label
+                    .set_text("Load a source clip to update keyword ranges.");
+                return;
+            }
+            if end_ns <= start_ns {
+                source_keyword_status_label
+                    .set_text("Set source In and Out to define a keyword range.");
+                return;
+            }
+            let updated = {
+                let mut lib = library.borrow_mut();
+                lib.items
+                    .iter_mut()
+                    .find(|item| item.source_path == path)
+                    .and_then(|item| {
+                        item.keyword_ranges
+                            .iter_mut()
+                            .find(|range| range.id == selected_range_id)
+                    })
+                    .map(|range| {
+                        range.label = label.clone();
+                        range.start_ns = start_ns;
+                        range.end_ns = end_ns;
+                    })
+                    .is_some()
+            };
+            if !updated {
+                source_keyword_status_label
+                    .set_text("Selected keyword range is no longer available.");
+                return;
+            }
+            on_library_changed();
+            refresh_source_keyword_picker();
+        });
+    }
+    {
+        let library = library.clone();
+        let source_marks = source_marks.clone();
+        let source_keyword_entry = source_keyword_entry.clone();
+        let selected_source_keyword_id = selected_source_keyword_id.clone();
+        let source_keyword_status_label = source_keyword_status_label.clone();
+        let refresh_source_keyword_picker = refresh_source_keyword_picker.clone();
+        let on_library_changed = on_library_changed.clone();
+        remove_source_keyword_btn.connect_clicked(move |_| {
+            let Some(selected_range_id) = selected_source_keyword_id.borrow().clone() else {
+                source_keyword_status_label.set_text("Select a keyword range to remove.");
+                return;
+            };
+            let path = source_marks.borrow().path.clone();
+            if path.is_empty() {
+                source_keyword_status_label
+                    .set_text("Load a source clip to remove keyword ranges.");
+                return;
+            }
+            let removed = {
+                let mut lib = library.borrow_mut();
+                if let Some(item) = lib.items.iter_mut().find(|item| item.source_path == path) {
+                    let before = item.keyword_ranges.len();
+                    item.keyword_ranges
+                        .retain(|range| range.id != selected_range_id);
+                    item.keyword_ranges.len() != before
+                } else {
+                    false
+                }
+            };
+            if !removed {
+                source_keyword_status_label
+                    .set_text("Selected keyword range is no longer available.");
+                return;
+            }
+            *selected_source_keyword_id.borrow_mut() = None;
+            source_keyword_entry.set_text("");
+            on_library_changed();
+            refresh_source_keyword_picker();
+        });
+    }
 
     let (browser, clear_media_selection, force_rebuild_media_browser) =
         media_browser::build_media_browser(
@@ -7726,6 +8149,7 @@ pub fn build_window(
             on_source_selected.clone(),
             on_relink_media_gui.clone(),
             on_create_multicam_from_browser,
+            on_library_changed,
             proxy_cache.clone(),
             preferences_state.clone(),
         );
@@ -8001,19 +8425,25 @@ pub fn build_window(
     // ── on_close_preview: deselect media + hide preview + reset source state ──
     *on_close_preview_impl.borrow_mut() = Some({
         let clear_media_selection = clear_media_selection.clone();
-        let preview_widget = preview_widget.clone();
+        let source_monitor_panel = source_monitor_panel.clone();
         let clip_name_label = clip_name_label.clone();
         let source_marks = source_marks.clone();
         let player = player.clone();
+        let selected_source_keyword_id = selected_source_keyword_id.clone();
+        let source_keyword_entry = source_keyword_entry.clone();
+        let refresh_source_keyword_picker = refresh_source_keyword_picker.clone();
         let source_original_uri_for_proxy_fallback = source_original_uri_for_proxy_fallback.clone();
         Rc::new(move || {
             clear_media_selection();
-            preview_widget.set_visible(false);
+            source_monitor_panel.set_visible(false);
             clip_name_label.set_text("No source loaded");
             {
                 let mut m = source_marks.borrow_mut();
                 *m = crate::model::media_library::SourceMarks::default();
             }
+            *selected_source_keyword_id.borrow_mut() = None;
+            source_keyword_entry.set_text("");
+            refresh_source_keyword_picker();
             if let Ok(mut fallback_uri) = source_original_uri_for_proxy_fallback.lock() {
                 *fallback_uri = None;
             }
@@ -8022,7 +8452,7 @@ pub fn build_window(
     });
     // Left panel: vertical Paned — browser/effects stack (top) + source preview (bottom)
     // The Paned lets the user resize the split after a source is selected.
-    preview_widget.set_visible(false);
+    source_monitor_panel.set_visible(false);
 
     // ── Effects Browser ──────────────────────────────────────────────────
     let on_apply_effect: Rc<dyn Fn(String)> = {
@@ -8386,7 +8816,7 @@ pub fn build_window(
     left_vpaned.set_vexpand(true);
     left_vpaned.set_position(320); // browser gets ~320 px by default
     left_vpaned.set_start_child(Some(&left_stack_container));
-    left_vpaned.set_end_child(Some(&preview_widget));
+    left_vpaned.set_end_child(Some(&source_monitor_panel));
     top_paned.set_start_child(Some(&left_vpaned));
 
     root_vpaned.set_start_child(Some(&top_paned));
@@ -8469,12 +8899,16 @@ pub fn build_window(
                     let mut lib = library.borrow_mut();
                     lib.items.clear();
                     lib.bins.clear();
+                    lib.collections.clear();
                 }
                 prog_player.borrow_mut().stop();
-                let proxy_mode_enabled = preferences_state.borrow().proxy_mode.is_enabled();
+                let preserve_sidecar_proxies = {
+                    let prefs = preferences_state.borrow();
+                    prefs.proxy_mode.is_enabled() && prefs.persist_proxies_next_to_original_media
+                };
                 {
                     let mut cache = proxy_cache.borrow_mut();
-                    cache.cleanup_for_unload(proxy_mode_enabled);
+                    cache.cleanup_for_unload(preserve_sidecar_proxies);
                     cache.invalidate_all();
                 }
                 prog_player.borrow_mut().update_proxy_paths(HashMap::new());
@@ -8745,7 +9179,12 @@ pub fn build_window(
                 let project_file_path = { project_reload.borrow().file_path.clone() };
                 {
                     let mut pp = prog_player_reload.borrow_mut();
-                    pp.set_prerender_project_path(project_file_path.as_deref());
+                    pp.set_prerender_project_path(
+                        project_file_path.as_deref(),
+                        preferences_state_reload
+                            .borrow()
+                            .persist_prerenders_next_to_project_file,
+                    );
                     pp.set_project_dimensions(proj_w, proj_h);
                     pp.set_frame_rate(fr_num, fr_den);
                     pp.load_clips(clips);
@@ -10068,11 +10507,14 @@ pub fn build_window(
         let close_approved = Rc::new(Cell::new(false));
         let close_approved_for_signal = close_approved.clone();
         window.connect_close_request(move |w| {
-            let proxy_mode_enabled = preferences_state.borrow().proxy_mode.is_enabled();
+            let preserve_sidecar_proxies = {
+                let prefs = preferences_state.borrow();
+                prefs.proxy_mode.is_enabled() && prefs.persist_proxies_next_to_original_media
+            };
             if close_approved_for_signal.get() {
                 proxy_cache
                     .borrow_mut()
-                    .cleanup_for_unload(proxy_mode_enabled);
+                    .cleanup_for_unload(preserve_sidecar_proxies);
                 return glib::Propagation::Proceed;
             }
             let close_approved_for_continue = close_approved.clone();
@@ -10081,13 +10523,13 @@ pub fn build_window(
             let weak = w.downgrade();
             let on_continue: Rc<dyn Fn()> = Rc::new(move || {
                 close_approved_for_continue.set(true);
-                let proxy_mode_enabled = preferences_state_for_continue
-                    .borrow()
-                    .proxy_mode
-                    .is_enabled();
+                let preserve_sidecar_proxies = {
+                    let prefs = preferences_state_for_continue.borrow();
+                    prefs.proxy_mode.is_enabled() && prefs.persist_proxies_next_to_original_media
+                };
                 proxy_cache_for_continue
                     .borrow_mut()
-                    .cleanup_for_unload(proxy_mode_enabled);
+                    .cleanup_for_unload(preserve_sidecar_proxies);
                 if let Some(win) = weak.upgrade() {
                     win.close();
                 }
@@ -10173,6 +10615,16 @@ fn handle_mcp_command(
 ) {
     use crate::mcp::McpCommand;
     use serde_json::{json, Value};
+
+    let sync_library_change = || {
+        {
+            let lib = library.borrow();
+            let mut proj = project.borrow_mut();
+            crate::model::media_library::sync_bins_to_project(&lib, &mut proj);
+            proj.dirty = true;
+        }
+        on_project_changed_full();
+    };
 
     match cmd {
         McpCommand::GetProject { reply } => {
@@ -10647,6 +11099,7 @@ fn handle_mcp_command(
                     "source_playback_priority": prefs.source_playback_priority.as_str(),
                     "proxy_mode": prefs.proxy_mode.as_str(),
                     "last_non_off_proxy_mode": prefs.remembered_proxy_mode().as_str(),
+                    "persist_proxies_next_to_original_media": prefs.persist_proxies_next_to_original_media,
                     "show_timeline_preview": prefs.show_timeline_preview,
                     "show_track_audio_levels": prefs.show_track_audio_levels,
                     "gsk_renderer": prefs.gsk_renderer.as_str(),
@@ -10654,6 +11107,7 @@ fn handle_mcp_command(
                     "experimental_preview_optimizations": prefs.experimental_preview_optimizations,
                     "realtime_preview": prefs.realtime_preview,
                     "background_prerender": prefs.background_prerender,
+                    "persist_prerenders_next_to_project_file": prefs.persist_prerenders_next_to_project_file,
                     "preview_luts": prefs.preview_luts,
                     "crossfade_enabled": prefs.crossfade_enabled,
                     "crossfade_curve": prefs.crossfade_curve.as_str(),
@@ -10792,6 +11246,18 @@ fn handle_mcp_command(
                 .ok();
         }
 
+        McpCommand::SetProxySidecarPersistence { enabled, reply } => {
+            let mut new_state = preferences_state.borrow().clone();
+            new_state.persist_proxies_next_to_original_media = enabled;
+            apply_preferences_state(new_state.clone());
+            reply
+                .send(json!({
+                    "success": true,
+                    "persist_proxies_next_to_original_media": enabled
+                }))
+                .ok();
+        }
+
         McpCommand::SetGskRenderer { renderer, reply } => {
             let parsed = crate::ui_state::GskRenderer::from_str(&renderer);
             let new_state = {
@@ -10870,6 +11336,18 @@ fn handle_mcp_command(
                 .send(json!({
                     "success": true,
                     "background_prerender": enabled
+                }))
+                .ok();
+        }
+
+        McpCommand::SetPrerenderProjectPersistence { enabled, reply } => {
+            let mut new_state = preferences_state.borrow().clone();
+            new_state.persist_prerenders_next_to_project_file = enabled;
+            apply_preferences_state(new_state.clone());
+            reply
+                .send(json!({
+                    "success": true,
+                    "persist_prerenders_next_to_project_file": enabled
                 }))
                 .ok();
         }
@@ -12971,6 +13449,7 @@ fn handle_mcp_command(
                 .map(|item| {
                     json!({
                         "id":          item.id,
+                        "library_key": item.library_key(),
                         "label":       item.label,
                         "source_path": item.source_path,
                         "duration_ns": item.duration_ns,
@@ -12989,6 +13468,15 @@ fn handle_mcp_command(
                         "title_text": item.title_text,
                         "is_missing": item.is_missing,
                         "bin_id": item.bin_id,
+                        "rating": media_rating_id(item.rating),
+                        "keyword_ranges": item.keyword_ranges.iter().map(|range| json!({
+                            "id": range.id,
+                            "label": range.label,
+                            "start_ns": range.start_ns,
+                            "end_ns": range.end_ns,
+                            "start_s": range.start_ns as f64 / 1_000_000_000.0,
+                            "end_s": range.end_ns as f64 / 1_000_000_000.0,
+                        })).collect::<Vec<_>>(),
                     })
                 })
                 .collect();
@@ -13042,6 +13530,7 @@ fn handle_mcp_command(
                     "is_missing": !crate::model::media_library::source_path_exists(&path)
                 }))
                 .ok();
+            sync_library_change();
         }
 
         McpCommand::RelinkMedia { root_path, reply } => {
@@ -13078,7 +13567,7 @@ fn handle_mcp_command(
                 }))
                 .ok();
             if summary.updated_clip_count > 0 || summary.updated_library_count > 0 {
-                on_project_changed_full();
+                sync_library_change();
             }
         }
 
@@ -13115,6 +13604,7 @@ fn handle_mcp_command(
             reply
                 .send(json!({"success": true, "id": id, "name": name, "parent_id": parent_id}))
                 .ok();
+            sync_library_change();
         }
 
         McpCommand::DeleteBin { bin_id, reply } => {
@@ -13146,6 +13636,7 @@ fn handle_mcp_command(
             lib.bins.retain(|b| b.id != bin_id);
             drop(lib);
             reply.send(json!({"success": true})).ok();
+            sync_library_change();
         }
 
         McpCommand::RenameBin {
@@ -13160,6 +13651,7 @@ fn handle_mcp_command(
                 reply
                     .send(json!({"success": true, "bin_id": bin_id, "name": name}))
                     .ok();
+                sync_library_change();
             } else {
                 reply.send(json!({"error": "Bin not found"})).ok();
             }
@@ -13211,6 +13703,7 @@ fn handle_mcp_command(
             reply
                 .send(json!({"success": true, "moved_count": moved}))
                 .ok();
+            sync_library_change();
         }
 
         McpCommand::ListCollections { reply } => {
@@ -13227,6 +13720,7 @@ fn handle_mcp_command(
                             "kind": media_kind_filter_id(collection.criteria.kind),
                             "resolution": resolution_filter_id(collection.criteria.resolution),
                             "frame_rate": frame_rate_filter_id(collection.criteria.frame_rate),
+                            "rating": media_rating_filter_id(collection.criteria.rating),
                         },
                         "item_count": lib.items_in_collection(&collection.id).len(),
                     })
@@ -13241,16 +13735,22 @@ fn handle_mcp_command(
             kind,
             resolution,
             frame_rate,
+            rating,
             reply,
         } => {
-            let criteria =
-                match collection_criteria_from_mcp(search_text, kind, resolution, frame_rate) {
-                    Ok(criteria) => criteria,
-                    Err(error) => {
-                        reply.send(json!({"error": error})).ok();
-                        return;
-                    }
-                };
+            let criteria = match collection_criteria_from_mcp(
+                search_text,
+                kind,
+                resolution,
+                frame_rate,
+                rating,
+            ) {
+                Ok(criteria) => criteria,
+                Err(error) => {
+                    reply.send(json!({"error": error})).ok();
+                    return;
+                }
+            };
             let mut lib = library.borrow_mut();
             let collection = MediaCollection::new(name.clone(), criteria);
             let id = collection.id.clone();
@@ -13259,7 +13759,7 @@ fn handle_mcp_command(
             reply
                 .send(json!({"success": true, "id": id, "name": name}))
                 .ok();
-            on_project_changed_full();
+            sync_library_change();
         }
 
         McpCommand::UpdateCollection {
@@ -13269,6 +13769,7 @@ fn handle_mcp_command(
             kind,
             resolution,
             frame_rate,
+            rating,
             reply,
         } => {
             let mut lib = library.borrow_mut();
@@ -13319,13 +13820,20 @@ fn handle_mcp_command(
                 };
                 criteria.frame_rate = parsed;
             }
+            if let Some(rating) = rating {
+                let Some(parsed) = parse_media_rating_filter(Some(rating.as_str())) else {
+                    reply.send(json!({"error": "invalid rating filter"})).ok();
+                    return;
+                };
+                criteria.rating = parsed;
+            }
             collection.criteria = criteria;
             let name = collection.name.clone();
             drop(lib);
             reply
                 .send(json!({"success": true, "collection_id": collection_id, "name": name}))
                 .ok();
-            on_project_changed_full();
+            sync_library_change();
         }
 
         McpCommand::DeleteCollection {
@@ -13342,7 +13850,197 @@ fn handle_mcp_command(
             }
             drop(lib);
             reply.send(json!({"success": true})).ok();
-            on_project_changed_full();
+            sync_library_change();
+        }
+
+        McpCommand::SetMediaRating {
+            library_key,
+            rating,
+            reply,
+        } => {
+            let parsed_rating = match rating.as_str() {
+                "none" => MediaRating::None,
+                "favorite" => MediaRating::Favorite,
+                "reject" => MediaRating::Reject,
+                _ => {
+                    reply
+                        .send(json!({"success": false, "error": "rating must be one of: none, favorite, reject"}))
+                        .ok();
+                    return;
+                }
+            };
+            let updated = {
+                let mut lib = library.borrow_mut();
+                lib.items
+                    .iter_mut()
+                    .find(|item| item.matches_library_key(&library_key))
+                    .map(|item| {
+                        item.rating = parsed_rating;
+                    })
+                    .is_some()
+            };
+            if !updated {
+                reply
+                    .send(json!({"success": false, "error": "Library item not found"}))
+                    .ok();
+                return;
+            }
+            reply
+                .send(json!({
+                    "success": true,
+                    "library_key": library_key,
+                    "rating": media_rating_id(parsed_rating),
+                }))
+                .ok();
+            sync_library_change();
+        }
+
+        McpCommand::AddMediaKeywordRange {
+            library_key,
+            label,
+            start_ns,
+            end_ns,
+            reply,
+        } => {
+            let trimmed_label = label.trim().to_string();
+            if trimmed_label.is_empty() {
+                reply
+                    .send(json!({"success": false, "error": "label cannot be empty"}))
+                    .ok();
+                return;
+            }
+            if end_ns <= start_ns {
+                reply
+                    .send(
+                        json!({"success": false, "error": "end_ns must be greater than start_ns"}),
+                    )
+                    .ok();
+                return;
+            }
+            let added_range = {
+                let mut lib = library.borrow_mut();
+                lib.items
+                    .iter_mut()
+                    .find(|item| item.matches_library_key(&library_key))
+                    .map(|item| {
+                        let range = MediaKeywordRange::new(trimmed_label.clone(), start_ns, end_ns);
+                        item.keyword_ranges.push(range.clone());
+                        range
+                    })
+            };
+            let Some(added_range) = added_range else {
+                reply
+                    .send(json!({"success": false, "error": "Library item not found"}))
+                    .ok();
+                return;
+            };
+            reply
+                .send(json!({
+                    "success": true,
+                    "library_key": library_key,
+                    "range": {
+                        "id": added_range.id,
+                        "label": added_range.label,
+                        "start_ns": added_range.start_ns,
+                        "end_ns": added_range.end_ns,
+                    }
+                }))
+                .ok();
+            sync_library_change();
+        }
+
+        McpCommand::UpdateMediaKeywordRange {
+            library_key,
+            range_id,
+            label,
+            start_ns,
+            end_ns,
+            reply,
+        } => {
+            let trimmed_label = label.trim().to_string();
+            if trimmed_label.is_empty() {
+                reply
+                    .send(json!({"success": false, "error": "label cannot be empty"}))
+                    .ok();
+                return;
+            }
+            if end_ns <= start_ns {
+                reply
+                    .send(
+                        json!({"success": false, "error": "end_ns must be greater than start_ns"}),
+                    )
+                    .ok();
+                return;
+            }
+            let updated = {
+                let mut lib = library.borrow_mut();
+                lib.items
+                    .iter_mut()
+                    .find(|item| item.matches_library_key(&library_key))
+                    .and_then(|item| {
+                        item.keyword_ranges
+                            .iter_mut()
+                            .find(|range| range.id == range_id)
+                    })
+                    .map(|range| {
+                        range.label = trimmed_label.clone();
+                        range.start_ns = start_ns;
+                        range.end_ns = end_ns;
+                    })
+                    .is_some()
+            };
+            if !updated {
+                reply
+                    .send(json!({"success": false, "error": "Keyword range not found"}))
+                    .ok();
+                return;
+            }
+            reply
+                .send(json!({
+                    "success": true,
+                    "library_key": library_key,
+                    "range_id": range_id,
+                    "label": trimmed_label,
+                    "start_ns": start_ns,
+                    "end_ns": end_ns,
+                }))
+                .ok();
+            sync_library_change();
+        }
+
+        McpCommand::DeleteMediaKeywordRange {
+            library_key,
+            range_id,
+            reply,
+        } => {
+            let deleted = {
+                let mut lib = library.borrow_mut();
+                if let Some(item) = lib
+                    .items
+                    .iter_mut()
+                    .find(|item| item.matches_library_key(&library_key))
+                {
+                    let before = item.keyword_ranges.len();
+                    item.keyword_ranges.retain(|range| range.id != range_id);
+                    item.keyword_ranges.len() != before
+                } else {
+                    false
+                }
+            };
+            if !deleted {
+                reply
+                    .send(json!({"success": false, "error": "Keyword range not found"}))
+                    .ok();
+                return;
+            }
+            reply
+                .send(json!({
+                    "success": true,
+                    "library_key": library_key,
+                    "range_id": range_id,
+                }))
+                .ok();
+            sync_library_change();
         }
 
         McpCommand::ReorderTrack {

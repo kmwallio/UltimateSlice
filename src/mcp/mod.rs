@@ -100,6 +100,10 @@ pub enum McpCommand {
         mode: String,
         reply: SyncSender<Value>,
     },
+    SetProxySidecarPersistence {
+        enabled: bool,
+        reply: SyncSender<Value>,
+    },
     AddClip {
         source_path: String,
         track_index: usize,
@@ -296,6 +300,7 @@ pub enum McpCommand {
         kind: Option<String>,
         resolution: Option<String>,
         frame_rate: Option<String>,
+        rating: Option<String>,
         reply: SyncSender<Value>,
     },
     UpdateCollection {
@@ -305,10 +310,36 @@ pub enum McpCommand {
         kind: Option<String>,
         resolution: Option<String>,
         frame_rate: Option<String>,
+        rating: Option<String>,
         reply: SyncSender<Value>,
     },
     DeleteCollection {
         collection_id: String,
+        reply: SyncSender<Value>,
+    },
+    SetMediaRating {
+        library_key: String,
+        rating: String,
+        reply: SyncSender<Value>,
+    },
+    AddMediaKeywordRange {
+        library_key: String,
+        label: String,
+        start_ns: u64,
+        end_ns: u64,
+        reply: SyncSender<Value>,
+    },
+    UpdateMediaKeywordRange {
+        library_key: String,
+        range_id: String,
+        label: String,
+        start_ns: u64,
+        end_ns: u64,
+        reply: SyncSender<Value>,
+    },
+    DeleteMediaKeywordRange {
+        library_key: String,
+        range_id: String,
         reply: SyncSender<Value>,
     },
     ReorderTrack {
@@ -417,6 +448,10 @@ pub enum McpCommand {
         reply: SyncSender<Value>,
     },
     SetBackgroundPrerender {
+        enabled: bool,
+        reply: SyncSender<Value>,
+    },
+    SetPrerenderProjectPersistence {
         enabled: bool,
         reply: SyncSender<Value>,
     },
