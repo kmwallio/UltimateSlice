@@ -457,6 +457,7 @@ For automation-heavy loops, MCP keeps a short-lived per-session read cache for r
 
 Required system packages (Debian/Ubuntu):
 ```
+build-essential cmake pkg-config
 libgtk-4-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-good
 gstreamer1.0-plugins-bad gstreamer1.0-gl libglib2.0-dev

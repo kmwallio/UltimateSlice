@@ -43,7 +43,9 @@ UltimateSlice uses open-source crates and runtime libraries, including:
 - FFmpeg (tooling/runtime) — LGPL-2.1-or-later (Flatpak build enables GPL options)
 - x264 (Flatpak build dependency) — GPL-2.0-or-later
 
-For exact versions and full dependency tree, see `Cargo.toml`, `Cargo.lock`, and `io.github.kmwallio.ultimateslice.yml`.
+For exact versions and full dependency tree, see `Cargo.toml`, `Cargo.lock`,
+`io.github.kmwallio.ultimateslice.yml`, `cargo-sources.json`, and
+`onnxruntime-sources.json`.
 
 ![UltimateSlice Screenshot](layer-demo.gif)
 
@@ -69,8 +71,13 @@ See `docs/ARCHITECTURE.md` for the full layout and design notes. Highlights:
 
 **Linux (Ubuntu/Debian):**
 
+The default feature set builds `whisper-rs` from source, so install the compiler toolchain, `pkg-config`, and `cmake` alongside the media libraries:
+
 ```bash
 sudo apt install \
+  build-essential \
+  cmake \
+  pkg-config \
   libgtk-4-dev \
   libgstreamer1.0-dev \
   libgstreamer-plugins-base1.0-dev \
@@ -82,8 +89,16 @@ sudo apt install \
 
 **macOS ([Homebrew](https://brew.sh)):**
 
+Install the Xcode Command Line Tools first:
+
 ```bash
-brew install gtk4 gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-libav ffmpeg
+xcode-select --install
+```
+
+Then install the Homebrew dependencies (the default speech-to-text feature needs `cmake` during `cargo build`):
+
+```bash
+brew install cmake gtk4 gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-libav ffmpeg
 ```
 
 Then add to your shell profile so cargo can locate the libraries:
@@ -136,7 +151,7 @@ Three tiers targeting up to 4K source media, each with suggested UltimateSlice p
 
 ## Build & Run
 
-```/dev/null/bash#L1-5
+```bash
 # from the project root
 cargo build
 cargo run
@@ -144,13 +159,13 @@ cargo run
 
 To run with MCP server enabled:
 
-```/dev/null/bash#L1-3
+```bash
 cargo run -- --mcp
 ```
 
 To open a project file at startup from program arguments:
 
-```/dev/null/bash#L1-3
+```bash
 cargo run -- /path/to/project.uspxml
 ```
 
@@ -197,10 +212,24 @@ Run `./install.sh --help` for full usage.
 
 A Flatpak manifest is provided at `io.github.kmwallio.ultimateslice.yml`.
 
-```/dev/null/bash#L1-3
-flatpak-builder build-dir io.github.kmwallio.ultimateslice.yml --user --install --force-clean
+Routine builds can use the checked-in `cargo-sources.json` and
+`onnxruntime-sources.json` source mirrors as-is. The first Flatpak build takes
+longer because ONNX Runtime is compiled from source inside the sandbox.
+
+```bash
+flatpak-builder --user --install --force-clean flatpak-build io.github.kmwallio.ultimateslice.yml
 flatpak run io.github.kmwallio.ultimateslice
 ```
+
+If `Cargo.lock` changes, regenerate the Rust vendored-source manifest before
+rebuilding:
+
+```bash
+python3 flatpak-cargo-generator.py Cargo.lock -o cargo-sources.json
+```
+
+`onnxruntime-sources.json` only needs to be refreshed when the pinned ONNX
+Runtime version or its mirrored CPU/shared-lib `cmake/deps.txt` inputs change.
 
 ## Notes
 
