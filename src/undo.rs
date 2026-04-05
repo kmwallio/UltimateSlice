@@ -729,6 +729,49 @@ impl EditCommand for SetClipEqCommand {
     }
 }
 
+/// Match clip audio tone using measured loudness plus 3-band EQ.
+pub struct MatchClipAudioCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_volume: f32,
+    pub new_volume: f32,
+    pub old_measured_loudness: Option<f64>,
+    pub new_measured_loudness: Option<f64>,
+    pub old_eq_bands: [crate::model::clip::EqBand; 3],
+    pub new_eq_bands: [crate::model::clip::EqBand; 3],
+}
+
+impl MatchClipAudioCommand {
+    fn apply_values(&self, project: &mut Project, use_new: bool) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+                if use_new {
+                    clip.volume = self.new_volume;
+                    clip.measured_loudness_lufs = self.new_measured_loudness;
+                    clip.eq_bands = self.new_eq_bands;
+                } else {
+                    clip.volume = self.old_volume;
+                    clip.measured_loudness_lufs = self.old_measured_loudness;
+                    clip.eq_bands = self.old_eq_bands;
+                }
+            }
+        }
+        project.dirty = true;
+    }
+}
+
+impl EditCommand for MatchClipAudioCommand {
+    fn execute(&self, project: &mut Project) {
+        self.apply_values(project, true);
+    }
+    fn undo(&self, project: &mut Project) {
+        self.apply_values(project, false);
+    }
+    fn description(&self) -> &str {
+        "Match clip audio"
+    }
+}
+
 /// Set clip volume and/or pan.
 pub struct SetClipVolumeCommand {
     pub clip_id: String,
@@ -1905,6 +1948,51 @@ mod tests {
         let tb = project.tracks.iter().find(|t| t.id == track_b_id).unwrap();
         assert_eq!(ta.clips[0].timeline_start, 0);
         assert!(tb.clips.is_empty());
+    }
+
+    #[test]
+    fn match_clip_audio_command_updates_and_restores_volume_loudness_and_eq() {
+        let mut project = Project::new("Test");
+        let mut track = Track::new_audio("A1");
+        let track_id = track.id.clone();
+        let mut clip = Clip::new("voice.wav", 10, 0, ClipKind::Audio);
+        clip.id = "A".to_string();
+        clip.volume = 0.8;
+        clip.measured_loudness_lufs = Some(-19.5);
+        clip.eq_bands = crate::model::clip::default_eq_bands();
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let mut matched_eq = crate::model::clip::default_eq_bands();
+        matched_eq[0].gain = -2.5;
+        matched_eq[1].gain = 1.0;
+        matched_eq[2].gain = 3.5;
+        let cmd = MatchClipAudioCommand {
+            clip_id: "A".to_string(),
+            track_id: track_id.clone(),
+            old_volume: 0.8,
+            new_volume: 1.1,
+            old_measured_loudness: Some(-19.5),
+            new_measured_loudness: Some(-19.5),
+            old_eq_bands: crate::model::clip::default_eq_bands(),
+            new_eq_bands: matched_eq,
+        };
+
+        cmd.execute(&mut project);
+        let track = project.tracks.iter().find(|t| t.id == track_id).unwrap();
+        let clip = track.clips.iter().find(|c| c.id == "A").unwrap();
+        assert_eq!(clip.volume, 1.1);
+        assert_eq!(clip.measured_loudness_lufs, Some(-19.5));
+        assert_eq!(clip.eq_bands[0].gain, -2.5);
+        assert_eq!(clip.eq_bands[1].gain, 1.0);
+        assert_eq!(clip.eq_bands[2].gain, 3.5);
+
+        cmd.undo(&mut project);
+        let track = project.tracks.iter().find(|t| t.id == track_id).unwrap();
+        let clip = track.clips.iter().find(|c| c.id == "A").unwrap();
+        assert_eq!(clip.volume, 0.8);
+        assert_eq!(clip.measured_loudness_lufs, Some(-19.5));
+        assert_eq!(clip.eq_bands, crate::model::clip::default_eq_bands());
     }
 
     #[test]

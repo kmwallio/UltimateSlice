@@ -56,7 +56,7 @@ The same **I / O** Source Monitor marks are also used by the keyword-range contr
 | `Ctrl+Shift+B` | Join selected through-edit boundary into one clip |
 | `,` | Insert at playhead (shift subsequent clips) |
 | `.` | Overwrite at playhead (replace existing material) |
-| `Escape` | Switch to Select tool |
+| `Escape` | Switch to Select tool, or cancel an armed **Generate Music Region** draw |
 | `Delete` / `Backspace` | Delete selected clip(s) |
 | `Shift+Delete` / `Shift+Backspace` | Ripple delete selected clip(s) (track-local gap close) |
 | `Ctrl+Shift+→` | Select clips forward from playhead |
@@ -87,6 +87,8 @@ The same **I / O** Source Monitor marks are also used by the keyword-range contr
 | `Scroll (vertical)` | Zoom timeline in/out |
 | `Scroll (horizontal)` | Pan timeline left/right |
 | `?` / `/` | Show keyboard shortcut reference |
+
+Right-click an audio track header and choose **Generate Music Region…** to arm the one-shot MusicGen draw gesture; `Escape` cancels it before you drag.
 
 ---
 

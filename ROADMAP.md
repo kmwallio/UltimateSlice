@@ -288,7 +288,7 @@ Tracking docs:
   - Project replacement resets cached monitor output so empty projects do not show stale prior frames
 - [x] Program-monitor playback priority mode in Preferences (`Smooth` / `Balanced` / `Accurate`)
 - [x] Docked Program Monitor and scopes are resizable via draggable splitter (position persisted; pane collapses fully when scopes are hidden)
-- [ ] Detachable Program Monitor window (pop-out preview)
+- [x] Detachable Program Monitor window (pop-out preview)
   - [x] Pop out Program Monitor into a separate top-level window for dual-display workflows
   - [x] Keep transport controls/timecode/playhead fully synchronized between docked + popped-out monitor
   - [x] Persist monitor window geometry and last docked/popped state across sessions
@@ -580,7 +580,7 @@ Tracking docs:
 - [ ] Accessibility: keyboard navigation in all panels
 - [x] Welcome window for choosing recent project or new one (Stack-based overlay with New/Open/Recent, crossfade transition to editor)
 - [ ] Help documentation and tutorials
-- [ ] Application icon and desktop integration (`.desktop` file)
+- [x] Application icon and desktop integration (`.desktop` file, MIME type, AppStream metadata, installer wiring)
 - [ ] Customizable keyboard shortcuts (shortcut config file + preferences UI)
 - [x] Timecode entry / go-to timecode (HH:MM:SS:FF to jump playhead)
 - [x] Drag-and-drop from file manager (import by dragging files into media browser or timeline)
@@ -621,6 +621,7 @@ Tracking docs:
 - [x] Voiceover recording tool with countdown and punch-in (toolbar Record button, 3s countdown, GStreamer `autoaudiosrc` capture to WAV, clip placed at playhead on first audio track, undo support, MCP `record_voiceover` tool)
 - [x] Automatic Ducking (per-track `duck` toggle, volume reduced when dialogue/non-ducked audio is active; configurable amount in Preferences; real-time preview; MCP `set_track_duck` tool; FCPXML persistence)
 - [x] Audio normalization and peak-matching (LUFS + peak modes via FFmpeg `ebur128`/`volumedetect`; Inspector button, MCP `normalize_clip_audio` tool, undo, measured loudness display + FCPXML persistence)
+- [x] Reference-based audio matching (Inspector **Match Audio…** action analyzes a source clip against a reference clip and applies conservative loudness + adaptive built-in 3-band EQ matching, including derived band freq/gain/Q targets plus subtitle/STT-aware speech-region weighting; dialog defaults to simple **Match voice** mode and exposes explicit source/reference In/Out ranges through **Choose region...**; bottom status bar shows matching activity while the analysis runs; undo support; MCP `match_clip_audio` with optional range args)
 - [x] Built-in parametric EQ (3-band: Low/Mid/High with freq/gain/Q per band; GStreamer `equalizer-nbands` preview, FFmpeg `equalizer` export, gain keyframes, Inspector UI, FCPXML persistence, MCP `set_clip_eq` tool, undo)
 - [x] Waveform sync (align external audio to camera reference audio by waveform analysis; "Sync & Replace Audio" context menu action links clips and mutes camera embedded audio; MCP `sync_clips_by_audio` with `replace_audio` flag)
 
@@ -642,10 +643,11 @@ Tracking docs:
 - [x] AI Scene Cut Detection for long source files
 - [x] Smart Collections based on metadata — save project-wide media-browser queries by search text, kind, resolution, and frame rate; manage them from the browser; persist via FCPXML vendor metadata; automate with MCP `list_collections` / `create_collection` / `update_collection` / `delete_collection`
 - [ ] Optical Flow slow-motion (AI frame interpolation)
-- [ ] AI Music Generation (MusicGen / MusicGPT)
-  - [ ] Phase 1 — Draw-region UX: draw a time-range box on an audio track to define a generated-audio region (reusable for silence/tone generation too)
+- [x] AI Music Generation (MusicGen / MusicGPT)
+  - [x] Phase 1 — Draw-region UX: draw a time-range box on an audio track to define a generated-audio region (reusable for silence/tone generation too)
   - [x] Phase 2 — Local model backend: MusicGen-small ONNX via `ort` with background generation worker thread and status-bar progress; MCP `generate_music` tool for automation; generated WAV clips placed on audio tracks with undo support
-  - [ ] Phase 3 — Prompt UI: popover on drawn region with text prompt input, optional reference audio, duration auto-calculated from region length; generated audio written as a WAV clip and placed in the region
+  - [x] Phase 3 — Region-aware prompt UI and inline timeline lifecycle: the existing Generate Music dialog now accepts track/playhead targets or drawn audio regions, auto-fills requested duration from the selected range, shows pending/failed overlays inline on the timeline, and inserts generated WAV clips back into the requested region with undo support
+  - [ ] Follow-up — Reference-audio conditioning / style guidance input for MusicGen prompts
 
 ### Script-to-Timeline (Create Project from Script & Clips)
 - [ ] **Script import**: parse Final Draft (FDX) and Fountain screenplay files to extract scene headings, dialogue lines, and scene order

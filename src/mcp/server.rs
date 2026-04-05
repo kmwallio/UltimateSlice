@@ -1109,6 +1109,22 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "match_clip_audio",
+            "description": "Match a source clip's audio tone toward a reference clip using integrated loudness plus the built-in 3-band EQ. The matcher derives adaptive band frequency/gain/Q targets from speech-focused spectral differences, preferring subtitle/STT dialogue regions when available and otherwise weighting voice-active frames. Optional source/reference start/end ranges let you match a specific phrase instead of the full clip region. This is a conservative reference-based match, not full microphone cloning. The operation is undoable.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source_clip_id": { "type": "string", "description": "Clip id to adjust (the clip that will be modified)." },
+                    "source_start_ns": { "type": "integer", "description": "Optional source subrange start in nanoseconds, relative to the clip's current in-point." },
+                    "source_end_ns": { "type": "integer", "description": "Optional source subrange end in nanoseconds, relative to the clip's current in-point." },
+                    "reference_clip_id": { "type": "string", "description": "Clip id whose tonal balance and loudness should be matched." },
+                    "reference_start_ns": { "type": "integer", "description": "Optional reference subrange start in nanoseconds, relative to the clip's current in-point." },
+                    "reference_end_ns": { "type": "integer", "description": "Optional reference subrange end in nanoseconds, relative to the clip's current in-point." }
+                },
+                "required": ["source_clip_id", "reference_clip_id"]
+            }
+        },
+        {
             "name": "detect_scene_cuts",
             "description": "Detect scene/shot changes in a clip using ffmpeg scdet and split the clip at each detected cut point. Blocks while ffmpeg analyzes the video (duration depends on clip length).",
             "inputSchema": {
@@ -2673,6 +2689,15 @@ fn dispatch_tool_payload(
                 .unwrap_or(-14.0),
             reply: tx,
         },
+        "match_clip_audio" => McpCommand::MatchClipAudio {
+            source_clip_id: args["source_clip_id"].as_str().unwrap_or("").to_string(),
+            source_start_ns: args.get("source_start_ns").and_then(|v| v.as_u64()),
+            source_end_ns: args.get("source_end_ns").and_then(|v| v.as_u64()),
+            reference_clip_id: args["reference_clip_id"].as_str().unwrap_or("").to_string(),
+            reference_start_ns: args.get("reference_start_ns").and_then(|v| v.as_u64()),
+            reference_end_ns: args.get("reference_end_ns").and_then(|v| v.as_u64()),
+            reply: tx,
+        },
         "detect_scene_cuts" => McpCommand::DetectSceneCuts {
             clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
             track_id: args["track_id"].as_str().unwrap_or("").to_string(),
@@ -3502,6 +3527,56 @@ mod tests {
     }
 
     #[test]
+    fn call_tool_dispatches_match_clip_audio() {
+        let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
+        std::thread::spawn(move || {
+            let cmd = receiver.recv().expect("expected command");
+            match cmd {
+                McpCommand::MatchClipAudio {
+                    source_clip_id,
+                    source_start_ns,
+                    source_end_ns,
+                    reference_clip_id,
+                    reference_start_ns,
+                    reference_end_ns,
+                    reply,
+                } => {
+                    assert_eq!(source_clip_id, "clip-1");
+                    assert_eq!(source_start_ns, Some(1_000_000_000));
+                    assert_eq!(source_end_ns, Some(3_000_000_000));
+                    assert_eq!(reference_clip_id, "clip-2");
+                    assert_eq!(reference_start_ns, Some(2_000_000_000));
+                    assert_eq!(reference_end_ns, Some(4_000_000_000));
+                    reply
+                        .send(json!({
+                            "success": true,
+                            "source_clip_id": source_clip_id,
+                            "reference_clip_id": reference_clip_id
+                        }))
+                        .ok();
+                }
+                _ => panic!("unexpected MCP command"),
+            }
+        });
+        let id = json!(9);
+        let params = json!({
+            "name": "match_clip_audio",
+            "arguments": {
+                "source_clip_id": "clip-1",
+                "source_start_ns": 1_000_000_000u64,
+                "source_end_ns": 3_000_000_000u64,
+                "reference_clip_id": "clip-2",
+                "reference_start_ns": 2_000_000_000u64,
+                "reference_end_ns": 4_000_000_000u64
+            }
+        });
+        let mut cache = std::collections::HashMap::new();
+        let response = call_tool(&id, &params, &sender, &mut cache);
+        assert_eq!(response["id"], id);
+        assert_eq!(response["error"], serde_json::Value::Null);
+    }
+
+    #[test]
     fn call_tool_dispatches_list_project_snapshots() {
         let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
         std::thread::spawn(move || {
@@ -3515,7 +3590,7 @@ mod tests {
                 _ => panic!("unexpected MCP command"),
             }
         });
-        let id = json!(9);
+        let id = json!(10);
         let params = json!({
             "name": "list_project_snapshots",
             "arguments": {}
@@ -3541,7 +3616,7 @@ mod tests {
                 _ => panic!("unexpected MCP command"),
             }
         });
-        let id = json!(10);
+        let id = json!(11);
         let params = json!({
             "name": "create_project_snapshot",
             "arguments": { "name": "Before color" }
@@ -3567,7 +3642,7 @@ mod tests {
                 _ => panic!("unexpected MCP command"),
             }
         });
-        let id = json!(11);
+        let id = json!(12);
         let params = json!({
             "name": "restore_project_snapshot",
             "arguments": { "snapshot_id": "snap-1" }
@@ -3593,7 +3668,7 @@ mod tests {
                 _ => panic!("unexpected MCP command"),
             }
         });
-        let id = json!(12);
+        let id = json!(13);
         let params = json!({
             "name": "delete_project_snapshot",
             "arguments": { "snapshot_id": "snap-1" }

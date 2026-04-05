@@ -281,6 +281,22 @@ fn bandpass_filter(samples: &mut [f32], sample_rate: f32, low_cut: f32, high_cut
 /// Caps extraction at MAX_EXTRACT_SECONDS to keep FFT sizes manageable
 /// when clips have very different durations.
 fn extract_raw_audio(path: &str, source_in_ns: u64, source_out_ns: u64) -> Option<Vec<f32>> {
+    extract_mono_audio_samples(
+        path,
+        source_in_ns,
+        source_out_ns,
+        SAMPLE_RATE,
+        MAX_EXTRACT_SECONDS,
+    )
+}
+
+pub(crate) fn extract_mono_audio_samples(
+    path: &str,
+    source_in_ns: u64,
+    source_out_ns: u64,
+    sample_rate: i32,
+    max_extract_seconds: f64,
+) -> Option<Vec<f32>> {
     let uri = if path.starts_with("file://") {
         path.to_string()
     } else {
@@ -302,7 +318,7 @@ fn extract_raw_audio(path: &str, source_in_ns: u64, source_out_ns: u64) -> Optio
     let caps = gst::Caps::builder("audio/x-raw")
         .field("format", "F32LE")
         .field("channels", 1i32)
-        .field("rate", SAMPLE_RATE)
+        .field("rate", sample_rate)
         .build();
     capsf.set_property("caps", &caps);
 
@@ -366,8 +382,8 @@ fn extract_raw_audio(path: &str, source_in_ns: u64, source_out_ns: u64) -> Optio
 
     // Cap extraction length: use the shorter of clip duration and MAX_EXTRACT_SECONDS
     let clip_duration_s = source_out_ns.saturating_sub(source_in_ns) as f64 / 1_000_000_000.0;
-    let extract_s = clip_duration_s.min(MAX_EXTRACT_SECONDS);
-    let max_samples = (extract_s * SAMPLE_RATE as f64) as usize + SAMPLE_RATE as usize; // small buffer
+    let extract_s = clip_duration_s.min(max_extract_seconds);
+    let max_samples = (extract_s * sample_rate as f64) as usize + sample_rate as usize; // small buffer
 
     let mut samples: Vec<f32> = Vec::new();
     let bus = pipeline.bus()?;

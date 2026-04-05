@@ -131,6 +131,21 @@ Automatically find scene/shot boundaries in a clip using ffmpeg video analysis.
 
 Also available via MCP `detect_scene_cuts` tool for automation.
 
+### Generate Music on an Audio Track
+
+Use MusicGen to fill an empty span on an audio track with generated background music.
+
+1. Right-click an **audio track header** and choose **Generate Music Region…**.
+2. Drag across **empty space on that same audio track** to define the target region.
+3. Enter a prompt in the MusicGen dialog and click **Generate**.
+4. UltimateSlice shows the requested region inline while generation is pending, then replaces it with the generated WAV clip when the job completes.
+
+- Regions must be **between 1 and 30 seconds**.
+- Regions must stay in **empty audio-track space**; drawing across an existing clip is rejected.
+- Press **Escape** to cancel an armed region draw before you start dragging.
+- The existing **Generate Music…** track action still works when you want a playhead-based generation instead of drawing a region first.
+- Music generation requires the MusicGen ONNX models under `~/.local/share/ultimateslice/models/musicgen-small/` and a build with the `ai-inference` feature enabled.
+
 ## Image Clips
 
 Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC, SVG) can be placed on the timeline like video clips.

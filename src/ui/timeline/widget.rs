@@ -32,6 +32,8 @@ const PIXELS_PER_SECOND_DEFAULT: f64 = 100.0;
 const NS_PER_SECOND: f64 = 1_000_000_000.0;
 /// Pixels from clip edge that activate trim mode
 const TRIM_HANDLE_PX: f64 = 10.0;
+const MUSIC_GEN_MIN_DURATION_NS: u64 = 1_000_000_000;
+const MUSIC_GEN_MAX_DURATION_NS: u64 = 30 * MUSIC_GEN_MIN_DURATION_NS;
 
 fn track_row_height(track: &crate::model::track::Track) -> f64 {
     match track.height_preset {
@@ -281,6 +283,43 @@ struct KeyframeMarqueeSelection {
     base_times: HashSet<u64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct MusicGenerationTarget {
+    pub track_id: String,
+    pub timeline_start_ns: u64,
+    pub timeline_end_ns: Option<u64>,
+}
+
+impl MusicGenerationTarget {
+    pub fn requested_duration_ns(&self) -> Option<u64> {
+        self.timeline_end_ns
+            .map(|end| end.saturating_sub(self.timeline_start_ns))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MusicGenerationRegionDraft {
+    track_id: String,
+    start_ns: u64,
+    current_ns: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MusicGenerationOverlayStatus {
+    Pending,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+struct MusicGenerationOverlay {
+    job_id: String,
+    track_id: String,
+    start_ns: u64,
+    end_ns: u64,
+    status: MusicGenerationOverlayStatus,
+    error: Option<String>,
+}
+
 /// Shared state for the timeline widget
 pub struct TimelineState {
     pub project: Rc<RefCell<Project>>,
@@ -317,7 +356,9 @@ pub struct TimelineState {
     /// Callback fired when user requests silence removal: (clip_id, track_id, source_path, source_in, source_out, noise_db, min_duration)
     pub on_remove_silent_parts: Option<Rc<dyn Fn(String, String, String, u64, u64, f64, f64)>>,
     pub on_detect_scene_cuts: Option<Rc<dyn Fn(String, String, String, u64, u64, f64)>>,
-    pub on_generate_music: Option<Rc<dyn Fn(String, u64)>>,
+    pub on_generate_music: Option<Rc<dyn Fn(MusicGenerationTarget)>>,
+    /// Lightweight status callback for the MusicGen region workflow.
+    pub on_music_generation_status: Option<Rc<dyn Fn(String)>>,
     /// Gap-free timeline behavior toggle (track-local ripple).
     pub magnetic_mode: bool,
     /// Hover preview while dragging a transition: (left_clip_id, right_clip_id).
@@ -346,6 +387,12 @@ pub struct TimelineState {
     selected_keyframe_local_times: HashMap<String, HashSet<u64>>,
     /// Active keyframe-column marquee selection drag state.
     keyframe_marquee_selection: Option<KeyframeMarqueeSelection>,
+    /// Track id currently armed for one-shot MusicGen region drawing.
+    music_generation_armed_track_id: Option<String>,
+    /// Active in-progress MusicGen region drag.
+    music_generation_region_draft: Option<MusicGenerationRegionDraft>,
+    /// Inline timeline overlays for pending/failed music generation jobs.
+    music_generation_overlays: Vec<MusicGenerationOverlay>,
     /// Callback fired when the active tool changes (via keyboard shortcut).
     pub on_tool_changed: Option<Rc<dyn Fn(ActiveTool)>>,
     /// Set of source paths currently resolved as missing/offline.
@@ -388,6 +435,7 @@ impl TimelineState {
             on_remove_silent_parts: None,
             on_detect_scene_cuts: None,
             on_generate_music: None,
+            on_music_generation_status: None,
             magnetic_mode: false,
             hover_transition_pair: None,
             show_waveform_on_video: false,
@@ -402,6 +450,9 @@ impl TimelineState {
             marquee_selection: None,
             selected_keyframe_local_times: HashMap::new(),
             keyframe_marquee_selection: None,
+            music_generation_armed_track_id: None,
+            music_generation_region_draft: None,
+            music_generation_overlays: Vec::new(),
             on_tool_changed: None,
             missing_media_paths: HashSet::new(),
             on_match_color: None,
@@ -429,6 +480,154 @@ impl TimelineState {
         let project = self.project.borrow();
         let editing_tracks = self.resolve_editing_tracks(&project);
         track_index_at_y_in_tracks(editing_tracks, y)
+    }
+
+    pub fn arm_music_generation_region(&mut self, track_id: String) {
+        self.selected_track_id = Some(track_id.clone());
+        self.music_generation_armed_track_id = Some(track_id);
+        self.music_generation_region_draft = None;
+        self.clear_failed_music_generation_overlays();
+    }
+
+    pub fn cancel_music_generation_region(&mut self) -> bool {
+        let had_draft = self.music_generation_region_draft.take().is_some();
+        let had_arm = self.music_generation_armed_track_id.take().is_some();
+        had_draft || had_arm
+    }
+
+    fn begin_music_generation_region_drag(&mut self, x: f64, y: f64) -> bool {
+        if x < TRACK_LABEL_WIDTH || self.hit_test(x, y).is_some() {
+            return false;
+        }
+        let Some(armed_track_id) = self.music_generation_armed_track_id.clone() else {
+            return false;
+        };
+        let Some(track_idx) = self.track_index_at_y(y) else {
+            return false;
+        };
+        let proj = self.project.borrow();
+        let editing_tracks = self.resolve_editing_tracks(&proj);
+        let Some(track) = editing_tracks.get(track_idx) else {
+            return false;
+        };
+        if track.kind != TrackKind::Audio || track.id != armed_track_id {
+            return false;
+        }
+        let start_ns = self.x_to_ns(x);
+        self.selected_track_id = Some(track.id.clone());
+        self.music_generation_region_draft = Some(MusicGenerationRegionDraft {
+            track_id: track.id.clone(),
+            start_ns,
+            current_ns: start_ns,
+        });
+        true
+    }
+
+    fn update_music_generation_region_drag(&mut self, current_x: f64) -> bool {
+        let current_ns = self.x_to_ns(current_x);
+        if let Some(ref mut draft) = self.music_generation_region_draft {
+            draft.current_ns = current_ns;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn music_generation_region_overlaps_clips(
+        &self,
+        track_id: &str,
+        start_ns: u64,
+        end_ns: u64,
+    ) -> bool {
+        let proj = self.project.borrow();
+        let Some(track) = proj.track_ref(track_id) else {
+            return true;
+        };
+        track
+            .clips
+            .iter()
+            .any(|clip| start_ns < clip.timeline_end() && end_ns > clip.timeline_start)
+    }
+
+    fn finish_music_generation_region_drag(
+        &mut self,
+    ) -> Option<Result<MusicGenerationTarget, String>> {
+        let draft = self.music_generation_region_draft.take()?;
+        let start_ns = draft.start_ns.min(draft.current_ns);
+        let end_ns = draft.start_ns.max(draft.current_ns);
+        let duration_ns = end_ns.saturating_sub(start_ns);
+        if duration_ns < MUSIC_GEN_MIN_DURATION_NS {
+            return Some(Err(
+                "MusicGen regions must be at least 1 second long.".to_string()
+            ));
+        }
+        if duration_ns > MUSIC_GEN_MAX_DURATION_NS {
+            return Some(Err(
+                "MusicGen regions currently support up to 30 seconds.".to_string()
+            ));
+        }
+        if self.music_generation_region_overlaps_clips(&draft.track_id, start_ns, end_ns) {
+            return Some(Err(
+                "Music region must stay in empty audio-track space.".to_string()
+            ));
+        }
+        self.music_generation_armed_track_id = None;
+        Some(Ok(MusicGenerationTarget {
+            track_id: draft.track_id,
+            timeline_start_ns: start_ns,
+            timeline_end_ns: Some(end_ns),
+        }))
+    }
+
+    pub fn clear_failed_music_generation_overlays(&mut self) -> bool {
+        let before = self.music_generation_overlays.len();
+        self.music_generation_overlays
+            .retain(|overlay| overlay.status != MusicGenerationOverlayStatus::Failed);
+        before != self.music_generation_overlays.len()
+    }
+
+    pub fn add_pending_music_generation_overlay(
+        &mut self,
+        job_id: String,
+        track_id: String,
+        start_ns: u64,
+        end_ns: u64,
+    ) {
+        if end_ns <= start_ns {
+            return;
+        }
+        self.clear_failed_music_generation_overlays();
+        self.music_generation_overlays
+            .retain(|overlay| overlay.job_id != job_id);
+        self.music_generation_overlays.push(MusicGenerationOverlay {
+            job_id,
+            track_id,
+            start_ns,
+            end_ns,
+            status: MusicGenerationOverlayStatus::Pending,
+            error: None,
+        });
+    }
+
+    pub fn resolve_music_generation_overlay_success(&mut self, job_id: &str) -> bool {
+        let before = self.music_generation_overlays.len();
+        self.music_generation_overlays
+            .retain(|overlay| overlay.job_id != job_id);
+        before != self.music_generation_overlays.len()
+    }
+
+    pub fn mark_music_generation_overlay_failed(&mut self, job_id: &str, error: String) -> bool {
+        if let Some(overlay) = self
+            .music_generation_overlays
+            .iter_mut()
+            .find(|overlay| overlay.job_id == job_id)
+        {
+            overlay.status = MusicGenerationOverlayStatus::Failed;
+            overlay.error = Some(error);
+            true
+        } else {
+            false
+        }
     }
 
     fn solo_badge_hit_track_index(&self, x: f64, y: f64) -> Option<usize> {
@@ -3648,6 +3847,12 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         "Generate music from a text prompt using MusicGen AI and place on this track",
     ));
     track_context_box.append(&btn_generate_music);
+    let btn_generate_music_region = gtk::Button::with_label("Generate Music Region\u{2026}");
+    btn_generate_music_region.add_css_class("flat");
+    btn_generate_music_region.set_tooltip_text(Some(
+        "Arm a one-shot drag on empty audio-track space to define a MusicGen region (1–30s)",
+    ));
+    track_context_box.append(&btn_generate_music_region);
     track_context_pop.set_child(Some(&track_context_box));
     let track_context_track_idx: Rc<RefCell<Option<usize>>> = Rc::new(RefCell::new(None));
 
@@ -4048,8 +4253,8 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 let (playhead, track_id) = {
                     let st = state.borrow();
                     let proj = st.project.borrow();
-                    let tid = proj
-                        .tracks
+                    let tid = st
+                        .resolve_editing_tracks(&proj)
                         .get(idx)
                         .map(|t| t.id.clone())
                         .unwrap_or_default();
@@ -4059,11 +4264,51 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 let cb = st.on_generate_music.clone();
                 drop(st);
                 if let Some(cb) = cb {
-                    cb(track_id, playhead);
+                    cb(MusicGenerationTarget {
+                        track_id,
+                        timeline_start_ns: playhead,
+                        timeline_end_ns: None,
+                    });
                 }
             }
             if let Some(pop) = pop_weak.upgrade() {
                 pop.popdown();
+            }
+        });
+    }
+
+    {
+        let state = state.clone();
+        let pop_weak = track_context_pop.downgrade();
+        let track_context_track_idx = track_context_track_idx.clone();
+        let area_weak = area.downgrade();
+        btn_generate_music_region.connect_clicked(move |_| {
+            let track_idx = *track_context_track_idx.borrow();
+            let selected_track = track_idx.and_then(|idx| {
+                let st = state.borrow();
+                let proj = st.project.borrow();
+                st.resolve_editing_tracks(&proj)
+                    .get(idx)
+                    .filter(|track| track.kind == TrackKind::Audio)
+                    .map(|track| (track.id.clone(), track.label.clone()))
+            });
+            let mut status_cb = None;
+            if let Some((track_id, _)) = selected_track.as_ref() {
+                let mut st = state.borrow_mut();
+                st.arm_music_generation_region(track_id.clone());
+                status_cb = st.on_music_generation_status.clone();
+            }
+            if let Some(pop) = pop_weak.upgrade() {
+                pop.popdown();
+            }
+            if let Some(a) = area_weak.upgrade() {
+                a.grab_focus();
+                a.queue_draw();
+            }
+            if let (Some((_, track_label)), Some(cb)) = (selected_track, status_cb) {
+                cb(format!(
+                    "Drag on {track_label} to define a MusicGen region (1–30s)."
+                ));
             }
         });
     }
@@ -4417,6 +4662,8 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 btn_add_adjustment_layer
                                     .set_visible(track_kind == TrackKind::Video);
                                 btn_generate_music.set_visible(track_kind == TrackKind::Audio);
+                                btn_generate_music_region
+                                    .set_visible(track_kind == TrackKind::Audio);
                                 track_context_pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
                                     x as i32, y as i32, 1, 1,
                                 )));
@@ -4505,6 +4752,16 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     }
                     if let Some(a) = area_weak.upgrade() {
                         a.queue_draw();
+                    }
+                    return;
+                }
+                if st.music_generation_armed_track_id.is_some() {
+                    let started = st.begin_music_generation_region_drag(x, y);
+                    drop(st);
+                    if started {
+                        if let Some(a) = area_weak.upgrade() {
+                            a.queue_draw();
+                        }
                     }
                     return;
                 }
@@ -4777,6 +5034,13 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 };
 
                 let mut st = state.borrow_mut();
+                if st.update_music_generation_region_drag(current_x) {
+                    drop(st);
+                    if let Some(a) = area_weak.upgrade() {
+                        a.queue_draw();
+                    }
+                    return;
+                }
                 let drag_op = st.drag_op.clone();
                 match drag_op {
                     DragOp::MoveClip {
@@ -5403,8 +5667,10 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
 
         drag.connect_drag_end({
             let state = state.clone();
+            let area_weak = area_weak.clone();
             move |_, _, _| {
                 let mut st = state.borrow_mut();
+                let music_generation_outcome = st.finish_music_generation_region_drag();
                 let drag_op = std::mem::replace(&mut st.drag_op, DragOp::None);
                 let should_notify_project = !matches!(&drag_op, DragOp::None);
                 let had_marquee = st.marquee_selection.is_some();
@@ -5861,6 +6127,12 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     DragOp::None => {}
                 }
 
+                let music_cb = matches!(music_generation_outcome, Some(Ok(_)))
+                    .then(|| st.on_generate_music.clone())
+                    .flatten();
+                let music_status_cb = matches!(music_generation_outcome, Some(Err(_)))
+                    .then(|| st.on_music_generation_status.clone())
+                    .flatten();
                 let proj_cb = if should_notify_project {
                     st.on_project_changed.clone()
                 } else {
@@ -5873,11 +6145,28 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 };
                 let new_sel = st.selected_clip_id.clone();
                 drop(st);
+                if let Some(a) = area_weak.upgrade() {
+                    a.queue_draw();
+                }
                 if let Some(cb) = proj_cb {
                     cb();
                 }
                 if let Some(cb) = sel_cb {
                     cb(new_sel);
+                }
+                if let Some(outcome) = music_generation_outcome {
+                    match outcome {
+                        Ok(target) => {
+                            if let Some(cb) = music_cb {
+                                cb(target);
+                            }
+                        }
+                        Err(message) => {
+                            if let Some(cb) = music_status_cb {
+                                cb(message);
+                            }
+                        }
+                    }
                 }
             }
         });
@@ -6243,7 +6532,9 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     true
                 }
                 Key::Escape => {
-                    if st.is_editing_compound() {
+                    if st.cancel_music_generation_region() {
+                        true
+                    } else if st.is_editing_compound() {
                         st.exit_compound();
                         notify_project = true;
                         true
@@ -6634,22 +6925,136 @@ fn draw_timeline(
         ActiveTool::Slide => Some("⇔ Slide (U to toggle)"),
         _ => None,
     };
+    let mut indicator_y = RULER_HEIGHT + 16.0;
     if let Some(label) = tool_label {
         cr.set_source_rgb(1.0, 0.8, 0.0);
         cr.set_font_size(12.0);
-        let _ = cr.move_to(TRACK_LABEL_WIDTH + 8.0, RULER_HEIGHT + 16.0);
+        let _ = cr.move_to(TRACK_LABEL_WIDTH + 8.0, indicator_y);
         let _ = cr.show_text(label);
+        indicator_y += 16.0;
     }
     if st.magnetic_mode {
         cr.set_source_rgb(0.55, 0.95, 0.65);
         cr.set_font_size(12.0);
-        let y = if tool_label.is_some() {
-            RULER_HEIGHT + 32.0
-        } else {
-            RULER_HEIGHT + 16.0
-        };
-        let _ = cr.move_to(TRACK_LABEL_WIDTH + 8.0, y);
+        let _ = cr.move_to(TRACK_LABEL_WIDTH + 8.0, indicator_y);
         let _ = cr.show_text("[Magnetic]");
+        indicator_y += 16.0;
+    }
+    if st.music_generation_armed_track_id.is_some() {
+        cr.set_source_rgb(0.78, 0.88, 1.0);
+        cr.set_font_size(12.0);
+        let _ = cr.move_to(TRACK_LABEL_WIDTH + 8.0, indicator_y);
+        let _ = cr.show_text(
+            "♫ Drag on the armed audio track to define a MusicGen region (Esc to cancel)",
+        );
+    }
+
+    let track_row_y = |track_idx: usize| {
+        RULER_HEIGHT
+            + breadcrumb_height
+            + editing_tracks
+                .iter()
+                .take(track_idx)
+                .map(track_row_height)
+                .sum::<f64>()
+    };
+    if let Some(armed_track_id) = &st.music_generation_armed_track_id {
+        if let Some((track_idx, track)) = editing_tracks
+            .iter()
+            .enumerate()
+            .find(|(_, track)| &track.id == armed_track_id)
+        {
+            let top = track_row_y(track_idx) + 2.0;
+            let height = track_row_height(track) - 4.0;
+            if height > 0.0 {
+                cr.set_source_rgba(0.30, 0.55, 0.95, 0.08);
+                cr.rectangle(
+                    TRACK_LABEL_WIDTH + 1.0,
+                    top,
+                    (w - TRACK_LABEL_WIDTH - 2.0).max(0.0),
+                    height,
+                );
+                cr.fill().ok();
+                cr.set_source_rgba(0.45, 0.75, 1.0, 0.85);
+                cr.set_line_width(1.2);
+                cr.rectangle(
+                    TRACK_LABEL_WIDTH + 1.0,
+                    top,
+                    (w - TRACK_LABEL_WIDTH - 2.0).max(0.0),
+                    height,
+                );
+                cr.stroke().ok();
+            }
+        }
+    }
+    if let Some(draft) = &st.music_generation_region_draft {
+        if let Some((track_idx, track)) = editing_tracks
+            .iter()
+            .enumerate()
+            .find(|(_, track)| track.id == draft.track_id)
+        {
+            let start_ns = draft.start_ns.min(draft.current_ns);
+            let end_ns = draft.start_ns.max(draft.current_ns);
+            let left = st.ns_to_x(start_ns).max(TRACK_LABEL_WIDTH);
+            let right = st.ns_to_x(end_ns);
+            let top = track_row_y(track_idx) + 2.0;
+            let bottom = top + track_row_height(track) - 4.0;
+            if right > left && bottom > top {
+                cr.set_source_rgba(0.36, 0.68, 1.0, 0.22);
+                cr.rectangle(left, top, right - left, bottom - top);
+                cr.fill().ok();
+                cr.set_source_rgba(0.56, 0.82, 1.0, 0.95);
+                cr.set_line_width(1.4);
+                cr.rectangle(left, top, right - left, bottom - top);
+                cr.stroke().ok();
+                if right - left > 90.0 {
+                    cr.set_source_rgba(0.96, 0.98, 1.0, 0.95);
+                    cr.set_font_size(11.0);
+                    let _ = cr.move_to(left + 8.0, top + 16.0);
+                    let _ = cr.show_text("Music region");
+                }
+            }
+        }
+    }
+    for overlay in &st.music_generation_overlays {
+        if let Some((track_idx, track)) = editing_tracks
+            .iter()
+            .enumerate()
+            .find(|(_, track)| track.id == overlay.track_id)
+        {
+            let left = st.ns_to_x(overlay.start_ns).max(TRACK_LABEL_WIDTH);
+            let right = st.ns_to_x(overlay.end_ns);
+            let top = track_row_y(track_idx) + 2.0;
+            let bottom = top + track_row_height(track) - 4.0;
+            if right <= left || bottom <= top {
+                continue;
+            }
+            let (fill_rgba, stroke_rgba, label) = match overlay.status {
+                MusicGenerationOverlayStatus::Pending => (
+                    (0.62, 0.36, 0.95, 0.20),
+                    (0.82, 0.60, 1.0, 0.95),
+                    "Generating music…",
+                ),
+                MusicGenerationOverlayStatus::Failed => (
+                    (0.92, 0.22, 0.28, 0.20),
+                    (1.0, 0.52, 0.55, 0.95),
+                    "Music generation failed",
+                ),
+            };
+            cr.set_source_rgba(fill_rgba.0, fill_rgba.1, fill_rgba.2, fill_rgba.3);
+            cr.rectangle(left, top, right - left, bottom - top);
+            cr.fill().ok();
+            cr.set_source_rgba(stroke_rgba.0, stroke_rgba.1, stroke_rgba.2, stroke_rgba.3);
+            cr.set_line_width(1.4);
+            cr.rectangle(left, top, right - left, bottom - top);
+            cr.stroke().ok();
+            if right - left > 120.0 {
+                cr.set_source_rgba(0.98, 0.98, 1.0, 0.95);
+                cr.set_font_size(11.0);
+                let _ = cr.move_to(left + 8.0, top + 16.0);
+                let _ = cr.show_text(label);
+            }
+        }
     }
 
     // Track reorder drop indicator
@@ -8295,7 +8700,10 @@ pub fn show_shortcuts_dialog(parent: &gtk::Window) {
             "Ctrl+Shift+B",
             "Join selected through-edit boundary into one clip",
         ),
-        ("Escape", "Switch to Select tool"),
+        (
+            "Escape",
+            "Cancel armed MusicGen region draw, exit compound edit, or switch to Select tool",
+        ),
         (
             "Delete / Bksp",
             "Delete selected clip(s), or selected keyframe column(s)",
@@ -8456,6 +8864,30 @@ mod tests {
         )
     }
 
+    fn timeline_state_with_audio_clips(
+        spec: &[(&str, u64, u64)],
+    ) -> (TimelineState, String, Vec<String>) {
+        let mut project = Project::new("Music generation tests");
+        let audio_idx = project
+            .tracks
+            .iter()
+            .position(|t| t.kind == TrackKind::Audio)
+            .expect("default project should include an audio track");
+        let track_id = project.tracks[audio_idx].id.clone();
+        let mut ids = Vec::new();
+        for (id, start, duration) in spec {
+            let mut clip = Clip::new(format!("{id}.wav"), *duration, *start, ClipKind::Audio);
+            clip.id = (*id).to_string();
+            project.tracks[audio_idx].add_clip(clip);
+            ids.push((*id).to_string());
+        }
+        (
+            TimelineState::new(Rc::new(RefCell::new(project))),
+            track_id,
+            ids,
+        )
+    }
+
     fn timeline_state_with_through_edit_track() -> (TimelineState, String) {
         let mut project = Project::new("Through-edit indicator tests");
         let video_idx = project
@@ -8489,6 +8921,92 @@ mod tests {
             TimelineState::new(Rc::new(RefCell::new(project))),
             "through-edit-track".to_string(),
         )
+    }
+
+    #[test]
+    fn finish_music_generation_region_drag_accepts_empty_audio_region() {
+        let (mut st, track_id, _ids) = timeline_state_with_audio_clips(&[]);
+        st.arm_music_generation_region(track_id.clone());
+        st.music_generation_region_draft = Some(MusicGenerationRegionDraft {
+            track_id: track_id.clone(),
+            start_ns: 2_000_000_000,
+            current_ns: 7_000_000_000,
+        });
+
+        let target = st
+            .finish_music_generation_region_drag()
+            .expect("draft should exist")
+            .expect("empty five-second region should be valid");
+
+        assert_eq!(target.track_id, track_id);
+        assert_eq!(target.timeline_start_ns, 2_000_000_000);
+        assert_eq!(target.timeline_end_ns, Some(7_000_000_000));
+        assert!(st.music_generation_armed_track_id.is_none());
+    }
+
+    #[test]
+    fn finish_music_generation_region_drag_rejects_overlap_without_disarming() {
+        let (mut st, track_id, _ids) =
+            timeline_state_with_audio_clips(&[("bed", 3_000_000_000, 2_000_000_000)]);
+        st.arm_music_generation_region(track_id.clone());
+        st.music_generation_region_draft = Some(MusicGenerationRegionDraft {
+            track_id: track_id.clone(),
+            start_ns: 4_000_000_000,
+            current_ns: 6_000_000_000,
+        });
+
+        let error = st
+            .finish_music_generation_region_drag()
+            .expect("draft should exist")
+            .expect_err("overlapping region should be rejected");
+
+        assert_eq!(error, "Music region must stay in empty audio-track space.");
+        assert_eq!(
+            st.music_generation_armed_track_id.as_deref(),
+            Some(track_id.as_str())
+        );
+    }
+
+    #[test]
+    fn music_generation_overlay_lifecycle_tracks_pending_failed_and_cleared_states() {
+        let (mut st, track_id, _ids) = timeline_state_with_audio_clips(&[]);
+        st.add_pending_music_generation_overlay(
+            "job-1".to_string(),
+            track_id.clone(),
+            1_000_000_000,
+            4_000_000_000,
+        );
+        assert_eq!(st.music_generation_overlays.len(), 1);
+        assert_eq!(
+            st.music_generation_overlays[0].status,
+            MusicGenerationOverlayStatus::Pending
+        );
+
+        assert!(st.mark_music_generation_overlay_failed("job-1", "boom".to_string()));
+        assert_eq!(
+            st.music_generation_overlays[0].status,
+            MusicGenerationOverlayStatus::Failed
+        );
+        assert_eq!(
+            st.music_generation_overlays[0].error.as_deref(),
+            Some("boom")
+        );
+
+        st.add_pending_music_generation_overlay(
+            "job-2".to_string(),
+            track_id,
+            5_000_000_000,
+            8_000_000_000,
+        );
+        assert_eq!(st.music_generation_overlays.len(), 1);
+        assert_eq!(st.music_generation_overlays[0].job_id, "job-2");
+        assert_eq!(
+            st.music_generation_overlays[0].status,
+            MusicGenerationOverlayStatus::Pending
+        );
+
+        assert!(st.resolve_music_generation_overlay_success("job-2"));
+        assert!(st.music_generation_overlays.is_empty());
     }
 
     #[test]

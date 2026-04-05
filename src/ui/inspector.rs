@@ -22,7 +22,7 @@ pub struct SubtitleStyleClipboard {
     pub position_y: f64,
     pub word_window_secs: f64,
 }
-use crate::model::project::Project;
+use crate::model::project::{FrameRate, Project};
 use gdk4;
 use gio;
 use gtk4::prelude::*;
@@ -68,6 +68,103 @@ fn linear_to_db_volume(linear: f64) -> f64 {
     } else {
         (20.0 * linear.log10()).clamp(VOLUME_DB_MIN, VOLUME_DB_MAX)
     }
+}
+
+#[derive(Clone)]
+struct MatchAudioCandidate {
+    clip_id: String,
+    label: String,
+    duration_ns: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MatchAudioDialogMode {
+    MatchVoice,
+    ChooseRegion,
+}
+
+impl MatchAudioDialogMode {
+    fn from_index(index: u32) -> Self {
+        match index {
+            1 => Self::ChooseRegion,
+            _ => Self::MatchVoice,
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::MatchVoice => {
+                "Recommended: match the full trimmed clips and prioritize dialogue or voice automatically."
+            }
+            Self::ChooseRegion => {
+                "Advanced: enter exact source/reference In/Out timecodes to match a specific phrase."
+            }
+        }
+    }
+
+    fn shows_region_fields(self) -> bool {
+        matches!(self, Self::ChooseRegion)
+    }
+}
+
+fn audio_match_clip_label(label: &str, clip_id: &str) -> String {
+    let trimmed = label.trim();
+    if trimmed.is_empty() {
+        clip_id.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn set_audio_match_region_entries(
+    start_entry: &Entry,
+    end_entry: &Entry,
+    region: crate::media::audio_match::AnalysisRegionNs,
+    frame_rate: &FrameRate,
+) {
+    start_entry.set_text(&crate::ui::timecode::format_ns_as_timecode(
+        region.start_ns,
+        frame_rate,
+    ));
+    end_entry.set_text(&crate::ui::timecode::format_ns_as_timecode(
+        region.end_ns,
+        frame_rate,
+    ));
+}
+
+fn parse_audio_match_region_entries(
+    start_entry: &Entry,
+    end_entry: &Entry,
+    duration_ns: u64,
+    frame_rate: &FrameRate,
+    label: &str,
+) -> Result<crate::media::audio_match::AnalysisRegionNs, String> {
+    let start_ns =
+        crate::ui::timecode::parse_timecode_to_ns(start_entry.text().as_ref(), frame_rate)
+            .map_err(|e| format!("{label} in: {e}"))?;
+    let end_ns = crate::ui::timecode::parse_timecode_to_ns(end_entry.text().as_ref(), frame_rate)
+        .map_err(|e| format!("{label} out: {e}"))?;
+    if end_ns <= start_ns {
+        return Err(format!("{label} out must be after {label} in."));
+    }
+    if end_ns > duration_ns {
+        return Err(format!(
+            "{label} range exceeds clip duration ({}).",
+            crate::ui::timecode::format_ns_as_timecode(duration_ns, frame_rate)
+        ));
+    }
+    Ok(crate::media::audio_match::AnalysisRegionNs { start_ns, end_ns })
+}
+
+fn sync_match_audio_mode_ui(
+    dialog: &gtk4::Window,
+    description_label: &Label,
+    region_box: &GBox,
+    mode: MatchAudioDialogMode,
+) {
+    description_label.set_text(mode.description());
+    region_box.set_visible(mode.shows_region_fields());
+    dialog.set_default_size(440, if mode.shows_region_fields() { 360 } else { 220 });
 }
 
 fn interp_idx_to_enum(idx: u32) -> KeyframeInterpolation {
@@ -124,6 +221,7 @@ pub struct InspectorView {
     pub volume_slider: Scale,
     pub pan_slider: Scale,
     pub normalize_btn: Button,
+    pub match_audio_btn: Button,
     pub measured_loudness_label: Label,
     // LADSPA effects
     pub ladspa_effects_list: GBox,
@@ -2502,12 +2600,26 @@ pub fn build_inspector(
     current_playhead_ns: impl Fn() -> u64 + 'static,
     on_seek_to: impl Fn(u64) + 'static,
     on_normalize_audio: impl Fn(&str) + 'static,
+    on_match_audio: impl Fn(
+            &str,
+            Option<crate::media::audio_match::AnalysisRegionNs>,
+            &str,
+            Option<crate::media::audio_match::AnalysisRegionNs>,
+        ) + 'static,
     on_duck_changed: impl Fn(&str, bool, f64) + 'static,
     on_role_changed: impl Fn(&str, &str) + 'static,
     on_execute_command: impl Fn(Box<dyn crate::undo::EditCommand>) + 'static,
 ) -> (GBox, Rc<InspectorView>) {
     // Wrap frei0r callbacks in Rc so they can be cloned into multiple closures.
     let on_normalize_audio: Rc<dyn Fn(&str)> = Rc::new(on_normalize_audio);
+    let on_match_audio: Rc<
+        dyn Fn(
+            &str,
+            Option<crate::media::audio_match::AnalysisRegionNs>,
+            &str,
+            Option<crate::media::audio_match::AnalysisRegionNs>,
+        ),
+    > = Rc::new(on_match_audio);
     let on_duck_changed: Rc<dyn Fn(&str, bool, f64)> = Rc::new(on_duck_changed);
     let on_role_changed: Rc<dyn Fn(&str, &str)> = Rc::new(on_role_changed);
     let on_execute_command: Rc<dyn Fn(Box<dyn crate::undo::EditCommand>)> =
@@ -3376,11 +3488,16 @@ pub fn build_inspector(
     normalize_btn.set_tooltip_text(Some(
         "Analyze clip loudness and adjust volume to a target level",
     ));
+    let match_audio_btn = Button::with_label("Match Audio\u{2026}");
+    match_audio_btn.set_tooltip_text(Some(
+        "Analyze this clip against a reference clip and apply matched loudness plus 3-band EQ",
+    ));
     let measured_loudness_label = Label::new(None);
     measured_loudness_label.add_css_class("dim-label");
     measured_loudness_label.set_halign(gtk4::Align::Start);
     measured_loudness_label.set_hexpand(true);
     normalize_row.append(&normalize_btn);
+    normalize_row.append(&match_audio_btn);
     normalize_row.append(&measured_loudness_label);
     audio_inner.append(&normalize_row);
 
@@ -4693,6 +4810,328 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 on_normalize_audio(clip_id);
             }
+        });
+    }
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let on_match_audio = on_match_audio.clone();
+        match_audio_btn.connect_clicked(move |btn| {
+            let source_id = selected_clip_id.borrow().clone();
+            let Some(source_clip_id) = source_id else {
+                return;
+            };
+
+            let (frame_rate, source_duration_ns, candidates) = {
+                let proj = project.borrow();
+                let mut source_duration_ns = None;
+                let mut candidates = Vec::new();
+                for track in &proj.tracks {
+                    for clip in &track.clips {
+                        let duration_ns = clip.source_out.saturating_sub(clip.source_in);
+                        if clip.id == source_clip_id {
+                            source_duration_ns = Some(duration_ns);
+                            continue;
+                        }
+                        if matches!(
+                            clip.kind,
+                            crate::model::clip::ClipKind::Video
+                                | crate::model::clip::ClipKind::Audio
+                        ) {
+                            let clip_label = audio_match_clip_label(&clip.label, &clip.id);
+                            candidates.push(MatchAudioCandidate {
+                                clip_id: clip.id.clone(),
+                                label: format!(
+                                    "{} ({})",
+                                    clip_label,
+                                    crate::ui::timecode::format_ns_as_timecode(
+                                        duration_ns,
+                                        &proj.frame_rate
+                                    )
+                                ),
+                                duration_ns,
+                            });
+                        }
+                    }
+                }
+                (proj.frame_rate.clone(), source_duration_ns, candidates)
+            };
+            let Some(source_duration_ns) = source_duration_ns else {
+                return;
+            };
+
+            if candidates.is_empty() {
+                return;
+            }
+            let candidates = Rc::new(candidates);
+
+            let window = btn.root().and_then(|r| r.downcast::<gtk4::Window>().ok());
+            let dialog = gtk4::Window::builder()
+                .title("Match Audio")
+                .modal(true)
+                .default_width(440)
+                .build();
+            dialog.set_resizable(false);
+            if let Some(ref w) = window {
+                dialog.set_transient_for(Some(w));
+            }
+
+            let vbox = GBox::new(Orientation::Vertical, 12);
+            vbox.set_margin_start(16);
+            vbox.set_margin_end(16);
+            vbox.set_margin_top(16);
+            vbox.set_margin_bottom(16);
+            dialog.set_child(Some(&vbox));
+
+            let label = Label::new(Some(
+                "Choose a reference clip, then keep the simple voice match or switch to an exact region.",
+            ));
+            label.set_halign(gtk4::Align::Start);
+            label.set_wrap(true);
+            vbox.append(&label);
+
+            let labels: Vec<String> = candidates
+                .iter()
+                .map(|candidate| candidate.label.clone())
+                .collect();
+            let string_list =
+                gtk4::StringList::new(&labels.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+            let reference_dropdown = gtk4::DropDown::new(Some(string_list), gtk4::Expression::NONE);
+            reference_dropdown.set_selected(0);
+            reference_dropdown.set_hexpand(true);
+
+            let mode_list =
+                gtk4::StringList::new(&["Match voice (Recommended)", "Choose region..."]);
+            let mode_dropdown = gtk4::DropDown::new(Some(mode_list), gtk4::Expression::NONE);
+            mode_dropdown.set_selected(0);
+            mode_dropdown.set_hexpand(true);
+
+            let form = gtk4::Grid::builder()
+                .column_spacing(12)
+                .row_spacing(8)
+                .build();
+            vbox.append(&form);
+
+            let mode_label = Label::new(Some("Match mode"));
+            mode_label.set_halign(gtk4::Align::Start);
+            form.attach(&mode_label, 0, 0, 1, 1);
+            form.attach(&mode_dropdown, 1, 0, 1, 1);
+
+            let reference_label = Label::new(Some("Reference clip"));
+            reference_label.set_halign(gtk4::Align::Start);
+            form.attach(&reference_label, 0, 1, 1, 1);
+            form.attach(&reference_dropdown, 1, 1, 1, 1);
+
+            let mode_description = Label::new(None);
+            mode_description.set_halign(gtk4::Align::Start);
+            mode_description.set_wrap(true);
+            mode_description.add_css_class("dim-label");
+            vbox.append(&mode_description);
+
+            let region_box = GBox::new(Orientation::Vertical, 8);
+            vbox.append(&region_box);
+
+            let region_hint = Label::new(Some(
+                "Timecode uses HH:MM:SS:FF (or MM:SS:FF) at the project frame rate.",
+            ));
+            region_hint.set_halign(gtk4::Align::Start);
+            region_hint.add_css_class("dim-label");
+            region_hint.set_wrap(true);
+            region_box.append(&region_hint);
+
+            let region_form = gtk4::Grid::builder()
+                .column_spacing(12)
+                .row_spacing(8)
+                .build();
+            region_box.append(&region_form);
+
+            let source_in_label = Label::new(Some("Source in"));
+            source_in_label.set_halign(gtk4::Align::Start);
+            region_form.attach(&source_in_label, 0, 0, 1, 1);
+            let source_in_entry = Entry::new();
+            source_in_entry.set_hexpand(true);
+            region_form.attach(&source_in_entry, 1, 0, 1, 1);
+
+            let source_out_label = Label::new(Some("Source out"));
+            source_out_label.set_halign(gtk4::Align::Start);
+            region_form.attach(&source_out_label, 0, 1, 1, 1);
+            let source_out_entry = Entry::new();
+            source_out_entry.set_hexpand(true);
+            region_form.attach(&source_out_entry, 1, 1, 1, 1);
+
+            let source_hint = Label::new(Some(&format!(
+                "Source clip length: {}",
+                crate::ui::timecode::format_ns_as_timecode(source_duration_ns, &frame_rate)
+            )));
+            source_hint.set_halign(gtk4::Align::Start);
+            source_hint.add_css_class("dim-label");
+            region_form.attach(&source_hint, 1, 2, 1, 1);
+
+            let reference_in_label = Label::new(Some("Reference in"));
+            reference_in_label.set_halign(gtk4::Align::Start);
+            region_form.attach(&reference_in_label, 0, 3, 1, 1);
+            let reference_in_entry = Entry::new();
+            reference_in_entry.set_hexpand(true);
+            region_form.attach(&reference_in_entry, 1, 3, 1, 1);
+
+            let reference_out_label = Label::new(Some("Reference out"));
+            reference_out_label.set_halign(gtk4::Align::Start);
+            region_form.attach(&reference_out_label, 0, 4, 1, 1);
+            let reference_out_entry = Entry::new();
+            reference_out_entry.set_hexpand(true);
+            region_form.attach(&reference_out_entry, 1, 4, 1, 1);
+
+            let reference_hint = Label::new(None);
+            reference_hint.set_halign(gtk4::Align::Start);
+            reference_hint.add_css_class("dim-label");
+            region_form.attach(&reference_hint, 1, 5, 1, 1);
+
+            let error_label = Label::new(None);
+            error_label.set_halign(gtk4::Align::Start);
+            error_label.set_wrap(true);
+            error_label.add_css_class("error");
+            error_label.set_visible(false);
+            vbox.append(&error_label);
+
+            set_audio_match_region_entries(
+                &source_in_entry,
+                &source_out_entry,
+                crate::media::audio_match::AnalysisRegionNs {
+                    start_ns: 0,
+                    end_ns: source_duration_ns,
+                },
+                &frame_rate,
+            );
+
+            let candidates_for_update = candidates.clone();
+            let reference_hint_for_update = reference_hint.clone();
+            let reference_in_for_update = reference_in_entry.clone();
+            let reference_out_for_update = reference_out_entry.clone();
+            let frame_rate_for_update = frame_rate.clone();
+            let update_reference_range = Rc::new(move |selected: u32| {
+                if let Some(candidate) = candidates_for_update.get(selected as usize) {
+                    reference_hint_for_update.set_text(&format!(
+                        "Reference clip length: {}",
+                        crate::ui::timecode::format_ns_as_timecode(
+                            candidate.duration_ns,
+                            &frame_rate_for_update
+                        )
+                    ));
+                    set_audio_match_region_entries(
+                        &reference_in_for_update,
+                        &reference_out_for_update,
+                        crate::media::audio_match::AnalysisRegionNs {
+                            start_ns: 0,
+                            end_ns: candidate.duration_ns,
+                        },
+                        &frame_rate_for_update,
+                    );
+                }
+            });
+            update_reference_range(reference_dropdown.selected());
+            let update_reference_range_notify = update_reference_range.clone();
+            let error_label_for_reference_change = error_label.clone();
+            reference_dropdown.connect_selected_notify(move |dd| {
+                error_label_for_reference_change.set_visible(false);
+                update_reference_range_notify(dd.selected());
+            });
+
+            let dialog_for_mode = dialog.clone();
+            let mode_description_for_sync = mode_description.clone();
+            let region_box_for_sync = region_box.clone();
+            let sync_mode = Rc::new(move |selected: u32| {
+                sync_match_audio_mode_ui(
+                    &dialog_for_mode,
+                    &mode_description_for_sync,
+                    &region_box_for_sync,
+                    MatchAudioDialogMode::from_index(selected),
+                );
+            });
+            sync_mode(mode_dropdown.selected());
+            let sync_mode_notify = sync_mode.clone();
+            let error_label_for_mode_change = error_label.clone();
+            mode_dropdown.connect_selected_notify(move |dd| {
+                error_label_for_mode_change.set_visible(false);
+                sync_mode_notify(dd.selected());
+            });
+
+            let btn_row = GBox::new(Orientation::Horizontal, 8);
+            btn_row.set_halign(gtk4::Align::End);
+            let cancel_btn = Button::with_label("Cancel");
+            let ok_btn = Button::with_label("Match");
+            ok_btn.add_css_class("suggested-action");
+            btn_row.append(&cancel_btn);
+            btn_row.append(&ok_btn);
+            vbox.append(&btn_row);
+
+            let dialog_cancel = dialog.clone();
+            cancel_btn.connect_clicked(move |_| {
+                dialog_cancel.close();
+            });
+
+            let dialog_ok = dialog.clone();
+            let on_match_audio = on_match_audio.clone();
+            let candidates = candidates.clone();
+            let mode_dropdown = mode_dropdown.clone();
+            let reference_dropdown = reference_dropdown.clone();
+            let source_in_entry = source_in_entry.clone();
+            let source_out_entry = source_out_entry.clone();
+            let reference_in_entry = reference_in_entry.clone();
+            let reference_out_entry = reference_out_entry.clone();
+            let error_label = error_label.clone();
+            let frame_rate = frame_rate.clone();
+            ok_btn.connect_clicked(move |_| {
+                let idx = reference_dropdown.selected() as usize;
+                if idx >= candidates.len() {
+                    error_label.set_text("Select a reference clip.");
+                    error_label.set_visible(true);
+                    return;
+                }
+                let mode = MatchAudioDialogMode::from_index(mode_dropdown.selected());
+                let (source_region, reference_region) = if mode.shows_region_fields() {
+                    let source_region = match parse_audio_match_region_entries(
+                        &source_in_entry,
+                        &source_out_entry,
+                        source_duration_ns,
+                        &frame_rate,
+                        "Source",
+                    ) {
+                        Ok(region) => region,
+                        Err(error) => {
+                            error_label.set_text(&error);
+                            error_label.set_visible(true);
+                            return;
+                        }
+                    };
+                    let reference_region = match parse_audio_match_region_entries(
+                        &reference_in_entry,
+                        &reference_out_entry,
+                        candidates[idx].duration_ns,
+                        &frame_rate,
+                        "Reference",
+                    ) {
+                        Ok(region) => region,
+                        Err(error) => {
+                            error_label.set_text(&error);
+                            error_label.set_visible(true);
+                            return;
+                        }
+                    };
+                    (Some(source_region), Some(reference_region))
+                } else {
+                    (None, None)
+                };
+                error_label.set_visible(false);
+                on_match_audio(
+                    &source_clip_id,
+                    source_region,
+                    &candidates[idx].clip_id,
+                    reference_region,
+                );
+                dialog_ok.close();
+            });
+
+            dialog.present();
         });
     }
 
@@ -7921,6 +8360,7 @@ pub fn build_inspector(
         volume_slider,
         pan_slider,
         normalize_btn,
+        match_audio_btn,
         measured_loudness_label,
         ladspa_effects_list,
         channel_mode_dropdown,

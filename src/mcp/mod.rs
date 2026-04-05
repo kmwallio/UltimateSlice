@@ -425,6 +425,15 @@ pub enum McpCommand {
         target_level: f64,
         reply: SyncSender<Value>,
     },
+    MatchClipAudio {
+        source_clip_id: String,
+        source_start_ns: Option<u64>,
+        source_end_ns: Option<u64>,
+        reference_clip_id: String,
+        reference_start_ns: Option<u64>,
+        reference_end_ns: Option<u64>,
+        reply: SyncSender<Value>,
+    },
     DetectSceneCuts {
         clip_id: String,
         track_id: String,

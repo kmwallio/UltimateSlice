@@ -1,5 +1,5 @@
 pub mod widget;
-pub use widget::{build_timeline, ActiveTool, TimelineState};
+pub use widget::{build_timeline, ActiveTool, MusicGenerationTarget, TimelineState};
 
 /// Build the full timeline panel: timeline DrawingArea + track management bar.
 /// Returns `(panel_box, drawing_area)` — call `drawing_area.queue_draw()` to repaint.

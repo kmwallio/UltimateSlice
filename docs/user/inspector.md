@@ -105,6 +105,19 @@ The **Normalize...** button (next to the volume slider) analyzes the clip's loud
 
 MCP tool: `normalize_clip_audio` supports `mode` (`lufs` or `peak`) and `target_level` (e.g., `-14.0` for LUFS, `0.0` for peak dBFS).
 
+### Match Audio
+
+The **Match Audio...** button analyzes the selected clip against another audio-capable clip and applies a conservative reference match using integrated loudness plus the built-in **Low / Mid / High** EQ bands. It now derives the three bands' **frequency**, **gain**, and **Q** from a finer speech-focused spectrum analysis instead of only pushing fixed band gains. If the clips already have subtitle/STT timing, Match Audio prioritizes those dialogue regions; otherwise it falls back to voice-active frame weighting to reduce the influence of silence, room tone, and non-speech noise. This works best when both clips contain the same speaker or similar dialogue material, such as nudging a lav mic recording closer to a shotgun mic recording.
+
+- Pick the source clip in the timeline, click **Match Audio...**, then choose the reference clip.
+- **Match voice** is the default and recommended mode: it analyzes the full trimmed source/reference clips while still prioritizing dialogue or voice regions automatically.
+- Switch **Match mode** to **Choose region...** to reveal **Source In/Out** and **Reference In/Out** timecode fields when you want to match only a selected phrase. Those fields default to each clip's full trimmed duration and use the project frame rate for timecode entry.
+- UltimateSlice measures both clips in the background and applies one undoable update to the source clip's volume, measured loudness, and 3-band EQ settings.
+- While the analysis is running, the bottom status bar shows **Matching audio...** and the shared progress bar pulses until the result is applied or fails.
+- The result is a tonal nudge, not full microphone cloning: room reflections, de-reverb, compression, and noise reduction are out of scope for this first pass.
+
+MCP tool: `match_clip_audio` with `source_clip_id`, `reference_clip_id`, and optional `source_start_ns`, `source_end_ns`, `reference_start_ns`, `reference_end_ns`.
+
 ### Audio keyframes (phase 1)
 
 - Use **Set Volume Keyframe** / **Remove Volume Keyframe** for the volume lane.

@@ -36,3 +36,7 @@ For playback tuning and render-cache behavior, start with [preferences.md](prefe
 4. **Arrange** — drag clips to reposition; drag their edges to trim; press **B** for the Razor tool to split.
 5. **Adjust** — select a clip and use the Inspector panel (right side) for color, audio, speed, and titles.
 6. **Export** — click **Export…** in the toolbar and choose your codec, resolution, and output file.
+
+For AI-generated music beds, right-click an audio track header and choose **Generate Music Region…**, then drag an empty 1-30 second range and enter a prompt.
+
+For dialogue tone matching, select a timeline clip and use **Inspector → Audio → Match Audio…** with a reference clip. The dialog now defaults to a simple **Match voice** mode, while **Choose region...** unlocks exact source/reference timecode ranges for power users. The same workflow is available through MCP `match_clip_audio`.

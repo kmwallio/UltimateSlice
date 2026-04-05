@@ -14,7 +14,7 @@ use crate::model::transition::{
 };
 use crate::recent;
 use crate::ui::timecode;
-use crate::ui::timeline::{build_timeline_panel, TimelineState};
+use crate::ui::timeline::{build_timeline_panel, MusicGenerationTarget, TimelineState};
 use crate::ui::{
     audio_effects_browser, effects_browser, inspector, keyframe_editor, media_browser, preferences,
     preview, program_monitor, title_templates, titles_browser, toolbar,
@@ -306,6 +306,239 @@ fn flash_window_status_title(
             }
         }
     });
+}
+
+fn clip_kind_supports_audio_match(kind: &ClipKind) -> bool {
+    matches!(kind, ClipKind::Video | ClipKind::Audio)
+}
+
+const AUDIO_MATCH_SPEECH_PAD_NS: u64 = 80_000_000;
+
+fn collect_audio_match_speech_regions(
+    clip: &Clip,
+) -> Vec<crate::media::audio_match::AnalysisRegionNs> {
+    let clip_len_ns = clip.source_out.saturating_sub(clip.source_in);
+    if clip_len_ns == 0 {
+        return Vec::new();
+    }
+
+    let mut regions = Vec::new();
+    for segment in &clip.subtitle_segments {
+        if segment.words.is_empty() {
+            if let Some(region) =
+                padded_audio_match_region(segment.start_ns, segment.end_ns, clip_len_ns)
+            {
+                regions.push(region);
+            }
+            continue;
+        }
+
+        for word in &segment.words {
+            if let Some(region) = padded_audio_match_region(word.start_ns, word.end_ns, clip_len_ns)
+            {
+                regions.push(region);
+            }
+        }
+    }
+
+    merge_audio_match_speech_regions(regions)
+}
+
+fn padded_audio_match_region(
+    start_ns: u64,
+    end_ns: u64,
+    clip_len_ns: u64,
+) -> Option<crate::media::audio_match::AnalysisRegionNs> {
+    let start_ns = start_ns.saturating_sub(AUDIO_MATCH_SPEECH_PAD_NS);
+    let end_ns = end_ns
+        .saturating_add(AUDIO_MATCH_SPEECH_PAD_NS)
+        .min(clip_len_ns);
+    (end_ns > start_ns).then_some(crate::media::audio_match::AnalysisRegionNs { start_ns, end_ns })
+}
+
+fn merge_audio_match_speech_regions(
+    mut regions: Vec<crate::media::audio_match::AnalysisRegionNs>,
+) -> Vec<crate::media::audio_match::AnalysisRegionNs> {
+    if regions.is_empty() {
+        return regions;
+    }
+
+    regions.sort_by_key(|region| region.start_ns);
+    let mut merged = Vec::with_capacity(regions.len());
+    let mut current = regions[0];
+    for region in regions.into_iter().skip(1) {
+        if region.start_ns <= current.end_ns {
+            current.end_ns = current.end_ns.max(region.end_ns);
+        } else {
+            merged.push(current);
+            current = region;
+        }
+    }
+    merged.push(current);
+    merged
+}
+
+#[derive(Debug, Clone)]
+struct AudioMatchClipInfo {
+    track_id: String,
+    source_path: String,
+    source_in: u64,
+    source_out: u64,
+    duration_ns: u64,
+    speech_regions: Vec<crate::media::audio_match::AnalysisRegionNs>,
+    volume: f32,
+    measured_loudness_lufs: Option<f64>,
+    eq_bands: [crate::model::clip::EqBand; 3],
+    kind: ClipKind,
+}
+
+fn full_audio_match_region(duration_ns: u64) -> crate::media::audio_match::AnalysisRegionNs {
+    crate::media::audio_match::AnalysisRegionNs {
+        start_ns: 0,
+        end_ns: duration_ns,
+    }
+}
+
+fn resolve_audio_match_region(
+    clip: &AudioMatchClipInfo,
+    requested: Option<crate::media::audio_match::AnalysisRegionNs>,
+    label: &str,
+) -> Result<crate::media::audio_match::AnalysisRegionNs, String> {
+    let region = requested.unwrap_or_else(|| full_audio_match_region(clip.duration_ns));
+    if region.end_ns <= region.start_ns {
+        return Err(format!("{label} range end must be after start."));
+    }
+    if region.end_ns > clip.duration_ns {
+        return Err(format!("{label} range exceeds clip duration."));
+    }
+    Ok(region)
+}
+
+fn overlap_audio_match_regions(
+    a: crate::media::audio_match::AnalysisRegionNs,
+    b: crate::media::audio_match::AnalysisRegionNs,
+) -> Option<crate::media::audio_match::AnalysisRegionNs> {
+    let start_ns = a.start_ns.max(b.start_ns);
+    let end_ns = a.end_ns.min(b.end_ns);
+    (end_ns > start_ns).then_some(crate::media::audio_match::AnalysisRegionNs { start_ns, end_ns })
+}
+
+fn region_scoped_audio_match_clip_info(
+    clip: &AudioMatchClipInfo,
+    region: crate::media::audio_match::AnalysisRegionNs,
+) -> AudioMatchClipInfo {
+    let speech_regions = clip
+        .speech_regions
+        .iter()
+        .filter_map(|speech_region| overlap_audio_match_regions(*speech_region, region))
+        .map(|overlap| crate::media::audio_match::AnalysisRegionNs {
+            start_ns: overlap.start_ns.saturating_sub(region.start_ns),
+            end_ns: overlap.end_ns.saturating_sub(region.start_ns),
+        })
+        .collect();
+    AudioMatchClipInfo {
+        source_in: clip.source_in.saturating_add(region.start_ns),
+        source_out: clip.source_in.saturating_add(region.end_ns),
+        duration_ns: region.end_ns.saturating_sub(region.start_ns),
+        speech_regions,
+        ..clip.clone()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PreparedAudioMatch {
+    clip_id: String,
+    track_id: String,
+    source_region: crate::media::audio_match::AnalysisRegionNs,
+    reference_region: crate::media::audio_match::AnalysisRegionNs,
+    old_volume: f32,
+    new_volume: f32,
+    old_measured_loudness: Option<f64>,
+    new_measured_loudness: Option<f64>,
+    old_eq_bands: [crate::model::clip::EqBand; 3],
+    new_eq_bands: [crate::model::clip::EqBand; 3],
+    source_loudness_lufs: f64,
+    reference_loudness_lufs: f64,
+    volume_gain: f64,
+    source_profile: crate::media::audio_match::SpectralProfile,
+    reference_profile: crate::media::audio_match::SpectralProfile,
+}
+
+fn collect_audio_match_clip_info(project: &Project, clip_id: &str) -> Option<AudioMatchClipInfo> {
+    project.tracks.iter().find_map(|track| {
+        track
+            .clips
+            .iter()
+            .find(|clip| clip.id == clip_id)
+            .map(|clip| AudioMatchClipInfo {
+                track_id: track.id.clone(),
+                source_path: clip.source_path.clone(),
+                source_in: clip.source_in,
+                source_out: clip.source_out,
+                duration_ns: clip.source_out.saturating_sub(clip.source_in),
+                speech_regions: collect_audio_match_speech_regions(clip),
+                volume: clip.volume,
+                measured_loudness_lufs: clip.measured_loudness_lufs,
+                eq_bands: clip.eq_bands,
+                kind: clip.kind.clone(),
+            })
+    })
+}
+
+fn run_audio_match_for_clips(
+    source_clip_id: &str,
+    source: &AudioMatchClipInfo,
+    source_region: Option<crate::media::audio_match::AnalysisRegionNs>,
+    reference_clip_id: &str,
+    reference: &AudioMatchClipInfo,
+    reference_region: Option<crate::media::audio_match::AnalysisRegionNs>,
+) -> Result<PreparedAudioMatch, String> {
+    if source_clip_id == reference_clip_id {
+        return Err("Source and reference clips must be different.".to_string());
+    }
+
+    if !clip_kind_supports_audio_match(&source.kind) {
+        return Err("Source clip does not support audio matching.".to_string());
+    }
+    if !clip_kind_supports_audio_match(&reference.kind) {
+        return Err("Reference clip does not support audio matching.".to_string());
+    }
+
+    let source_region = resolve_audio_match_region(source, source_region, "Source")?;
+    let reference_region = resolve_audio_match_region(reference, reference_region, "Reference")?;
+    let source = region_scoped_audio_match_clip_info(source, source_region);
+    let reference = region_scoped_audio_match_clip_info(reference, reference_region);
+
+    let outcome =
+        crate::media::audio_match::run_audio_match(&crate::media::audio_match::AudioMatchParams {
+            source_path: source.source_path.clone(),
+            source_in_ns: source.source_in,
+            source_out_ns: source.source_out,
+            source_speech_regions: source.speech_regions.clone(),
+            reference_path: reference.source_path.clone(),
+            reference_in_ns: reference.source_in,
+            reference_out_ns: reference.source_out,
+            reference_speech_regions: reference.speech_regions.clone(),
+        })
+        .map_err(|e| e.to_string())?;
+
+    Ok(PreparedAudioMatch {
+        clip_id: source_clip_id.to_string(),
+        track_id: source.track_id.clone(),
+        source_region,
+        reference_region,
+        old_volume: source.volume,
+        new_volume: (source.volume as f64 * outcome.volume_gain).clamp(0.0, 4.0) as f32,
+        old_measured_loudness: source.measured_loudness_lufs,
+        new_measured_loudness: Some(outcome.source_loudness_lufs),
+        old_eq_bands: source.eq_bands,
+        new_eq_bands: outcome.eq_bands,
+        source_loudness_lufs: outcome.source_loudness_lufs,
+        reference_loudness_lufs: outcome.reference_loudness_lufs,
+        volume_gain: outcome.volume_gain,
+        source_profile: outcome.source_profile,
+        reference_profile: outcome.reference_profile,
+    })
 }
 
 /// Evaluate a clip's keyframe-interpolated transform at a given playhead position.
@@ -1372,6 +1605,89 @@ fn overwrite_clip_range_on_track(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn audio_match_clip_info_with_regions(
+        duration_ns: u64,
+        speech_regions: Vec<crate::media::audio_match::AnalysisRegionNs>,
+    ) -> AudioMatchClipInfo {
+        AudioMatchClipInfo {
+            track_id: "track-1".to_string(),
+            source_path: "/tmp/source.wav".to_string(),
+            source_in: 10_000_000_000,
+            source_out: 10_000_000_000 + duration_ns,
+            duration_ns,
+            speech_regions,
+            volume: 1.0,
+            measured_loudness_lufs: None,
+            eq_bands: crate::model::clip::default_eq_bands(),
+            kind: ClipKind::Audio,
+        }
+    }
+
+    #[test]
+    fn resolve_audio_match_region_defaults_to_full_clip() {
+        let clip = audio_match_clip_info_with_regions(5_000_000_000, Vec::new());
+        let region = resolve_audio_match_region(&clip, None, "Source")
+            .expect("default region should cover the full clip");
+        assert_eq!(region, full_audio_match_region(clip.duration_ns));
+    }
+
+    #[test]
+    fn resolve_audio_match_region_rejects_out_of_bounds_ranges() {
+        let clip = audio_match_clip_info_with_regions(5_000_000_000, Vec::new());
+        let err = resolve_audio_match_region(
+            &clip,
+            Some(crate::media::audio_match::AnalysisRegionNs {
+                start_ns: 1_000_000_000,
+                end_ns: 6_000_000_000,
+            }),
+            "Reference",
+        )
+        .expect_err("range beyond clip duration should fail");
+        assert_eq!(err, "Reference range exceeds clip duration.");
+    }
+
+    #[test]
+    fn region_scoped_audio_match_clip_info_rebases_speech_regions() {
+        let clip = audio_match_clip_info_with_regions(
+            8_000_000_000,
+            vec![
+                crate::media::audio_match::AnalysisRegionNs {
+                    start_ns: 500_000_000,
+                    end_ns: 2_000_000_000,
+                },
+                crate::media::audio_match::AnalysisRegionNs {
+                    start_ns: 3_000_000_000,
+                    end_ns: 6_500_000_000,
+                },
+            ],
+        );
+
+        let scoped = region_scoped_audio_match_clip_info(
+            &clip,
+            crate::media::audio_match::AnalysisRegionNs {
+                start_ns: 1_000_000_000,
+                end_ns: 5_000_000_000,
+            },
+        );
+
+        assert_eq!(scoped.source_in, 11_000_000_000);
+        assert_eq!(scoped.source_out, 15_000_000_000);
+        assert_eq!(scoped.duration_ns, 4_000_000_000);
+        assert_eq!(
+            scoped.speech_regions,
+            vec![
+                crate::media::audio_match::AnalysisRegionNs {
+                    start_ns: 0,
+                    end_ns: 1_000_000_000,
+                },
+                crate::media::audio_match::AnalysisRegionNs {
+                    start_ns: 2_000_000_000,
+                    end_ns: 4_000_000_000,
+                },
+            ]
+        );
+    }
 
     #[test]
     fn collect_project_library_entries_keeps_distinct_sourceless_titles() {
@@ -3739,6 +4055,7 @@ pub fn build_window(
     let timeline_panel_cell: Rc<RefCell<Option<gtk4::Widget>>> = Rc::new(RefCell::new(None));
     // Shared flag for normalize-in-progress state (used by callback + button UI).
     let norm_in_progress: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
+    let match_audio_in_progress: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
     let keyframe_editor_cell: Rc<RefCell<Option<Rc<keyframe_editor::KeyframeEditorView>>>> =
         Rc::new(RefCell::new(None));
     // transform_overlay_cell holds the TransformOverlay after the program monitor is built.
@@ -4471,6 +4788,142 @@ pub fn build_window(
                 });
             }
         },
+        // on_match_audio: analyse source/reference audio and apply volume + EQ together
+        {
+            type MatchAudioResult = Result<PreparedAudioMatch, String>;
+            let match_rx: Rc<RefCell<Option<std::sync::mpsc::Receiver<MatchAudioResult>>>> =
+                Rc::new(RefCell::new(None));
+            let match_in_progress = match_audio_in_progress.clone();
+
+            {
+                let match_rx = match_rx.clone();
+                let match_in_progress = match_in_progress.clone();
+                let project = project.clone();
+                let timeline_state = timeline_state.clone();
+                let on_project_changed = on_project_changed.clone();
+                let window_weak = window_weak.clone();
+                glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+                    let rx_opt = match_rx.borrow();
+                    if let Some(ref rx) = *rx_opt {
+                        if let Ok(result) = rx.try_recv() {
+                            drop(rx_opt);
+                            match_rx.borrow_mut().take();
+                            match_in_progress.set(false);
+                            match result {
+                                Ok(prepared) => {
+                                    {
+                                        let mut proj = project.borrow_mut();
+                                        let cmd = crate::undo::MatchClipAudioCommand {
+                                            clip_id: prepared.clip_id.clone(),
+                                            track_id: prepared.track_id.clone(),
+                                            old_volume: prepared.old_volume,
+                                            new_volume: prepared.new_volume,
+                                            old_measured_loudness: prepared.old_measured_loudness,
+                                            new_measured_loudness: prepared.new_measured_loudness,
+                                            old_eq_bands: prepared.old_eq_bands,
+                                            new_eq_bands: prepared.new_eq_bands,
+                                        };
+                                        let mut ts = timeline_state.borrow_mut();
+                                        ts.history.execute(Box::new(cmd), &mut proj);
+                                    }
+                                    on_project_changed();
+                                    if let Some(win) = window_weak.upgrade() {
+                                        flash_window_status_title(
+                                            &win,
+                                            &project,
+                                            "Audio match applied",
+                                        );
+                                    }
+                                    log::info!(
+                                        "audio_match: clip={} gain={:.3} lufs {:.1}->{:.1} profile src({:.1},{:.1},{:.1}) ref({:.1},{:.1},{:.1})",
+                                        prepared.clip_id,
+                                        prepared.volume_gain,
+                                        prepared.source_loudness_lufs,
+                                        prepared.reference_loudness_lufs,
+                                        prepared.source_profile.low_db,
+                                        prepared.source_profile.mid_db,
+                                        prepared.source_profile.high_db,
+                                        prepared.reference_profile.low_db,
+                                        prepared.reference_profile.mid_db,
+                                        prepared.reference_profile.high_db
+                                    );
+                                }
+                                Err(e) => {
+                                    log::warn!("Audio match failed: {e}");
+                                    if let Some(win) = window_weak.upgrade() {
+                                        flash_window_status_title(
+                                            &win,
+                                            &project,
+                                            &format!("Audio match failed: {e}"),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    glib::ControlFlow::Continue
+                });
+            }
+
+            let project = project.clone();
+            let window_weak = window_weak.clone();
+            let match_in_progress = match_in_progress.clone();
+            move |source_clip_id: &str,
+                  source_region: Option<crate::media::audio_match::AnalysisRegionNs>,
+                  reference_clip_id: &str,
+                  reference_region: Option<crate::media::audio_match::AnalysisRegionNs>| {
+                if match_in_progress.get() {
+                    return;
+                }
+                let clip_info = {
+                    let proj = project.borrow();
+                    let source = collect_audio_match_clip_info(&proj, source_clip_id)
+                        .ok_or_else(|| "Source clip not found.".to_string());
+                    let reference = collect_audio_match_clip_info(&proj, reference_clip_id)
+                        .ok_or_else(|| "Reference clip not found.".to_string());
+                    match (source, reference) {
+                        (Ok(source), Ok(reference)) => Ok((source, reference)),
+                        (Err(e), _) | (_, Err(e)) => Err(e),
+                    }
+                };
+                let (source, reference) = match clip_info {
+                    Ok(pair) => pair,
+                    Err(message) => {
+                        if let Some(win) = window_weak.upgrade() {
+                            flash_window_status_title(
+                                &win,
+                                &project,
+                                &format!("Audio match failed: {message}"),
+                            );
+                        }
+                        return;
+                    }
+                };
+
+                match_in_progress.set(true);
+                if let Some(win) = window_weak.upgrade() {
+                    let proj = project.borrow();
+                    win.set_title(Some(&format!(
+                        "UltimateSlice — {} (Matching audio…)",
+                        proj.title
+                    )));
+                }
+                let source_clip_id = source_clip_id.to_string();
+                let reference_clip_id = reference_clip_id.to_string();
+                let (tx, rx) = std::sync::mpsc::channel();
+                *match_rx.borrow_mut() = Some(rx);
+                std::thread::spawn(move || {
+                    let _ = tx.send(run_audio_match_for_clips(
+                        &source_clip_id,
+                        &source,
+                        source_region,
+                        &reference_clip_id,
+                        &reference,
+                        reference_region,
+                    ));
+                });
+            }
+        },
         // on_duck_changed: update track duck settings from inspector
         {
             let project = project.clone();
@@ -4541,6 +4994,26 @@ pub fn build_window(
                     btn.set_label("Normalize\u{2026}");
                     // The measured loudness label will be updated by on_project_changed
                     // via the inspector's update() method.
+                }
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+    // Sync Match Audio button state with in-progress flag.
+    {
+        let btn = inspector_view.match_audio_btn.clone();
+        let in_progress = match_audio_in_progress.clone();
+        let mut was_in_progress = false;
+        glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
+            let now = in_progress.get();
+            if now != was_in_progress {
+                was_in_progress = now;
+                if now {
+                    btn.set_sensitive(false);
+                    btn.set_label("Matching\u{2026}");
+                } else {
+                    btn.set_sensitive(true);
+                    btn.set_label("Match Audio\u{2026}");
                 }
             }
             glib::ControlFlow::Continue
@@ -6727,12 +7200,30 @@ pub fn build_window(
         ));
     }
 
+    {
+        let project = project.clone();
+        let timeline_panel_cell = timeline_panel_cell.clone();
+        let window_weak = window.downgrade();
+        timeline_state.borrow_mut().on_music_generation_status =
+            Some(Rc::new(move |message: String| {
+                if let Some(win) = window_weak.upgrade() {
+                    flash_window_status_title(&win, &project, &message);
+                }
+                if let Some(ref w) = *timeline_panel_cell.borrow() {
+                    w.queue_draw();
+                }
+            }));
+    }
+
     // Wire on_generate_music — opens a dialog to generate music via MusicGen AI.
     {
         let music_gen_cache = music_gen_cache.clone();
+        let project = project.clone();
+        let timeline_state_for_music = timeline_state.clone();
+        let timeline_panel_cell = timeline_panel_cell.clone();
         let window_weak = window.downgrade();
         timeline_state.borrow_mut().on_generate_music =
-            Some(Rc::new(move |track_id: String, playhead_ns: u64| {
+            Some(Rc::new(move |target: MusicGenerationTarget| {
                 let win = match window_weak.upgrade() {
                     Some(w) => w,
                     None => return,
@@ -6767,8 +7258,15 @@ pub fn build_window(
                     return;
                 }
 
+                let fixed_duration_ns = target.requested_duration_ns();
+                let fixed_duration_secs = fixed_duration_ns.map(|ns| ns as f64 / 1_000_000_000.0);
+                let dialog_title = if fixed_duration_ns.is_some() {
+                    "Generate Music Region"
+                } else {
+                    "Generate Music"
+                };
                 let dialog = gtk::Dialog::builder()
-                    .title("Generate Music")
+                    .title(dialog_title)
                     .default_width(400)
                     .modal(true)
                     .transient_for(&win)
@@ -6809,12 +7307,36 @@ pub fn build_window(
 
                 body.append(&prompt_label);
                 body.append(&prompt_scroll);
-                body.append(&dur_label);
-                body.append(&dur_spin);
+                if let (Some(duration_ns), Some(end_ns)) =
+                    (fixed_duration_ns, target.timeline_end_ns)
+                {
+                    let region_summary = gtk::Label::new(Some(&format!(
+                        "Selected region: {} - {} ({:.1}s)",
+                        format_source_keyword_time(target.timeline_start_ns),
+                        format_source_keyword_time(end_ns),
+                        duration_ns as f64 / 1_000_000_000.0
+                    )));
+                    region_summary.set_halign(gtk::Align::Start);
+                    region_summary.set_wrap(true);
+                    region_summary.add_css_class("dim-label");
+                    body.append(&region_summary);
+
+                    let fixed_duration_label =
+                        gtk::Label::new(Some("Duration is fixed by the selected region."));
+                    fixed_duration_label.set_halign(gtk::Align::Start);
+                    fixed_duration_label.add_css_class("dim-label");
+                    body.append(&fixed_duration_label);
+                } else {
+                    body.append(&dur_label);
+                    body.append(&dur_spin);
+                }
                 body.append(&hint);
                 dialog.content_area().append(&body);
 
                 let music_gen_cache = music_gen_cache.clone();
+                let timeline_state = timeline_state_for_music.clone();
+                let timeline_panel_cell = timeline_panel_cell.clone();
+                let _project = project.clone();
                 dialog.connect_response(move |d, resp| {
                     if resp == gtk::ResponseType::Accept {
                         let buffer = prompt_entry.buffer();
@@ -6825,15 +7347,32 @@ pub fn build_window(
                             d.close();
                             return;
                         }
-                        let duration_secs = dur_spin.value();
+                        let duration_secs = fixed_duration_secs.unwrap_or_else(|| dur_spin.value());
+                        let requested_end_ns = target.timeline_end_ns.unwrap_or_else(|| {
+                            target
+                                .timeline_start_ns
+                                .saturating_add((duration_secs * 1_000_000_000.0).round() as u64)
+                        });
                         let job_id = uuid::Uuid::new_v4().to_string();
+                        {
+                            let mut st = timeline_state.borrow_mut();
+                            st.add_pending_music_generation_overlay(
+                                job_id.clone(),
+                                target.track_id.clone(),
+                                target.timeline_start_ns,
+                                requested_end_ns,
+                            );
+                        }
+                        if let Some(ref w) = *timeline_panel_cell.borrow() {
+                            w.queue_draw();
+                        }
                         let job = crate::media::music_gen::MusicGenJob {
                             job_id,
                             prompt,
                             duration_secs,
                             output_path: std::path::PathBuf::new(),
-                            track_id: track_id.clone(),
-                            timeline_start_ns: playhead_ns,
+                            track_id: target.track_id.clone(),
+                            timeline_start_ns: target.timeline_start_ns,
                         };
                         music_gen_cache.borrow_mut().request(job);
                     }
@@ -9958,6 +10497,7 @@ pub fn build_window(
     let status_progress = gtk::ProgressBar::new();
     status_progress.set_hexpand(true);
     status_progress.set_show_text(true);
+    status_progress.set_pulse_step(0.12);
     status_progress.set_text(Some("Idle"));
     status_progress.add_css_class("proxy-progress");
     status_progress.set_visible(false);
@@ -10929,9 +11469,11 @@ pub fn build_window(
         let audio_sync_in_progress = audio_sync_in_progress.clone();
         let silence_detect_in_progress = silence_detect_in_progress.clone();
         let scene_detect_in_progress = scene_detect_in_progress.clone();
+        let match_audio_in_progress = match_audio_in_progress.clone();
         let music_gen_cache = music_gen_cache.clone();
         let project_for_music = project.clone();
         let timeline_state_music = timeline_state.clone();
+        let timeline_panel_cell_music = timeline_panel_cell.clone();
         let on_project_changed_music = on_project_changed.clone();
         let window_weak_music = window.downgrade();
         let inspector_view = inspector_view.clone();
@@ -11056,43 +11598,67 @@ pub fn build_window(
             let syncing_audio = audio_sync_in_progress.get();
             let detecting_silence = silence_detect_in_progress.get();
             let detecting_scene_cuts = scene_detect_in_progress.get();
+            let matching_audio = match_audio_in_progress.get();
             // Poll music generation results and place completed clips.
             let music_progress = music_gen_cache.borrow().progress();
             let music_active = music_progress.in_flight;
             {
                 let music_results = music_gen_cache.borrow_mut().poll();
                 for result in music_results {
-                    if result.success && result.output_path.exists() {
-                        let clip = crate::model::clip::Clip::new(
-                            result.output_path.to_string_lossy().as_ref(),
-                            result.duration_ns,
-                            result.timeline_start_ns,
-                            crate::model::clip::ClipKind::Audio,
-                        );
-                        let proj = project_for_music.borrow();
-                        if let Some(track) = proj.tracks.iter().find(|t| t.id == result.track_id) {
-                            let old_clips = track.clips.clone();
-                            let mut new_clips = old_clips.clone();
-                            new_clips.push(clip);
-                            new_clips.sort_by_key(|c| c.timeline_start);
-                            drop(proj);
-                            let mut ts = timeline_state_music.borrow_mut();
-                            let proj_rc = ts.project.clone();
-                            let mut proj = proj_rc.borrow_mut();
-                            let cmd = crate::undo::SetTrackClipsCommand {
-                                track_id: result.track_id.clone(),
-                                old_clips,
-                                new_clips,
-                                label: "Generate music".to_string(),
+                    let mut error = None;
+                    if result.success {
+                        if !result.output_path.exists() {
+                            error = Some("Generated audio file was not found.".to_string());
+                        } else {
+                            let clip = crate::model::clip::Clip::new(
+                                result.output_path.to_string_lossy().as_ref(),
+                                result.duration_ns,
+                                result.timeline_start_ns,
+                                crate::model::clip::ClipKind::Audio,
+                            );
+                            let track_snapshot = {
+                                let proj = project_for_music.borrow();
+                                proj.track_ref(&result.track_id)
+                                    .map(|track| track.clips.clone())
                             };
-                            ts.history.execute(Box::new(cmd), &mut proj);
-                            proj.dirty = true;
-                            drop(proj);
-                            drop(ts);
-                            on_project_changed_music();
+                            if let Some(old_clips) = track_snapshot {
+                                let mut new_clips = old_clips.clone();
+                                new_clips.push(clip);
+                                new_clips.sort_by_key(|c| c.timeline_start);
+                                let mut ts = timeline_state_music.borrow_mut();
+                                let proj_rc = ts.project.clone();
+                                let mut proj = proj_rc.borrow_mut();
+                                let cmd = crate::undo::SetTrackClipsCommand {
+                                    track_id: result.track_id.clone(),
+                                    old_clips,
+                                    new_clips,
+                                    label: "Generate music".to_string(),
+                                };
+                                ts.history.execute(Box::new(cmd), &mut proj);
+                                proj.dirty = true;
+                                ts.resolve_music_generation_overlay_success(&result.job_id);
+                                drop(proj);
+                                drop(ts);
+                                on_project_changed_music();
+                                if let Some(win) = window_weak_music.upgrade() {
+                                    flash_window_status_title(
+                                        &win,
+                                        &project_for_music,
+                                        "Music generation complete",
+                                    );
+                                }
+                            } else {
+                                error = Some("Target audio track no longer exists.".to_string());
+                            }
                         }
-                    } else if !result.success {
-                        let err = result.error.unwrap_or_else(|| "Unknown error".into());
+                    } else {
+                        error = Some(result.error.unwrap_or_else(|| "Unknown error".into()));
+                    }
+
+                    if let Some(err) = error {
+                        timeline_state_music
+                            .borrow_mut()
+                            .mark_music_generation_overlay_failed(&result.job_id, err.clone());
                         log::error!("Music generation failed: {err}");
                         if let Some(win) = window_weak_music.upgrade() {
                             flash_window_status_title(
@@ -11102,6 +11668,9 @@ pub fn build_window(
                             );
                         }
                     }
+                    if let Some(ref w) = *timeline_panel_cell_music.borrow() {
+                        w.queue_draw();
+                    }
                 }
             }
             if proxy_active
@@ -11109,6 +11678,7 @@ pub fn build_window(
                 || syncing_audio
                 || detecting_silence
                 || detecting_scene_cuts
+                || matching_audio
                 || music_active
                 || bg_active
                 || stt_active
@@ -11123,6 +11693,9 @@ pub fn build_window(
                 }
                 if detecting_scene_cuts {
                     parts.push("Detecting scene cuts\u{2026}".to_string());
+                }
+                if matching_audio {
+                    parts.push("Matching audio\u{2026}".to_string());
                 }
                 if music_active {
                     parts.push("Generating music\u{2026}".to_string());
@@ -11174,6 +11747,11 @@ pub fn build_window(
                         (bg_progress.completed as f64 / bg_progress.total as f64).clamp(0.0, 0.99);
                     status_progress.set_fraction(fraction);
                     status_progress.set_text(Some(&format!("{:.0}%", fraction * 100.0)));
+                } else if matching_audio {
+                    status_progress.set_visible(true);
+                    status_progress.set_fraction(0.0);
+                    status_progress.pulse();
+                    status_progress.set_text(Some("Matching…"));
                 } else {
                     status_progress.set_visible(false);
                 }
@@ -13931,6 +14509,117 @@ fn handle_mcp_command(
                 reply
                     .send(serde_json::json!({"success": false, "error": "Clip not found"}))
                     .ok();
+            }
+        }
+
+        McpCommand::MatchClipAudio {
+            source_clip_id,
+            source_start_ns,
+            source_end_ns,
+            reference_clip_id,
+            reference_start_ns,
+            reference_end_ns,
+            reply,
+        } => {
+            let clip_info = {
+                let proj = project.borrow();
+                let source = collect_audio_match_clip_info(&proj, &source_clip_id)
+                    .ok_or_else(|| "Source clip not found.".to_string());
+                let reference = collect_audio_match_clip_info(&proj, &reference_clip_id)
+                    .ok_or_else(|| "Reference clip not found.".to_string());
+                match (source, reference) {
+                    (Ok(source), Ok(reference)) => Ok((source, reference)),
+                    (Err(e), _) | (_, Err(e)) => Err(e),
+                }
+            };
+            match clip_info.and_then(|(source, reference)| {
+                let source_region = if source_start_ns.is_some() || source_end_ns.is_some() {
+                    Some(crate::media::audio_match::AnalysisRegionNs {
+                        start_ns: source_start_ns.unwrap_or(0),
+                        end_ns: source_end_ns.unwrap_or(source.duration_ns),
+                    })
+                } else {
+                    None
+                };
+                let reference_region = if reference_start_ns.is_some() || reference_end_ns.is_some()
+                {
+                    Some(crate::media::audio_match::AnalysisRegionNs {
+                        start_ns: reference_start_ns.unwrap_or(0),
+                        end_ns: reference_end_ns.unwrap_or(reference.duration_ns),
+                    })
+                } else {
+                    None
+                };
+                run_audio_match_for_clips(
+                    &source_clip_id,
+                    &source,
+                    source_region,
+                    &reference_clip_id,
+                    &reference,
+                    reference_region,
+                )
+            }) {
+                Ok(prepared) => {
+                    {
+                        let mut proj = project.borrow_mut();
+                        let cmd = crate::undo::MatchClipAudioCommand {
+                            clip_id: prepared.clip_id.clone(),
+                            track_id: prepared.track_id.clone(),
+                            old_volume: prepared.old_volume,
+                            new_volume: prepared.new_volume,
+                            old_measured_loudness: prepared.old_measured_loudness,
+                            new_measured_loudness: prepared.new_measured_loudness,
+                            old_eq_bands: prepared.old_eq_bands,
+                            new_eq_bands: prepared.new_eq_bands,
+                        };
+                        let mut ts = timeline_state.borrow_mut();
+                        ts.history.execute(Box::new(cmd), &mut proj);
+                    }
+                    reply
+                        .send(serde_json::json!({
+                            "success": true,
+                            "source_clip_id": source_clip_id,
+                            "reference_clip_id": reference_clip_id,
+                            "source_range_ns": {
+                                "start": prepared.source_region.start_ns,
+                                "end": prepared.source_region.end_ns,
+                            },
+                            "reference_range_ns": {
+                                "start": prepared.reference_region.start_ns,
+                                "end": prepared.reference_region.end_ns,
+                            },
+                            "source_loudness_lufs": prepared.source_loudness_lufs,
+                            "reference_loudness_lufs": prepared.reference_loudness_lufs,
+                            "gain_linear": prepared.volume_gain,
+                            "old_volume": prepared.old_volume,
+                            "new_volume": prepared.new_volume,
+                            "eq_bands": prepared.new_eq_bands.iter().map(|band| serde_json::json!({
+                                "freq": band.freq,
+                                "gain": band.gain,
+                                "q": band.q,
+                            })).collect::<Vec<_>>(),
+                            "source_profile_db": {
+                                "low": prepared.source_profile.low_db,
+                                "mid": prepared.source_profile.mid_db,
+                                "high": prepared.source_profile.high_db,
+                            },
+                            "reference_profile_db": {
+                                "low": prepared.reference_profile.low_db,
+                                "mid": prepared.reference_profile.mid_db,
+                                "high": prepared.reference_profile.high_db,
+                            }
+                        }))
+                        .ok();
+                    on_project_changed();
+                }
+                Err(error) => {
+                    reply
+                        .send(serde_json::json!({
+                            "success": false,
+                            "error": error,
+                        }))
+                        .ok();
+                }
             }
         }
 
