@@ -84,7 +84,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_PREVIEW_AUDIO_GAIN: f64 = 3.981_071_705_5; // +12 dB
-const BACKGROUND_PRERENDER_CACHE_VERSION: u32 = 4;
+const BACKGROUND_PRERENDER_CACHE_VERSION: u32 = 5;
 const PROGRAM_PREVIEW_AUDIO_RATE: i32 = 48_000;
 const PROGRAM_PREVIEW_AUDIO_CHANNELS: i32 = 2;
 const MAX_READY_PRERENDER_SEGMENTS: usize = 24;
@@ -5636,12 +5636,11 @@ impl ProgramPlayer {
     }
 
     fn clip_has_unsupported_background_prerender_audio_effects(clip: &ProgramClip) -> bool {
-        clip.has_audio
-            && (clip.pan.abs() > 0.001
-                || clip.eq_bands.iter().any(|band| band.gain.abs() > 0.001)
-                || clip.ladspa_effects.iter().any(|effect| effect.enabled)
-                || clip.pitch_shift_semitones.abs() > 0.001
-                || clip.duck)
+        // Audio effects no longer block prerendering.  The prerender bakes
+        // audio at current levels; audio property changes are excluded from
+        // the signature so they don't invalidate cached segments.
+        let _ = clip;
+        false
     }
 
     fn clip_has_unsupported_background_prerender_features(clip: &ProgramClip) -> bool {
@@ -5649,7 +5648,6 @@ impl ProgramPlayer {
             || clip.is_freeze_frame()
             || clip.reverse
             || (clip.speed - 1.0).abs() > 0.001
-            || Self::clip_has_unsupported_background_prerender_audio_effects(clip)
     }
 
     fn active_has_unsupported_background_prerender_features(&self, active: &[usize]) -> bool {
@@ -6982,8 +6980,9 @@ impl ProgramPlayer {
             clip.transition_after_ns,
             clip.transition_alignment,
         );
-        clip.volume.to_bits().hash(hasher);
-        Self::hash_prerender_keyframes(hasher, &clip.volume_keyframes);
+        // Volume, pan, and EQ are excluded from the prerender signature.
+        // Audio is baked at current levels; changes don't invalidate the
+        // cached segment — the next idle render cycle picks up new levels.
         clip.brightness.to_bits().hash(hasher);
         Self::hash_prerender_keyframes(hasher, &clip.brightness_keyframes);
         clip.contrast.to_bits().hash(hasher);
@@ -15976,16 +15975,18 @@ mod tests {
     }
 
     #[test]
-    fn clip_has_unsupported_background_prerender_features_detects_speed_and_audio_fx() {
+    fn clip_has_unsupported_background_prerender_features_detects_speed() {
         let mut clip = make_clip();
         assert!(!ProgramPlayer::clip_has_unsupported_background_prerender_features(&clip));
 
         clip.speed = 1.25;
         assert!(ProgramPlayer::clip_has_unsupported_background_prerender_features(&clip));
 
+        // Audio effects no longer block prerendering — audio is baked at
+        // current levels and excluded from the signature.
         clip.speed = 1.0;
         clip.pan = 0.4;
-        assert!(ProgramPlayer::clip_has_unsupported_background_prerender_features(&clip));
+        assert!(!ProgramPlayer::clip_has_unsupported_background_prerender_features(&clip));
     }
 
     #[test]
