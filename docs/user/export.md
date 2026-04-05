@@ -95,8 +95,9 @@ Fade lengths are clamped safely for very short clips and overlap boundaries so e
 
 ## Video Transitions
 
-Export applies supported primary-track video transitions using the same duration and alignment timing shown in the Timeline and Program Monitor.
+Export applies the supported primary-track transition set using the same duration and alignment timing shown in the Timeline and Program Monitor.
 
+- The Inspector and **Transitions** pane expose the preview-supported transition set: `Cross-dissolve`, `Fade to black`, `Fade to white`, `Wipe left/right/up/down`, `Circle open/close`, `Cover left/right/up/down`, `Reveal left/right/up/down`, and `Slide left/right/up/down`.
 - **End on cut**: the overlap finishes at the cut.
 - **Center on cut**: the overlap is split across the cut.
 - **Start on cut**: the overlap begins at the cut.

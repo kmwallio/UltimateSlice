@@ -1,8 +1,11 @@
 use crate::media::adjustment_scope::AdjustmentScopeShape;
 use crate::media::cube_lut::CubeLut;
 use crate::media::player::PlayerState;
-use crate::model::clip::{Clip as ModelClip, NumericKeyframe};
-use crate::model::transition::{TransitionAlignment, TransitionOverlapWindow};
+use crate::model::clip::{Clip as ModelClip, ClipMask, MaskShape, NumericKeyframe};
+use crate::model::transition::{
+    canonicalize_transition_kind, transition_kind_from_xfade_name, transition_xfade_name_for_kind,
+    TransitionAlignment, TransitionOverlapWindow,
+};
 use crate::ui_state::{
     clamp_prerender_crf, CrossfadeCurve, PlaybackPriority, PrerenderEncodingPreset,
     DEFAULT_PRERENDER_CRF,
@@ -69,6 +72,7 @@ fn eq_set_band_gain(element: &gst::Element, band_idx: u32, gain: f64) {
 }
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::f64::consts::FRAC_1_SQRT_2;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::Path;
@@ -485,6 +489,32 @@ enum TransitionRole {
     Incoming,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransitionDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+impl TransitionDirection {
+    fn unit_vector(self) -> (f64, f64) {
+        match self {
+            Self::Left => (-1.0, 0.0),
+            Self::Right => (1.0, 0.0),
+            Self::Up => (0.0, -1.0),
+            Self::Down => (0.0, 1.0),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransitionMotionKind {
+    Cover,
+    Reveal,
+    Slide,
+}
+
 /// Per-slot transition state computed from timeline position.
 #[derive(Debug, Clone)]
 struct TransitionState {
@@ -494,6 +524,129 @@ struct TransitionState {
     progress: f64,
     /// Whether this slot's clip is the outgoing or incoming clip.
     role: TransitionRole,
+}
+
+const TRANSITION_MASK_EDGE_FEATHER: f64 = 0.01;
+// Half-width/height large enough for a centered circle to reach all four corners.
+const TRANSITION_FULL_FRAME_CIRCLE_RADIUS: f64 = FRAC_1_SQRT_2 + 0.01;
+
+fn transition_preview_background_pattern(
+    active_states: &[Option<TransitionState>],
+) -> &'static str {
+    if active_states
+        .iter()
+        .flatten()
+        .any(|ts| ts.kind == "fade_to_white")
+    {
+        "white"
+    } else {
+        "black"
+    }
+}
+
+fn transition_preview_mask(kind: &str, role: TransitionRole, progress: f64) -> Option<ClipMask> {
+    let progress = progress.clamp(0.0, 1.0);
+    match (kind, role) {
+        ("circle_open", TransitionRole::Incoming) => Some(transition_preview_circle_mask(
+            TRANSITION_FULL_FRAME_CIRCLE_RADIUS * progress,
+            false,
+        )),
+        ("circle_close", TransitionRole::Incoming) => Some(transition_preview_circle_mask(
+            TRANSITION_FULL_FRAME_CIRCLE_RADIUS * (1.0 - progress),
+            true,
+        )),
+        _ => None,
+    }
+}
+
+fn transition_preview_circle_mask(radius: f64, invert: bool) -> ClipMask {
+    let mut mask = ClipMask::new(MaskShape::Ellipse);
+    let radius = radius.max(0.0);
+    mask.width = radius;
+    mask.height = radius;
+    mask.feather = TRANSITION_MASK_EDGE_FEATHER;
+    mask.invert = invert;
+    mask
+}
+
+fn transition_direction(kind: &str) -> Option<TransitionDirection> {
+    match kind {
+        "wipe_left" | "cover_left" | "reveal_left" | "slide_left" => {
+            Some(TransitionDirection::Left)
+        }
+        "wipe_right" | "cover_right" | "reveal_right" | "slide_right" => {
+            Some(TransitionDirection::Right)
+        }
+        "wipeup" | "cover_up" | "reveal_up" | "slide_up" => Some(TransitionDirection::Up),
+        "wipedown" | "cover_down" | "reveal_down" | "slide_down" => Some(TransitionDirection::Down),
+        _ => None,
+    }
+}
+
+fn transition_motion_kind(kind: &str) -> Option<TransitionMotionKind> {
+    match kind {
+        "cover_left" | "cover_right" | "cover_up" | "cover_down" => {
+            Some(TransitionMotionKind::Cover)
+        }
+        "reveal_left" | "reveal_right" | "reveal_up" | "reveal_down" => {
+            Some(TransitionMotionKind::Reveal)
+        }
+        "slide_left" | "slide_right" | "slide_up" | "slide_down" => {
+            Some(TransitionMotionKind::Slide)
+        }
+        _ => None,
+    }
+}
+
+fn transition_preview_canvas_offset(
+    kind: &str,
+    role: TransitionRole,
+    progress: f64,
+) -> Option<(f64, f64)> {
+    let progress = progress.clamp(0.0, 1.0);
+    let motion_kind = transition_motion_kind(kind)?;
+    let (dir_x, dir_y) = transition_direction(kind)?.unit_vector();
+    match (motion_kind, role) {
+        (TransitionMotionKind::Cover, TransitionRole::Incoming)
+        | (TransitionMotionKind::Slide, TransitionRole::Incoming) => {
+            Some((-dir_x * (1.0 - progress), -dir_y * (1.0 - progress)))
+        }
+        (TransitionMotionKind::Reveal, TransitionRole::Outgoing)
+        | (TransitionMotionKind::Slide, TransitionRole::Outgoing) => {
+            Some((dir_x * progress, dir_y * progress))
+        }
+        _ => None,
+    }
+}
+
+fn transition_preview_outgoing_should_draw_on_top(kind: &str) -> bool {
+    matches!(
+        kind,
+        "reveal_left" | "reveal_right" | "reveal_up" | "reveal_down"
+    )
+}
+
+fn transition_uses_wipe_crop(kind: &str) -> bool {
+    matches!(kind, "wipe_right" | "wipe_left" | "wipeup" | "wipedown")
+}
+
+fn transition_preserves_slot_alpha(kind: &str) -> bool {
+    transition_uses_wipe_crop(kind)
+        || matches!(kind, "circle_open" | "circle_close")
+        || transition_motion_kind(kind).is_some()
+}
+
+fn merged_transition_preview_masks(
+    base_masks: &[ClipMask],
+    tstate: Option<&TransitionState>,
+) -> Vec<ClipMask> {
+    let mut masks = base_masks.to_vec();
+    if let Some(ts) = tstate {
+        if let Some(mask) = transition_preview_mask(ts.kind.as_str(), ts.role, ts.progress) {
+            masks.push(mask);
+        }
+    }
+    masks
 }
 
 #[derive(Clone, Debug)]
@@ -2773,9 +2926,12 @@ impl ProgramPlayer {
                 c.tint_at_timeline_ns(frame_pos_ns)
                     .to_bits()
                     .hash(&mut hasher);
-                c.transition_after.hash(&mut hasher);
-                c.transition_after_ns.hash(&mut hasher);
-                c.transition_alignment.hash(&mut hasher);
+                Self::hash_transition_cache_state(
+                    &mut hasher,
+                    &c.transition_after,
+                    c.transition_after_ns,
+                    c.transition_alignment,
+                );
                 c.title_text.hash(&mut hasher);
                 c.title_font.hash(&mut hasher);
                 c.title_color.hash(&mut hasher);
@@ -5597,7 +5753,7 @@ impl ProgramPlayer {
         if let Some(window) = Self::outgoing_transition_window_for_clip(clip) {
             if let Some(progress) = window.progress_at(timeline_pos_ns) {
                 return Some(TransitionState {
-                    kind: clip.transition_after.clone(),
+                    kind: canonicalize_transition_kind(&clip.transition_after),
                     progress,
                     role: TransitionRole::Outgoing,
                 });
@@ -5609,7 +5765,7 @@ impl ProgramPlayer {
         {
             if let Some(progress) = window.progress_at(timeline_pos_ns) {
                 return Some(TransitionState {
-                    kind: self.clips[prev_idx].transition_after.clone(),
+                    kind: canonicalize_transition_kind(&self.clips[prev_idx].transition_after),
                     progress,
                     role: TransitionRole::Incoming,
                 });
@@ -5708,31 +5864,82 @@ impl ProgramPlayer {
         }
     }
 
-    /// Apply transition visual effects (alpha, crop) to all visible slots
+    /// Apply transition visual effects (alpha, crop, motion) to all visible slots
     /// based on the current timeline position.
     fn apply_transition_effects(&self, timeline_pos: u64) {
-        let (proc_w, _proc_h) = self.preview_processing_dimensions();
-        for slot in &self.slots {
+        let (proc_w, proc_h) = self.preview_processing_dimensions();
+        let active = self.clips_active_at(timeline_pos);
+        let transition_states: Vec<Option<TransitionState>> = self
+            .slots
+            .iter()
+            .map(|slot| {
+                if slot.hidden || slot.is_prerender_slot {
+                    None
+                } else {
+                    self.compute_transition_state(slot.clip_idx, timeline_pos)
+                }
+            })
+            .collect();
+        let mut slot_zorders: HashMap<usize, u32> = active
+            .iter()
+            .enumerate()
+            .map(|(idx, &clip_idx)| (clip_idx, (idx + 1) as u32))
+            .collect();
+        for (slot, tstate) in self.slots.iter().zip(transition_states.iter()) {
+            let Some(ts) = tstate.as_ref() else {
+                continue;
+            };
+            if ts.role != TransitionRole::Outgoing
+                || !transition_preview_outgoing_should_draw_on_top(ts.kind.as_str())
+            {
+                continue;
+            }
+            let Some(incoming_idx) = Self::adjacent_next_same_track(&self.clips, slot.clip_idx)
+            else {
+                continue;
+            };
+            let Some(outgoing_zorder) = slot_zorders.get(&slot.clip_idx).copied() else {
+                continue;
+            };
+            let Some(incoming_zorder) = slot_zorders.get(&incoming_idx).copied() else {
+                continue;
+            };
+            slot_zorders.insert(slot.clip_idx, incoming_zorder);
+            slot_zorders.insert(incoming_idx, outgoing_zorder);
+        }
+        self.background_src.set_property_from_str(
+            "pattern",
+            transition_preview_background_pattern(&transition_states),
+        );
+        for (slot, tstate) in self.slots.iter().zip(transition_states.iter()) {
             if slot.hidden || slot.is_prerender_slot {
                 continue;
             }
             let clip = &self.clips[slot.clip_idx];
-            let tstate = self.compute_transition_state(slot.clip_idx, timeline_pos);
+            if let Ok(mut guard) = slot.mask_data.lock() {
+                *guard = merged_transition_preview_masks(&clip.masks, tstate.as_ref());
+            }
             if let Some(ref pad) = slot.compositor_pad {
+                if let Some(zorder) = slot_zorders.get(&slot.clip_idx).copied() {
+                    pad.set_property("zorder", zorder);
+                }
                 let base_alpha = clip.opacity_at_timeline_ns(timeline_pos).clamp(0.0, 1.0);
-                let effective_alpha = match &tstate {
+                let scale = clip.scale_at_timeline_ns(timeline_pos);
+                let pos_x = clip.position_x_at_timeline_ns(timeline_pos);
+                let pos_y = clip.position_y_at_timeline_ns(timeline_pos);
+                let effective_alpha = match tstate.as_ref() {
                     Some(ts) => {
                         let t = ts.progress;
                         match (ts.kind.as_str(), ts.role) {
                             ("cross_dissolve", TransitionRole::Outgoing) => base_alpha * (1.0 - t),
                             ("cross_dissolve", TransitionRole::Incoming) => base_alpha * t,
-                            ("fade_to_black", TransitionRole::Outgoing) => {
+                            ("fade_to_black" | "fade_to_white", TransitionRole::Outgoing) => {
                                 base_alpha * (1.0 - 2.0 * t).max(0.0)
                             }
-                            ("fade_to_black", TransitionRole::Incoming) => {
+                            ("fade_to_black" | "fade_to_white", TransitionRole::Incoming) => {
                                 base_alpha * (2.0 * t - 1.0).max(0.0)
                             }
-                            ("wipe_right", _) | ("wipe_left", _) => base_alpha,
+                            _ if transition_preserves_slot_alpha(ts.kind.as_str()) => base_alpha,
                             _ => match ts.role {
                                 TransitionRole::Outgoing => base_alpha * (1.0 - t),
                                 TransitionRole::Incoming => base_alpha * t,
@@ -5748,31 +5955,61 @@ impl ProgramPlayer {
                 } else {
                     pad.set_property("alpha", effective_alpha);
                 }
+                if let Some((canvas_x, canvas_y)) = tstate.as_ref().and_then(|ts| {
+                    transition_preview_canvas_offset(ts.kind.as_str(), ts.role, ts.progress)
+                }) {
+                    Self::apply_zoom_to_slot_with_canvas_offset(
+                        slot,
+                        pad,
+                        scale,
+                        pos_x,
+                        pos_y,
+                        proc_w,
+                        proc_h,
+                        (canvas_x * proc_w as f64).round() as i32,
+                        (canvas_y * proc_h as f64).round() as i32,
+                    );
+                }
             }
             // Wipe transitions: animate videocrop on incoming clip to progressively reveal.
-            if let Some(ref ts) = tstate {
-                if (ts.kind == "wipe_right" || ts.kind == "wipe_left")
+            if let Some(ts) = tstate.as_ref() {
+                if transition_uses_wipe_crop(ts.kind.as_str())
                     && ts.role == TransitionRole::Incoming
                 {
                     let t = ts.progress;
-                    let crop_px = ((1.0 - t) * proc_w as f64).round() as i32;
                     if let Some(ref vc) = slot.videocrop {
                         let user_cl = clip.crop_left_at_timeline_ns(timeline_pos).max(0);
                         let user_cr = clip.crop_right_at_timeline_ns(timeline_pos).max(0);
                         let user_ct = clip.crop_top_at_timeline_ns(timeline_pos).max(0);
                         let user_cb = clip.crop_bottom_at_timeline_ns(timeline_pos).max(0);
                         if ts.kind == "wipe_right" {
+                            let crop_px = ((1.0 - t) * proc_w as f64).round() as i32;
                             // Reveal from left to right: crop the right side.
                             vc.set_property("left", user_cl);
                             vc.set_property("right", user_cr + crop_px);
                             vc.set_property("top", user_ct);
                             vc.set_property("bottom", user_cb);
-                        } else {
+                        } else if ts.kind == "wipe_left" {
+                            let crop_px = ((1.0 - t) * proc_w as f64).round() as i32;
                             // Reveal from right to left: crop the left side.
                             vc.set_property("left", user_cl + crop_px);
                             vc.set_property("right", user_cr);
                             vc.set_property("top", user_ct);
                             vc.set_property("bottom", user_cb);
+                        } else if ts.kind == "wipeup" {
+                            let crop_px = ((1.0 - t) * proc_h as f64).round() as i32;
+                            // Reveal from bottom to top: crop the top side.
+                            vc.set_property("left", user_cl);
+                            vc.set_property("right", user_cr);
+                            vc.set_property("top", user_ct + crop_px);
+                            vc.set_property("bottom", user_cb);
+                        } else {
+                            let crop_px = ((1.0 - t) * proc_h as f64).round() as i32;
+                            // Reveal from top to bottom: crop the bottom side.
+                            vc.set_property("left", user_cl);
+                            vc.set_property("right", user_cr);
+                            vc.set_property("top", user_ct);
+                            vc.set_property("bottom", user_cb + crop_px);
                         }
                     }
                     // Re-pad with transparent borders to maintain frame dimensions.
@@ -5782,22 +6019,32 @@ impl ProgramPlayer {
                         let user_ct = clip.crop_top_at_timeline_ns(timeline_pos).max(0);
                         let user_cb = clip.crop_bottom_at_timeline_ns(timeline_pos).max(0);
                         if ts.kind == "wipe_right" {
+                            let crop_px = ((1.0 - t) * proc_w as f64).round() as i32;
                             vb.set_property("left", -user_cl);
                             vb.set_property("right", -(user_cr + crop_px));
                             vb.set_property("top", -user_ct);
                             vb.set_property("bottom", -user_cb);
-                        } else {
+                        } else if ts.kind == "wipe_left" {
+                            let crop_px = ((1.0 - t) * proc_w as f64).round() as i32;
                             vb.set_property("left", -(user_cl + crop_px));
                             vb.set_property("right", -user_cr);
                             vb.set_property("top", -user_ct);
                             vb.set_property("bottom", -user_cb);
+                        } else if ts.kind == "wipeup" {
+                            let crop_px = ((1.0 - t) * proc_h as f64).round() as i32;
+                            vb.set_property("left", -user_cl);
+                            vb.set_property("right", -user_cr);
+                            vb.set_property("top", -(user_ct + crop_px));
+                            vb.set_property("bottom", -user_cb);
+                        } else {
+                            let crop_px = ((1.0 - t) * proc_h as f64).round() as i32;
+                            vb.set_property("left", -user_cl);
+                            vb.set_property("right", -user_cr);
+                            vb.set_property("top", -user_ct);
+                            vb.set_property("bottom", -(user_cb + crop_px));
                         }
                         vb.set_property("border-alpha", 0.0_f64);
                     }
-                } else if tstate.is_none() || !(ts.kind == "wipe_right" || ts.kind == "wipe_left") {
-                    // Not in a wipe transition — ensure crop reflects user values only.
-                    // (Skip reset if this slot is the outgoing clip of a wipe, since
-                    // the outgoing clip's crop stays at user values naturally.)
                 }
             }
         }
@@ -6058,23 +6305,11 @@ impl ProgramPlayer {
     }
 
     fn supported_transition_prerender_kind(kind: &str) -> Option<&'static str> {
-        match kind {
-            "cross_dissolve" => Some("fade"),
-            "fade_to_black" => Some("fadeblack"),
-            "wipe_right" => Some("wiperight"),
-            "wipe_left" => Some("wipeleft"),
-            _ => None,
-        }
+        transition_xfade_name_for_kind(kind)
     }
 
     fn transition_kind_for_prerender_metric(xfade_transition: &str) -> &'static str {
-        match xfade_transition {
-            "fade" => "cross_dissolve",
-            "fadeblack" => "fade_to_black",
-            "wiperight" => "wipe_right",
-            "wipeleft" => "wipe_left",
-            _ => "unknown",
-        }
+        transition_kind_from_xfade_name(xfade_transition).unwrap_or("unknown")
     }
 
     fn record_transition_prerender_metric(&mut self, transition_kind: &str, hit: bool) {
@@ -6691,6 +6926,17 @@ impl ProgramPlayer {
         }
     }
 
+    fn hash_transition_cache_state(
+        hasher: &mut DefaultHasher,
+        kind: &str,
+        duration_ns: u64,
+        alignment: TransitionAlignment,
+    ) {
+        canonicalize_transition_kind(kind).hash(hasher);
+        duration_ns.hash(hasher);
+        alignment.hash(hasher);
+    }
+
     fn hash_prerender_clip_state(
         hasher: &mut DefaultHasher,
         clip: &ProgramClip,
@@ -6728,6 +6974,14 @@ impl ProgramPlayer {
         Self::hash_prerender_keyframes(hasher, &clip.position_y_keyframes);
         clip.opacity.to_bits().hash(hasher);
         Self::hash_prerender_keyframes(hasher, &clip.opacity_keyframes);
+        // Transition settings must participate in prerender cache keys so
+        // changing a boundary type/duration/alignment cannot reuse a stale segment.
+        Self::hash_transition_cache_state(
+            hasher,
+            &clip.transition_after,
+            clip.transition_after_ns,
+            clip.transition_alignment,
+        );
         clip.volume.to_bits().hash(hasher);
         Self::hash_prerender_keyframes(hasher, &clip.volume_keyframes);
         clip.brightness.to_bits().hash(hasher);
@@ -8287,6 +8541,30 @@ impl ProgramPlayer {
         project_width: u32,
         project_height: u32,
     ) {
+        Self::apply_zoom_to_slot_with_canvas_offset(
+            slot,
+            pad,
+            scale,
+            position_x,
+            position_y,
+            project_width,
+            project_height,
+            0,
+            0,
+        );
+    }
+
+    fn apply_zoom_to_slot_with_canvas_offset(
+        slot: &VideoSlot,
+        pad: &gst::Pad,
+        scale: f64,
+        position_x: f64,
+        position_y: f64,
+        project_width: u32,
+        project_height: u32,
+        extra_x_px: i32,
+        extra_y_px: i32,
+    ) {
         let scale = scale.clamp(0.1, 4.0);
         let pw = project_width as f64;
         let ph = project_height as f64;
@@ -8309,8 +8587,8 @@ impl ProgramPlayer {
             if pad.find_property("xpos").is_some() && pad.find_property("ypos").is_some() {
                 let total_x = pw * (scale - 1.0);
                 let total_y = ph * (scale - 1.0);
-                let xpos = (-(total_x * (1.0 + position_x) / 2.0)).round() as i32;
-                let ypos = (-(total_y * (1.0 + position_y) / 2.0)).round() as i32;
+                let xpos = (-(total_x * (1.0 + position_x) / 2.0)).round() as i32 + extra_x_px;
+                let ypos = (-(total_y * (1.0 + position_y) / 2.0)).round() as i32 + extra_y_px;
                 pad.set_property("xpos", xpos);
                 pad.set_property("ypos", ypos);
             }
@@ -9652,50 +9930,52 @@ impl ProgramPlayer {
         // 2b. Shape mask alpha probe — multiplies alpha channel by mask SDF.
         //     Placed after crop (cropped regions stay transparent) and before
         //     color effects so the mask operates in pre-transform clip space.
-        let need_mask = clip.masks.iter().any(|m| m.enabled);
         // Populate the shared mask data for live updates from inspector sliders.
         *mask_shared.lock().unwrap() = clip.masks.clone();
-        if need_mask {
-            if let Some(mask_identity) = gst::ElementFactory::make("identity").build().ok() {
-                let mask_ref = mask_shared.clone();
-                mask_identity.static_pad("src").unwrap().add_probe(
-                    gst::PadProbeType::BUFFER,
-                    move |_pad, info| {
-                        if let Some(gst::PadProbeData::Buffer(ref mut buffer)) = info.data {
-                            let masks = mask_ref.lock().unwrap().clone();
-                            if masks.iter().any(|m| m.enabled) {
-                                let buf = buffer.make_mut();
-                                let pts_ns = buf.pts().map(|p| p.nseconds()).unwrap_or(0);
-                                if let Ok(mut map) = buf.map_writable() {
-                                    let data = map.as_mut_slice();
-                                    let total = data.len();
-                                    if total >= 4 {
-                                        let (width, height) =
-                                            if let Some(caps) = _pad.current_caps() {
-                                                let s = caps.structure(0).unwrap();
-                                                (
-                                                    s.get::<i32>("width").unwrap_or(0) as usize,
-                                                    s.get::<i32>("height").unwrap_or(0) as usize,
-                                                )
-                                            } else {
-                                                let pixels = total / 4;
-                                                let w = (pixels as f64).sqrt() as usize;
-                                                (w, if w > 0 { pixels / w } else { 0 })
-                                            };
-                                        if width > 0 && height > 0 && width * height * 4 <= total {
-                                            crate::media::mask_alpha::apply_masks_to_rgba_buffer(
-                                                &masks, data, width, height, pts_ns,
-                                            );
-                                        }
+        // Always keep the live mask stage in the bin so transition previews can
+        // inject temporary masks even when the clip has no authored masks.
+        if let Some(mask_identity) = gst::ElementFactory::make("identity")
+            .property("name", "us-mask-identity")
+            .build()
+            .ok()
+        {
+            let mask_ref = mask_shared.clone();
+            mask_identity.static_pad("src").unwrap().add_probe(
+                gst::PadProbeType::BUFFER,
+                move |_pad, info| {
+                    if let Some(gst::PadProbeData::Buffer(ref mut buffer)) = info.data {
+                        let masks = mask_ref.lock().unwrap().clone();
+                        if masks.iter().any(|m| m.enabled) {
+                            let buf = buffer.make_mut();
+                            let pts_ns = buf.pts().map(|p| p.nseconds()).unwrap_or(0);
+                            if let Ok(mut map) = buf.map_writable() {
+                                let data = map.as_mut_slice();
+                                let total = data.len();
+                                if total >= 4 {
+                                    let (width, height) = if let Some(caps) = _pad.current_caps() {
+                                        let s = caps.structure(0).unwrap();
+                                        (
+                                            s.get::<i32>("width").unwrap_or(0) as usize,
+                                            s.get::<i32>("height").unwrap_or(0) as usize,
+                                        )
+                                    } else {
+                                        let pixels = total / 4;
+                                        let w = (pixels as f64).sqrt() as usize;
+                                        (w, if w > 0 { pixels / w } else { 0 })
+                                    };
+                                    if width > 0 && height > 0 && width * height * 4 <= total {
+                                        crate::media::mask_alpha::apply_masks_to_rgba_buffer(
+                                            &masks, data, width, height, pts_ns,
+                                        );
                                     }
                                 }
                             }
                         }
-                        gst::PadProbeReturn::Ok
-                    },
-                );
-                chain.push(mask_identity);
-            }
+                    }
+                    gst::PadProbeReturn::Ok
+                },
+            );
+            chain.push(mask_identity);
         }
         // 3. Effects at project resolution (much cheaper than source res).
         if let Some(ref e) = conv1 {
@@ -15101,9 +15381,9 @@ fn clip_can_fully_occlude(clip: &ProgramClip) -> bool {
 mod tests {
     use super::{
         clip_can_fully_occlude, CachedPlayheadFrame, ProgramClip, ProgramPlayer, ScopeFrame,
-        ShortFrameCache, ThreePointParabola, TransitionPrerenderSpec, VideoSlot,
+        ShortFrameCache, ThreePointParabola, TransitionPrerenderSpec, TransitionRole, VideoSlot,
     };
-    use crate::model::clip::{KeyframeInterpolation, NumericKeyframe};
+    use crate::model::clip::{KeyframeInterpolation, MaskShape, NumericKeyframe};
     use crate::model::transition::TransitionAlignment;
     use crate::ui_state::{PrerenderEncodingPreset, DEFAULT_PRERENDER_CRF};
     use gstreamer as gst;
@@ -15792,6 +16072,130 @@ mod tests {
     fn transition_metric_decay_preserves_singleton_counts() {
         assert_eq!(ProgramPlayer::decay_transition_metric_count(0), 0);
         assert_eq!(ProgramPlayer::decay_transition_metric_count(1), 1);
+    }
+
+    #[test]
+    fn transition_preview_mask_expands_circle_open() {
+        let mask = super::transition_preview_mask("circle_open", TransitionRole::Incoming, 0.5)
+            .expect("circle_open should build a preview mask");
+        assert_eq!(mask.shape, MaskShape::Ellipse);
+        assert!(!mask.invert);
+        assert!((mask.width - mask.height).abs() < 1e-9);
+        assert!(
+            (mask.width - super::TRANSITION_FULL_FRAME_CIRCLE_RADIUS * 0.5).abs() < 1e-9,
+            "unexpected circle_open radius: {}",
+            mask.width
+        );
+    }
+
+    #[test]
+    fn transition_preview_mask_inverts_circle_close() {
+        let mask = super::transition_preview_mask("circle_close", TransitionRole::Incoming, 0.25)
+            .expect("circle_close should build a preview mask");
+        assert_eq!(mask.shape, MaskShape::Ellipse);
+        assert!(mask.invert);
+        assert!(
+            (mask.width - super::TRANSITION_FULL_FRAME_CIRCLE_RADIUS * 0.75).abs() < 1e-9,
+            "unexpected circle_close radius: {}",
+            mask.width
+        );
+    }
+
+    #[test]
+    fn transition_preview_canvas_offset_moves_cover_left_incoming_from_right() {
+        let (x, y) =
+            super::transition_preview_canvas_offset("cover_left", TransitionRole::Incoming, 0.25)
+                .expect("cover_left should offset the incoming slot");
+        assert!(
+            (x - 0.75).abs() < 1e-9,
+            "unexpected cover_left x offset: {x}"
+        );
+        assert!(
+            (y - 0.0).abs() < 1e-9,
+            "unexpected cover_left y offset: {y}"
+        );
+    }
+
+    #[test]
+    fn transition_preview_canvas_offset_moves_reveal_down_outgoing_downward() {
+        let (x, y) =
+            super::transition_preview_canvas_offset("reveal_down", TransitionRole::Outgoing, 0.5)
+                .expect("reveal_down should offset the outgoing slot");
+        assert!(
+            (x - 0.0).abs() < 1e-9,
+            "unexpected reveal_down x offset: {x}"
+        );
+        assert!(
+            (y - 0.5).abs() < 1e-9,
+            "unexpected reveal_down y offset: {y}"
+        );
+    }
+
+    #[test]
+    fn transition_preview_canvas_offset_moves_slide_up_both_slots() {
+        let (incoming_x, incoming_y) =
+            super::transition_preview_canvas_offset("slide_up", TransitionRole::Incoming, 0.4)
+                .expect("slide_up incoming should offset");
+        let (outgoing_x, outgoing_y) =
+            super::transition_preview_canvas_offset("slide_up", TransitionRole::Outgoing, 0.4)
+                .expect("slide_up outgoing should offset");
+        assert!(
+            (incoming_x - 0.0).abs() < 1e-9 && (incoming_y - 0.6).abs() < 1e-9,
+            "unexpected slide_up incoming offset: ({incoming_x}, {incoming_y})"
+        );
+        assert!(
+            (outgoing_x - 0.0).abs() < 1e-9 && (outgoing_y + 0.4).abs() < 1e-9,
+            "unexpected slide_up outgoing offset: ({outgoing_x}, {outgoing_y})"
+        );
+    }
+
+    #[test]
+    fn transition_preview_canvas_offset_ignores_wipes() {
+        assert!(super::transition_preview_canvas_offset(
+            "wipe_right",
+            TransitionRole::Incoming,
+            0.5
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn build_effects_bin_keeps_live_mask_stage_without_authored_masks() {
+        use gst::prelude::*;
+
+        let _ = gst::init();
+        let clip = make_clip();
+        let mask_shared = Arc::new(Mutex::new(Vec::new()));
+        let (effects_bin, ..) =
+            ProgramPlayer::build_effects_bin(&clip, false, 640, 360, 640, 360, None, mask_shared);
+        assert!(
+            effects_bin.by_name("us-mask-identity").is_some(),
+            "effects bin should keep the live mask stage even when clip.masks is empty"
+        );
+    }
+
+    #[test]
+    fn fade_to_white_switches_preview_background() {
+        let states = vec![
+            Some(super::TransitionState {
+                kind: "cross_dissolve".to_string(),
+                progress: 0.25,
+                role: TransitionRole::Outgoing,
+            }),
+            Some(super::TransitionState {
+                kind: "fade_to_white".to_string(),
+                progress: 0.5,
+                role: TransitionRole::Incoming,
+            }),
+        ];
+        assert_eq!(
+            super::transition_preview_background_pattern(&states),
+            "white"
+        );
+        assert_eq!(
+            super::transition_preview_background_pattern(&[None]),
+            "black"
+        );
     }
 
     #[test]
@@ -16529,6 +16933,52 @@ mod tests {
         let after = player.prerender_signature_for_active(&[0]);
 
         assert_ne!(before, after);
+    }
+
+    #[test]
+    fn prerender_signature_changes_when_transition_changes() {
+        let mut first_hasher = DefaultHasher::new();
+        let mut second_hasher = DefaultHasher::new();
+        let mut first_clip = make_clip();
+        let mut second_clip = make_clip();
+        first_clip.transition_after = "cross_dissolve".to_string();
+        first_clip.transition_after_ns = 500_000_000;
+        second_clip.transition_after = "circle_open".to_string();
+        second_clip.transition_after_ns = 500_000_000;
+        ProgramPlayer::hash_prerender_clip_state(
+            &mut first_hasher,
+            &first_clip,
+            &first_clip.source_path,
+        );
+        ProgramPlayer::hash_prerender_clip_state(
+            &mut second_hasher,
+            &second_clip,
+            &second_clip.source_path,
+        );
+        assert_ne!(first_hasher.finish(), second_hasher.finish());
+    }
+
+    #[test]
+    fn prerender_signature_canonicalizes_transition_aliases() {
+        let mut first_hasher = DefaultHasher::new();
+        let mut second_hasher = DefaultHasher::new();
+        let mut first_clip = make_clip();
+        let mut second_clip = make_clip();
+        first_clip.transition_after = "circleopen".to_string();
+        first_clip.transition_after_ns = 500_000_000;
+        second_clip.transition_after = "circle_open".to_string();
+        second_clip.transition_after_ns = 500_000_000;
+        ProgramPlayer::hash_prerender_clip_state(
+            &mut first_hasher,
+            &first_clip,
+            &first_clip.source_path,
+        );
+        ProgramPlayer::hash_prerender_clip_state(
+            &mut second_hasher,
+            &second_clip,
+            &second_clip.source_path,
+        );
+        assert_eq!(first_hasher.finish(), second_hasher.finish());
     }
 
     #[test]

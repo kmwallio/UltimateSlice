@@ -1006,7 +1006,7 @@ fn tools_list() -> Value {
                 "properties": {
                     "track_index": { "type": "integer", "description": "0-based track index." },
                     "clip_index":  { "type": "integer", "description": "0-based clip index within the track (must have a next clip)." },
-                    "kind":        { "type": "string",  "description": "Transition kind. Use 'cross_dissolve' to set, or empty string to clear." },
+                    "kind":        { "type": "string",  "description": "Transition kind. Use any supported transition id from the Inspector/Transitions pane (for example 'cross_dissolve', 'circle_open', or 'slide_left'), or empty string to clear." },
                     "duration_ns": { "type": "integer", "description": "Transition duration in nanoseconds." },
                     "alignment":   { "type": "string",  "description": "Overlap placement: 'end_on_cut' (default), 'center_on_cut', or 'start_on_cut'." }
                 },

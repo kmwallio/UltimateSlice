@@ -14,6 +14,7 @@ use super::schema::*;
 use crate::model::clip::ClipKind;
 use crate::model::project::Project;
 use crate::model::track::TrackKind;
+use crate::model::transition::transition_label_for_kind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OtioMediaPathMode {
@@ -289,7 +290,9 @@ fn write_otio_with_mode(
                 let split = clip.outgoing_transition.cut_split();
                 children.push(OtioTrackChild::Transition(OtioTransition {
                     schema: "Transition.1".into(),
-                    name: clip.outgoing_transition.kind.replace('_', " "),
+                    name: transition_label_for_kind(clip.outgoing_transition.kind_trimmed())
+                        .unwrap_or(clip.outgoing_transition.kind.as_str())
+                        .to_string(),
                     transition_type: otio_transition_type(&clip.outgoing_transition.kind).into(),
                     in_offset: ns_to_rational_time(split.before_cut_ns, rate),
                     out_offset: ns_to_rational_time(split.after_cut_ns, rate),

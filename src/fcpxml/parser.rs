@@ -4,7 +4,10 @@ use crate::model::clip::{
 };
 use crate::model::project::{FrameRate, Project};
 use crate::model::track::{Track, TrackHeightPreset};
-use crate::model::transition::{OutgoingTransition, TransitionAlignment};
+use crate::model::transition::{
+    canonicalize_transition_kind, transition_kind_from_display_name, OutgoingTransition,
+    TransitionAlignment,
+};
 use anyhow::{anyhow, bail, Result};
 use quick_xml::escape::unescape;
 use quick_xml::events::Event;
@@ -1361,7 +1364,7 @@ fn parse_asset_clip(
                 clip.lut_paths = vec![v.clone()];
             }
             if let Some(v) = attrs.get("us:transition-after") {
-                clip.outgoing_transition.kind = v.clone();
+                clip.outgoing_transition.kind = canonicalize_transition_kind(v);
             }
             if let Some(v) = attrs.get("us:transition-after-ns") {
                 clip.outgoing_transition.duration_ns = v.parse().unwrap_or(0);
@@ -1627,18 +1630,7 @@ fn apply_adjust_panner(
 }
 
 fn transition_kind_from_name(name: &str) -> Option<&'static str> {
-    let token: String = name
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .flat_map(|ch| ch.to_lowercase())
-        .collect();
-    match token.as_str() {
-        "crossdissolve" | "dissolve" | "fade" => Some("cross_dissolve"),
-        "fadetoblack" | "fadeblack" => Some("fade_to_black"),
-        "wiperight" => Some("wipe_right"),
-        "wipeleft" => Some("wipe_left"),
-        _ => None,
-    }
+    transition_kind_from_display_name(name)
 }
 
 fn apply_transition(
@@ -1659,6 +1651,10 @@ fn apply_transition(
     let kind = attrs
         .get("name")
         .and_then(|name| transition_kind_from_name(name))
+        .or_else(|| {
+            let existing = clip.outgoing_transition.kind_trimmed();
+            (!existing.is_empty()).then_some(existing)
+        })
         .unwrap_or("cross_dissolve");
     let before_cut_ns = attrs
         .get("offset")

@@ -9,7 +9,8 @@ use crate::model::media_library::{
 use crate::model::project::Project;
 use crate::model::track::TrackKind;
 use crate::model::transition::{
-    validate_track_transition_request, TransitionAlignment, SUPPORTED_TRANSITION_KINDS,
+    supported_transition_definitions, supported_transition_kinds,
+    validate_track_transition_request, TransitionAlignment,
 };
 use crate::recent;
 use crate::ui::timecode;
@@ -3240,7 +3241,7 @@ fn clip_to_program_clips(
         pitch_preserve: c.pitch_preserve,
         anamorphic_desqueeze: c.anamorphic_desqueeze,
         track_index,
-        transition_after: c.outgoing_transition.kind.clone(),
+        transition_after: c.outgoing_transition.kind_trimmed().to_string(),
         transition_after_ns: c.outgoing_transition.duration_ns,
         transition_alignment: c.outgoing_transition.alignment,
         lut_paths: c.lut_paths.clone(),
@@ -9682,11 +9683,22 @@ pub fn build_window(
 
     right_sidebar.append(&multicam_panel);
 
+    let right_sidebar_default_split_pos =
+        crate::ui_state::WorkspaceArrangement::default().right_sidebar_paned_pos;
+    let transitions_last_visible_split_pos = Rc::new(Cell::new(right_sidebar_default_split_pos));
+    let right_sidebar_paned = Paned::new(Orientation::Vertical);
+    right_sidebar_paned.set_vexpand(true);
+    right_sidebar_paned.set_hexpand(true);
+    right_sidebar_paned.set_position(right_sidebar_default_split_pos);
+    right_sidebar_paned.set_resize_start_child(true);
+    right_sidebar_paned.set_shrink_start_child(false);
+    right_sidebar_paned.set_resize_end_child(true);
+    right_sidebar_paned.set_shrink_end_child(false);
+
     let inspector_scroll = ScrolledWindow::new();
     inspector_scroll.set_vexpand(true);
     inspector_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     inspector_scroll.set_child(Some(&inspector_box));
-    right_sidebar.append(&inspector_scroll);
 
     let transitions_header = gtk::Box::new(Orientation::Horizontal, 6);
     let transitions_title = gtk::Label::new(Some("Transitions"));
@@ -9696,13 +9708,18 @@ pub fn build_window(
     transitions_toggle.add_css_class("small-btn");
     transitions_header.append(&transitions_title);
     transitions_header.append(&transitions_toggle);
-    right_sidebar.append(&transitions_header);
 
     let transitions_revealer = gtk::Revealer::new();
     transitions_revealer.set_reveal_child(true);
+    transitions_revealer.set_vexpand(true);
     let transitions_list = gtk::ListBox::new();
     transitions_list.add_css_class("boxed-list");
     transitions_list.set_selection_mode(gtk::SelectionMode::None);
+    let transitions_scroll = ScrolledWindow::new();
+    transitions_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    transitions_scroll.set_min_content_height(120);
+    transitions_scroll.set_vexpand(true);
+    transitions_scroll.set_child(Some(&transitions_list));
 
     // Helper: add a transition row with drag-source to the list.
     let add_transition_row = |list: &gtk::ListBox, display: &str, kind: &str| {
@@ -9730,13 +9747,18 @@ pub fn build_window(
         list.append(&row);
     };
 
-    add_transition_row(&transitions_list, "Cross-dissolve", "cross_dissolve");
-    add_transition_row(&transitions_list, "Fade to black", "fade_to_black");
-    add_transition_row(&transitions_list, "Wipe right →", "wipe_right");
-    add_transition_row(&transitions_list, "← Wipe left", "wipe_left");
+    for transition in supported_transition_definitions() {
+        add_transition_row(&transitions_list, transition.label, transition.kind);
+    }
 
-    transitions_revealer.set_child(Some(&transitions_list));
-    right_sidebar.append(&transitions_revealer);
+    let transitions_section = gtk::Box::new(Orientation::Vertical, 6);
+    transitions_section.set_vexpand(true);
+    transitions_section.append(&transitions_header);
+    transitions_revealer.set_child(Some(&transitions_scroll));
+    transitions_section.append(&transitions_revealer);
+    right_sidebar_paned.set_start_child(Some(&inspector_scroll));
+    right_sidebar_paned.set_end_child(Some(&transitions_section));
+    right_sidebar.append(&right_sidebar_paned);
 
     // ── Keyframe dopesheet (resizable via Paned) ───────────────────────────
     let dopesheet_on_seek: Rc<dyn Fn(u64)> = {
@@ -9801,9 +9823,30 @@ pub fn build_window(
 
     {
         let revealer = transitions_revealer.clone();
+        let paned = right_sidebar_paned.clone();
+        let header = transitions_header.clone();
+        let last_visible_pos = transitions_last_visible_split_pos.clone();
         transitions_toggle.connect_clicked(move |btn| {
             let show = !revealer.reveals_child();
-            revealer.set_reveal_child(show);
+            if show {
+                revealer.set_reveal_child(true);
+                paned.set_position(clamp_workspace_paned_position(
+                    &paned,
+                    last_visible_pos.get(),
+                ));
+            } else {
+                let current_pos = clamp_workspace_paned_position(&paned, paned.position());
+                if current_pos > 0 {
+                    last_visible_pos.set(current_pos);
+                }
+                revealer.set_reveal_child(false);
+                let total = workspace_paned_extent(&paned);
+                if total > 0 {
+                    let header_height = header.measure(Orientation::Vertical, -1).0.max(1);
+                    let collapsed_pos = total.saturating_sub(header_height);
+                    paned.set_position(clamp_workspace_paned_position(&paned, collapsed_pos));
+                }
+            }
             btn.set_label(if show {
                 "Hide Transitions"
             } else {
@@ -9840,6 +9883,24 @@ pub fn build_window(
         let workspace_layouts_applying = workspace_layouts_applying.clone();
         let sync_workspace_layout_state = sync_workspace_layout_state.clone();
         root_hpaned.connect_position_notify(move |_| {
+            if !workspace_layouts_applying.get() {
+                sync_workspace_layout_state();
+            }
+        });
+    }
+    {
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
+        let transitions_revealer = transitions_revealer.clone();
+        let transitions_last_visible_split_pos = transitions_last_visible_split_pos.clone();
+        right_sidebar_paned.connect_position_notify(move |paned| {
+            if !transitions_revealer.reveals_child() {
+                return;
+            }
+            let current_pos = clamp_workspace_paned_position(paned, paned.position());
+            if current_pos > 0 {
+                transitions_last_visible_split_pos.set(current_pos);
+            }
             if !workspace_layouts_applying.get() {
                 sync_workspace_layout_state();
             }
@@ -10167,6 +10228,9 @@ pub fn build_window(
         let tb_audio_fx = tb_audio_fx.clone();
         let tb_titles = tb_titles.clone();
         let workspace_layouts_state = workspace_layouts_state.clone();
+        let right_sidebar_paned = right_sidebar_paned.clone();
+        let transitions_revealer = transitions_revealer.clone();
+        let transitions_last_visible_split_pos = transitions_last_visible_split_pos.clone();
         Rc::new(move || {
             let previous_arrangement = workspace_layouts_state.borrow().current.clone();
             let left_panel_tab = if tb_effects.is_active() {
@@ -10220,6 +10284,31 @@ pub fn build_window(
                 previous_arrangement.timeline_paned_pos,
                 previous_arrangement.timeline_paned_ratio_permille,
             );
+            let (right_sidebar_paned_pos, right_sidebar_paned_ratio_permille) =
+                if transitions_revealer.reveals_child() {
+                    capture_workspace_paned_state(
+                        &right_sidebar_paned,
+                        previous_arrangement.right_sidebar_paned_pos,
+                        previous_arrangement.right_sidebar_paned_ratio_permille,
+                    )
+                } else {
+                    let total = workspace_paned_extent(&right_sidebar_paned);
+                    if total <= 0 {
+                        (
+                            previous_arrangement.right_sidebar_paned_pos,
+                            previous_arrangement.right_sidebar_paned_ratio_permille,
+                        )
+                    } else {
+                        let pos = clamp_workspace_paned_position(
+                            &right_sidebar_paned,
+                            transitions_last_visible_split_pos.get(),
+                        );
+                        (
+                            pos,
+                            crate::ui_state::workspace_split_ratio_from_pixels(pos, total),
+                        )
+                    }
+                };
             crate::ui_state::WorkspaceArrangement {
                 root_hpaned_pos,
                 root_hpaned_ratio_permille,
@@ -10231,6 +10320,8 @@ pub fn build_window(
                 left_vpaned_ratio_permille,
                 timeline_paned_pos,
                 timeline_paned_ratio_permille,
+                right_sidebar_paned_pos,
+                right_sidebar_paned_ratio_permille,
                 media_browser_visible: media_browser_toggle.is_active(),
                 inspector_visible: inspector_toggle.is_active(),
                 keyframe_editor_visible: keyframe_scroller.is_visible(),
@@ -10305,6 +10396,8 @@ pub fn build_window(
         let workspace_layout_apply_generation = workspace_layout_apply_generation.clone();
         let workspace_layout_pending_name = workspace_layout_pending_name.clone();
         let sync_workspace_layout_state = sync_workspace_layout_state.clone();
+        let right_sidebar_paned = right_sidebar_paned.clone();
+        let transitions_last_visible_split_pos = transitions_last_visible_split_pos.clone();
         Rc::new(move |arrangement: crate::ui_state::WorkspaceArrangement| {
             workspace_layouts_applying.set(true);
             let apply_generation = workspace_layout_apply_generation.get().wrapping_add(1);
@@ -10357,7 +10450,9 @@ pub fn build_window(
                 let top_paned = top_paned.clone();
                 let left_vpaned = left_vpaned.clone();
                 let timeline_paned = timeline_paned.clone();
+                let right_sidebar_paned = right_sidebar_paned.clone();
                 let docked_scopes_paned = docked_scopes_paned.clone();
+                let transitions_last_visible_split_pos = transitions_last_visible_split_pos.clone();
                 let arrangement = arrangement.clone();
                 move || {
                     if let Some(pos) = workspace_target_paned_position(
@@ -10402,6 +10497,16 @@ pub fn build_window(
                             }
                         }
                     }
+                    if arrangement.inspector_visible {
+                        if let Some(pos) = workspace_target_paned_position(
+                            &right_sidebar_paned,
+                            arrangement.right_sidebar_paned_pos,
+                            arrangement.right_sidebar_paned_ratio_permille,
+                        ) {
+                            transitions_last_visible_split_pos.set(pos);
+                            right_sidebar_paned.set_position(pos);
+                        }
+                    }
                     if arrangement.program_monitor.scopes_visible {
                         docked_scopes_paned
                             .set_position(arrangement.program_monitor.docked_split_pos.max(160));
@@ -10415,12 +10520,16 @@ pub fn build_window(
                 let top_paned = top_paned.clone();
                 let left_vpaned = left_vpaned.clone();
                 let timeline_paned = timeline_paned.clone();
+                let arrangement = arrangement.clone();
+                let right_sidebar_paned = right_sidebar_paned.clone();
                 move || {
                     workspace_paned_extent(&root_hpaned) > 0
                         && workspace_paned_extent(&root_vpaned) > 0
                         && workspace_paned_extent(&top_paned) > 0
                         && workspace_paned_extent(&left_vpaned) > 0
                         && workspace_paned_extent(&timeline_paned) > 0
+                        && (!arrangement.inspector_visible
+                            || workspace_paned_extent(&right_sidebar_paned) > 0)
                 }
             });
             schedule_workspace_layout_apply_completion(
@@ -15496,7 +15605,7 @@ fn handle_mcp_command(
                         reply
                             .send(json!({
                                 "error": err.to_string(),
-                                "supported_kinds": SUPPORTED_TRANSITION_KINDS,
+                                "supported_kinds": supported_transition_kinds(),
                                 "supported_alignments":["end_on_cut", "center_on_cut", "start_on_cut"]
                             }))
                             .ok();

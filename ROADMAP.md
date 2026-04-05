@@ -86,7 +86,7 @@ Tracking docs:
 ### Inspector Panel
 - [x] Right-side inspector showing selected clip properties
 - [x] Fields: clip name, source path, source in/out, duration, timeline start
-- [x] Outgoing transition editor in the Inspector with editable type/duration/alignment, remove action, shared duration clamping across Inspector/timeline/MCP, alignment-aware preview/export/prerender timing, and collapsed-below-Transform placement
+- [x] Outgoing transition editor in the Inspector with editable type/duration/alignment, remove action, shared duration clamping across Inspector/timeline/MCP, alignment-aware preview/export/prerender timing, collapsed-below-Transform placement, preview-supported transition catalog (including fade-to-white, circle-open/close, and directional cover/reveal/slide live preview), plus a scrollable, resizable transitions pane whose split is saved with workspace layouts
 
 ### Toolbar / Header
 - [x] New / Open / Save / Export MP4 buttons

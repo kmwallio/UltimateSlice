@@ -3,8 +3,9 @@ use crate::model::clip::{
     SubtitleHighlightMode,
 };
 use crate::model::transition::{
-    max_transition_duration_ns, validate_track_transition_request, TransitionAlignment,
-    DEFAULT_TRANSITION_DURATION_NS, MIN_TRANSITION_DURATION_NS,
+    is_supported_transition_kind, max_transition_duration_ns, supported_transition_definitions,
+    validate_track_transition_request, TransitionAlignment, DEFAULT_TRANSITION_DURATION_NS,
+    MIN_TRANSITION_DURATION_NS,
 };
 
 /// Clipboard for copy/paste subtitle style between clips.
@@ -1608,12 +1609,12 @@ impl InspectorView {
                 self.dur_value.set_text(&ns_to_timecode(c.duration()));
                 self.pos_value.set_text(&ns_to_timecode(c.timeline_start));
                 let current_transition = &c.outgoing_transition;
-                let current_kind_id = match current_transition.kind_trimmed() {
-                    "cross_dissolve" | "fade_to_black" | "wipe_right" | "wipe_left" => {
+                let current_kind_id =
+                    if is_supported_transition_kind(current_transition.kind_trimmed()) {
                         current_transition.kind_trimmed()
-                    }
-                    _ => "",
-                };
+                    } else {
+                        ""
+                    };
                 self.transition_kind_dropdown
                     .set_active_id(Some(current_kind_id));
                 self.transition_alignment_dropdown
@@ -2609,10 +2610,9 @@ pub fn build_inspector(
     row_label(&transition_inner, "Type");
     let transition_kind_dropdown = gtk4::ComboBoxText::new();
     transition_kind_dropdown.append(Some(""), "None");
-    transition_kind_dropdown.append(Some("cross_dissolve"), "Cross-dissolve");
-    transition_kind_dropdown.append(Some("fade_to_black"), "Fade to black");
-    transition_kind_dropdown.append(Some("wipe_right"), "Wipe right");
-    transition_kind_dropdown.append(Some("wipe_left"), "Wipe left");
+    for transition in supported_transition_definitions() {
+        transition_kind_dropdown.append(Some(transition.kind), transition.label);
+    }
     transition_kind_dropdown.set_active_id(Some(""));
     transition_kind_dropdown.set_halign(gtk4::Align::Start);
     transition_kind_dropdown.set_hexpand(true);

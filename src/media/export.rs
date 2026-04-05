@@ -1,7 +1,7 @@
 use crate::media::{adjustment_scope::AdjustmentScopeShape, program_player::ProgramPlayer};
 use crate::model::clip::{Clip, ClipKind, NumericKeyframe, SlowMotionInterp};
 use crate::model::project::Project;
-use crate::model::transition::max_transition_duration_ns;
+use crate::model::transition::{max_transition_duration_ns, transition_xfade_name_for_kind};
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
@@ -461,17 +461,6 @@ pub fn export_project(
             ));
         }
     }
-    // Map transition kind string to the ffmpeg xfade transition name.
-    let transition_xfade_name = |kind: &str| -> &'static str {
-        match kind {
-            "cross_dissolve" => "fade",
-            "fade_to_black" => "fadeblack",
-            "wipe_right" => "wiperight",
-            "wipe_left" => "wipeleft",
-            _ => "fade", // safe fallback
-        }
-    };
-
     // Build primary-track sequence:
     // - If transitions exist AND filters are supported, chain xfade filters
     // - Otherwise use concat (original behavior).
@@ -488,7 +477,8 @@ pub fn export_project(
             let sep = if i == 0 { "" } else { ";" };
             if let Some(timing) = primary_transition_timings[i] {
                 let offset_s = (running_cut_s - timing.before_cut_s()).max(0.0);
-                let xfade = transition_xfade_name(clip.outgoing_transition.kind_trimmed());
+                let xfade = transition_xfade_name_for_kind(clip.outgoing_transition.kind_trimmed())
+                    .unwrap_or("fade");
                 filter.push_str(&format!(
                     "{sep}[{prev_label}][{next_label}]xfade=transition={xfade}:duration={:.6}:offset={offset_s:.6}[{out_label}]",
                     timing.duration_s(),

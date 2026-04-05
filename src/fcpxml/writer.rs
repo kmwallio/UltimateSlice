@@ -1,3 +1,4 @@
+use crate::model::transition::transition_label_for_kind;
 use crate::model::{
     media_library::MediaItem,
     project::{FrameRate, Project},
@@ -68,7 +69,7 @@ fn fcpxml_transition_name_for_kind(kind: &str) -> Option<&'static str> {
         "fade_to_black" => Some("Fade To Black"),
         "wipe_right" => Some("Wipe Right"),
         "wipe_left" => Some("Wipe Left"),
-        _ => None,
+        _ => transition_label_for_kind(kind),
     }
 }
 

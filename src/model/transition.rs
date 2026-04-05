@@ -6,8 +6,124 @@ use thiserror::Error;
 pub const DEFAULT_TRANSITION_DURATION_NS: u64 = 500_000_000;
 pub const MIN_TRANSITION_DURATION_NS: u64 = 10_000_000;
 
-pub const SUPPORTED_TRANSITION_KINDS: &[&str] =
-    &["cross_dissolve", "fade_to_black", "wipe_right", "wipe_left"];
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransitionDefinition {
+    pub kind: &'static str,
+    pub label: &'static str,
+    pub xfade_name: &'static str,
+}
+
+const fn transition_def(
+    kind: &'static str,
+    label: &'static str,
+    xfade_name: &'static str,
+) -> TransitionDefinition {
+    TransitionDefinition {
+        kind,
+        label,
+        xfade_name,
+    }
+}
+
+pub const SUPPORTED_TRANSITIONS: &[TransitionDefinition] = &[
+    transition_def("cross_dissolve", "Cross-dissolve", "fade"),
+    transition_def("fade_to_black", "Fade to black", "fadeblack"),
+    transition_def("fade_to_white", "Fade to white", "fadewhite"),
+    transition_def("wipe_right", "Wipe right", "wiperight"),
+    transition_def("wipe_left", "Wipe left", "wipeleft"),
+    transition_def("wipeup", "Wipe up", "wipeup"),
+    transition_def("wipedown", "Wipe down", "wipedown"),
+    transition_def("circle_open", "Circle open", "circleopen"),
+    transition_def("circle_close", "Circle close", "circleclose"),
+    transition_def("cover_left", "Cover left", "coverleft"),
+    transition_def("cover_right", "Cover right", "coverright"),
+    transition_def("cover_up", "Cover up", "coverup"),
+    transition_def("cover_down", "Cover down", "coverdown"),
+    transition_def("reveal_left", "Reveal left", "revealleft"),
+    transition_def("reveal_right", "Reveal right", "revealright"),
+    transition_def("reveal_up", "Reveal up", "revealup"),
+    transition_def("reveal_down", "Reveal down", "revealdown"),
+    transition_def("slide_left", "Slide left", "slideleft"),
+    transition_def("slide_right", "Slide right", "slideright"),
+    transition_def("slide_up", "Slide up", "slideup"),
+    transition_def("slide_down", "Slide down", "slidedown"),
+];
+
+pub fn supported_transition_definitions() -> &'static [TransitionDefinition] {
+    SUPPORTED_TRANSITIONS
+}
+
+pub fn supported_transition_kinds() -> Vec<&'static str> {
+    SUPPORTED_TRANSITIONS.iter().map(|def| def.kind).collect()
+}
+
+fn transition_definition_for_exact_kind(kind: &str) -> Option<&'static TransitionDefinition> {
+    let trimmed = kind.trim();
+    SUPPORTED_TRANSITIONS.iter().find(|def| def.kind == trimmed)
+}
+
+pub fn canonical_transition_kind(kind: &str) -> Option<&'static str> {
+    let trimmed = kind.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    transition_definition_for_exact_kind(trimmed)
+        .map(|def| def.kind)
+        .or_else(|| transition_kind_from_xfade_name(trimmed))
+        .or_else(|| transition_kind_from_display_name(trimmed))
+}
+
+pub fn canonicalize_transition_kind(kind: &str) -> String {
+    let trimmed = kind.trim();
+    canonical_transition_kind(trimmed)
+        .unwrap_or(trimmed)
+        .to_string()
+}
+
+pub fn transition_definition_for_kind(kind: &str) -> Option<&'static TransitionDefinition> {
+    let canonical_kind = canonical_transition_kind(kind)?;
+    transition_definition_for_exact_kind(canonical_kind)
+}
+
+pub fn transition_label_for_kind(kind: &str) -> Option<&'static str> {
+    transition_definition_for_kind(kind).map(|def| def.label)
+}
+
+pub fn transition_xfade_name_for_kind(kind: &str) -> Option<&'static str> {
+    transition_definition_for_kind(kind).map(|def| def.xfade_name)
+}
+
+pub fn transition_kind_from_xfade_name(xfade_name: &str) -> Option<&'static str> {
+    let trimmed = xfade_name.trim();
+    SUPPORTED_TRANSITIONS
+        .iter()
+        .find(|def| def.xfade_name == trimmed)
+        .map(|def| def.kind)
+}
+
+fn normalize_transition_token(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect()
+}
+
+pub fn transition_kind_from_display_name(name: &str) -> Option<&'static str> {
+    let token = normalize_transition_token(name);
+    match token.as_str() {
+        "fade" | "dissolve" => Some("cross_dissolve"),
+        "fadeblack" | "fadetoblack" => Some("fade_to_black"),
+        _ => SUPPORTED_TRANSITIONS
+            .iter()
+            .find(|def| {
+                normalize_transition_token(def.kind) == token
+                    || normalize_transition_token(def.label) == token
+                    || normalize_transition_token(def.xfade_name) == token
+            })
+            .map(|def| def.kind),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -144,7 +260,8 @@ impl Default for OutgoingTransition {
 
 impl OutgoingTransition {
     pub fn new(kind: impl Into<String>, duration_ns: u64, alignment: TransitionAlignment) -> Self {
-        let kind = kind.into().trim().to_string();
+        let raw_kind = kind.into();
+        let kind = canonicalize_transition_kind(&raw_kind);
         if kind.is_empty() || duration_ns == 0 {
             Self::default()
         } else {
@@ -165,7 +282,7 @@ impl OutgoingTransition {
     }
 
     pub fn kind_trimmed(&self) -> &str {
-        self.kind.trim()
+        canonical_transition_kind(&self.kind).unwrap_or_else(|| self.kind.trim())
     }
 
     pub fn cut_split(&self) -> TransitionCutSplit {
@@ -192,7 +309,7 @@ pub enum TransitionValidationError {
 }
 
 pub fn is_supported_transition_kind(kind: &str) -> bool {
-    SUPPORTED_TRANSITION_KINDS.contains(&kind)
+    transition_definition_for_kind(kind).is_some()
 }
 
 pub fn max_transition_duration_ns(outgoing: &Clip, incoming: &Clip) -> u64 {
@@ -227,11 +344,11 @@ pub fn validate_track_transition_request(
         return Err(TransitionValidationError::MissingFollowingClip);
     };
     let max_duration_ns = max_transition_duration_ns(outgoing, incoming);
-    if !is_supported_transition_kind(trimmed_kind) {
+    let Some(canonical_kind) = canonical_transition_kind(trimmed_kind) else {
         return Err(TransitionValidationError::UnsupportedKind {
             kind: trimmed_kind.to_string(),
         });
-    }
+    };
     if duration_ns == 0 {
         return Err(TransitionValidationError::MissingDuration);
     }
@@ -240,7 +357,7 @@ pub fn validate_track_transition_request(
     }
     Ok(ValidatedTransitionEdit {
         transition: OutgoingTransition::new(
-            trimmed_kind,
+            canonical_kind,
             duration_ns.clamp(MIN_TRANSITION_DURATION_NS, max_duration_ns),
             alignment,
         ),
@@ -367,5 +484,126 @@ mod tests {
         .expect("clearing should succeed");
         assert_eq!(validated.transition, OutgoingTransition::default());
         assert_eq!(validated.max_duration_ns, 0);
+    }
+
+    #[test]
+    fn transition_catalog_exposes_preview_supported_variants() {
+        assert!(is_supported_transition_kind("fade_to_white"));
+        assert_eq!(
+            transition_label_for_kind("fade_to_white"),
+            Some("Fade to white")
+        );
+        assert_eq!(
+            transition_xfade_name_for_kind("fade_to_white"),
+            Some("fadewhite")
+        );
+        assert_eq!(
+            transition_kind_from_xfade_name("circleopen"),
+            Some("circle_open")
+        );
+        assert_eq!(
+            transition_kind_from_display_name("Circle Close"),
+            Some("circle_close")
+        );
+        assert_eq!(
+            transition_xfade_name_for_kind("cover_left"),
+            Some("coverleft")
+        );
+        assert_eq!(
+            transition_kind_from_xfade_name("revealright"),
+            Some("reveal_right")
+        );
+        assert_eq!(
+            transition_kind_from_display_name("Slide Down"),
+            Some("slide_down")
+        );
+        assert!(is_supported_transition_kind("wipeup"));
+        assert_eq!(transition_label_for_kind("wipeup"), Some("Wipe up"));
+        assert_eq!(transition_xfade_name_for_kind("wipeup"), Some("wipeup"));
+        assert_eq!(transition_kind_from_xfade_name("wipeup"), Some("wipeup"));
+        assert_eq!(transition_kind_from_display_name("Wipe Up"), Some("wipeup"));
+        assert!(is_supported_transition_kind("circleopen"));
+        assert_eq!(transition_label_for_kind("circleopen"), Some("Circle open"));
+        assert_eq!(
+            transition_xfade_name_for_kind("revealright"),
+            Some("revealright")
+        );
+        assert!(!is_supported_transition_kind("zoomin"));
+    }
+
+    #[test]
+    fn outgoing_transition_new_canonicalizes_xfade_alias() {
+        let transition =
+            OutgoingTransition::new("circleopen", 500_000_000, TransitionAlignment::EndOnCut);
+        assert_eq!(transition.kind, "circle_open");
+        assert_eq!(transition.kind_trimmed(), "circle_open");
+    }
+
+    #[test]
+    fn validate_track_transition_accepts_additional_previewable_kind() {
+        let mut track = Track::new_video("V1");
+        track.add_clip(make_clip("a", 1_000_000_000, 0));
+        track.add_clip(make_clip("b", 1_000_000_000, 1_000_000_000));
+        let validated = validate_track_transition_request(
+            &track,
+            0,
+            "wipeup",
+            500_000_000,
+            TransitionAlignment::EndOnCut,
+        )
+        .expect("wipeup should be supported");
+        assert_eq!(validated.transition.kind, "wipeup");
+        assert_eq!(validated.transition.duration_ns, 500_000_000);
+    }
+
+    #[test]
+    fn validate_track_transition_accepts_circle_open() {
+        let mut track = Track::new_video("V1");
+        track.add_clip(make_clip("a", 1_000_000_000, 0));
+        track.add_clip(make_clip("b", 1_000_000_000, 1_000_000_000));
+        let validated = validate_track_transition_request(
+            &track,
+            0,
+            "circle_open",
+            500_000_000,
+            TransitionAlignment::EndOnCut,
+        )
+        .expect("circle_open should be supported");
+        assert_eq!(validated.transition.kind, "circle_open");
+        assert_eq!(validated.transition.duration_ns, 500_000_000);
+    }
+
+    #[test]
+    fn validate_track_transition_accepts_circle_open_xfade_alias() {
+        let mut track = Track::new_video("V1");
+        track.add_clip(make_clip("a", 1_000_000_000, 0));
+        track.add_clip(make_clip("b", 1_000_000_000, 1_000_000_000));
+        let validated = validate_track_transition_request(
+            &track,
+            0,
+            "circleopen",
+            500_000_000,
+            TransitionAlignment::EndOnCut,
+        )
+        .expect("circleopen alias should resolve to circle_open");
+        assert_eq!(validated.transition.kind, "circle_open");
+        assert_eq!(validated.transition.duration_ns, 500_000_000);
+    }
+
+    #[test]
+    fn validate_track_transition_accepts_slide_left() {
+        let mut track = Track::new_video("V1");
+        track.add_clip(make_clip("a", 1_000_000_000, 0));
+        track.add_clip(make_clip("b", 1_000_000_000, 1_000_000_000));
+        let validated = validate_track_transition_request(
+            &track,
+            0,
+            "slide_left",
+            500_000_000,
+            TransitionAlignment::EndOnCut,
+        )
+        .expect("slide_left should be supported");
+        assert_eq!(validated.transition.kind, "slide_left");
+        assert_eq!(validated.transition.duration_ns, 500_000_000);
     }
 }

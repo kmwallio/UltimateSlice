@@ -29,7 +29,7 @@ The Inspector can edit the selected clip's **outgoing** transition when another 
 
 | Control | Description |
 |---|---|
-| **Type** | `None`, `Cross-dissolve`, `Fade to black`, `Wipe right`, or `Wipe left` |
+| **Type** | `None`, `Cross-dissolve`, `Fade to black`, `Fade to white`, `Wipe left/right/up/down`, `Circle open/close`, `Cover left/right/up/down`, `Reveal left/right/up/down`, or `Slide left/right/up/down` |
 | **Duration (ms)** | Transition length in milliseconds. Durations are clamped automatically to the boundary capacity of the two adjacent clips |
 | **Alignment** | Controls where the overlap sits relative to the edit (`End on cut`, `Center on cut`, `Start on cut`) |
 | **Remove Transition** | Clears the outgoing transition from the selected clip |
@@ -37,6 +37,7 @@ The Inspector can edit the selected clip's **outgoing** transition when another 
 - Dragging from the **Transitions** browser still creates a new transition with the default **500 ms** duration; use the Inspector to refine it after drop.
 - If the selected clip has no following clip on the same track, transition editing is disabled and the Inspector explains why.
 - Duration and alignment changes affect preview, export, and background prerender together.
+- Program Monitor keeps exact live previews for all supported transition types.
 - `Start on cut` and the after-cut half of `Center on cut` keep the outgoing clip visible by holding its last frame after the cut. UltimateSlice does this because trimmed clips do not currently expose hidden source handles past their out-point.
 
 ---

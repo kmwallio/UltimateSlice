@@ -303,13 +303,17 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC, SVG) can be placed on the t
 ## Transitions
 
 - Use the **Transitions** pane on the right (below Inspector) to browse available transitions.
+- The pane exposes the preview-supported transition set: `Cross-dissolve`, `Fade to black`, `Fade to white`, `Wipe left/right/up/down`, `Circle open/close`, `Cover left/right/up/down`, `Reveal left/right/up/down`, and `Slide left/right/up/down`.
+- The transition list scrolls, and the divider above it can be dragged to resize how much of the right sidebar the pane uses.
 - Use the pane's button to **hide/show** the transition list.
+- Saved **Workspace** layouts remember the transitions-pane split height.
 - Drag a transition from the pane and drop it near a clip boundary in the timeline to apply a transition marker.
 - While dragging, the two clips that will receive the transition are highlighted as a live preview.
 - New drops start with a default **500 ms** duration and can be refined from the clip **Inspector → Transition** section.
 - The Inspector's **Alignment** control changes where the overlap sits relative to the cut: **End on cut** keeps the overlap before the cut, **Center on cut** straddles it, and **Start on cut** pushes the overlap after it.
 - **Remove a transition** by right-clicking its boundary marker in the timeline or by clicking **Remove Transition** in the Inspector.
 - Preview, export, and background prerender all follow the same transition duration/alignment timing.
+- Export and background prerender use the exact selected supported transition, matching the live Program Monitor preview.
 - For after-cut overlap, UltimateSlice keeps the outgoing clip visible by holding its final frame through the post-cut portion of the transition.
 - Transitions are designed to be extensible: future transition types will appear in the same pane.
 

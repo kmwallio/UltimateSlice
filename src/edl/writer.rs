@@ -89,7 +89,7 @@ fn edl_transition(transition: &str) -> (&'static str, u16) {
         "fade_to_black" => ("D", 0), // treated as dissolve to black
         "wipe_right" => ("W", 1),
         "wipe_left" => ("W", 2),
-        _ => ("C", 0),
+        _ => ("D", 0),
     }
 }
 
