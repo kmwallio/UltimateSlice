@@ -392,7 +392,7 @@ pub fn show_preferences_dialog(
     source_monitor_auto_link_av_check.set_active(current.source_monitor_auto_link_av);
     source_monitor_auto_link_av_check.set_halign(gtk::Align::Start);
     let source_monitor_auto_link_av_hint = Label::new(Some(
-        "When enabled, Append/Insert/Overwrite places linked video+audio clips when matching tracks exist. The video clip is muted and audio comes from the dedicated audio clip.",
+        "When enabled, Append/Insert/Overwrite and timeline drag/drop place linked video+audio clips when matching tracks exist. The video clip is muted and audio comes from the dedicated audio clip.",
     ));
     source_monitor_auto_link_av_hint.set_halign(gtk::Align::Start);
     source_monitor_auto_link_av_hint.add_css_class("dim-label");

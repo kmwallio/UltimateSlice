@@ -1637,6 +1637,51 @@ mod tests {
     }
 
     #[test]
+    fn track_index_plan_with_auto_link_disabled_uses_single_video_clip_for_av_sources() {
+        let project = Project::new("Test");
+        let preferred_video_track_idx = project
+            .tracks
+            .iter()
+            .enumerate()
+            .find(|(_, track)| track.kind == TrackKind::Video)
+            .map(|(idx, _)| idx)
+            .expect("video track should exist");
+        let source_info = SourcePlacementInfo {
+            is_audio_only: false,
+            has_audio: true,
+            is_image: false,
+            is_animated_svg: false,
+            source_timecode_base_ns: None,
+        };
+
+        let plan = build_source_placement_plan_by_track_index(
+            &project,
+            Some(preferred_video_track_idx),
+            source_info,
+            false,
+        );
+        let created = build_source_clips_for_plan(
+            &plan,
+            "/tmp/source.mp4",
+            0,
+            1_000,
+            2_000,
+            source_info.source_timecode_base_ns,
+            Some(10_000),
+            false,
+        );
+
+        assert_eq!(plan.targets.len(), 1);
+        assert_eq!(plan.targets[0].track_index, preferred_video_track_idx);
+        assert_eq!(plan.targets[0].clip_kind, ClipKind::Video);
+        assert!(plan.link_group_id.is_none());
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0].0, preferred_video_track_idx);
+        assert_eq!(created[0].1.kind, ClipKind::Video);
+        assert!(created[0].1.link_group_id.is_none());
+    }
+
+    #[test]
     fn mcp_track_index_plan_returns_empty_without_matching_tracks() {
         let mut project = Project::new("Test");
         project
@@ -5831,11 +5876,14 @@ pub fn build_window(
         let project = project.clone();
         let library = library.clone();
         let on_project_changed = on_project_changed.clone();
+        let preferences_state = preferences_state.clone();
         let source_marks = source_marks.clone();
         let timeline_state_for_drop = timeline_state.clone();
         timeline_state.borrow_mut().on_drop_clip = Some(Rc::new(
             move |source_path, duration_ns, track_idx, timeline_start_ns| {
                 let magnetic_mode = timeline_state_for_drop.borrow().magnetic_mode;
+                let source_monitor_auto_link_av =
+                    preferences_state.borrow().source_monitor_auto_link_av;
                 let source_info = {
                     let marks = source_marks.borrow();
                     if marks.path == source_path {
@@ -5863,130 +5911,70 @@ pub fn build_window(
                         (0, duration_ns)
                     }
                 };
-                let auto_link_pair =
-                    !source_info.is_audio_only && source_info.has_audio && !source_info.is_image;
-                let video_track_idx =
-                    find_preferred_track_index_by_index(&proj, Some(track_idx), TrackKind::Video);
-                let audio_track_idx =
-                    find_preferred_track_index_by_index(&proj, Some(track_idx), TrackKind::Audio);
-
-                if auto_link_pair && video_track_idx.is_some() && audio_track_idx.is_some() {
-                    let link_group_id = uuid::Uuid::new_v4().to_string();
-                    let mut track_changes: Vec<TrackClipsChange> = Vec::new();
-                    if let Some(video_idx) = video_track_idx {
-                        let video_clip = build_source_clip(
-                            &source_path,
-                            src_in,
-                            src_out,
-                            timeline_start_ns,
-                            ClipKind::Video,
-                            source_info.source_timecode_base_ns,
-                            Some(link_group_id.as_str()),
-                            Some(duration_ns),
-                        );
-                        track_changes.push(add_clip_to_track(
-                            &mut proj.tracks[video_idx],
-                            video_clip,
-                            magnetic_mode,
-                        ));
-                    }
-                    if let Some(audio_idx) = audio_track_idx {
-                        let audio_clip = build_source_clip(
-                            &source_path,
-                            src_in,
-                            src_out,
-                            timeline_start_ns,
-                            ClipKind::Audio,
-                            source_info.source_timecode_base_ns,
-                            Some(link_group_id.as_str()),
-                            Some(duration_ns),
-                        );
-                        track_changes.push(add_clip_to_track(
-                            &mut proj.tracks[audio_idx],
-                            audio_clip,
-                            magnetic_mode,
-                        ));
-                    }
-                    proj.dirty = true;
-                    drop(proj);
-                    let cmd: Box<dyn crate::undo::EditCommand> = if track_changes.len() == 1 {
-                        let change = track_changes.pop().unwrap();
-                        Box::new(crate::undo::SetTrackClipsCommand {
-                            track_id: change.track_id,
-                            old_clips: change.old_clips,
-                            new_clips: change.new_clips,
-                            label: "Drop clip".to_string(),
-                        })
+                let placement_plan = build_source_placement_plan_by_track_index(
+                    &proj,
+                    Some(track_idx),
+                    source_info,
+                    source_monitor_auto_link_av,
+                );
+                let magnetic_mode_for_placement =
+                    magnetic_mode && !placement_plan.uses_linked_pair();
+                let media_dur_opt = if source_info.is_image {
+                    if source_info.is_animated_svg {
+                        Some(duration_ns)
                     } else {
-                        Box::new(crate::undo::SetMultipleTracksClipsCommand {
-                            changes: track_changes,
-                            label: "Drop clip".to_string(),
-                        })
-                    };
-                    timeline_state_for_drop
-                        .borrow_mut()
-                        .history
-                        .undo_stack
-                        .push(cmd);
-                    timeline_state_for_drop
-                        .borrow_mut()
-                        .history
-                        .redo_stack
-                        .clear();
-                    on_project_changed();
+                        None
+                    }
+                } else {
+                    Some(duration_ns)
+                };
+                let mut track_changes: Vec<TrackClipsChange> = Vec::new();
+                for (target_track_idx, clip) in build_source_clips_for_plan(
+                    &placement_plan,
+                    &source_path,
+                    src_in,
+                    src_out,
+                    timeline_start_ns,
+                    source_info.source_timecode_base_ns,
+                    media_dur_opt,
+                    source_info.is_animated_svg,
+                ) {
+                    track_changes.push(add_clip_to_track(
+                        &mut proj.tracks[target_track_idx],
+                        clip,
+                        magnetic_mode_for_placement,
+                    ));
+                }
+                if track_changes.is_empty() {
                     return;
                 }
-
-                if let Some(track) = proj.tracks.get_mut(track_idx) {
-                    let kind = if source_info.is_image {
-                        ClipKind::Image
-                    } else {
-                        match track.kind {
-                            TrackKind::Video => ClipKind::Video,
-                            TrackKind::Audio => ClipKind::Audio,
-                        }
-                    };
-                    let media_dur = if source_info.is_image {
-                        if source_info.is_animated_svg {
-                            Some(duration_ns)
-                        } else {
-                            None
-                        }
-                    } else {
-                        Some(duration_ns)
-                    };
-                    let mut clip = build_source_clip(
-                        &source_path,
-                        src_in,
-                        src_out,
-                        timeline_start_ns,
-                        kind,
-                        source_info.source_timecode_base_ns,
-                        None,
-                        media_dur,
-                    );
-                    clip.animated_svg = source_info.is_animated_svg;
-                    let change = add_clip_to_track(track, clip, magnetic_mode);
-                    proj.dirty = true;
-                    drop(proj);
-                    let cmd = Box::new(crate::undo::SetTrackClipsCommand {
+                proj.dirty = true;
+                drop(proj);
+                let cmd: Box<dyn crate::undo::EditCommand> = if track_changes.len() == 1 {
+                    let change = track_changes.pop().unwrap();
+                    Box::new(crate::undo::SetTrackClipsCommand {
                         track_id: change.track_id,
                         old_clips: change.old_clips,
                         new_clips: change.new_clips,
                         label: "Drop clip".to_string(),
-                    });
-                    timeline_state_for_drop
-                        .borrow_mut()
-                        .history
-                        .undo_stack
-                        .push(cmd);
-                    timeline_state_for_drop
-                        .borrow_mut()
-                        .history
-                        .redo_stack
-                        .clear();
-                    on_project_changed();
-                }
+                    })
+                } else {
+                    Box::new(crate::undo::SetMultipleTracksClipsCommand {
+                        changes: track_changes,
+                        label: "Drop clip".to_string(),
+                    })
+                };
+                timeline_state_for_drop
+                    .borrow_mut()
+                    .history
+                    .undo_stack
+                    .push(cmd);
+                timeline_state_for_drop
+                    .borrow_mut()
+                    .history
+                    .redo_stack
+                    .clear();
+                on_project_changed();
             },
         ));
     }
@@ -5997,10 +5985,13 @@ pub fn build_window(
         let project = project.clone();
         let library = library.clone();
         let on_project_changed = on_project_changed.clone();
+        let preferences_state = preferences_state.clone();
         let timeline_state_for_ext = timeline_state.clone();
         timeline_state.borrow_mut().on_drop_external_files = Some(Rc::new(
             move |file_paths: Vec<String>, track_idx: usize, timeline_start_ns: u64| {
                 let magnetic_mode = timeline_state_for_ext.borrow().magnetic_mode;
+                let source_monitor_auto_link_av =
+                    preferences_state.borrow().source_monitor_auto_link_av;
                 let mut cursor_ns = timeline_start_ns;
                 let mut track_changes: Vec<crate::undo::TrackClipsChange> = Vec::new();
 
@@ -6079,87 +6070,38 @@ pub fn build_window(
                     let src_out = duration_ns;
 
                     let mut proj = project.borrow_mut();
-
-                    let auto_link_pair = !source_info.is_audio_only
-                        && source_info.has_audio
-                        && !source_info.is_image;
-                    let video_track_idx = find_preferred_track_index_by_index(
+                    let placement_plan = build_source_placement_plan_by_track_index(
                         &proj,
                         Some(track_idx),
-                        TrackKind::Video,
+                        source_info,
+                        source_monitor_auto_link_av,
                     );
-                    let audio_track_idx = find_preferred_track_index_by_index(
-                        &proj,
-                        Some(track_idx),
-                        TrackKind::Audio,
-                    );
-
-                    if auto_link_pair && video_track_idx.is_some() && audio_track_idx.is_some() {
-                        let link_group_id = uuid::Uuid::new_v4().to_string();
-                        if let Some(video_idx) = video_track_idx {
-                            let video_clip = build_source_clip(
-                                path,
-                                src_in,
-                                src_out,
-                                cursor_ns,
-                                ClipKind::Video,
-                                source_info.source_timecode_base_ns,
-                                Some(link_group_id.as_str()),
-                                Some(duration_ns),
-                            );
-                            track_changes.push(add_clip_to_track(
-                                &mut proj.tracks[video_idx],
-                                video_clip,
-                                magnetic_mode,
-                            ));
-                        }
-                        if let Some(audio_idx) = audio_track_idx {
-                            let audio_clip = build_source_clip(
-                                path,
-                                src_in,
-                                src_out,
-                                cursor_ns,
-                                ClipKind::Audio,
-                                source_info.source_timecode_base_ns,
-                                Some(link_group_id.as_str()),
-                                Some(duration_ns),
-                            );
-                            track_changes.push(add_clip_to_track(
-                                &mut proj.tracks[audio_idx],
-                                audio_clip,
-                                magnetic_mode,
-                            ));
-                        }
-                    } else if let Some(track) = proj.tracks.get_mut(track_idx) {
-                        let kind = if source_info.is_image {
-                            ClipKind::Image
-                        } else {
-                            match track.kind {
-                                TrackKind::Video => ClipKind::Video,
-                                TrackKind::Audio => ClipKind::Audio,
-                            }
-                        };
-                        let media_dur = if source_info.is_image {
-                            if source_info.is_animated_svg {
-                                Some(duration_ns)
-                            } else {
-                                None
-                            }
-                        } else {
+                    let magnetic_mode_for_placement =
+                        magnetic_mode && !placement_plan.uses_linked_pair();
+                    let media_dur_opt = if source_info.is_image {
+                        if source_info.is_animated_svg {
                             Some(duration_ns)
-                        };
-                        let mut clip = build_source_clip(
-                            path,
-                            src_in,
-                            src_out,
-                            cursor_ns,
-                            kind,
-                            source_info.source_timecode_base_ns,
-                            None,
-                            media_dur,
-                        );
-                        clip.animated_svg = source_info.is_animated_svg;
-                        track_changes.push(add_clip_to_track(track, clip, magnetic_mode));
+                        } else {
+                            None
+                        }
+                    } else {
+                        Some(duration_ns)
+                    };
+                    for (target_track_idx, clip) in build_source_clips_for_plan(
+                        &placement_plan,
+                        path,
+                        src_in,
+                        src_out,
+                        cursor_ns,
+                        source_info.source_timecode_base_ns,
+                        media_dur_opt,
+                        source_info.is_animated_svg,
+                    ) {
+                        track_changes.push(add_clip_to_track(
+                            &mut proj.tracks[target_track_idx],
+                            clip,
+                            magnetic_mode_for_placement,
+                        ));
                     }
 
                     proj.dirty = true;

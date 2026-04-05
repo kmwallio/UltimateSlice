@@ -25,7 +25,7 @@ The **Timeline** panel (bottom) is where you arrange, trim, and edit clips into 
 There are several ways to get clips onto the timeline:
 
 - **Drag from Media Browser** — drag a clip from the media library panel and drop it onto a track at the desired position.
-- **Drag from File Manager** — drag files directly from Nautilus, Thunar, or any file manager onto the timeline. Files are automatically imported into the media library and placed as clips at the drop position. Multiple files are placed sequentially. Video files with audio create linked A/V clip pairs when auto-link is applicable.
+- **Drag from File Manager** — drag files directly from Nautilus, Thunar, or any file manager onto the timeline. Files are automatically imported into the media library and placed as clips at the drop position. Multiple files are placed sequentially. Video files with audio follow the same **Source Monitor A/V auto-link** setting as other source placements: enabled creates linked A/V clip pairs when matching tracks exist, while disabled uses single-clip placement behavior.
 - **Append to Timeline** — use the "Append to Timeline" button in the media browser to place the selected clip at the end of the first matching track.
 - **Insert / Overwrite** — use Insert (`,`) or Overwrite (`.`) to place the source monitor selection at the playhead position.
 - **Source Monitor drag** — drag from the source monitor preview directly onto a timeline track.
@@ -203,7 +203,7 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC, SVG) can be placed on the t
 
 ### Clip Linking (`Ctrl+L`, `Ctrl+Shift+L`)
 
-- Dragging or MCP-placing a source that contains both video and audio auto-creates a linked A/V pair when matching video and audio tracks exist. Source Monitor Append/Insert/Overwrite do the same only when Source Monitor A/V auto-link is enabled; when disabled, those operations use single-clip placement behavior.
+- Dragging or MCP-placing a source that contains both video and audio follows **Source Monitor A/V auto-link**. When enabled, UltimateSlice auto-creates a linked A/V pair if matching video and audio tracks exist. When disabled, those operations use single-clip placement behavior.
 - Auto-linked pairs share the same clip link group immediately, so the picture and sound stay selected/moved/deleted together without requiring a manual `Ctrl+L`.
 - While a linked same-source audio-track peer exists, UltimateSlice suppresses the duplicate embedded audio from the linked video-track clip to avoid doubled playback/export audio. Unlinking restores the video clip's own embedded audio automatically.
 - **Link (`Ctrl+L`)** assigns the current multi-selection to a shared clip link group.

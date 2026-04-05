@@ -1010,7 +1010,7 @@ pub struct PreferencesState {
     /// Show thumbnail preview strips on timeline video clips.
     #[serde(default = "default_show_timeline_preview")]
     pub show_timeline_preview: bool,
-    /// Auto-link source monitor A/V placements into paired video+audio clips when possible.
+    /// Auto-link source placements and timeline drops into paired video+audio clips when possible.
     #[serde(default = "default_source_monitor_auto_link_av")]
     pub source_monitor_auto_link_av: bool,
     /// Show per-track audio levels in timeline track labels.
