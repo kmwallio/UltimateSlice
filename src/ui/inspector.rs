@@ -1354,13 +1354,7 @@ impl InspectorView {
     ) {
         use crate::model::clip::ClipKind;
 
-        let clip = clip_id.and_then(|id| {
-            project
-                .tracks
-                .iter()
-                .flat_map(|t| t.clips.iter())
-                .find(|c| c.id == id)
-        });
+        let clip = clip_id.and_then(|id| project.clip_ref(id));
 
         // Show content only when a clip is selected; otherwise show empty-state guidance.
         let has_clip = clip_id.is_some();

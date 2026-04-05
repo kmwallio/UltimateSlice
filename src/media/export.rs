@@ -4229,6 +4229,9 @@ fn flatten_clips(clips: &[Clip], timeline_offset: u64, depth: usize) -> Vec<Clip
             let clip_start = timeline_offset.saturating_add(clip.timeline_start);
             let clip_dur = clip.duration();
             let segments = clip.multicam_segments();
+            // Segments are window-relative (0 = visible start); add source_in
+            // to map back to the angle's internal timeline.
+            let mc_offset = clip.source_in;
             // Video segments from angle switches
             for (seg_start, seg_end, angle_idx) in &segments {
                 if let Some(angle) = clip
@@ -4240,14 +4243,19 @@ fn flatten_clips(clips: &[Clip], timeline_offset: u64, depth: usize) -> Vec<Clip
                         &angle.source_path,
                         angle
                             .source_in
+                            .saturating_add(mc_offset)
                             .saturating_add(*seg_end)
                             .min(angle.source_out),
                         clip_start.saturating_add(*seg_start),
                         ClipKind::Video,
                     );
-                    seg.source_in = angle.source_in.saturating_add(*seg_start);
+                    seg.source_in = angle
+                        .source_in
+                        .saturating_add(mc_offset)
+                        .saturating_add(*seg_start);
                     seg.source_out = angle
                         .source_in
+                        .saturating_add(mc_offset)
                         .saturating_add(*seg_end)
                         .min(angle.source_out);
                     seg.id = uuid::Uuid::new_v4().to_string();
@@ -4264,14 +4272,16 @@ fn flatten_clips(clips: &[Clip], timeline_offset: u64, depth: usize) -> Vec<Clip
                         &angle.source_path,
                         angle
                             .source_in
+                            .saturating_add(mc_offset)
                             .saturating_add(clip_dur)
                             .min(angle.source_out),
                         clip_start,
                         ClipKind::Audio,
                     );
-                    audio_clip.source_in = angle.source_in;
+                    audio_clip.source_in = angle.source_in.saturating_add(mc_offset);
                     audio_clip.source_out = angle
                         .source_in
+                        .saturating_add(mc_offset)
                         .saturating_add(clip_dur)
                         .min(angle.source_out);
                     audio_clip.volume = angle.volume;

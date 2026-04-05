@@ -1711,21 +1711,50 @@ impl Clip {
     }
 
     /// Return the multicam segments — contiguous ranges between angle switches.
-    /// Each segment is (start_ns, end_ns, angle_index) relative to clip start.
+    /// Each segment is (start_ns, end_ns, angle_index) relative to the visible
+    /// clip start (accounting for `source_in` after a razor cut).
     pub fn multicam_segments(&self) -> Vec<(u64, u64, usize)> {
         let switches = match self.multicam_switches.as_ref() {
             Some(s) if !s.is_empty() => s,
             _ => return vec![(0, self.duration(), 0)],
         };
         let clip_dur = self.duration();
+        let offset = self.source_in;
+
+        // Find the angle active at the start of the visible window by
+        // looking at the last switch at or before source_in.
+        let active_at_start = switches
+            .iter()
+            .filter(|s| s.position_ns <= offset)
+            .last()
+            .map(|s| s.angle_index)
+            .unwrap_or(switches[0].angle_index);
+
+        // Build window-relative switch list starting with the implicit
+        // start, then all switches that fall within the visible window.
+        let mut visible: Vec<(u64, usize)> = vec![(0, active_at_start)];
+        for sw in switches {
+            if sw.position_ns <= offset {
+                continue;
+            }
+            let vis_pos = sw.position_ns - offset;
+            if vis_pos >= clip_dur {
+                break;
+            }
+            // Avoid duplicate at position 0 if the first visible switch
+            // happens to land exactly on the window start.
+            if vis_pos == 0 {
+                visible[0].1 = sw.angle_index;
+            } else {
+                visible.push((vis_pos, sw.angle_index));
+            }
+        }
+
         let mut segments = Vec::new();
-        for (i, sw) in switches.iter().enumerate() {
-            let end = switches
-                .get(i + 1)
-                .map(|next| next.position_ns)
-                .unwrap_or(clip_dur);
-            if sw.position_ns < end {
-                segments.push((sw.position_ns, end, sw.angle_index));
+        for (i, (pos, angle_idx)) in visible.iter().enumerate() {
+            let end = visible.get(i + 1).map(|s| s.0).unwrap_or(clip_dur);
+            if *pos < end {
+                segments.push((*pos, end, *angle_idx));
             }
         }
         segments
@@ -3900,6 +3929,58 @@ mod tests {
         assert_eq!(segments[0], (0, 5_000_000_000, 0));
         assert_eq!(segments[1], (5_000_000_000, 10_000_000_000, 1));
         assert_eq!(segments[2], (10_000_000_000, mc.duration(), 0));
+    }
+
+    #[test]
+    fn test_multicam_segments_with_source_in_offset() {
+        // Simulate a razor-cut multicam (right half).
+        // Switches at 0→angle0, 5s→angle1, 10s→angle0.
+        // After cut at 7s: source_in=7s, visible window covers 7-20s.
+        // Expected segments (window-relative):
+        //   0-3s (=internal 7-10): angle1 (active at 7s)
+        //   3-13s (=internal 10-20): angle0
+        let mut mc = Clip::new_multicam(
+            0,
+            vec![
+                MulticamAngle {
+                    id: "a1".into(),
+                    label: "Cam1".into(),
+                    source_path: "a.mp4".into(),
+                    source_in: 0,
+                    source_out: 20_000_000_000,
+                    sync_offset_ns: 0,
+                    source_timecode_base_ns: None,
+                    media_duration_ns: None,
+                    volume: 1.0,
+                    muted: false,
+                },
+                MulticamAngle {
+                    id: "a2".into(),
+                    label: "Cam2".into(),
+                    source_path: "b.mp4".into(),
+                    source_in: 0,
+                    source_out: 20_000_000_000,
+                    sync_offset_ns: 0,
+                    source_timecode_base_ns: None,
+                    media_duration_ns: None,
+                    volume: 1.0,
+                    muted: false,
+                },
+            ],
+        );
+        mc.insert_angle_switch(5_000_000_000, 1);
+        mc.insert_angle_switch(10_000_000_000, 0);
+        // Simulate razor cut: right half
+        mc.source_in = 7_000_000_000;
+
+        let segments = mc.multicam_segments();
+        // duration = 20s - 7s = 13s
+        assert_eq!(mc.duration(), 13_000_000_000);
+        assert_eq!(segments.len(), 2);
+        // First segment: 0 to 3s, angle 1 (active at internal 7s)
+        assert_eq!(segments[0], (0, 3_000_000_000, 1));
+        // Second segment: 3s to 13s, angle 0
+        assert_eq!(segments[1], (3_000_000_000, 13_000_000_000, 0));
     }
 
     #[test]

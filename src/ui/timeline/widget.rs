@@ -61,6 +61,15 @@ fn timeline_content_height_for_tracks(tracks: &[crate::model::track::Track]) -> 
     RULER_HEIGHT + tracks.iter().map(track_row_height).sum::<f64>()
 }
 
+fn track_row_top_in_tracks(tracks: &[crate::model::track::Track], track_idx: usize) -> f64 {
+    RULER_HEIGHT
+        + tracks
+            .iter()
+            .take(track_idx)
+            .map(track_row_height)
+            .sum::<f64>()
+}
+
 fn track_index_at_y_in_tracks(tracks: &[crate::model::track::Track], y: f64) -> Option<usize> {
     if y <= RULER_HEIGHT {
         return None;
@@ -479,7 +488,8 @@ impl TimelineState {
     fn track_index_at_y(&self, y: f64) -> Option<usize> {
         let project = self.project.borrow();
         let editing_tracks = self.resolve_editing_tracks(&project);
-        track_index_at_y_in_tracks(editing_tracks, y)
+        // Subtract breadcrumb bar height so hit-testing aligns with drawing
+        track_index_at_y_in_tracks(editing_tracks, y - self.breadcrumb_bar_height())
     }
 
     pub fn arm_music_generation_region(&mut self, track_id: String) {
@@ -633,7 +643,9 @@ impl TimelineState {
     fn solo_badge_hit_track_index(&self, x: f64, y: f64) -> Option<usize> {
         let track_idx = self.track_index_at_y(y)?;
         let project = self.project.borrow();
-        let row_y = track_row_top(&project, track_idx);
+        let editing_tracks = self.resolve_editing_tracks(&project);
+        let row_y =
+            track_row_top_in_tracks(editing_tracks, track_idx) + self.breadcrumb_bar_height();
         let badge_x = track_label_solo_badge_x(self.show_track_audio_levels);
         let badge_y = row_y + 6.0;
         if x >= badge_x
@@ -650,11 +662,13 @@ impl TimelineState {
     fn duck_badge_hit_track_index(&self, x: f64, y: f64) -> Option<usize> {
         let track_idx = self.track_index_at_y(y)?;
         let project = self.project.borrow();
-        let track = project.tracks.get(track_idx)?;
+        let editing_tracks = self.resolve_editing_tracks(&project);
+        let track = editing_tracks.get(track_idx)?;
         if track.kind != TrackKind::Audio {
             return None;
         }
-        let row_y = track_row_top(&project, track_idx);
+        let row_y =
+            track_row_top_in_tracks(editing_tracks, track_idx) + self.breadcrumb_bar_height();
         let solo_x = track_label_solo_badge_x(self.show_track_audio_levels);
         let badge_x = solo_x - TRACK_LABEL_SOLO_BADGE_WIDTH - 2.0;
         let badge_y = row_y + 6.0;
@@ -2112,6 +2126,15 @@ impl TimelineState {
         !self.compound_nav_stack.is_empty()
     }
 
+    /// Height of the compound breadcrumb bar (22px when inside a compound, 0 otherwise).
+    pub fn breadcrumb_bar_height(&self) -> f64 {
+        if self.is_editing_compound() {
+            22.0
+        } else {
+            0.0
+        }
+    }
+
     /// Resolve the currently-editing tracks based on the navigation stack.
     /// Returns project.tracks when at root level, or the innermost compound
     /// clip's internal tracks when drilled in.
@@ -3041,9 +3064,10 @@ impl TimelineState {
         }
         let proj = self.project.borrow();
         let editing_tracks = self.resolve_editing_tracks(&proj);
+        let bc = self.breadcrumb_bar_height();
         let mut hits = Vec::new();
         for (track_idx, track) in editing_tracks.iter().enumerate() {
-            let track_y = track_row_top(&proj, track_idx);
+            let track_y = track_row_top_in_tracks(editing_tracks, track_idx) + bc;
             let clip_top = track_y + 2.0;
             let clip_bottom = clip_top + track_row_height(track) - 4.0;
             if clip_bottom < top || clip_top > bottom {
@@ -4360,7 +4384,10 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             let st = state.borrow();
             let content_height = {
                 let proj = st.project.borrow();
-                timeline_content_height(&proj).ceil() as i32
+                let editing_tracks = st.resolve_editing_tracks(&proj);
+                (timeline_content_height_for_tracks(editing_tracks)
+                    + st.breadcrumb_bar_height())
+                .ceil() as i32
             };
             area.set_content_height(content_height.max(1));
             draw_timeline(cr, width, height, &st, &mut tcache, &mut wcache);
@@ -7098,9 +7125,9 @@ fn draw_timeline(
     } = &st.drag_op
     {
         if track_idx != target_idx {
-            let target_top = track_row_top(&proj, *target_idx);
-            let target_height = proj
-                .tracks
+            let target_top =
+                track_row_top_in_tracks(editing_tracks, *target_idx) + breadcrumb_height;
+            let target_height = editing_tracks
                 .get(*target_idx)
                 .map(track_row_height)
                 .unwrap_or(0.0);
@@ -7135,8 +7162,7 @@ fn draw_timeline(
     }
 
     if let Some(km) = &st.keyframe_marquee_selection {
-        if let Some((track_idx, track)) = proj
-            .tracks
+        if let Some((track_idx, track)) = editing_tracks
             .iter()
             .enumerate()
             .find(|(_, t)| t.id == km.track_id)
@@ -7150,7 +7176,9 @@ fn draw_timeline(
                     let x1 = cx + (km.current_local_ns as f64 / duration_ns as f64) * cw;
                     let left = x0.min(x1).max(TRACK_LABEL_WIDTH);
                     let right = x0.max(x1);
-                    let top = track_row_top(&proj, track_idx) + 2.0;
+                    let top = track_row_top_in_tracks(editing_tracks, track_idx)
+                        + breadcrumb_height
+                        + 2.0;
                     let bottom = top + track_row_height(track) - 4.0;
                     if right > left && bottom > top {
                         cr.set_source_rgba(1.0, 0.75, 0.22, 0.20);

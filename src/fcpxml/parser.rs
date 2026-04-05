@@ -779,7 +779,38 @@ fn parse_asset_clip(
     parent_ctx: Option<&ActiveClipContext>,
 ) -> Option<ActiveClipContext> {
     if let Some(asset_ref) = attrs.get("ref") {
-        if let Some(asset) = assets.get(asset_ref) {
+        // Compound and multicam clips have no <asset> in resources — they
+        // store their data in vendor attributes.  Create a synthetic asset
+        // so the rest of the parser can proceed normally.
+        let is_sourceless_clip = matches!(
+            attrs.get("us:clip-kind").map(|s| s.as_str()),
+            Some("compound") | Some("multicam") | Some("title") | Some("adjustment")
+        );
+        let synthetic_asset;
+        let asset: &Asset = if let Some(a) = assets.get(asset_ref) {
+            a
+        } else if is_sourceless_clip {
+            synthetic_asset = Asset {
+                id: asset_ref.clone(),
+                src: String::new(),
+                name: attrs
+                    .get("name")
+                    .cloned()
+                    .unwrap_or_else(|| "Compound Clip".to_string()),
+                duration_ns: attrs
+                    .get("duration")
+                    .and_then(|t| parse_fcpxml_time(t))
+                    .unwrap_or(0),
+                start_ns: 0,
+                has_video: true,
+                has_audio: false,
+                unknown_attrs: Vec::new(),
+                unknown_children: Vec::new(),
+            };
+            &synthetic_asset
+        } else {
+            return None;
+        };
             let raw_offset = attrs
                 .get("offset")
                 .and_then(|t| parse_fcpxml_time(t))
@@ -1420,7 +1451,6 @@ fn parse_asset_clip(
                 has_us_freeze_source_ns: attrs.contains_key("us:freeze-source-ns"),
                 has_us_freeze_hold_duration_ns: attrs.contains_key("us:freeze-hold-duration-ns"),
             });
-        }
     }
     None
 }

@@ -3459,11 +3459,17 @@ fn clip_to_program_clips(
         let mut result = Vec::new();
 
         // Video segments: one ProgramClip per contiguous angle segment (no embedded audio)
+        // Segments are window-relative (0 = visible start); add source_in
+        // to map back to the angle's internal timeline.
         for (seg_start, seg_end, angle_idx) in &segments {
             if let Some(angle) = c.multicam_angles.as_ref().and_then(|a| a.get(*angle_idx)) {
-                let angle_source_in = angle.source_in.saturating_add(*seg_start);
+                let angle_source_in = angle
+                    .source_in
+                    .saturating_add(c.source_in)
+                    .saturating_add(*seg_start);
                 let angle_source_out = angle
                     .source_in
+                    .saturating_add(c.source_in)
                     .saturating_add(*seg_end)
                     .min(angle.source_out);
                 let mut seg_clip = crate::model::clip::Clip::new(
@@ -3494,14 +3500,16 @@ fn clip_to_program_clips(
         }
 
         // Audio mix: one continuous audio ProgramClip per unmuted angle spanning the full multicam duration
+        // Add source_in to map into the correct part of the angle source.
         if let Some(ref angles) = c.multicam_angles {
             for (ai, angle) in angles.iter().enumerate() {
                 if angle.muted {
                     continue;
                 }
-                let angle_source_in = angle.source_in;
+                let angle_source_in = angle.source_in.saturating_add(c.source_in);
                 let angle_source_out = angle
                     .source_in
+                    .saturating_add(c.source_in)
                     .saturating_add(clip_dur)
                     .min(angle.source_out);
                 let mut audio_clip = crate::model::clip::Clip::new(
