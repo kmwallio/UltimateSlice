@@ -2135,6 +2135,41 @@ impl TimelineState {
         }
     }
 
+    /// Translate the main-timeline playhead to compound-internal time when
+    /// in drill-down mode.  At root level this is a no-op.
+    ///
+    /// When viewing a compound clip that starts at `T` on the parent
+    /// timeline with `source_in = S`, internal position =
+    /// `(playhead - T) + S`.  This makes the playhead align with the
+    /// compound's internal clips.
+    pub fn editing_playhead_ns(&self) -> u64 {
+        if self.compound_nav_stack.is_empty() {
+            return self.playhead_ns;
+        }
+        let proj = self.project.borrow();
+        let mut playhead = self.playhead_ns;
+        let mut tracks: &[crate::model::track::Track] = &proj.tracks;
+        for compound_id in &self.compound_nav_stack {
+            let found = tracks
+                .iter()
+                .flat_map(|t| t.clips.iter())
+                .find(|c| c.id == *compound_id && c.is_compound());
+            if let Some(compound) = found {
+                playhead = playhead
+                    .saturating_sub(compound.timeline_start)
+                    .saturating_add(compound.source_in);
+                if let Some(ref inner) = compound.compound_tracks {
+                    tracks = inner;
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        playhead
+    }
+
     /// Resolve the currently-editing tracks based on the navigation stack.
     /// Returns project.tracks when at root level, or the innermost compound
     /// clip's internal tracks when drilled in.
@@ -3095,7 +3130,7 @@ impl TimelineState {
     /// `Some`, only the specified track is considered; otherwise all tracks
     /// are searched (first match wins).
     pub fn razor_cut_at_playhead_on_track(&mut self, track_idx: Option<usize>) {
-        let playhead = self.playhead_ns;
+        let playhead = self.editing_playhead_ns();
         let (clip_to_cut, track_id) = {
             let proj = self.project.borrow();
             let editing_tracks = self.resolve_editing_tracks(&proj);
@@ -6959,7 +6994,9 @@ fn draw_timeline(
     }
 
     // Playhead (clipped to content area so it doesn't overdraw track labels)
-    let ph_x = st.ns_to_x(st.playhead_ns);
+    // When inside a compound, translate the main-timeline playhead to the
+    // compound's internal time so it aligns with the internal clips.
+    let ph_x = st.ns_to_x(st.editing_playhead_ns());
     cr.save().ok();
     cr.rectangle(TRACK_LABEL_WIDTH, 0.0, w - TRACK_LABEL_WIDTH, h);
     cr.clip();
