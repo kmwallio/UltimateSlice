@@ -290,6 +290,34 @@ fn extract_raw_audio(path: &str, source_in_ns: u64, source_out_ns: u64) -> Optio
     )
 }
 
+pub(crate) fn mix_down_interleaved_audio_samples(
+    interleaved: &[f32],
+    channel_count: usize,
+) -> Vec<f32> {
+    if channel_count <= 1 {
+        return interleaved.to_vec();
+    }
+    interleaved
+        .chunks_exact(channel_count)
+        .map(|frame| frame.iter().copied().sum::<f32>() / channel_count as f32)
+        .collect()
+}
+
+pub(crate) fn extract_interleaved_audio_channel(
+    interleaved: &[f32],
+    channel_count: usize,
+    channel_index: usize,
+) -> Vec<f32> {
+    if interleaved.is_empty() || channel_count == 0 {
+        return Vec::new();
+    }
+    let channel_index = channel_index.min(channel_count.saturating_sub(1));
+    interleaved
+        .chunks_exact(channel_count)
+        .map(|frame| frame[channel_index])
+        .collect()
+}
+
 pub(crate) fn extract_mono_audio_samples(
     path: &str,
     source_in_ns: u64,
@@ -297,6 +325,24 @@ pub(crate) fn extract_mono_audio_samples(
     sample_rate: i32,
     max_extract_seconds: f64,
 ) -> Option<Vec<f32>> {
+    let (interleaved, channel_count) = extract_interleaved_audio_samples(
+        path,
+        source_in_ns,
+        source_out_ns,
+        sample_rate,
+        max_extract_seconds,
+    )?;
+    let samples = mix_down_interleaved_audio_samples(&interleaved, channel_count);
+    (!samples.is_empty()).then_some(samples)
+}
+
+pub(crate) fn extract_interleaved_audio_samples(
+    path: &str,
+    source_in_ns: u64,
+    source_out_ns: u64,
+    sample_rate: i32,
+    max_extract_seconds: f64,
+) -> Option<(Vec<f32>, usize)> {
     let uri = if path.starts_with("file://") {
         path.to_string()
     } else {
@@ -317,7 +363,6 @@ pub(crate) fn extract_mono_audio_samples(
 
     let caps = gst::Caps::builder("audio/x-raw")
         .field("format", "F32LE")
-        .field("channels", 1i32)
         .field("rate", sample_rate)
         .build();
     capsf.set_property("caps", &caps);
@@ -386,10 +431,21 @@ pub(crate) fn extract_mono_audio_samples(
     let max_samples = (extract_s * sample_rate as f64) as usize + sample_rate as usize; // small buffer
 
     let mut samples: Vec<f32> = Vec::new();
+    let mut channel_count: Option<usize> = None;
     let bus = pipeline.bus()?;
 
     loop {
         if let Some(s) = appsink.try_pull_sample(gst::ClockTime::from_mseconds(100)) {
+            if channel_count.is_none() {
+                let caps = s.caps()?;
+                let structure = caps.structure(0)?;
+                let channels = structure.get::<i32>("channels").ok()?;
+                let channels = usize::try_from(channels).ok()?;
+                if channels == 0 {
+                    return None;
+                }
+                channel_count = Some(channels);
+            }
             let buffer = s.buffer()?;
             let map = buffer.map_readable().ok()?;
             let raw_bytes = map.as_slice();
@@ -398,7 +454,8 @@ pub(crate) fn extract_mono_audio_samples(
             };
             samples.extend_from_slice(floats);
 
-            if samples.len() >= max_samples {
+            let max_interleaved_samples = max_samples * channel_count.unwrap_or(1);
+            if samples.len() >= max_interleaved_samples {
                 break;
             }
         }
@@ -416,16 +473,19 @@ pub(crate) fn extract_mono_audio_samples(
         }
     }
 
-    // Trim to max_samples
-    if samples.len() > max_samples {
-        samples.truncate(max_samples);
+    let channel_count = channel_count?;
+    let max_interleaved_samples = max_samples * channel_count;
+    if samples.len() > max_interleaved_samples {
+        samples.truncate(max_interleaved_samples);
     }
+    let frames = samples.len() / channel_count;
+    samples.truncate(frames * channel_count);
 
     if samples.is_empty() {
         return None;
     }
 
-    Some(samples)
+    Some((samples, channel_count))
 }
 
 // ── GCC-PHAT cross-correlation ─────────────────────────────────────────────
@@ -626,6 +686,26 @@ mod tests {
             energy_after < energy_before * 0.3,
             "50Hz energy ratio = {:.2} (expected < 0.3)",
             energy_after / energy_before
+        );
+    }
+
+    #[test]
+    fn mix_down_interleaved_audio_samples_averages_channels() {
+        let interleaved = vec![1.0, 0.0, 0.5, -0.5, -1.0, 1.0];
+        let mono = mix_down_interleaved_audio_samples(&interleaved, 2);
+        assert_eq!(mono, vec![0.5, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn extract_interleaved_audio_channel_reads_requested_side() {
+        let interleaved = vec![1.0, 0.0, 0.5, -0.5, -1.0, 1.0];
+        assert_eq!(
+            extract_interleaved_audio_channel(&interleaved, 2, 0),
+            vec![1.0, 0.5, -1.0]
+        );
+        assert_eq!(
+            extract_interleaved_audio_channel(&interleaved, 2, 1),
+            vec![0.0, -0.5, 1.0]
         );
     }
 }

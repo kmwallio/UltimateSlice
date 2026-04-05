@@ -164,7 +164,14 @@ fn sync_match_audio_mode_ui(
 ) {
     description_label.set_text(mode.description());
     region_box.set_visible(mode.shows_region_fields());
-    dialog.set_default_size(440, if mode.shows_region_fields() { 360 } else { 220 });
+    dialog.set_default_size(460, if mode.shows_region_fields() { 420 } else { 260 });
+}
+
+fn sync_match_audio_channel_mode_ui(
+    description_label: &Label,
+    mode: crate::media::audio_match::AudioMatchChannelMode,
+) {
+    description_label.set_text(mode.description());
 }
 
 fn interp_idx_to_enum(idx: u32) -> KeyframeInterpolation {
@@ -2603,8 +2610,10 @@ pub fn build_inspector(
     on_match_audio: impl Fn(
             &str,
             Option<crate::media::audio_match::AnalysisRegionNs>,
+            crate::media::audio_match::AudioMatchChannelMode,
             &str,
             Option<crate::media::audio_match::AnalysisRegionNs>,
+            crate::media::audio_match::AudioMatchChannelMode,
         ) + 'static,
     on_duck_changed: impl Fn(&str, bool, f64) + 'static,
     on_role_changed: impl Fn(&str, &str) + 'static,
@@ -2616,8 +2625,10 @@ pub fn build_inspector(
         dyn Fn(
             &str,
             Option<crate::media::audio_match::AnalysisRegionNs>,
+            crate::media::audio_match::AudioMatchChannelMode,
             &str,
             Option<crate::media::audio_match::AnalysisRegionNs>,
+            crate::media::audio_match::AudioMatchChannelMode,
         ),
     > = Rc::new(on_match_audio);
     let on_duck_changed: Rc<dyn Fn(&str, bool, f64)> = Rc::new(on_duck_changed);
@@ -4869,7 +4880,7 @@ pub fn build_inspector(
             let dialog = gtk4::Window::builder()
                 .title("Match Audio")
                 .modal(true)
-                .default_width(440)
+                .default_width(460)
                 .build();
             dialog.set_resizable(false);
             if let Some(ref w) = window {
@@ -4900,6 +4911,15 @@ pub fn build_inspector(
             reference_dropdown.set_selected(0);
             reference_dropdown.set_hexpand(true);
 
+            let channel_labels = crate::media::audio_match::AudioMatchChannelMode::ALL
+                .iter()
+                .map(|mode| mode.label())
+                .collect::<Vec<_>>();
+            let channel_list = gtk4::StringList::new(&channel_labels);
+            let channel_dropdown = gtk4::DropDown::new(Some(channel_list), gtk4::Expression::NONE);
+            channel_dropdown.set_selected(0);
+            channel_dropdown.set_hexpand(true);
+
             let mode_list =
                 gtk4::StringList::new(&["Match voice (Recommended)", "Choose region..."]);
             let mode_dropdown = gtk4::DropDown::new(Some(mode_list), gtk4::Expression::NONE);
@@ -4922,11 +4942,22 @@ pub fn build_inspector(
             form.attach(&reference_label, 0, 1, 1, 1);
             form.attach(&reference_dropdown, 1, 1, 1, 1);
 
+            let channel_label = Label::new(Some("Channel handling"));
+            channel_label.set_halign(gtk4::Align::Start);
+            form.attach(&channel_label, 0, 2, 1, 1);
+            form.attach(&channel_dropdown, 1, 2, 1, 1);
+
             let mode_description = Label::new(None);
             mode_description.set_halign(gtk4::Align::Start);
             mode_description.set_wrap(true);
             mode_description.add_css_class("dim-label");
             vbox.append(&mode_description);
+
+            let channel_description = Label::new(None);
+            channel_description.set_halign(gtk4::Align::Start);
+            channel_description.set_wrap(true);
+            channel_description.add_css_class("dim-label");
+            vbox.append(&channel_description);
 
             let region_box = GBox::new(Orientation::Vertical, 8);
             vbox.append(&region_box);
@@ -5055,6 +5086,22 @@ pub fn build_inspector(
                 sync_mode_notify(dd.selected());
             });
 
+            let channel_description_for_sync = channel_description.clone();
+            let sync_channel_mode = Rc::new(move |selected: u32| {
+                let mode = crate::media::audio_match::AudioMatchChannelMode::ALL
+                    .get(selected as usize)
+                    .copied()
+                    .unwrap_or_default();
+                sync_match_audio_channel_mode_ui(&channel_description_for_sync, mode);
+            });
+            sync_channel_mode(channel_dropdown.selected());
+            let sync_channel_mode_notify = sync_channel_mode.clone();
+            let error_label_for_channel_change = error_label.clone();
+            channel_dropdown.connect_selected_notify(move |dd| {
+                error_label_for_channel_change.set_visible(false);
+                sync_channel_mode_notify(dd.selected());
+            });
+
             let btn_row = GBox::new(Orientation::Horizontal, 8);
             btn_row.set_halign(gtk4::Align::End);
             let cancel_btn = Button::with_label("Cancel");
@@ -5072,6 +5119,7 @@ pub fn build_inspector(
             let dialog_ok = dialog.clone();
             let on_match_audio = on_match_audio.clone();
             let candidates = candidates.clone();
+            let channel_dropdown = channel_dropdown.clone();
             let mode_dropdown = mode_dropdown.clone();
             let reference_dropdown = reference_dropdown.clone();
             let source_in_entry = source_in_entry.clone();
@@ -5088,6 +5136,10 @@ pub fn build_inspector(
                     return;
                 }
                 let mode = MatchAudioDialogMode::from_index(mode_dropdown.selected());
+                let channel_mode = crate::media::audio_match::AudioMatchChannelMode::ALL
+                    .get(channel_dropdown.selected() as usize)
+                    .copied()
+                    .unwrap_or_default();
                 let (source_region, reference_region) = if mode.shows_region_fields() {
                     let source_region = match parse_audio_match_region_entries(
                         &source_in_entry,
@@ -5125,8 +5177,10 @@ pub fn build_inspector(
                 on_match_audio(
                     &source_clip_id,
                     source_region,
+                    channel_mode,
                     &candidates[idx].clip_id,
                     reference_region,
+                    channel_mode,
                 );
                 dialog_ok.close();
             });

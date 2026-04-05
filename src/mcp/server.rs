@@ -1110,16 +1110,18 @@ fn tools_list() -> Value {
         },
         {
             "name": "match_clip_audio",
-            "description": "Match a source clip's audio tone toward a reference clip using integrated loudness plus the built-in 3-band EQ. The matcher derives adaptive band frequency/gain/Q targets from speech-focused spectral differences, preferring subtitle/STT dialogue regions when available and otherwise weighting voice-active frames. Optional source/reference start/end ranges let you match a specific phrase instead of the full clip region. This is a conservative reference-based match, not full microphone cloning. The operation is undoable.",
+            "description": "Match a source clip's audio tone toward a reference clip using integrated loudness plus the built-in 3-band EQ. The matcher derives adaptive band frequency/gain/Q targets from speech-focused spectral differences, preferring subtitle/STT dialogue regions when available and otherwise weighting voice-active frames. Channel-aware analysis defaults to auto-detecting dominant one-sided audio while respecting existing clip routing; optional source/reference channel overrides and start/end ranges let you target a specific side or phrase. This is a conservative reference-based match, not full microphone cloning. The operation is undoable.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "source_clip_id": { "type": "string", "description": "Clip id to adjust (the clip that will be modified)." },
                     "source_start_ns": { "type": "integer", "description": "Optional source subrange start in nanoseconds, relative to the clip's current in-point." },
                     "source_end_ns": { "type": "integer", "description": "Optional source subrange end in nanoseconds, relative to the clip's current in-point." },
+                    "source_channel_mode": { "type": "string", "description": "Optional source channel analysis mode: `auto`, `mono_mix`, `left`, or `right`." },
                     "reference_clip_id": { "type": "string", "description": "Clip id whose tonal balance and loudness should be matched." },
                     "reference_start_ns": { "type": "integer", "description": "Optional reference subrange start in nanoseconds, relative to the clip's current in-point." },
-                    "reference_end_ns": { "type": "integer", "description": "Optional reference subrange end in nanoseconds, relative to the clip's current in-point." }
+                    "reference_end_ns": { "type": "integer", "description": "Optional reference subrange end in nanoseconds, relative to the clip's current in-point." },
+                    "reference_channel_mode": { "type": "string", "description": "Optional reference channel analysis mode: `auto`, `mono_mix`, `left`, or `right`." }
                 },
                 "required": ["source_clip_id", "reference_clip_id"]
             }
@@ -2693,9 +2695,19 @@ fn dispatch_tool_payload(
             source_clip_id: args["source_clip_id"].as_str().unwrap_or("").to_string(),
             source_start_ns: args.get("source_start_ns").and_then(|v| v.as_u64()),
             source_end_ns: args.get("source_end_ns").and_then(|v| v.as_u64()),
+            source_channel_mode: crate::media::audio_match::AudioMatchChannelMode::from_str(
+                args.get("source_channel_mode")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("auto"),
+            ),
             reference_clip_id: args["reference_clip_id"].as_str().unwrap_or("").to_string(),
             reference_start_ns: args.get("reference_start_ns").and_then(|v| v.as_u64()),
             reference_end_ns: args.get("reference_end_ns").and_then(|v| v.as_u64()),
+            reference_channel_mode: crate::media::audio_match::AudioMatchChannelMode::from_str(
+                args.get("reference_channel_mode")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("auto"),
+            ),
             reply: tx,
         },
         "detect_scene_cuts" => McpCommand::DetectSceneCuts {
@@ -3536,17 +3548,27 @@ mod tests {
                     source_clip_id,
                     source_start_ns,
                     source_end_ns,
+                    source_channel_mode,
                     reference_clip_id,
                     reference_start_ns,
                     reference_end_ns,
+                    reference_channel_mode,
                     reply,
                 } => {
                     assert_eq!(source_clip_id, "clip-1");
                     assert_eq!(source_start_ns, Some(1_000_000_000));
                     assert_eq!(source_end_ns, Some(3_000_000_000));
+                    assert_eq!(
+                        source_channel_mode,
+                        crate::media::audio_match::AudioMatchChannelMode::Left
+                    );
                     assert_eq!(reference_clip_id, "clip-2");
                     assert_eq!(reference_start_ns, Some(2_000_000_000));
                     assert_eq!(reference_end_ns, Some(4_000_000_000));
+                    assert_eq!(
+                        reference_channel_mode,
+                        crate::media::audio_match::AudioMatchChannelMode::Right
+                    );
                     reply
                         .send(json!({
                             "success": true,
@@ -3565,9 +3587,11 @@ mod tests {
                 "source_clip_id": "clip-1",
                 "source_start_ns": 1_000_000_000u64,
                 "source_end_ns": 3_000_000_000u64,
+                "source_channel_mode": "left",
                 "reference_clip_id": "clip-2",
                 "reference_start_ns": 2_000_000_000u64,
-                "reference_end_ns": 4_000_000_000u64
+                "reference_end_ns": 4_000_000_000u64,
+                "reference_channel_mode": "right"
             }
         });
         let mut cache = std::collections::HashMap::new();

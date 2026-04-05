@@ -429,9 +429,11 @@ pub enum McpCommand {
         source_clip_id: String,
         source_start_ns: Option<u64>,
         source_end_ns: Option<u64>,
+        source_channel_mode: crate::media::audio_match::AudioMatchChannelMode,
         reference_clip_id: String,
         reference_start_ns: Option<u64>,
         reference_end_ns: Option<u64>,
+        reference_channel_mode: crate::media::audio_match::AudioMatchChannelMode,
         reply: SyncSender<Value>,
     },
     DetectSceneCuts {

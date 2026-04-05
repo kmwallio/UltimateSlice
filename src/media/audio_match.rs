@@ -6,7 +6,7 @@ use anyhow::{anyhow, Result};
 use rustfft::num_complex::Complex;
 use rustfft::FftPlanner;
 
-use crate::model::clip::{default_eq_bands, EqBand};
+use crate::model::clip::{default_eq_bands, AudioChannelMode as ClipAudioChannelMode, EqBand};
 
 const SAMPLE_RATE: i32 = 22_050;
 const MAX_EXTRACT_SECONDS: f64 = 20.0;
@@ -22,6 +22,8 @@ const ENERGY_ACTIVE_RANGE_DB: f64 = 26.0;
 const ENERGY_WEIGHT_SOFTNESS_DB: f64 = 10.0;
 const REGION_MIN_WEIGHT_SUM: f64 = 0.75;
 const REGION_MIN_ACTIVE_FRAMES: usize = 4;
+const AUTO_CHANNEL_MIN_ENERGY: f64 = 1e-8;
+const AUTO_CHANNEL_ISOLATION_RATIO: f64 = 16.0;
 
 const ANALYSIS_BAND_COUNT: usize = 11;
 const ANALYSIS_BANDS: [(f64, f64); ANALYSIS_BAND_COUNT] = [
@@ -57,16 +59,80 @@ pub struct AnalysisRegionNs {
     pub end_ns: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AudioMatchChannelMode {
+    #[default]
+    Auto,
+    MonoMix,
+    Left,
+    Right,
+}
+
+impl AudioMatchChannelMode {
+    pub const ALL: [Self; 4] = [Self::Auto, Self::MonoMix, Self::Left, Self::Right];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto (Recommended)",
+            Self::MonoMix => "Mono Mix",
+            Self::Left => "Left Only",
+            Self::Right => "Right Only",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Auto => {
+                "Respects the clip's current channel routing and automatically picks a single side when the other channel is effectively silent."
+            }
+            Self::MonoMix => "Average the available channels before matching.",
+            Self::Left => "Analyze the left channel only (or the only channel on mono clips).",
+            Self::Right => "Analyze the right channel only (or the only channel on mono clips).",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::MonoMix => "mono_mix",
+            Self::Left => "left",
+            Self::Right => "right",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "mono" | "mono_mix" | "mix" => Self::MonoMix,
+            "left" => Self::Left,
+            "right" => Self::Right,
+            _ => Self::Auto,
+        }
+    }
+
+    fn fallback_from_clip_channel_mode(mode: ClipAudioChannelMode) -> Self {
+        match mode {
+            ClipAudioChannelMode::Left => Self::Left,
+            ClipAudioChannelMode::Right => Self::Right,
+            ClipAudioChannelMode::MonoMix => Self::MonoMix,
+            ClipAudioChannelMode::Stereo => Self::Auto,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AudioMatchParams {
     pub source_path: String,
     pub source_in_ns: u64,
     pub source_out_ns: u64,
     pub source_speech_regions: Vec<AnalysisRegionNs>,
+    pub source_channel_mode: AudioMatchChannelMode,
+    pub source_clip_channel_mode: ClipAudioChannelMode,
     pub reference_path: String,
     pub reference_in_ns: u64,
     pub reference_out_ns: u64,
     pub reference_speech_regions: Vec<AnalysisRegionNs>,
+    pub reference_channel_mode: AudioMatchChannelMode,
+    pub reference_clip_channel_mode: ClipAudioChannelMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -156,43 +222,59 @@ pub struct AudioMatchOutcome {
     pub eq_bands: [EqBand; 3],
     pub source_profile: SpectralProfile,
     pub reference_profile: SpectralProfile,
+    pub source_resolved_channel_mode: AudioMatchChannelMode,
+    pub reference_resolved_channel_mode: AudioMatchChannelMode,
+}
+
+#[derive(Debug, Clone)]
+struct ExtractedMatchSamples {
+    samples: Vec<f32>,
+    channel_count: usize,
+    resolved_channel_mode: AudioMatchChannelMode,
 }
 
 pub fn run_audio_match(params: &AudioMatchParams) -> Result<AudioMatchOutcome> {
-    let source_loudness_lufs = crate::media::export::analyze_loudness_lufs(
+    let source_audio = extract_audio_match_samples(
         &params.source_path,
         params.source_in_ns,
         params.source_out_ns,
+        params.source_channel_mode,
+        params.source_clip_channel_mode,
     )?;
-    let reference_loudness_lufs = crate::media::export::analyze_loudness_lufs(
+    let reference_audio = extract_audio_match_samples(
         &params.reference_path,
         params.reference_in_ns,
         params.reference_out_ns,
+        params.reference_channel_mode,
+        params.reference_clip_channel_mode,
     )?;
-    let source_samples = crate::media::audio_sync::extract_mono_audio_samples(
+
+    let source_loudness_lufs = crate::media::export::analyze_loudness_lufs_with_prefilter(
         &params.source_path,
         params.source_in_ns,
         params.source_out_ns,
-        SAMPLE_RATE,
-        MAX_EXTRACT_SECONDS,
-    )
-    .ok_or_else(|| anyhow!("Could not extract source audio samples"))?;
-    let reference_samples = crate::media::audio_sync::extract_mono_audio_samples(
+        loudness_prefilter_for_channel_mode(
+            source_audio.resolved_channel_mode,
+            source_audio.channel_count,
+        ),
+    )?;
+    let reference_loudness_lufs = crate::media::export::analyze_loudness_lufs_with_prefilter(
         &params.reference_path,
         params.reference_in_ns,
         params.reference_out_ns,
-        SAMPLE_RATE,
-        MAX_EXTRACT_SECONDS,
-    )
-    .ok_or_else(|| anyhow!("Could not extract reference audio samples"))?;
+        loudness_prefilter_for_channel_mode(
+            reference_audio.resolved_channel_mode,
+            reference_audio.channel_count,
+        ),
+    )?;
 
     let source_spectrum = detailed_spectrum_from_samples(
-        &source_samples,
+        &source_audio.samples,
         SAMPLE_RATE as f64,
         &params.source_speech_regions,
     )?;
     let reference_spectrum = detailed_spectrum_from_samples(
-        &reference_samples,
+        &reference_audio.samples,
         SAMPLE_RATE as f64,
         &params.reference_speech_regions,
     )?;
@@ -209,7 +291,145 @@ pub fn run_audio_match(params: &AudioMatchParams) -> Result<AudioMatchOutcome> {
         eq_bands: matched_eq_bands(source_spectrum, reference_spectrum),
         source_profile,
         reference_profile,
+        source_resolved_channel_mode: source_audio.resolved_channel_mode,
+        reference_resolved_channel_mode: reference_audio.resolved_channel_mode,
     })
+}
+
+fn extract_audio_match_samples(
+    path: &str,
+    source_in_ns: u64,
+    source_out_ns: u64,
+    requested_channel_mode: AudioMatchChannelMode,
+    clip_channel_mode: ClipAudioChannelMode,
+) -> Result<ExtractedMatchSamples> {
+    let (interleaved, channel_count) = crate::media::audio_sync::extract_interleaved_audio_samples(
+        path,
+        source_in_ns,
+        source_out_ns,
+        SAMPLE_RATE,
+        MAX_EXTRACT_SECONDS,
+    )
+    .ok_or_else(|| anyhow!("Could not extract audio samples"))?;
+    let resolved_channel_mode = resolve_audio_match_channel_mode(
+        requested_channel_mode,
+        clip_channel_mode,
+        &interleaved,
+        channel_count,
+    );
+    let samples = match resolved_channel_mode {
+        AudioMatchChannelMode::Auto => unreachable!("auto mode should resolve to a concrete mode"),
+        AudioMatchChannelMode::MonoMix => {
+            crate::media::audio_sync::mix_down_interleaved_audio_samples(
+                &interleaved,
+                channel_count,
+            )
+        }
+        AudioMatchChannelMode::Left => crate::media::audio_sync::extract_interleaved_audio_channel(
+            &interleaved,
+            channel_count,
+            0,
+        ),
+        AudioMatchChannelMode::Right => {
+            crate::media::audio_sync::extract_interleaved_audio_channel(
+                &interleaved,
+                channel_count,
+                1,
+            )
+        }
+    };
+    if samples.is_empty() {
+        return Err(anyhow!("Could not extract audio samples"));
+    }
+    Ok(ExtractedMatchSamples {
+        samples,
+        channel_count,
+        resolved_channel_mode,
+    })
+}
+
+fn resolve_audio_match_channel_mode(
+    requested_channel_mode: AudioMatchChannelMode,
+    clip_channel_mode: ClipAudioChannelMode,
+    interleaved: &[f32],
+    channel_count: usize,
+) -> AudioMatchChannelMode {
+    if channel_count <= 1 {
+        return AudioMatchChannelMode::MonoMix;
+    }
+    match requested_channel_mode {
+        AudioMatchChannelMode::Auto => {
+            let clip_fallback =
+                AudioMatchChannelMode::fallback_from_clip_channel_mode(clip_channel_mode);
+            if clip_fallback != AudioMatchChannelMode::Auto {
+                return clip_fallback;
+            }
+            auto_detect_dominant_channel(interleaved, channel_count)
+                .unwrap_or(AudioMatchChannelMode::MonoMix)
+        }
+        mode => mode,
+    }
+}
+
+fn auto_detect_dominant_channel(
+    interleaved: &[f32],
+    channel_count: usize,
+) -> Option<AudioMatchChannelMode> {
+    if channel_count != 2 {
+        return None;
+    }
+    let left_energy = interleaved_channel_energy(interleaved, channel_count, 0);
+    let right_energy = interleaved_channel_energy(interleaved, channel_count, 1);
+    let (dominant_mode, dominant_energy, other_energy) = if left_energy >= right_energy {
+        (AudioMatchChannelMode::Left, left_energy, right_energy)
+    } else {
+        (AudioMatchChannelMode::Right, right_energy, left_energy)
+    };
+    if dominant_energy <= AUTO_CHANNEL_MIN_ENERGY {
+        return None;
+    }
+    let other_energy = other_energy.max(AUTO_CHANNEL_MIN_ENERGY);
+    ((dominant_energy / other_energy) >= AUTO_CHANNEL_ISOLATION_RATIO).then_some(dominant_mode)
+}
+
+fn interleaved_channel_energy(
+    interleaved: &[f32],
+    channel_count: usize,
+    channel_index: usize,
+) -> f64 {
+    crate::media::audio_sync::extract_interleaved_audio_channel(
+        interleaved,
+        channel_count,
+        channel_index,
+    )
+    .into_iter()
+    .map(|sample| {
+        let sample = sample as f64;
+        sample * sample
+    })
+    .sum::<f64>()
+}
+
+fn loudness_prefilter_for_channel_mode(
+    channel_mode: AudioMatchChannelMode,
+    channel_count: usize,
+) -> Option<String> {
+    if channel_count <= 1 {
+        return None;
+    }
+    match channel_mode {
+        AudioMatchChannelMode::Auto => None,
+        AudioMatchChannelMode::MonoMix => {
+            let gain = 1.0 / channel_count as f64;
+            let terms = (0..channel_count)
+                .map(|channel_idx| format!("{gain:.6}*c{channel_idx}"))
+                .collect::<Vec<_>>()
+                .join("+");
+            Some(format!("pan=mono|c0={terms}"))
+        }
+        AudioMatchChannelMode::Left => Some("pan=mono|c0=c0".to_string()),
+        AudioMatchChannelMode::Right => Some("pan=mono|c0=c1".to_string()),
+    }
 }
 
 fn matched_eq_bands(
@@ -692,5 +912,41 @@ mod tests {
         assert_eq!(eq_bands[0], default_eq_bands()[0]);
         assert_eq!(eq_bands[1], default_eq_bands()[1]);
         assert_eq!(eq_bands[2], default_eq_bands()[2]);
+    }
+
+    #[test]
+    fn auto_channel_mode_prefers_dominant_single_sided_audio() {
+        let interleaved = vec![1.0, 0.0, 0.8, 0.0, 0.6, 0.0, 0.4, 0.0];
+        let resolved = resolve_audio_match_channel_mode(
+            AudioMatchChannelMode::Auto,
+            ClipAudioChannelMode::Stereo,
+            &interleaved,
+            2,
+        );
+        assert_eq!(resolved, AudioMatchChannelMode::Left);
+    }
+
+    #[test]
+    fn auto_channel_mode_respects_existing_clip_routing() {
+        let interleaved = vec![0.7, 0.7, 0.6, 0.6, 0.5, 0.5];
+        let resolved = resolve_audio_match_channel_mode(
+            AudioMatchChannelMode::Auto,
+            ClipAudioChannelMode::Right,
+            &interleaved,
+            2,
+        );
+        assert_eq!(resolved, AudioMatchChannelMode::Right);
+    }
+
+    #[test]
+    fn auto_channel_mode_keeps_balanced_stereo_as_mono_mix() {
+        let interleaved = vec![1.0, 0.9, 0.8, 0.7, 0.6, 0.5];
+        let resolved = resolve_audio_match_channel_mode(
+            AudioMatchChannelMode::Auto,
+            ClipAudioChannelMode::Stereo,
+            &interleaved,
+            2,
+        );
+        assert_eq!(resolved, AudioMatchChannelMode::MonoMix);
     }
 }

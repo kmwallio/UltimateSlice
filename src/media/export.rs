@@ -3348,9 +3348,7 @@ fn build_channel_filter(clip: &crate::model::clip::Clip) -> String {
         AudioChannelMode::Stereo => String::new(),
         AudioChannelMode::Left => "pan=stereo|c0=c0|c1=c0".to_string(),
         AudioChannelMode::Right => "pan=stereo|c0=c1|c1=c1".to_string(),
-        AudioChannelMode::MonoMix => {
-            "pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1".to_string()
-        }
+        AudioChannelMode::MonoMix => "pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1".to_string(),
     }
 }
 
@@ -3900,6 +3898,15 @@ pub(crate) fn analyze_loudness_lufs(
     source_in_ns: u64,
     source_out_ns: u64,
 ) -> Result<f64> {
+    analyze_loudness_lufs_with_prefilter(source_path, source_in_ns, source_out_ns, None)
+}
+
+pub(crate) fn analyze_loudness_lufs_with_prefilter(
+    source_path: &str,
+    source_in_ns: u64,
+    source_out_ns: u64,
+    prefilter: Option<String>,
+) -> Result<f64> {
     let ffmpeg = find_ffmpeg()?;
     if !probe_has_audio(&ffmpeg, source_path) {
         return Err(anyhow!("Clip has no audio stream"));
@@ -3909,6 +3916,9 @@ pub(crate) fn analyze_loudness_lufs(
     if duration_sec <= 0.0 {
         return Err(anyhow!("Clip has zero duration"));
     }
+    let audio_filter = prefilter
+        .map(|filter| format!("{filter},ebur128"))
+        .unwrap_or_else(|| "ebur128".to_string());
     let output = Command::new(&ffmpeg)
         .args([
             "-ss",
@@ -3919,7 +3929,7 @@ pub(crate) fn analyze_loudness_lufs(
             source_path,
             "-vn", // skip video decode — audio-only analysis
             "-af",
-            "ebur128",
+            &audio_filter,
             "-f",
             "null",
             "-",
@@ -4164,12 +4174,48 @@ fn flatten_clips(clips: &[Clip], timeline_offset: u64, depth: usize) -> Vec<Clip
     for clip in clips {
         if clip.kind == ClipKind::Compound {
             if let Some(ref internal_tracks) = clip.compound_tracks {
-                let compound_offset = timeline_offset.saturating_add(clip.timeline_start);
+                // Map internal clip positions into the parent timeline.
+                // After windowing, each clip's timeline_start >= source_in,
+                // so subtracting source_in gives the offset from the visible
+                // start. Adding the compound's parent position avoids u64
+                // underflow that saturating_sub would cause.
+                let compound_offset = timeline_offset
+                    .saturating_add(clip.timeline_start);
+                let window_start = clip.source_in;
+                let window_end = clip.source_out;
                 for inner_track in internal_tracks {
                     for inner_clip in &inner_track.clips {
+                        // Skip clips entirely outside the visible window
+                        if inner_clip.timeline_end() <= window_start
+                            || inner_clip.timeline_start >= window_end
+                        {
+                            continue;
+                        }
                         let mut rebased = inner_clip.clone();
-                        rebased.timeline_start =
-                            compound_offset.saturating_add(rebased.timeline_start);
+                        // Trim clips that partially overlap window boundaries
+                        let orig_duration = rebased.duration();
+                        let left_trim =
+                            window_start.saturating_sub(rebased.timeline_start);
+                        if left_trim > 0 {
+                            rebased.source_in = rebased.source_in.saturating_add(left_trim);
+                            rebased.timeline_start = window_start;
+                        }
+                        let mut right_trim = 0u64;
+                        if rebased.timeline_end() > window_end {
+                            right_trim = rebased.timeline_end() - window_end;
+                            rebased.source_out = rebased.source_out.saturating_sub(right_trim);
+                        }
+                        // Rebase keyframes so they stay aligned with clip content
+                        if left_trim > 0 || right_trim > 0 {
+                            rebased.retain_keyframes_in_local_range(
+                                left_trim,
+                                orig_duration.saturating_sub(right_trim),
+                            );
+                        }
+                        // Rebase: offset from window start + compound parent pos
+                        rebased.timeline_start = compound_offset.saturating_add(
+                            rebased.timeline_start.saturating_sub(window_start),
+                        );
                         if rebased.kind == ClipKind::Compound || rebased.kind == ClipKind::Multicam
                         {
                             result.extend(flatten_clips(&[rebased], 0, depth + 1));
@@ -5499,6 +5545,108 @@ mod tests {
         let first_audio = &audio_tracks[0].clips[0];
         assert_eq!(first_audio.source_path, "audio.wav");
         assert_eq!(first_audio.timeline_start, 1_000); // compound offset applied
+    }
+
+    #[test]
+    fn test_flatten_compound_with_source_in_offset() {
+        use crate::model::track::Track;
+
+        // Simulate a razor-cut compound clip (right half) where source_in > 0.
+        // Internal clips: A at 0..3000, B at 3000..6000
+        // Compound source_in=3000 (cut at 3000), source_out=6000
+        // Compound timeline_start=10000 (placed at 10s on parent)
+        let mut inner_track = Track::new_video("Inner V");
+        let mut clip_a = Clip::new("a.mp4", 3_000, 0, ClipKind::Video);
+        clip_a.id = "A".into();
+        inner_track.add_clip(clip_a);
+        let mut clip_b = Clip::new("b.mp4", 6_000, 3_000, ClipKind::Video);
+        clip_b.id = "B".into();
+        inner_track.add_clip(clip_b);
+
+        let mut compound = Clip::new_compound(10_000, vec![inner_track]);
+        compound.id = "compound".into();
+        // Simulate razor cut: right half starts at source_in=3000
+        compound.source_in = 3_000;
+        // source_out stays at 6000 (the internal timeline duration)
+
+        let mut root_track = Track::new_video("Root V");
+        root_track.add_clip(compound);
+
+        let flattened = flatten_compound_tracks(&[root_track]);
+        // Clip A (0..3000) is entirely before source_in=3000, should be excluded
+        // Clip B (3000..6000) is within the window, should appear at 10000
+        assert_eq!(flattened[0].clips.len(), 1);
+        assert_eq!(flattened[0].clips[0].source_path, "b.mp4");
+        assert_eq!(flattened[0].clips[0].timeline_start, 10_000);
+    }
+
+    #[test]
+    fn test_flatten_compound_moved_after_cut_no_gap() {
+        use crate::model::track::Track;
+
+        // Scenario: compound cut at 10s, left half deleted, right half moved
+        // to position 0.  The compound's visible window is [10000, 25000] but
+        // timeline_start is 0 — content must start immediately, no gap.
+        let mut inner_track = Track::new_video("Inner V");
+        let mut clip_a = Clip::new("a.mp4", 10_000, 0, ClipKind::Video);
+        clip_a.id = "A".into();
+        inner_track.add_clip(clip_a);
+        let mut clip_b = Clip::new("b.mp4", 25_000, 10_000, ClipKind::Video);
+        clip_b.id = "B".into();
+        inner_track.add_clip(clip_b);
+
+        let mut compound = Clip::new_compound(0, vec![inner_track]);
+        compound.id = "compound".into();
+        compound.source_in = 10_000;
+        // source_out = 25_000 (from new_compound)
+
+        let mut root = Track::new_video("Root V");
+        root.add_clip(compound);
+
+        let flattened = flatten_compound_tracks(&[root]);
+        // Clip A (0..10000) is outside window, excluded
+        // Clip B (10000..25000) should start at position 0 (no gap)
+        assert_eq!(flattened[0].clips.len(), 1);
+        assert_eq!(flattened[0].clips[0].source_path, "b.mp4");
+        assert_eq!(
+            flattened[0].clips[0].timeline_start, 0,
+            "clip should start at 0 with no gap"
+        );
+    }
+
+    #[test]
+    fn test_flatten_compound_trims_partial_overlap() {
+        use crate::model::track::Track;
+
+        // Internal clip spans 1000..5000, compound window is 2000..4000
+        let mut inner_track = Track::new_video("Inner V");
+        let mut clip = Clip::new("wide.mp4", 5_000, 1_000, ClipKind::Video);
+        clip.source_in = 0;
+        clip.source_out = 4_000; // 4000ns of source material
+        clip.timeline_start = 1_000;
+        clip.id = "W".into();
+        inner_track.add_clip(clip);
+
+        let mut compound = Clip::new_compound(20_000, vec![inner_track]);
+        compound.id = "compound".into();
+        compound.source_in = 2_000;
+        compound.source_out = 4_000;
+
+        let mut root = Track::new_video("Root V");
+        root.add_clip(compound);
+
+        let flattened = flatten_compound_tracks(&[root]);
+        assert_eq!(flattened[0].clips.len(), 1);
+        let fc = &flattened[0].clips[0];
+        // compound_offset = 20000 - 2000 = 18000
+        // Clip starts at 1000, trimmed to window_start=2000, so trim=1000
+        // Rebased: 18000 + 2000 = 20000
+        assert_eq!(fc.timeline_start, 20_000);
+        // source_in trimmed by 1000 (from 0 to 1000)
+        assert_eq!(fc.source_in, 1_000);
+        // source_out trimmed: clip would end at 5000, window_end=4000, excess=1000
+        // source_out was 4000, minus 1000 = 3000
+        assert_eq!(fc.source_out, 3_000);
     }
 
     #[test]

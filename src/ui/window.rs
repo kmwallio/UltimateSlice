@@ -389,6 +389,7 @@ struct AudioMatchClipInfo {
     volume: f32,
     measured_loudness_lufs: Option<f64>,
     eq_bands: [crate::model::clip::EqBand; 3],
+    audio_channel_mode: crate::model::clip::AudioChannelMode,
     kind: ClipKind,
 }
 
@@ -451,6 +452,8 @@ struct PreparedAudioMatch {
     track_id: String,
     source_region: crate::media::audio_match::AnalysisRegionNs,
     reference_region: crate::media::audio_match::AnalysisRegionNs,
+    source_channel_mode: crate::media::audio_match::AudioMatchChannelMode,
+    reference_channel_mode: crate::media::audio_match::AudioMatchChannelMode,
     old_volume: f32,
     new_volume: f32,
     old_measured_loudness: Option<f64>,
@@ -480,6 +483,7 @@ fn collect_audio_match_clip_info(project: &Project, clip_id: &str) -> Option<Aud
                 volume: clip.volume,
                 measured_loudness_lufs: clip.measured_loudness_lufs,
                 eq_bands: clip.eq_bands,
+                audio_channel_mode: clip.audio_channel_mode,
                 kind: clip.kind.clone(),
             })
     })
@@ -489,9 +493,11 @@ fn run_audio_match_for_clips(
     source_clip_id: &str,
     source: &AudioMatchClipInfo,
     source_region: Option<crate::media::audio_match::AnalysisRegionNs>,
+    source_channel_mode: crate::media::audio_match::AudioMatchChannelMode,
     reference_clip_id: &str,
     reference: &AudioMatchClipInfo,
     reference_region: Option<crate::media::audio_match::AnalysisRegionNs>,
+    reference_channel_mode: crate::media::audio_match::AudioMatchChannelMode,
 ) -> Result<PreparedAudioMatch, String> {
     if source_clip_id == reference_clip_id {
         return Err("Source and reference clips must be different.".to_string());
@@ -515,10 +521,14 @@ fn run_audio_match_for_clips(
             source_in_ns: source.source_in,
             source_out_ns: source.source_out,
             source_speech_regions: source.speech_regions.clone(),
+            source_channel_mode,
+            source_clip_channel_mode: source.audio_channel_mode,
             reference_path: reference.source_path.clone(),
             reference_in_ns: reference.source_in,
             reference_out_ns: reference.source_out,
             reference_speech_regions: reference.speech_regions.clone(),
+            reference_channel_mode,
+            reference_clip_channel_mode: reference.audio_channel_mode,
         })
         .map_err(|e| e.to_string())?;
 
@@ -527,6 +537,8 @@ fn run_audio_match_for_clips(
         track_id: source.track_id.clone(),
         source_region,
         reference_region,
+        source_channel_mode: outcome.source_resolved_channel_mode,
+        reference_channel_mode: outcome.reference_resolved_channel_mode,
         old_volume: source.volume,
         new_volume: (source.volume as f64 * outcome.volume_gain).clamp(0.0, 4.0) as f32,
         old_measured_loudness: source.measured_loudness_lufs,
@@ -1620,6 +1632,7 @@ mod tests {
             volume: 1.0,
             measured_loudness_lufs: None,
             eq_bands: crate::model::clip::default_eq_bands(),
+            audio_channel_mode: crate::model::clip::AudioChannelMode::Stereo,
             kind: ClipKind::Audio,
         }
     }
@@ -3378,14 +3391,51 @@ fn clip_to_program_clips(
     // Compound clips: recursively flatten internal clips
     if c.kind == ClipKind::Compound && depth < 16 {
         if let Some(ref internal_tracks) = c.compound_tracks {
+            // Map internal clip positions into the parent timeline.
+            // After windowing, each clip's timeline_start is >= source_in,
+            // so subtracting source_in gives the offset from the compound's
+            // visible start. Adding the compound's parent position gives the
+            // absolute position without any u64 underflow risk.
             let compound_offset = timeline_offset.saturating_add(c.timeline_start);
+            let window_start = c.source_in;
+            let window_end = c.source_out;
             let mut result = Vec::new();
             for (inner_idx, inner_track) in internal_tracks.iter().enumerate() {
                 let inner_audio = inner_track.kind == crate::model::track::TrackKind::Audio;
                 for inner_clip in &inner_track.clips {
+                    // Skip clips entirely outside the visible window
+                    if inner_clip.timeline_end() <= window_start
+                        || inner_clip.timeline_start >= window_end
+                    {
+                        continue;
+                    }
                     let inner_track_idx = track_index + inner_idx;
+                    // Trim clips that partially overlap the window boundaries
+                    let mut windowed = inner_clip.clone();
+                    let orig_duration = windowed.duration();
+                    let left_trim =
+                        window_start.saturating_sub(windowed.timeline_start);
+                    if left_trim > 0 {
+                        windowed.source_in = windowed.source_in.saturating_add(left_trim);
+                        windowed.timeline_start = window_start;
+                    }
+                    let mut right_trim = 0u64;
+                    if windowed.timeline_end() > window_end {
+                        right_trim = windowed.timeline_end() - window_end;
+                        windowed.source_out = windowed.source_out.saturating_sub(right_trim);
+                    }
+                    // Rebase keyframes so they stay aligned with clip content
+                    if left_trim > 0 || right_trim > 0 {
+                        windowed.retain_keyframes_in_local_range(
+                            left_trim,
+                            orig_duration.saturating_sub(right_trim),
+                        );
+                    }
+                    // Rebase: offset from window start + compound parent pos
+                    windowed.timeline_start =
+                        windowed.timeline_start.saturating_sub(window_start);
                     result.extend(clip_to_program_clips(
-                        inner_clip,
+                        &windowed,
                         inner_audio,
                         inner_track.duck,
                         inner_track.duck_amount_db,
@@ -4836,11 +4886,13 @@ pub fn build_window(
                                         );
                                     }
                                     log::info!(
-                                        "audio_match: clip={} gain={:.3} lufs {:.1}->{:.1} profile src({:.1},{:.1},{:.1}) ref({:.1},{:.1},{:.1})",
+                                        "audio_match: clip={} gain={:.3} lufs {:.1}->{:.1} channels src={} ref={} profile src({:.1},{:.1},{:.1}) ref({:.1},{:.1},{:.1})",
                                         prepared.clip_id,
                                         prepared.volume_gain,
                                         prepared.source_loudness_lufs,
                                         prepared.reference_loudness_lufs,
+                                        prepared.source_channel_mode.as_str(),
+                                        prepared.reference_channel_mode.as_str(),
                                         prepared.source_profile.low_db,
                                         prepared.source_profile.mid_db,
                                         prepared.source_profile.high_db,
@@ -4871,8 +4923,10 @@ pub fn build_window(
             let match_in_progress = match_in_progress.clone();
             move |source_clip_id: &str,
                   source_region: Option<crate::media::audio_match::AnalysisRegionNs>,
+                  source_channel_mode: crate::media::audio_match::AudioMatchChannelMode,
                   reference_clip_id: &str,
-                  reference_region: Option<crate::media::audio_match::AnalysisRegionNs>| {
+                  reference_region: Option<crate::media::audio_match::AnalysisRegionNs>,
+                  reference_channel_mode: crate::media::audio_match::AudioMatchChannelMode| {
                 if match_in_progress.get() {
                     return;
                 }
@@ -4918,9 +4972,11 @@ pub fn build_window(
                         &source_clip_id,
                         &source,
                         source_region,
+                        source_channel_mode,
                         &reference_clip_id,
                         &reference,
                         reference_region,
+                        reference_channel_mode,
                     ));
                 });
             }
@@ -14517,9 +14573,11 @@ fn handle_mcp_command(
             source_clip_id,
             source_start_ns,
             source_end_ns,
+            source_channel_mode,
             reference_clip_id,
             reference_start_ns,
             reference_end_ns,
+            reference_channel_mode,
             reply,
         } => {
             let clip_info = {
@@ -14555,9 +14613,11 @@ fn handle_mcp_command(
                     &source_clip_id,
                     &source,
                     source_region,
+                    source_channel_mode,
                     &reference_clip_id,
                     &reference,
                     reference_region,
+                    reference_channel_mode,
                 )
             }) {
                 Ok(prepared) => {
@@ -14585,10 +14645,12 @@ fn handle_mcp_command(
                                 "start": prepared.source_region.start_ns,
                                 "end": prepared.source_region.end_ns,
                             },
+                            "source_channel_mode": prepared.source_channel_mode.as_str(),
                             "reference_range_ns": {
                                 "start": prepared.reference_region.start_ns,
                                 "end": prepared.reference_region.end_ns,
                             },
+                            "reference_channel_mode": prepared.reference_channel_mode.as_str(),
                             "source_loudness_lufs": prepared.source_loudness_lufs,
                             "reference_loudness_lufs": prepared.reference_loudness_lufs,
                             "gain_linear": prepared.volume_gain,

@@ -39,4 +39,4 @@ For playback tuning and render-cache behavior, start with [preferences.md](prefe
 
 For AI-generated music beds, right-click an audio track header and choose **Generate Music Region…**, then drag an empty 1-30 second range and enter a prompt.
 
-For dialogue tone matching, select a timeline clip and use **Inspector → Audio → Match Audio…** with a reference clip. The dialog now defaults to a simple **Match voice** mode, while **Choose region...** unlocks exact source/reference timecode ranges for power users. The same workflow is available through MCP `match_clip_audio`.
+For dialogue tone matching, select a timeline clip and use **Inspector → Audio → Match Audio…** with a reference clip. The dialog now defaults to a simple **Match voice** mode, adds **Auto** channel-aware analysis for stereo/one-sided audio, and still lets power users switch to **Choose region...** for exact source/reference timecode ranges. The same workflow is available through MCP `match_clip_audio`.

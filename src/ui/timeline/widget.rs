@@ -2560,16 +2560,52 @@ impl TimelineState {
         let compound_track_id = compound_track_id.unwrap();
         let _compound_track_idx = compound_track_idx.unwrap();
         let compound_start = compound.timeline_start;
+        let compound_source_in = compound.source_in;
+        let compound_source_out = compound.source_out;
         let internal_tracks = match compound.compound_tracks {
             Some(ref t) => t.clone(),
             None => return false,
         };
 
-        // Determine which project tracks to place internal clips on.
-        // Strategy: map internal video tracks to the compound's video track,
-        // and internal audio tracks to adjacent audio tracks (create if needed).
-        // For simplicity in v1: place all internal clips on the compound's track
-        // (video clips on compound track, audio clips need an audio track).
+        // Helper: rebase an internal clip to the parent timeline, accounting
+        // for source_in (non-zero after a razor cut) and clipping to the
+        // visible [source_in, source_out] window.
+        let rebase_clip = |mut clip: Clip| -> Option<Clip> {
+            // Skip clips entirely outside the visible window
+            if clip.timeline_end() <= compound_source_in
+                || clip.timeline_start >= compound_source_out
+            {
+                return None;
+            }
+            // Trim clips that partially overlap window boundaries
+            let orig_duration = clip.duration();
+            let left_trim =
+                compound_source_in.saturating_sub(clip.timeline_start);
+            if left_trim > 0 {
+                clip.source_in = clip.source_in.saturating_add(left_trim);
+                clip.timeline_start = compound_source_in;
+            }
+            let mut right_trim = 0u64;
+            if clip.timeline_end() > compound_source_out {
+                right_trim = clip.timeline_end() - compound_source_out;
+                clip.source_out = clip.source_out.saturating_sub(right_trim);
+            }
+            // Rebase keyframes so they stay aligned with clip content
+            if left_trim > 0 || right_trim > 0 {
+                clip.retain_keyframes_in_local_range(
+                    left_trim,
+                    orig_duration.saturating_sub(right_trim),
+                );
+            }
+            // After windowing, timeline_start >= source_in, so this
+            // subtraction is safe. Add compound's parent position to get
+            // the absolute timeline position without u64 underflow.
+            clip.timeline_start = clip
+                .timeline_start
+                .saturating_sub(compound_source_in)
+                .saturating_add(compound_start);
+            Some(clip)
+        };
 
         // Build changes: remove compound from its track, add internal clips back
         let mut changes = Vec::new();
@@ -2590,9 +2626,10 @@ impl TimelineState {
         // Add rebased internal video clips to compound's track
         for int_track in &internal_tracks {
             if int_track.kind == crate::model::track::TrackKind::Video {
-                for mut clip in int_track.clips.clone() {
-                    clip.timeline_start = clip.timeline_start.saturating_add(compound_start);
-                    new_clips.push(clip);
+                for clip in int_track.clips.clone() {
+                    if let Some(rebased) = rebase_clip(clip) {
+                        new_clips.push(rebased);
+                    }
                 }
             }
         }
@@ -2608,10 +2645,7 @@ impl TimelineState {
             .iter()
             .filter(|t| t.kind == crate::model::track::TrackKind::Audio)
             .flat_map(|t| t.clips.clone())
-            .map(|mut c| {
-                c.timeline_start = c.timeline_start.saturating_add(compound_start);
-                c
-            })
+            .filter_map(|c| rebase_clip(c))
             .collect();
 
         if !audio_clips.is_empty() {

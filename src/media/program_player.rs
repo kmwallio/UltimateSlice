@@ -14955,17 +14955,14 @@ impl ProgramPlayer {
             if pipeline.add_many([&decoder, &ac]).is_err() {
                 continue;
             }
-            let ch_mode = clip_ref
-                .map(|c| c.audio_channel_mode)
-                .unwrap_or_default();
+            let ch_mode = clip_ref.map(|c| c.audio_channel_mode).unwrap_or_default();
             let mut link_src_pad = if let Some((resample, capsfilter, normalized_src)) =
                 attach_preview_audio_normalizer_with_channel_mode(
                     &pipeline,
                     &ac,
                     ch_mode,
                     "audio_multi_pipeline",
-                )
-            {
+                ) {
                 audio_resample = Some(resample);
                 audio_capsfilter = Some(capsfilter);
                 Some(normalized_src)

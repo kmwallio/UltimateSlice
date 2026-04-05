@@ -180,6 +180,14 @@ python3 tools/mcp_call.py match_clip_audio '{"source_clip_id":"clip-1","source_s
 
 `match_clip_audio` applies an undoable loudness + adaptive built-in 3-band EQ adjustment to the source clip, including derived band frequency/gain/Q targets. If the clips already have subtitle/STT timing, the matcher prioritizes those dialogue regions; otherwise it falls back to voice-active frame weighting. Optional `source_*` / `reference_*` range arguments are relative to each clip's current in-point. It is designed for conservative dialogue/reference matching rather than full microphone or voice cloning.
 
+Optional channel overrides let you force how each side is analyzed when dealing with stereo or one-sided recordings:
+
+```bash
+python3 tools/mcp_call.py match_clip_audio '{"source_clip_id":"clip-1","source_channel_mode":"left","reference_clip_id":"clip-2","reference_channel_mode":"mono_mix"}'
+```
+
+When channel modes are omitted, `match_clip_audio` defaults to `auto`, which respects the clip's existing channel routing and automatically picks a dominant single side when the opposite channel is effectively silent.
+
 ## Project management examples
 
 Create a new empty project:

@@ -111,12 +111,13 @@ The **Match Audio...** button analyzes the selected clip against another audio-c
 
 - Pick the source clip in the timeline, click **Match Audio...**, then choose the reference clip.
 - **Match voice** is the default and recommended mode: it analyzes the full trimmed source/reference clips while still prioritizing dialogue or voice regions automatically.
+- **Channel handling** defaults to **Auto (Recommended)**, which respects each clip's current channel routing and automatically switches to a single side when the other stereo channel is effectively silent. You can also force **Mono Mix**, **Left Only**, or **Right Only** analysis.
 - Switch **Match mode** to **Choose region...** to reveal **Source In/Out** and **Reference In/Out** timecode fields when you want to match only a selected phrase. Those fields default to each clip's full trimmed duration and use the project frame rate for timecode entry.
 - UltimateSlice measures both clips in the background and applies one undoable update to the source clip's volume, measured loudness, and 3-band EQ settings.
 - While the analysis is running, the bottom status bar shows **Matching audio...** and the shared progress bar pulses until the result is applied or fails.
 - The result is a tonal nudge, not full microphone cloning: room reflections, de-reverb, compression, and noise reduction are out of scope for this first pass.
 
-MCP tool: `match_clip_audio` with `source_clip_id`, `reference_clip_id`, and optional `source_start_ns`, `source_end_ns`, `reference_start_ns`, `reference_end_ns`.
+MCP tool: `match_clip_audio` with `source_clip_id`, `reference_clip_id`, optional `source_start_ns`, `source_end_ns`, `reference_start_ns`, `reference_end_ns`, plus optional `source_channel_mode` / `reference_channel_mode`.
 
 ### Audio keyframes (phase 1)
 
