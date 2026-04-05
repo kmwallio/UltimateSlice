@@ -6570,6 +6570,7 @@ pub fn build_window(
 
     // Shared flag: true while silence detection is running (read by status bar timer).
     let silence_detect_in_progress: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    let scene_detect_in_progress: Rc<Cell<bool>> = Rc::new(Cell::new(false));
 
     // Wire on_remove_silent_parts — spawns a background thread for ffmpeg silencedetect.
     {
@@ -6656,7 +6657,6 @@ pub fn build_window(
             RefCell<Option<std::sync::mpsc::Receiver<(String, String, Vec<f64>)>>>,
         > = Rc::new(RefCell::new(None));
         let scene_rx_for_timer = scene_rx.clone();
-        let scene_detect_in_progress: Rc<Cell<bool>> = Rc::new(Cell::new(false));
         let scene_detect_in_progress_timer = scene_detect_in_progress.clone();
         {
             let project = project.clone();
@@ -10696,6 +10696,7 @@ pub fn build_window(
         let source_marks = source_marks.clone();
         let audio_sync_in_progress = audio_sync_in_progress.clone();
         let silence_detect_in_progress = silence_detect_in_progress.clone();
+        let scene_detect_in_progress = scene_detect_in_progress.clone();
         let inspector_view = inspector_view.clone();
         let preferences_state = preferences_state.clone();
         let timeline_state_stt = timeline_state.clone();
@@ -10817,10 +10818,12 @@ pub fn build_window(
             let stt_active = stt_progress.in_flight;
             let syncing_audio = audio_sync_in_progress.get();
             let detecting_silence = silence_detect_in_progress.get();
+            let detecting_scene_cuts = scene_detect_in_progress.get();
             if proxy_active
                 || prerender_active
                 || syncing_audio
                 || detecting_silence
+                || detecting_scene_cuts
                 || bg_active
                 || stt_active
             {
@@ -10830,7 +10833,10 @@ pub fn build_window(
                     parts.push("Syncing audio…".to_string());
                 }
                 if detecting_silence {
-                    parts.push("Detecting silence…".to_string());
+                    parts.push("Detecting silence\u{2026}".to_string());
+                }
+                if detecting_scene_cuts {
+                    parts.push("Detecting scene cuts\u{2026}".to_string());
                 }
                 if proxy_active {
                     parts.push(format!(

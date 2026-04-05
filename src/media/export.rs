@@ -3808,8 +3808,8 @@ pub(crate) fn detect_scene_cuts(
     let stderr = String::from_utf8_lossy(&output.stderr);
     let mut cuts = Vec::new();
     for line in stderr.lines() {
-        if let Some(pos) = line.find("lavfi.sdet.time=") {
-            let val_str = &line[pos + "lavfi.sdet.time=".len()..];
+        if let Some(pos) = line.find("lavfi.scd.time:") {
+            let val_str = &line[pos + "lavfi.scd.time:".len()..];
             if let Some(t) = val_str
                 .split_whitespace()
                 .next()
