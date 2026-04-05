@@ -638,7 +638,7 @@ Tracking docs:
 - [x] Subtitle renderer-detail parity cleanup: Program Monitor subtitle outline, box, underline, and stroke metrics now scale from the same 1080-based sizing model used by export, and subtitle vertical positioning now uses the same normalized top/center/bottom anchoring model as export, reducing visible preview-vs-export styling drift without changing the separate GTK-overlay vs libass renderer architecture
   - [x] SRT file export, 7 MCP tools, FCPXML round-trip, timeline CC badge
   - [x] Whisper output cleanup (contraction merging, punctuation spacing)
-- [ ] AI Scene Cut Detection for long source files
+- [x] AI Scene Cut Detection for long source files
 - [x] Smart Collections based on metadata — save project-wide media-browser queries by search text, kind, resolution, and frame rate; manage them from the browser; persist via FCPXML vendor metadata; automate with MCP `list_collections` / `create_collection` / `update_collection` / `delete_collection`
 - [ ] Optical Flow slow-motion (AI frame interpolation)
 - [ ] AI Music Generation (MusicGen / MusicGPT)

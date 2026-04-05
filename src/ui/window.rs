@@ -2506,6 +2506,154 @@ fn apply_remove_silent_parts_results(
     }
 }
 
+/// Apply scene cut detection results: split the original clip at each detected cut point,
+/// placing sub-clips back-to-back (preserving total duration).
+fn apply_scene_cut_results(
+    clip_id: &str,
+    track_id: &str,
+    cut_points: &[f64],
+    project: &Rc<RefCell<Project>>,
+    timeline_state: &Rc<RefCell<crate::ui::timeline::TimelineState>>,
+    on_project_changed: &Rc<dyn Fn()>,
+    window: Option<&gtk::ApplicationWindow>,
+) {
+    use crate::undo::SetTrackClipsCommand;
+
+    if cut_points.is_empty() {
+        if let Some(win) = window {
+            flash_window_status_title(win, project, "No scene cuts detected \u{2014} clip unchanged");
+        }
+        return;
+    }
+
+    let (original_clip, old_clips, clip_duration_ns) = {
+        let proj = project.borrow();
+        let track = match proj.tracks.iter().find(|t| t.id == track_id) {
+            Some(t) => t,
+            None => {
+                if let Some(win) = window {
+                    flash_window_status_title(
+                        win,
+                        project,
+                        "Scene cut detection failed \u{2014} track not found",
+                    );
+                }
+                return;
+            }
+        };
+        let clip = match track.clips.iter().find(|c| c.id == clip_id) {
+            Some(c) => c.clone(),
+            None => {
+                if let Some(win) = window {
+                    flash_window_status_title(
+                        win,
+                        project,
+                        "Scene cut detection failed \u{2014} clip not found",
+                    );
+                }
+                return;
+            }
+        };
+        let dur = clip.source_out.saturating_sub(clip.source_in);
+        (clip, track.clips.clone(), dur)
+    };
+
+    let clip_duration_sec = clip_duration_ns as f64 / 1_000_000_000.0;
+    let speed = original_clip.speed;
+    let original_timeline_start = original_clip.timeline_start;
+    let original_source_in = original_clip.source_in;
+
+    // Build segments from cut points: [0, cut0], [cut0, cut1], ..., [cutN, duration]
+    let mut boundaries: Vec<f64> = Vec::with_capacity(cut_points.len() + 2);
+    boundaries.push(0.0);
+    for &cp in cut_points {
+        let cp = cp.max(0.0).min(clip_duration_sec);
+        if cp > *boundaries.last().unwrap() + 0.01 {
+            boundaries.push(cp);
+        }
+    }
+    if *boundaries.last().unwrap() < clip_duration_sec - 0.01 {
+        boundaries.push(clip_duration_sec);
+    }
+
+    let mut sub_clips: Vec<Clip> = Vec::new();
+    let mut timeline_cursor = original_timeline_start;
+    for window_pair in boundaries.windows(2) {
+        let seg_start_sec = window_pair[0];
+        let seg_end_sec = window_pair[1];
+        let seg_start_ns = (seg_start_sec * 1_000_000_000.0).round() as u64;
+        let seg_end_ns = (seg_end_sec * 1_000_000_000.0).round() as u64;
+        let seg_duration_ns = seg_end_ns.saturating_sub(seg_start_ns);
+
+        let mut sub = original_clip.clone();
+        sub.id = uuid::Uuid::new_v4().to_string();
+        sub.source_in = original_source_in + seg_start_ns;
+        sub.source_out = original_source_in + seg_end_ns;
+        sub.timeline_start = timeline_cursor;
+
+        let local_start = if speed != 0.0 && speed != 1.0 {
+            (seg_start_ns as f64 / speed).round() as u64
+        } else {
+            seg_start_ns
+        };
+        let local_end = if speed != 0.0 && speed != 1.0 {
+            (seg_end_ns as f64 / speed).round() as u64
+        } else {
+            seg_end_ns
+        };
+        sub.retain_keyframes_in_local_range(local_start, local_end);
+
+        sub.transition_after = String::new();
+        sub.transition_after_ns = 0;
+
+        let timeline_duration = if speed != 0.0 {
+            (seg_duration_ns as f64 / speed).round() as u64
+        } else {
+            seg_duration_ns
+        };
+        timeline_cursor += timeline_duration;
+        sub_clips.push(sub);
+    }
+
+    let num_cuts = sub_clips.len().saturating_sub(1);
+
+    // Build the new clip list for this track (total duration is preserved, no magnetic shift)
+    let mut new_clips: Vec<Clip> = Vec::new();
+    for clip in &old_clips {
+        if clip.id == clip_id {
+            new_clips.extend(sub_clips.iter().cloned());
+        } else {
+            new_clips.push(clip.clone());
+        }
+    }
+    new_clips.sort_by_key(|c| c.timeline_start);
+
+    {
+        let mut st = timeline_state.borrow_mut();
+        let proj_rc = st.project.clone();
+        let mut proj = proj_rc.borrow_mut();
+        let cmd = SetTrackClipsCommand {
+            track_id: track_id.to_string(),
+            old_clips,
+            new_clips,
+            label: "Detect scene cuts".to_string(),
+        };
+        st.history.execute(Box::new(cmd), &mut proj);
+        proj.dirty = true;
+    }
+
+    on_project_changed();
+
+    if let Some(win) = window {
+        let msg = format!(
+            "Detected {} scene cut(s) \u{2014} clip split into {} sub-clips",
+            num_cuts,
+            sub_clips.len()
+        );
+        flash_window_status_title(win, project, &msg);
+    }
+}
+
 fn export_displayed_frame_to_image(
     prog_player: &Rc<RefCell<ProgramPlayer>>,
     out_path: &std::path::Path,
@@ -6494,6 +6642,79 @@ pub fn build_window(
                     );
                     let intervals = result.unwrap_or_default();
                     let _ = tx.send((clip_id, track_id, intervals));
+                });
+            },
+        ));
+    }
+
+    // Wire on_detect_scene_cuts — spawns a background thread for ffmpeg scdet.
+    {
+        let project = project.clone();
+        let on_project_changed = on_project_changed.clone();
+        let window_weak = window.downgrade();
+        let scene_rx: Rc<
+            RefCell<Option<std::sync::mpsc::Receiver<(String, String, Vec<f64>)>>>,
+        > = Rc::new(RefCell::new(None));
+        let scene_rx_for_timer = scene_rx.clone();
+        let scene_detect_in_progress: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+        let scene_detect_in_progress_timer = scene_detect_in_progress.clone();
+        {
+            let project = project.clone();
+            let on_project_changed = on_project_changed.clone();
+            let timeline_state = timeline_state.clone();
+            let window_weak = window_weak.clone();
+            glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+                let rx_opt = scene_rx_for_timer.borrow();
+                if let Some(ref rx) = *rx_opt {
+                    if let Ok((clip_id, track_id, cut_points)) = rx.try_recv() {
+                        drop(rx_opt);
+                        scene_rx_for_timer.borrow_mut().take();
+                        scene_detect_in_progress_timer.set(false);
+                        apply_scene_cut_results(
+                            &clip_id,
+                            &track_id,
+                            &cut_points,
+                            &project,
+                            &timeline_state,
+                            &on_project_changed,
+                            window_weak.upgrade().as_ref(),
+                        );
+                    }
+                }
+                glib::ControlFlow::Continue
+            });
+        }
+        let scene_detect_in_progress_cb = scene_detect_in_progress.clone();
+        timeline_state.borrow_mut().on_detect_scene_cuts = Some(Rc::new(
+            move |clip_id: String,
+                  track_id: String,
+                  source_path: String,
+                  source_in: u64,
+                  source_out: u64,
+                  threshold: f64| {
+                if scene_rx.borrow().is_some() {
+                    return;
+                }
+                scene_detect_in_progress_cb.set(true);
+                if let Some(win) = window_weak.upgrade() {
+                    let proj = project.borrow();
+                    let title = proj.title.clone();
+                    drop(proj);
+                    win.set_title(Some(&format!(
+                        "UltimateSlice \u{2014} {title} (Detecting scene cuts...)"
+                    )));
+                }
+                let (tx, rx) = std::sync::mpsc::channel();
+                *scene_rx.borrow_mut() = Some(rx);
+                std::thread::spawn(move || {
+                    let result = crate::media::export::detect_scene_cuts(
+                        &source_path,
+                        source_in,
+                        source_out,
+                        threshold,
+                    );
+                    let cuts = result.unwrap_or_default();
+                    let _ = tx.send((clip_id, track_id, cuts));
                 });
             },
         ));
@@ -13411,6 +13632,57 @@ fn handle_mcp_command(
             } else {
                 reply
                     .send(serde_json::json!({"success": false, "error": "Clip not found"}))
+                    .ok();
+            }
+        }
+
+        McpCommand::DetectSceneCuts {
+            clip_id,
+            track_id,
+            threshold,
+            reply,
+        } => {
+            let clip_info = {
+                let proj = project.borrow();
+                proj.tracks
+                    .iter()
+                    .find(|t| t.id == track_id)
+                    .and_then(|t| {
+                        t.clips
+                            .iter()
+                            .find(|c| c.id == clip_id)
+                            .map(|c| (c.source_path.clone(), c.source_in, c.source_out))
+                    })
+            };
+            if let Some((source_path, source_in, source_out)) = clip_info {
+                let cuts = crate::media::export::detect_scene_cuts(
+                    &source_path,
+                    source_in,
+                    source_out,
+                    threshold,
+                )
+                .unwrap_or_default();
+                let n = cuts.len();
+                if !cuts.is_empty() {
+                    apply_scene_cut_results(
+                        &clip_id,
+                        &track_id,
+                        &cuts,
+                        project,
+                        timeline_state,
+                        on_project_changed,
+                        Some(window),
+                    );
+                }
+                reply
+                    .send(serde_json::json!({
+                        "success": true,
+                        "cuts_detected": n,
+                    }))
+                    .ok();
+            } else {
+                reply
+                    .send(serde_json::json!({"success": false, "error": "Clip or track not found"}))
                     .ok();
             }
         }

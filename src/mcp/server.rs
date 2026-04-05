@@ -1108,6 +1108,19 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "detect_scene_cuts",
+            "description": "Detect scene/shot changes in a clip using ffmpeg scdet and split the clip at each detected cut point. Blocks while ffmpeg analyzes the video (duration depends on clip length).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id":   { "type": "string", "description": "Clip id (from list_clips)." },
+                    "track_id":  { "type": "string", "description": "Track id containing the clip (from list_tracks)." },
+                    "threshold": { "type": "number", "description": "Scene change sensitivity (1-50, default 10). Lower values detect more cuts." }
+                },
+                "required": ["clip_id", "track_id"]
+            }
+        },
+        {
             "name": "record_voiceover",
             "description": "Record audio from the default microphone for a fixed duration and place it as a clip on an audio track at the current playhead position. Blocks while recording.",
             "inputSchema": {
@@ -2639,6 +2652,15 @@ fn dispatch_tool_payload(
                 .get("target_level")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(-14.0),
+            reply: tx,
+        },
+        "detect_scene_cuts" => McpCommand::DetectSceneCuts {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            track_id: args["track_id"].as_str().unwrap_or("").to_string(),
+            threshold: args
+                .get("threshold")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(10.0),
             reply: tx,
         },
         "record_voiceover" => McpCommand::RecordVoiceover {

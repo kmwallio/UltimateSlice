@@ -424,6 +424,12 @@ pub enum McpCommand {
         target_level: f64,
         reply: SyncSender<Value>,
     },
+    DetectSceneCuts {
+        clip_id: String,
+        track_id: String,
+        threshold: f64,
+        reply: SyncSender<Value>,
+    },
     RecordVoiceover {
         duration_ns: u64,
         track_index: Option<usize>,

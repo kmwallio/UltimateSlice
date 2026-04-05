@@ -119,6 +119,18 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 - Join Through Edit is unavailable when metadata/effect settings have diverged between the two segments or when the selection resolves to multiple candidate boundaries.
 - Also available from the right-click clip context menu as **Join Through Edit**.
 
+### Detect Scene Cuts
+
+Automatically find scene/shot boundaries in a clip using ffmpeg video analysis.
+
+1. Right-click a video or audio clip on the timeline and choose **Detect Scene Cuts…**
+2. Set the **threshold** (1–50, default 10). Lower values detect more cuts, including subtle transitions. Higher values only detect obvious hard cuts.
+3. Click **Detect** — ffmpeg analyzes the video in a background thread (title bar shows progress).
+4. The clip is split at each detected cut point into back-to-back sub-clips, preserving the total duration.
+5. **Undo** with `Ctrl+Z` to restore the original clip.
+
+Also available via MCP `detect_scene_cuts` tool for automation.
+
 ## Image Clips
 
 Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC, SVG) can be placed on the timeline like video clips.
@@ -244,7 +256,7 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC, SVG) can be placed on the t
 | `Ctrl+Shift+G` | Ungroup selected clips |
 | `Ctrl+L` | Link selected clips |
 | `Ctrl+Shift+L` | Unlink selected clips |
-| `Right-click clip` | Open clip context menu with only currently actionable clip actions (join-through-edit, freeze-frame, link/unlink, grouped timecode-align, audio sync when applicable) |
+| `Right-click clip` | Open clip context menu with only currently actionable clip actions (join-through-edit, freeze-frame, link/unlink, grouped timecode-align, audio sync, detect scene cuts when applicable) |
 | `Shift+Click` (timeline) | Add range selection (same-track span, or cross-track time-range select) |
 | `Ctrl`/`Cmd` + Click (timeline) | Toggle clip in current selection |
 | `Ctrl+A` | Select all timeline clips |

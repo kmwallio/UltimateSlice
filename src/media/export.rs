@@ -3768,6 +3768,64 @@ pub(crate) fn detect_silence(
     Ok(intervals)
 }
 
+/// Detect scene/shot changes in a video clip using ffmpeg's `scdet` filter.
+///
+/// Returns cut-point timestamps in seconds, relative to `source_in_ns`.
+/// Returns an empty vec if the source has no video stream or no cuts are found.
+pub(crate) fn detect_scene_cuts(
+    source_path: &str,
+    source_in_ns: u64,
+    source_out_ns: u64,
+    threshold: f64,
+) -> Result<Vec<f64>> {
+    let ffmpeg = find_ffmpeg()?;
+    let src_in_sec = source_in_ns as f64 / 1_000_000_000.0;
+    let duration_sec = source_out_ns.saturating_sub(source_in_ns) as f64 / 1_000_000_000.0;
+    if duration_sec <= 0.0 {
+        return Ok(Vec::new());
+    }
+    let vf = format!("scdet=threshold={threshold}:sc_pass=1");
+    let output = Command::new(&ffmpeg)
+        .args([
+            "-ss",
+            &format!("{src_in_sec}"),
+            "-t",
+            &format!("{duration_sec}"),
+            "-i",
+            source_path,
+            "-vf",
+            &vf,
+            "-an",
+            "-f",
+            "null",
+            "-",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| anyhow!("Failed to run ffmpeg scdet: {e}"))?;
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut cuts = Vec::new();
+    for line in stderr.lines() {
+        if let Some(pos) = line.find("lavfi.sdet.time=") {
+            let val_str = &line[pos + "lavfi.sdet.time=".len()..];
+            if let Some(t) = val_str
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse::<f64>().ok())
+            {
+                // Skip cuts at the very start or end of the clip
+                if t > 0.01 && t < duration_sec - 0.01 {
+                    cuts.push(t);
+                }
+            }
+        }
+    }
+    cuts.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+    Ok(cuts)
+}
+
 /// Measure integrated loudness (LUFS) of a clip's audio via FFmpeg `ebur128` filter.
 /// Returns the integrated loudness value in LUFS (e.g. -18.3).
 pub(crate) fn analyze_loudness_lufs(

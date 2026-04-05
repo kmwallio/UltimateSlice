@@ -312,6 +312,7 @@ pub struct TimelineState {
     pub on_sync_replace_audio: Option<Rc<dyn Fn(Vec<(String, String, u64, u64, u64, String)>)>>,
     /// Callback fired when user requests silence removal: (clip_id, track_id, source_path, source_in, source_out, noise_db, min_duration)
     pub on_remove_silent_parts: Option<Rc<dyn Fn(String, String, String, u64, u64, f64, f64)>>,
+    pub on_detect_scene_cuts: Option<Rc<dyn Fn(String, String, String, u64, u64, f64)>>,
     /// Gap-free timeline behavior toggle (track-local ripple).
     pub magnetic_mode: bool,
     /// Hover preview while dragging a transition: (left_clip_id, right_clip_id).
@@ -380,6 +381,7 @@ impl TimelineState {
             on_sync_audio: None,
             on_sync_replace_audio: None,
             on_remove_silent_parts: None,
+            on_detect_scene_cuts: None,
             magnetic_mode: false,
             hover_transition_pair: None,
             show_waveform_on_video: false,
@@ -1053,6 +1055,26 @@ impl TimelineState {
             .unwrap_or(false)
     }
 
+    fn can_detect_scene_cuts(&self) -> bool {
+        let ids = self.selected_ids_or_primary();
+        if ids.len() != 1 {
+            return false;
+        }
+        let clip_id = ids.iter().next().unwrap();
+        let proj = self.project.borrow();
+        let editing_tracks = self.resolve_editing_tracks(&proj);
+        editing_tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .find(|c| &c.id == clip_id)
+            .map(|c| {
+                c.kind != ClipKind::Image
+                    && c.kind != ClipKind::Title
+                    && c.kind != ClipKind::Adjustment
+            })
+            .unwrap_or(false)
+    }
+
     fn clip_context_menu_actionability(&self) -> ClipContextMenuActionability {
         ClipContextMenuActionability {
             join_through_edit: self.can_join_selected_through_edit(),
@@ -1063,6 +1085,7 @@ impl TimelineState {
             sync_audio: self.can_sync_selected_clips_by_audio(),
             sync_replace_audio: self.can_sync_selected_clips_by_audio(),
             remove_silent_parts: self.can_remove_silent_parts(),
+            detect_scene_cuts: self.can_detect_scene_cuts(),
             split_stereo: {
                 let ids = self.selected_ids_or_primary();
                 ids.len() == 1
@@ -3200,6 +3223,92 @@ pub fn open_remove_silent_parts_dialog(state: Rc<RefCell<TimelineState>>) {
     dialog.present();
 }
 
+#[allow(deprecated)]
+pub fn open_detect_scene_cuts_dialog(state: Rc<RefCell<TimelineState>>) {
+    if !state.borrow().can_detect_scene_cuts() {
+        return;
+    }
+
+    let (clip_id, track_id, source_path, source_in, source_out) = {
+        let st = state.borrow();
+        let ids = st.selected_ids_or_primary();
+        let clip_id = ids.iter().next().unwrap().clone();
+        let proj = st.project.borrow();
+        let editing_tracks = st.resolve_editing_tracks(&proj);
+        let mut info = None;
+        for track in editing_tracks {
+            if let Some(c) = track.clips.iter().find(|c| c.id == clip_id) {
+                info = Some((
+                    c.id.clone(),
+                    track.id.clone(),
+                    c.source_path.clone(),
+                    c.source_in,
+                    c.source_out,
+                ));
+                break;
+            }
+        }
+        match info {
+            Some(i) => i,
+            None => return,
+        }
+    };
+
+    let dialog = gtk::Dialog::builder()
+        .title("Detect Scene Cuts")
+        .default_width(360)
+        .modal(true)
+        .build();
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+    dialog.add_button("Detect", gtk::ResponseType::Accept);
+
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    body.set_margin_start(16);
+    body.set_margin_end(16);
+    body.set_margin_top(16);
+    body.set_margin_bottom(16);
+
+    let threshold_label = gtk::Label::new(Some("Scene change threshold:"));
+    threshold_label.set_halign(gtk::Align::Start);
+    let threshold_spin = gtk::SpinButton::with_range(1.0, 50.0, 1.0);
+    threshold_spin.set_digits(0);
+    threshold_spin.set_value(10.0);
+    threshold_spin.set_halign(gtk::Align::Start);
+    threshold_spin.set_hexpand(false);
+
+    let hint = gtk::Label::new(Some(
+        "Lower values detect more cuts (including subtle changes).\n\
+         Try 10 for obvious scene changes, 5 for subtle cuts.",
+    ));
+    hint.set_halign(gtk::Align::Start);
+    hint.add_css_class("dim-label");
+
+    body.append(&threshold_label);
+    body.append(&threshold_spin);
+    body.append(&hint);
+    dialog.content_area().append(&body);
+
+    dialog.connect_response(move |d, resp| {
+        if resp == gtk::ResponseType::Accept {
+            let threshold = threshold_spin.value();
+            let st = state.borrow();
+            if let Some(ref cb) = st.on_detect_scene_cuts {
+                cb(
+                    clip_id.clone(),
+                    track_id.clone(),
+                    source_path.clone(),
+                    source_in,
+                    source_out,
+                    threshold,
+                );
+            }
+        }
+        d.close();
+    });
+
+    dialog.present();
+}
+
 fn apply_pasted_attributes(target: &mut Clip, source: &Clip) -> bool {
     let before = target.clone();
     // Color grading (primary)
@@ -3333,6 +3442,7 @@ struct ClipContextMenuActionability {
     sync_audio: bool,
     sync_replace_audio: bool,
     remove_silent_parts: bool,
+    detect_scene_cuts: bool,
     split_stereo: bool,
     create_compound: bool,
     break_apart_compound: bool,
@@ -3349,6 +3459,7 @@ impl ClipContextMenuActionability {
             || self.sync_audio
             || self.sync_replace_audio
             || self.remove_silent_parts
+            || self.detect_scene_cuts
             || self.split_stereo
             || self.create_compound
             || self.break_apart_compound
@@ -3365,6 +3476,7 @@ fn apply_clip_context_menu_actionability(
     btn_sync_audio: &gtk::Button,
     btn_sync_replace_audio: &gtk::Button,
     btn_remove_silent_parts: &gtk::Button,
+    btn_detect_scene_cuts: &gtk::Button,
     btn_split_stereo: &gtk::Button,
     btn_create_compound: &gtk::Button,
     btn_break_apart_compound: &gtk::Button,
@@ -3383,6 +3495,7 @@ fn apply_clip_context_menu_actionability(
     set_state(btn_sync_audio, actionability.sync_audio);
     set_state(btn_sync_replace_audio, actionability.sync_replace_audio);
     set_state(btn_remove_silent_parts, actionability.remove_silent_parts);
+    set_state(btn_detect_scene_cuts, actionability.detect_scene_cuts);
     set_state(btn_split_stereo, actionability.split_stereo);
     set_state(btn_create_compound, actionability.create_compound);
     set_state(btn_break_apart_compound, actionability.break_apart_compound);
@@ -3477,6 +3590,12 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
     clip_context_box.append(&btn_sync_audio);
     clip_context_box.append(&btn_sync_replace_audio);
     clip_context_box.append(&btn_remove_silent_parts);
+    let btn_detect_scene_cuts = gtk::Button::with_label("Detect Scene Cuts\u{2026}");
+    btn_detect_scene_cuts.add_css_class("flat");
+    btn_detect_scene_cuts.set_tooltip_text(Some(
+        "Detect scene/shot changes and split this clip at each cut point using ffmpeg scdet",
+    ));
+    clip_context_box.append(&btn_detect_scene_cuts);
     let btn_split_stereo = gtk::Button::with_label("Split Stereo to Mono Tracks");
     btn_split_stereo.add_css_class("flat");
     btn_split_stereo.set_tooltip_text(Some(
@@ -3685,6 +3804,17 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 pop.popdown();
             }
             open_remove_silent_parts_dialog(state.clone());
+        });
+    }
+
+    {
+        let state = state.clone();
+        let pop_weak = clip_context_pop.downgrade();
+        btn_detect_scene_cuts.connect_clicked(move |_| {
+            if let Some(pop) = pop_weak.upgrade() {
+                pop.popdown();
+            }
+            open_detect_scene_cuts_dialog(state.clone());
         });
     }
 
@@ -4278,6 +4408,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 &btn_sync_audio,
                                 &btn_sync_replace_audio,
                                 &btn_remove_silent_parts,
+                                &btn_detect_scene_cuts,
                                 &btn_split_stereo,
                                 &btn_create_compound,
                                 &btn_break_apart_compound,
