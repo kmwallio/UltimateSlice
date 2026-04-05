@@ -3509,6 +3509,7 @@ fn clip_to_program_clips(
         volume_keyframes: c.volume_keyframes.clone(),
         pan: c.pan as f64,
         pan_keyframes: c.pan_keyframes.clone(),
+        audio_channel_mode: c.audio_channel_mode,
         eq_bands: c.eq_bands,
         eq_low_gain_keyframes: c.eq_low_gain_keyframes.clone(),
         eq_mid_gain_keyframes: c.eq_mid_gain_keyframes.clone(),

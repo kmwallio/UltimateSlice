@@ -785,7 +785,7 @@ pub fn export_project(
                 let pre_pan = format!("{label}_prepan");
                 let post_pan = format!("{label}_panned");
                 filter.push_str(&format!(
-                ";[{i}:a]{areverse}{atempo}{ch_part}{volume_filter}{pitch_part}{ladspa_part}{eq_part},{fade_filters}anull[{pre_pan}]"
+                ";[{i}:a]{areverse}{atempo}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{eq_part},{fade_filters}anull[{pre_pan}]"
             ));
                 append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
                 filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
@@ -843,7 +843,7 @@ pub fn export_project(
                 let pre_pan = format!("{label}_prepan");
                 let post_pan = format!("{label}_panned");
                 filter.push_str(&format!(
-                ";[{in_idx}:a]{areverse}{atempo}{ch_part}{volume_filter}{pitch_part}{ladspa_part}{eq_part},{fade_filters}anull[{pre_pan}]"
+                ";[{in_idx}:a]{areverse}{atempo}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{eq_part},{fade_filters}anull[{pre_pan}]"
             ));
                 append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
                 filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
@@ -906,7 +906,7 @@ pub fn export_project(
             let pre_pan = format!("{label}_prepan");
             let post_pan = format!("{label}_panned");
             filter.push_str(&format!(
-            ";[{}:a]{areverse}{atempo}{ch_part}{volume_filter}{pitch_part}{ladspa_part}{duck_part}{eq_part},{fade_filters}anull[{pre_pan}]",
+            ";[{}:a]{areverse}{atempo}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{duck_part}{eq_part},{fade_filters}anull[{pre_pan}]",
             audio_base + j
         ));
             append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
@@ -3348,7 +3348,9 @@ fn build_channel_filter(clip: &crate::model::clip::Clip) -> String {
         AudioChannelMode::Stereo => String::new(),
         AudioChannelMode::Left => "pan=stereo|c0=c0|c1=c0".to_string(),
         AudioChannelMode::Right => "pan=stereo|c0=c1|c1=c1".to_string(),
-        AudioChannelMode::MonoMix => "pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1".to_string(),
+        AudioChannelMode::MonoMix => {
+            "pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1".to_string()
+        }
     }
 }
 

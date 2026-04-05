@@ -252,9 +252,59 @@ fn remove_prerender_segment_files(output_path: &Path) {
 
 /// Normalize mixer-bound clip audio so camera AAC (e.g. 16 kHz mono Ring MP4s)
 /// negotiates cleanly with the fixed preview mix format.
+/// Insert a mono capsfilter between `audioconvert` and the rest of the audio
+/// chain to extract a single channel (Left/Right) or downmix (MonoMix).
+/// The downstream stereo capsfilter then upmixes mono to both speakers.
+/// Returns the element on success (caller must sync state), or None for Stereo.
+/// Set `mix-matrix` on an `audioconvert` element for channel extraction.
+/// Left: both outputs get input left. Right: both get input right.
+/// MonoMix: both get 0.5*L + 0.5*R.  Stereo: no-op.
+fn apply_channel_mode_to_audioconvert(
+    audio_conv: &gst::Element,
+    mode: crate::model::clip::AudioChannelMode,
+) {
+    use crate::model::clip::AudioChannelMode;
+    let matrix: Vec<Vec<f32>> = match mode {
+        AudioChannelMode::Stereo => return,
+        AudioChannelMode::Left => vec![vec![1.0, 0.0], vec![1.0, 0.0]],
+        AudioChannelMode::Right => vec![vec![0.0, 1.0], vec![0.0, 1.0]],
+        AudioChannelMode::MonoMix => vec![vec![0.5, 0.5], vec![0.5, 0.5]],
+    };
+    if audio_conv.find_property("mix-matrix").is_some() {
+        let gst_matrix: Vec<glib::SendValue> = matrix
+            .iter()
+            .map(|row| {
+                let inner = gst::Array::new(row.iter().copied());
+                inner.to_send_value()
+            })
+            .collect();
+        let outer = gst::Array::from_values(gst_matrix);
+        audio_conv.set_property("mix-matrix", &outer);
+    } else {
+        log::warn!(
+            "apply_channel_mode_to_audioconvert: audioconvert lacks mix-matrix property, channel mode {:?} ignored",
+            mode
+        );
+    }
+}
+
 fn attach_preview_audio_normalizer(
     pipeline: &gst::Pipeline,
     audio_conv: &gst::Element,
+    log_context: &str,
+) -> Option<(gst::Element, gst::Element, gst::Pad)> {
+    attach_preview_audio_normalizer_with_channel_mode(
+        pipeline,
+        audio_conv,
+        crate::model::clip::AudioChannelMode::Stereo,
+        log_context,
+    )
+}
+
+fn attach_preview_audio_normalizer_with_channel_mode(
+    pipeline: &gst::Pipeline,
+    audio_conv: &gst::Element,
+    channel_mode: crate::model::clip::AudioChannelMode,
     log_context: &str,
 ) -> Option<(gst::Element, gst::Element, gst::Pad)> {
     let resample = match gst::ElementFactory::make("audioresample").build() {
@@ -286,11 +336,17 @@ fn attach_preview_audio_normalizer(
         pipeline.remove(resample).ok();
     };
 
+    // Apply channel extraction (Left/Right/MonoMix) via the audioconvert
+    // mix-matrix.  The matrix maps input channels to output stereo so that
+    // both speakers carry the selected channel(s).
+    apply_channel_mode_to_audioconvert(audio_conv, channel_mode);
+
     let Some(conv_src) = audio_conv.static_pad("src") else {
         log::warn!("{log_context}: audioconvert src pad missing");
         cleanup(pipeline, &resample, &capsfilter);
         return None;
     };
+
     let Some(resample_sink) = resample.static_pad("sink") else {
         log::warn!("{log_context}: audioresample sink pad missing");
         cleanup(pipeline, &resample, &capsfilter);
@@ -730,6 +786,8 @@ pub struct ProgramClip {
     /// Audio pan: -1.0 (full left) to 1.0 (full right), default 0.0
     pub pan: f64,
     pub pan_keyframes: Vec<NumericKeyframe>,
+    /// Audio channel extraction/downmix mode.
+    pub audio_channel_mode: crate::model::clip::AudioChannelMode,
     /// 3-band parametric EQ settings.
     pub eq_bands: [crate::model::clip::EqBand; 3],
     pub eq_low_gain_keyframes: Vec<NumericKeyframe>,
@@ -6283,11 +6341,16 @@ impl ProgramPlayer {
                     }
                     continue;
                 }
-                if manifest.signature != signature
-                    || manifest.inputs != expected_inputs
-                    || timeline_pos < manifest.start_ns
-                    || timeline_pos >= manifest.end_ns
-                {
+                if manifest.signature != signature || manifest.inputs != expected_inputs {
+                    // Signature or input mismatch — this segment was rendered
+                    // with different clip state and will never match again.
+                    // Remove it to free disk space and avoid repeated scans.
+                    if managed_segment {
+                        remove_prerender_segment_files(&path);
+                    }
+                    continue;
+                }
+                if timeline_pos < manifest.start_ns || timeline_pos >= manifest.end_ns {
                     continue;
                 }
                 let segment = PrerenderSegment {
@@ -10344,9 +10407,10 @@ impl ProgramPlayer {
             let pad = if let Some(ac_elem) = ac.clone() {
                 if self.pipeline.add(&ac_elem).is_ok() {
                     let mut link_src = if let Some((resample, capsfilter, normalized_src)) =
-                        attach_preview_audio_normalizer(
+                        attach_preview_audio_normalizer_with_channel_mode(
                             &self.pipeline,
                             &ac_elem,
+                            clip.audio_channel_mode,
                             "build_audio_only_slot",
                         ) {
                         ar = Some(resample);
@@ -12370,9 +12434,10 @@ impl ProgramPlayer {
             let pad = if let Some(ac_elem) = ac.clone() {
                 if self.pipeline.add(&ac_elem).is_ok() {
                     let mut link_src = if let Some((resample, capsfilter, normalized_src)) =
-                        attach_preview_audio_normalizer(
+                        attach_preview_audio_normalizer_with_channel_mode(
                             &self.pipeline,
                             &ac_elem,
+                            clip.audio_channel_mode,
                             "build_slot_for_clip",
                         ) {
                         ar = Some(resample);
@@ -14890,8 +14955,16 @@ impl ProgramPlayer {
             if pipeline.add_many([&decoder, &ac]).is_err() {
                 continue;
             }
+            let ch_mode = clip_ref
+                .map(|c| c.audio_channel_mode)
+                .unwrap_or_default();
             let mut link_src_pad = if let Some((resample, capsfilter, normalized_src)) =
-                attach_preview_audio_normalizer(&pipeline, &ac, "audio_multi_pipeline")
+                attach_preview_audio_normalizer_with_channel_mode(
+                    &pipeline,
+                    &ac,
+                    ch_mode,
+                    "audio_multi_pipeline",
+                )
             {
                 audio_resample = Some(resample);
                 audio_capsfilter = Some(capsfilter);
@@ -15600,6 +15673,7 @@ mod tests {
             volume_keyframes: Vec::new(),
             pan: 0.0,
             pan_keyframes: Vec::new(),
+            audio_channel_mode: crate::model::clip::AudioChannelMode::default(),
             eq_bands: crate::model::clip::default_eq_bands(),
             eq_low_gain_keyframes: Vec::new(),
             eq_mid_gain_keyframes: Vec::new(),
