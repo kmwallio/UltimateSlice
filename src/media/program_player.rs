@@ -134,6 +134,51 @@ fn prerender_cache_root_for_project_path(
     }
 }
 
+/// Remove prerender cache directories from old versions that are no longer
+/// used.  Both the temp root (`$TMPDIR/ultimateslice/`) and persistent roots
+/// (`UltimateSlice.cache/`) can accumulate `prerender-vN/` directories when
+/// the cache version is bumped.
+fn cleanup_old_prerender_cache_versions(current_root: &Path) {
+    let current_version_dir = format!("prerender-v{BACKGROUND_PRERENDER_CACHE_VERSION}");
+    // Walk up from current_root to find the parent that contains
+    // `prerender-vN/` directories (skip current_root itself and any
+    // intermediate path components that are part of the version dir name).
+    let mut parent = None;
+    for ancestor in current_root.ancestors().skip(1) {
+        let is_version_dir = ancestor
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.starts_with("prerender-v"))
+            .unwrap_or(false);
+        if !is_version_dir {
+            parent = Some(ancestor);
+            break;
+        }
+    }
+    let Some(parent) = parent else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else {
+            continue;
+        };
+        if name_str.starts_with("prerender-v")
+            && name_str != current_version_dir
+            && entry.path().is_dir()
+        {
+            log::info!(
+                "cleanup_old_prerender_cache_versions: removing {}",
+                entry.path().display()
+            );
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
 fn sanitize_prerender_cache_component(component: &str) -> String {
     let sanitized: String = component
         .chars()
@@ -2814,6 +2859,7 @@ impl ProgramPlayer {
         self.prerender_cache_root = next_root;
         self.prerender_cache_persistent = persistent;
         let _ = std::fs::create_dir_all(&self.prerender_cache_root);
+        cleanup_old_prerender_cache_versions(&self.prerender_cache_root);
         // Saved-project roots must keep compatible prerenders even when this path is
         // attached before the background-prerender preference has been restored.
         if persistent {
