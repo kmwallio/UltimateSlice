@@ -22,12 +22,30 @@ build-options:
     CARGO_HOME: /run/build/ultimate-slice/cargo
     LIBCLANG_PATH: /usr/lib/sdk/llvm20/lib
 modules:
+  - name: onnxruntime
+    buildsystem: simple
+    build-commands:
+      - cmake -S cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/app -DCMAKE_INSTALL_LIBDIR=lib -DPython_EXECUTABLE=/usr/bin/python3 -Donnxruntime_BUILD_SHARED_LIB=ON -Donnxruntime_RUN_ONNX_TESTS=OFF -Donnxruntime_BUILD_UNIT_TESTS=OFF -Donnxruntime_BUILD_BENCHMARKS=OFF -Donnxruntime_GENERATE_TEST_REPORTS=OFF -Donnxruntime_USE_VCPKG=OFF -Donnxruntime_USE_CUDA=OFF -Donnxruntime_USE_DNNL=OFF -Donnxruntime_USE_MIMALLOC=OFF -Donnxruntime_USE_OPENVINO=OFF -Donnxruntime_USE_XNNPACK=OFF -DFETCHCONTENT_TRY_FIND_PACKAGE_MODE=NEVER -Donnxruntime_CMAKE_DEPS_MIRROR_DIR=/run/build/onnxruntime/mirror
+      - cmake --build build --parallel ${FLATPAK_BUILDER_N_JOBS}
+      - cmake --install build
+      - install -Dm644 LICENSE /app/share/licenses/onnxruntime/LICENSE
+      - install -Dm644 ThirdPartyNotices.txt /app/share/licenses/onnxruntime/ThirdPartyNotices.txt
+    sources:
+      - type: git
+        url: https://github.com/microsoft/onnxruntime.git
+        tag: v1.24.2
+        commit: 058787ceead760166e3c50a0a4cba8a833a6f53f
+        disable-submodules: true
+      - onnxruntime-sources.json
   - name: ultimate-slice
     buildsystem: simple
     build-options:
       env:
         CARGO_HOME: /run/build/ultimate-slice/cargo
         LIBCLANG_PATH: /usr/lib/sdk/llvm20/lib
+        ORT_LIB_LOCATION: /app/lib
+        ORT_PREFER_DYNAMIC_LINK: "1"
+        ORT_SKIP_DOWNLOAD: "1"
     build-commands:
       - cargo --offline build --release --locked
       - install -Dm755 target/release/ultimate-slice /app/bin/ultimate-slice

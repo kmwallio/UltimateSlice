@@ -643,7 +643,7 @@ Tracking docs:
 - [ ] Optical Flow slow-motion (AI frame interpolation)
 - [ ] AI Music Generation (MusicGen / MusicGPT)
   - [ ] Phase 1 — Draw-region UX: draw a time-range box on an audio track to define a generated-audio region (reusable for silence/tone generation too)
-  - [ ] Phase 2 — Local model backend: Preferences entry for local model path; candidate runtimes include the `musicgpt` Rust crate (native, no Python dependency), MusicGen-small ONNX via `ort`, or Python `audiocraft` subprocess; background generation with status-bar progress (same pattern as proxy transcoding)
+  - [x] Phase 2 — Local model backend: MusicGen-small ONNX via `ort` with background generation worker thread and status-bar progress; MCP `generate_music` tool for automation; generated WAV clips placed on audio tracks with undo support
   - [ ] Phase 3 — Prompt UI: popover on drawn region with text prompt input, optional reference audio, duration auto-calculated from region length; generated audio written as a WAV clip and placed in the region
 
 ### Script-to-Timeline (Create Project from Script & Clips)

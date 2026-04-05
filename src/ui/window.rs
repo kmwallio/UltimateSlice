@@ -3486,6 +3486,7 @@ pub fn build_window(
         crate::media::bg_removal_cache::BgRemovalCache::new(),
     ));
     let stt_cache = Rc::new(RefCell::new(crate::media::stt_cache::SttCache::new()));
+    let music_gen_cache = Rc::new(RefCell::new(crate::media::music_gen::MusicGenCache::new()));
     let effective_proxy_enabled = Rc::new(Cell::new(initial_proxy_mode.is_enabled()));
     let effective_proxy_scale_divisor = Rc::new(Cell::new(match initial_proxy_mode {
         crate::ui_state::ProxyMode::QuarterRes => 4,
@@ -6716,6 +6717,124 @@ pub fn build_window(
                     let cuts = result.unwrap_or_default();
                     let _ = tx.send((clip_id, track_id, cuts));
                 });
+            },
+        ));
+    }
+
+    // Wire on_generate_music — opens a dialog to generate music via MusicGen AI.
+    {
+        let music_gen_cache = music_gen_cache.clone();
+        let window_weak = window.downgrade();
+        timeline_state.borrow_mut().on_generate_music = Some(Rc::new(
+            move |track_id: String, playhead_ns: u64| {
+                let win = match window_weak.upgrade() {
+                    Some(w) => w,
+                    None => return,
+                };
+                if !music_gen_cache.borrow().is_available() {
+                    let dialog = gtk::Dialog::builder()
+                        .title("Generate Music")
+                        .default_width(360)
+                        .modal(true)
+                        .transient_for(&win)
+                        .build();
+                    dialog.add_button("OK", gtk::ResponseType::Accept);
+                    let body = gtk::Box::new(gtk::Orientation::Vertical, 8);
+                    body.set_margin_start(16);
+                    body.set_margin_end(16);
+                    body.set_margin_top(16);
+                    body.set_margin_bottom(16);
+                    let label = gtk::Label::new(Some(
+                        "MusicGen ONNX models not found.\n\n\
+                         Download musicgen-small models from Hugging Face\n\
+                         (Xenova/musicgen-small) and place them in:\n\n\
+                         ~/.local/share/ultimateslice/models/musicgen-small/\n\n\
+                         Required files: text_encoder.onnx,\n\
+                         decoder_model_merged.onnx, encodec_decode.onnx,\n\
+                         tokenizer.json",
+                    ));
+                    label.set_wrap(true);
+                    body.append(&label);
+                    dialog.content_area().append(&body);
+                    dialog.connect_response(|d, _| d.close());
+                    dialog.present();
+                    return;
+                }
+
+                let dialog = gtk::Dialog::builder()
+                    .title("Generate Music")
+                    .default_width(400)
+                    .modal(true)
+                    .transient_for(&win)
+                    .build();
+                dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+                dialog.add_button("Generate", gtk::ResponseType::Accept);
+
+                let body = gtk::Box::new(gtk::Orientation::Vertical, 8);
+                body.set_margin_start(16);
+                body.set_margin_end(16);
+                body.set_margin_top(16);
+                body.set_margin_bottom(16);
+
+                let prompt_label = gtk::Label::new(Some("Describe the music to generate:"));
+                prompt_label.set_halign(gtk::Align::Start);
+                let prompt_entry = gtk::TextView::new();
+                prompt_entry.set_wrap_mode(gtk::WrapMode::Word);
+                prompt_entry.set_height_request(80);
+                let prompt_scroll = gtk::ScrolledWindow::builder()
+                    .child(&prompt_entry)
+                    .min_content_height(80)
+                    .build();
+
+                let dur_label = gtk::Label::new(Some("Duration (seconds):"));
+                dur_label.set_halign(gtk::Align::Start);
+                let dur_spin = gtk::SpinButton::with_range(1.0, 30.0, 1.0);
+                dur_spin.set_digits(0);
+                dur_spin.set_value(10.0);
+                dur_spin.set_halign(gtk::Align::Start);
+                dur_spin.set_hexpand(false);
+
+                let hint = gtk::Label::new(Some(
+                    "Examples: \"upbeat jazz piano\", \"calm ambient synth\",\n\
+                     \"energetic rock drums and guitar\"",
+                ));
+                hint.set_halign(gtk::Align::Start);
+                hint.add_css_class("dim-label");
+
+                body.append(&prompt_label);
+                body.append(&prompt_scroll);
+                body.append(&dur_label);
+                body.append(&dur_spin);
+                body.append(&hint);
+                dialog.content_area().append(&body);
+
+                let music_gen_cache = music_gen_cache.clone();
+                dialog.connect_response(move |d, resp| {
+                    if resp == gtk::ResponseType::Accept {
+                        let buffer = prompt_entry.buffer();
+                        let prompt = buffer
+                            .text(&buffer.start_iter(), &buffer.end_iter(), false)
+                            .to_string();
+                        if prompt.trim().is_empty() {
+                            d.close();
+                            return;
+                        }
+                        let duration_secs = dur_spin.value();
+                        let job_id = uuid::Uuid::new_v4().to_string();
+                        let job = crate::media::music_gen::MusicGenJob {
+                            job_id,
+                            prompt,
+                            duration_secs,
+                            output_path: std::path::PathBuf::new(),
+                            track_id: track_id.clone(),
+                            timeline_start_ns: playhead_ns,
+                        };
+                        music_gen_cache.borrow_mut().request(job);
+                    }
+                    d.close();
+                });
+
+                dialog.present();
             },
         ));
     }
@@ -10697,6 +10816,11 @@ pub fn build_window(
         let audio_sync_in_progress = audio_sync_in_progress.clone();
         let silence_detect_in_progress = silence_detect_in_progress.clone();
         let scene_detect_in_progress = scene_detect_in_progress.clone();
+        let music_gen_cache = music_gen_cache.clone();
+        let project_for_music = project.clone();
+        let timeline_state_music = timeline_state.clone();
+        let on_project_changed_music = on_project_changed.clone();
+        let window_weak_music = window.downgrade();
         let inspector_view = inspector_view.clone();
         let preferences_state = preferences_state.clone();
         let timeline_state_stt = timeline_state.clone();
@@ -10819,11 +10943,60 @@ pub fn build_window(
             let syncing_audio = audio_sync_in_progress.get();
             let detecting_silence = silence_detect_in_progress.get();
             let detecting_scene_cuts = scene_detect_in_progress.get();
+            // Poll music generation results and place completed clips.
+            let music_progress = music_gen_cache.borrow().progress();
+            let music_active = music_progress.in_flight;
+            {
+                let music_results = music_gen_cache.borrow_mut().poll();
+                for result in music_results {
+                    if result.success && result.output_path.exists() {
+                        let clip = crate::model::clip::Clip::new(
+                            result.output_path.to_string_lossy().as_ref(),
+                            result.duration_ns,
+                            result.timeline_start_ns,
+                            crate::model::clip::ClipKind::Audio,
+                        );
+                        let proj = project_for_music.borrow();
+                        if let Some(track) = proj.tracks.iter().find(|t| t.id == result.track_id) {
+                            let old_clips = track.clips.clone();
+                            let mut new_clips = old_clips.clone();
+                            new_clips.push(clip);
+                            new_clips.sort_by_key(|c| c.timeline_start);
+                            drop(proj);
+                            let mut ts = timeline_state_music.borrow_mut();
+                            let proj_rc = ts.project.clone();
+                            let mut proj = proj_rc.borrow_mut();
+                            let cmd = crate::undo::SetTrackClipsCommand {
+                                track_id: result.track_id.clone(),
+                                old_clips,
+                                new_clips,
+                                label: "Generate music".to_string(),
+                            };
+                            ts.history.execute(Box::new(cmd), &mut proj);
+                            proj.dirty = true;
+                            drop(proj);
+                            drop(ts);
+                            on_project_changed_music();
+                        }
+                    } else if !result.success {
+                        let err = result.error.unwrap_or_else(|| "Unknown error".into());
+                        log::error!("Music generation failed: {err}");
+                        if let Some(win) = window_weak_music.upgrade() {
+                            flash_window_status_title(
+                                &win,
+                                &project_for_music,
+                                &format!("Music generation failed: {err}"),
+                            );
+                        }
+                    }
+                }
+            }
             if proxy_active
                 || prerender_active
                 || syncing_audio
                 || detecting_silence
                 || detecting_scene_cuts
+                || music_active
                 || bg_active
                 || stt_active
             {
@@ -10837,6 +11010,9 @@ pub fn build_window(
                 }
                 if detecting_scene_cuts {
                     parts.push("Detecting scene cuts\u{2026}".to_string());
+                }
+                if music_active {
+                    parts.push("Generating music\u{2026}".to_string());
                 }
                 if proxy_active {
                     parts.push(format!(
@@ -10971,6 +11147,7 @@ pub fn build_window(
         let suppress_resume_on_next_reload = suppress_resume_on_next_reload.clone();
         let clear_media_browser_on_next_reload = clear_media_browser_on_next_reload.clone();
         let stt_cache = stt_cache.clone();
+        let music_gen_cache = music_gen_cache.clone();
         let main_stack_for_mcp = main_stack.clone();
         let window_weak = window.downgrade();
         let workspace_layout_pending_name_for_mcp = workspace_layout_pending_name.clone();
@@ -10991,6 +11168,7 @@ pub fn build_window(
                         &proxy_cache,
                         &bg_removal_cache,
                         &stt_cache,
+                        &music_gen_cache,
                         &on_close_preview,
                         &source_marks,
                         &on_source_selected,
@@ -11530,6 +11708,7 @@ fn handle_mcp_command(
     proxy_cache: &Rc<RefCell<crate::media::proxy_cache::ProxyCache>>,
     bg_removal_cache: &Rc<RefCell<crate::media::bg_removal_cache::BgRemovalCache>>,
     stt_cache: &Rc<RefCell<crate::media::stt_cache::SttCache>>,
+    music_gen_cache: &Rc<RefCell<crate::media::music_gen::MusicGenCache>>,
     on_close_preview: &Rc<dyn Fn()>,
     source_marks: &Rc<RefCell<crate::model::media_library::SourceMarks>>,
     on_source_selected: &Rc<dyn Fn(String, u64)>,
@@ -13690,6 +13869,66 @@ fn handle_mcp_command(
                 reply
                     .send(serde_json::json!({"success": false, "error": "Clip or track not found"}))
                     .ok();
+            }
+        }
+
+        McpCommand::GenerateMusic {
+            prompt,
+            duration_secs,
+            track_index,
+            timeline_start_ns,
+            reply,
+        } => {
+            let music_cache = music_gen_cache.borrow();
+            if !music_cache.is_available() {
+                reply
+                    .send(serde_json::json!({
+                        "success": false,
+                        "error": "MusicGen ONNX models not found. Download musicgen-small models to ~/.local/share/ultimateslice/models/musicgen-small/"
+                    }))
+                    .ok();
+            } else {
+                drop(music_cache);
+                // Find or default audio track.
+                let track_id = {
+                    let proj = project.borrow();
+                    let audio_tracks: Vec<_> = proj
+                        .tracks
+                        .iter()
+                        .filter(|t| t.kind == crate::model::track::TrackKind::Audio)
+                        .collect();
+                    let track = if let Some(idx) = track_index {
+                        proj.tracks.get(idx).map(|t| t.id.clone())
+                    } else {
+                        audio_tracks.first().map(|t| t.id.clone())
+                    };
+                    track
+                };
+                if let Some(track_id) = track_id {
+                    let playhead_ns = timeline_state.borrow().playhead_ns;
+                    let start_ns = timeline_start_ns.unwrap_or(playhead_ns);
+                    let job_id = uuid::Uuid::new_v4().to_string();
+                    let job = crate::media::music_gen::MusicGenJob {
+                        job_id: job_id.clone(),
+                        prompt,
+                        duration_secs,
+                        output_path: std::path::PathBuf::new(), // will be set by cache
+                        track_id,
+                        timeline_start_ns: start_ns,
+                    };
+                    music_gen_cache.borrow_mut().request(job);
+                    reply
+                        .send(serde_json::json!({
+                            "success": true,
+                            "job_id": job_id,
+                            "message": "Music generation started. Poll list_clips to see the clip when ready."
+                        }))
+                        .ok();
+                } else {
+                    reply
+                        .send(serde_json::json!({"success": false, "error": "No audio track found"}))
+                        .ok();
+                }
             }
         }
 

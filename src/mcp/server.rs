@@ -1121,6 +1121,20 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "generate_music",
+            "description": "Generate music from a text prompt using MusicGen AI. Places the generated WAV clip on an audio track. Requires MusicGen ONNX models to be installed. Returns immediately with a job_id; poll list_clips to see the clip when generation completes.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "prompt":           { "type": "string", "description": "Text description of the music to generate (e.g. 'upbeat jazz piano')." },
+                    "duration_secs":    { "type": "number", "description": "Duration of generated audio in seconds (1-30, default 10)." },
+                    "track_index":      { "type": "integer", "description": "Audio track index to place the clip (default: first audio track)." },
+                    "timeline_start_ns": { "type": "integer", "description": "Timeline position in nanoseconds (default: current playhead)." }
+                },
+                "required": ["prompt"]
+            }
+        },
+        {
             "name": "record_voiceover",
             "description": "Record audio from the default microphone for a fixed duration and place it as a clip on an audio track at the current playhead position. Blocks while recording.",
             "inputSchema": {
@@ -2661,6 +2675,22 @@ fn dispatch_tool_payload(
                 .get("threshold")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(10.0),
+            reply: tx,
+        },
+        "generate_music" => McpCommand::GenerateMusic {
+            prompt: args["prompt"].as_str().unwrap_or("").to_string(),
+            duration_secs: args
+                .get("duration_secs")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(10.0)
+                .clamp(1.0, 30.0),
+            track_index: args
+                .get("track_index")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize),
+            timeline_start_ns: args
+                .get("timeline_start_ns")
+                .and_then(|v| v.as_u64()),
             reply: tx,
         },
         "record_voiceover" => McpCommand::RecordVoiceover {

@@ -26,13 +26,15 @@ anyhow = "1"
 rustfft = "6"
 ort = { version = "2.0.0-rc.12", optional = true }
 ndarray = { version = "0.17", optional = true }
+tokenizers = { version = "0.21", optional = true, default-features = false, features = ["fancy-regex"] }
+hound = { version = "3", optional = true }
 whisper-rs = { version = "0.12", optional = true }
 tempfile = "3.27.0"
 resvg = "0.47.0"
 
 [features]
-default = ["speech-to-text"]
-ai-inference = ["ort", "ndarray"]
+default = ["speech-to-text", "ai-inference"]
+ai-inference = ["ort", "ndarray", "tokenizers", "hound"]
 speech-to-text = ["whisper-rs"]
 
 [profile.dev]

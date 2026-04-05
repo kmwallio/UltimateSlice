@@ -313,6 +313,7 @@ pub struct TimelineState {
     /// Callback fired when user requests silence removal: (clip_id, track_id, source_path, source_in, source_out, noise_db, min_duration)
     pub on_remove_silent_parts: Option<Rc<dyn Fn(String, String, String, u64, u64, f64, f64)>>,
     pub on_detect_scene_cuts: Option<Rc<dyn Fn(String, String, String, u64, u64, f64)>>,
+    pub on_generate_music: Option<Rc<dyn Fn(String, u64)>>,
     /// Gap-free timeline behavior toggle (track-local ripple).
     pub magnetic_mode: bool,
     /// Hover preview while dragging a transition: (left_clip_id, right_clip_id).
@@ -382,6 +383,7 @@ impl TimelineState {
             on_sync_replace_audio: None,
             on_remove_silent_parts: None,
             on_detect_scene_cuts: None,
+            on_generate_music: None,
             magnetic_mode: false,
             hover_transition_pair: None,
             show_waveform_on_video: false,
@@ -3643,6 +3645,12 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
     }
     btn_add_adjustment_layer.add_css_class("flat");
     track_context_box.append(&btn_add_adjustment_layer);
+    let btn_generate_music = gtk::Button::with_label("Generate Music\u{2026}");
+    btn_generate_music.add_css_class("flat");
+    btn_generate_music.set_tooltip_text(Some(
+        "Generate music from a text prompt using MusicGen AI and place on this track",
+    ));
+    track_context_box.append(&btn_generate_music);
     track_context_pop.set_child(Some(&track_context_box));
     let track_context_track_idx: Rc<RefCell<Option<usize>>> = Rc::new(RefCell::new(None));
 
@@ -4033,6 +4041,36 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         });
     }
 
+    {
+        let state = state.clone();
+        let pop_weak = track_context_pop.downgrade();
+        let track_context_track_idx = track_context_track_idx.clone();
+        btn_generate_music.connect_clicked(move |_| {
+            let track_idx = *track_context_track_idx.borrow();
+            if let Some(idx) = track_idx {
+                let (playhead, track_id) = {
+                    let st = state.borrow();
+                    let proj = st.project.borrow();
+                    let tid = proj
+                        .tracks
+                        .get(idx)
+                        .map(|t| t.id.clone())
+                        .unwrap_or_default();
+                    (st.playhead_ns, tid)
+                };
+                let st = state.borrow();
+                let cb = st.on_generate_music.clone();
+                drop(st);
+                if let Some(cb) = cb {
+                    cb(track_id, playhead);
+                }
+            }
+            if let Some(pop) = pop_weak.upgrade() {
+                pop.popdown();
+            }
+        });
+    }
+
     // Drawing
     {
         let state = state.clone();
@@ -4099,6 +4137,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         let btn_track_height_medium = btn_track_height_medium.clone();
         let btn_track_height_large = btn_track_height_large.clone();
         let btn_add_adjustment_layer = btn_add_adjustment_layer.clone();
+        let btn_generate_music = btn_generate_music.clone();
         click.connect_pressed(move |gesture, n_press, x, y| {
             // Grab keyboard focus so Delete/Backspace etc. work immediately
             if let Some(a) = area_weak.upgrade() {
@@ -4386,6 +4425,8 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 );
                                 btn_add_adjustment_layer
                                     .set_visible(track_kind == TrackKind::Video);
+                                btn_generate_music
+                                    .set_visible(track_kind == TrackKind::Audio);
                                 track_context_pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
                                     x as i32, y as i32, 1, 1,
                                 )));

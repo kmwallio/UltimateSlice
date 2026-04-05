@@ -16,6 +16,7 @@ pub mod stt_cache;
 pub mod thumb_cache;
 pub mod thumbnail;
 pub mod title_font;
+pub mod music_gen;
 pub mod voiceover;
 pub mod waveform_cache;
 

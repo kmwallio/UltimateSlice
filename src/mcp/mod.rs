@@ -430,6 +430,13 @@ pub enum McpCommand {
         threshold: f64,
         reply: SyncSender<Value>,
     },
+    GenerateMusic {
+        prompt: String,
+        duration_secs: f64,
+        track_index: Option<usize>,
+        timeline_start_ns: Option<u64>,
+        reply: SyncSender<Value>,
+    },
     RecordVoiceover {
         duration_ns: u64,
         track_index: Option<usize>,

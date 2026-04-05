@@ -244,8 +244,10 @@ fire `on_project_changed`, **don't call it from inside the method**. Instead:
 | `thiserror` | `1` | error types |
 | `log` + `env_logger` | latest | logging |
 | `rustfft` | `6` | FFT for audio cross-correlation sync |
-| `ort` | `2.0.0-rc.12` | ONNX Runtime for AI background removal |
+| `ort` | `2.0.0-rc.12` | ONNX Runtime for AI background removal and MusicGen inference |
 | `ndarray` | `0.17` | N-dimensional array for ONNX tensor I/O |
+| `tokenizers` | `0.21` | Hugging Face tokenizer for MusicGen T5 text encoding |
+| `hound` | `3` | WAV audio file writer for MusicGen output |
 | `tempfile` | `3` | Temporary files for ffmpeg chapter metadata |
 
 **Do not upgrade gstreamer without also upgrading gtk4/gdk4/glib to the matching glib version.**
@@ -270,6 +272,8 @@ flatpak run io.github.kmwallio.ultimateslice --mcp
 > **Flatpak build:** Run `python3 flatpak-cargo-generator.py Cargo.lock -o cargo-sources.json`
 > then `flatpak-builder --user --install --force-clean flatpak-build io.github.kmwallio.ultimateslice.yml`
 > after any dependency changes (Cargo.lock update) to regenerate `cargo-sources.json`.
+> The ONNX Runtime Flatpak mirror lives in `onnxruntime-sources.json`; regenerate it whenever the pinned ONNX Runtime version
+> or its mirrored CPU/shared-lib `cmake/deps.txt` inputs change.
 
 > **Single-instance enforcement for `--mcp`:** Only one MCP-enabled instance may
 > run at a time. On startup with `--mcp`, the binary reads
@@ -391,6 +395,7 @@ Before declaring a task finished, agents must verify via MCP:
 | `set_clip_eq` | Set 3-band parametric EQ on a clip (optional per-band `low_freq`/`low_gain`/`low_q`, `mid_freq`/`mid_gain`/`mid_q`, `high_freq`/`high_gain`/`high_q`; omitted fields keep current value) |
 | `normalize_clip_audio` | Analyze clip loudness and normalize volume; `mode` (`peak`/`lufs`), `target_level` (dB); blocks during ffmpeg analysis (1–5 s) |
 | `detect_scene_cuts` | Detect scene/shot changes in a clip using ffmpeg `scdet` and split at each cut point; `threshold` (1–50, default 10); blocks during analysis |
+| `generate_music` | Generate music from a text prompt using MusicGen AI; `prompt` (required), `duration_secs` (1–30, default 10), optional `track_index`/`timeline_start_ns`; returns immediately, clip appears when generation completes |
 | `record_voiceover` | Record audio from microphone for `duration_ns` at playhead position; places WAV clip on audio track; blocks during recording |
 | `set_clip_keyframe` | Set/update a phase-1 keyframe (`scale`/`opacity`/`position_x`/`position_y`/`brightness`/`contrast`/`saturation`/`temperature`/`tint`/`volume`/`pan`/`rotate`/`crop_left`/`crop_right`/`crop_top`/`crop_bottom`/`eq_low_gain`/`eq_mid_gain`/`eq_high_gain`) at an absolute timeline position |
 | `remove_clip_keyframe` | Remove a phase-1 keyframe for a property at an absolute timeline position |

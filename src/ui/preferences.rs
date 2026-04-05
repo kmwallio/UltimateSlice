@@ -4,7 +4,8 @@ use crate::ui_state::{
 };
 use gtk4::prelude::*;
 use gtk4::{
-    self as gtk, Box as GBox, CheckButton, Label, Orientation, ResponseType, Stack, StackSidebar,
+    self as gtk, Box as GBox, CheckButton, Label, Orientation, ResponseType, Separator, Stack,
+    StackSidebar,
 };
 use std::rc::Rc;
 
@@ -20,6 +21,8 @@ Third-party crates and libraries:\n\
 • whisper-rs — Unlicense\n\
 • ort (ONNX Runtime) — MIT OR Apache-2.0\n\
 • ndarray — MIT OR Apache-2.0\n\
+• tokenizers (Hugging Face) — Apache-2.0\n\
+• hound (WAV I/O) — Apache-2.0\n\
 • resvg / usvg / tiny-skia — MIT OR Apache-2.0\n\
 • tempfile — MIT OR Apache-2.0\n\
 • FFmpeg (export/runtime tooling) — LGPL-2.1-or-later (built with GPL options in Flatpak)\n\
@@ -33,6 +36,74 @@ UltimateSlice project license: GPL-3.0-or-later.\n\
 This application uses third-party open-source crates and libraries.\n\
 Please review each dependency license in Cargo.lock, the Flatpak manifest,\n\
 and upstream project repositories for complete terms and notices.";
+
+/// Returns true if a directory exists and contains at least one file.
+fn dir_has_files(dir: &std::path::Path) -> bool {
+    dir.is_dir()
+        && std::fs::read_dir(dir)
+            .map(|mut rd| rd.next().is_some())
+            .unwrap_or(false)
+}
+
+/// Append a "Generated Files" section to the Models page if any generated
+/// audio directories (voiceovers, AI music) contain files.
+fn append_generated_files_section(container: &GBox) {
+    let vo_dir = crate::media::voiceover::voiceover_cache_dir();
+    let music_dir = crate::media::music_gen::music_gen_cache_dir();
+    let has_vo = dir_has_files(&vo_dir);
+    let has_music = dir_has_files(&music_dir);
+
+    if !has_vo && !has_music {
+        return;
+    }
+
+    container.append(&Separator::new(Orientation::Horizontal));
+
+    let title = Label::new(Some("Generated Files"));
+    title.set_halign(gtk::Align::Start);
+    title.add_css_class("title-4");
+    container.append(&title);
+
+    if has_vo {
+        let row = GBox::new(Orientation::Vertical, 2);
+        let name = Label::new(Some("Voiceover Recordings"));
+        name.set_halign(gtk::Align::Start);
+        row.append(&name);
+
+        let dir_str = vo_dir.to_string_lossy();
+        let path_label = Label::new(None);
+        path_label.set_markup(&format!(
+            "<a href=\"file://{}\">{}</a>",
+            glib::markup_escape_text(&dir_str),
+            glib::markup_escape_text(&dir_str),
+        ));
+        path_label.set_halign(gtk::Align::Start);
+        path_label.add_css_class("monospace");
+        path_label.add_css_class("dim-label");
+        row.append(&path_label);
+        container.append(&row);
+    }
+
+    if has_music {
+        let row = GBox::new(Orientation::Vertical, 2);
+        let name = Label::new(Some("Generated Music"));
+        name.set_halign(gtk::Align::Start);
+        row.append(&name);
+
+        let dir_str = music_dir.to_string_lossy();
+        let path_label = Label::new(None);
+        path_label.set_markup(&format!(
+            "<a href=\"file://{}\">{}</a>",
+            glib::markup_escape_text(&dir_str),
+            glib::markup_escape_text(&dir_str),
+        ));
+        path_label.set_halign(gtk::Align::Start);
+        path_label.add_css_class("monospace");
+        path_label.add_css_class("dim-label");
+        row.append(&path_label);
+        container.append(&row);
+    }
+}
 
 #[allow(deprecated)]
 pub fn show_preferences_dialog(
@@ -619,6 +690,65 @@ pub fn show_preferences_dialog(
         stt_path_label.add_css_class("monospace");
         models_box.append(&stt_path_label);
 
+        // ── MusicGen model status ─────────────────────────────────────
+        models_box.append(&Separator::new(Orientation::Horizontal));
+
+        let musicgen_row = GBox::new(Orientation::Horizontal, 8);
+        let musicgen_name = Label::new(Some("MusicGen (AI Music Generation)"));
+        musicgen_name.set_halign(gtk::Align::Start);
+        musicgen_name.set_hexpand(true);
+        let musicgen_status = Label::new(None);
+        musicgen_status.set_halign(gtk::Align::End);
+
+        let has_musicgen = crate::media::music_gen::find_model_dir().is_some();
+        if has_musicgen {
+            musicgen_status.set_text("\u{2713} Installed");
+            musicgen_status.add_css_class("success");
+        } else {
+            musicgen_status.set_text("Not installed");
+            musicgen_status.add_css_class("dim-label");
+        }
+        musicgen_row.append(&musicgen_name);
+        musicgen_row.append(&musicgen_status);
+        models_box.append(&musicgen_row);
+
+        let musicgen_hint = Label::new(None);
+        musicgen_hint.set_markup(
+            "MusicGen generates music from text prompts. \
+             Download the ONNX models (~900 MB) from \
+             <a href=\"https://huggingface.co/Xenova/musicgen-small/tree/main/onnx\">huggingface.co/Xenova/musicgen-small</a> \
+             and place them in:",
+        );
+        musicgen_hint.set_halign(gtk::Align::Start);
+        musicgen_hint.add_css_class("dim-label");
+        musicgen_hint.set_wrap(true);
+        musicgen_hint.set_max_width_chars(60);
+        models_box.append(&musicgen_hint);
+
+        let musicgen_dir = crate::media::music_gen::model_install_dir();
+        let musicgen_dir_str = musicgen_dir.to_string_lossy();
+        let musicgen_path_label = Label::new(None);
+        musicgen_path_label.set_markup(&format!(
+            "<a href=\"file://{}\">{}</a>",
+            glib::markup_escape_text(&musicgen_dir_str),
+            glib::markup_escape_text(&musicgen_dir_str),
+        ));
+        musicgen_path_label.set_halign(gtk::Align::Start);
+        musicgen_path_label.add_css_class("monospace");
+        models_box.append(&musicgen_path_label);
+
+        let musicgen_files_hint = Label::new(Some(
+            "Required files: text_encoder.onnx, decoder_model_merged.onnx,\n\
+             encodec_decode.onnx, tokenizer.json",
+        ));
+        musicgen_files_hint.set_halign(gtk::Align::Start);
+        musicgen_files_hint.add_css_class("dim-label");
+        musicgen_files_hint.set_wrap(true);
+        musicgen_files_hint.set_max_width_chars(60);
+        models_box.append(&musicgen_files_hint);
+
+        append_generated_files_section(&models_box);
+
         stack.add_titled(&models_box, Some("models"), "Models");
     }
 
@@ -676,6 +806,65 @@ pub fn show_preferences_dialog(
         stt_path_label.set_halign(gtk::Align::Start);
         stt_path_label.add_css_class("monospace");
         models_box.append(&stt_path_label);
+
+        // ── MusicGen model status ─────────────────────────────────────
+        models_box.append(&Separator::new(Orientation::Horizontal));
+
+        let musicgen_row = GBox::new(Orientation::Horizontal, 8);
+        let musicgen_name = Label::new(Some("MusicGen (AI Music Generation)"));
+        musicgen_name.set_halign(gtk::Align::Start);
+        musicgen_name.set_hexpand(true);
+        let musicgen_status = Label::new(None);
+        musicgen_status.set_halign(gtk::Align::End);
+
+        let has_musicgen = crate::media::music_gen::find_model_dir().is_some();
+        if has_musicgen {
+            musicgen_status.set_text("\u{2713} Installed");
+            musicgen_status.add_css_class("success");
+        } else {
+            musicgen_status.set_text("Not installed");
+            musicgen_status.add_css_class("dim-label");
+        }
+        musicgen_row.append(&musicgen_name);
+        musicgen_row.append(&musicgen_status);
+        models_box.append(&musicgen_row);
+
+        let musicgen_hint = Label::new(None);
+        musicgen_hint.set_markup(
+            "MusicGen generates music from text prompts. \
+             Download the ONNX models (~900 MB) from \
+             <a href=\"https://huggingface.co/Xenova/musicgen-small/tree/main/onnx\">huggingface.co/Xenova/musicgen-small</a> \
+             and place them in:",
+        );
+        musicgen_hint.set_halign(gtk::Align::Start);
+        musicgen_hint.add_css_class("dim-label");
+        musicgen_hint.set_wrap(true);
+        musicgen_hint.set_max_width_chars(60);
+        models_box.append(&musicgen_hint);
+
+        let musicgen_dir = crate::media::music_gen::model_install_dir();
+        let musicgen_dir_str = musicgen_dir.to_string_lossy();
+        let musicgen_path_label = Label::new(None);
+        musicgen_path_label.set_markup(&format!(
+            "<a href=\"file://{}\">{}</a>",
+            glib::markup_escape_text(&musicgen_dir_str),
+            glib::markup_escape_text(&musicgen_dir_str),
+        ));
+        musicgen_path_label.set_halign(gtk::Align::Start);
+        musicgen_path_label.add_css_class("monospace");
+        models_box.append(&musicgen_path_label);
+
+        let musicgen_files_hint = Label::new(Some(
+            "Required files: text_encoder.onnx, decoder_model_merged.onnx,\n\
+             encodec_decode.onnx, tokenizer.json",
+        ));
+        musicgen_files_hint.set_halign(gtk::Align::Start);
+        musicgen_files_hint.add_css_class("dim-label");
+        musicgen_files_hint.set_wrap(true);
+        musicgen_files_hint.set_max_width_chars(60);
+        models_box.append(&musicgen_files_hint);
+
+        append_generated_files_section(&models_box);
 
         stack.add_titled(&models_box, Some("models"), "Models");
     }

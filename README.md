@@ -36,6 +36,8 @@ UltimateSlice uses open-source crates and runtime libraries, including:
 - `rustfft` — MIT OR Apache-2.0
 - `whisper-rs` — Unlicense
 - `ort` (ONNX Runtime) / `ndarray` — MIT OR Apache-2.0
+- `tokenizers` (Hugging Face) — Apache-2.0
+- `hound` (WAV I/O) — Apache-2.0
 - `resvg` / `usvg` / `tiny-skia` — MIT OR Apache-2.0
 - `tempfile` — MIT OR Apache-2.0
 - FFmpeg (tooling/runtime) — LGPL-2.1-or-later (Flatpak build enables GPL options)
