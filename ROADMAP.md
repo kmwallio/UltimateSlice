@@ -86,6 +86,7 @@ Tracking docs:
 ### Inspector Panel
 - [x] Right-side inspector showing selected clip properties
 - [x] Fields: clip name, source path, source in/out, duration, timeline start
+- [x] Outgoing transition editor in the Inspector with editable type/duration/alignment, remove action, shared duration clamping across Inspector/timeline/MCP, alignment-aware preview/export/prerender timing, and collapsed-below-Transform placement
 
 ### Toolbar / Header
 - [x] New / Open / Save / Export MP4 buttons

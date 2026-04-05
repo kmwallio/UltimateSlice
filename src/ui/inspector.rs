@@ -2,6 +2,10 @@ use crate::model::clip::{
     ClipColorLabel, KeyframeInterpolation, NumericKeyframe, Phase1KeyframeProperty,
     SubtitleHighlightMode,
 };
+use crate::model::transition::{
+    max_transition_duration_ns, validate_track_transition_request, TransitionAlignment,
+    DEFAULT_TRANSITION_DURATION_NS, MIN_TRANSITION_DURATION_NS,
+};
 
 /// Clipboard for copy/paste subtitle style between clips.
 #[derive(Clone)]
@@ -168,6 +172,12 @@ pub struct InspectorView {
     pub speed_slider: Scale,
     pub reverse_check: CheckButton,
     pub slow_motion_dropdown: DropDown,
+    // Transitions
+    pub transition_kind_dropdown: gtk4::ComboBoxText,
+    pub transition_duration_ms: gtk4::SpinButton,
+    pub transition_alignment_dropdown: gtk4::ComboBoxText,
+    pub transition_clear_btn: Button,
+    pub transition_status_label: Label,
     // LUT (color grading)
     pub lut_display_box: GBox,
     pub lut_clear_btn: Button,
@@ -182,6 +192,7 @@ pub struct InspectorView {
     pub transform_section: GBox,
     pub title_section_box: GBox,
     pub speed_section_box: GBox,
+    pub transition_section: GBox,
     pub lut_section_box: GBox,
     // Chroma key
     pub chroma_key_section: GBox,
@@ -1596,6 +1607,115 @@ impl InspectorView {
                 self.out_value.set_text(&ns_to_timecode(c.source_out));
                 self.dur_value.set_text(&ns_to_timecode(c.duration()));
                 self.pos_value.set_text(&ns_to_timecode(c.timeline_start));
+                let current_transition = &c.outgoing_transition;
+                let current_kind_id = match current_transition.kind_trimmed() {
+                    "cross_dissolve" | "fade_to_black" | "wipe_right" | "wipe_left" => {
+                        current_transition.kind_trimmed()
+                    }
+                    _ => "",
+                };
+                self.transition_kind_dropdown
+                    .set_active_id(Some(current_kind_id));
+                self.transition_alignment_dropdown
+                    .set_active_id(Some(current_transition.alignment.as_str()));
+                self.transition_clear_btn
+                    .set_sensitive(current_transition.is_active());
+                if let Some((track, clip_index)) = project.tracks.iter().find_map(|track| {
+                    track
+                        .clips
+                        .iter()
+                        .position(|clip| clip.id == c.id)
+                        .map(|clip_index| (track, clip_index))
+                }) {
+                    if let Some(next_clip) = track.clips.get(clip_index + 1) {
+                        let max_duration_ns = max_transition_duration_ns(c, next_clip);
+                        let max_duration_ms =
+                            (max_duration_ns.max(MIN_TRANSITION_DURATION_NS) as f64) / 1_000_000.0;
+                        let display_duration_ns = if current_transition.is_active() {
+                            current_transition.duration_ns.clamp(
+                                MIN_TRANSITION_DURATION_NS,
+                                max_duration_ns.max(MIN_TRANSITION_DURATION_NS),
+                            )
+                        } else {
+                            DEFAULT_TRANSITION_DURATION_NS.clamp(
+                                MIN_TRANSITION_DURATION_NS,
+                                max_duration_ns.max(MIN_TRANSITION_DURATION_NS),
+                            )
+                        };
+                        let current_has_kind = !current_kind_id.is_empty();
+                        let boundary_supports_transition =
+                            max_duration_ns >= MIN_TRANSITION_DURATION_NS;
+                        self.transition_duration_ms.set_range(
+                            (MIN_TRANSITION_DURATION_NS as f64) / 1_000_000.0,
+                            max_duration_ms,
+                        );
+                        self.transition_duration_ms
+                            .set_value((display_duration_ns as f64) / 1_000_000.0);
+                        self.transition_kind_dropdown
+                            .set_sensitive(boundary_supports_transition);
+                        self.transition_duration_ms
+                            .set_sensitive(boundary_supports_transition && current_has_kind);
+                        self.transition_alignment_dropdown
+                            .set_sensitive(boundary_supports_transition && current_has_kind);
+                        let status = if !boundary_supports_transition {
+                            format!(
+                                "This cut is too short for a transition. Max overlap here is {:.0} ms.",
+                                max_duration_ns as f64 / 1_000_000.0
+                            )
+                        } else if current_transition.is_active()
+                            && current_transition.duration_ns > max_duration_ns
+                        {
+                            format!(
+                                "Max duration at this cut is {:.0} ms. The saved transition will clamp when you update it.",
+                                max_duration_ns as f64 / 1_000_000.0
+                            )
+                        } else if current_transition.is_active() {
+                            format!(
+                                "Max duration at this cut is {:.0} ms.",
+                                max_duration_ns as f64 / 1_000_000.0
+                            )
+                        } else {
+                            format!(
+                                "Choose a transition for the cut after this clip. Max duration here is {:.0} ms.",
+                                max_duration_ns as f64 / 1_000_000.0
+                            )
+                        };
+                        self.transition_status_label.set_text(&status);
+                    } else {
+                        let default_duration_ms =
+                            (DEFAULT_TRANSITION_DURATION_NS as f64) / 1_000_000.0;
+                        self.transition_duration_ms.set_range(
+                            (MIN_TRANSITION_DURATION_NS as f64) / 1_000_000.0,
+                            default_duration_ms
+                                .max((MIN_TRANSITION_DURATION_NS as f64) / 1_000_000.0),
+                        );
+                        let display_duration_ns = if current_transition.is_active() {
+                            current_transition
+                                .duration_ns
+                                .max(MIN_TRANSITION_DURATION_NS)
+                        } else {
+                            DEFAULT_TRANSITION_DURATION_NS
+                        };
+                        self.transition_duration_ms
+                            .set_value((display_duration_ns as f64) / 1_000_000.0);
+                        self.transition_kind_dropdown.set_sensitive(false);
+                        self.transition_duration_ms.set_sensitive(false);
+                        self.transition_alignment_dropdown.set_sensitive(false);
+                        let status = if current_transition.is_active() {
+                            "This clip has no following clip on the same track. Remove the saved transition or add another clip after it."
+                        } else {
+                            "Add another clip after this one on the same track to enable outgoing transitions."
+                        };
+                        self.transition_status_label.set_text(status);
+                    }
+                } else {
+                    self.transition_kind_dropdown.set_sensitive(false);
+                    self.transition_duration_ms.set_sensitive(false);
+                    self.transition_alignment_dropdown.set_sensitive(false);
+                    self.transition_clear_btn.set_sensitive(false);
+                    self.transition_status_label
+                        .set_text("Transition controls are unavailable for this clip.");
+                }
                 self.brightness_slider.set_value(c.brightness as f64);
                 self.contrast_slider.set_value(c.contrast as f64);
                 self.saturation_slider.set_value(c.saturation as f64);
@@ -2083,6 +2203,22 @@ impl InspectorView {
                 self.path_status_value.remove_css_class("offline-label");
                 self.path_status_value.add_css_class("dim-label");
                 self.relink_btn.set_visible(false);
+                self.transition_kind_dropdown.set_active_id(Some(""));
+                self.transition_duration_ms.set_range(
+                    (MIN_TRANSITION_DURATION_NS as f64) / 1_000_000.0,
+                    (DEFAULT_TRANSITION_DURATION_NS as f64) / 1_000_000.0,
+                );
+                self.transition_duration_ms
+                    .set_value((DEFAULT_TRANSITION_DURATION_NS as f64) / 1_000_000.0);
+                self.transition_alignment_dropdown
+                    .set_active_id(Some(TransitionAlignment::EndOnCut.as_str()));
+                self.transition_kind_dropdown.set_sensitive(false);
+                self.transition_duration_ms.set_sensitive(false);
+                self.transition_alignment_dropdown.set_sensitive(false);
+                self.transition_clear_btn.set_sensitive(false);
+                self.transition_status_label.set_text(
+                    "Select a clip with a following clip to edit its outgoing transition.",
+                );
                 self.brightness_slider.set_value(0.0);
                 self.contrast_slider.set_value(1.0);
                 self.saturation_slider.set_value(1.0);
@@ -2459,6 +2595,66 @@ pub fn build_inspector(
     row_label(&content_box, "Timeline Start");
     let pos_value = value_label("—");
     content_box.append(&pos_value);
+
+    // ── Transition section ───────────────────────────────────────────────────
+    let transition_section = GBox::new(Orientation::Vertical, 8);
+
+    transition_section.append(&Separator::new(Orientation::Horizontal));
+    let transition_expander = Expander::new(Some("Transition"));
+    transition_expander.set_expanded(false);
+    transition_section.append(&transition_expander);
+    let transition_inner = GBox::new(Orientation::Vertical, 8);
+    transition_expander.set_child(Some(&transition_inner));
+
+    row_label(&transition_inner, "Type");
+    let transition_kind_dropdown = gtk4::ComboBoxText::new();
+    transition_kind_dropdown.append(Some(""), "None");
+    transition_kind_dropdown.append(Some("cross_dissolve"), "Cross-dissolve");
+    transition_kind_dropdown.append(Some("fade_to_black"), "Fade to black");
+    transition_kind_dropdown.append(Some("wipe_right"), "Wipe right");
+    transition_kind_dropdown.append(Some("wipe_left"), "Wipe left");
+    transition_kind_dropdown.set_active_id(Some(""));
+    transition_kind_dropdown.set_halign(gtk4::Align::Start);
+    transition_kind_dropdown.set_hexpand(true);
+    transition_inner.append(&transition_kind_dropdown);
+
+    row_label(&transition_inner, "Duration (ms)");
+    let transition_duration_ms = gtk4::SpinButton::with_range(
+        (MIN_TRANSITION_DURATION_NS as f64) / 1_000_000.0,
+        10_000.0,
+        10.0,
+    );
+    transition_duration_ms.set_value((DEFAULT_TRANSITION_DURATION_NS as f64) / 1_000_000.0);
+    transition_duration_ms.set_digits(0);
+    transition_duration_ms.set_halign(gtk::Align::Start);
+    transition_inner.append(&transition_duration_ms);
+
+    row_label(&transition_inner, "Alignment");
+    let transition_alignment_dropdown = gtk4::ComboBoxText::new();
+    for alignment in TransitionAlignment::ALL {
+        transition_alignment_dropdown.append(Some(alignment.as_str()), alignment.label());
+    }
+    transition_alignment_dropdown.set_active_id(Some(TransitionAlignment::EndOnCut.as_str()));
+    transition_alignment_dropdown.set_halign(gtk::Align::Start);
+    transition_alignment_dropdown.set_hexpand(true);
+    transition_alignment_dropdown.set_tooltip_text(Some(
+        "Controls where the overlap sits relative to the cut in preview, export, and background prerender.",
+    ));
+    transition_inner.append(&transition_alignment_dropdown);
+
+    let transition_clear_btn = Button::with_label("Remove Transition");
+    transition_clear_btn.set_halign(gtk::Align::Start);
+    transition_clear_btn.add_css_class("small-btn");
+    transition_inner.append(&transition_clear_btn);
+
+    let transition_status_label = Label::new(Some(
+        "Select a clip with a following clip to edit its outgoing transition.",
+    ));
+    transition_status_label.set_halign(gtk::Align::Start);
+    transition_status_label.set_xalign(0.0);
+    transition_status_label.set_wrap(true);
+    transition_status_label.add_css_class("dim-label");
+    transition_inner.append(&transition_status_label);
 
     // ── Color + Denoise/Sharpness section (Video + Image only) ───────────────
     let color_section = GBox::new(Orientation::Vertical, 8);
@@ -3628,6 +3824,8 @@ pub fn build_inspector(
     flip_row.append(&flip_h_btn);
     flip_row.append(&flip_v_btn);
     transform_inner.append(&flip_row);
+
+    content_box.append(&transition_section);
 
     // ── Title Overlay section (Video + Image only) ───────────────────────────
     let title_section_box = GBox::new(Orientation::Vertical, 8);
@@ -6522,6 +6720,129 @@ pub fn build_inspector(
         });
     }
 
+    // Transition controls
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let transition_kind_dropdown = transition_kind_dropdown.clone();
+        let transition_duration_ms = transition_duration_ms.clone();
+        let transition_alignment_dropdown = transition_alignment_dropdown.clone();
+        let transition_status_label = transition_status_label.clone();
+        let on_execute_command = on_execute_command.clone();
+        let on_clip_changed = on_clip_changed.clone();
+        let transition_kind_dropdown_for_apply = transition_kind_dropdown.clone();
+        let transition_duration_ms_for_apply = transition_duration_ms.clone();
+        let transition_alignment_dropdown_for_apply = transition_alignment_dropdown.clone();
+        let apply_transition_edit: Rc<dyn Fn(Option<String>)> = Rc::new(
+            move |kind_override: Option<String>| {
+                if *updating.borrow() {
+                    return;
+                }
+                let Some(clip_id) = selected_clip_id.borrow().clone() else {
+                    return;
+                };
+                let kind = kind_override.unwrap_or_else(|| {
+                    transition_kind_dropdown_for_apply
+                        .active_id()
+                        .map(|id| id.to_string())
+                        .unwrap_or_default()
+                });
+                let alignment = transition_alignment_dropdown_for_apply
+                    .active_id()
+                    .as_deref()
+                    .and_then(TransitionAlignment::from_str)
+                    .unwrap_or(TransitionAlignment::EndOnCut);
+                let duration_ns = (transition_duration_ms_for_apply.value().round().max(0.0)
+                    as u64)
+                    .saturating_mul(1_000_000);
+                let transition_change =
+                    {
+                        let proj = project.borrow();
+                        proj.tracks.iter().find_map(|track| {
+                            track.clips.iter().position(|clip| clip.id == clip_id).map(
+                                |clip_index| {
+                                    (
+                                        track.id.clone(),
+                                        track.clips[clip_index].outgoing_transition.clone(),
+                                        validate_track_transition_request(
+                                            track,
+                                            clip_index,
+                                            &kind,
+                                            duration_ns,
+                                            alignment,
+                                        ),
+                                    )
+                                },
+                            )
+                        })
+                    };
+                let Some((track_id, old_transition, validated)) = transition_change else {
+                    return;
+                };
+                let new_transition = match validated {
+                    Ok(validated) => validated.transition,
+                    Err(err) => {
+                        let message = match err {
+                            crate::model::transition::TransitionValidationError::MissingFollowingClip => {
+                                "This clip needs a following clip on the same track to add a transition."
+                                    .to_string()
+                            }
+                            crate::model::transition::TransitionValidationError::UnsupportedKind {
+                                kind,
+                            } => {
+                                format!("Unsupported transition type: {kind}.")
+                            }
+                            crate::model::transition::TransitionValidationError::MissingDuration => {
+                                "Transition duration must be greater than 0 ms.".to_string()
+                            }
+                            crate::model::transition::TransitionValidationError::BoundaryTooShort {
+                                max_duration_ns,
+                            } => format!(
+                                "This cut is too short for a transition. Max overlap here is {:.0} ms.",
+                                max_duration_ns as f64 / 1_000_000.0
+                            ),
+                        };
+                        transition_status_label.set_text(&message);
+                        return;
+                    }
+                };
+                if new_transition == old_transition {
+                    return;
+                }
+                on_execute_command(Box::new(crate::undo::SetClipTransitionCommand {
+                    clip_id: clip_id.clone(),
+                    track_id,
+                    old_transition,
+                    new_transition,
+                }));
+                on_clip_changed();
+            },
+        );
+
+        {
+            let apply_transition_edit = apply_transition_edit.clone();
+            transition_kind_dropdown.connect_changed(move |_| {
+                apply_transition_edit(None);
+            });
+        }
+        {
+            let apply_transition_edit = apply_transition_edit.clone();
+            transition_duration_ms.connect_value_changed(move |_| {
+                apply_transition_edit(None);
+            });
+        }
+        {
+            let apply_transition_edit = apply_transition_edit.clone();
+            transition_alignment_dropdown.connect_changed(move |_| {
+                apply_transition_edit(None);
+            });
+        }
+        transition_clear_btn.connect_clicked(move |_| {
+            apply_transition_edit(Some(String::new()));
+        });
+    }
+
     // Speed slider — when speed keyframes are present, live-update the
     // nearest keyframe at the playhead. Without keyframes, update clip.speed.
     // Uses a pending-update pattern to avoid re-entrancy panics: the model
@@ -7641,6 +7962,11 @@ pub fn build_inspector(
         speed_slider,
         reverse_check,
         slow_motion_dropdown,
+        transition_kind_dropdown,
+        transition_duration_ms,
+        transition_alignment_dropdown,
+        transition_clear_btn,
+        transition_status_label,
         lut_display_box,
         lut_clear_btn,
         match_color_btn,
@@ -7652,6 +7978,7 @@ pub fn build_inspector(
         transform_section,
         title_section_box,
         speed_section_box,
+        transition_section,
         lut_section_box,
         chroma_key_section,
         chroma_key_enable,

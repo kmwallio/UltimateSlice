@@ -130,7 +130,7 @@ fn is_track_pair_through_edit_candidate(
 }
 
 fn clip_has_outgoing_transition(clip: &Clip) -> bool {
-    clip.transition_after_ns > 0 || !clip.transition_after.trim().is_empty()
+    clip.outgoing_transition.is_active()
 }
 
 #[cfg(test)]
@@ -139,6 +139,7 @@ mod tests {
     use crate::model::clip::{Clip, ClipKind};
     use crate::model::project::Project;
     use crate::model::track::Track;
+    use crate::model::transition::{OutgoingTransition, TransitionAlignment};
 
     fn make_clip(
         id: &str,
@@ -192,8 +193,8 @@ mod tests {
     fn rejects_boundary_when_transition_exists_at_cut() {
         let mut track = Track::new_video("V1");
         let mut left = make_clip("left", "a.mov", 0, 10, 0, ClipKind::Video);
-        left.transition_after = "cross_dissolve".to_string();
-        left.transition_after_ns = 500_000_000;
+        left.outgoing_transition =
+            OutgoingTransition::new("cross_dissolve", 500_000_000, TransitionAlignment::EndOnCut);
         track.add_clip(left);
         track.add_clip(make_clip("right", "a.mov", 10, 20, 10, ClipKind::Video));
 
@@ -204,7 +205,8 @@ mod tests {
     fn rejects_boundary_when_transition_duration_exists_even_without_kind() {
         let mut track = Track::new_video("V1");
         let mut left = make_clip("left", "a.mov", 0, 10, 0, ClipKind::Video);
-        left.transition_after_ns = 250_000_000;
+        left.outgoing_transition =
+            OutgoingTransition::new("cross_dissolve", 250_000_000, TransitionAlignment::EndOnCut);
         track.add_clip(left);
         track.add_clip(make_clip("right", "a.mov", 10, 20, 10, ClipKind::Video));
 
@@ -216,8 +218,8 @@ mod tests {
         let mut track = Track::new_video("V1");
         track.add_clip(make_clip("left", "a.mov", 0, 10, 0, ClipKind::Video));
         let mut right = make_clip("right", "a.mov", 10, 20, 10, ClipKind::Video);
-        right.transition_after = "cross_dissolve".to_string();
-        right.transition_after_ns = 250_000_000;
+        right.outgoing_transition =
+            OutgoingTransition::new("cross_dissolve", 250_000_000, TransitionAlignment::EndOnCut);
         track.add_clip(right);
 
         let boundaries = detect_track_through_edit_boundaries(&track);
@@ -230,7 +232,7 @@ mod tests {
     fn ignores_whitespace_transition_kind_when_duration_is_zero() {
         let mut track = Track::new_video("V1");
         let mut left = make_clip("left", "a.mov", 0, 10, 0, ClipKind::Video);
-        left.transition_after = "   ".to_string();
+        left.outgoing_transition.kind = "   ".to_string();
         track.add_clip(left);
         track.add_clip(make_clip("right", "a.mov", 10, 20, 10, ClipKind::Video));
 

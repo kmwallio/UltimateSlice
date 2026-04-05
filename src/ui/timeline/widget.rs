@@ -2,6 +2,10 @@ use crate::model::clip::{Clip, ClipKind, KeyframeInterpolation};
 use crate::model::project::Project;
 use crate::model::through_edit::detect_track_through_edit_boundaries;
 use crate::model::track::TrackKind;
+use crate::model::transition::{
+    validate_track_transition_request, OutgoingTransition, TransitionAlignment,
+    DEFAULT_TRANSITION_DURATION_NS,
+};
 use crate::undo::{
     EditHistory, JoinThroughEditCommand, MoveClipCommand, ReorderTrackCommand,
     SetMultipleTracksClipsCommand, SetTrackClipsCommand, SplitClipCommand, TrackClipsChange,
@@ -1236,8 +1240,7 @@ impl TimelineState {
         freeze_clip.freeze_frame_hold_duration_ns = Some(hold_duration_ns);
         freeze_clip.group_id = None;
         freeze_clip.link_group_id = None;
-        freeze_clip.transition_after.clear();
-        freeze_clip.transition_after_ns = 0;
+        freeze_clip.clear_outgoing_transition();
 
         let mut changes = {
             let proj = self.project.borrow();
@@ -1265,15 +1268,13 @@ impl TimelineState {
                             new_clips.push(shifted);
                         } else if playhead_ns >= clip.timeline_end() {
                             let mut left_clip = clip.clone();
-                            left_clip.transition_after.clear();
-                            left_clip.transition_after_ns = 0;
+                            left_clip.clear_outgoing_transition();
                             new_clips.push(left_clip);
                         } else {
                             let cut_offset = playhead_ns.saturating_sub(clip.timeline_start);
                             let mut left_clip = clip.clone();
                             left_clip.source_out = left_clip.source_in.saturating_add(cut_offset);
-                            left_clip.transition_after.clear();
-                            left_clip.transition_after_ns = 0;
+                            left_clip.clear_outgoing_transition();
                             new_clips.push(left_clip);
 
                             let mut right_clip = clip.clone();
@@ -3356,8 +3357,7 @@ fn apply_pasted_attributes(target: &mut Clip, source: &Clip) -> bool {
     target.title_x = source.title_x;
     target.title_y = source.title_y;
     // Transitions
-    target.transition_after = source.transition_after.clone();
-    target.transition_after_ns = source.transition_after_ns;
+    target.outgoing_transition = source.outgoing_transition.clone();
     // Transform
     target.scale = source.scale;
     target.opacity = source.opacity;
@@ -3395,16 +3395,14 @@ fn through_edit_metadata_compatible(left: &Clip, right: &Clip) -> bool {
     left_norm.source_in = 0;
     left_norm.source_out = 0;
     left_norm.timeline_start = 0;
-    left_norm.transition_after.clear();
-    left_norm.transition_after_ns = 0;
+    left_norm.clear_outgoing_transition();
 
     let mut right_norm = right.clone();
     right_norm.id.clear();
     right_norm.source_in = 0;
     right_norm.source_out = 0;
     right_norm.timeline_start = 0;
-    right_norm.transition_after.clear();
-    right_norm.transition_after_ns = 0;
+    right_norm.clear_outgoing_transition();
 
     left_norm == right_norm
 }
@@ -3412,8 +3410,7 @@ fn through_edit_metadata_compatible(left: &Clip, right: &Clip) -> bool {
 fn merge_through_edit_clips(left: &Clip, right: &Clip) -> Clip {
     let mut merged = left.clone();
     merged.source_out = right.source_out;
-    merged.transition_after = right.transition_after.clone();
-    merged.transition_after_ns = right.transition_after_ns;
+    merged.outgoing_transition = right.outgoing_transition.clone();
     merged
 }
 
@@ -4350,39 +4347,33 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         track
                             .clips
                             .iter()
-                            .filter(|c| !c.transition_after.is_empty() && c.transition_after_ns > 0)
+                            .filter(|c| c.outgoing_transition.is_active())
                             .filter_map(|c| {
                                 let diff = c.timeline_end().abs_diff(ns);
                                 if diff <= threshold_ns {
                                     Some((
                                         c.id.clone(),
                                         track.id.clone(),
-                                        c.transition_after.clone(),
-                                        c.transition_after_ns,
+                                        c.outgoing_transition.clone(),
                                         diff,
                                     ))
                                 } else {
                                     None
                                 }
                             })
-                            .min_by_key(|(_, _, _, _, diff)| *diff)
-                            .map(
-                                |(clip_id, track_id, old_transition, old_transition_ns, _)| {
-                                    (clip_id, track_id, old_transition, old_transition_ns)
-                                },
-                            )
+                            .min_by_key(|(_, _, _, diff)| *diff)
+                            .map(|(clip_id, track_id, old_transition, _)| {
+                                (clip_id, track_id, old_transition)
+                            })
                     })
                 };
 
-                if let Some((clip_id, track_id, old_transition, old_transition_ns)) = transition_hit
-                {
+                if let Some((clip_id, track_id, old_transition)) = transition_hit {
                     let cmd = crate::undo::SetClipTransitionCommand {
                         clip_id,
                         track_id,
                         old_transition,
-                        old_transition_ns,
-                        new_transition: String::new(),
-                        new_transition_ns: 0,
+                        new_transition: OutgoingTransition::default(),
                     };
                     let project_rc = st.project.clone();
                     let mut proj = project_rc.borrow_mut();
@@ -4425,8 +4416,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 );
                                 btn_add_adjustment_layer
                                     .set_visible(track_kind == TrackKind::Video);
-                                btn_generate_music
-                                    .set_visible(track_kind == TrackKind::Audio);
+                                btn_generate_music.set_visible(track_kind == TrackKind::Audio);
                                 track_context_pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
                                     x as i32, y as i32, 1, 1,
                                 )));
@@ -6416,7 +6406,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         Some(t) => t,
                         None => return false,
                     };
-                    let mut best: Option<(String, String, String, u64)> = None;
+                    let mut best: Option<(String, usize, String, OutgoingTransition)> = None;
                     let mut best_diff = u64::MAX;
                     for (i, clip) in track.clips.iter().enumerate() {
                         if i + 1 >= track.clips.len() {
@@ -6427,23 +6417,43 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         if diff <= threshold_ns && diff < best_diff {
                             best = Some((
                                 track.id.clone(),
+                                i,
                                 clip.id.clone(),
-                                clip.transition_after.clone(),
-                                clip.transition_after_ns,
+                                clip.outgoing_transition.clone(),
                             ));
                             best_diff = diff;
                         }
                     }
                     best
                 };
-                if let Some((track_id, clip_id, old_transition, old_transition_ns)) = candidate {
+                if let Some((track_id, clip_index, clip_id, old_transition)) = candidate {
+                    let validated_transition = {
+                        let proj = st.project.borrow();
+                        proj.tracks
+                            .iter()
+                            .find(|track| track.id == track_id)
+                            .ok_or(())
+                            .and_then(|track| {
+                                validate_track_transition_request(
+                                    track,
+                                    clip_index,
+                                    &transition_kind,
+                                    DEFAULT_TRANSITION_DURATION_NS,
+                                    TransitionAlignment::EndOnCut,
+                                )
+                                .map(|validated| validated.transition)
+                                .map_err(|_| ())
+                            })
+                    };
+                    let Ok(new_transition) = validated_transition else {
+                        st.hover_transition_pair = None;
+                        return false;
+                    };
                     let cmd = crate::undo::SetClipTransitionCommand {
                         clip_id,
                         track_id,
                         old_transition,
-                        old_transition_ns,
-                        new_transition: transition_kind.to_string(),
-                        new_transition_ns: 500_000_000,
+                        new_transition,
                     };
                     let project_rc = st.project.clone();
                     let mut proj = project_rc.borrow_mut();
@@ -6902,7 +6912,7 @@ fn draw_track_row(
 
     // Draw transition markers (clip -> next clip) after clip bodies.
     for clip in &track.clips {
-        if clip.transition_after_ns > 0 && !clip.transition_after.is_empty() {
+        if clip.outgoing_transition.is_active() {
             let ex = st.ns_to_x(clip.timeline_end());
             let marker_w = 10.0;
             cr.set_source_rgba(0.85, 0.85, 1.0, 0.75);
@@ -9112,8 +9122,11 @@ mod tests {
                 .find(|clip| clip.id == ids[0])
                 .expect("clip A exists");
             clip_a.source_out = 4_000_000_000;
-            clip_a.transition_after = "cross_dissolve".to_string();
-            clip_a.transition_after_ns = 500_000_000;
+            clip_a.outgoing_transition = OutgoingTransition::new(
+                "cross_dissolve",
+                500_000_000,
+                TransitionAlignment::EndOnCut,
+            );
         }
         st.set_single_clip_selection(ids[0].clone(), track_id.clone());
         st.playhead_ns = 1_000_000_000;
@@ -9131,16 +9144,14 @@ mod tests {
             .iter()
             .find(|clip| clip.id == ids[0])
             .expect("left split clip should exist");
-        assert!(left_clip.transition_after.is_empty());
-        assert_eq!(left_clip.transition_after_ns, 0);
+        assert!(!left_clip.outgoing_transition.is_active());
 
         let freeze_clip = track
             .clips
             .iter()
             .find(|clip| clip.freeze_frame)
             .expect("freeze clip should exist");
-        assert!(freeze_clip.transition_after.is_empty());
-        assert_eq!(freeze_clip.transition_after_ns, 0);
+        assert!(!freeze_clip.outgoing_transition.is_active());
     }
 
     #[test]
@@ -9416,8 +9427,11 @@ mod tests {
                     clip.lut_paths = vec!["/tmp/look.cube".to_string()];
                 }
                 if clip.id == "right" {
-                    clip.transition_after = "cross_dissolve".to_string();
-                    clip.transition_after_ns = 250_000_000;
+                    clip.outgoing_transition = OutgoingTransition::new(
+                        "cross_dissolve",
+                        250_000_000,
+                        TransitionAlignment::EndOnCut,
+                    );
                 }
             }
         }
@@ -9453,8 +9467,14 @@ mod tests {
             assert_eq!(merged.link_group_id.as_deref(), Some("link-1"));
             assert_eq!(merged.brightness, 0.25);
             assert_eq!(merged.lut_paths, vec!["/tmp/look.cube"]);
-            assert_eq!(merged.transition_after, "cross_dissolve");
-            assert_eq!(merged.transition_after_ns, 250_000_000);
+            assert_eq!(
+                merged.outgoing_transition,
+                OutgoingTransition::new(
+                    "cross_dissolve",
+                    250_000_000,
+                    TransitionAlignment::EndOnCut,
+                )
+            );
         }
         assert_eq!(st.selected_clip_id.as_deref(), Some("left"));
 
@@ -9523,8 +9543,11 @@ mod tests {
                 .iter_mut()
                 .find(|clip| clip.id == "left")
                 .expect("left clip should exist");
-            left.transition_after = "cross_dissolve".to_string();
-            left.transition_after_ns = 125_000_000;
+            left.outgoing_transition = OutgoingTransition::new(
+                "cross_dissolve",
+                125_000_000,
+                TransitionAlignment::EndOnCut,
+            );
         }
 
         st.set_single_clip_selection("right".to_string(), track_id);
@@ -9547,8 +9570,8 @@ mod tests {
         right.source_in = 1_000_000_000;
         right.source_out = 2_000_000_000;
         right.timeline_start = 1_000_000_000;
-        right.transition_after = "cross_dissolve".to_string();
-        right.transition_after_ns = 250_000_000;
+        right.outgoing_transition =
+            OutgoingTransition::new("cross_dissolve", 250_000_000, TransitionAlignment::EndOnCut);
 
         assert!(through_edit_metadata_compatible(&left, &right));
     }

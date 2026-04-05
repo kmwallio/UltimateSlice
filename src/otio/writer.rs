@@ -4,10 +4,6 @@ use anyhow::Result;
 use serde_json::json;
 use std::path::{Component, Path, PathBuf};
 
-use crate::model::clip::ClipKind;
-use crate::model::project::Project;
-use crate::model::track::TrackKind;
-
 use super::metadata::{
     wrap_clip_metadata, wrap_marker_metadata, wrap_project_metadata, wrap_track_metadata,
     wrap_transition_metadata, UltimateSliceClipOtioMetadata, UltimateSliceMarkerOtioMetadata,
@@ -15,6 +11,9 @@ use super::metadata::{
     UltimateSliceTransitionOtioMetadata,
 };
 use super::schema::*;
+use crate::model::clip::ClipKind;
+use crate::model::project::Project;
+use crate::model::track::TrackKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OtioMediaPathMode {
@@ -286,16 +285,19 @@ fn write_otio_with_mode(
             cursor_ns = clip.timeline_start + clip_duration_ns;
 
             // Transition after this clip?
-            if !clip.transition_after.is_empty() && clip.transition_after_ns > 0 {
-                let half_ns = clip.transition_after_ns / 2;
+            if clip.outgoing_transition.is_active() {
+                let split = clip.outgoing_transition.cut_split();
                 children.push(OtioTrackChild::Transition(OtioTransition {
                     schema: "Transition.1".into(),
-                    name: clip.transition_after.replace('_', " "),
-                    transition_type: otio_transition_type(&clip.transition_after).into(),
-                    in_offset: ns_to_rational_time(half_ns, rate),
-                    out_offset: ns_to_rational_time(clip.transition_after_ns - half_ns, rate),
+                    name: clip.outgoing_transition.kind.replace('_', " "),
+                    transition_type: otio_transition_type(&clip.outgoing_transition.kind).into(),
+                    in_offset: ns_to_rational_time(split.before_cut_ns, rate),
+                    out_offset: ns_to_rational_time(split.after_cut_ns, rate),
                     metadata: wrap_transition_metadata(&UltimateSliceTransitionOtioMetadata {
-                        transition_kind: Some(clip.transition_after.clone()),
+                        transition_kind: Some(clip.outgoing_transition.kind.clone()),
+                        transition_alignment: Some(
+                            clip.outgoing_transition.alignment.as_str().to_string(),
+                        ),
                     }),
                 }));
             }
@@ -522,8 +524,11 @@ mod tests {
         let mut p = make_project();
         let mut track = Track::new_video("V1");
         let mut c1 = Clip::new("/footage/a.mp4", 3_000_000_000, 0, ClipKind::Video);
-        c1.transition_after = "cross_dissolve".into();
-        c1.transition_after_ns = 1_000_000_000; // 1 second
+        c1.outgoing_transition = crate::model::transition::OutgoingTransition::new(
+            "cross_dissolve",
+            1_000_000_000,
+            crate::model::transition::TransitionAlignment::EndOnCut,
+        ); // 1 second
         track.add_clip(c1);
         track.add_clip(Clip::new(
             "/footage/b.mp4",

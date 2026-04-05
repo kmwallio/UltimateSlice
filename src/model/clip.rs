@@ -1,4 +1,5 @@
 use super::track::Track;
+use super::transition::OutgoingTransition;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -1098,12 +1099,9 @@ pub struct Clip {
     /// Secondary line of text (used by some templates).
     #[serde(default)]
     pub title_secondary_text: String,
-    /// Transition to the next clip on the same track (e.g. "cross_dissolve").
-    #[serde(default)]
-    pub transition_after: String,
-    /// Transition duration in nanoseconds for `transition_after` (0 = none).
-    #[serde(default)]
-    pub transition_after_ns: u64,
+    /// Transition to the next clip on the same track.
+    #[serde(default, flatten)]
+    pub outgoing_transition: OutgoingTransition,
     /// Ordered list of .cube LUT file paths for color grading (applied sequentially on export via ffmpeg lut3d).
     /// Empty means no LUTs are assigned.
     #[serde(default)]
@@ -1445,6 +1443,14 @@ impl Clip {
         self.masks.iter().any(|m| m.enabled)
     }
 
+    pub fn has_outgoing_transition(&self) -> bool {
+        self.outgoing_transition.is_active()
+    }
+
+    pub fn clear_outgoing_transition(&mut self) {
+        self.outgoing_transition.clear();
+    }
+
     pub fn new(
         source_path: impl Into<String>,
         source_out: u64,
@@ -1526,8 +1532,7 @@ impl Clip {
             title_bg_box_padding: default_title_bg_box_padding(),
             title_clip_bg_color: 0,
             title_secondary_text: String::new(),
-            transition_after: String::new(),
-            transition_after_ns: 0,
+            outgoing_transition: OutgoingTransition::default(),
             lut_paths: Vec::new(),
             scale: 1.0,
             scale_keyframes: Vec::new(),
@@ -2648,7 +2653,7 @@ mod tests {
         assert!(clip.group_id.is_none());
         assert!(clip.link_group_id.is_none());
         assert!(clip.source_timecode_base_ns.is_none());
-        assert!(clip.transition_after.is_empty());
+        assert!(!clip.outgoing_transition.is_active());
         assert!(clip.fcpxml_unknown_attrs.is_empty());
         assert!(clip.fcpxml_unknown_children.is_empty());
         assert!(clip.fcpxml_original_source_path.is_none());

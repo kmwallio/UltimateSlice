@@ -492,19 +492,23 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                 writer.write_event(Event::End(BytesEnd::new("asset-clip")))?;
 
                 // Transition between adjacent primary clips
-                if clip_idx + 1 < primary_track.clips.len()
-                    && !clip.transition_after.trim().is_empty()
-                    && clip.transition_after_ns > 0
+                if clip_idx + 1 < primary_track.clips.len() && clip.outgoing_transition.is_active()
                 {
                     let next_clip = &primary_track.clips[clip_idx + 1];
                     let clamped_duration_ns = clip
-                        .transition_after_ns
+                        .outgoing_transition
+                        .duration_ns
                         .min(clip.duration())
                         .min(next_clip.duration());
                     if clamped_duration_ns > 0 {
+                        let before_cut_ns = clip
+                            .outgoing_transition
+                            .alignment
+                            .split_duration(clamped_duration_ns)
+                            .before_cut_ns;
                         let mut transition = BytesStart::new("transition");
                         if let Some(name) =
-                            fcpxml_transition_name_for_kind(clip.transition_after.trim())
+                            fcpxml_transition_name_for_kind(clip.outgoing_transition.kind_trimmed())
                         {
                             transition.push_attribute(("name", name));
                         }
@@ -513,7 +517,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                             ns_to_fcpxml_time(
                                 clip.timeline_start
                                     .saturating_add(clip.duration())
-                                    .saturating_sub(clamped_duration_ns),
+                                    .saturating_sub(before_cut_ns),
                                 &project.frame_rate,
                             )
                             .as_str(),
@@ -1158,14 +1162,18 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                         // Also write first LUT as us:lut-path for backward compat
                         asset_clip.push_attribute(("us:lut-path", clip.lut_paths[0].as_str()));
                     }
-                    if !clip.transition_after.is_empty() {
+                    if clip.outgoing_transition.is_active() {
                         asset_clip.push_attribute((
                             "us:transition-after",
-                            clip.transition_after.as_str(),
+                            clip.outgoing_transition.kind.as_str(),
                         ));
                         asset_clip.push_attribute((
                             "us:transition-after-ns",
-                            clip.transition_after_ns.to_string().as_str(),
+                            clip.outgoing_transition.duration_ns.to_string().as_str(),
+                        ));
+                        asset_clip.push_attribute((
+                            "us:transition-after-alignment",
+                            clip.outgoing_transition.alignment.as_str(),
                         ));
                     }
                 }
@@ -1299,19 +1307,22 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
 
                 writer.write_event(Event::End(BytesEnd::new("asset-clip")))?;
 
-                if clip_idx + 1 < track.clips.len()
-                    && !clip.transition_after.trim().is_empty()
-                    && clip.transition_after_ns > 0
-                {
+                if clip_idx + 1 < track.clips.len() && clip.outgoing_transition.is_active() {
                     let next_clip = &track.clips[clip_idx + 1];
                     let clamped_duration_ns = clip
-                        .transition_after_ns
+                        .outgoing_transition
+                        .duration_ns
                         .min(clip.duration())
                         .min(next_clip.duration());
                     if clamped_duration_ns > 0 {
+                        let before_cut_ns = clip
+                            .outgoing_transition
+                            .alignment
+                            .split_duration(clamped_duration_ns)
+                            .before_cut_ns;
                         let mut transition = BytesStart::new("transition");
                         if let Some(name) =
-                            fcpxml_transition_name_for_kind(clip.transition_after.trim())
+                            fcpxml_transition_name_for_kind(clip.outgoing_transition.kind_trimmed())
                         {
                             transition.push_attribute(("name", name));
                         }
@@ -1320,7 +1331,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                             ns_to_fcpxml_time(
                                 clip.timeline_start
                                     .saturating_add(clip.duration())
-                                    .saturating_sub(clamped_duration_ns),
+                                    .saturating_sub(before_cut_ns),
                                 &project.frame_rate,
                             )
                             .as_str(),
@@ -4397,8 +4408,11 @@ mod tests {
         project.tracks.clear();
         let mut track = Track::new_video("Video 1");
         let mut a = Clip::new("/tmp/a.mov", 2_000_000_000, 0, ClipKind::Video);
-        a.transition_after = "cross_dissolve".to_string();
-        a.transition_after_ns = 1_000_000_000;
+        a.outgoing_transition = crate::model::transition::OutgoingTransition::new(
+            "cross_dissolve",
+            1_000_000_000,
+            crate::model::transition::TransitionAlignment::EndOnCut,
+        );
         track.add_clip(a);
         track.add_clip(Clip::new(
             "/tmp/b.mov",
@@ -4414,8 +4428,14 @@ mod tests {
 
         let parsed = parse_fcpxml(&xml).expect("parse written xml");
         let first = &parsed.video_tracks().next().expect("video track").clips[0];
-        assert_eq!(first.transition_after, "cross_dissolve");
-        assert_eq!(first.transition_after_ns, 1_000_000_000);
+        assert_eq!(
+            first.outgoing_transition,
+            crate::model::transition::OutgoingTransition::new(
+                "cross_dissolve",
+                1_000_000_000,
+                crate::model::transition::TransitionAlignment::EndOnCut,
+            )
+        );
     }
 
     #[test]

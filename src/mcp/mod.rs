@@ -380,6 +380,7 @@ pub enum McpCommand {
         clip_index: usize,
         kind: String,
         duration_ns: u64,
+        alignment: String,
         reply: SyncSender<Value>,
     },
     CreateProject {

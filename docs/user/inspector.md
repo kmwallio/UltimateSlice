@@ -21,6 +21,26 @@ Select a clip in the timeline to populate the Inspector. All changes apply immed
 
 ---
 
+## Transition
+
+The Inspector can edit the selected clip's **outgoing** transition when another clip follows it on the same track.
+
+- In the Inspector layout, the **Transition** section appears below **Transform** and starts collapsed by default.
+
+| Control | Description |
+|---|---|
+| **Type** | `None`, `Cross-dissolve`, `Fade to black`, `Wipe right`, or `Wipe left` |
+| **Duration (ms)** | Transition length in milliseconds. Durations are clamped automatically to the boundary capacity of the two adjacent clips |
+| **Alignment** | Controls where the overlap sits relative to the edit (`End on cut`, `Center on cut`, `Start on cut`) |
+| **Remove Transition** | Clears the outgoing transition from the selected clip |
+
+- Dragging from the **Transitions** browser still creates a new transition with the default **500 ms** duration; use the Inspector to refine it after drop.
+- If the selected clip has no following clip on the same track, transition editing is disabled and the Inspector explains why.
+- Duration and alignment changes affect preview, export, and background prerender together.
+- `Start on cut` and the after-cut half of `Center on cut` keep the outgoing clip visible by holding its last frame after the cut. UltimateSlice does this because trimmed clips do not currently expose hidden source handles past their out-point.
+
+---
+
 ## Color Correction
 
 Adjustments are applied live via GStreamer `videobalance` and rendered through ffmpeg on export.

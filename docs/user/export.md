@@ -93,6 +93,15 @@ When enabled, export applies automatic fades at adjacent same-track audio edit p
 
 Fade lengths are clamped safely for very short clips and overlap boundaries so exports remain stable.
 
+## Video Transitions
+
+Export applies supported primary-track video transitions using the same duration and alignment timing shown in the Timeline and Program Monitor.
+
+- **End on cut**: the overlap finishes at the cut.
+- **Center on cut**: the overlap is split across the cut.
+- **Start on cut**: the overlap begins at the cut.
+- For any post-cut overlap portion, export mirrors preview/background-prerender by holding the outgoing clip's last frame after the cut instead of reading source past the trimmed out-point.
+
 ### Frei0r effect export compatibility
 
 When UltimateSlice cannot discover native frei0r plugin metadata on the local system, export falls back to built-in native parameter schemas for supported plugins instead of guessing from unordered numeric parameters.

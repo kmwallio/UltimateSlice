@@ -8,6 +8,9 @@ use crate::model::media_library::{
 };
 use crate::model::project::Project;
 use crate::model::track::TrackKind;
+use crate::model::transition::{
+    validate_track_transition_request, TransitionAlignment, SUPPORTED_TRANSITION_KINDS,
+};
 use crate::recent;
 use crate::ui::timecode;
 use crate::ui::timeline::{build_timeline_panel, TimelineState};
@@ -2439,8 +2442,7 @@ fn apply_remove_silent_parts_results(
         sub.retain_keyframes_in_local_range(local_start, local_end);
 
         // Clear transition on all sub-clips except possibly the last
-        sub.transition_after = String::new();
-        sub.transition_after_ns = 0;
+        sub.clear_outgoing_transition();
 
         // Timeline duration accounts for speed
         let timeline_duration = if speed != 0.0 {
@@ -2521,7 +2523,11 @@ fn apply_scene_cut_results(
 
     if cut_points.is_empty() {
         if let Some(win) = window {
-            flash_window_status_title(win, project, "No scene cuts detected \u{2014} clip unchanged");
+            flash_window_status_title(
+                win,
+                project,
+                "No scene cuts detected \u{2014} clip unchanged",
+            );
         }
         return;
     }
@@ -2603,8 +2609,7 @@ fn apply_scene_cut_results(
         };
         sub.retain_keyframes_in_local_range(local_start, local_end);
 
-        sub.transition_after = String::new();
-        sub.transition_after_ns = 0;
+        sub.clear_outgoing_transition();
 
         let timeline_duration = if speed != 0.0 {
             (seg_duration_ns as f64 / speed).round() as u64
@@ -3235,8 +3240,9 @@ fn clip_to_program_clips(
         pitch_preserve: c.pitch_preserve,
         anamorphic_desqueeze: c.anamorphic_desqueeze,
         track_index,
-        transition_after: c.transition_after.clone(),
-        transition_after_ns: c.transition_after_ns,
+        transition_after: c.outgoing_transition.kind.clone(),
+        transition_after_ns: c.outgoing_transition.duration_ns,
+        transition_alignment: c.outgoing_transition.alignment,
         lut_paths: c.lut_paths.clone(),
         scale: c.scale,
         scale_keyframes: c.scale_keyframes.clone(),
@@ -6654,9 +6660,8 @@ pub fn build_window(
         let project = project.clone();
         let on_project_changed = on_project_changed.clone();
         let window_weak = window.downgrade();
-        let scene_rx: Rc<
-            RefCell<Option<std::sync::mpsc::Receiver<(String, String, Vec<f64>)>>>,
-        > = Rc::new(RefCell::new(None));
+        let scene_rx: Rc<RefCell<Option<std::sync::mpsc::Receiver<(String, String, Vec<f64>)>>>> =
+            Rc::new(RefCell::new(None));
         let scene_rx_for_timer = scene_rx.clone();
         let scene_detect_in_progress_timer = scene_detect_in_progress.clone();
         {
@@ -6725,8 +6730,8 @@ pub fn build_window(
     {
         let music_gen_cache = music_gen_cache.clone();
         let window_weak = window.downgrade();
-        timeline_state.borrow_mut().on_generate_music = Some(Rc::new(
-            move |track_id: String, playhead_ns: u64| {
+        timeline_state.borrow_mut().on_generate_music =
+            Some(Rc::new(move |track_id: String, playhead_ns: u64| {
                 let win = match window_weak.upgrade() {
                     Some(w) => w,
                     None => return,
@@ -6835,8 +6840,7 @@ pub fn build_window(
                 });
 
                 dialog.present();
-            },
-        ));
+            }));
     }
 
     // Wire on_match_color — triggers the inspector Match Color button via keyboard shortcut.
@@ -13829,15 +13833,12 @@ fn handle_mcp_command(
         } => {
             let clip_info = {
                 let proj = project.borrow();
-                proj.tracks
-                    .iter()
-                    .find(|t| t.id == track_id)
-                    .and_then(|t| {
-                        t.clips
-                            .iter()
-                            .find(|c| c.id == clip_id)
-                            .map(|c| (c.source_path.clone(), c.source_in, c.source_out))
-                    })
+                proj.tracks.iter().find(|t| t.id == track_id).and_then(|t| {
+                    t.clips
+                        .iter()
+                        .find(|c| c.id == clip_id)
+                        .map(|c| (c.source_path.clone(), c.source_in, c.source_out))
+                })
             };
             if let Some((source_path, source_in, source_out)) = clip_info {
                 let cuts = crate::media::export::detect_scene_cuts(
@@ -13926,7 +13927,9 @@ fn handle_mcp_command(
                         .ok();
                 } else {
                     reply
-                        .send(serde_json::json!({"success": false, "error": "No audio track found"}))
+                        .send(
+                            serde_json::json!({"success": false, "error": "No audio track found"}),
+                        )
                         .ok();
                 }
             }
@@ -15459,6 +15462,7 @@ fn handle_mcp_command(
             clip_index,
             kind,
             duration_ns,
+            alignment,
             reply,
         } => {
             let candidate = {
@@ -15467,43 +15471,53 @@ fn handle_mcp_command(
                     reply.send(json!({"error":"Track index out of range","track_count":proj.tracks.len()})).ok();
                     return;
                 };
-                if clip_index + 1 >= track.clips.len() {
+                let Some(transition_alignment) = TransitionAlignment::from_str(&alignment) else {
+                    reply
+                        .send(json!({
+                            "error":"Unsupported transition alignment",
+                            "supported_alignments":["end_on_cut", "center_on_cut", "start_on_cut"]
+                        }))
+                        .ok();
+                    return;
+                };
+                let Some(clip) = track.clips.get(clip_index) else {
                     reply.send(json!({"error":"clip_index must reference a clip with a following clip","clip_count":track.clips.len()})).ok();
                     return;
-                }
-                let clip = &track.clips[clip_index];
+                };
+                let validated = match validate_track_transition_request(
+                    track,
+                    clip_index,
+                    &kind,
+                    duration_ns,
+                    transition_alignment,
+                ) {
+                    Ok(validated) => validated,
+                    Err(err) => {
+                        reply
+                            .send(json!({
+                                "error": err.to_string(),
+                                "supported_kinds": SUPPORTED_TRANSITION_KINDS,
+                                "supported_alignments":["end_on_cut", "center_on_cut", "start_on_cut"]
+                            }))
+                            .ok();
+                        return;
+                    }
+                };
                 Some((
                     track.id.clone(),
                     clip.id.clone(),
-                    clip.transition_after.clone(),
-                    clip.transition_after_ns,
-                    clip.duration(),
+                    clip.outgoing_transition.clone(),
+                    validated,
                 ))
             };
-            let Some((track_id, clip_id, old_kind, old_duration_ns, clip_dur_ns)) = candidate
-            else {
+            let Some((track_id, clip_id, old_transition, validated)) = candidate else {
                 return;
-            };
-            let new_kind = kind.trim().to_string();
-            let supported = ["cross_dissolve", "fade_to_black", "wipe_right", "wipe_left"];
-            if !new_kind.is_empty() && !supported.contains(&new_kind.as_str()) {
-                reply
-                    .send(json!({"error":"Unsupported transition kind","supported":supported}))
-                    .ok();
-                return;
-            }
-            let new_duration_ns = if new_kind.is_empty() {
-                0
-            } else {
-                duration_ns.min(clip_dur_ns.saturating_sub(1_000_000))
             };
             let cmd = crate::undo::SetClipTransitionCommand {
                 clip_id,
                 track_id,
-                old_transition: old_kind,
-                old_transition_ns: old_duration_ns,
-                new_transition: new_kind.clone(),
-                new_transition_ns: new_duration_ns,
+                old_transition,
+                new_transition: validated.transition.clone(),
             };
             {
                 let st = timeline_state.borrow_mut();
@@ -15520,8 +15534,10 @@ fn handle_mcp_command(
                     "success": true,
                     "track_index": track_index,
                     "clip_index": clip_index,
-                    "kind": new_kind,
-                    "duration_ns": new_duration_ns
+                    "kind": validated.transition.kind,
+                    "duration_ns": validated.transition.duration_ns,
+                    "alignment": validated.transition.alignment.as_str(),
+                    "max_duration_ns": validated.max_duration_ns
                 }))
                 .ok();
             on_project_changed_full();

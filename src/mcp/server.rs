@@ -1007,7 +1007,8 @@ fn tools_list() -> Value {
                     "track_index": { "type": "integer", "description": "0-based track index." },
                     "clip_index":  { "type": "integer", "description": "0-based clip index within the track (must have a next clip)." },
                     "kind":        { "type": "string",  "description": "Transition kind. Use 'cross_dissolve' to set, or empty string to clear." },
-                    "duration_ns": { "type": "integer", "description": "Transition duration in nanoseconds." }
+                    "duration_ns": { "type": "integer", "description": "Transition duration in nanoseconds." },
+                    "alignment":   { "type": "string",  "description": "Overlap placement: 'end_on_cut' (default), 'center_on_cut', or 'start_on_cut'." }
                 },
                 "required": ["track_index", "clip_index", "kind", "duration_ns"]
             }
@@ -2598,6 +2599,10 @@ fn dispatch_tool_payload(
             clip_index: args["clip_index"].as_u64().unwrap_or(0) as usize,
             kind: args["kind"].as_str().unwrap_or("").to_string(),
             duration_ns: args["duration_ns"].as_u64().unwrap_or(0),
+            alignment: args["alignment"]
+                .as_str()
+                .unwrap_or("end_on_cut")
+                .to_string(),
             reply: tx,
         },
         "set_proxy_mode" => McpCommand::SetProxyMode {
@@ -2688,9 +2693,7 @@ fn dispatch_tool_payload(
                 .get("track_index")
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize),
-            timeline_start_ns: args
-                .get("timeline_start_ns")
-                .and_then(|v| v.as_u64()),
+            timeline_start_ns: args.get("timeline_start_ns").and_then(|v| v.as_u64()),
             reply: tx,
         },
         "record_voiceover" => McpCommand::RecordVoiceover {

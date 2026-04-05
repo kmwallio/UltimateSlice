@@ -2,6 +2,7 @@ use crate::media::adjustment_scope::AdjustmentScopeShape;
 use crate::media::cube_lut::CubeLut;
 use crate::media::player::PlayerState;
 use crate::model::clip::{Clip as ModelClip, NumericKeyframe};
+use crate::model::transition::{TransitionAlignment, TransitionOverlapWindow};
 use crate::ui_state::{
     clamp_prerender_crf, CrossfadeCurve, PlaybackPriority, PrerenderEncodingPreset,
     DEFAULT_PRERENDER_CRF,
@@ -604,6 +605,8 @@ pub struct ProgramClip {
     pub transition_after: String,
     /// Transition duration in nanoseconds.
     pub transition_after_ns: u64,
+    /// Placement of the overlap relative to the cut.
+    pub transition_alignment: TransitionAlignment,
     /// LUT file paths for color grading (used for proxy lookup when proxy mode is enabled).
     pub lut_paths: Vec<String>,
     /// Scale multiplier: 1.0 = fill frame, >1.0 = zoom in, <1.0 = shrink with black borders.
@@ -985,6 +988,16 @@ impl ProgramClip {
         self.freeze_frame_duration_ns()
             .unwrap_or_else(|| self.playback_duration_ns())
     }
+
+    pub fn has_outgoing_transition(&self) -> bool {
+        !self.transition_after.trim().is_empty() && self.transition_after_ns > 0
+    }
+
+    pub fn transition_cut_split(&self) -> crate::model::transition::TransitionCutSplit {
+        self.transition_alignment
+            .split_duration(self.transition_after_ns)
+    }
+
     pub fn timeline_end_ns(&self) -> u64 {
         self.timeline_start_ns + self.duration_ns()
     }
@@ -1121,8 +1134,8 @@ struct VideoSlot {
     /// Timeline start of the prerender segment for synthetic prerender slots.
     prerender_segment_start_ns: Option<u64>,
     /// Nonzero when this slot was created for a clip entering early via a
-    /// transition overlap.  The value equals the preceding clip's
-    /// `transition_after_ns` and is added to timeline_pos when computing
+    /// transition overlap. The value equals the preceding clip's
+    /// before-cut overlap amount and is added to timeline_pos when computing
     /// source-file seek positions.
     transition_enter_offset_ns: u64,
     /// True when the clip uses a non-Normal blend mode.  Zoom is forced
@@ -1160,6 +1173,8 @@ struct TransitionPrerenderSpec {
     incoming_input: usize,
     xfade_transition: String,
     duration_ns: u64,
+    before_cut_ns: u64,
+    after_cut_ns: u64,
 }
 
 struct PrerenderJobResult {
@@ -2760,6 +2775,7 @@ impl ProgramPlayer {
                     .hash(&mut hasher);
                 c.transition_after.hash(&mut hasher);
                 c.transition_after_ns.hash(&mut hasher);
+                c.transition_alignment.hash(&mut hasher);
                 c.title_text.hash(&mut hasher);
                 c.title_font.hash(&mut hasher);
                 c.title_color.hash(&mut hasher);
@@ -3781,17 +3797,13 @@ impl ProgramPlayer {
         }
     }
 
-    fn adjacent_prev_same_track_with_audio(
-        clips: &[ProgramClip],
-        clip_idx: usize,
-    ) -> Option<usize> {
+    fn adjacent_prev_same_track(clips: &[ProgramClip], clip_idx: usize) -> Option<usize> {
         let clip = clips.get(clip_idx)?;
         clips
             .iter()
             .enumerate()
             .filter(|(idx, c)| {
                 *idx != clip_idx
-                    && c.has_embedded_audio()
                     && c.track_index == clip.track_index
                     && c.timeline_end_ns() == clip.timeline_start_ns
             })
@@ -3799,22 +3811,75 @@ impl ProgramPlayer {
             .map(|(idx, _)| idx)
     }
 
-    fn adjacent_next_same_track_with_audio(
-        clips: &[ProgramClip],
-        clip_idx: usize,
-    ) -> Option<usize> {
+    fn adjacent_next_same_track(clips: &[ProgramClip], clip_idx: usize) -> Option<usize> {
         let clip = clips.get(clip_idx)?;
         clips
             .iter()
             .enumerate()
             .filter(|(idx, c)| {
                 *idx != clip_idx
-                    && c.has_embedded_audio()
                     && c.track_index == clip.track_index
                     && c.timeline_start_ns == clip.timeline_end_ns()
             })
             .min_by_key(|(_, c)| c.timeline_start_ns)
             .map(|(idx, _)| idx)
+    }
+
+    fn adjacent_prev_same_track_with_audio(
+        clips: &[ProgramClip],
+        clip_idx: usize,
+    ) -> Option<usize> {
+        Self::adjacent_prev_same_track(clips, clip_idx).filter(|&idx| {
+            clips
+                .get(idx)
+                .map(|clip| clip.has_embedded_audio())
+                .unwrap_or(false)
+        })
+    }
+
+    fn adjacent_next_same_track_with_audio(
+        clips: &[ProgramClip],
+        clip_idx: usize,
+    ) -> Option<usize> {
+        Self::adjacent_next_same_track(clips, clip_idx).filter(|&idx| {
+            clips
+                .get(idx)
+                .map(|clip| clip.has_embedded_audio())
+                .unwrap_or(false)
+        })
+    }
+
+    fn outgoing_transition_window_for_clip(clip: &ProgramClip) -> Option<TransitionOverlapWindow> {
+        if !clip.has_outgoing_transition() {
+            return None;
+        }
+        Some(
+            clip.transition_cut_split()
+                .overlap_window(clip.timeline_end_ns()),
+        )
+    }
+
+    fn incoming_transition_window_for_clip(
+        clips: &[ProgramClip],
+        clip_idx: usize,
+    ) -> Option<(usize, TransitionOverlapWindow)> {
+        let prev_idx = Self::adjacent_prev_same_track(clips, clip_idx)?;
+        let prev_clip = clips.get(prev_idx)?;
+        Self::outgoing_transition_window_for_clip(prev_clip).map(|window| (prev_idx, window))
+    }
+
+    fn clip_active_window(clips: &[ProgramClip], clip_idx: usize) -> Option<(u64, u64)> {
+        let clip = clips.get(clip_idx)?;
+        let incoming_before_ns = Self::incoming_transition_window_for_clip(clips, clip_idx)
+            .map(|(_, window)| window.before_cut_ns)
+            .unwrap_or(0);
+        let outgoing_after_ns = Self::outgoing_transition_window_for_clip(clip)
+            .map(|window| window.after_cut_ns)
+            .unwrap_or(0);
+        Some((
+            clip.timeline_start_ns.saturating_sub(incoming_before_ns),
+            clip.timeline_end_ns().saturating_add(outgoing_after_ns),
+        ))
     }
 
     fn clamped_crossfade_duration_ns(
@@ -5473,58 +5538,45 @@ impl ProgramPlayer {
     }
 
     /// Return ALL clip indices active at the given timeline position, sorted by track_index.
-    /// Includes clips that are entering early due to a transition overlap: when clip A
-    /// (active) has `transition_after_ns > 0`, the next same-track clip B is included
-    /// during the window `[A.end - A.transition_after_ns, A.end)`.
+    /// Includes clips that enter early or linger after the cut because of transition
+    /// overlap placement.
     fn clips_active_at(&self, timeline_pos_ns: u64) -> Vec<usize> {
         let mut active: Vec<usize> = self
             .clips
             .iter()
             .enumerate()
-            .filter(|(_, c)| {
-                timeline_pos_ns >= c.timeline_start_ns && timeline_pos_ns < c.timeline_end_ns()
+            .filter(|(idx, _)| {
+                Self::clip_active_window(&self.clips, *idx)
+                    .map(|(start_ns, end_ns)| {
+                        timeline_pos_ns >= start_ns && timeline_pos_ns < end_ns
+                    })
+                    .unwrap_or(false)
             })
             .map(|(i, _)| i)
             .collect();
-        // Include clips entering via transition overlap from a preceding clip.
-        for i in 0..self.clips.len() {
-            if active.contains(&i) {
-                continue;
-            }
-            let clip = &self.clips[i];
-            // Find preceding clip on same track with an active transition.
-            let prev = self.clips.iter().enumerate().find(|(_, c)| {
-                c.track_index == clip.track_index
-                    && c.timeline_end_ns() == clip.timeline_start_ns
-                    && !c.transition_after.is_empty()
-                    && c.transition_after_ns > 0
-            });
-            if let Some((_, prev_clip)) = prev {
-                let trans_start = prev_clip
-                    .timeline_end_ns()
-                    .saturating_sub(prev_clip.transition_after_ns);
-                if timeline_pos_ns >= trans_start && timeline_pos_ns < prev_clip.timeline_end_ns() {
-                    active.push(i);
-                }
-            }
-        }
         if active.is_empty() {
             const GAP_NS: u64 = 100_000_000;
             if let Some(next_start) = self
                 .clips
                 .iter()
-                .filter(|c| {
-                    c.timeline_start_ns > timeline_pos_ns
-                        && c.timeline_start_ns <= timeline_pos_ns + GAP_NS
+                .enumerate()
+                .filter_map(|(idx, _)| {
+                    Self::clip_active_window(&self.clips, idx).map(|(start_ns, _)| start_ns)
                 })
-                .map(|c| c.timeline_start_ns)
+                .filter(|start_ns| {
+                    *start_ns > timeline_pos_ns && *start_ns <= timeline_pos_ns + GAP_NS
+                })
                 .min()
             {
                 active = self
                     .clips
                     .iter()
                     .enumerate()
-                    .filter(|(_, c)| c.timeline_start_ns == next_start)
+                    .filter(|(idx, _)| {
+                        Self::clip_active_window(&self.clips, *idx)
+                            .map(|(start_ns, _)| start_ns == next_start)
+                            .unwrap_or(false)
+                    })
                     .map(|(i, _)| i)
                     .collect();
             }
@@ -5542,14 +5594,8 @@ impl ProgramPlayer {
     ) -> Option<TransitionState> {
         let clip = &self.clips[clip_idx];
         // Check if this clip is the OUTGOING clip (has transition_after set).
-        if !clip.transition_after.is_empty() && clip.transition_after_ns > 0 {
-            let trans_start = clip
-                .timeline_end_ns()
-                .saturating_sub(clip.transition_after_ns);
-            if timeline_pos_ns >= trans_start && timeline_pos_ns < clip.timeline_end_ns() {
-                let elapsed = timeline_pos_ns.saturating_sub(trans_start) as f64;
-                let duration = clip.transition_after_ns as f64;
-                let progress = (elapsed / duration).clamp(0.0, 1.0);
+        if let Some(window) = Self::outgoing_transition_window_for_clip(clip) {
+            if let Some(progress) = window.progress_at(timeline_pos_ns) {
                 return Some(TransitionState {
                     kind: clip.transition_after.clone(),
                     progress,
@@ -5558,22 +5604,12 @@ impl ProgramPlayer {
             }
         }
         // Check if this clip is the INCOMING clip (preceding same-track clip has transition).
-        let prev = self.clips.iter().find(|c| {
-            c.track_index == clip.track_index
-                && c.timeline_end_ns() == clip.timeline_start_ns
-                && !c.transition_after.is_empty()
-                && c.transition_after_ns > 0
-        });
-        if let Some(prev_clip) = prev {
-            let trans_start = prev_clip
-                .timeline_end_ns()
-                .saturating_sub(prev_clip.transition_after_ns);
-            if timeline_pos_ns >= trans_start && timeline_pos_ns < prev_clip.timeline_end_ns() {
-                let elapsed = timeline_pos_ns.saturating_sub(trans_start) as f64;
-                let duration = prev_clip.transition_after_ns as f64;
-                let progress = (elapsed / duration).clamp(0.0, 1.0);
+        if let Some((prev_idx, window)) =
+            Self::incoming_transition_window_for_clip(&self.clips, clip_idx)
+        {
+            if let Some(progress) = window.progress_at(timeline_pos_ns) {
                 return Some(TransitionState {
-                    kind: prev_clip.transition_after.clone(),
+                    kind: self.clips[prev_idx].transition_after.clone(),
                     progress,
                     role: TransitionRole::Incoming,
                 });
@@ -5582,20 +5618,11 @@ impl ProgramPlayer {
         None
     }
 
-    /// Find the transition_after_ns for a clip entering via transition overlap.
-    /// Returns the preceding clip's `transition_after_ns` if this clip starts
-    /// at the exact end of a clip with an active transition, otherwise 0.
+    /// Find the before-cut overlap amount for a clip entering via a transition.
+    /// Returns the preceding clip's before-cut split if present, otherwise 0.
     fn transition_enter_offset_for_clip(&self, clip_idx: usize) -> u64 {
-        let clip = &self.clips[clip_idx];
-        self.clips
-            .iter()
-            .find(|c| {
-                c.track_index == clip.track_index
-                    && c.timeline_end_ns() == clip.timeline_start_ns
-                    && !c.transition_after.is_empty()
-                    && c.transition_after_ns > 0
-            })
-            .map(|c| c.transition_after_ns)
+        Self::incoming_transition_window_for_clip(&self.clips, clip_idx)
+            .map(|(_, window)| window.before_cut_ns)
             .unwrap_or(0)
     }
 
@@ -6012,13 +6039,13 @@ impl ProgramPlayer {
 
     fn next_video_boundary_after(&self, timeline_pos_ns: u64) -> Option<u64> {
         let mut next: Option<u64> = None;
-        for clip in &self.clips {
-            for candidate in [
-                clip.timeline_start_ns,
-                clip.timeline_end_ns(),
-                clip.timeline_end_ns()
-                    .saturating_sub(clip.transition_after_ns),
-            ] {
+        for clip_idx in 0..self.clips.len() {
+            let Some((active_start_ns, active_end_ns)) =
+                Self::clip_active_window(&self.clips, clip_idx)
+            else {
+                continue;
+            };
+            for candidate in [active_start_ns, active_end_ns] {
                 if candidate > timeline_pos_ns {
                     next = Some(
                         next.map(|current| current.min(candidate))
@@ -6416,32 +6443,19 @@ impl ProgramPlayer {
         }
         for &outgoing_idx in active {
             let outgoing = self.clips.get(outgoing_idx)?;
-            if outgoing.transition_after_ns == 0 || outgoing.transition_after.is_empty() {
-                continue;
-            }
             let Some(xfade_transition) =
                 Self::supported_transition_prerender_kind(outgoing.transition_after.as_str())
             else {
                 continue;
             };
-            let trans_start = outgoing
-                .timeline_end_ns()
-                .saturating_sub(outgoing.transition_after_ns);
-            if timeline_pos_ns < trans_start || timeline_pos_ns >= outgoing.timeline_end_ns() {
+            let Some(window) = Self::outgoing_transition_window_for_clip(outgoing) else {
+                continue;
+            };
+            if !window.contains(timeline_pos_ns) {
                 continue;
             }
-            let incoming_idx = active.iter().copied().find(|&idx| {
-                if idx == outgoing_idx {
-                    return false;
-                }
-                self.clips
-                    .get(idx)
-                    .map(|incoming| {
-                        incoming.track_index == outgoing.track_index
-                            && incoming.timeline_start_ns == outgoing.timeline_end_ns()
-                    })
-                    .unwrap_or(false)
-            })?;
+            let incoming_idx = Self::adjacent_next_same_track(&self.clips, outgoing_idx)
+                .filter(|idx| active.contains(idx))?;
             let incoming = self.clips.get(incoming_idx)?;
             if outgoing.chroma_key_enabled || incoming.chroma_key_enabled {
                 continue;
@@ -6453,6 +6467,8 @@ impl ProgramPlayer {
                 incoming_input,
                 xfade_transition: xfade_transition.to_string(),
                 duration_ns: outgoing.transition_after_ns,
+                before_cut_ns: window.before_cut_ns,
+                after_cut_ns: window.after_cut_ns,
             });
         }
         None
@@ -10911,16 +10927,24 @@ impl ProgramPlayer {
         let Some(spec) = transition_spec else {
             return String::new();
         };
-        if input_index != spec.incoming_input {
-            return String::new();
-        }
+        let mut filter = String::new();
         let offset_s = transition_offset_ns as f64 / 1_000_000_000.0;
-        if offset_s <= 0.0 {
-            return String::new();
+        if input_index == spec.incoming_input && offset_s > 0.0 {
+            // Keep incoming transition source parked on its first frame until the
+            // overlap boundary, so pre-padding does not advance incoming content.
+            filter.push_str(&format!(
+                ",tpad=start_duration={offset_s:.6}:start_mode=clone"
+            ));
         }
-        // Keep incoming transition source parked on its first frame until the
-        // overlap boundary, so pre-padding does not advance incoming content.
-        format!(",tpad=start_duration={offset_s:.6}:start_mode=clone")
+        if input_index == spec.outgoing_input && spec.after_cut_ns > 0 {
+            // For after-cut overlap, hold the outgoing clip's final frame long
+            // enough for xfade to cover the tail that extends past the cut.
+            filter.push_str(&format!(
+                ",tpad=stop_mode=clone:stop_duration={:.6}",
+                spec.after_cut_ns as f64 / 1_000_000_000.0
+            ));
+        }
+        filter
     }
 
     fn prerender_build_transition_adelay_filter(
@@ -15080,6 +15104,7 @@ mod tests {
         ShortFrameCache, ThreePointParabola, TransitionPrerenderSpec, VideoSlot,
     };
     use crate::model::clip::{KeyframeInterpolation, NumericKeyframe};
+    use crate::model::transition::TransitionAlignment;
     use crate::ui_state::{PrerenderEncodingPreset, DEFAULT_PRERENDER_CRF};
     use gstreamer as gst;
     use std::collections::hash_map::DefaultHasher;
@@ -15287,6 +15312,7 @@ mod tests {
             track_index: 0,
             transition_after: String::new(),
             transition_after_ns: 0,
+            transition_alignment: TransitionAlignment::EndOnCut,
             lut_paths: Vec::new(),
             scale: 1.0,
             scale_keyframes: Vec::new(),
@@ -15346,6 +15372,56 @@ mod tests {
     }
 
     #[test]
+    fn clip_active_window_extends_for_centered_transition_alignment() {
+        let mut outgoing = make_clip();
+        outgoing.id = "out".to_string();
+        outgoing.source_out_ns = 5_000_000_000;
+        outgoing.transition_after = "cross_dissolve".to_string();
+        outgoing.transition_after_ns = 1_000_000_000;
+        outgoing.transition_alignment = TransitionAlignment::CenterOnCut;
+
+        let mut incoming = make_clip();
+        incoming.id = "in".to_string();
+        incoming.source_out_ns = 5_000_000_000;
+        incoming.timeline_start_ns = 5_000_000_000;
+
+        let clips = vec![outgoing, incoming];
+        assert_eq!(
+            ProgramPlayer::clip_active_window(&clips, 0),
+            Some((0, 5_500_000_000))
+        );
+        assert_eq!(
+            ProgramPlayer::clip_active_window(&clips, 1),
+            Some((4_500_000_000, 10_000_000_000))
+        );
+        assert_eq!(
+            ProgramPlayer::incoming_transition_window_for_clip(&clips, 1)
+                .map(|(_, window)| window.before_cut_ns),
+            Some(500_000_000)
+        );
+    }
+
+    #[test]
+    fn prerender_transition_tpad_filter_holds_outgoing_after_cut() {
+        let spec = TransitionPrerenderSpec {
+            outgoing_input: 0,
+            incoming_input: 1,
+            xfade_transition: "fade".to_string(),
+            duration_ns: 1_000_000_000,
+            before_cut_ns: 500_000_000,
+            after_cut_ns: 500_000_000,
+        };
+        assert_eq!(
+            ProgramPlayer::prerender_build_transition_tpad_filter(Some(&spec), 83_333_333, 0),
+            ",tpad=stop_mode=clone:stop_duration=0.500000"
+        );
+        assert_eq!(
+            ProgramPlayer::prerender_build_transition_tpad_filter(Some(&spec), 83_333_333, 1),
+            ",tpad=start_duration=0.083333:start_mode=clone"
+        );
+    }
+
+    #[test]
     fn not_negotiated_recovery_detector_matches_error_or_debug_text() {
         assert!(ProgramPlayer::should_recover_not_negotiated(
             "streaming stopped, reason not-negotiated (-4)",
@@ -15368,6 +15444,8 @@ mod tests {
             incoming_input: 1,
             xfade_transition: "fade".to_string(),
             duration_ns: 500_000_000,
+            before_cut_ns: 500_000_000,
+            after_cut_ns: 0,
         };
         let f = ProgramPlayer::prerender_build_transition_adelay_filter(Some(&spec), 83_333_333, 1);
         assert_eq!(f, ",adelay=84:all=1");
@@ -15380,6 +15458,8 @@ mod tests {
             incoming_input: 1,
             xfade_transition: "fade".to_string(),
             duration_ns: 500_000_000,
+            before_cut_ns: 500_000_000,
+            after_cut_ns: 0,
         };
         assert_eq!(
             ProgramPlayer::prerender_build_transition_adelay_filter(Some(&spec), 0, 1),

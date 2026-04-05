@@ -64,30 +64,31 @@ impl MusicGenCache {
                         Err(_) => break,
                     };
                     // Catch panics so the worker thread survives model errors.
-                    let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        run_music_gen(&job)
-                    })) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            let msg = if let Some(s) = e.downcast_ref::<&str>() {
-                                s.to_string()
-                            } else if let Some(s) = e.downcast_ref::<String>() {
-                                s.clone()
-                            } else {
-                                "unknown panic".to_string()
-                            };
-                            log::error!("MusicGenCache: worker panic: {msg}");
-                            MusicGenResult {
-                                job_id: job.job_id.clone(),
-                                output_path: job.output_path.clone(),
-                                duration_ns: 0,
-                                track_id: job.track_id.clone(),
-                                timeline_start_ns: job.timeline_start_ns,
-                                success: false,
-                                error: Some(format!("Worker panic: {msg}")),
+                    let result =
+                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            run_music_gen(&job)
+                        })) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                let msg = if let Some(s) = e.downcast_ref::<&str>() {
+                                    s.to_string()
+                                } else if let Some(s) = e.downcast_ref::<String>() {
+                                    s.clone()
+                                } else {
+                                    "unknown panic".to_string()
+                                };
+                                log::error!("MusicGenCache: worker panic: {msg}");
+                                MusicGenResult {
+                                    job_id: job.job_id.clone(),
+                                    output_path: job.output_path.clone(),
+                                    duration_ns: 0,
+                                    track_id: job.track_id.clone(),
+                                    timeline_start_ns: job.timeline_start_ns,
+                                    success: false,
+                                    error: Some(format!("Worker panic: {msg}")),
+                                }
                             }
-                        }
-                    };
+                        };
                     let _ = tx.send(result);
                 }
             });
@@ -127,9 +128,7 @@ impl MusicGenCache {
             return;
         }
         // Set output path in our cache directory.
-        job.output_path = self
-            .cache_root
-            .join(format!("musicgen_{}.wav", job.job_id));
+        job.output_path = self.cache_root.join(format!("musicgen_{}.wav", job.job_id));
         self.pending.insert(job.job_id.clone());
         self.total_requested += 1;
         if let Some(ref tx) = self.work_tx {
@@ -278,9 +277,7 @@ fn run_music_gen_inner(job: &MusicGenJob) -> Result<(PathBuf, u64), String> {
                     ort::session::builder::GraphOptimizationLevel::Level3,
                 )?)
             })
-            .and_then(|mut b| {
-                b.commit_from_file(model_dir.join(name).to_string_lossy().as_ref())
-            })
+            .and_then(|mut b| b.commit_from_file(model_dir.join(name).to_string_lossy().as_ref()))
             .map_err(|e| format!("Failed to load {name}: {e}"))
     };
 
@@ -288,7 +285,10 @@ fn run_music_gen_inner(job: &MusicGenJob) -> Result<(PathBuf, u64), String> {
     let mut decoder = load_session("decoder_model_merged.onnx")?;
     let mut encodec = load_session("encodec_decode.onnx")?;
 
-    log::info!("MusicGenCache: models loaded, generating for prompt={:?}", job.prompt);
+    log::info!(
+        "MusicGenCache: models loaded, generating for prompt={:?}",
+        job.prompt
+    );
 
     // ── Tokenize prompt ──────────────────────────────────────────────
     let encoding = tokenizer
@@ -319,9 +319,11 @@ fn run_music_gen_inner(job: &MusicGenJob) -> Result<(PathBuf, u64), String> {
 
     // last_hidden_state: (1, enc_seq_len, 768)
     let encoder_hidden_data: Vec<f32> = {
-        let val = enc_outputs.get("last_hidden_state")
+        let val = enc_outputs
+            .get("last_hidden_state")
             .ok_or("No text_encoder output")?;
-        let (_shape, data) = val.try_extract_tensor::<f32>()
+        let (_shape, data) = val
+            .try_extract_tensor::<f32>()
             .map_err(|e| format!("extract encoder output: {e}"))?;
         data.to_vec()
     };
@@ -353,16 +355,13 @@ fn run_music_gen_inner(job: &MusicGenJob) -> Result<(PathBuf, u64), String> {
     let mut generated_tokens: Vec<Vec<i64>> = vec![vec![bos_token_id]; num_codebooks];
 
     // Encoder attention mask for decoder (stays constant).
-    let enc_attn_mask = ndarray::Array2::<i64>::from_shape_vec(
-        (1, enc_seq_len),
-        attn_mask,
-    ).map_err(|e| format!("enc_attn_mask: {e}"))?;
+    let enc_attn_mask = ndarray::Array2::<i64>::from_shape_vec((1, enc_seq_len), attn_mask)
+        .map_err(|e| format!("enc_attn_mask: {e}"))?;
 
     // Encoder hidden states for decoder (stays constant).
-    let enc_hidden = ndarray::Array3::<f32>::from_shape_vec(
-        (1, enc_seq_len, hidden_dim),
-        encoder_hidden_data,
-    ).map_err(|e| format!("enc_hidden: {e}"))?;
+    let enc_hidden =
+        ndarray::Array3::<f32>::from_shape_vec((1, enc_seq_len, hidden_dim), encoder_hidden_data)
+            .map_err(|e| format!("enc_hidden: {e}"))?;
 
     // KV cache: 24 layers × 4 tensors (decoder.key, decoder.value, encoder.key, encoder.value)
     // Each is shape (1, num_heads, seq_len, head_dim). Starts empty (seq_len=0).
@@ -399,12 +398,24 @@ fn run_music_gen_inner(job: &MusicGenJob) -> Result<(PathBuf, u64), String> {
 
         let mut inputs: Vec<(String, ort::value::DynValue)> = Vec::new();
 
-        inputs.push(("encoder_attention_mask".into(),
-            Tensor::from_array(enc_attn_mask.clone()).map_err(|e| format!("{e}"))?.into_dyn()));
-        inputs.push(("input_ids".into(),
-            Tensor::from_array(dec_input_ids).map_err(|e| format!("{e}"))?.into_dyn()));
-        inputs.push(("encoder_hidden_states".into(),
-            Tensor::from_array(enc_hidden.clone()).map_err(|e| format!("{e}"))?.into_dyn()));
+        inputs.push((
+            "encoder_attention_mask".into(),
+            Tensor::from_array(enc_attn_mask.clone())
+                .map_err(|e| format!("{e}"))?
+                .into_dyn(),
+        ));
+        inputs.push((
+            "input_ids".into(),
+            Tensor::from_array(dec_input_ids)
+                .map_err(|e| format!("{e}"))?
+                .into_dyn(),
+        ));
+        inputs.push((
+            "encoder_hidden_states".into(),
+            Tensor::from_array(enc_hidden.clone())
+                .map_err(|e| format!("{e}"))?
+                .into_dyn(),
+        ));
 
         // Add KV cache tensors (empty on step 0, populated on step 1+).
         if let Some(ref cache) = kv_cache {
@@ -418,8 +429,12 @@ fn run_music_gen_inner(job: &MusicGenJob) -> Result<(PathBuf, u64), String> {
                     _ => ("encoder", "value"),
                 };
                 let name = format!("past_key_values.{layer}.{kind}.{kv}");
-                inputs.push((name,
-                    Tensor::from_array(arr.clone()).map_err(|e| format!("{e}"))?.into_dyn()));
+                inputs.push((
+                    name,
+                    Tensor::from_array(arr.clone())
+                        .map_err(|e| format!("{e}"))?
+                        .into_dyn(),
+                ));
             }
         } else {
             let empty_kv = ndarray::Array4::<f32>::zeros((1, num_heads, 0, head_dim));
@@ -427,15 +442,23 @@ fn run_music_gen_inner(job: &MusicGenJob) -> Result<(PathBuf, u64), String> {
                 for kind in ["decoder", "encoder"] {
                     for kv in ["key", "value"] {
                         let name = format!("past_key_values.{layer}.{kind}.{kv}");
-                        inputs.push((name,
-                            Tensor::from_array(empty_kv.clone()).map_err(|e| format!("{e}"))?.into_dyn()));
+                        inputs.push((
+                            name,
+                            Tensor::from_array(empty_kv.clone())
+                                .map_err(|e| format!("{e}"))?
+                                .into_dyn(),
+                        ));
                     }
                 }
             }
         }
 
-        inputs.push(("use_cache_branch".into(),
-            Tensor::from_array(use_cache_arr).map_err(|e| format!("{e}"))?.into_dyn()));
+        inputs.push((
+            "use_cache_branch".into(),
+            Tensor::from_array(use_cache_arr)
+                .map_err(|e| format!("{e}"))?
+                .into_dyn(),
+        ));
 
         let dec_outputs = decoder
             .run(inputs)
@@ -443,9 +466,11 @@ fn run_music_gen_inner(job: &MusicGenJob) -> Result<(PathBuf, u64), String> {
 
         // Extract logits: (num_codebooks, input_seq_len, vocab_size)
         let logits_data = {
-            let val = dec_outputs.get("logits")
+            let val = dec_outputs
+                .get("logits")
                 .ok_or("No decoder logits output")?;
-            let (_shape, data) = val.try_extract_tensor::<f32>()
+            let (_shape, data) = val
+                .try_extract_tensor::<f32>()
                 .map_err(|e| format!("extract logits: {e}"))?;
             data.to_vec()
         };
@@ -456,7 +481,15 @@ fn run_music_gen_inner(job: &MusicGenJob) -> Result<(PathBuf, u64), String> {
         let prev_cache = kv_cache.take();
         let mut new_cache: Vec<ndarray::Array4<f32>> = Vec::with_capacity(num_layers * 4);
         for layer in 0..num_layers {
-            for (sub_idx, (kind, kv)) in [("decoder", "key"), ("decoder", "value"), ("encoder", "key"), ("encoder", "value")].iter().enumerate() {
+            for (sub_idx, (kind, kv)) in [
+                ("decoder", "key"),
+                ("decoder", "value"),
+                ("encoder", "key"),
+                ("encoder", "value"),
+            ]
+            .iter()
+            .enumerate()
+            {
                 let cache_idx = layer * 4 + sub_idx;
                 let is_encoder = *kind == "encoder";
 
@@ -470,7 +503,8 @@ fn run_music_gen_inner(job: &MusicGenJob) -> Result<(PathBuf, u64), String> {
 
                 let name = format!("present.{layer}.{kind}.{kv}");
                 if let Some(val) = dec_outputs.get(&name) {
-                    let (shape, data) = val.try_extract_tensor::<f32>()
+                    let (shape, data) = val
+                        .try_extract_tensor::<f32>()
                         .map_err(|e| format!("extract {name}: {e}"))?;
                     let shape_vec: Vec<usize> = shape.iter().map(|&s| s as usize).collect();
                     if shape_vec.len() == 4 && shape_vec[0] > 0 {
@@ -478,7 +512,8 @@ fn run_music_gen_inner(job: &MusicGenJob) -> Result<(PathBuf, u64), String> {
                             ndarray::Array4::from_shape_vec(
                                 (shape_vec[0], shape_vec[1], shape_vec[2], shape_vec[3]),
                                 data.to_vec(),
-                            ).map_err(|e| format!("reshape {name}: {e}"))?,
+                            )
+                            .map_err(|e| format!("reshape {name}: {e}"))?,
                         );
                     } else {
                         // Dummy output (batch=0) — reuse previous if available.
@@ -516,10 +551,18 @@ fn run_music_gen_inner(job: &MusicGenJob) -> Result<(PathBuf, u64), String> {
 
         if step % 50 == 0 {
             let elapsed = start_time.elapsed().as_secs_f64();
-            let steps_per_sec = if elapsed > 0.0 { (step + 1) as f64 / elapsed } else { 0.0 };
+            let steps_per_sec = if elapsed > 0.0 {
+                (step + 1) as f64 / elapsed
+            } else {
+                0.0
+            };
             log::info!(
                 "MusicGenCache: step {}/{} ({:.1}s/{:.1}s) [{:.1} steps/s]",
-                step, max_new_tokens, step as f64 / 50.0, job.duration_secs, steps_per_sec
+                step,
+                max_new_tokens,
+                step as f64 / 50.0,
+                job.duration_secs,
+                steps_per_sec
             );
         }
     }
@@ -530,7 +573,11 @@ fn run_music_gen_inner(job: &MusicGenJob) -> Result<(PathBuf, u64), String> {
     for cb in 0..num_codebooks {
         let skip = cb + 1;
         let tokens: Vec<i64> = generated_tokens[cb]
-            .iter().skip(skip).take(min_len.saturating_sub(skip)).copied().collect();
+            .iter()
+            .skip(skip)
+            .take(min_len.saturating_sub(skip))
+            .copied()
+            .collect();
         aligned.push(tokens);
     }
     let output_len = aligned.iter().map(|t| t.len()).min().unwrap_or(0);
@@ -544,10 +591,9 @@ fn run_music_gen_inner(job: &MusicGenJob) -> Result<(PathBuf, u64), String> {
     for cb in 0..num_codebooks {
         codes_flat.extend_from_slice(&aligned[cb][..output_len]);
     }
-    let codes_arr = ndarray::Array4::<i64>::from_shape_vec(
-        (1, 1, num_codebooks, output_len),
-        codes_flat,
-    ).map_err(|e| format!("encodec codes shape: {e}"))?;
+    let codes_arr =
+        ndarray::Array4::<i64>::from_shape_vec((1, 1, num_codebooks, output_len), codes_flat)
+            .map_err(|e| format!("encodec codes shape: {e}"))?;
 
     let codes_tensor = Tensor::from_array(codes_arr).map_err(|e| format!("codes tensor: {e}"))?;
     let enc_dec_outputs = encodec
@@ -555,9 +601,11 @@ fn run_music_gen_inner(job: &MusicGenJob) -> Result<(PathBuf, u64), String> {
         .map_err(|e| format!("encodec_decode: {e}"))?;
 
     let audio_samples: Vec<f32> = {
-        let val = enc_dec_outputs.get("audio_values")
+        let val = enc_dec_outputs
+            .get("audio_values")
             .ok_or("No encodec output")?;
-        let (_shape, data) = val.try_extract_tensor::<f32>()
+        let (_shape, data) = val
+            .try_extract_tensor::<f32>()
             .map_err(|e| format!("extract audio: {e}"))?;
         data.to_vec()
     };
@@ -576,16 +624,18 @@ fn run_music_gen_inner(job: &MusicGenJob) -> Result<(PathBuf, u64), String> {
     };
     let temp_path = job.output_path.with_extension("partial.wav");
     {
-        let mut writer = hound::WavWriter::create(&temp_path, spec)
-            .map_err(|e| format!("WAV create: {e}"))?;
+        let mut writer =
+            hound::WavWriter::create(&temp_path, spec).map_err(|e| format!("WAV create: {e}"))?;
         for &s in &audio_samples {
-            writer.write_sample((s.clamp(-1.0, 1.0) * 32767.0) as i16)
+            writer
+                .write_sample((s.clamp(-1.0, 1.0) * 32767.0) as i16)
                 .map_err(|e| format!("WAV write: {e}"))?;
         }
-        writer.finalize().map_err(|e| format!("WAV finalize: {e}"))?;
+        writer
+            .finalize()
+            .map_err(|e| format!("WAV finalize: {e}"))?;
     }
-    std::fs::rename(&temp_path, &job.output_path)
-        .map_err(|e| format!("WAV rename: {e}"))?;
+    std::fs::rename(&temp_path, &job.output_path).map_err(|e| format!("WAV rename: {e}"))?;
 
     let duration_ns = (audio_samples.len() as f64 / sample_rate as f64 * 1_000_000_000.0) as u64;
     log::info!(
@@ -628,7 +678,9 @@ fn sample_top_k(logits: &[f32], k: usize, temperature: f32) -> i64 {
         .unwrap_or_default()
         .subsec_nanos() as u64;
     seed ^= logits.len() as u64;
-    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    seed = seed
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     let rand_val = (seed >> 33) as f32 / (1u64 << 31) as f32;
 
     let mut cumulative = 0.0f32;

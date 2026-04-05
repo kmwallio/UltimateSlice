@@ -4,6 +4,7 @@ use crate::model::clip::{
 };
 use crate::model::project::{FrameRate, Project};
 use crate::model::track::{Track, TrackHeightPreset};
+use crate::model::transition::{OutgoingTransition, TransitionAlignment};
 use anyhow::{anyhow, bail, Result};
 use quick_xml::escape::unescape;
 use quick_xml::events::Event;
@@ -1360,10 +1361,15 @@ fn parse_asset_clip(
                 clip.lut_paths = vec![v.clone()];
             }
             if let Some(v) = attrs.get("us:transition-after") {
-                clip.transition_after = v.clone();
+                clip.outgoing_transition.kind = v.clone();
             }
             if let Some(v) = attrs.get("us:transition-after-ns") {
-                clip.transition_after_ns = v.parse().unwrap_or(0);
+                clip.outgoing_transition.duration_ns = v.parse().unwrap_or(0);
+            }
+            if let Some(v) = attrs.get("us:transition-after-alignment") {
+                if let Some(alignment) = TransitionAlignment::from_str(v) {
+                    clip.outgoing_transition.alignment = alignment;
+                }
             }
             for (k, v) in attrs {
                 if !is_known_asset_clip_attr(k) {
@@ -1654,8 +1660,20 @@ fn apply_transition(
         .get("name")
         .and_then(|name| transition_kind_from_name(name))
         .unwrap_or("cross_dissolve");
-    clip.transition_after = kind.to_string();
-    clip.transition_after_ns = duration_ns;
+    let before_cut_ns = attrs
+        .get("offset")
+        .and_then(|s| parse_fcpxml_time(s))
+        .map(|offset_ns| {
+            clip.timeline_end()
+                .saturating_sub(offset_ns)
+                .min(duration_ns)
+        })
+        .unwrap_or(duration_ns);
+    clip.outgoing_transition = OutgoingTransition::new(
+        kind.to_string(),
+        duration_ns,
+        TransitionAlignment::from_before_cut_duration(before_cut_ns, duration_ns),
+    );
 }
 
 #[derive(Clone, Copy)]
@@ -2612,6 +2630,7 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:lut-path"
             | "us:transition-after"
             | "us:transition-after-ns"
+            | "us:transition-after-alignment"
             | "us:blend-mode"
             | "us:title-template"
             | "us:title-outline-color"
@@ -3697,8 +3716,14 @@ mod tests {
         let project = parse_fcpxml(xml).expect("parse should succeed");
         let video = project.video_tracks().next().expect("video track");
         assert_eq!(video.clips.len(), 2);
-        assert_eq!(video.clips[0].transition_after, "cross_dissolve");
-        assert_eq!(video.clips[0].transition_after_ns, 1_000_000_000);
+        assert_eq!(
+            video.clips[0].outgoing_transition,
+            OutgoingTransition::new(
+                "cross_dissolve",
+                1_000_000_000,
+                TransitionAlignment::EndOnCut,
+            )
+        );
     }
 
     #[test]

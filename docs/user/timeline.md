@@ -304,11 +304,13 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC, SVG) can be placed on the t
 
 - Use the **Transitions** pane on the right (below Inspector) to browse available transitions.
 - Use the pane's button to **hide/show** the transition list.
-- Drag **Cross-dissolve** from the pane and drop it near a clip boundary in the timeline to apply a transition marker.
+- Drag a transition from the pane and drop it near a clip boundary in the timeline to apply a transition marker.
 - While dragging, the two clips that will receive the transition are highlighted as a live preview.
-- **Remove a transition** by right-clicking its boundary marker in the timeline.
-- Exports apply cross-dissolves on the primary video track.
-- Preview shows transition fade ramps at clip boundaries for cross-dissolve markers.
+- New drops start with a default **500 ms** duration and can be refined from the clip **Inspector → Transition** section.
+- The Inspector's **Alignment** control changes where the overlap sits relative to the cut: **End on cut** keeps the overlap before the cut, **Center on cut** straddles it, and **Start on cut** pushes the overlap after it.
+- **Remove a transition** by right-clicking its boundary marker in the timeline or by clicking **Remove Transition** in the Inspector.
+- Preview, export, and background prerender all follow the same transition duration/alignment timing.
+- For after-cut overlap, UltimateSlice keeps the outgoing clip visible by holding its final frame through the post-cut portion of the transition.
 - Transitions are designed to be extensible: future transition types will appear in the same pane.
 
 ## Keyframes panel (dopesheet)

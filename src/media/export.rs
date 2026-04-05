@@ -1,6 +1,7 @@
 use crate::media::{adjustment_scope::AdjustmentScopeShape, program_player::ProgramPlayer};
 use crate::model::clip::{Clip, ClipKind, NumericKeyframe, SlowMotionInterp};
 use crate::model::project::Project;
+use crate::model::transition::max_transition_duration_ns;
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
@@ -334,6 +335,18 @@ pub fn export_project(
         }
     }
 
+    let primary_transition_timings: Vec<Option<PrimaryTransitionTiming>> = primary_clips
+        .windows(2)
+        .map(|clips| clamped_primary_transition_timing(clips[0], clips[1]))
+        .collect();
+    let has_primary_transitions = primary_clips
+        .iter()
+        .take(primary_clips.len().saturating_sub(1))
+        .any(|c| c.outgoing_transition.is_active());
+    let has_xfade = check_filter_support(&ffmpeg, "xfade");
+    let has_tpad = check_filter_support(&ffmpeg, "tpad");
+    let can_render_primary_transitions = has_primary_transitions && has_xfade && has_tpad;
+
     // === Primary video track: scale/correct each clip then concatenate ===
     // Adjustment clips are already filtered out of primary_clips.
     for (i, clip) in primary_clips.iter().enumerate() {
@@ -358,6 +371,11 @@ pub fn export_project(
         let lut_prefix = build_lut_filter_prefix(clip);
         let crop_filter = build_crop_filter(clip, out_w, out_h, false);
         let rotate_filter = build_rotation_filter(clip, false);
+        let transition_stop_pad_filter = if can_render_primary_transitions {
+            build_primary_clip_transition_stop_pad_filter(&primary_transition_timings, i)
+        } else {
+            String::new()
+        };
         let has_transform_keyframes = has_transform_keyframes(clip);
         let has_opacity_keyframes = !clip.opacity_keyframes.is_empty();
         let clip_has_mask = clip.has_mask();
@@ -403,8 +421,8 @@ pub fn export_project(
                  ,scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[pv{i}fg];\
                  color=c=black:size={out_w}x{out_h}:r={}/{}:d={clip_duration_s:.6}[pv{i}bg];\
                  [pv{i}bg][pv{i}fg]overlay=x='(W-w)*(1+({pos_x_expr}))/2':y='(H-h)*(1+({pos_y_expr}))/2':eval=frame\
-                 ,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({opacity_expr})*({mask_alpha_expr})'[pv{i}raw];\
-                 [pv{i}raw]format=yuv420p[pv{i}];",
+                  ,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({opacity_expr})*({mask_alpha_expr})'[pv{i}raw];\
+                 [pv{i}raw]format=yuv420p{transition_stop_pad_filter}[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
                 , project.frame_rate.numerator, project.frame_rate.denominator
             ));
@@ -412,10 +430,13 @@ pub fn export_project(
             if let Some(MaskAlphaResult::RasterFile(mask_file)) = mask_result {
                 let mask_path_str = mask_file.path().display().to_string();
                 _mask_temp_files.push(mask_file);
-                let old_tail = format!("[pv{i}raw];[pv{i}raw]format=yuv420p[pv{i}];", i = i);
+                let old_tail = format!(
+                    "[pv{i}raw];[pv{i}raw]format=yuv420p{transition_stop_pad_filter}[pv{i}];",
+                    i = i
+                );
                 let new_tail = format!(
                     "[pv{i}raw];movie='{mask_path_str}',format=gray,scale={out_w}:{out_h}[pv{i}mask];\
-                     [pv{i}raw][pv{i}mask]alphamerge,format=yuv420p[pv{i}];",
+                     [pv{i}raw][pv{i}mask]alphamerge,format=yuv420p{transition_stop_pad_filter}[pv{i}];",
                     i = i, out_w = out_w, out_h = out_h,
                 );
                 let current = filter.clone();
@@ -428,22 +449,18 @@ pub fn export_project(
             let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
             let anamorphic_filter = build_anamorphic_filter(clip);
             filter.push_str(&format!(
-                "[{i}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{speed_filter}[pv{i}raw];[pv{i}raw]format=yuv420p[pv{i}];",
+                "[{i}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{speed_filter}[pv{i}raw];[pv{i}raw]format=yuv420p{transition_stop_pad_filter}[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
             ));
         } else {
             let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
             let anamorphic_filter = build_anamorphic_filter(clip);
             filter.push_str(&format!(
-                "[{i}:v]{lut_prefix}{anamorphic_filter}scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{},format=yuv420p{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{title_filter}{subtitle_filter}{speed_filter}[pv{i}];",
+                "[{i}:v]{lut_prefix}{anamorphic_filter}scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{},format=yuv420p{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{title_filter}{subtitle_filter}{speed_filter}{transition_stop_pad_filter}[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
             ));
         }
     }
-    // Check for xfade and tpad support
-    let has_xfade = check_filter_support(&ffmpeg, "xfade");
-    let has_tpad = check_filter_support(&ffmpeg, "tpad");
-
     // Map transition kind string to the ffmpeg xfade transition name.
     let transition_xfade_name = |kind: &str| -> &'static str {
         match kind {
@@ -458,46 +475,33 @@ pub fn export_project(
     // Build primary-track sequence:
     // - If transitions exist AND filters are supported, chain xfade filters
     // - Otherwise use concat (original behavior).
-    let has_primary_transitions = primary_clips
-        .iter()
-        .take(primary_clips.len().saturating_sub(1))
-        .any(|c| !c.transition_after.is_empty() && c.transition_after_ns > 0);
-
     if primary_clips.len() == 1 {
         filter.push_str("[pv0]copy[vbase]");
-    } else if has_primary_transitions && has_xfade && has_tpad {
+    } else if can_render_primary_transitions {
         let mut prev_label = "pv0".to_string();
-        let mut running_s = primary_clips[0].duration() as f64 / 1_000_000_000.0;
-        let mut total_overlap_s = 0.0_f64;
+        let mut running_cut_s = primary_clips[0].duration() as f64 / 1_000_000_000.0;
         for i in 0..(primary_clips.len() - 1) {
             let next_label = format!("pv{}", i + 1);
             let out_label = format!("vseq{}", i + 1);
             let clip = &primary_clips[i];
             let next_clip = &primary_clips[i + 1];
             let sep = if i == 0 { "" } else { ";" };
-            if let Some(d_s) = clamped_primary_xfade_duration_s(clip, next_clip) {
-                let offset_s = (running_s - d_s).max(0.0);
-                let xfade = transition_xfade_name(&clip.transition_after);
+            if let Some(timing) = primary_transition_timings[i] {
+                let offset_s = (running_cut_s - timing.before_cut_s()).max(0.0);
+                let xfade = transition_xfade_name(clip.outgoing_transition.kind_trimmed());
                 filter.push_str(&format!(
-                    "{sep}[{prev_label}][{next_label}]xfade=transition={xfade}:duration={d_s:.6}:offset={offset_s:.6}[{out_label}]"
+                    "{sep}[{prev_label}][{next_label}]xfade=transition={xfade}:duration={:.6}:offset={offset_s:.6}[{out_label}]",
+                    timing.duration_s(),
                 ));
-                running_s += next_clip.duration() as f64 / 1_000_000_000.0 - d_s;
-                total_overlap_s += d_s;
             } else {
                 filter.push_str(&format!(
                     "{sep}[{prev_label}][{next_label}]concat=n=2:v=1:a=0[{out_label}]"
                 ));
-                running_s += next_clip.duration() as f64 / 1_000_000_000.0;
             }
+            running_cut_s += next_clip.duration() as f64 / 1_000_000_000.0;
             prev_label = out_label;
         }
-        if total_overlap_s > 0.0 {
-            filter.push_str(&format!(
-                ";[{prev_label}]tpad=stop_mode=clone:stop_duration={total_overlap_s:.6}[vbase]"
-            ));
-        } else {
-            filter.push_str(&format!(";[{prev_label}]copy[vbase]"));
-        }
+        filter.push_str(&format!(";[{prev_label}]copy[vbase]"));
     } else {
         for i in 0..primary_clips.len() {
             filter.push_str(&format!("[pv{i}]"));
@@ -3202,14 +3206,85 @@ fn build_scale_position_filter(
     }
 }
 
-fn clamped_primary_xfade_duration_s(current: &Clip, next: &Clip) -> Option<f64> {
-    if current.transition_after.is_empty() || current.transition_after_ns == 0 {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PrimaryTransitionTiming {
+    duration_ns: u64,
+    before_cut_ns: u64,
+    after_cut_ns: u64,
+}
+
+impl PrimaryTransitionTiming {
+    fn duration_s(self) -> f64 {
+        self.duration_ns as f64 / 1_000_000_000.0
+    }
+
+    fn before_cut_s(self) -> f64 {
+        self.before_cut_ns as f64 / 1_000_000_000.0
+    }
+}
+
+fn clamped_primary_transition_timing(
+    current: &Clip,
+    next: &Clip,
+) -> Option<PrimaryTransitionTiming> {
+    if !current.outgoing_transition.is_active() {
         return None;
     }
-    let mut d_s = current.transition_after_ns as f64 / 1_000_000_000.0;
-    let max_d = (current.duration().min(next.duration()) as f64 / 1_000_000_000.0) - 0.001;
-    d_s = d_s.clamp(0.001, max_d.max(0.001));
-    Some(d_s)
+    let max_duration_ns = max_transition_duration_ns(current, next);
+    if max_duration_ns < 1_000_000 {
+        return None;
+    }
+    let duration_ns = current
+        .outgoing_transition
+        .duration_ns
+        .min(max_duration_ns)
+        .max(1_000_000);
+    let split = current
+        .outgoing_transition
+        .alignment
+        .split_duration(duration_ns);
+    Some(PrimaryTransitionTiming {
+        duration_ns,
+        before_cut_ns: split.before_cut_ns,
+        after_cut_ns: split.after_cut_ns,
+    })
+}
+
+fn primary_clip_transition_stop_pad_ns(
+    transition_timings: &[Option<PrimaryTransitionTiming>],
+    clip_idx: usize,
+) -> u64 {
+    let incoming_before_ns = clip_idx
+        .checked_sub(1)
+        .and_then(|prev_idx| transition_timings.get(prev_idx))
+        .and_then(|timing| *timing)
+        .map(|timing| timing.before_cut_ns)
+        .unwrap_or(0);
+    let outgoing_after_ns = transition_timings
+        .get(clip_idx)
+        .and_then(|timing| *timing)
+        .map(|timing| timing.after_cut_ns)
+        .unwrap_or(0);
+    incoming_before_ns.saturating_add(outgoing_after_ns)
+}
+
+fn build_primary_clip_transition_stop_pad_filter(
+    transition_timings: &[Option<PrimaryTransitionTiming>],
+    clip_idx: usize,
+) -> String {
+    let stop_pad_ns = primary_clip_transition_stop_pad_ns(transition_timings, clip_idx);
+    if stop_pad_ns == 0 {
+        String::new()
+    } else {
+        format!(
+            ",tpad=stop_mode=clone:stop_duration={:.6}",
+            stop_pad_ns as f64 / 1_000_000_000.0
+        )
+    }
+}
+
+fn clamped_primary_xfade_duration_s(current: &Clip, next: &Clip) -> Option<f64> {
+    clamped_primary_transition_timing(current, next).map(PrimaryTransitionTiming::duration_s)
 }
 
 /// Build atempo filter chain for audio speed change.
@@ -4184,11 +4259,12 @@ mod tests {
         build_crop_filter, build_grading_filter, build_keyframed_property_expression,
         build_pan_expression, build_rotation_filter, build_subtitle_filter_composited,
         build_temperature_tint_filter, build_timing_filter, build_title_filter,
-        build_volume_filter, clamped_primary_xfade_duration_s, compute_clip_audio_fades,
-        compute_export_coloradj_params, estimate_export_size_bytes, flatten_compound_tracks,
-        has_linked_audio_peer, has_transform_keyframes, parse_progress_line,
-        resolve_subtitle_font_style, video_input_seek_and_duration, write_chapter_metadata,
-        AudioCodec, ClipAudioFade, ColorFilterCapabilities, ExportOptions, VideoCodec,
+        build_volume_filter, clamped_primary_transition_timing, clamped_primary_xfade_duration_s,
+        compute_clip_audio_fades, compute_export_coloradj_params, estimate_export_size_bytes,
+        flatten_compound_tracks, has_linked_audio_peer, has_transform_keyframes,
+        parse_progress_line, primary_clip_transition_stop_pad_ns, resolve_subtitle_font_style,
+        video_input_seek_and_duration, write_chapter_metadata, AudioCodec, ClipAudioFade,
+        ColorFilterCapabilities, ExportOptions, VideoCodec,
     };
     use crate::media::program_player::ProgramPlayer;
     use crate::model::clip::{
@@ -4615,10 +4691,54 @@ mod tests {
     fn clamped_primary_xfade_duration_clamps_to_boundary_limits() {
         let mut a = make_video_clip("a", 0, 4_000_000_000);
         let b = make_video_clip("b", 4_000_000_000, 8_000_000_000);
-        a.transition_after = "cross_dissolve".to_string();
-        a.transition_after_ns = 10_000_000_000;
+        a.outgoing_transition = crate::model::transition::OutgoingTransition::new(
+            "cross_dissolve",
+            10_000_000_000,
+            crate::model::transition::TransitionAlignment::EndOnCut,
+        );
         let d = clamped_primary_xfade_duration_s(&a, &b).expect("transition should be enabled");
         assert!((d - 3.999).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn clamped_primary_transition_timing_respects_alignment_split() {
+        let mut a = make_video_clip("a", 0, 4_000_000_000);
+        let b = make_video_clip("b", 4_000_000_000, 8_000_000_000);
+        a.outgoing_transition = crate::model::transition::OutgoingTransition::new(
+            "cross_dissolve",
+            1_000_000_000,
+            crate::model::transition::TransitionAlignment::CenterOnCut,
+        );
+        let timing =
+            clamped_primary_transition_timing(&a, &b).expect("transition timing should exist");
+        assert_eq!(timing.duration_ns, 1_000_000_000);
+        assert_eq!(timing.before_cut_ns, 500_000_000);
+        assert_eq!(timing.after_cut_ns, 500_000_000);
+    }
+
+    #[test]
+    fn primary_clip_transition_stop_pad_combines_incoming_and_outgoing_hold() {
+        let timings = vec![
+            Some(super::PrimaryTransitionTiming {
+                duration_ns: 1_000_000_000,
+                before_cut_ns: 400_000_000,
+                after_cut_ns: 600_000_000,
+            }),
+            Some(super::PrimaryTransitionTiming {
+                duration_ns: 800_000_000,
+                before_cut_ns: 0,
+                after_cut_ns: 800_000_000,
+            }),
+        ];
+        assert_eq!(
+            primary_clip_transition_stop_pad_ns(&timings, 0),
+            600_000_000
+        );
+        assert_eq!(
+            primary_clip_transition_stop_pad_ns(&timings, 1),
+            1_200_000_000
+        );
+        assert_eq!(primary_clip_transition_stop_pad_ns(&timings, 2), 0);
     }
 
     #[test]

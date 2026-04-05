@@ -7,6 +7,7 @@ use std::path::{Component, Path, PathBuf};
 use crate::model::clip::{Clip, ClipKind};
 use crate::model::project::{FrameRate, Marker, Project};
 use crate::model::track::{AudioRole, Track, TrackKind};
+use crate::model::transition::{OutgoingTransition, TransitionAlignment};
 
 use super::metadata::{
     clip_metadata_from_root, marker_metadata_from_root, project_metadata_from_root,
@@ -100,8 +101,8 @@ pub fn parse_otio_with_path(json: &str, otio_path: Option<&Path>) -> Result<Proj
                 OtioTrackChild::Transition(trans) => {
                     // Attach transition info to the preceding clip.
                     if let Some(prev) = track.clips.last_mut() {
-                        let kind_name = transition_metadata_from_root(&trans.metadata)
-                            .and_then(|us| us.transition_kind);
+                        let metadata = transition_metadata_from_root(&trans.metadata);
+                        let kind_name = metadata.as_ref().and_then(|us| us.transition_kind.clone());
                         let transition_name =
                             kind_name.unwrap_or_else(|| match trans.transition_type.as_str() {
                                 "SMPTE_Dissolve" => "cross_dissolve".into(),
@@ -109,8 +110,16 @@ pub fn parse_otio_with_path(json: &str, otio_path: Option<&Path>) -> Result<Proj
                             });
                         let in_ns = rational_time_to_ns(&trans.in_offset);
                         let out_ns = rational_time_to_ns(&trans.out_offset);
-                        prev.transition_after = transition_name;
-                        prev.transition_after_ns = in_ns + out_ns;
+                        let duration_ns = in_ns + out_ns;
+                        let alignment = metadata
+                            .as_ref()
+                            .and_then(|us| us.transition_alignment.as_deref())
+                            .and_then(TransitionAlignment::from_str)
+                            .unwrap_or_else(|| {
+                                TransitionAlignment::from_before_cut_duration(in_ns, duration_ns)
+                            });
+                        prev.outgoing_transition =
+                            OutgoingTransition::new(transition_name, duration_ns, alignment);
                     }
                 }
             }
@@ -693,8 +702,8 @@ mod tests {
         }"#;
         let p = parse_otio(json).unwrap();
         let a = &p.tracks[0].clips[0];
-        assert_eq!(a.transition_after, "cross_dissolve");
-        assert!(a.transition_after_ns > 0);
+        assert_eq!(a.outgoing_transition.kind, "cross_dissolve");
+        assert!(a.outgoing_transition.duration_ns > 0);
     }
 
     #[test]

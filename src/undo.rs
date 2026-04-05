@@ -1,5 +1,6 @@
 use crate::model::clip::Clip;
 use crate::model::project::Project;
+use crate::model::transition::OutgoingTransition;
 
 /// A reversible edit operation on the project.
 pub trait EditCommand {
@@ -1000,18 +1001,15 @@ impl EditCommand for MatchColorCommand {
 pub struct SetClipTransitionCommand {
     pub clip_id: String,
     pub track_id: String,
-    pub old_transition: String,
-    pub old_transition_ns: u64,
-    pub new_transition: String,
-    pub new_transition_ns: u64,
+    pub old_transition: OutgoingTransition,
+    pub new_transition: OutgoingTransition,
 }
 
 impl EditCommand for SetClipTransitionCommand {
     fn execute(&self, project: &mut Project) {
         if let Some(track) = project.track_mut(&self.track_id) {
             if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
-                clip.transition_after = self.new_transition.clone();
-                clip.transition_after_ns = self.new_transition_ns;
+                clip.outgoing_transition = self.new_transition.clone();
             }
         }
         project.dirty = true;
@@ -1019,8 +1017,7 @@ impl EditCommand for SetClipTransitionCommand {
     fn undo(&self, project: &mut Project) {
         if let Some(track) = project.track_mut(&self.track_id) {
             if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
-                clip.transition_after = self.old_transition.clone();
-                clip.transition_after_ns = self.old_transition_ns;
+                clip.outgoing_transition = self.old_transition.clone();
             }
         }
         project.dirty = true;
@@ -2059,8 +2056,11 @@ mod tests {
         right.source_in = 10;
         right.source_out = 20;
         right.timeline_start = 10;
-        right.transition_after = "cross_dissolve".to_string();
-        right.transition_after_ns = 500;
+        right.outgoing_transition = OutgoingTransition::new(
+            "cross_dissolve",
+            500,
+            crate::model::transition::TransitionAlignment::EndOnCut,
+        );
         track.add_clip(left.clone());
         track.add_clip(right.clone());
         project.tracks.push(track);
@@ -2068,8 +2068,7 @@ mod tests {
         let old_clips = vec![left.clone(), right.clone()];
         let mut merged = left.clone();
         merged.source_out = right.source_out;
-        merged.transition_after = right.transition_after.clone();
-        merged.transition_after_ns = right.transition_after_ns;
+        merged.outgoing_transition = right.outgoing_transition.clone();
         let new_clips = vec![merged.clone()];
 
         let cmd = JoinThroughEditCommand {

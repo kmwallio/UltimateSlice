@@ -8,6 +8,7 @@ pub mod export;
 pub mod frei0r_registry;
 pub mod ladspa_registry;
 pub mod mask_alpha;
+pub mod music_gen;
 pub mod player;
 pub mod probe_cache;
 pub mod program_player;
@@ -16,7 +17,6 @@ pub mod stt_cache;
 pub mod thumb_cache;
 pub mod thumbnail;
 pub mod title_font;
-pub mod music_gen;
 pub mod voiceover;
 pub mod waveform_cache;
 

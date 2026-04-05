@@ -145,6 +145,8 @@ pub(crate) struct UltimateSliceProjectOtioMetadata {
 pub(crate) struct UltimateSliceTransitionOtioMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) transition_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) transition_alignment: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
