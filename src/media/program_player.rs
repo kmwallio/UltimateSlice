@@ -3903,15 +3903,15 @@ impl ProgramPlayer {
 
     pub fn stop(&mut self) {
         self.invalidate_short_frame_cache("transport-stop");
-        self.teardown_slots();
+        // Don't teardown slots — keep decoder elements alive so the next
+        // play() can reuse them via seek instead of a cold rebuild.
+        // Tearing down + rebuilding causes a race where uridecodebin doesn't
+        // produce pads fast enough during the preroll window, leaving video
+        // unlinked (black screen with audio on the next play).
         self.teardown_prepreroll_sidecars();
-        let _ = self.pipeline.set_state(gst::State::Ready);
         let _ = self.audio_pipeline.set_state(gst::State::Paused);
         self.teardown_audio_multi_pipeline();
         self.apply_reverse_video_main_audio_ducking(None);
-        self.state = PlayerState::Stopped;
-        self.timeline_pos_ns = 0;
-        self.base_timeline_ns = 0;
         self.play_start = None;
         self.prewarmed_boundary_ns = None;
         self.last_seeked_frame_pos = None;
@@ -3925,12 +3925,16 @@ impl ProgramPlayer {
             peaks[1] = -60.0;
         }
         if self.clips.is_empty() && self.audio_clips.is_empty() {
+            self.state = PlayerState::Stopped;
             return;
         }
-        self.sync_audio_to(0);
-        // Keep stop lightweight; avoid paused rebuild/seek in the stop path.
-        let _ = self.pipeline.set_state(gst::State::Paused);
+        // Seek to 0 while keeping slots alive, then pause.
+        self.state = PlayerState::Paused;
+        let _ = self.seek(0);
         self.state = PlayerState::Stopped;
+        self.timeline_pos_ns = 0;
+        self.base_timeline_ns = 0;
+        self.jkl_rate = 0.0;
         self.update_drop_late_policy();
         self.update_slot_queue_policy();
     }
