@@ -124,6 +124,141 @@ Holds the currently-loaded source clip path and the user's in/out selection.
 
 ---
 
+## Compound Clips, Timelines & Coordinate Spaces
+
+### Data model
+
+A compound clip is a regular `Clip` with `kind = ClipKind::Compound` and an
+additional field `compound_tracks: Option<Vec<Track>>`. The internal tracks
+contain full `Clip` objects with their own keyframes, subtitles, effects, etc.
+
+When a compound clip is **created** from selected clips, each clip's
+`timeline_start` is rebased so the earliest clip starts at internal position 0.
+The compound clip is placed on the parent timeline at the original
+`earliest_start` with `source_in = 0` and `source_out = internal_duration`.
+
+### source_in windowing
+
+`source_in` / `source_out` define a **visible window** into the compound's
+internal timeline. A fresh compound has `source_in = 0`. After a razor cut,
+the right half gets `source_in = cut_offset` — only internal content from
+`source_in` onward is rendered.
+
+**Critical**: when flattening internal clips for preview or export, the
+compound's `source_in` must be accounted for:
+
+```
+absolute_position = compound.timeline_start + (inner.timeline_start - compound.source_in)
+```
+
+Do NOT use `saturating_sub(source_in)` on the compound offset — it underflows
+to 0 when the compound is moved earlier than its original position, leaving a
+gap. Instead, subtract `source_in` from each inner clip's position **after**
+windowing (which guarantees `inner.timeline_start >= source_in`):
+
+```rust
+// CORRECT — no underflow risk
+let rebased = compound_offset + (windowed.timeline_start - source_in);
+
+// WRONG — underflows when timeline_start < source_in
+let compound_offset = timeline_start.saturating_sub(source_in); // clamps to 0!
+let rebased = compound_offset + windowed.timeline_start;
+```
+
+### Windowing internal clips
+
+When flattening, internal clips outside the `[source_in, source_out]` window
+must be excluded or trimmed:
+
+1. Skip clips where `timeline_end() <= source_in` or `timeline_start >= source_out`
+2. Trim left edge: increase `source_in`, set `timeline_start = window_start`
+3. Trim right edge: decrease `source_out`
+4. **Rebase keyframes**: call `retain_keyframes_in_local_range(left_trim, duration - right_trim)`
+5. **Rebase subtitles**: call `retain_subtitles_in_local_range(left_trim, duration - right_trim)`
+
+Keyframes and subtitles are in **clip-local time** (0 = clip start on
+timeline). When the left edge is trimmed, their times must shift to stay
+aligned with the content they reference.
+
+### Three flattening paths
+
+The same windowing logic must be applied in all three consumer paths:
+
+| Path | File | Purpose |
+|------|------|---------|
+| `clip_to_program_clips()` | `src/ui/window.rs` | Preview playback |
+| `flatten_clips()` | `src/media/export.rs` | MP4/ffmpeg export |
+| `break_apart_compound()` | `src/ui/timeline/widget.rs` | Restore clips to parent |
+
+### Drill-down editing
+
+Double-clicking a compound enters drill-down mode via `compound_nav_stack`.
+`resolve_editing_tracks()` navigates the stack to return the innermost
+compound's internal tracks. Key rules:
+
+- **Content height** must include the 22px breadcrumb bar
+  (`+ st.breadcrumb_bar_height()`)
+- **Track Y positions** (`track_row_top_in_tracks`, `track_index_at_y`) must
+  offset by `breadcrumb_bar_height()` so hit testing aligns with drawing
+- **Playhead** must be translated to compound-internal time via
+  `editing_playhead_ns()`: `(playhead - compound.timeline_start) + compound.source_in`
+- **Razor cuts** inside compounds use the translated playhead
+
+### Clip lookup — always use recursive methods
+
+Clips inside compounds are invisible to direct `project.tracks` iteration.
+**Every** clip lookup must use the recursive `Project` methods:
+
+```rust
+// CORRECT — searches recursively through compound_tracks
+project.clip_ref(&clip_id)   // read
+project.clip_mut(&clip_id)   // write
+project.track_mut(&track_id) // also recursive
+
+// WRONG — only finds top-level clips
+project.tracks.iter().flat_map(|t| t.clips.iter()).find(|c| c.id == id)
+for track in &mut project.tracks { for clip in &mut track.clips { ... } }
+```
+
+This applies to inspector handlers, MCP tool handlers, undo commands, and any
+code that resolves a `clip_id` to a `&Clip` or `&mut Clip`.
+
+### Multicam clips
+
+Multicam clips store camera angles as `MulticamAngle` structs (source path +
+in/out), not full `Clip` objects. `multicam_segments()` returns angle switch
+segments relative to the **visible window** (accounting for `source_in`).
+When flattening, add `clip.source_in` to segment positions to map into the
+correct angle source offset.
+
+### Subtitle timing coordinate space
+
+Subtitle `start_ns` / `end_ns` and word-level timings are in **clip-local
+time** — 0 corresponds to `source_in` (the start of the visible clip content).
+They are NOT in absolute source-file time.
+
+When converting to timeline-absolute time for rendering or export:
+
+```rust
+// CORRECT — subtitles are already relative to clip start
+let abs_time = clip.timeline_start + (seg.start_ns as f64 / clip.speed) as u64;
+
+// WRONG — double-counts source_in
+let abs_time = clip.timeline_start + ((seg.start_ns - clip.source_in) / speed);
+// Also WRONG:
+let local_ns = clip_local_time + clip.source_in; // adds source_in
+if local_ns >= seg.start_ns { ... }              // compares absolute vs relative
+```
+
+### FCPXML round-trip for compound/multicam clips
+
+Compound and multicam clips have no `<asset>` in FCPXML `<resources>` (they
+have no source file). The parser creates a **synthetic asset** when
+`us:clip-kind` is `compound`, `multicam`, `title`, or `adjustment` so the
+clip is parsed instead of silently dropped.
+
+---
+
 ## Critical Rules for GTK4 + RefCell
 
 ### ⚠️ GTK4 C trampolines cannot unwind
