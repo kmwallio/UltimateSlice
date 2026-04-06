@@ -1884,7 +1884,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "set_subtitle_style",
-            "description": "Set subtitle display style for a clip (font, colors, highlight mode).",
+            "description": "Set subtitle display style for a clip (font, colors, base styles, highlight flags).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1895,8 +1895,20 @@ fn tools_list() -> Value {
                     "outline_width": { "type": "number", "description": "Outline width in pts" },
                     "bg_box": { "type": "boolean", "description": "Enable background box" },
                     "bg_box_color": { "type": "integer", "description": "Background box color as 0xRRGGBBAA" },
-                    "highlight_mode": { "type": "string", "enum": ["none", "bold", "color", "underline", "stroke"], "description": "Word highlight mode" },
-                    "highlight_color": { "type": "integer", "description": "Highlight color as 0xRRGGBBAA" }
+                    "highlight_mode": { "type": "string", "enum": ["none", "bold", "color", "underline", "stroke"], "description": "Legacy word highlight mode (prefer highlight flags)" },
+                    "highlight_color": { "type": "integer", "description": "Highlight color as 0xRRGGBBAA" },
+                    "bold": { "type": "boolean", "description": "Base style: bold for all subtitle text" },
+                    "italic": { "type": "boolean", "description": "Base style: italic for all subtitle text" },
+                    "underline": { "type": "boolean", "description": "Base style: underline for all subtitle text" },
+                    "shadow": { "type": "boolean", "description": "Base style: shadow for all subtitle text" },
+                    "highlight_bold": { "type": "boolean", "description": "Highlight flag: bold on active word" },
+                    "highlight_color_flag": { "type": "boolean", "description": "Highlight flag: color on active word" },
+                    "highlight_underline": { "type": "boolean", "description": "Highlight flag: underline on active word" },
+                    "highlight_stroke": { "type": "boolean", "description": "Highlight flag: stroke on active word" },
+                    "highlight_italic": { "type": "boolean", "description": "Highlight flag: italic on active word" },
+                    "highlight_background": { "type": "boolean", "description": "Highlight flag: background on active word" },
+                    "highlight_shadow": { "type": "boolean", "description": "Highlight flag: shadow on active word" },
+                    "bg_highlight_color": { "type": "integer", "description": "Background highlight color as 0xRRGGBBAA" }
                 },
                 "required": ["clip_id"]
             }
@@ -3123,6 +3135,18 @@ fn dispatch_tool_payload(
             bg_box_color: args["bg_box_color"].as_u64().map(|v| v as u32),
             highlight_mode: args["highlight_mode"].as_str().map(String::from),
             highlight_color: args["highlight_color"].as_u64().map(|v| v as u32),
+            bold: args["bold"].as_bool(),
+            italic: args["italic"].as_bool(),
+            underline: args["underline"].as_bool(),
+            shadow: args["shadow"].as_bool(),
+            highlight_bold: args["highlight_bold"].as_bool(),
+            highlight_color_flag: args["highlight_color_flag"].as_bool(),
+            highlight_underline: args["highlight_underline"].as_bool(),
+            highlight_stroke: args["highlight_stroke"].as_bool(),
+            highlight_italic: args["highlight_italic"].as_bool(),
+            highlight_background: args["highlight_background"].as_bool(),
+            highlight_shadow: args["highlight_shadow"].as_bool(),
+            bg_highlight_color: args["bg_highlight_color"].as_u64().map(|v| v as u32),
             reply: tx,
         },
         "export_srt" => McpCommand::ExportSrt {

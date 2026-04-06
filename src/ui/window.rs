@@ -5263,6 +5263,296 @@ pub fn build_window(
             });
     }
 
+    // Wire subtitle base style toggle buttons.
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let updating = inspector_view.updating.clone();
+        inspector_view.sub_bold_btn.connect_toggled(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let active = btn.is_active();
+            let selected = timeline_state.borrow().selected_clip_id.clone();
+            if let Some(ref clip_id) = selected {
+                let mut proj = project.borrow_mut();
+                if let Some(clip) = proj.clip_mut(clip_id) {
+                    clip.subtitle_bold = active;
+                }
+                proj.dirty = true;
+                drop(proj);
+                on_project_changed();
+            }
+        });
+    }
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let updating = inspector_view.updating.clone();
+        inspector_view.sub_italic_btn.connect_toggled(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let active = btn.is_active();
+            let selected = timeline_state.borrow().selected_clip_id.clone();
+            if let Some(ref clip_id) = selected {
+                let mut proj = project.borrow_mut();
+                if let Some(clip) = proj.clip_mut(clip_id) {
+                    clip.subtitle_italic = active;
+                }
+                proj.dirty = true;
+                drop(proj);
+                on_project_changed();
+            }
+        });
+    }
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let updating = inspector_view.updating.clone();
+        inspector_view
+            .sub_underline_btn
+            .connect_toggled(move |btn| {
+                if *updating.borrow() {
+                    return;
+                }
+                let active = btn.is_active();
+                let selected = timeline_state.borrow().selected_clip_id.clone();
+                if let Some(ref clip_id) = selected {
+                    let mut proj = project.borrow_mut();
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.subtitle_underline = active;
+                    }
+                    proj.dirty = true;
+                    drop(proj);
+                    on_project_changed();
+                }
+            });
+    }
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let updating = inspector_view.updating.clone();
+        inspector_view.sub_shadow_btn.connect_toggled(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let active = btn.is_active();
+            let selected = timeline_state.borrow().selected_clip_id.clone();
+            if let Some(ref clip_id) = selected {
+                let mut proj = project.borrow_mut();
+                if let Some(clip) = proj.clip_mut(clip_id) {
+                    clip.subtitle_shadow = active;
+                }
+                proj.dirty = true;
+                drop(proj);
+                on_project_changed();
+            }
+        });
+    }
+
+    // Wire subtitle highlight flag checkboxes.
+    // Helper macro-style: each checkbox sets one flag in subtitle_highlight_flags.
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let updating = inspector_view.updating.clone();
+        let hl_color_row = inspector_view.subtitle_highlight_color_row.clone();
+        let bg_hl_color_row = inspector_view.subtitle_bg_highlight_color_row.clone();
+        inspector_view.hl_bold_check.connect_toggled(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let active = btn.is_active();
+            let selected = timeline_state.borrow().selected_clip_id.clone();
+            if let Some(ref clip_id) = selected {
+                let mut proj = project.borrow_mut();
+                if let Some(clip) = proj.clip_mut(clip_id) {
+                    clip.subtitle_highlight_flags.bold = active;
+                }
+                let _ = &hl_color_row;
+                let _ = &bg_hl_color_row;
+                proj.dirty = true;
+                drop(proj);
+                on_project_changed();
+            }
+        });
+    }
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let updating = inspector_view.updating.clone();
+        inspector_view.hl_color_check.connect_toggled(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let active = btn.is_active();
+            let selected = timeline_state.borrow().selected_clip_id.clone();
+            if let Some(ref clip_id) = selected {
+                let mut proj = project.borrow_mut();
+                if let Some(clip) = proj.clip_mut(clip_id) {
+                    clip.subtitle_highlight_flags.color = active;
+                }
+                proj.dirty = true;
+                drop(proj);
+                on_project_changed();
+            }
+        });
+    }
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let updating = inspector_view.updating.clone();
+        inspector_view
+            .hl_underline_check
+            .connect_toggled(move |btn| {
+                if *updating.borrow() {
+                    return;
+                }
+                let active = btn.is_active();
+                let selected = timeline_state.borrow().selected_clip_id.clone();
+                if let Some(ref clip_id) = selected {
+                    let mut proj = project.borrow_mut();
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.subtitle_highlight_flags.underline = active;
+                    }
+                    proj.dirty = true;
+                    drop(proj);
+                    on_project_changed();
+                }
+            });
+    }
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let updating = inspector_view.updating.clone();
+        inspector_view.hl_stroke_check.connect_toggled(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let active = btn.is_active();
+            let selected = timeline_state.borrow().selected_clip_id.clone();
+            if let Some(ref clip_id) = selected {
+                let mut proj = project.borrow_mut();
+                if let Some(clip) = proj.clip_mut(clip_id) {
+                    clip.subtitle_highlight_flags.stroke = active;
+                }
+                proj.dirty = true;
+                drop(proj);
+                on_project_changed();
+            }
+        });
+    }
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let updating = inspector_view.updating.clone();
+        inspector_view
+            .hl_italic_check
+            .connect_toggled(move |btn| {
+                if *updating.borrow() {
+                    return;
+                }
+                let active = btn.is_active();
+                let selected = timeline_state.borrow().selected_clip_id.clone();
+                if let Some(ref clip_id) = selected {
+                    let mut proj = project.borrow_mut();
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.subtitle_highlight_flags.italic = active;
+                    }
+                    proj.dirty = true;
+                    drop(proj);
+                    on_project_changed();
+                }
+            });
+    }
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let updating = inspector_view.updating.clone();
+        inspector_view.hl_bg_check.connect_toggled(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let active = btn.is_active();
+            let selected = timeline_state.borrow().selected_clip_id.clone();
+            if let Some(ref clip_id) = selected {
+                let mut proj = project.borrow_mut();
+                if let Some(clip) = proj.clip_mut(clip_id) {
+                    clip.subtitle_highlight_flags.background = active;
+                }
+                proj.dirty = true;
+                drop(proj);
+                on_project_changed();
+            }
+        });
+    }
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let updating = inspector_view.updating.clone();
+        inspector_view
+            .hl_shadow_check
+            .connect_toggled(move |btn| {
+                if *updating.borrow() {
+                    return;
+                }
+                let active = btn.is_active();
+                let selected = timeline_state.borrow().selected_clip_id.clone();
+                if let Some(ref clip_id) = selected {
+                    let mut proj = project.borrow_mut();
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.subtitle_highlight_flags.shadow = active;
+                    }
+                    proj.dirty = true;
+                    drop(proj);
+                    on_project_changed();
+                }
+            });
+    }
+
+    // Wire subtitle background highlight color button.
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let updating = inspector_view.updating.clone();
+        inspector_view
+            .subtitle_bg_highlight_color_btn
+            .connect_notify_local(Some("rgba"), move |btn, _| {
+                if *updating.borrow() {
+                    return;
+                }
+                let rgba = btn.rgba();
+                let r = (rgba.red() * 255.0) as u32;
+                let g = (rgba.green() * 255.0) as u32;
+                let b = (rgba.blue() * 255.0) as u32;
+                let a = (rgba.alpha() * 255.0) as u32;
+                let color = (r << 24) | (g << 16) | (b << 8) | a;
+                let selected = timeline_state.borrow().selected_clip_id.clone();
+                if let Some(ref clip_id) = selected {
+                    let mut proj = project.borrow_mut();
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.subtitle_bg_highlight_color = color;
+                    }
+                    proj.dirty = true;
+                    drop(proj);
+                    on_project_changed();
+                }
+            });
+    }
+
     // Wire subtitle word window slider.
     {
         let project = project.clone();
@@ -5537,6 +5827,15 @@ pub fn build_window(
                                 highlight_color: clip.subtitle_highlight_color,
                                 position_y: clip.subtitle_position_y,
                                 word_window_secs: clip.subtitle_word_window_secs,
+                                subtitle_bold: clip.subtitle_bold,
+                                subtitle_italic: clip.subtitle_italic,
+                                subtitle_underline: clip.subtitle_underline,
+                                subtitle_shadow: clip.subtitle_shadow,
+                                subtitle_shadow_color: clip.subtitle_shadow_color,
+                                subtitle_shadow_offset_x: clip.subtitle_shadow_offset_x,
+                                subtitle_shadow_offset_y: clip.subtitle_shadow_offset_y,
+                                highlight_flags: clip.subtitle_highlight_flags,
+                                bg_highlight_color: clip.subtitle_bg_highlight_color,
                             });
                         paste_btn.set_sensitive(true);
                     }
@@ -5568,6 +5867,15 @@ pub fn build_window(
                         clip.subtitle_highlight_color = style.highlight_color;
                         clip.subtitle_position_y = style.position_y;
                         clip.subtitle_word_window_secs = style.word_window_secs;
+                        clip.subtitle_bold = style.subtitle_bold;
+                        clip.subtitle_italic = style.subtitle_italic;
+                        clip.subtitle_underline = style.subtitle_underline;
+                        clip.subtitle_shadow = style.subtitle_shadow;
+                        clip.subtitle_shadow_color = style.subtitle_shadow_color;
+                        clip.subtitle_shadow_offset_x = style.subtitle_shadow_offset_x;
+                        clip.subtitle_shadow_offset_y = style.subtitle_shadow_offset_y;
+                        clip.subtitle_highlight_flags = style.highlight_flags;
+                        clip.subtitle_bg_highlight_color = style.bg_highlight_color;
                     }
                     proj.dirty = true;
                     drop(proj);
@@ -8195,8 +8503,7 @@ pub fn build_window(
                                             (clip.subtitle_word_window_secs as usize).max(2);
                                         let mut word_displays = Vec::new();
                                         if !seg.words.is_empty()
-                                            && clip.subtitle_highlight_mode
-                                                != crate::model::clip::SubtitleHighlightMode::None
+                                            && !clip.subtitle_highlight_flags.is_none()
                                         {
                                             // Find which word is active.
                                             let active_idx = seg.words.iter().position(|w| {
@@ -8217,6 +8524,8 @@ pub fn build_window(
                                             }
                                         }
 
+                                        let sc = clip.subtitle_shadow_color;
+                                        let bhc = clip.subtitle_bg_highlight_color;
                                         lines.push(crate::ui::program_monitor::SubtitleLine {
                                             words: word_displays,
                                             text: seg.text.clone(),
@@ -8232,7 +8541,7 @@ pub fn build_window(
                                                 ((hc >> 8) & 0xFF) as f64 / 255.0,
                                                 (hc & 0xFF) as f64 / 255.0,
                                             ),
-                                            highlight_mode: clip.subtitle_highlight_mode,
+                                            highlight_flags: clip.subtitle_highlight_flags,
                                             outline_color: (
                                                 ((oc >> 24) & 0xFF) as f64 / 255.0,
                                                 ((oc >> 16) & 0xFF) as f64 / 255.0,
@@ -8249,6 +8558,26 @@ pub fn build_window(
                                             ),
                                             font_desc,
                                             position_y: clip.subtitle_position_y,
+                                            subtitle_bold: clip.subtitle_bold,
+                                            subtitle_italic: clip.subtitle_italic,
+                                            subtitle_underline: clip.subtitle_underline,
+                                            subtitle_shadow: clip.subtitle_shadow,
+                                            subtitle_shadow_color: (
+                                                ((sc >> 24) & 0xFF) as f64 / 255.0,
+                                                ((sc >> 16) & 0xFF) as f64 / 255.0,
+                                                ((sc >> 8) & 0xFF) as f64 / 255.0,
+                                                (sc & 0xFF) as f64 / 255.0,
+                                            ),
+                                            subtitle_shadow_offset: (
+                                                clip.subtitle_shadow_offset_x,
+                                                clip.subtitle_shadow_offset_y,
+                                            ),
+                                            bg_highlight_color: (
+                                                ((bhc >> 24) & 0xFF) as f64 / 255.0,
+                                                ((bhc >> 16) & 0xFF) as f64 / 255.0,
+                                                ((bhc >> 8) & 0xFF) as f64 / 255.0,
+                                                (bhc & 0xFF) as f64 / 255.0,
+                                            ),
                                         });
                                         break;
                                     }
@@ -18012,6 +18341,18 @@ fn handle_mcp_command(
             bg_box_color,
             highlight_mode,
             highlight_color,
+            bold,
+            italic,
+            underline,
+            shadow,
+            highlight_bold,
+            highlight_color_flag,
+            highlight_underline,
+            highlight_stroke,
+            highlight_italic,
+            highlight_background,
+            highlight_shadow,
+            bg_highlight_color,
             reply,
         } => {
             let mut proj = project.borrow_mut();
@@ -18034,6 +18375,7 @@ fn handle_mcp_command(
                 if let Some(c) = bg_box_color {
                     clip.subtitle_bg_box_color = c;
                 }
+                // Legacy highlight_mode support: convert to flags
                 if let Some(mode) = highlight_mode {
                     clip.subtitle_highlight_mode = match mode.as_str() {
                         "bold" => crate::model::clip::SubtitleHighlightMode::Bold,
@@ -18042,9 +18384,52 @@ fn handle_mcp_command(
                         "stroke" => crate::model::clip::SubtitleHighlightMode::Stroke,
                         _ => crate::model::clip::SubtitleHighlightMode::None,
                     };
+                    // Also set flags from legacy mode for consistency
+                    clip.subtitle_highlight_flags =
+                        crate::model::clip::SubtitleHighlightFlags::from_legacy(
+                            clip.subtitle_highlight_mode,
+                        );
                 }
                 if let Some(c) = highlight_color {
                     clip.subtitle_highlight_color = c;
+                }
+                // New base style fields
+                if let Some(v) = bold {
+                    clip.subtitle_bold = v;
+                }
+                if let Some(v) = italic {
+                    clip.subtitle_italic = v;
+                }
+                if let Some(v) = underline {
+                    clip.subtitle_underline = v;
+                }
+                if let Some(v) = shadow {
+                    clip.subtitle_shadow = v;
+                }
+                // New highlight flag fields
+                if let Some(v) = highlight_bold {
+                    clip.subtitle_highlight_flags.bold = v;
+                }
+                if let Some(v) = highlight_color_flag {
+                    clip.subtitle_highlight_flags.color = v;
+                }
+                if let Some(v) = highlight_underline {
+                    clip.subtitle_highlight_flags.underline = v;
+                }
+                if let Some(v) = highlight_stroke {
+                    clip.subtitle_highlight_flags.stroke = v;
+                }
+                if let Some(v) = highlight_italic {
+                    clip.subtitle_highlight_flags.italic = v;
+                }
+                if let Some(v) = highlight_background {
+                    clip.subtitle_highlight_flags.background = v;
+                }
+                if let Some(v) = highlight_shadow {
+                    clip.subtitle_highlight_flags.shadow = v;
+                }
+                if let Some(c) = bg_highlight_color {
+                    clip.subtitle_bg_highlight_color = c;
                 }
                 proj.dirty = true;
                 drop(proj);

@@ -265,7 +265,7 @@ Features:
 - Track metadata (muted, locked, soloed, audio role, ducking)
 - UltimateSlice OTIO metadata currently preserves the supported clip metadata set, including core clip settings (`speed`, `reverse`, `opacity`, `volume`, `pan`, `brightness`, `contrast`, `saturation`), transform/compositing settings (`scale`, `position_x`, `position_y`, `rotate`, `flip_h`, `flip_v`, `crop_left`, `crop_right`, `crop_top`, `crop_bottom`, `blend_mode`), and core animated lanes (`opacity_keyframes`, `scale_keyframes`, `position_x_keyframes`, `position_y_keyframes`, `rotate_keyframes`)
 - Title clips exported with `MissingReference`, plus title styling metadata (text, font, colors, outline, shadow, box, template, secondary text, and clip background color)
-- Subtitle-bearing clips preserve subtitle segments/word timing plus subtitle styling metadata (language, font/colors, outline, background box, highlight mode/color, word window, and vertical position)
+- Subtitle-bearing clips preserve subtitle segments/word timing plus subtitle styling metadata (language, font/colors, outline, background box, highlight flags, highlight color, BG highlight color, base styles, word window, and vertical position)
 - Adjustment clips also export as `MissingReference`
 
 **Import:** Open `.otio` files via the main **Open…** action in the header bar or Welcome screen (or MCP `open_otio` tool). OTIO files from other tools are imported with default clip properties; UltimateSlice metadata is restored when present. Relative OTIO media references are resolved against the opened `.otio` file location. UltimateSlice also accepts older flat OTIO metadata from previous app builds and upgrades it to the current versioned OTIO metadata contract on save.

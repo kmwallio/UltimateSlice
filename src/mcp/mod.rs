@@ -758,6 +758,20 @@ pub enum McpCommand {
         bg_box_color: Option<u32>,
         highlight_mode: Option<String>,
         highlight_color: Option<u32>,
+        // New base style fields
+        bold: Option<bool>,
+        italic: Option<bool>,
+        underline: Option<bool>,
+        shadow: Option<bool>,
+        // New highlight flag fields
+        highlight_bold: Option<bool>,
+        highlight_color_flag: Option<bool>,
+        highlight_underline: Option<bool>,
+        highlight_stroke: Option<bool>,
+        highlight_italic: Option<bool>,
+        highlight_background: Option<bool>,
+        highlight_shadow: Option<bool>,
+        bg_highlight_color: Option<u32>,
         reply: SyncSender<Value>,
     },
     ExportSrt {

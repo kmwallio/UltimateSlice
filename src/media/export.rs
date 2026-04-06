@@ -2278,8 +2278,6 @@ fn build_subtitle_filter_composited(
     style_clip: &crate::model::clip::Clip,
     out_h: u32,
 ) -> (String, Option<tempfile::NamedTempFile>) {
-    use crate::model::clip::SubtitleHighlightMode;
-
     if segments.is_empty() {
         return (String::new(), None);
     }
@@ -2287,8 +2285,8 @@ fn build_subtitle_filter_composited(
     let scale_factor = out_h as f64 / TITLE_REFERENCE_HEIGHT;
     let font_style = resolve_subtitle_font_style(&style_clip.subtitle_font);
     let scaled_size = (font_style.size_points * (4.0 / 3.0) * scale_factor).round() as u32;
-    let ass_bold = ass_bool(font_style.bold);
-    let ass_italic = ass_bool(font_style.italic);
+    let ass_bold = ass_bool(font_style.bold || style_clip.subtitle_bold);
+    let ass_italic = ass_bool(font_style.italic || style_clip.subtitle_italic);
 
     let rgba = style_clip.subtitle_color;
     let r = ((rgba >> 24) & 0xFF) as u8;
@@ -2334,19 +2332,19 @@ fn build_subtitle_filter_composited(
         ));
     }
 
-    let highlight_mode = style_clip.subtitle_highlight_mode;
+    let flags = &style_clip.subtitle_highlight_flags;
     let has_words = style_clip
         .subtitle_segments
         .iter()
         .any(|s| !s.words.is_empty());
-    let use_karaoke = highlight_mode != SubtitleHighlightMode::None && has_words;
+    let use_karaoke = !flags.is_none() && has_words;
 
     // Always use the ASS path for subtitle burn-in.  The SRT+force_style path
     // is unreliable: libass silently drops subtitles when certain force_style
     // parameters (e.g. MarginV at high values) interact with BorderStyle=3.
     // ASS embeds all styling inline, avoiding the issue entirely.
     {
-        let _ = use_karaoke; // suppress unused warning
+        let _ = use_karaoke;
         // Write a proper ASS file with embedded styles.
         let mut sub_file = match tempfile::Builder::new().suffix(".ass").tempfile() {
             Ok(f) => f,
@@ -2386,7 +2384,8 @@ fn build_subtitle_filter_composited(
                 outline_color = format!("&H00{obb:02X}{obg:02X}{obr:02X}");
                 outline_w = (style_clip.subtitle_outline_width * scale_factor).round() as u32;
             }
-            let mut shadow_depth = 0u32;
+            let mut shadow_depth = if style_clip.subtitle_shadow { 2u32 } else { 0u32 };
+            let ass_underline = if style_clip.subtitle_underline { -1i32 } else { 0i32 };
             if style_clip.subtitle_bg_box {
                 let bc = style_clip.subtitle_bg_box_color;
                 let bbr = ((bc >> 24) & 0xFF) as u8;
@@ -2395,18 +2394,18 @@ fn build_subtitle_filter_composited(
                 let bba = (bc & 0xFF) as u8;
                 let ass_alpha = 255 - bba;
                 back_color = format!("&H{ass_alpha:02X}{bbb:02X}{bbg:02X}{bbr:02X}");
-                if highlight_mode == SubtitleHighlightMode::Stroke {
+                if flags.stroke {
                     // Stroke mode needs BorderStyle=1 for outline overrides to work.
                     // Simulate bg box via shadow (BackColour + Shadow depth).
                     border_style = 1;
-                    shadow_depth = 4;
+                    shadow_depth = shadow_depth.max(4);
                 } else {
                     border_style = 3;
                 }
             }
             let _ = writeln!(
                 sub_file,
-                "Style: Default,{font_name},{scaled_size},{ass_primary},&H000000FF,{outline_color},{back_color},{ass_bold},{ass_italic},0,0,100,100,0,0,{border_style},{outline_w},{shadow_depth},{ass_align},10,10,{margin_v},1",
+                "Style: Default,{font_name},{scaled_size},{ass_primary},&H000000FF,{outline_color},{back_color},{ass_bold},{ass_italic},{ass_underline},0,100,100,0,0,{border_style},{outline_w},{shadow_depth},{ass_align},10,10,{margin_v},1",
                 font_name = font_style.family,
                 ass_bold = ass_bold,
                 ass_italic = ass_italic
@@ -2453,34 +2452,32 @@ fn build_subtitle_filter_composited(
                             text.push(' ');
                         }
                         if group_start + owi == wi {
-                            match highlight_mode {
-                                SubtitleHighlightMode::Color => {
-                                    text.push_str(&format!("{{\\c&H{hb:02X}{hg:02X}{hr:02X}&}}"));
-                                    text.push_str(&ow.text);
-                                    text.push_str(&format!("{{\\c{ass_primary}&}}"));
-                                }
-                                SubtitleHighlightMode::Bold => {
-                                    text.push_str("{\\b1}");
-                                    text.push_str(&ow.text);
-                                    text.push_str("{\\b0}");
-                                }
-                                SubtitleHighlightMode::Underline => {
-                                    text.push_str("{\\u1}");
-                                    text.push_str(&ow.text);
-                                    text.push_str("{\\u0}");
-                                }
-                                SubtitleHighlightMode::Stroke => {
-                                    // Switch to outline border style, set outline color
-                                    // to highlight color with thick border, then restore.
-                                    text.push_str(&format!(
-                                        "{{\\bord4\\3c&H{hb:02X}{hg:02X}{hr:02X}&}}"
-                                    ));
-                                    text.push_str(&ow.text);
-                                    text.push_str(&format!(
-                                        "{{\\bord{outline_w}\\3c{outline_color}&}}"
-                                    ));
-                                }
-                                SubtitleHighlightMode::None => text.push_str(&ow.text),
+                            // Build combined ASS override tags from highlight flags.
+                            let mut overrides = String::new();
+                            if flags.bold { overrides.push_str("\\b1"); }
+                            if flags.italic { overrides.push_str("\\i1"); }
+                            if flags.underline { overrides.push_str("\\u1"); }
+                            if flags.color {
+                                overrides.push_str(&format!("\\c&H{hb:02X}{hg:02X}{hr:02X}&"));
+                            }
+                            if flags.stroke {
+                                overrides.push_str(&format!("\\bord4\\3c&H{hb:02X}{hg:02X}{hr:02X}&"));
+                            }
+                            if flags.background {
+                                let bhc = style_clip.subtitle_bg_highlight_color;
+                                let bhr = ((bhc >> 24) & 0xFF) as u8;
+                                let bhg = ((bhc >> 16) & 0xFF) as u8;
+                                let bhb = ((bhc >> 8) & 0xFF) as u8;
+                                overrides.push_str(&format!("\\4c&H{bhb:02X}{bhg:02X}{bhr:02X}&\\shad2"));
+                            }
+                            if flags.shadow { overrides.push_str("\\shad2"); }
+
+                            if overrides.is_empty() {
+                                text.push_str(&ow.text);
+                            } else {
+                                text.push_str(&format!("{{{overrides}}}"));
+                                text.push_str(&ow.text);
+                                text.push_str("{\\r}");
                             }
                         } else {
                             text.push_str(&ow.text);

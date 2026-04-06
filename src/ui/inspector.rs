@@ -21,6 +21,15 @@ pub struct SubtitleStyleClipboard {
     pub highlight_color: u32,
     pub position_y: f64,
     pub word_window_secs: f64,
+    pub subtitle_bold: bool,
+    pub subtitle_italic: bool,
+    pub subtitle_underline: bool,
+    pub subtitle_shadow: bool,
+    pub subtitle_shadow_color: u32,
+    pub subtitle_shadow_offset_x: f64,
+    pub subtitle_shadow_offset_y: f64,
+    pub highlight_flags: crate::model::clip::SubtitleHighlightFlags,
+    pub bg_highlight_color: u32,
 }
 use crate::model::project::{FrameRate, Project};
 use gdk4;
@@ -335,6 +344,19 @@ pub struct InspectorView {
     pub subtitle_font_btn: gtk4::Button,
     pub subtitle_color_btn: gtk4::ColorDialogButton,
     pub subtitle_highlight_dropdown: gtk4::DropDown,
+    pub sub_bold_btn: gtk4::ToggleButton,
+    pub sub_italic_btn: gtk4::ToggleButton,
+    pub sub_underline_btn: gtk4::ToggleButton,
+    pub sub_shadow_btn: gtk4::ToggleButton,
+    pub hl_bold_check: CheckButton,
+    pub hl_color_check: CheckButton,
+    pub hl_underline_check: CheckButton,
+    pub hl_stroke_check: CheckButton,
+    pub hl_italic_check: CheckButton,
+    pub hl_bg_check: CheckButton,
+    pub hl_shadow_check: CheckButton,
+    pub subtitle_bg_highlight_color_btn: gtk4::ColorDialogButton,
+    pub subtitle_bg_highlight_color_row: GBox,
     pub subtitle_highlight_color_btn: gtk4::ColorDialogButton,
     pub subtitle_highlight_color_row: GBox,
     pub subtitle_word_window_slider: Scale,
@@ -1538,20 +1560,33 @@ impl InspectorView {
                 let a = (rgba & 0xFF) as f32 / 255.0;
                 self.subtitle_color_btn
                     .set_rgba(&gdk4::RGBA::new(r, g, b, a));
-                let hl_idx = match c.subtitle_highlight_mode {
-                    crate::model::clip::SubtitleHighlightMode::None => 0,
-                    crate::model::clip::SubtitleHighlightMode::Bold => 1,
-                    crate::model::clip::SubtitleHighlightMode::Color => 2,
-                    crate::model::clip::SubtitleHighlightMode::Underline => 3,
-                    crate::model::clip::SubtitleHighlightMode::Stroke => 4,
-                };
-                self.subtitle_highlight_dropdown.set_selected(hl_idx);
+                // Sync base style toggles
+                self.sub_bold_btn.set_active(c.subtitle_bold);
+                self.sub_italic_btn.set_active(c.subtitle_italic);
+                self.sub_underline_btn.set_active(c.subtitle_underline);
+                self.sub_shadow_btn.set_active(c.subtitle_shadow);
+
+                // Sync highlight flags checkboxes
+                let flags = &c.subtitle_highlight_flags;
+                self.hl_bold_check.set_active(flags.bold);
+                self.hl_color_check.set_active(flags.color);
+                self.hl_underline_check.set_active(flags.underline);
+                self.hl_stroke_check.set_active(flags.stroke);
+                self.hl_italic_check.set_active(flags.italic);
+                self.hl_bg_check.set_active(flags.background);
+                self.hl_shadow_check.set_active(flags.shadow);
+
+                // Show highlight color row when color or stroke is checked
                 self.subtitle_highlight_color_row
-                    .set_visible(hl_idx == 2 || hl_idx == 4);
+                    .set_visible(flags.color || flags.stroke);
+                // Show bg highlight color row when background is checked
+                self.subtitle_bg_highlight_color_row
+                    .set_visible(flags.background);
+
                 self.subtitle_word_window_slider
                     .set_value(c.subtitle_word_window_secs);
-                // Show word window slider only when a highlight mode is active.
-                self.subtitle_word_window_slider.set_visible(hl_idx != 0);
+                // Show word window slider only when any highlight flag is set.
+                self.subtitle_word_window_slider.set_visible(!flags.is_none());
                 self.subtitle_position_slider
                     .set_value(c.subtitle_position_y);
                 let oc = c.subtitle_outline_color;
@@ -1571,7 +1606,7 @@ impl InspectorView {
                 ));
                 self.subtitle_export_srt_btn
                     .set_sensitive(!c.subtitle_segments.is_empty());
-                if hl_idx == 2 || hl_idx == 4 {
+                if flags.color || flags.stroke {
                     let hc = c.subtitle_highlight_color;
                     let hr = ((hc >> 24) & 0xFF) as f32 / 255.0;
                     let hg = ((hc >> 16) & 0xFF) as f32 / 255.0;
@@ -1579,6 +1614,15 @@ impl InspectorView {
                     let ha = (hc & 0xFF) as f32 / 255.0;
                     self.subtitle_highlight_color_btn
                         .set_rgba(&gdk4::RGBA::new(hr, hg, hb, ha));
+                }
+                if flags.background {
+                    let bhc = c.subtitle_bg_highlight_color;
+                    let bhr = ((bhc >> 24) & 0xFF) as f32 / 255.0;
+                    let bhg = ((bhc >> 16) & 0xFF) as f32 / 255.0;
+                    let bhb = ((bhc >> 8) & 0xFF) as f32 / 255.0;
+                    let bha = (bhc & 0xFF) as f32 / 255.0;
+                    self.subtitle_bg_highlight_color_btn
+                        .set_rgba(&gdk4::RGBA::new(bhr, bhg, bhb, bha));
                 }
                 self.mask_section
                     .set_visible(is_video || is_image || is_title_clip);
@@ -3064,6 +3108,22 @@ pub fn build_inspector(
     sync_subtitle_font_button(&subtitle_font_btn, "Sans Bold 24");
     subtitle_style_box.append(&subtitle_font_btn);
 
+    // Base style toggle buttons
+    let subtitle_style_row = GBox::new(Orientation::Horizontal, 4);
+    let sub_bold_btn = gtk4::ToggleButton::with_label("B");
+    sub_bold_btn.set_tooltip_text(Some("Bold"));
+    let sub_italic_btn = gtk4::ToggleButton::with_label("I");
+    sub_italic_btn.set_tooltip_text(Some("Italic"));
+    let sub_underline_btn = gtk4::ToggleButton::with_label("U");
+    sub_underline_btn.set_tooltip_text(Some("Underline"));
+    let sub_shadow_btn = gtk4::ToggleButton::with_label("S");
+    sub_shadow_btn.set_tooltip_text(Some("Shadow"));
+    subtitle_style_row.append(&sub_bold_btn);
+    subtitle_style_row.append(&sub_italic_btn);
+    subtitle_style_row.append(&sub_underline_btn);
+    subtitle_style_row.append(&sub_shadow_btn);
+    subtitle_style_box.append(&subtitle_style_row);
+
     row_label(&subtitle_style_box, "Text Color");
     let sub_color_dialog = gtk4::ColorDialog::new();
     sub_color_dialog.set_with_alpha(true);
@@ -3072,11 +3132,33 @@ pub fn build_inspector(
     subtitle_style_box.append(&subtitle_color_btn);
 
     row_label(&subtitle_style_box, "Word Highlight");
+    // Keep the dropdown for legacy compat (hidden), but drive UI from checkboxes.
     let highlight_model = gtk4::StringList::new(&["None", "Bold", "Color", "Underline", "Stroke"]);
     let subtitle_highlight_dropdown =
         gtk4::DropDown::new(Some(highlight_model), Option::<gtk4::Expression>::None);
     subtitle_highlight_dropdown.set_selected(0);
-    subtitle_style_box.append(&subtitle_highlight_dropdown);
+    subtitle_highlight_dropdown.set_visible(false);
+
+    let hl_checks_box = GBox::new(Orientation::Horizontal, 4);
+    hl_checks_box.set_halign(gtk::Align::Start);
+    let hl_bold_check = CheckButton::with_label("Bold");
+    let hl_color_check = CheckButton::with_label("Color");
+    let hl_underline_check = CheckButton::with_label("Underline");
+    let hl_stroke_check = CheckButton::with_label("Stroke");
+    hl_checks_box.append(&hl_bold_check);
+    hl_checks_box.append(&hl_color_check);
+    hl_checks_box.append(&hl_underline_check);
+    hl_checks_box.append(&hl_stroke_check);
+    let hl_checks_box2 = GBox::new(Orientation::Horizontal, 4);
+    hl_checks_box2.set_halign(gtk::Align::Start);
+    let hl_italic_check = CheckButton::with_label("Italic");
+    let hl_bg_check = CheckButton::with_label("Background");
+    let hl_shadow_check = CheckButton::with_label("Shadow");
+    hl_checks_box2.append(&hl_italic_check);
+    hl_checks_box2.append(&hl_bg_check);
+    hl_checks_box2.append(&hl_shadow_check);
+    subtitle_style_box.append(&hl_checks_box);
+    subtitle_style_box.append(&hl_checks_box2);
 
     let subtitle_highlight_color_row = GBox::new(Orientation::Vertical, 4);
     row_label(&subtitle_highlight_color_row, "Highlight Color");
@@ -3086,6 +3168,16 @@ pub fn build_inspector(
     subtitle_highlight_color_btn.set_rgba(&gdk4::RGBA::new(1.0, 1.0, 0.0, 1.0));
     subtitle_highlight_color_row.append(&subtitle_highlight_color_btn);
     subtitle_style_box.append(&subtitle_highlight_color_row);
+
+    let subtitle_bg_highlight_color_row = GBox::new(Orientation::Vertical, 4);
+    row_label(&subtitle_bg_highlight_color_row, "BG Highlight Color");
+    let sub_bg_hl_color_dialog = gtk4::ColorDialog::new();
+    sub_bg_hl_color_dialog.set_with_alpha(true);
+    let subtitle_bg_highlight_color_btn = gtk4::ColorDialogButton::new(Some(sub_bg_hl_color_dialog));
+    subtitle_bg_highlight_color_btn.set_rgba(&gdk4::RGBA::new(1.0, 1.0, 0.0, 0.5));
+    subtitle_bg_highlight_color_row.append(&subtitle_bg_highlight_color_btn);
+    subtitle_bg_highlight_color_row.set_visible(false);
+    subtitle_style_box.append(&subtitle_bg_highlight_color_row);
 
     let subtitle_word_window_slider = Scale::with_range(Orientation::Horizontal, 2.0, 10.0, 1.0);
     subtitle_word_window_slider.set_value(4.0);
@@ -8227,6 +8319,19 @@ pub fn build_inspector(
         subtitle_font_btn,
         subtitle_color_btn,
         subtitle_highlight_dropdown,
+        sub_bold_btn,
+        sub_italic_btn,
+        sub_underline_btn,
+        sub_shadow_btn,
+        hl_bold_check,
+        hl_color_check,
+        hl_underline_check,
+        hl_stroke_check,
+        hl_italic_check,
+        hl_bg_check,
+        hl_shadow_check,
+        subtitle_bg_highlight_color_btn,
+        subtitle_bg_highlight_color_row,
         subtitle_highlight_color_btn,
         subtitle_highlight_color_row,
         subtitle_word_window_slider,

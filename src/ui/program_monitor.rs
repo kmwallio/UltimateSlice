@@ -23,8 +23,8 @@ pub struct SubtitleLine {
     pub color: (f64, f64, f64, f64),
     /// Highlight color for the active word.
     pub highlight_color: (f64, f64, f64, f64),
-    /// Highlight mode.
-    pub highlight_mode: crate::model::clip::SubtitleHighlightMode,
+    /// Highlight flags (multi-effect).
+    pub highlight_flags: crate::model::clip::SubtitleHighlightFlags,
     /// Outline color.
     pub outline_color: (f64, f64, f64, f64),
     /// Outline width in pts.
@@ -38,6 +38,20 @@ pub struct SubtitleLine {
     /// Vertical position: 0.0 (top) to 1.0 (bottom), mapped to the subtitle line's
     /// top/center/bottom anchor the same way export does.
     pub position_y: f64,
+    /// Base style: bold applied to all text.
+    pub subtitle_bold: bool,
+    /// Base style: italic applied to all text.
+    pub subtitle_italic: bool,
+    /// Base style: underline applied to all text.
+    pub subtitle_underline: bool,
+    /// Base style: shadow applied to all text.
+    pub subtitle_shadow: bool,
+    /// Shadow color as (r, g, b, a) 0.0–1.0.
+    pub subtitle_shadow_color: (f64, f64, f64, f64),
+    /// Shadow offset (x, y).
+    pub subtitle_shadow_offset: (f64, f64),
+    /// Background highlight color for active word.
+    pub bg_highlight_color: (f64, f64, f64, f64),
 }
 
 /// A single word to display, with active (highlighted) flag.
@@ -54,13 +68,20 @@ impl Default for SubtitleLine {
             text: String::new(),
             color: (1.0, 1.0, 1.0, 1.0),
             highlight_color: (1.0, 1.0, 0.0, 1.0),
-            highlight_mode: crate::model::clip::SubtitleHighlightMode::None,
+            highlight_flags: crate::model::clip::SubtitleHighlightFlags::default(),
             outline_color: (0.0, 0.0, 0.0, 0.9),
             outline_width: 2.0,
             bg_box: true,
             bg_box_color: (0.0, 0.0, 0.0, 0.6),
             font_desc: crate::media::title_font::DEFAULT_SUBTITLE_FONT_DESC.to_string(),
             position_y: 0.85,
+            subtitle_bold: false,
+            subtitle_italic: false,
+            subtitle_underline: false,
+            subtitle_shadow: false,
+            subtitle_shadow_color: (0.0, 0.0, 0.0, 0.667),
+            subtitle_shadow_offset: (1.5, 1.5),
+            bg_highlight_color: (1.0, 1.0, 0.0, 0.5),
         }
     }
 }
@@ -580,8 +601,7 @@ pub fn build_program_monitor(
                 }
 
                 // Render words individually with highlighting, or as a single block.
-                use crate::model::clip::SubtitleHighlightMode;
-                if !line.words.is_empty() && line.highlight_mode != SubtitleHighlightMode::None {
+                if !line.words.is_empty() && !line.highlight_flags.is_none() {
                     let mut word_x = tx;
                     let space_w = cr
                         .text_extents(" ")
@@ -595,72 +615,149 @@ pub fn build_program_monitor(
                             .text_extents(&word.text)
                             .unwrap_or_else(|_| cr.text_extents("M").unwrap());
 
+                        // Base styles: shadow for all words
+                        if line.subtitle_shadow {
+                            let (sr, sg, sb, sa) = line.subtitle_shadow_color;
+                            let (sox, soy) = line.subtitle_shadow_offset;
+                            cr.set_source_rgba(sr, sg, sb, sa);
+                            let _ = cr.move_to(word_x + sox, ty + soy);
+                            let _ = cr.show_text(&word.text);
+                        }
+
                         if word.active {
-                            match line.highlight_mode {
-                                SubtitleHighlightMode::Color => {
-                                    let (hr, hg, hb, ha) = line.highlight_color;
-                                    cr.set_source_rgba(hr, hg, hb, ha);
-                                }
-                                SubtitleHighlightMode::Bold => {
-                                    // Draw twice for faux bold.
-                                    let (tr, tg, tb, ta) = line.color;
-                                    cr.set_source_rgba(tr, tg, tb, ta);
-                                    let _ = cr.move_to(word_x + 0.5, ty);
-                                    let _ = cr.show_text(&word.text);
-                                    cr.set_source_rgba(tr, tg, tb, ta);
-                                }
-                                SubtitleHighlightMode::Underline => {
-                                    let (underline_thickness, underline_offset) =
-                                        subtitle_preview_underline_metrics(font_size);
-                                    let (tr, tg, tb, ta) = line.color;
-                                    cr.set_source_rgba(tr, tg, tb, ta);
-                                    let _ = cr.move_to(word_x, ty);
-                                    let _ = cr.show_text(&word.text);
-                                    // Draw underline.
-                                    cr.set_line_width(underline_thickness);
-                                    let _ = cr.move_to(word_x, ty + underline_offset);
-                                    let _ =
-                                        cr.line_to(word_x + we.x_advance(), ty + underline_offset);
-                                    cr.stroke().ok();
-                                    word_x += we.x_advance();
-                                    continue;
-                                }
-                                SubtitleHighlightMode::Stroke => {
-                                    // Draw the word text first in normal color, then
-                                    // overlay a stroked outline in highlight_color.
-                                    let (tr, tg, tb, ta) = line.color;
-                                    cr.set_source_rgba(tr, tg, tb, ta);
-                                    let _ = cr.move_to(word_x, ty);
-                                    let _ = cr.show_text(&word.text);
-                                    // Stroke outline.
-                                    let (hr, hg, hb, ha) = line.highlight_color;
-                                    cr.set_source_rgba(hr, hg, hb, ha);
-                                    cr.set_line_width(subtitle_preview_stroke_width(h));
-                                    let _ = cr.move_to(word_x, ty);
-                                    cr.text_path(&word.text);
-                                    cr.stroke().ok();
-                                    word_x += we.x_advance();
-                                    continue;
-                                }
-                                SubtitleHighlightMode::None => {
-                                    let (tr, tg, tb, ta) = line.color;
-                                    cr.set_source_rgba(tr, tg, tb, ta);
-                                }
+                            // Multi-flag highlight rendering for active word
+                            let flags = &line.highlight_flags;
+
+                            // Shadow highlight
+                            if flags.shadow {
+                                let (sr, sg, sb, sa) = line.subtitle_shadow_color;
+                                cr.set_source_rgba(sr, sg, sb, sa);
+                                let _ = cr.move_to(word_x + 2.0, ty + 2.0);
+                                let _ = cr.show_text(&word.text);
+                            }
+
+                            // Background highlight
+                            if flags.background {
+                                let (bgr, bgg, bgb, bga) = line.bg_highlight_color;
+                                cr.set_source_rgba(bgr, bgg, bgb, bga);
+                                let pad = font_size * 0.1;
+                                let _ = cr.rectangle(
+                                    word_x - pad,
+                                    ty - font_size + pad,
+                                    we.x_advance() + pad * 2.0,
+                                    font_size + pad,
+                                );
+                                cr.fill().ok();
+                            }
+
+                            // Stroke highlight
+                            if flags.stroke {
+                                let (hr, hg, hb, ha) = line.highlight_color;
+                                cr.set_source_rgba(hr, hg, hb, ha);
+                                cr.set_line_width(subtitle_preview_stroke_width(h));
+                                let _ = cr.move_to(word_x, ty);
+                                cr.text_path(&word.text);
+                                cr.stroke().ok();
+                            }
+
+                            // Bold highlight (faux bold via offset draw)
+                            if flags.bold {
+                                let (tr, tg, tb, ta) = line.color;
+                                cr.set_source_rgba(tr, tg, tb, ta);
+                                let _ = cr.move_to(word_x + 0.5, ty);
+                                let _ = cr.show_text(&word.text);
+                            }
+
+                            // Color highlight
+                            if flags.color {
+                                let (hr, hg, hb, ha) = line.highlight_color;
+                                cr.set_source_rgba(hr, hg, hb, ha);
+                            } else {
+                                let (tr, tg, tb, ta) = line.color;
+                                cr.set_source_rgba(tr, tg, tb, ta);
+                            }
+
+                            // Draw main text
+                            let _ = cr.move_to(word_x, ty);
+                            let _ = cr.show_text(&word.text);
+
+                            // Underline highlight
+                            if flags.underline {
+                                let (underline_thickness, underline_offset) =
+                                    subtitle_preview_underline_metrics(font_size);
+                                cr.set_line_width(underline_thickness);
+                                let _ = cr.move_to(word_x, ty + underline_offset);
+                                let _ = cr.line_to(
+                                    word_x + we.x_advance(),
+                                    ty + underline_offset,
+                                );
+                                cr.stroke().ok();
                             }
                         } else {
+                            // Non-active word: base styles only
                             let (tr, tg, tb, ta) = line.color;
                             cr.set_source_rgba(tr, tg, tb, ta);
+
+                            // Base bold
+                            if line.subtitle_bold {
+                                let _ = cr.move_to(word_x + 0.5, ty);
+                                let _ = cr.show_text(&word.text);
+                            }
+
+                            let _ = cr.move_to(word_x, ty);
+                            let _ = cr.show_text(&word.text);
+
+                            // Base underline
+                            if line.subtitle_underline {
+                                let (underline_thickness, underline_offset) =
+                                    subtitle_preview_underline_metrics(font_size);
+                                cr.set_line_width(underline_thickness);
+                                let _ = cr.move_to(word_x, ty + underline_offset);
+                                let _ = cr.line_to(
+                                    word_x + we.x_advance(),
+                                    ty + underline_offset,
+                                );
+                                cr.stroke().ok();
+                            }
                         }
-                        let _ = cr.move_to(word_x, ty);
-                        let _ = cr.show_text(&word.text);
                         word_x += we.x_advance();
                     }
                 } else {
                     // Single-block rendering (no word-level highlight).
+
+                    // Base shadow
+                    if line.subtitle_shadow {
+                        let (sr, sg, sb, sa) = line.subtitle_shadow_color;
+                        let (sox, soy) = line.subtitle_shadow_offset;
+                        cr.set_source_rgba(sr, sg, sb, sa);
+                        let _ = cr.move_to(tx + sox, ty + soy);
+                        let _ = cr.show_text(&display_text);
+                    }
+
                     let (tr, tg, tb, ta) = line.color;
                     cr.set_source_rgba(tr, tg, tb, ta);
+
+                    // Base bold (faux)
+                    if line.subtitle_bold {
+                        let _ = cr.move_to(tx + 0.5, ty);
+                        let _ = cr.show_text(&display_text);
+                    }
+
                     let _ = cr.move_to(tx, ty);
                     let _ = cr.show_text(&display_text);
+
+                    // Base underline
+                    if line.subtitle_underline {
+                        let te = cr
+                            .text_extents(&display_text)
+                            .unwrap_or_else(|_| cr.text_extents("M").unwrap());
+                        let (underline_thickness, underline_offset) =
+                            subtitle_preview_underline_metrics(font_size);
+                        cr.set_line_width(underline_thickness);
+                        let _ = cr.move_to(tx, ty + underline_offset);
+                        let _ = cr.line_to(tx + te.x_advance(), ty + underline_offset);
+                        cr.stroke().ok();
+                    }
                 }
             }
         });

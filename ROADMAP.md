@@ -632,6 +632,9 @@ Tracking docs:
   - [x] Per-clip subtitle segments with word-level timestamps
   - [x] Subtitle styling: font, color, outline, background box, vertical position
   - [x] Word highlight modes: None, Bold, Color, Underline, Stroke (karaoke-style)
+  - [x] Multi-effect word highlight flags (bold, color, underline, stroke, italic, background, shadow combinable) with Inspector checkboxes, preview rendering, ASS export, and MCP support
+  - [x] Base subtitle styles: bold, italic, underline, shadow (with color/offset) applied to all text, with Inspector toggle buttons, preview rendering, ASS export, and MCP support
+  - [x] Background highlight color picker for active word background effect
   - [x] Time-based word window (configurable seconds around active word)
   - [x] Multi-track subtitle support with independent per-clip positioning/styling
 - [x] Program Monitor overlay with real-time word highlighting

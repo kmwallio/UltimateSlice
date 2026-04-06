@@ -44,6 +44,52 @@ impl Default for SubtitleHighlightMode {
     }
 }
 
+/// Bitflags for which highlight effects apply to the active word.
+/// Multiple effects can be combined (e.g., bold + color + underline).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SubtitleHighlightFlags {
+    #[serde(default)]
+    pub bold: bool,
+    #[serde(default)]
+    pub color: bool,
+    #[serde(default)]
+    pub underline: bool,
+    #[serde(default)]
+    pub stroke: bool,
+    #[serde(default)]
+    pub italic: bool,
+    #[serde(default)]
+    pub background: bool,
+    #[serde(default)]
+    pub shadow: bool,
+}
+
+impl SubtitleHighlightFlags {
+    /// Returns `true` when no highlight effects are enabled.
+    pub fn is_none(&self) -> bool {
+        !self.bold
+            && !self.color
+            && !self.underline
+            && !self.stroke
+            && !self.italic
+            && !self.background
+            && !self.shadow
+    }
+
+    /// Convert a legacy `SubtitleHighlightMode` enum value into flags.
+    pub fn from_legacy(mode: SubtitleHighlightMode) -> Self {
+        let mut flags = Self::default();
+        match mode {
+            SubtitleHighlightMode::None => {}
+            SubtitleHighlightMode::Bold => flags.bold = true,
+            SubtitleHighlightMode::Color => flags.color = true,
+            SubtitleHighlightMode::Underline => flags.underline = true,
+            SubtitleHighlightMode::Stroke => flags.stroke = true,
+        }
+        flags
+    }
+}
+
 /// A single word with timing from speech-to-text token-level timestamps.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SubtitleWord {
@@ -98,6 +144,15 @@ fn default_subtitle_word_window_secs() -> f64 {
 }
 fn default_subtitle_position_y() -> f64 {
     0.85
+}
+fn default_subtitle_shadow_color() -> u32 {
+    0x000000AA
+}
+fn default_subtitle_shadow_offset() -> f64 {
+    1.5
+}
+fn default_subtitle_bg_highlight_color() -> u32 {
+    0xFFFF0080
 }
 
 /// Type of media a clip contains
@@ -1248,6 +1303,27 @@ pub struct Clip {
     /// Subtitle display font descriptor.
     #[serde(default = "default_subtitle_font")]
     pub subtitle_font: String,
+    /// Base style: always-on bold for all subtitle text.
+    #[serde(default)]
+    pub subtitle_bold: bool,
+    /// Base style: always-on italic for all subtitle text.
+    #[serde(default)]
+    pub subtitle_italic: bool,
+    /// Base style: always-on underline for all subtitle text.
+    #[serde(default)]
+    pub subtitle_underline: bool,
+    /// Base style: draw a shadow behind all subtitle text.
+    #[serde(default)]
+    pub subtitle_shadow: bool,
+    /// Shadow color (0xRRGGBBAA). Default: 0x000000AA (black, ~67% opaque).
+    #[serde(default = "default_subtitle_shadow_color")]
+    pub subtitle_shadow_color: u32,
+    /// Shadow X offset in pts.
+    #[serde(default = "default_subtitle_shadow_offset")]
+    pub subtitle_shadow_offset_x: f64,
+    /// Shadow Y offset in pts.
+    #[serde(default = "default_subtitle_shadow_offset")]
+    pub subtitle_shadow_offset_y: f64,
     /// Subtitle text color (0xRRGGBBAA).
     #[serde(default = "default_subtitle_color")]
     pub subtitle_color: u32,
@@ -1269,6 +1345,12 @@ pub struct Clip {
     /// Highlight color for the active word (0xRRGGBBAA).
     #[serde(default = "default_subtitle_highlight_color")]
     pub subtitle_highlight_color: u32,
+    /// Multi-effect highlight flags (replaces single-mode enum for new projects).
+    #[serde(default)]
+    pub subtitle_highlight_flags: SubtitleHighlightFlags,
+    /// Background highlight color behind the active word (0xRRGGBBAA).
+    #[serde(default = "default_subtitle_bg_highlight_color")]
+    pub subtitle_bg_highlight_color: u32,
     /// Time window (seconds) around the active word to display in karaoke mode.
     /// Words within ±this duration of the current word are shown. Default 2.0s.
     #[serde(default = "default_subtitle_word_window_secs")]
@@ -1593,6 +1675,13 @@ impl Clip {
             subtitle_segments: Vec::new(),
             subtitles_language: String::new(),
             subtitle_font: default_subtitle_font(),
+            subtitle_bold: false,
+            subtitle_italic: false,
+            subtitle_underline: false,
+            subtitle_shadow: false,
+            subtitle_shadow_color: default_subtitle_shadow_color(),
+            subtitle_shadow_offset_x: default_subtitle_shadow_offset(),
+            subtitle_shadow_offset_y: default_subtitle_shadow_offset(),
             subtitle_color: default_subtitle_color(),
             subtitle_outline_color: default_subtitle_outline_color(),
             subtitle_outline_width: default_subtitle_outline_width(),
@@ -1600,6 +1689,8 @@ impl Clip {
             subtitle_bg_box_color: default_subtitle_bg_box_color(),
             subtitle_highlight_mode: SubtitleHighlightMode::None,
             subtitle_highlight_color: default_subtitle_highlight_color(),
+            subtitle_highlight_flags: SubtitleHighlightFlags::default(),
+            subtitle_bg_highlight_color: default_subtitle_bg_highlight_color(),
             subtitle_word_window_secs: default_subtitle_word_window_secs(),
             subtitle_position_y: default_subtitle_position_y(),
             fcpxml_unknown_attrs: Vec::new(),

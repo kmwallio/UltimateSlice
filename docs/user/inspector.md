@@ -237,9 +237,16 @@ Clips with subtitle segments show subtitle style controls in the Inspector.
 | Field | Description |
 |---|---|
 | **Font** | Subtitle font description (Pango-style, e.g. `Sans Bold 24`) |
+| **Bold** | Always-on bold for all subtitle text (independent of font description) |
+| **Italic** | Always-on italic for all subtitle text |
+| **Underline** | Always-on underline for all subtitle text |
+| **Shadow** | Draw a drop shadow behind all subtitle text |
+| **Shadow Color** | Shadow color (default: semi-transparent black) |
+| **Shadow Offset X/Y** | Shadow displacement in points (default: 1.5) |
 | **Text Color** | Main subtitle text color |
-| **Word Highlight** | `None`, `Bold`, `Color`, `Underline`, or `Stroke` |
-| **Highlight Color** | Active-word color for `Color` / `Stroke` highlight modes |
+| **Word Highlight Flags** | Multi-select checkboxes: combine Bold, Color, Underline, Stroke, Italic, Background, and Shadow effects on the active word (replaces old single-mode dropdown) |
+| **Highlight Color** | Active-word color for Color / Stroke highlight effects |
+| **BG Highlight Color** | Background highlight color behind the active word (default: semi-transparent yellow) |
 | **Word Window** | Number of nearby words grouped on screen around the active word |
 | **Vertical Position** | Subtitle placement from top (`0.0`) to bottom (`1.0`) |
 | **Outline Color** | Subtitle outline/stroke color |
