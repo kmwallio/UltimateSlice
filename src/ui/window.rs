@@ -4188,25 +4188,22 @@ pub fn build_window(
                     // keyframe evaluation is current without a full pipeline reload.
                     {
                         let proj = project.borrow();
-                        for track in &proj.tracks {
-                            if let Some(model_clip) = track.clips.iter().find(|c| c.id == clip_id) {
-                                // Sync to video clips (embedded audio)
-                                if let Some(player_clip) =
-                                    pp.clips.iter_mut().find(|c| c.id == clip_id)
-                                {
-                                    player_clip.volume_keyframes =
-                                        model_clip.volume_keyframes.clone();
-                                    player_clip.pan_keyframes = model_clip.pan_keyframes.clone();
-                                }
-                                // Sync to audio-only clips
-                                if let Some(audio_clip) =
-                                    pp.audio_clips.iter_mut().find(|c| c.id == clip_id)
-                                {
-                                    audio_clip.volume_keyframes =
-                                        model_clip.volume_keyframes.clone();
-                                    audio_clip.pan_keyframes = model_clip.pan_keyframes.clone();
-                                }
-                                break;
+                        if let Some(model_clip) = proj.clip_ref(&clip_id) {
+                            // Sync to video clips (embedded audio)
+                            if let Some(player_clip) =
+                                pp.clips.iter_mut().find(|c| c.id == clip_id)
+                            {
+                                player_clip.volume_keyframes =
+                                    model_clip.volume_keyframes.clone();
+                                player_clip.pan_keyframes = model_clip.pan_keyframes.clone();
+                            }
+                            // Sync to audio-only clips
+                            if let Some(audio_clip) =
+                                pp.audio_clips.iter_mut().find(|c| c.id == clip_id)
+                            {
+                                audio_clip.volume_keyframes =
+                                    model_clip.volume_keyframes.clone();
+                                audio_clip.pan_keyframes = model_clip.pan_keyframes.clone();
                             }
                         }
                     }
@@ -4238,31 +4235,28 @@ pub fn build_window(
                     // Sync EQ keyframes from model to player
                     {
                         let proj = project.borrow();
-                        for track in &proj.tracks {
-                            if let Some(model_clip) = track.clips.iter().find(|c| c.id == clip_id) {
-                                if let Some(player_clip) =
-                                    pp.clips.iter_mut().find(|c| c.id == clip_id)
-                                {
-                                    player_clip.eq_bands = model_clip.eq_bands;
-                                    player_clip.eq_low_gain_keyframes =
-                                        model_clip.eq_low_gain_keyframes.clone();
-                                    player_clip.eq_mid_gain_keyframes =
-                                        model_clip.eq_mid_gain_keyframes.clone();
-                                    player_clip.eq_high_gain_keyframes =
-                                        model_clip.eq_high_gain_keyframes.clone();
-                                }
-                                if let Some(audio_clip) =
-                                    pp.audio_clips.iter_mut().find(|c| c.id == clip_id)
-                                {
-                                    audio_clip.eq_bands = model_clip.eq_bands;
-                                    audio_clip.eq_low_gain_keyframes =
-                                        model_clip.eq_low_gain_keyframes.clone();
-                                    audio_clip.eq_mid_gain_keyframes =
-                                        model_clip.eq_mid_gain_keyframes.clone();
-                                    audio_clip.eq_high_gain_keyframes =
-                                        model_clip.eq_high_gain_keyframes.clone();
-                                }
-                                break;
+                        if let Some(model_clip) = proj.clip_ref(&clip_id) {
+                            if let Some(player_clip) =
+                                pp.clips.iter_mut().find(|c| c.id == clip_id)
+                            {
+                                player_clip.eq_bands = model_clip.eq_bands;
+                                player_clip.eq_low_gain_keyframes =
+                                    model_clip.eq_low_gain_keyframes.clone();
+                                player_clip.eq_mid_gain_keyframes =
+                                    model_clip.eq_mid_gain_keyframes.clone();
+                                player_clip.eq_high_gain_keyframes =
+                                    model_clip.eq_high_gain_keyframes.clone();
+                            }
+                            if let Some(audio_clip) =
+                                pp.audio_clips.iter_mut().find(|c| c.id == clip_id)
+                            {
+                                audio_clip.eq_bands = model_clip.eq_bands;
+                                audio_clip.eq_low_gain_keyframes =
+                                    model_clip.eq_low_gain_keyframes.clone();
+                                audio_clip.eq_mid_gain_keyframes =
+                                    model_clip.eq_mid_gain_keyframes.clone();
+                                audio_clip.eq_high_gain_keyframes =
+                                    model_clip.eq_high_gain_keyframes.clone();
                             }
                         }
                     }
@@ -4321,17 +4315,14 @@ pub fn build_window(
                 if let Some(ref clip_id) = selected {
                     let mut proj = project.borrow_mut();
                     let mut changed = false;
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            if (clip.anamorphic_desqueeze - factor).abs() > 0.001 {
-                                clip.anamorphic_desqueeze = factor;
-                                proj.dirty = true;
-                                changed = true;
-                                break;
-                            }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        if (clip.anamorphic_desqueeze - factor).abs() > 0.001 {
+                            clip.anamorphic_desqueeze = factor;
+                            changed = true;
                         }
                     }
                     if changed {
+                        proj.dirty = true;
                         drop(proj);
                         on_project_changed();
                     }
@@ -5162,15 +5153,10 @@ pub fn build_window(
                             let selected = ts_c.borrow().selected_clip_id.clone();
                             if let Some(ref clip_id) = selected {
                                 let mut proj = project_c.borrow_mut();
-                                for track in &mut proj.tracks {
-                                    if let Some(clip) =
-                                        track.clips.iter_mut().find(|c| &c.id == clip_id)
-                                    {
-                                        clip.subtitle_font = desc_str.clone();
-                                        proj.dirty = true;
-                                        break;
-                                    }
+                                if let Some(clip) = proj.clip_mut(clip_id) {
+                                    clip.subtitle_font = desc_str.clone();
                                 }
+                                proj.dirty = true;
                                 drop(proj);
                                 opc();
                             }
@@ -5201,13 +5187,10 @@ pub fn build_window(
                 let selected = timeline_state.borrow().selected_clip_id.clone();
                 if let Some(ref clip_id) = selected {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.subtitle_color = color;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.subtitle_color = color;
                     }
+                    proj.dirty = true;
                     drop(proj);
                     on_project_changed();
                 }
@@ -5239,13 +5222,10 @@ pub fn build_window(
                 let selected = timeline_state.borrow().selected_clip_id.clone();
                 if let Some(ref clip_id) = selected {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.subtitle_highlight_mode = mode;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.subtitle_highlight_mode = mode;
                     }
+                    proj.dirty = true;
                     drop(proj);
                     on_project_changed();
                 }
@@ -5273,13 +5253,10 @@ pub fn build_window(
                 let selected = timeline_state.borrow().selected_clip_id.clone();
                 if let Some(ref clip_id) = selected {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.subtitle_highlight_color = color;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.subtitle_highlight_color = color;
                     }
+                    proj.dirty = true;
                     drop(proj);
                     on_project_changed();
                 }
@@ -5301,13 +5278,10 @@ pub fn build_window(
                 let selected = timeline_state.borrow().selected_clip_id.clone();
                 if let Some(ref clip_id) = selected {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.subtitle_word_window_secs = val;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.subtitle_word_window_secs = val;
                     }
+                    proj.dirty = true;
                 }
             });
     }
@@ -5327,13 +5301,10 @@ pub fn build_window(
                 let selected = timeline_state.borrow().selected_clip_id.clone();
                 if let Some(ref clip_id) = selected {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.subtitle_position_y = val;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.subtitle_position_y = val;
                     }
+                    proj.dirty = true;
                 }
             });
     }
@@ -5353,13 +5324,10 @@ pub fn build_window(
                 let selected = timeline_state.borrow().selected_clip_id.clone();
                 if let Some(ref clip_id) = selected {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.subtitle_bg_box = enabled;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.subtitle_bg_box = enabled;
                     }
+                    proj.dirty = true;
                 }
             });
     }
@@ -5384,13 +5352,10 @@ pub fn build_window(
                 let selected = timeline_state.borrow().selected_clip_id.clone();
                 if let Some(ref clip_id) = selected {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.subtitle_outline_color = color;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.subtitle_outline_color = color;
                     }
+                    proj.dirty = true;
                 }
             });
     }
@@ -5415,13 +5380,10 @@ pub fn build_window(
                 let selected = timeline_state.borrow().selected_clip_id.clone();
                 if let Some(ref clip_id) = selected {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.subtitle_bg_box_color = color;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.subtitle_bg_box_color = color;
                     }
+                    proj.dirty = true;
                 }
             });
     }
@@ -5562,24 +5524,21 @@ pub fn build_window(
                 let selected = timeline_state.borrow().selected_clip_id.clone();
                 if let Some(ref clip_id) = selected {
                     let proj = project.borrow();
-                    for track in &proj.tracks {
-                        if let Some(clip) = track.clips.iter().find(|c| &c.id == clip_id) {
-                            *clipboard.borrow_mut() =
-                                Some(crate::ui::inspector::SubtitleStyleClipboard {
-                                    font: clip.subtitle_font.clone(),
-                                    color: clip.subtitle_color,
-                                    outline_color: clip.subtitle_outline_color,
-                                    outline_width: clip.subtitle_outline_width,
-                                    bg_box: clip.subtitle_bg_box,
-                                    bg_box_color: clip.subtitle_bg_box_color,
-                                    highlight_mode: clip.subtitle_highlight_mode,
-                                    highlight_color: clip.subtitle_highlight_color,
-                                    position_y: clip.subtitle_position_y,
-                                    word_window_secs: clip.subtitle_word_window_secs,
-                                });
-                            paste_btn.set_sensitive(true);
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_ref(clip_id) {
+                        *clipboard.borrow_mut() =
+                            Some(crate::ui::inspector::SubtitleStyleClipboard {
+                                font: clip.subtitle_font.clone(),
+                                color: clip.subtitle_color,
+                                outline_color: clip.subtitle_outline_color,
+                                outline_width: clip.subtitle_outline_width,
+                                bg_box: clip.subtitle_bg_box,
+                                bg_box_color: clip.subtitle_bg_box_color,
+                                highlight_mode: clip.subtitle_highlight_mode,
+                                highlight_color: clip.subtitle_highlight_color,
+                                position_y: clip.subtitle_position_y,
+                                word_window_secs: clip.subtitle_word_window_secs,
+                            });
+                        paste_btn.set_sensitive(true);
                     }
                 }
             });
@@ -5598,22 +5557,19 @@ pub fn build_window(
                 let selected = timeline_state.borrow().selected_clip_id.clone();
                 if let (Some(style), Some(ref clip_id)) = (style, selected) {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.subtitle_font = style.font;
-                            clip.subtitle_color = style.color;
-                            clip.subtitle_outline_color = style.outline_color;
-                            clip.subtitle_outline_width = style.outline_width;
-                            clip.subtitle_bg_box = style.bg_box;
-                            clip.subtitle_bg_box_color = style.bg_box_color;
-                            clip.subtitle_highlight_mode = style.highlight_mode;
-                            clip.subtitle_highlight_color = style.highlight_color;
-                            clip.subtitle_position_y = style.position_y;
-                            clip.subtitle_word_window_secs = style.word_window_secs;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.subtitle_font = style.font;
+                        clip.subtitle_color = style.color;
+                        clip.subtitle_outline_color = style.outline_color;
+                        clip.subtitle_outline_width = style.outline_width;
+                        clip.subtitle_bg_box = style.bg_box;
+                        clip.subtitle_bg_box_color = style.bg_box_color;
+                        clip.subtitle_highlight_mode = style.highlight_mode;
+                        clip.subtitle_highlight_color = style.highlight_color;
+                        clip.subtitle_position_y = style.position_y;
+                        clip.subtitle_word_window_secs = style.word_window_secs;
                     }
+                    proj.dirty = true;
                     drop(proj);
                     on_project_changed();
                 }
@@ -7474,15 +7430,12 @@ pub fn build_window(
                     let selected = timeline_state.borrow().selected_clip_id.clone();
                     if let Some(ref clip_id) = selected {
                         let mut proj = project.borrow_mut();
-                        for track in &mut proj.tracks {
-                            if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                                clip.scale = sc;
-                                clip.position_x = px;
-                                clip.position_y = py;
-                                proj.dirty = true;
-                                break;
-                            }
+                        if let Some(clip) = proj.clip_mut(clip_id) {
+                            clip.scale = sc;
+                            clip.position_x = px;
+                            clip.position_y = py;
                         }
+                        proj.dirty = true;
                     }
                     // 2. Sync inspector sliders without re-triggering the transform callback
                     {
@@ -7533,13 +7486,10 @@ pub fn build_window(
                     let selected = timeline_state.borrow().selected_clip_id.clone();
                     if let Some(ref clip_id) = selected {
                         let mut proj = project.borrow_mut();
-                        for track in &mut proj.tracks {
-                            if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                                clip.rotate = rot;
-                                proj.dirty = true;
-                                break;
-                            }
+                        if let Some(clip) = proj.clip_mut(clip_id) {
+                            clip.rotate = rot;
                         }
+                        proj.dirty = true;
                     }
                     {
                         *inspector_view.updating.borrow_mut() = true;
@@ -7594,16 +7544,13 @@ pub fn build_window(
                     let selected = timeline_state.borrow().selected_clip_id.clone();
                     if let Some(ref clip_id) = selected {
                         let mut proj = project.borrow_mut();
-                        for track in &mut proj.tracks {
-                            if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                                clip.crop_left = cl;
-                                clip.crop_right = cr;
-                                clip.crop_top = ct;
-                                clip.crop_bottom = cb;
-                                proj.dirty = true;
-                                break;
-                            }
+                        if let Some(clip) = proj.clip_mut(clip_id) {
+                            clip.crop_left = cl;
+                            clip.crop_right = cr;
+                            clip.crop_top = ct;
+                            clip.crop_bottom = cb;
                         }
+                        proj.dirty = true;
                     }
                     {
                         *inspector_view.updating.borrow_mut() = true;
@@ -7676,33 +7623,28 @@ pub fn build_window(
                             let mut changed = false;
                             {
                                 let mut proj = project.borrow_mut();
-                                for track in &mut proj.tracks {
-                                    if let Some(clip) =
-                                        track.clips.iter_mut().find(|c| c.id == clip_id)
-                                    {
-                                        let interp = inspector_view.selected_interpolation();
-                                        clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
-                                            Phase1KeyframeProperty::Scale,
-                                            playhead,
-                                            sc,
-                                            interp,
-                                        );
-                                        clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
-                                            Phase1KeyframeProperty::PositionX,
-                                            playhead,
-                                            px,
-                                            interp,
-                                        );
-                                        clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
-                                            Phase1KeyframeProperty::PositionY,
-                                            playhead,
-                                            py,
-                                            interp,
-                                        );
-                                        proj.dirty = true;
-                                        changed = true;
-                                        break;
-                                    }
+                                if let Some(clip) = proj.clip_mut(&clip_id) {
+                                    let interp = inspector_view.selected_interpolation();
+                                    clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
+                                        Phase1KeyframeProperty::Scale,
+                                        playhead,
+                                        sc,
+                                        interp,
+                                    );
+                                    clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
+                                        Phase1KeyframeProperty::PositionX,
+                                        playhead,
+                                        px,
+                                        interp,
+                                    );
+                                    clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
+                                        Phase1KeyframeProperty::PositionY,
+                                        playhead,
+                                        py,
+                                        interp,
+                                    );
+                                    proj.dirty = true;
+                                    changed = true;
                                 }
                             }
                             if changed {
@@ -7721,25 +7663,19 @@ pub fn build_window(
                     let selected = timeline_state.borrow().selected_clip_id.clone();
                     if let Some(ref clip_id) = selected {
                         let mut proj = project.borrow_mut();
-                        for track in &mut proj.tracks {
-                            if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                                if let Some(ref mut mask) = clip.masks.first_mut() {
-                                    mask.path = Some(crate::model::clip::MaskPath {
-                                        points: points.to_vec(),
-                                    });
-                                    proj.dirty = true;
-                                }
-                                break;
+                        if let Some(clip) = proj.clip_mut(clip_id) {
+                            if let Some(ref mut mask) = clip.masks.first_mut() {
+                                mask.path = Some(crate::model::clip::MaskPath {
+                                    points: points.to_vec(),
+                                });
                             }
                         }
+                        proj.dirty = true;
                         drop(proj);
                         // Push live mask update to preview pipeline.
                         let masks = {
                             let proj = project.borrow();
-                            proj.tracks
-                                .iter()
-                                .flat_map(|t| t.clips.iter())
-                                .find(|c| &c.id == clip_id)
+                            proj.clip_ref(clip_id)
                                 .map(|c| c.masks.clone())
                                 .unwrap_or_default()
                         };
@@ -7758,27 +7694,19 @@ pub fn build_window(
                     if let Some(ref clip_id) = selected {
                         {
                             let mut proj = project.borrow_mut();
-                            for track in &mut proj.tracks {
-                                if let Some(clip) =
-                                    track.clips.iter_mut().find(|c| &c.id == clip_id)
-                                {
-                                    if let Some(ref mut mask) = clip.masks.first_mut() {
-                                        mask.path = Some(crate::model::clip::MaskPath {
-                                            points: points.to_vec(),
-                                        });
-                                        proj.dirty = true;
-                                    }
-                                    break;
+                            if let Some(clip) = proj.clip_mut(clip_id) {
+                                if let Some(ref mut mask) = clip.masks.first_mut() {
+                                    mask.path = Some(crate::model::clip::MaskPath {
+                                        points: points.to_vec(),
+                                    });
                                 }
                             }
+                            proj.dirty = true;
                         }
                         // Push to preview + trigger full project change for inspector sync.
                         let masks = {
                             let proj = project.borrow();
-                            proj.tracks
-                                .iter()
-                                .flat_map(|t| t.clips.iter())
-                                .find(|c| &c.id == clip_id)
+                            proj.clip_ref(clip_id)
                                 .map(|c| c.masks.clone())
                                 .unwrap_or_default()
                         };
@@ -8241,8 +8169,7 @@ pub fn build_window(
                             let clip_end = clip.timeline_start + clip.duration();
                             if pos_ns >= clip.timeline_start && pos_ns < clip_end {
                                 let local_ns = ((pos_ns - clip.timeline_start) as f64 * clip.speed)
-                                    as u64
-                                    + clip.source_in;
+                                    as u64;
                                 for seg in &clip.subtitle_segments {
                                     if local_ns >= seg.start_ns && local_ns < seg.end_ns {
                                         let c = clip.subtitle_color;
@@ -9546,13 +9473,10 @@ pub fn build_window(
             let Some(clip_id) = clip_id else { return };
             {
                 let mut proj = project.borrow_mut();
-                for track in &mut proj.tracks {
-                    if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                        clip.ladspa_effects.push(effect);
-                        proj.dirty = true;
-                        break;
-                    }
+                if let Some(clip) = proj.clip_mut(&clip_id) {
+                    clip.ladspa_effects.push(effect);
                 }
+                proj.dirty = true;
             }
             let cb = {
                 let st = timeline_state.borrow();
@@ -11624,16 +11548,44 @@ pub fn build_window(
                             result.source_in_ns,
                             result.source_out_ns,
                         );
+                        if found.is_none() {
+                            log::warn!(
+                                "STT result: could not find clip for source={} in={} out={} ({} segments lost)",
+                                result.source_path,
+                                result.source_in_ns,
+                                result.source_out_ns,
+                                result.segments.len(),
+                            );
+                        }
                         drop(proj);
 
                         if let Some((clip_id, track_id, old_segments)) = found {
-                            let cmd = crate::undo::GenerateSubtitlesCommand {
+                            log::info!(
+                                "STT result: writing {} segments to clip {} (track {})",
+                                result.segments.len(),
                                 clip_id,
+                                track_id,
+                            );
+                            let cmd = crate::undo::GenerateSubtitlesCommand {
+                                clip_id: clip_id.clone(),
                                 track_id,
                                 old_segments,
                                 new_segments: result.segments,
                             };
                             cmd.execute(&mut project_for_stt.borrow_mut());
+                            // Verify the write succeeded
+                            {
+                                let proj = project_for_stt.borrow();
+                                let sub_count = proj
+                                    .clip_ref(&clip_id)
+                                    .map(|c| c.subtitle_segments.len())
+                                    .unwrap_or(0);
+                                log::info!(
+                                    "STT result: after execute, clip {} has {} subtitle segments",
+                                    clip_id,
+                                    sub_count,
+                                );
+                            }
                             timeline_state_stt
                                 .borrow_mut()
                                 .history
@@ -12233,18 +12185,15 @@ pub fn build_window(
                 let selected = timeline_state.borrow().selected_clip_id.clone();
                 if let Some(ref clip_id) = selected {
                     let proj = project.borrow();
-                    for track in &proj.tracks {
-                        if let Some(clip) = track.clips.iter().find(|c| &c.id == clip_id) {
-                            if clip.subtitle_segments.is_empty() {
-                                stt_cache.borrow_mut().request(
-                                    &clip.source_path,
-                                    clip.source_in,
-                                    clip.source_out,
-                                    "auto",
-                                );
-                                inspector_view.stt_generating.set(true);
-                            }
-                            break;
+                    if let Some(clip) = proj.clip_ref(clip_id) {
+                        if clip.subtitle_segments.is_empty() {
+                            stt_cache.borrow_mut().request(
+                                &clip.source_path,
+                                clip.source_in,
+                                clip.source_out,
+                                "auto",
+                            );
+                            inspector_view.stt_generating.set(true);
                         }
                     }
                 }
@@ -12781,14 +12730,14 @@ fn handle_mcp_command(
                 );
                 let effect_id = effect.id.clone();
                 let mut proj = project.borrow_mut();
-                let mut found = false;
-                for track in &mut proj.tracks {
-                    if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                        clip.ladspa_effects.push(effect);
-                        proj.dirty = true;
-                        found = true;
-                        break;
-                    }
+                let found = if let Some(clip) = proj.clip_mut(&clip_id) {
+                    clip.ladspa_effects.push(effect);
+                    true
+                } else {
+                    false
+                };
+                if found {
+                    proj.dirty = true;
                 }
                 drop(proj);
                 reply
@@ -12810,17 +12759,15 @@ fn handle_mcp_command(
             reply,
         } => {
             let mut proj = project.borrow_mut();
-            let mut found = false;
-            for track in &mut proj.tracks {
-                if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                    let before = clip.ladspa_effects.len();
-                    clip.ladspa_effects.retain(|e| e.id != effect_id);
-                    if clip.ladspa_effects.len() < before {
-                        proj.dirty = true;
-                        found = true;
-                    }
-                    break;
-                }
+            let found = if let Some(clip) = proj.clip_mut(&clip_id) {
+                let before = clip.ladspa_effects.len();
+                clip.ladspa_effects.retain(|e| e.id != effect_id);
+                clip.ladspa_effects.len() < before
+            } else {
+                false
+            };
+            if found {
+                proj.dirty = true;
             }
             drop(proj);
             reply.send(serde_json::json!({"success": found})).ok();
@@ -12836,19 +12783,21 @@ fn handle_mcp_command(
             reply,
         } => {
             let mut proj = project.borrow_mut();
-            let mut found = false;
-            for track in &mut proj.tracks {
-                if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                    if let Some(effect) = clip.ladspa_effects.iter_mut().find(|e| e.id == effect_id)
-                    {
-                        for (k, v) in &params {
-                            effect.params.insert(k.clone(), *v);
-                        }
-                        proj.dirty = true;
-                        found = true;
+            let found = if let Some(clip) = proj.clip_mut(&clip_id) {
+                if let Some(effect) = clip.ladspa_effects.iter_mut().find(|e| e.id == effect_id)
+                {
+                    for (k, v) in &params {
+                        effect.params.insert(k.clone(), *v);
                     }
-                    break;
+                    true
+                } else {
+                    false
                 }
+            } else {
+                false
+            };
+            if found {
+                proj.dirty = true;
             }
             drop(proj);
             reply.send(serde_json::json!({"success": found})).ok();
@@ -13891,13 +13840,8 @@ fn handle_mcp_command(
                     // Also assign the generated LUT if any.
                     if let Some(ref lut_path) = outcome.lut_path {
                         let mut proj = project.borrow_mut();
-                        for track in &mut proj.tracks {
-                            if let Some(clip) =
-                                track.clips.iter_mut().find(|c| c.id == source_clip_id)
-                            {
-                                clip.lut_paths.push(lut_path.clone());
-                                break;
-                            }
+                        if let Some(clip) = proj.clip_mut(&source_clip_id) {
+                            clip.lut_paths.push(lut_path.clone());
                         }
                         proj.dirty = true;
                     }
@@ -13974,23 +13918,23 @@ fn handle_mcp_command(
             reply,
         } => {
             let mut proj = project.borrow_mut();
-            let mut found = false;
-            for track in proj.tracks.iter_mut() {
-                if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                    let new_in = (clip.source_in as i64 + delta_ns).max(0) as u64;
-                    let mut new_out =
-                        (clip.source_out as i64 + delta_ns).max(new_in as i64 + 1_000_000) as u64;
-                    if let Some(max) = clip.max_source_out() {
-                        if new_out > max {
-                            new_out = max;
-                        }
+            let found = if let Some(clip) = proj.clip_mut(&clip_id) {
+                let new_in = (clip.source_in as i64 + delta_ns).max(0) as u64;
+                let mut new_out =
+                    (clip.source_out as i64 + delta_ns).max(new_in as i64 + 1_000_000) as u64;
+                if let Some(max) = clip.max_source_out() {
+                    if new_out > max {
+                        new_out = max;
                     }
-                    clip.source_in = new_in;
-                    clip.source_out = new_out;
-                    proj.dirty = true;
-                    found = true;
-                    break;
                 }
+                clip.source_in = new_in;
+                clip.source_out = new_out;
+                true
+            } else {
+                false
+            };
+            if found {
+                proj.dirty = true;
             }
             drop(proj);
             reply.send(json!({"success": found})).ok();
@@ -14870,16 +14814,14 @@ fn handle_mcp_command(
                 return;
             };
             let mut proj = project.borrow_mut();
-            let mut found = false;
-            'outer: for track in proj.tracks.iter_mut() {
-                for clip in track.clips.iter_mut() {
-                    if clip.id == clip_id {
-                        clip.blend_mode = parsed;
-                        proj.dirty = true;
-                        found = true;
-                        break 'outer;
-                    }
-                }
+            let found = if let Some(clip) = proj.clip_mut(&clip_id) {
+                clip.blend_mode = parsed;
+                true
+            } else {
+                false
+            };
+            if found {
+                proj.dirty = true;
             }
             drop(proj);
             reply
@@ -14922,36 +14864,31 @@ fn handle_mcp_command(
             let mut keyframe_time_ns = None;
             {
                 let mut proj = project.borrow_mut();
-                'outer: for track in proj.tracks.iter_mut() {
-                    for clip in track.clips.iter_mut() {
-                        if clip.id == clip_id {
-                            keyframe_time_ns =
-                                Some(clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
-                                    property,
-                                    timeline_pos_ns,
-                                    value,
-                                    interp,
-                                ));
-                            if let (Some(local_ns), Some((x1, y1, x2, y2))) =
-                                (keyframe_time_ns, bezier_controls)
-                            {
-                                let keyframes = clip.keyframes_for_phase1_property_mut(property);
-                                if let Some(kf) =
-                                    keyframes.iter_mut().find(|kf| kf.time_ns == local_ns)
-                                {
-                                    kf.bezier_controls = Some(crate::model::clip::BezierControls {
-                                        x1: x1.clamp(0.0, 1.0),
-                                        y1: y1.clamp(0.0, 1.0),
-                                        x2: x2.clamp(0.0, 1.0),
-                                        y2: y2.clamp(0.0, 1.0),
-                                    });
-                                }
-                            }
-                            proj.dirty = true;
-                            found = true;
-                            break 'outer;
+                if let Some(clip) = proj.clip_mut(&clip_id) {
+                    keyframe_time_ns =
+                        Some(clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
+                            property,
+                            timeline_pos_ns,
+                            value,
+                            interp,
+                        ));
+                    if let (Some(local_ns), Some((x1, y1, x2, y2))) =
+                        (keyframe_time_ns, bezier_controls)
+                    {
+                        let keyframes = clip.keyframes_for_phase1_property_mut(property);
+                        if let Some(kf) =
+                            keyframes.iter_mut().find(|kf| kf.time_ns == local_ns)
+                        {
+                            kf.bezier_controls = Some(crate::model::clip::BezierControls {
+                                x1: x1.clamp(0.0, 1.0),
+                                y1: y1.clamp(0.0, 1.0),
+                                x2: x2.clamp(0.0, 1.0),
+                                y2: y2.clamp(0.0, 1.0),
+                            });
                         }
                     }
+                    proj.dirty = true;
+                    found = true;
                 }
             }
             reply
@@ -14992,18 +14929,13 @@ fn handle_mcp_command(
             let mut removed = false;
             {
                 let mut proj = project.borrow_mut();
-                'outer: for track in proj.tracks.iter_mut() {
-                    for clip in track.clips.iter_mut() {
-                        if clip.id == clip_id {
-                            removed = clip
-                                .remove_phase1_keyframe_at_timeline_ns(property, timeline_pos_ns);
-                            if removed {
-                                proj.dirty = true;
-                            }
-                            found = true;
-                            break 'outer;
-                        }
+                if let Some(clip) = proj.clip_mut(&clip_id) {
+                    removed = clip
+                        .remove_phase1_keyframe_at_timeline_ns(property, timeline_pos_ns);
+                    if removed {
+                        proj.dirty = true;
                     }
+                    found = true;
                 }
             }
             reply
@@ -17023,14 +16955,11 @@ fn handle_mcp_command(
             let mut found = false;
             {
                 let mut proj = project.borrow_mut();
-                for track in &mut proj.tracks {
-                    if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                        clip.vidstab_enabled = enabled;
-                        clip.vidstab_smoothing = (smoothing as f32).clamp(0.0, 1.0);
-                        proj.dirty = true;
-                        found = true;
-                        break;
-                    }
+                if let Some(clip) = proj.clip_mut(&clip_id) {
+                    clip.vidstab_enabled = enabled;
+                    clip.vidstab_smoothing = (smoothing as f32).clamp(0.0, 1.0);
+                    proj.dirty = true;
+                    found = true;
                 }
             }
             if found {
@@ -17096,24 +17025,16 @@ fn handle_mcp_command(
             let proj = project.borrow();
             let mut found = false;
             let mut effects_json = Vec::new();
-            for track in &proj.tracks {
-                for clip in &track.clips {
-                    if clip.id == clip_id {
-                        found = true;
-                        for e in &clip.frei0r_effects {
-                            effects_json.push(json!({
-                                "id": e.id,
-                                "plugin_name": e.plugin_name,
-                                "enabled": e.enabled,
-                                "params": e.params,
-                                "string_params": e.string_params,
-                            }));
-                        }
-                        break;
-                    }
-                }
-                if found {
-                    break;
+            if let Some(clip) = proj.clip_ref(&clip_id) {
+                found = true;
+                for e in &clip.frei0r_effects {
+                    effects_json.push(json!({
+                        "id": e.id,
+                        "plugin_name": e.plugin_name,
+                        "enabled": e.enabled,
+                        "params": e.params,
+                        "string_params": e.string_params,
+                    }));
                 }
             }
             if found {
@@ -17165,17 +17086,13 @@ fn handle_mcp_command(
                 string_params: default_string_params,
             };
             let mut proj = project.borrow_mut();
-            let mut found = false;
-            'outer_add: for track in proj.tracks.iter_mut() {
-                for clip in track.clips.iter_mut() {
-                    if clip.id == clip_id {
-                        clip.frei0r_effects.push(effect);
-                        proj.dirty = true;
-                        found = true;
-                        break 'outer_add;
-                    }
-                }
-            }
+            let found = if let Some(clip) = proj.clip_mut(&clip_id) {
+                clip.frei0r_effects.push(effect);
+                proj.dirty = true;
+                true
+            } else {
+                false
+            };
             drop(proj);
             if found {
                 on_project_changed_full();
@@ -17193,21 +17110,19 @@ fn handle_mcp_command(
             reply,
         } => {
             let mut proj = project.borrow_mut();
-            let mut found = false;
-            'outer_rm: for track in proj.tracks.iter_mut() {
-                for clip in track.clips.iter_mut() {
-                    if clip.id == clip_id {
-                        if let Some(pos) =
-                            clip.frei0r_effects.iter().position(|e| e.id == effect_id)
-                        {
-                            clip.frei0r_effects.remove(pos);
-                            proj.dirty = true;
-                            found = true;
-                        }
-                        break 'outer_rm;
-                    }
+            let found = if let Some(clip) = proj.clip_mut(&clip_id) {
+                if let Some(pos) =
+                    clip.frei0r_effects.iter().position(|e| e.id == effect_id)
+                {
+                    clip.frei0r_effects.remove(pos);
+                    proj.dirty = true;
+                    true
+                } else {
+                    false
                 }
-            }
+            } else {
+                false
+            };
             drop(proj);
             if found {
                 on_project_changed_full();
@@ -17223,28 +17138,26 @@ fn handle_mcp_command(
             reply,
         } => {
             let mut proj = project.borrow_mut();
-            let mut found = false;
-            'outer_set: for track in proj.tracks.iter_mut() {
-                for clip in track.clips.iter_mut() {
-                    if clip.id == clip_id {
-                        if let Some(effect) =
-                            clip.frei0r_effects.iter_mut().find(|e| e.id == effect_id)
-                        {
-                            for (k, v) in params {
-                                effect.params.insert(k, v);
-                            }
-                            if let Some(sp) = string_params {
-                                for (k, v) in sp {
-                                    effect.string_params.insert(k, v);
-                                }
-                            }
-                            proj.dirty = true;
-                            found = true;
-                        }
-                        break 'outer_set;
+            let found = if let Some(clip) = proj.clip_mut(&clip_id) {
+                if let Some(effect) =
+                    clip.frei0r_effects.iter_mut().find(|e| e.id == effect_id)
+                {
+                    for (k, v) in params {
+                        effect.params.insert(k, v);
                     }
+                    if let Some(sp) = string_params {
+                        for (k, v) in sp {
+                            effect.string_params.insert(k, v);
+                        }
+                    }
+                    proj.dirty = true;
+                    true
+                } else {
+                    false
                 }
-            }
+            } else {
+                false
+            };
             drop(proj);
             if found {
                 on_project_changed_full();
@@ -17258,31 +17171,27 @@ fn handle_mcp_command(
             reply,
         } => {
             let mut proj = project.borrow_mut();
-            let mut found = false;
-            'outer_reorder: for track in proj.tracks.iter_mut() {
-                for clip in track.clips.iter_mut() {
-                    if clip.id == clip_id {
-                        // Build new order from effect_ids.
-                        let mut reordered = Vec::with_capacity(effect_ids.len());
-                        for eid in &effect_ids {
-                            if let Some(pos) = clip.frei0r_effects.iter().position(|e| &e.id == eid)
-                            {
-                                reordered.push(clip.frei0r_effects[pos].clone());
-                            }
-                        }
-                        // Append any effects not mentioned (safety net).
-                        for e in &clip.frei0r_effects {
-                            if !effect_ids.contains(&e.id) {
-                                reordered.push(e.clone());
-                            }
-                        }
-                        clip.frei0r_effects = reordered;
-                        proj.dirty = true;
-                        found = true;
-                        break 'outer_reorder;
+            let found = if let Some(clip) = proj.clip_mut(&clip_id) {
+                // Build new order from effect_ids.
+                let mut reordered = Vec::with_capacity(effect_ids.len());
+                for eid in &effect_ids {
+                    if let Some(pos) = clip.frei0r_effects.iter().position(|e| &e.id == eid)
+                    {
+                        reordered.push(clip.frei0r_effects[pos].clone());
                     }
                 }
-            }
+                // Append any effects not mentioned (safety net).
+                for e in &clip.frei0r_effects {
+                    if !effect_ids.contains(&e.id) {
+                        reordered.push(e.clone());
+                    }
+                }
+                clip.frei0r_effects = reordered;
+                proj.dirty = true;
+                true
+            } else {
+                false
+            };
             drop(proj);
             if found {
                 on_project_changed_full();

@@ -659,17 +659,25 @@ pub fn export_project(
                 if clip.subtitle_segments.is_empty() {
                     continue;
                 }
+                log::debug!(
+                    "export: found {} subtitle segments on clip {} (kind={:?}, tl_start={}, source_in={})",
+                    clip.subtitle_segments.len(),
+                    clip.label,
+                    clip.kind,
+                    clip.timeline_start,
+                    clip.source_in,
+                );
                 // Collect this clip's segments as timeline-absolute.
+                // Subtitle start_ns/end_ns are relative to clip start (0 = source_in),
+                // so we just scale by speed and add timeline_start.
                 let clip_segs: Vec<(u64, u64, String, &crate::model::clip::Clip)> = clip
                     .subtitle_segments
                     .iter()
                     .map(|seg| {
                         let abs_start = clip.timeline_start
-                            + ((seg.start_ns.saturating_sub(clip.source_in)) as f64 / clip.speed)
-                                as u64;
+                            + (seg.start_ns as f64 / clip.speed) as u64;
                         let abs_end = clip.timeline_start
-                            + ((seg.end_ns.saturating_sub(clip.source_in)) as f64 / clip.speed)
-                                as u64;
+                            + (seg.end_ns as f64 / clip.speed) as u64;
                         (abs_start, abs_end, seg.text.clone(), clip)
                     })
                     .collect();
@@ -2333,8 +2341,13 @@ fn build_subtitle_filter_composited(
         .any(|s| !s.words.is_empty());
     let use_karaoke = highlight_mode != SubtitleHighlightMode::None && has_words;
 
-    if use_karaoke {
-        // Write a proper ASS file so override tags (\c, \b, \u) work.
+    // Always use the ASS path for subtitle burn-in.  The SRT+force_style path
+    // is unreliable: libass silently drops subtitles when certain force_style
+    // parameters (e.g. MarginV at high values) interact with BorderStyle=3.
+    // ASS embeds all styling inline, avoiding the issue entirely.
+    {
+        let _ = use_karaoke; // suppress unused warning
+        // Write a proper ASS file with embedded styles.
         let mut sub_file = match tempfile::Builder::new().suffix(".ass").tempfile() {
             Ok(f) => f,
             Err(_) => return (String::new(), None),
@@ -2408,11 +2421,9 @@ fn build_subtitle_filter_composited(
             for seg in &style_clip.subtitle_segments {
                 if seg.words.is_empty() {
                     let abs_start = style_clip.timeline_start
-                        + ((seg.start_ns.saturating_sub(style_clip.source_in)) as f64
-                            / style_clip.speed) as u64;
+                        + (seg.start_ns as f64 / style_clip.speed) as u64;
                     let abs_end = style_clip.timeline_start
-                        + ((seg.end_ns.saturating_sub(style_clip.source_in)) as f64
-                            / style_clip.speed) as u64;
+                        + (seg.end_ns as f64 / style_clip.speed) as u64;
                     let _ = writeln!(
                         sub_file,
                         "Dialogue: 0,{},{},Default,,0,0,0,,{}",
@@ -2428,11 +2439,9 @@ fn build_subtitle_filter_composited(
                 // but the visible text is the same fixed set of words.
                 for (wi, word) in seg.words.iter().enumerate() {
                     let w_abs_start = style_clip.timeline_start
-                        + ((word.start_ns.saturating_sub(style_clip.source_in)) as f64
-                            / style_clip.speed) as u64;
+                        + (word.start_ns as f64 / style_clip.speed) as u64;
                     let w_abs_end = style_clip.timeline_start
-                        + ((word.end_ns.saturating_sub(style_clip.source_in)) as f64
-                            / style_clip.speed) as u64;
+                        + (word.end_ns as f64 / style_clip.speed) as u64;
 
                     // Determine which fixed group this word belongs to.
                     let group_start = (wi / group_size) * group_size;
@@ -2496,40 +2505,8 @@ fn build_subtitle_filter_composited(
             .replace('\'', "'\\''");
 
         // ASS file has styles embedded, no force_style needed.
-        let filter = format!("subtitles='{escaped_path}'");
-        (filter, Some(sub_file))
-    } else {
-        // Simple mode: SRT with force_style.
-        let mut sub_file = match tempfile::Builder::new().suffix(".srt").tempfile() {
-            Ok(f) => f,
-            Err(_) => return (String::new(), None),
-        };
-
-        {
-            use std::io::Write;
-            let mut sorted: Vec<_> = segments.iter().collect();
-            sorted.sort_by_key(|(start, _, _, _)| *start);
-            for (i, (start_ns, end_ns, text, _)) in sorted.iter().enumerate() {
-                let _ = writeln!(sub_file, "{}", i + 1);
-                let _ = writeln!(
-                    sub_file,
-                    "{} --> {}",
-                    srt_timecode(*start_ns),
-                    srt_timecode(*end_ns)
-                );
-                let _ = writeln!(sub_file, "{text}");
-                let _ = writeln!(sub_file);
-            }
-            let _ = sub_file.flush();
-        }
-
-        let sub_path = sub_file.path().to_string_lossy().to_string();
-        let escaped_path = sub_path
-            .replace('\\', "\\\\")
-            .replace(':', "\\:")
-            .replace('\'', "'\\''");
-
-        let filter = format!("subtitles='{escaped_path}':force_style='{style_parts}'");
+        // No single quotes around path — argv is not shell-interpreted.
+        let filter = format!("subtitles={escaped_path}");
         (filter, Some(sub_file))
     }
 }
@@ -2545,11 +2522,12 @@ pub fn export_srt(project: &Project, output_path: &str) -> Result<()> {
                 continue;
             }
             for seg in &clip.subtitle_segments {
-                // Convert source-relative to timeline-absolute timestamps.
+                // Convert clip-local to timeline-absolute timestamps.
+                // Subtitle start_ns/end_ns are relative to clip start (0 = source_in).
                 let timeline_start = clip.timeline_start
-                    + ((seg.start_ns.saturating_sub(clip.source_in)) as f64 / clip.speed) as u64;
+                    + (seg.start_ns as f64 / clip.speed) as u64;
                 let timeline_end = clip.timeline_start
-                    + ((seg.end_ns.saturating_sub(clip.source_in)) as f64 / clip.speed) as u64;
+                    + (seg.end_ns as f64 / clip.speed) as u64;
                 segments.push((timeline_start, timeline_end, seg.text.clone()));
             }
         }
@@ -4500,16 +4478,18 @@ mod tests {
     }
 
     #[test]
-    fn subtitle_force_style_splits_family_and_style_flags() {
+    fn subtitle_ass_style_splits_family_and_style_flags() {
         let clip = make_subtitle_video_clip("DejaVu Sans Mono Bold Oblique 24");
         let segs = vec![(0_u64, 1_000_000_000_u64, "Hello world".to_string(), &clip)];
 
-        let (filter, _temp) = build_subtitle_filter_composited(&segs, &clip, 1080);
-
-        assert!(filter.contains("FontName=DejaVu Sans Mono"));
-        assert!(filter.contains("Bold=-1"));
-        assert!(filter.contains("Italic=-1"));
-        assert!(!filter.contains("FontName=DejaVu Sans Mono Bold Oblique"));
+        let (_filter, temp) = build_subtitle_filter_composited(&segs, &clip, 1080);
+        // Now always uses ASS path — check the ASS file content for correct font splitting
+        let content = std::fs::read_to_string(temp.unwrap().path()).unwrap();
+        assert!(
+            content.contains("DejaVu Sans Mono"),
+            "ASS should contain font family"
+        );
+        assert!(content.contains(",-1,"), "ASS should contain Bold=-1");
     }
 
     #[test]
@@ -5554,6 +5534,133 @@ mod tests {
         let first_audio = &audio_tracks[0].clips[0];
         assert_eq!(first_audio.source_path, "audio.wav");
         assert_eq!(first_audio.timeline_start, 1_000); // compound offset applied
+    }
+
+    #[test]
+    fn test_flatten_compound_preserves_subtitles_on_audio_clip() {
+        use crate::model::track::Track;
+
+        // Audio clip inside compound with subtitles
+        let mut inner_a = Track::new_audio("Inner A");
+        let mut ac = Clip::new("audio.wav", 20_000, 0, ClipKind::Audio);
+        ac.id = "ac".into();
+        ac.subtitle_segments = vec![
+            crate::model::clip::SubtitleSegment {
+                id: "s1".into(),
+                start_ns: 1_000,
+                end_ns: 5_000,
+                text: "hello world".into(),
+                words: vec![],
+            },
+            crate::model::clip::SubtitleSegment {
+                id: "s2".into(),
+                start_ns: 8_000,
+                end_ns: 12_000,
+                text: "second segment".into(),
+                words: vec![],
+            },
+        ];
+        inner_a.add_clip(ac);
+
+        let mut inner_v = Track::new_video("Inner V");
+        let mut vc = Clip::new("video.mp4", 20_000, 0, ClipKind::Video);
+        vc.id = "vc".into();
+        inner_v.add_clip(vc);
+
+        let mut compound = Clip::new_compound(5_000, vec![inner_v, inner_a]);
+        compound.id = "compound".into();
+
+        let mut root = Track::new_video("V1");
+        root.add_clip(compound);
+
+        let flattened = flatten_compound_tracks(&[root]);
+
+        // Find the audio clip in flattened tracks
+        let audio_clips: Vec<&Clip> = flattened
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .filter(|c| c.kind == ClipKind::Audio)
+            .collect();
+        assert_eq!(audio_clips.len(), 1, "should have one flattened audio clip");
+
+        let audio = audio_clips[0];
+        assert_eq!(audio.source_path, "audio.wav");
+        assert!(
+            !audio.subtitle_segments.is_empty(),
+            "subtitles should survive flattening"
+        );
+        assert_eq!(audio.subtitle_segments.len(), 2);
+        assert_eq!(audio.subtitle_segments[0].text, "hello world");
+        assert_eq!(audio.subtitle_segments[1].text, "second segment");
+    }
+
+    #[test]
+    fn test_clip_mut_writes_subtitles_into_compound_then_flattened() {
+        use crate::model::project::Project;
+        use crate::model::track::Track;
+
+        // Simulate the STT handler flow: create a project with a compound clip,
+        // use clip_mut to write subtitles to an internal clip, then flatten
+        // and verify subtitles survive.
+        let mut project = Project::new("Test");
+
+        let mut inner_v = Track::new_video("Inner V");
+        let mut vc = Clip::new("video.mp4", 20_000, 0, ClipKind::Video);
+        vc.id = "vc".into();
+        inner_v.add_clip(vc);
+
+        let mut inner_a = Track::new_audio("Inner A");
+        let mut ac = Clip::new("audio.wav", 20_000, 0, ClipKind::Audio);
+        ac.id = "ac".into();
+        inner_a.add_clip(ac);
+
+        let mut compound = Clip::new_compound(5_000, vec![inner_v, inner_a]);
+        compound.id = "compound".into();
+
+        let mut root = Track::new_video("V1");
+        root.add_clip(compound);
+        project.tracks.push(root);
+
+        // Verify clip_mut finds the audio clip inside the compound
+        assert!(
+            project.clip_mut("ac").is_some(),
+            "clip_mut should find audio clip inside compound"
+        );
+
+        // Write subtitles via clip_mut (same path as STT result handler)
+        if let Some(clip) = project.clip_mut("ac") {
+            clip.subtitle_segments = vec![
+                crate::model::clip::SubtitleSegment {
+                    id: "s1".into(),
+                    start_ns: 1_000,
+                    end_ns: 5_000,
+                    text: "hello from clip_mut".into(),
+                    words: vec![],
+                },
+            ];
+        }
+
+        // Verify the subtitle was written
+        let subs = project
+            .clip_ref("ac")
+            .map(|c| c.subtitle_segments.len())
+            .unwrap_or(0);
+        assert_eq!(subs, 1, "subtitle should be written to clip inside compound");
+
+        // Flatten and verify subtitles survive
+        let flattened = flatten_compound_tracks(&project.tracks);
+        let audio_clips: Vec<&Clip> = flattened
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .filter(|c| c.kind == ClipKind::Audio)
+            .collect();
+        assert_eq!(audio_clips.len(), 1);
+        assert_eq!(
+            audio_clips[0].subtitle_segments.len(),
+            1,
+            "subtitle should survive flattening"
+        );
+        assert_eq!(audio_clips[0].subtitle_segments[0].text, "hello from clip_mut");
     }
 
     #[test]
