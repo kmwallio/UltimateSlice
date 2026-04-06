@@ -1033,6 +1033,9 @@ pub struct Clip {
     /// Audio volume multiplier: 0.0 (silent) to 2.0 (double), default 1.0
     #[serde(default = "default_volume")]
     pub volume: f32,
+    /// Voice Isolation (Smart Noise Gating via Whisper timings): 0.0 (off) to 1.0 (full ducking)
+    #[serde(default)]
+    pub voice_isolation: f32,
     /// Last measured integrated loudness in LUFS (informational, from normalization analysis).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measured_loudness_lufs: Option<f64>,
@@ -1589,6 +1592,7 @@ impl Clip {
             vidstab_enabled: false,
             vidstab_smoothing: default_vidstab_smoothing(),
             volume: 1.0,
+            voice_isolation: 0.0,
             measured_loudness_lufs: None,
             volume_keyframes: Vec::new(),
             pan: 0.0,

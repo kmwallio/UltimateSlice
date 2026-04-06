@@ -18,6 +18,8 @@ pub(crate) struct UltimateSliceClipOtioMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) pan: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) voice_isolation: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) brightness: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) contrast: Option<f64>,

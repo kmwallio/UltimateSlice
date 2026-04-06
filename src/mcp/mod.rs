@@ -406,6 +406,11 @@ pub enum McpCommand {
         opacity: f64,
         reply: SyncSender<Value>,
     },
+    SetClipVoiceIsolation {
+        clip_id: String,
+        voice_isolation: f64,
+        reply: SyncSender<Value>,
+    },
     SetClipEq {
         clip_id: String,
         low_freq: Option<f64>,

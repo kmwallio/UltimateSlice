@@ -97,6 +97,7 @@ Video stabilization compensates camera shake using ffmpeg's libvidstab (two-pass
 | Slider | Range | Default | Effect |
 |---|---|---|---|
 | **Volume** | −100 dB → +12 dB | 0 dB | Per-clip gain (`0 dB = 1.0x`, `-96 dB`/`-100 dB` ≈ mute) |
+| **Voice Isolation** | 0% → 100% | Off | Ducks volume between spoken words (requires generated subtitles) |
 | **Pan** | −1.0 → 1.0 | 0.0 | Stereo position (−1 = full left, +1 = full right) |
 
 ### Normalize Audio

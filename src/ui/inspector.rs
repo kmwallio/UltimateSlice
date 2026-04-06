@@ -235,6 +235,7 @@ pub struct InspectorView {
     pub shadows_tint_slider: Scale,
     // Audio sliders
     pub volume_slider: Scale,
+    pub voice_isolation_slider: Scale,
     pub pan_slider: Scale,
     pub normalize_btn: Button,
     pub match_audio_btn: Button,
@@ -1859,6 +1860,8 @@ impl InspectorView {
                     playhead_ns,
                 );
                 self.volume_slider.set_value(linear_to_db_volume(vol_val));
+                self.voice_isolation_slider.set_value((c.voice_isolation * 100.0) as f64);
+                self.voice_isolation_slider.set_sensitive(true);
                 self.pan_slider
                     .set_value(c.value_for_phase1_property_at_timeline_ns(
                         Phase1KeyframeProperty::Pan,
@@ -2320,6 +2323,7 @@ impl InspectorView {
                 self.midtones_slider.set_value(0.0);
                 self.highlights_slider.set_value(0.0);
                 self.volume_slider.set_value(0.0);
+                self.voice_isolation_slider.set_value(0.0);
                 self.pan_slider.set_value(0.0);
                 self.measured_loudness_label.set_text("");
                 let eq_defaults = crate::model::clip::default_eq_bands();
@@ -2470,6 +2474,7 @@ impl InspectorView {
                     playhead_ns,
                 ),
             ));
+            self.voice_isolation_slider.set_value((c.voice_isolation * 100.0) as f64);
             self.pan_slider
                 .set_value(c.value_for_phase1_property_at_timeline_ns(
                     Phase1KeyframeProperty::Pan,
@@ -2558,7 +2563,7 @@ pub fn build_inspector(
             f32,
             f32,
         ) + 'static,
-    on_audio_changed: impl Fn(&str, f32, f32) + 'static,
+    on_audio_changed: impl Fn(&str, f32, f32, f32) + 'static,
     on_eq_changed: impl Fn(&str, [crate::model::clip::EqBand; 3]) + 'static,
     on_transform_changed: impl Fn(i32, i32, i32, i32, i32, bool, bool, f64, f64, f64) + 'static,
     on_anamorphic_changed: impl Fn(f64) + 'static,
@@ -3511,6 +3516,16 @@ pub fn build_inspector(
     volume_keyframe_row.append(&volume_remove_keyframe_btn);
     audio_inner.append(&volume_keyframe_row);
 
+    row_label(&audio_inner, "Voice Isolation");
+    let voice_isolation_slider = Scale::with_range(Orientation::Horizontal, 0.0, 100.0, 1.0);
+    voice_isolation_slider.set_value(0.0);
+    voice_isolation_slider.set_draw_value(true);
+    voice_isolation_slider.set_digits(0);
+    voice_isolation_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("Off"));
+    voice_isolation_slider.add_mark(100.0, gtk4::PositionType::Bottom, Some("Max"));
+    voice_isolation_slider.set_tooltip_text(Some("Duck volume between spoken words (requires generated subtitles)"));
+    audio_inner.append(&voice_isolation_slider);
+
     let normalize_row = GBox::new(Orientation::Horizontal, 6);
     let normalize_btn = Button::with_label("Normalize\u{2026}");
     normalize_btn.set_tooltip_text(Some(
@@ -4192,7 +4207,7 @@ pub fn build_inspector(
             f32,
         ),
     > = Rc::new(on_color_changed);
-    let on_audio_changed: Rc<dyn Fn(&str, f32, f32)> = Rc::new(on_audio_changed);
+    let on_audio_changed: Rc<dyn Fn(&str, f32, f32, f32)> = Rc::new(on_audio_changed);
     let on_eq_changed: Rc<dyn Fn(&str, [crate::model::clip::EqBand; 3])> = Rc::new(on_eq_changed);
     let on_transform_changed: Rc<dyn Fn(i32, i32, i32, i32, i32, bool, bool, f64, f64, f64)> =
         Rc::new(on_transform_changed);
@@ -4649,6 +4664,7 @@ pub fn build_inspector(
         let updating = updating.clone();
         let on_audio_changed = on_audio_changed.clone();
         let pan_slider_cb = pan_slider.clone();
+        let voice_isolation_slider = voice_isolation_slider.clone();
         let animation_mode = animation_mode.clone();
         let current_playhead_ns = current_playhead_ns.clone();
         let interp_dropdown = interp_dropdown.clone();
@@ -4680,7 +4696,12 @@ pub fn build_inspector(
                 // Use lightweight audio update (syncs keyframes to player without
                 // full pipeline reload). on_clip_changed would cause a heavy rebuild
                 // and visible playhead jump for every slider tick.
-                on_audio_changed(clip_id, linear_vol, pan_slider_cb.value() as f32);
+                on_audio_changed(
+                    clip_id,
+                    linear_vol,
+                    pan_slider_cb.value() as f32,
+                    voice_isolation_slider.value() as f32 / 100.0,
+                );
             }
         });
     }
@@ -4691,6 +4712,7 @@ pub fn build_inspector(
         let on_audio_changed = on_audio_changed.clone();
         let volume_slider_cb = volume_slider.clone();
         let pan_slider_cb = pan_slider.clone();
+        let voice_isolation_slider = voice_isolation_slider.clone();
         let animation_mode = animation_mode.clone();
         let current_playhead_ns = current_playhead_ns.clone();
         let interp_dropdown = interp_dropdown.clone();
@@ -4723,6 +4745,7 @@ pub fn build_inspector(
                     clip_id,
                     db_to_linear_volume(volume_slider_cb.value()) as f32,
                     pan_slider_cb.value() as f32,
+                    voice_isolation_slider.value() as f32 / 100.0,
                 );
             }
         });
@@ -4803,6 +4826,99 @@ pub fn build_inspector(
             });
             slider.add_controller(focus_ctrl);
         }
+    }
+
+    // Undo controller for voice isolation slider
+    {
+        type VoiceIsoSnapCell = Rc<RefCell<Option<(String, String, f32)>>>;
+        let voice_iso_snap: VoiceIsoSnapCell = Rc::new(RefCell::new(None));
+
+        let do_vi_snapshot = {
+            let project = project.clone();
+            let selected_clip_id = selected_clip_id.clone();
+            let voice_iso_snap = voice_iso_snap.clone();
+            move || {
+                let cid = selected_clip_id.borrow().clone();
+                if let Some(cid) = cid {
+                    let mut proj = project.borrow_mut();
+                    if let Some(clip) = proj.clip_mut(&cid) {
+                        *voice_iso_snap.borrow_mut() = Some((cid.clone(), String::new(), clip.voice_isolation));
+                    }
+                }
+            }
+        };
+
+        let do_vi_commit = {
+            let project = project.clone();
+            let voice_iso_snap = voice_iso_snap.clone();
+            let on_execute_command = on_execute_command.clone();
+            move || {
+                let entry = voice_iso_snap.borrow_mut().take();
+                if let Some((clip_id, track_id, old_amount)) = entry {
+                    let new_amount = {
+                        let mut proj = project.borrow_mut();
+                        proj.clip_mut(&clip_id).map(|c| c.voice_isolation).unwrap_or(old_amount)
+                    };
+                    on_execute_command(Box::new(crate::undo::SetClipVoiceIsolationCommand {
+                        clip_id,
+                        track_id,
+                        old_amount,
+                        new_amount,
+                    }));
+                }
+            }
+        };
+
+        let ges = gtk4::GestureClick::new();
+        let snap_c = do_vi_snapshot.clone();
+        let commit_c = do_vi_commit.clone();
+        ges.connect_pressed(move |_, _, _, _| {
+            snap_c();
+        });
+        ges.connect_released(move |_, _, _, _| {
+            commit_c();
+        });
+        voice_isolation_slider.add_controller(ges);
+
+        let focus_ctrl = gtk4::EventControllerFocus::new();
+        let snap_c = do_vi_snapshot.clone();
+        let commit_c = do_vi_commit.clone();
+        focus_ctrl.connect_enter(move |_| {
+            snap_c();
+        });
+        focus_ctrl.connect_leave(move |_| {
+            commit_c();
+        });
+        voice_isolation_slider.add_controller(focus_ctrl);
+
+        let project_c = project.clone();
+        let selected_clip_id_c = selected_clip_id.clone();
+        let updating_c = updating.clone();
+        let on_audio_changed_c = on_audio_changed.clone();
+        let volume_slider_c = volume_slider.clone();
+        let pan_slider_c = pan_slider.clone();
+        voice_isolation_slider.connect_value_changed(move |s| {
+            if *updating_c.borrow() {
+                return;
+            }
+            let val = (s.value() / 100.0) as f32;
+            let id = selected_clip_id_c.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project_c.borrow_mut();
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.voice_isolation = val;
+                    }
+                    proj.dirty = true;
+                }
+                on_audio_changed_c(
+                    clip_id,
+                    db_to_linear_volume(volume_slider_c.value()) as f32,
+                    pan_slider_c.value() as f32,
+                    val,
+                );
+            }
+        });
     }
 
     // Wire Normalize button
@@ -8227,6 +8343,7 @@ pub fn build_inspector(
         shadows_warmth_slider,
         shadows_tint_slider,
         volume_slider,
+        voice_isolation_slider,
         pan_slider,
         normalize_btn,
         match_audio_btn,

@@ -211,6 +211,9 @@ fn otio_clip_to_clip(
         if let Some(v) = us.pan {
             clip.pan = v as f32;
         }
+        if let Some(v) = us.voice_isolation {
+            clip.voice_isolation = v as f32;
+        }
         if let Some(v) = us.brightness {
             clip.brightness = v as f32;
         }

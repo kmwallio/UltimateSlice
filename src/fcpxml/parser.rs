@@ -390,6 +390,11 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                         if let Some(ctx) = clip_stack.last() {
                             apply_native_volume_keyframes(&native, ctx, &mut track_map);
                             apply_native_pan_keyframes(&native, ctx, &mut track_map);
+                            if let Some(vi) = native.voice_isolation {
+                                if let Some(clip) = current_clip_mut(&mut track_map, Some(ctx)) {
+                                    clip.voice_isolation = vi;
+                                }
+                            }
                         }
                     }
                     "marker" | "chapter-marker" if in_selected_sequence => {
@@ -621,6 +626,10 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                     "adjust-volume" if in_spine => {
                         let attrs = parse_attrs(e)?;
                         apply_adjust_volume(&attrs, clip_stack.last(), &mut track_map);
+                    }
+                    "adjust-voiceIsolation" if in_spine => {
+                        let attrs = parse_attrs(e)?;
+                        apply_adjust_voice_isolation(&attrs, clip_stack.last(), &mut track_map);
                     }
                     "adjust-panner" if in_spine => {
                         let attrs = parse_attrs(e)?;
@@ -1098,6 +1107,9 @@ fn parse_asset_clip(
             }
             if let Some(v) = attrs.get("us:volume") {
                 clip.volume = v.parse().unwrap_or(1.0);
+            }
+            if let Some(v) = attrs.get("us:voice-isolation") {
+                clip.voice_isolation = v.parse().unwrap_or(0.0);
             }
             if let Some(v) = attrs.get("us:volume-keyframes") {
                 clip.volume_keyframes =
@@ -1647,6 +1659,21 @@ fn apply_adjust_volume(
     }
 }
 
+fn apply_adjust_voice_isolation(
+    attrs: &HashMap<String, String>,
+    active_ctx: Option<&ActiveClipContext>,
+    track_map: &mut BTreeMap<(u8, usize), Track>,
+) {
+    if let Some(clip) = current_clip_mut(track_map, active_ctx) {
+        if let Some(amount) = attrs
+            .get("amount")
+            .and_then(|s| s.parse::<f32>().ok())
+        {
+            clip.voice_isolation = (amount / 100.0).clamp(0.0, 1.0);
+        }
+    }
+}
+
 fn apply_adjust_panner(
     attrs: &HashMap<String, String>,
     active_ctx: Option<&ActiveClipContext>,
@@ -1967,6 +1994,7 @@ struct NativeKeyframeParams {
     opacity_keyframes: Vec<NumericKeyframe>,
     volume_keyframes: Vec<NumericKeyframe>,
     pan_keyframes: Vec<NumericKeyframe>,
+    voice_isolation: Option<f32>,
     unknown_fragments: Vec<String>,
 }
 
@@ -2155,7 +2183,16 @@ fn parse_audio_channel_source_children(reader: &mut Reader<&[u8]>) -> Result<Nat
                     }
                 }
             }
-            Event::Empty(_) => {}
+            Event::Empty(ref e) => {
+                let local_name = e.local_name();
+                let name = std::str::from_utf8(local_name.as_ref())?;
+                if name == "adjust-voiceIsolation" && depth == 1 {
+                    let attrs = parse_attrs(e)?;
+                    if let Some(amount) = attrs.get("amount").and_then(|s| s.parse::<f32>().ok()) {
+                        result.voice_isolation = Some((amount / 100.0).clamp(0.0, 1.0));
+                    }
+                }
+            }
             Event::End(_) => {
                 depth = depth.saturating_sub(1);
             }
@@ -2596,6 +2633,7 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:blur-keyframes"
             | "us:frei0r-effects"
             | "us:volume"
+            | "us:voice-isolation"
             | "us:volume-keyframes"
             | "us:pan"
             | "us:pan-keyframes"

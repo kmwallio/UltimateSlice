@@ -807,6 +807,9 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                         }
                     }
                     asset_clip.push_attribute(("us:volume", clip.volume.to_string().as_str()));
+                    if clip.voice_isolation > 0.0 {
+                        asset_clip.push_attribute(("us:voice-isolation", clip.voice_isolation.to_string().as_str()));
+                    }
                     let volume_keyframes_json = if clip.volume_keyframes.is_empty() {
                         None
                     } else {
@@ -1269,6 +1272,13 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                         writer.write_event(Event::End(BytesEnd::new("adjust-volume")))?;
                     } else {
                         writer.write_event(Event::Empty(adjust_volume))?;
+                    }
+
+                    if clip.voice_isolation > 0.0 {
+                        let mut adjust_vi = BytesStart::new("adjust-voiceIsolation");
+                        let vi_amount = format!("{:.0}", clip.voice_isolation * 100.0);
+                        adjust_vi.push_attribute(("amount", vi_amount.as_str()));
+                        writer.write_event(Event::Empty(adjust_vi))?;
                     }
 
                     let mut adjust_panner = BytesStart::new("adjust-panner");
@@ -2274,8 +2284,9 @@ fn write_strict_audio_channel_sources(
 ) -> Result<()> {
     let has_vol_kf = !clip.volume_keyframes.is_empty();
     let has_pan_kf = !clip.pan_keyframes.is_empty();
+    let has_voice_isolation = clip.voice_isolation > 0.0;
 
-    if !has_vol_kf && !has_pan_kf {
+    if !has_vol_kf && !has_pan_kf && !has_voice_isolation {
         return Ok(());
     }
 
@@ -2293,6 +2304,13 @@ fn write_strict_audio_channel_sources(
         writer.write_event(Event::Start(adjust_volume))?;
         write_volume_keyframe_params(writer, clip, fps, source_start_ns, true)?;
         writer.write_event(Event::End(BytesEnd::new("adjust-volume")))?;
+    }
+
+    if has_voice_isolation {
+        let mut adjust_vi = BytesStart::new("adjust-voiceIsolation");
+        let vi_amount = format!("{:.0}", clip.voice_isolation * 100.0);
+        adjust_vi.push_attribute(("amount", vi_amount.as_str()));
+        writer.write_event(Event::Empty(adjust_vi))?;
     }
 
     if has_pan_kf {
@@ -4165,6 +4183,7 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:blur-keyframes"
             | "us:frei0r-effects"
             | "us:volume"
+            | "us:voice-isolation"
             | "us:volume-keyframes"
             | "us:pan"
             | "us:pan-keyframes"

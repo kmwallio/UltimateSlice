@@ -1587,18 +1587,42 @@ fn build_duck_filter(
 }
 
 fn build_volume_filter(clip: &Clip) -> String {
-    if clip.volume_keyframes.is_empty() {
-        return format!("volume={:.4}", clip.volume.clamp(0.0, 4.0));
+    let base_expr = if clip.volume_keyframes.is_empty() {
+        format!("{:.4}", clip.volume.clamp(0.0, 4.0))
+    } else {
+        build_keyframed_property_expression(
+            &clip.volume_keyframes,
+            clip.volume as f64,
+            0.0,
+            4.0,
+            "t",
+        )
+    };
+
+    if clip.voice_isolation > 0.0 && !clip.subtitle_segments.is_empty() {
+        let mut intervals = Vec::new();
+        for seg in &clip.subtitle_segments {
+            if seg.words.is_empty() {
+                intervals.push(format!("between(t,{:.3},{:.3})", seg.start_ns as f64 / 1e9, seg.end_ns as f64 / 1e9));
+            } else {
+                for w in &seg.words {
+                    intervals.push(format!("between(t,{:.3},{:.3})", w.start_ns as f64 / 1e9, w.end_ns as f64 / 1e9));
+                }
+            }
+        }
+        let duck_ratio = 1.0 - clip.voice_isolation;
+        if !intervals.is_empty() {
+            let condition = intervals.join("+");
+            let expr = format!("({}) * if({}, 1.0, {:.4})", base_expr, condition, duck_ratio);
+            return format!("volume='{}':eval=frame", expr);
+        }
     }
-    let expr = build_keyframed_property_expression(
-        &clip.volume_keyframes,
-        clip.volume as f64,
-        0.0,
-        4.0,
-        "t",
-    );
-    // Keyframed volume expressions depend on `t`, so force per-frame evaluation.
-    format!("volume='{expr}':eval=frame")
+
+    if clip.volume_keyframes.is_empty() {
+        format!("volume={base_expr}")
+    } else {
+        format!("volume='{base_expr}':eval=frame")
+    }
 }
 
 /// Build FFmpeg `equalizer` filter chain for the clip's 3-band parametric EQ.
@@ -2593,8 +2617,8 @@ pub fn import_srt(
             if !text.is_empty() {
                 segments.push(crate::model::clip::SubtitleSegment {
                     id: uuid::Uuid::new_v4().to_string(),
-                    start_ns: source_in_ns + start_ns,
-                    end_ns: source_in_ns + end_ns,
+                    start_ns,
+                    end_ns,
                     text,
                     words: Vec::new(),
                 });

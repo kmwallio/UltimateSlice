@@ -3553,7 +3553,9 @@ fn clip_to_program_clips(
         vidstab_enabled: c.vidstab_enabled,
         vidstab_smoothing: c.vidstab_smoothing,
         volume: c.volume as f64,
+        voice_isolation: c.voice_isolation as f64,
         volume_keyframes: c.volume_keyframes.clone(),
+        subtitle_segments: c.subtitle_segments.clone(),
         pan: c.pan as f64,
         pan_keyframes: c.pan_keyframes.clone(),
         audio_channel_mode: c.audio_channel_mode,
@@ -4175,7 +4177,7 @@ pub fn build_window(
             let cell = timeline_panel_cell.clone();
             // clip_id comes directly from the inspector (authoritative selected clip),
             // avoiding any race with timeline_state.selected_clip_id.
-            move |clip_id: &str, vol: f32, pan: f32| {
+            move |clip_id: &str, vol: f32, pan: f32, voice_isolation: f32| {
                 // The inspector already persisted vol/pan to the project model.
                 // Just mark dirty and update live GStreamer audio for the exact clip.
                 {
@@ -4190,24 +4192,20 @@ pub fn build_window(
                         let proj = project.borrow();
                         if let Some(model_clip) = proj.clip_ref(&clip_id) {
                             // Sync to video clips (embedded audio)
-                            if let Some(player_clip) =
-                                pp.clips.iter_mut().find(|c| c.id == clip_id)
-                            {
-                                player_clip.volume_keyframes =
-                                    model_clip.volume_keyframes.clone();
+                            for player_clip in pp.clips.iter_mut().filter(|c| c.id == clip_id) {
+                                player_clip.volume_keyframes = model_clip.volume_keyframes.clone();
                                 player_clip.pan_keyframes = model_clip.pan_keyframes.clone();
+                                player_clip.voice_isolation = voice_isolation as f64;
                             }
                             // Sync to audio-only clips
-                            if let Some(audio_clip) =
-                                pp.audio_clips.iter_mut().find(|c| c.id == clip_id)
-                            {
-                                audio_clip.volume_keyframes =
-                                    model_clip.volume_keyframes.clone();
+                            for audio_clip in pp.audio_clips.iter_mut().filter(|c| c.id == clip_id) {
+                                audio_clip.volume_keyframes = model_clip.volume_keyframes.clone();
                                 audio_clip.pan_keyframes = model_clip.pan_keyframes.clone();
+                                audio_clip.voice_isolation = voice_isolation as f64;
                             }
                         }
                     }
-                    pp.update_audio_for_clip(clip_id, vol as f64, pan as f64);
+                    pp.update_audio_for_clip(clip_id, vol as f64, pan as f64, voice_isolation as f64);
                 }
                 if let Some(win) = window_weak.upgrade() {
                     let proj = project.borrow();
@@ -14641,6 +14639,26 @@ fn handle_mcp_command(
             let mut proj = project.borrow_mut();
             let found = if let Some(clip) = proj.clip_mut(&clip_id) {
                 clip.opacity = opacity.clamp(0.0, 1.0);
+                proj.dirty = true;
+                true
+            } else {
+                false
+            };
+            drop(proj);
+            reply.send(json!({"success": found})).ok();
+            if found {
+                on_project_changed();
+            }
+        }
+
+        McpCommand::SetClipVoiceIsolation {
+            clip_id,
+            voice_isolation,
+            reply,
+        } => {
+            let mut proj = project.borrow_mut();
+            let found = if let Some(clip) = proj.clip_mut(&clip_id) {
+                clip.voice_isolation = voice_isolation.clamp(0.0, 1.0) as f32;
                 proj.dirty = true;
                 true
             } else {

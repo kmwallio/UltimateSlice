@@ -798,6 +798,32 @@ impl EditCommand for SetClipVolumeCommand {
     }
 }
 
+/// Set clip voice isolation amount.
+pub struct SetClipVoiceIsolationCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_amount: f32,
+    pub new_amount: f32,
+}
+
+impl EditCommand for SetClipVoiceIsolationCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.voice_isolation = self.new_amount;
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.voice_isolation = self.old_amount;
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set clip voice isolation"
+    }
+}
+
 /// Set clip playback speed.
 pub struct SetClipSpeedCommand {
     pub clip_id: String,

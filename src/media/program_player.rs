@@ -782,7 +782,9 @@ pub struct ProgramClip {
     pub vidstab_smoothing: f32,
     /// Volume multiplier: 0.0 (silent) to 2.0 (double), default 1.0
     pub volume: f64,
+    pub voice_isolation: f64,
     pub volume_keyframes: Vec<NumericKeyframe>,
+    pub subtitle_segments: Vec<crate::model::clip::SubtitleSegment>,
     /// Audio pan: -1.0 (full left) to 1.0 (full right), default 0.0
     pub pan: f64,
     pub pan_keyframes: Vec<NumericKeyframe>,
@@ -1027,11 +1029,27 @@ impl ProgramClip {
     }
 
     pub fn volume_at_timeline_ns(&self, timeline_pos_ns: u64) -> f64 {
-        ModelClip::evaluate_keyframed_value(
+        let local_ns = self.local_timeline_position_ns(timeline_pos_ns);
+        let base_vol = ModelClip::evaluate_keyframed_value(
             &self.volume_keyframes,
-            self.local_timeline_position_ns(timeline_pos_ns),
+            local_ns,
             self.volume,
-        )
+        );
+        if self.voice_isolation > 0.0 && !self.subtitle_segments.is_empty() {
+            let rel_ns = timeline_pos_ns.saturating_sub(self.timeline_start_ns);
+            let clip_local_ns = (rel_ns as f64 * self.speed) as u64;
+            let in_speech = self.subtitle_segments.iter().any(|seg| {
+                if seg.words.is_empty() {
+                    clip_local_ns >= seg.start_ns && clip_local_ns <= seg.end_ns
+                } else {
+                    seg.words.iter().any(|w| clip_local_ns >= w.start_ns && clip_local_ns <= w.end_ns)
+                }
+            });
+            if !in_speech {
+                return base_vol * (1.0 - self.voice_isolation);
+            }
+        }
+        base_vol
     }
 
     pub fn pan_at_timeline_ns(&self, timeline_pos_ns: u64) -> f64 {
@@ -5080,21 +5098,31 @@ impl ProgramPlayer {
         self.sync_preview_audio_levels(self.timeline_pos_ns);
     }
 
-    pub fn update_audio_for_clip(&mut self, clip_id: &str, volume: f64, pan: f64) {
+    pub fn update_audio_for_clip(&mut self, clip_id: &str, volume: f64, pan: f64, voice_isolation: f64) {
         let volume = volume.clamp(0.0, MAX_PREVIEW_AUDIO_GAIN);
         let pan = pan.clamp(-1.0, 1.0);
+        let mut video_found = false;
         // Check video clips first (use audiomixer pad on compositor pipeline).
-        if let Some(i) = self.clips.iter().position(|c| c.id == clip_id) {
-            self.clips[i].volume = volume;
-            self.clips[i].pan = pan;
+        for clip in self.clips.iter_mut().filter(|c| c.id == clip_id) {
+            clip.volume = volume;
+            clip.pan = pan;
+            clip.voice_isolation = voice_isolation;
+            video_found = true;
+        }
+        if video_found {
             self.apply_main_audio_slot_volumes(self.timeline_pos_ns);
-            return;
         }
         // For audio-only clips, update the stored volume and, if actively playing,
         // update the dedicated volume element (avoids playbin StreamVolume crosstalk).
-        if let Some(i) = self.audio_clips.iter().position(|c| c.id == clip_id) {
+        // Collect matching indices first to avoid holding iter_mut borrow across &self calls.
+        let matched_indices: Vec<usize> = self.audio_clips.iter().enumerate()
+            .filter(|(_, c)| c.id == clip_id)
+            .map(|(i, _)| i)
+            .collect();
+        for i in matched_indices {
             self.audio_clips[i].volume = volume;
             self.audio_clips[i].pan = pan;
+            self.audio_clips[i].voice_isolation = voice_isolation;
             if self.audio_current_source == Some(AudioCurrentSource::AudioClip(i)) {
                 let effective = self.effective_audio_source_volume(
                     AudioCurrentSource::AudioClip(i),
@@ -15671,7 +15699,9 @@ mod tests {
             vidstab_enabled: false,
             vidstab_smoothing: 0.5,
             volume: 1.0,
+            voice_isolation: 0.0,
             volume_keyframes: Vec::new(),
+            subtitle_segments: Vec::new(),
             pan: 0.0,
             pan_keyframes: Vec::new(),
             audio_channel_mode: crate::model::clip::AudioChannelMode::default(),

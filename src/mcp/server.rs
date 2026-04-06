@@ -1076,6 +1076,18 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_clip_voice_isolation",
+            "description": "Set voice isolation (smart noise gating based on Whisper timings). 0.0 is off, 1.0 is full gating.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id" },
+                    "voice_isolation": { "type": "number", "description": "Isolation amount 0.0 to 1.0" }
+                },
+                "required": ["clip_id", "voice_isolation"]
+            }
+        },
+        {
             "name": "set_clip_eq",
             "description": "Set 3-band parametric EQ on a clip. Each band has freq (Hz), gain (dB), and Q (bandwidth). All parameters optional — omitted fields keep their current value.",
             "inputSchema": {
@@ -2675,6 +2687,11 @@ fn dispatch_tool_payload(
         "set_clip_opacity" => McpCommand::SetClipOpacity {
             clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
             opacity: args["opacity"].as_f64().unwrap_or(1.0),
+            reply: tx,
+        },
+        "set_clip_voice_isolation" => McpCommand::SetClipVoiceIsolation {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            voice_isolation: args["voice_isolation"].as_f64().unwrap_or(0.0),
             reply: tx,
         },
         "set_clip_eq" => McpCommand::SetClipEq {

@@ -398,6 +398,7 @@ Tracking docs:
   - [x] ~~Fix preview halting with 3+ video tracks — ensure preroll before seek during mid-playback clip switches, plus timeline-position safety check~~ *(superseded by compositor rewrite — wall-clock position tracking)*
 
 ### Audio
+- [x] Voice Isolation (Smart Noise Gating) based on Whisper STT subtitle timestamps
 - [x] Audio track clip display with waveform (see Timeline Improvements above)
 - [x] Volume / pan controls per clip in the inspector (volume slider now dB-based: `-100 dB` to `+12 dB`, mapped to linear gain for playback/export, persisted in FCPXML)
 - [x] Basic audio mixing (level meters)
