@@ -4205,12 +4205,11 @@ fn flatten_clips(clips: &[Clip], timeline_offset: u64, depth: usize) -> Vec<Clip
                             right_trim = rebased.timeline_end() - window_end;
                             rebased.source_out = rebased.source_out.saturating_sub(right_trim);
                         }
-                        // Rebase keyframes so they stay aligned with clip content
+                        // Rebase keyframes and subtitles so they stay aligned with clip content
                         if left_trim > 0 || right_trim > 0 {
-                            rebased.retain_keyframes_in_local_range(
-                                left_trim,
-                                orig_duration.saturating_sub(right_trim),
-                            );
+                            let range_end = orig_duration.saturating_sub(right_trim);
+                            rebased.retain_keyframes_in_local_range(left_trim, range_end);
+                            rebased.retain_subtitles_in_local_range(left_trim, range_end);
                         }
                         // Rebase: offset from window start + compound parent pos
                         rebased.timeline_start = compound_offset.saturating_add(

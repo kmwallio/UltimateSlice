@@ -380,7 +380,6 @@ fn merge_audio_match_speech_regions(
 
 #[derive(Debug, Clone)]
 struct AudioMatchClipInfo {
-    track_id: String,
     source_path: String,
     source_in: u64,
     source_out: u64,
@@ -449,7 +448,6 @@ fn region_scoped_audio_match_clip_info(
 #[derive(Debug, Clone)]
 struct PreparedAudioMatch {
     clip_id: String,
-    track_id: String,
     source_region: crate::media::audio_match::AnalysisRegionNs,
     reference_region: crate::media::audio_match::AnalysisRegionNs,
     source_channel_mode: crate::media::audio_match::AudioMatchChannelMode,
@@ -468,24 +466,18 @@ struct PreparedAudioMatch {
 }
 
 fn collect_audio_match_clip_info(project: &Project, clip_id: &str) -> Option<AudioMatchClipInfo> {
-    project.tracks.iter().find_map(|track| {
-        track
-            .clips
-            .iter()
-            .find(|clip| clip.id == clip_id)
-            .map(|clip| AudioMatchClipInfo {
-                track_id: track.id.clone(),
-                source_path: clip.source_path.clone(),
-                source_in: clip.source_in,
-                source_out: clip.source_out,
-                duration_ns: clip.source_out.saturating_sub(clip.source_in),
-                speech_regions: collect_audio_match_speech_regions(clip),
-                volume: clip.volume,
-                measured_loudness_lufs: clip.measured_loudness_lufs,
-                eq_bands: clip.eq_bands,
-                audio_channel_mode: clip.audio_channel_mode,
-                kind: clip.kind.clone(),
-            })
+    let clip = project.clip_ref(clip_id)?;
+    Some(AudioMatchClipInfo {
+        source_path: clip.source_path.clone(),
+        source_in: clip.source_in,
+        source_out: clip.source_out,
+        duration_ns: clip.source_out.saturating_sub(clip.source_in),
+        speech_regions: collect_audio_match_speech_regions(clip),
+        volume: clip.volume,
+        measured_loudness_lufs: clip.measured_loudness_lufs,
+        eq_bands: clip.eq_bands,
+        audio_channel_mode: clip.audio_channel_mode,
+        kind: clip.kind.clone(),
     })
 }
 
@@ -534,7 +526,6 @@ fn run_audio_match_for_clips(
 
     Ok(PreparedAudioMatch {
         clip_id: source_clip_id.to_string(),
-        track_id: source.track_id.clone(),
         source_region,
         reference_region,
         source_channel_mode: outcome.source_resolved_channel_mode,
@@ -1623,7 +1614,6 @@ mod tests {
         speech_regions: Vec<crate::media::audio_match::AnalysisRegionNs>,
     ) -> AudioMatchClipInfo {
         AudioMatchClipInfo {
-            track_id: "track-1".to_string(),
             source_path: "/tmp/source.wav".to_string(),
             source_in: 10_000_000_000,
             source_out: 10_000_000_000 + duration_ns,
@@ -3424,12 +3414,11 @@ fn clip_to_program_clips(
                         right_trim = windowed.timeline_end() - window_end;
                         windowed.source_out = windowed.source_out.saturating_sub(right_trim);
                     }
-                    // Rebase keyframes so they stay aligned with clip content
+                    // Rebase keyframes and subtitles so they stay aligned with clip content
                     if left_trim > 0 || right_trim > 0 {
-                        windowed.retain_keyframes_in_local_range(
-                            left_trim,
-                            orig_duration.saturating_sub(right_trim),
-                        );
+                        let range_end = orig_duration.saturating_sub(right_trim);
+                        windowed.retain_keyframes_in_local_range(left_trim, range_end);
+                        windowed.retain_subtitles_in_local_range(left_trim, range_end);
                     }
                     // Rebase: offset from window start + compound parent pos
                     windowed.timeline_start =
@@ -4705,9 +4694,9 @@ pub fn build_window(
         // on_normalize_audio: analyze clip loudness and adjust volume
         {
             // Channel-based background analysis (same pattern as silence detection).
-            // Result: Ok((clip_id, track_id, old_volume, old_measured, measured_lufs, target_lufs))
+            // Result: Ok((clip_id, old_volume, old_measured, measured_lufs, target_lufs))
             //         Err(error_message)
-            type NormResult = Result<(String, String, f32, Option<f64>, f64, f64), String>;
+            type NormResult = Result<(String, f32, Option<f64>, f64, f64), String>;
             let norm_rx: Rc<RefCell<Option<std::sync::mpsc::Receiver<NormResult>>>> =
                 Rc::new(RefCell::new(None));
 
@@ -4729,7 +4718,6 @@ pub fn build_window(
                             match result {
                                 Ok((
                                     clip_id,
-                                    track_id,
                                     old_volume,
                                     old_measured,
                                     measured_lufs,
@@ -4745,7 +4733,6 @@ pub fn build_window(
                                         let mut proj = project.borrow_mut();
                                         let cmd = crate::undo::NormalizeClipAudioCommand {
                                             clip_id: clip_id.clone(),
-                                            track_id,
                                             old_volume,
                                             new_volume,
                                             old_measured_loudness: old_measured,
@@ -4794,23 +4781,17 @@ pub fn build_window(
                 }
                 let clip_info = {
                     let proj = project.borrow();
-                    let mut info = None;
-                    for track in &proj.tracks {
-                        if let Some(clip) = track.clips.iter().find(|c| c.id == clip_id) {
-                            info = Some((
-                                clip.source_path.clone(),
-                                clip.source_in,
-                                clip.source_out,
-                                clip.volume,
-                                clip.measured_loudness_lufs,
-                                track.id.clone(),
-                            ));
-                            break;
-                        }
-                    }
-                    info
+                    proj.clip_ref(clip_id).map(|clip| {
+                        (
+                            clip.source_path.clone(),
+                            clip.source_in,
+                            clip.source_out,
+                            clip.volume,
+                            clip.measured_loudness_lufs,
+                        )
+                    })
                 };
-                let Some((source_path, source_in, source_out, old_volume, old_measured, track_id)) =
+                let Some((source_path, source_in, source_out, old_volume, old_measured)) =
                     clip_info
                 else {
                     return;
@@ -4836,7 +4817,6 @@ pub fn build_window(
                     let _ = tx.send(match result {
                         Ok(measured_lufs) => Ok((
                             clip_id_owned,
-                            track_id,
                             old_volume,
                             old_measured,
                             measured_lufs,
@@ -4874,7 +4854,6 @@ pub fn build_window(
                                         let mut proj = project.borrow_mut();
                                         let cmd = crate::undo::MatchClipAudioCommand {
                                             clip_id: prepared.clip_id.clone(),
-                                            track_id: prepared.track_id.clone(),
                                             old_volume: prepared.old_volume,
                                             new_volume: prepared.new_volume,
                                             old_measured_loudness: prepared.old_measured_loudness,
@@ -5116,17 +5095,14 @@ pub fn build_window(
                     ];
                     let lang_idx = lang_dropdown.selected() as usize;
                     let language = languages.get(lang_idx).unwrap_or(&"auto");
-                    for track in &proj.tracks {
-                        if let Some(clip) = track.clips.iter().find(|c| &c.id == clip_id) {
-                            stt_cache.borrow_mut().request(
-                                &clip.source_path,
-                                clip.source_in,
-                                clip.source_out,
-                                language,
-                            );
-                            inspector_view_gen.stt_generating.set(true);
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_ref(clip_id) {
+                        stt_cache.borrow_mut().request(
+                            &clip.source_path,
+                            clip.source_in,
+                            clip.source_out,
+                            language,
+                        );
+                        inspector_view_gen.stt_generating.set(true);
                     }
                 }
             });
@@ -5143,13 +5119,10 @@ pub fn build_window(
                 let selected = timeline_state.borrow().selected_clip_id.clone();
                 if let Some(ref clip_id) = selected {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.subtitle_segments.clear();
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.subtitle_segments.clear();
                     }
+                    proj.dirty = true;
                     drop(proj);
                     on_project_changed();
                 }
@@ -8239,11 +8212,29 @@ pub fn build_window(
                 }
                 // Update subtitle overlay text for current playhead position.
                 // Collect active subtitles from ALL clips at the playhead, with per-clip styling.
+                // Searches recursively through compound clips, translating the playhead into
+                // each compound's internal time.
                 {
                     let proj = project.borrow();
                     let mut lines: Vec<crate::ui::program_monitor::SubtitleLine> = Vec::new();
-                    for track in &proj.tracks {
+                    fn collect_subtitle_lines(
+                        tracks: &[crate::model::track::Track],
+                        pos_ns: u64,
+                        lines: &mut Vec<crate::ui::program_monitor::SubtitleLine>,
+                    ) {
+                    for track in tracks {
                         for clip in &track.clips {
+                            // Recurse into compound clips with translated time
+                            if let Some(ref inner) = clip.compound_tracks {
+                                let clip_end = clip.timeline_start + clip.duration();
+                                if pos_ns >= clip.timeline_start && pos_ns < clip_end {
+                                    let internal_pos = pos_ns
+                                        .saturating_sub(clip.timeline_start)
+                                        .saturating_add(clip.source_in);
+                                    collect_subtitle_lines(inner, internal_pos, lines);
+                                }
+                                continue;
+                            }
                             if clip.subtitle_segments.is_empty() {
                                 continue;
                             }
@@ -8338,6 +8329,8 @@ pub fn build_window(
                             }
                         }
                     }
+                    }
+                    collect_subtitle_lines(&proj.tracks, pos_ns, &mut lines);
                     prog_subtitle_setter_poll(lines);
                 }
                 if let Some(ref editor) = *keyframe_editor_poll.borrow() {
@@ -11593,27 +11586,44 @@ pub fn build_window(
                 let stt_results = stt_cache.borrow_mut().poll();
                 if !stt_results.is_empty() {
                     for result in stt_results {
-                        // Find the matching clip and push an undoable command.
+                        // Find the matching clip (recursively, including inside compounds).
                         let proj = project_for_stt.borrow();
-                        let mut found = None;
-                        for track in &proj.tracks {
-                            for clip in &track.clips {
-                                if clip.source_path == result.source_path
-                                    && clip.source_in == result.source_in_ns
-                                    && clip.source_out == result.source_out_ns
-                                {
-                                    found = Some((
-                                        clip.id.clone(),
-                                        track.id.clone(),
-                                        clip.subtitle_segments.clone(),
-                                    ));
-                                    break;
+                        fn find_stt_clip(
+                            tracks: &[crate::model::track::Track],
+                            source_path: &str,
+                            source_in: u64,
+                            source_out: u64,
+                        ) -> Option<(String, String, Vec<crate::model::clip::SubtitleSegment>)>
+                        {
+                            for track in tracks {
+                                for clip in &track.clips {
+                                    if clip.source_path == source_path
+                                        && clip.source_in == source_in
+                                        && clip.source_out == source_out
+                                    {
+                                        return Some((
+                                            clip.id.clone(),
+                                            track.id.clone(),
+                                            clip.subtitle_segments.clone(),
+                                        ));
+                                    }
+                                    if let Some(ref inner) = clip.compound_tracks {
+                                        if let Some(found) =
+                                            find_stt_clip(inner, source_path, source_in, source_out)
+                                        {
+                                            return Some(found);
+                                        }
+                                    }
                                 }
                             }
-                            if found.is_some() {
-                                break;
-                            }
+                            None
                         }
+                        let found = find_stt_clip(
+                            &proj.tracks,
+                            &result.source_path,
+                            result.source_in_ns,
+                            result.source_out_ns,
+                        );
                         drop(proj);
 
                         if let Some((clip_id, track_id, old_segments)) = found {
@@ -14076,35 +14086,31 @@ fn handle_mcp_command(
             reply,
         } => {
             let mut proj = project.borrow_mut();
-            let mut found = false;
-            'outer: for track in proj.tracks.iter_mut() {
-                for clip in track.clips.iter_mut() {
-                    if clip.id == clip_id {
-                        clip.brightness = brightness as f32;
-                        clip.contrast = contrast as f32;
-                        clip.saturation = saturation as f32;
-                        clip.temperature = temperature as f32;
-                        clip.tint = tint as f32;
-                        clip.denoise = denoise as f32;
-                        clip.sharpness = sharpness as f32;
-                        clip.blur = blur as f32;
-                        clip.shadows = shadows as f32;
-                        clip.midtones = midtones as f32;
-                        clip.highlights = highlights as f32;
-                        clip.exposure = exposure as f32;
-                        clip.black_point = black_point as f32;
-                        clip.highlights_warmth = highlights_warmth as f32;
-                        clip.highlights_tint = highlights_tint as f32;
-                        clip.midtones_warmth = midtones_warmth as f32;
-                        clip.midtones_tint = midtones_tint as f32;
-                        clip.shadows_warmth = shadows_warmth as f32;
-                        clip.shadows_tint = shadows_tint as f32;
-                        proj.dirty = true;
-                        found = true;
-                        break 'outer;
-                    }
-                }
-            }
+            let found = if let Some(clip) = proj.clip_mut(&clip_id) {
+                clip.brightness = brightness as f32;
+                clip.contrast = contrast as f32;
+                clip.saturation = saturation as f32;
+                clip.temperature = temperature as f32;
+                clip.tint = tint as f32;
+                clip.denoise = denoise as f32;
+                clip.sharpness = sharpness as f32;
+                clip.blur = blur as f32;
+                clip.shadows = shadows as f32;
+                clip.midtones = midtones as f32;
+                clip.highlights = highlights as f32;
+                clip.exposure = exposure as f32;
+                clip.black_point = black_point as f32;
+                clip.highlights_warmth = highlights_warmth as f32;
+                clip.highlights_tint = highlights_tint as f32;
+                clip.midtones_warmth = midtones_warmth as f32;
+                clip.midtones_tint = midtones_tint as f32;
+                clip.shadows_warmth = shadows_warmth as f32;
+                clip.shadows_tint = shadows_tint as f32;
+                proj.dirty = true;
+                true
+            } else {
+                false
+            };
             drop(proj);
             reply.send(json!({"success": found})).ok();
             if found {
@@ -14136,17 +14142,13 @@ fn handle_mcp_command(
                 return;
             };
             let mut proj = project.borrow_mut();
-            let mut found = false;
-            'outer: for track in proj.tracks.iter_mut() {
-                for clip in track.clips.iter_mut() {
-                    if clip.id == clip_id {
-                        clip.color_label = parsed;
-                        proj.dirty = true;
-                        found = true;
-                        break 'outer;
-                    }
-                }
-            }
+            let found = if let Some(clip) = proj.clip_mut(&clip_id) {
+                clip.color_label = parsed;
+                proj.dirty = true;
+                true
+            } else {
+                false
+            };
             drop(proj);
             reply
                 .send(json!({"success": found, "clip_id": clip_id, "color_label": color_label}))
@@ -14165,28 +14167,24 @@ fn handle_mcp_command(
             reply,
         } => {
             let mut proj = project.borrow_mut();
-            let mut found = false;
-            'outer: for track in proj.tracks.iter_mut() {
-                for clip in track.clips.iter_mut() {
-                    if clip.id == clip_id {
-                        if let Some(v) = enabled {
-                            clip.chroma_key_enabled = v;
-                        }
-                        if let Some(v) = color {
-                            clip.chroma_key_color = v;
-                        }
-                        if let Some(v) = tolerance {
-                            clip.chroma_key_tolerance = v as f32;
-                        }
-                        if let Some(v) = softness {
-                            clip.chroma_key_softness = v as f32;
-                        }
-                        proj.dirty = true;
-                        found = true;
-                        break 'outer;
-                    }
+            let found = if let Some(clip) = proj.clip_mut(&clip_id) {
+                if let Some(v) = enabled {
+                    clip.chroma_key_enabled = v;
                 }
-            }
+                if let Some(v) = color {
+                    clip.chroma_key_color = v;
+                }
+                if let Some(v) = tolerance {
+                    clip.chroma_key_tolerance = v as f32;
+                }
+                if let Some(v) = softness {
+                    clip.chroma_key_softness = v as f32;
+                }
+                proj.dirty = true;
+                true
+            } else {
+                false
+            };
             drop(proj);
             reply.send(json!({"success": found})).ok();
             if found {
@@ -14210,77 +14208,73 @@ fn handle_mcp_command(
             reply,
         } => {
             let mut proj = project.borrow_mut();
-            let mut found = false;
-            'outer: for track in proj.tracks.iter_mut() {
-                for clip in track.clips.iter_mut() {
-                    if clip.id == clip_id {
-                        // Create mask[0] if absent
-                        if clip.masks.is_empty() {
-                            clip.masks.push(crate::model::clip::ClipMask::new(
-                                crate::model::clip::MaskShape::Rectangle,
-                            ));
-                        }
-                        if let Some(mask) = clip.masks.first_mut() {
-                            if let Some(v) = enabled {
-                                mask.enabled = v;
-                            }
-                            if let Some(ref s) = shape {
-                                mask.shape = match s.as_str() {
-                                    "ellipse" => crate::model::clip::MaskShape::Ellipse,
-                                    "path" => crate::model::clip::MaskShape::Path,
-                                    _ => crate::model::clip::MaskShape::Rectangle,
-                                };
-                            }
-                            // Handle path data for bezier path masks
-                            if let Some(ref s) = shape {
-                                if s == "path" {
-                                    if let Some(ref path_val) = path {
-                                        if let Ok(points) = serde_json::from_value::<
-                                            Vec<crate::model::clip::BezierPoint>,
-                                        >(
-                                            path_val.clone()
-                                        ) {
-                                            mask.path =
-                                                Some(crate::model::clip::MaskPath { points });
-                                        }
-                                    }
-                                    if mask.path.is_none() {
-                                        mask.path =
-                                            Some(crate::model::clip::default_diamond_path());
-                                    }
+            let found = if let Some(clip) = proj.clip_mut(&clip_id) {
+                // Create mask[0] if absent
+                if clip.masks.is_empty() {
+                    clip.masks.push(crate::model::clip::ClipMask::new(
+                        crate::model::clip::MaskShape::Rectangle,
+                    ));
+                }
+                if let Some(mask) = clip.masks.first_mut() {
+                    if let Some(v) = enabled {
+                        mask.enabled = v;
+                    }
+                    if let Some(ref s) = shape {
+                        mask.shape = match s.as_str() {
+                            "ellipse" => crate::model::clip::MaskShape::Ellipse,
+                            "path" => crate::model::clip::MaskShape::Path,
+                            _ => crate::model::clip::MaskShape::Rectangle,
+                        };
+                    }
+                    // Handle path data for bezier path masks
+                    if let Some(ref s) = shape {
+                        if s == "path" {
+                            if let Some(ref path_val) = path {
+                                if let Ok(points) = serde_json::from_value::<
+                                    Vec<crate::model::clip::BezierPoint>,
+                                >(
+                                    path_val.clone()
+                                ) {
+                                    mask.path =
+                                        Some(crate::model::clip::MaskPath { points });
                                 }
                             }
-                            if let Some(v) = center_x {
-                                mask.center_x = v.clamp(0.0, 1.0);
-                            }
-                            if let Some(v) = center_y {
-                                mask.center_y = v.clamp(0.0, 1.0);
-                            }
-                            if let Some(v) = width {
-                                mask.width = v.clamp(0.01, 0.5);
-                            }
-                            if let Some(v) = height {
-                                mask.height = v.clamp(0.01, 0.5);
-                            }
-                            if let Some(v) = rotation {
-                                mask.rotation = v.clamp(-180.0, 180.0);
-                            }
-                            if let Some(v) = feather {
-                                mask.feather = v.clamp(0.0, 0.5);
-                            }
-                            if let Some(v) = expansion {
-                                mask.expansion = v.clamp(-0.5, 0.5);
-                            }
-                            if let Some(v) = invert {
-                                mask.invert = v;
+                            if mask.path.is_none() {
+                                mask.path =
+                                    Some(crate::model::clip::default_diamond_path());
                             }
                         }
-                        proj.dirty = true;
-                        found = true;
-                        break 'outer;
+                    }
+                    if let Some(v) = center_x {
+                        mask.center_x = v.clamp(0.0, 1.0);
+                    }
+                    if let Some(v) = center_y {
+                        mask.center_y = v.clamp(0.0, 1.0);
+                    }
+                    if let Some(v) = width {
+                        mask.width = v.clamp(0.01, 0.5);
+                    }
+                    if let Some(v) = height {
+                        mask.height = v.clamp(0.01, 0.5);
+                    }
+                    if let Some(v) = rotation {
+                        mask.rotation = v.clamp(-180.0, 180.0);
+                    }
+                    if let Some(v) = feather {
+                        mask.feather = v.clamp(0.0, 0.5);
+                    }
+                    if let Some(v) = expansion {
+                        mask.expansion = v.clamp(-0.5, 0.5);
+                    }
+                    if let Some(v) = invert {
+                        mask.invert = v;
                     }
                 }
-            }
+                proj.dirty = true;
+                true
+            } else {
+                false
+            };
             drop(proj);
             reply.send(json!({"success": found})).ok();
             if found {
@@ -14295,22 +14289,18 @@ fn handle_mcp_command(
             reply,
         } => {
             let mut proj = project.borrow_mut();
-            let mut found = false;
-            'outer: for track in proj.tracks.iter_mut() {
-                for clip in track.clips.iter_mut() {
-                    if clip.id == clip_id {
-                        if let Some(v) = enabled {
-                            clip.bg_removal_enabled = v;
-                        }
-                        if let Some(v) = threshold {
-                            clip.bg_removal_threshold = v;
-                        }
-                        proj.dirty = true;
-                        found = true;
-                        break 'outer;
-                    }
+            let found = if let Some(clip) = proj.clip_mut(&clip_id) {
+                if let Some(v) = enabled {
+                    clip.bg_removal_enabled = v;
                 }
-            }
+                if let Some(v) = threshold {
+                    clip.bg_removal_threshold = v;
+                }
+                proj.dirty = true;
+                true
+            } else {
+                false
+            };
             drop(proj);
             reply.send(json!({"success": found})).ok();
             if found {
@@ -14324,17 +14314,13 @@ fn handle_mcp_command(
             reply,
         } => {
             let mut proj = project.borrow_mut();
-            let mut found = false;
-            'outer: for track in proj.tracks.iter_mut() {
-                for clip in track.clips.iter_mut() {
-                    if clip.id == clip_id {
-                        clip.lut_paths = lut_paths.clone();
-                        proj.dirty = true;
-                        found = true;
-                        break 'outer;
-                    }
-                }
-            }
+            let found = if let Some(clip) = proj.clip_mut(&clip_id) {
+                clip.lut_paths = lut_paths.clone();
+                proj.dirty = true;
+                true
+            } else {
+                false
+            };
             drop(proj);
             reply.send(json!({"success": found})).ok();
             if found {
@@ -14352,25 +14338,21 @@ fn handle_mcp_command(
             reply,
         } => {
             let mut proj = project.borrow_mut();
-            let mut found = false;
-            'outer: for track in proj.tracks.iter_mut() {
-                for clip in track.clips.iter_mut() {
-                    if clip.id == clip_id {
-                        clip.scale = scale.clamp(0.1, 4.0);
-                        clip.position_x = position_x.clamp(-1.0, 1.0);
-                        clip.position_y = position_y.clamp(-1.0, 1.0);
-                        if let Some(rot) = rotate {
-                            clip.rotate = rot.clamp(-180, 180);
-                        }
-                        if let Some(a) = anamorphic_desqueeze {
-                            clip.anamorphic_desqueeze = a;
-                        }
-                        proj.dirty = true;
-                        found = true;
-                        break 'outer;
-                    }
+            let found = if let Some(clip) = proj.clip_mut(&clip_id) {
+                clip.scale = scale.clamp(0.1, 4.0);
+                clip.position_x = position_x.clamp(-1.0, 1.0);
+                clip.position_y = position_y.clamp(-1.0, 1.0);
+                if let Some(rot) = rotate {
+                    clip.rotate = rot.clamp(-180, 180);
                 }
-            }
+                if let Some(a) = anamorphic_desqueeze {
+                    clip.anamorphic_desqueeze = a;
+                }
+                proj.dirty = true;
+                true
+            } else {
+                false
+            };
             drop(proj);
             reply.send(json!({"success": found})).ok();
             if found {
@@ -14384,17 +14366,13 @@ fn handle_mcp_command(
             reply,
         } => {
             let mut proj = project.borrow_mut();
-            let mut found = false;
-            'outer: for track in proj.tracks.iter_mut() {
-                for clip in track.clips.iter_mut() {
-                    if clip.id == clip_id {
-                        clip.opacity = opacity.clamp(0.0, 1.0);
-                        proj.dirty = true;
-                        found = true;
-                        break 'outer;
-                    }
-                }
-            }
+            let found = if let Some(clip) = proj.clip_mut(&clip_id) {
+                clip.opacity = opacity.clamp(0.0, 1.0);
+                proj.dirty = true;
+                true
+            } else {
+                false
+            };
             drop(proj);
             reply.send(json!({"success": found})).ok();
             if found {
@@ -14416,45 +14394,41 @@ fn handle_mcp_command(
             reply,
         } => {
             let mut proj = project.borrow_mut();
-            let mut found = false;
             let mut result_bands = crate::model::clip::default_eq_bands();
-            'eq_outer: for track in proj.tracks.iter_mut() {
-                for clip in track.clips.iter_mut() {
-                    if clip.id == clip_id {
-                        if let Some(v) = low_freq {
-                            clip.eq_bands[0].freq = v.clamp(20.0, 20000.0);
-                        }
-                        if let Some(v) = low_gain {
-                            clip.eq_bands[0].gain = v.clamp(-24.0, 12.0);
-                        }
-                        if let Some(v) = low_q {
-                            clip.eq_bands[0].q = v.clamp(0.1, 10.0);
-                        }
-                        if let Some(v) = mid_freq {
-                            clip.eq_bands[1].freq = v.clamp(20.0, 20000.0);
-                        }
-                        if let Some(v) = mid_gain {
-                            clip.eq_bands[1].gain = v.clamp(-24.0, 12.0);
-                        }
-                        if let Some(v) = mid_q {
-                            clip.eq_bands[1].q = v.clamp(0.1, 10.0);
-                        }
-                        if let Some(v) = high_freq {
-                            clip.eq_bands[2].freq = v.clamp(20.0, 20000.0);
-                        }
-                        if let Some(v) = high_gain {
-                            clip.eq_bands[2].gain = v.clamp(-24.0, 12.0);
-                        }
-                        if let Some(v) = high_q {
-                            clip.eq_bands[2].q = v.clamp(0.1, 10.0);
-                        }
-                        result_bands = clip.eq_bands;
-                        proj.dirty = true;
-                        found = true;
-                        break 'eq_outer;
-                    }
+            let found = if let Some(clip) = proj.clip_mut(&clip_id) {
+                if let Some(v) = low_freq {
+                    clip.eq_bands[0].freq = v.clamp(20.0, 20000.0);
                 }
-            }
+                if let Some(v) = low_gain {
+                    clip.eq_bands[0].gain = v.clamp(-24.0, 12.0);
+                }
+                if let Some(v) = low_q {
+                    clip.eq_bands[0].q = v.clamp(0.1, 10.0);
+                }
+                if let Some(v) = mid_freq {
+                    clip.eq_bands[1].freq = v.clamp(20.0, 20000.0);
+                }
+                if let Some(v) = mid_gain {
+                    clip.eq_bands[1].gain = v.clamp(-24.0, 12.0);
+                }
+                if let Some(v) = mid_q {
+                    clip.eq_bands[1].q = v.clamp(0.1, 10.0);
+                }
+                if let Some(v) = high_freq {
+                    clip.eq_bands[2].freq = v.clamp(20.0, 20000.0);
+                }
+                if let Some(v) = high_gain {
+                    clip.eq_bands[2].gain = v.clamp(-24.0, 12.0);
+                }
+                if let Some(v) = high_q {
+                    clip.eq_bands[2].q = v.clamp(0.1, 10.0);
+                }
+                result_bands = clip.eq_bands;
+                proj.dirty = true;
+                true
+            } else {
+                false
+            };
             drop(proj);
             if found {
                 prog_player
@@ -14483,21 +14457,13 @@ fn handle_mcp_command(
             // Extract clip info from the model.
             let clip_info = {
                 let proj = project.borrow();
-                let mut info = None;
-                for track in &proj.tracks {
-                    if let Some(clip) = track.clips.iter().find(|c| c.id == clip_id) {
-                        info = Some((
-                            clip.source_path.clone(),
-                            clip.source_in,
-                            clip.source_out,
-                            clip.volume,
-                            clip.measured_loudness_lufs,
-                            track.id.clone(),
-                        ));
-                        break;
-                    }
-                }
-                info
+                proj.clip_ref(&clip_id).map(|clip| (
+                    clip.source_path.clone(),
+                    clip.source_in,
+                    clip.source_out,
+                    clip.volume,
+                    clip.measured_loudness_lufs,
+                ))
             };
             if let Some((
                 source_path,
@@ -14505,7 +14471,6 @@ fn handle_mcp_command(
                 source_out,
                 old_volume,
                 _old_measured,
-                _track_id,
             )) = clip_info
             {
                 // Run analysis synchronously (blocks GTK main loop for a few seconds,
@@ -14535,15 +14500,10 @@ fn handle_mcp_command(
                         let measured_lufs = if mode == "lufs" { Some(measured) } else { None };
                         {
                             let mut proj = project.borrow_mut();
-                            'norm_outer: for track in proj.tracks.iter_mut() {
-                                for clip in track.clips.iter_mut() {
-                                    if clip.id == clip_id {
-                                        clip.volume = new_volume;
-                                        if let Some(lufs) = measured_lufs {
-                                            clip.measured_loudness_lufs = Some(lufs);
-                                        }
-                                        break 'norm_outer;
-                                    }
+                            if let Some(clip) = proj.clip_mut(&clip_id) {
+                                clip.volume = new_volume;
+                                if let Some(lufs) = measured_lufs {
+                                    clip.measured_loudness_lufs = Some(lufs);
                                 }
                             }
                             proj.dirty = true;
@@ -14633,7 +14593,6 @@ fn handle_mcp_command(
                         let mut proj = project.borrow_mut();
                         let cmd = crate::undo::MatchClipAudioCommand {
                             clip_id: prepared.clip_id.clone(),
-                            track_id: prepared.track_id.clone(),
                             old_volume: prepared.old_volume,
                             new_volume: prepared.new_volume,
                             old_measured_loudness: prepared.old_measured_loudness,
@@ -18018,10 +17977,7 @@ fn handle_mcp_command(
         } => {
             let proj = project.borrow();
             let clip_info = proj
-                .tracks
-                .iter()
-                .flat_map(|t| t.clips.iter())
-                .find(|c| c.id == clip_id)
+                .clip_ref(&clip_id)
                 .map(|c| (c.source_path.clone(), c.source_in, c.source_out));
             drop(proj);
             if let Some((source_path, source_in, source_out)) = clip_info {
@@ -18039,12 +17995,7 @@ fn handle_mcp_command(
         }
         McpCommand::GetClipSubtitles { clip_id, reply } => {
             let proj = project.borrow();
-            if let Some(clip) = proj
-                .tracks
-                .iter()
-                .flat_map(|t| t.clips.iter())
-                .find(|c| c.id == clip_id)
-            {
+            if let Some(clip) = proj.clip_ref(&clip_id) {
                 reply
                     .send(json!({
                         "clip_id": clip_id,

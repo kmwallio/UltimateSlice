@@ -667,7 +667,6 @@ impl EditCommand for SetClipColorCommand {
 #[allow(dead_code)]
 pub struct NormalizeClipAudioCommand {
     pub clip_id: String,
-    pub track_id: String,
     pub old_volume: f32,
     pub new_volume: f32,
     pub old_measured_loudness: Option<f64>,
@@ -676,20 +675,16 @@ pub struct NormalizeClipAudioCommand {
 
 impl EditCommand for NormalizeClipAudioCommand {
     fn execute(&self, project: &mut Project) {
-        if let Some(track) = project.track_mut(&self.track_id) {
-            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
-                clip.volume = self.new_volume;
-                clip.measured_loudness_lufs = self.new_measured_loudness;
-            }
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            clip.volume = self.new_volume;
+            clip.measured_loudness_lufs = self.new_measured_loudness;
         }
         project.dirty = true;
     }
     fn undo(&self, project: &mut Project) {
-        if let Some(track) = project.track_mut(&self.track_id) {
-            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
-                clip.volume = self.old_volume;
-                clip.measured_loudness_lufs = self.old_measured_loudness;
-            }
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            clip.volume = self.old_volume;
+            clip.measured_loudness_lufs = self.old_measured_loudness;
         }
         project.dirty = true;
     }
@@ -732,7 +727,6 @@ impl EditCommand for SetClipEqCommand {
 /// Match clip audio tone using measured loudness plus 3-band EQ.
 pub struct MatchClipAudioCommand {
     pub clip_id: String,
-    pub track_id: String,
     pub old_volume: f32,
     pub new_volume: f32,
     pub old_measured_loudness: Option<f64>,
@@ -743,17 +737,15 @@ pub struct MatchClipAudioCommand {
 
 impl MatchClipAudioCommand {
     fn apply_values(&self, project: &mut Project, use_new: bool) {
-        if let Some(track) = project.track_mut(&self.track_id) {
-            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
-                if use_new {
-                    clip.volume = self.new_volume;
-                    clip.measured_loudness_lufs = self.new_measured_loudness;
-                    clip.eq_bands = self.new_eq_bands;
-                } else {
-                    clip.volume = self.old_volume;
-                    clip.measured_loudness_lufs = self.old_measured_loudness;
-                    clip.eq_bands = self.old_eq_bands;
-                }
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            if use_new {
+                clip.volume = self.new_volume;
+                clip.measured_loudness_lufs = self.new_measured_loudness;
+                clip.eq_bands = self.new_eq_bands;
+            } else {
+                clip.volume = self.old_volume;
+                clip.measured_loudness_lufs = self.old_measured_loudness;
+                clip.eq_bands = self.old_eq_bands;
             }
         }
         project.dirty = true;
@@ -1780,17 +1772,15 @@ impl EditCommand for SetSubtitleStyleCommand {
     }
 }
 
-/// Helper: find a mutable clip reference by clip_id and track_id.
+//// Helper: find a mutable clip reference by clip_id and track_id.
+/// Uses recursive `clip_mut` so clips inside compound tracks are found
+/// regardless of whether `track_id` is valid.
 fn find_clip_mut<'a>(
     project: &'a mut Project,
     clip_id: &str,
-    track_id: &str,
+    _track_id: &str,
 ) -> Option<&'a mut Clip> {
-    project
-        .track_mut(track_id)?
-        .clips
-        .iter_mut()
-        .find(|c| c.id == clip_id)
+    project.clip_mut(clip_id)
 }
 
 #[cfg(test)]
@@ -1969,7 +1959,6 @@ mod tests {
         matched_eq[2].gain = 3.5;
         let cmd = MatchClipAudioCommand {
             clip_id: "A".to_string(),
-            track_id: track_id.clone(),
             old_volume: 0.8,
             new_volume: 1.1,
             old_measured_loudness: Some(-19.5),

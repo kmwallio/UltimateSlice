@@ -2648,12 +2648,11 @@ impl TimelineState {
                 right_trim = clip.timeline_end() - compound_source_out;
                 clip.source_out = clip.source_out.saturating_sub(right_trim);
             }
-            // Rebase keyframes so they stay aligned with clip content
+            // Rebase keyframes and subtitles so they stay aligned with clip content
             if left_trim > 0 || right_trim > 0 {
-                clip.retain_keyframes_in_local_range(
-                    left_trim,
-                    orig_duration.saturating_sub(right_trim),
-                );
+                let range_end = orig_duration.saturating_sub(right_trim);
+                clip.retain_keyframes_in_local_range(left_trim, range_end);
+                clip.retain_subtitles_in_local_range(left_trim, range_end);
             }
             // After windowing, timeline_start >= source_in, so this
             // subtraction is safe. Add compound's parent position to get

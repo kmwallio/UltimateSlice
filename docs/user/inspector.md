@@ -2,7 +2,7 @@
 
 The **Inspector** panel (right side) shows and edits the properties of the currently selected timeline clip.
 
-Select a clip in the timeline to populate the Inspector. All changes apply immediately to the program monitor preview.
+Select a clip in the timeline to populate the Inspector. All changes apply immediately to the program monitor preview. Clips inside compound clips are fully supported -- double-click a compound clip to enter it, then select an internal clip to inspect and edit its properties.
 
 ---
 
