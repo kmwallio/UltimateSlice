@@ -14758,14 +14758,13 @@ impl ProgramPlayer {
                                         vals.get(1).and_then(|v| v.get::<f64>().ok()).unwrap_or(l);
                                     self.push_master_peak(l, r);
                                     // Route level to the specific track using the
-                                    // element name (e.g. "audiolevel_track3" → track 3).
+                                    // encoded track index in the element name.
                                     if let Some(src) = msg.src() {
                                         let name = src.name().to_string();
-                                        if let Some(idx_str) = name.strip_prefix("audiolevel_track")
+                                        if let Some(ti) =
+                                            Self::track_index_from_audio_level_element_name(&name)
                                         {
-                                            if let Ok(ti) = idx_str.parse::<usize>() {
-                                                self.push_track_peak(ti, l, r);
-                                            }
+                                            self.push_track_peak(ti, l, r);
                                         }
                                     }
                                 }
@@ -14805,6 +14804,18 @@ impl ProgramPlayer {
         } else {
             clip.source_in_ns
         }
+    }
+
+    fn audio_level_element_name(audio_clip_idx: usize, track_index: usize) -> String {
+        format!("audiolevel_clip{audio_clip_idx}_track{track_index}")
+    }
+
+    fn track_index_from_audio_level_element_name(name: &str) -> Option<usize> {
+        if let Some(idx_str) = name.strip_prefix("audiolevel_track") {
+            return idx_str.parse::<usize>().ok();
+        }
+        name.rsplit_once("_track")
+            .and_then(|(_, idx_str)| idx_str.parse::<usize>().ok())
     }
 
     fn reseek_audio_multi_pipeline(
@@ -15000,10 +15011,12 @@ impl ProgramPlayer {
                 rb.set_property("cents", cents);
             }
 
-            // Name the level element with the track index so bus messages
-            // can be routed to the correct per-track meter.
+            // Name the level element uniquely per audio clip while preserving
+            // the originating track index for per-track meter routing.
+            let level_name =
+                Self::audio_level_element_name(branch.audio_clip_idx, branch.track_index);
             let lv = gst::ElementFactory::make("level")
-                .name(&format!("audiolevel_track{}", branch.track_index))
+                .name(level_name.as_str())
                 .property("post-messages", true)
                 .property("interval", 50_000_000u64)
                 .build()
@@ -15716,6 +15729,26 @@ mod tests {
             &[2, 3],
             true,
         ));
+    }
+
+    #[test]
+    fn audio_level_element_names_are_unique_per_clip_and_parse_track_index() {
+        let first = ProgramPlayer::audio_level_element_name(0, 1);
+        let second = ProgramPlayer::audio_level_element_name(1, 1);
+
+        assert_ne!(first, second);
+        assert_eq!(
+            ProgramPlayer::track_index_from_audio_level_element_name(&first),
+            Some(1)
+        );
+        assert_eq!(
+            ProgramPlayer::track_index_from_audio_level_element_name(&second),
+            Some(1)
+        );
+        assert_eq!(
+            ProgramPlayer::track_index_from_audio_level_element_name("audiolevel_track7"),
+            Some(7)
+        );
     }
 
     fn make_clip() -> ProgramClip {

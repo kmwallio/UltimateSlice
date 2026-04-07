@@ -212,40 +212,49 @@ pub fn build_program_monitor(
     root.set_vexpand(true);
     root.add_css_class("preview-panel");
 
-    // Title bar
-    let title_bar = GBox::new(Orientation::Horizontal, 8);
+    // Header
+    let title_bar = GBox::new(Orientation::Vertical, 4);
     title_bar.add_css_class("preview-header");
     title_bar.set_margin_start(8);
     title_bar.set_margin_end(8);
     title_bar.set_margin_top(4);
     title_bar.set_margin_bottom(4);
 
+    let status_row = GBox::new(Orientation::Horizontal, 8);
+    status_row.set_hexpand(true);
+
     let label = Label::new(Some("Program Monitor"));
     label.add_css_class("dim-label");
-    title_bar.append(&label);
+    status_row.append(&label);
 
     let spacer = gtk::Separator::new(Orientation::Horizontal);
     spacer.set_hexpand(true);
-    title_bar.append(&spacer);
+    status_row.append(&spacer);
 
     // J/K/L shuttle rate indicator — shown/hidden by window.rs.
     let speed_label = Label::new(None);
     speed_label.add_css_class("timecode");
     speed_label.set_visible(false);
-    title_bar.append(&speed_label);
+    status_row.append(&speed_label);
 
     let pos_label = Label::new(Some("00:00:00:00"));
     pos_label.add_css_class("timecode");
-    title_bar.append(&pos_label);
+    pos_label.set_width_chars(11);
+    status_row.append(&pos_label);
+
+    title_bar.append(&status_row);
+
+    let controls_row = GBox::new(Orientation::Horizontal, 8);
+    controls_row.set_hexpand(true);
 
     let btn_go_to = Button::with_label("Go To");
     btn_go_to.set_tooltip_text(Some("Jump playhead to a timecode"));
     btn_go_to.connect_clicked(move |_| on_go_to_timecode());
-    title_bar.append(&btn_go_to);
+    controls_row.append(&btn_go_to);
 
     let btn_popout = Button::with_label("Pop Out / Dock");
     btn_popout.connect_clicked(move |_| on_toggle_popout());
-    title_bar.append(&btn_popout);
+    controls_row.append(&btn_popout);
 
     let on_safe_area_changed = Rc::new(on_safe_area_changed);
     let safe_area_btn = CheckButton::with_label("Safe Areas");
@@ -289,7 +298,11 @@ pub fn build_program_monitor(
     overlays_menu_btn.set_label("Overlays");
     overlays_menu_btn.set_popover(Some(&overlays_popover));
     overlays_menu_btn.set_tooltip_text(Some("Toggle Safe Areas, False Color, and Zebra overlays"));
-    title_bar.append(&overlays_menu_btn);
+    controls_row.append(&overlays_menu_btn);
+
+    let controls_spacer = gtk::Separator::new(Orientation::Horizontal);
+    controls_spacer.set_hexpand(true);
+    controls_row.append(&controls_spacer);
 
     // Zoom controls: − / zoom% label / + / Fit
     // These are appended to the title bar AFTER we build apply_zoom (below), so we
@@ -303,11 +316,12 @@ pub fn build_program_monitor(
     zoom_in_btn.set_tooltip_text(Some("Zoom in preview (Ctrl+Scroll)"));
     let zoom_fit_btn = Button::with_label("Fit");
     zoom_fit_btn.set_tooltip_text(Some("Reset zoom to fit"));
-    title_bar.append(&zoom_out_btn);
-    title_bar.append(&zoom_label);
-    title_bar.append(&zoom_in_btn);
-    title_bar.append(&zoom_fit_btn);
+    controls_row.append(&zoom_out_btn);
+    controls_row.append(&zoom_label);
+    controls_row.append(&zoom_in_btn);
+    controls_row.append(&zoom_fit_btn);
 
+    title_bar.append(&controls_row);
     root.append(&title_bar);
 
     // Video display: GtkOverlay composites picture_b as the bottom layer and
@@ -988,8 +1002,8 @@ pub fn build_program_monitor(
     vu_bar.set_margin_end(4);
     vu_bar.append(&vu_meter);
 
-    // Place VU meter at the end of the title bar (right-aligned).
-    title_bar.append(&vu_bar);
+    // Place VU meter at the end of the header controls.
+    controls_row.append(&vu_bar);
 
     let safe_area_setter: Rc<dyn Fn(bool)> = {
         let safe_area_visible = safe_area_visible.clone();
