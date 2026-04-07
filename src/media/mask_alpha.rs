@@ -618,6 +618,365 @@ pub fn apply_masks_to_rgba_buffer(
     }
 }
 
+#[derive(Debug, Clone)]
+struct ResolvedCanvasMask {
+    shape: MaskShape,
+    center_x: f64,
+    center_y: f64,
+    width: f64,
+    height: f64,
+    rotation_rad: f64,
+    feather: f64,
+    expansion: f64,
+    invert: bool,
+    path_polyline: Option<Vec<(f64, f64)>>,
+    path_aabb: Option<(f64, f64, f64, f64)>,
+}
+
+impl ResolvedCanvasMask {
+    fn alpha_at_normalized_point(&self, npx: f64, npy: f64) -> f64 {
+        match self.shape {
+            MaskShape::Rectangle => {
+                let sdf = compute_rect_sdf(
+                    npx,
+                    npy,
+                    self.center_x,
+                    self.center_y,
+                    (self.width + self.expansion).max(0.0),
+                    (self.height + self.expansion).max(0.0),
+                    self.rotation_rad,
+                );
+                alpha_from_sdf(sdf, self.feather, self.invert)
+            }
+            MaskShape::Ellipse => {
+                let sdf = compute_ellipse_sdf(
+                    npx,
+                    npy,
+                    self.center_x,
+                    self.center_y,
+                    (self.width + self.expansion).max(0.0),
+                    (self.height + self.expansion).max(0.0),
+                    self.rotation_rad,
+                );
+                alpha_from_sdf(sdf, self.feather, self.invert)
+            }
+            MaskShape::Path => match (&self.path_polyline, self.path_aabb) {
+                (Some(polyline), Some(aabb)) => path_mask_alpha(
+                    polyline,
+                    aabb,
+                    npx,
+                    npy,
+                    self.feather,
+                    self.expansion,
+                    self.invert,
+                ),
+                _ => 1.0,
+            },
+        }
+    }
+
+    fn build_ffmpeg_expression(&self, npx_expr: &str, npy_expr: &str) -> String {
+        match self.shape {
+            MaskShape::Rectangle => build_rect_geq_expr_for_coords(
+                npx_expr,
+                npy_expr,
+                self.center_x,
+                self.center_y,
+                (self.width + self.expansion).max(0.0),
+                (self.height + self.expansion).max(0.0),
+                self.rotation_rad,
+                self.feather,
+                self.invert,
+            ),
+            MaskShape::Ellipse => build_ellipse_geq_expr_for_coords(
+                npx_expr,
+                npy_expr,
+                self.center_x,
+                self.center_y,
+                (self.width + self.expansion).max(0.0),
+                (self.height + self.expansion).max(0.0),
+                self.rotation_rad,
+                self.feather,
+                self.invert,
+            ),
+            MaskShape::Path => "1".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PreparedCanvasMasks {
+    clip_scale: f64,
+    clip_pos_x: f64,
+    clip_pos_y: f64,
+    clip_rotation_rad: f64,
+    transform_space: CanvasTransformSpace,
+    masks: Vec<ResolvedCanvasMask>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CanvasTransformSpace {
+    ClipPlacement,
+    AdjustmentLayer,
+}
+
+impl PreparedCanvasMasks {
+    pub fn alpha_at_canvas_pixel(
+        &self,
+        x: usize,
+        y: usize,
+        frame_width: usize,
+        frame_height: usize,
+    ) -> f64 {
+        if self.masks.is_empty() || frame_width == 0 || frame_height == 0 {
+            return 1.0;
+        }
+
+        let (npx, npy) = self.canvas_pixel_to_normalized_coords(x, y, frame_width, frame_height);
+        let mut combined = 1.0;
+        for mask in &self.masks {
+            combined *= mask.alpha_at_normalized_point(npx, npy);
+            if combined <= f64::EPSILON {
+                return 0.0;
+            }
+        }
+        combined
+    }
+
+    pub fn rasterize_to_grayscale(&self, frame_width: usize, frame_height: usize) -> Vec<u8> {
+        let mut buf = vec![255u8; frame_width.saturating_mul(frame_height)];
+        for y in 0..frame_height {
+            for x in 0..frame_width {
+                buf[y * frame_width + x] =
+                    (self.alpha_at_canvas_pixel(x, y, frame_width, frame_height) * 255.0)
+                        .round()
+                        .clamp(0.0, 255.0) as u8;
+            }
+        }
+        buf
+    }
+
+    fn canvas_pixel_to_normalized_coords(
+        &self,
+        x: usize,
+        y: usize,
+        frame_width: usize,
+        frame_height: usize,
+    ) -> (f64, f64) {
+        let fw = frame_width.max(1) as f64;
+        let fh = frame_height.max(1) as f64;
+        let clip_scale = self.clip_scale.max(1e-6);
+        let (clip_center_x, clip_center_y, clip_width, clip_height) = match self.transform_space {
+            CanvasTransformSpace::ClipPlacement => (
+                fw / 2.0 + self.clip_pos_x * fw * (1.0 - clip_scale) / 2.0,
+                fh / 2.0 + self.clip_pos_y * fh * (1.0 - clip_scale) / 2.0,
+                (fw * clip_scale).max(1e-6),
+                (fh * clip_scale).max(1e-6),
+            ),
+            CanvasTransformSpace::AdjustmentLayer => {
+                let (center_x, center_y, clip_width, clip_height) =
+                    crate::media::adjustment_scope::adjustment_canvas_geometry(
+                        fw,
+                        fh,
+                        clip_scale,
+                        self.clip_pos_x,
+                        self.clip_pos_y,
+                    );
+                (
+                    center_x,
+                    center_y,
+                    clip_width.max(1e-6),
+                    clip_height.max(1e-6),
+                )
+            }
+        };
+        let clip_left = clip_center_x - clip_width / 2.0;
+        let clip_top = clip_center_y - clip_height / 2.0;
+        let px = x as f64 + 0.5;
+        let py = y as f64 + 0.5;
+        let dx = px - clip_center_x;
+        let dy = py - clip_center_y;
+        let cos_r = self.clip_rotation_rad.cos();
+        let sin_r = self.clip_rotation_rad.sin();
+        let ux = clip_center_x + dx * cos_r - dy * sin_r;
+        let uy = clip_center_y + dx * sin_r + dy * cos_r;
+        ((ux - clip_left) / clip_width, (uy - clip_top) / clip_height)
+    }
+
+    fn has_path_masks(&self) -> bool {
+        self.masks.iter().any(|mask| mask.shape == MaskShape::Path)
+    }
+}
+
+fn alpha_from_sdf(sdf: f64, feather: f64, invert: bool) -> f64 {
+    let alpha = if feather < 1e-9 {
+        if sdf <= 0.0 {
+            1.0
+        } else {
+            0.0
+        }
+    } else {
+        1.0 - smoothstep(-feather, 0.0, sdf)
+    };
+    if invert {
+        1.0 - alpha
+    } else {
+        alpha
+    }
+}
+
+pub fn prepare_canvas_masks(
+    masks: &[ClipMask],
+    local_time_ns: u64,
+    clip_scale: f64,
+    clip_pos_x: f64,
+    clip_pos_y: f64,
+    clip_rotation_deg: f64,
+) -> Option<PreparedCanvasMasks> {
+    prepare_canvas_masks_with_space(
+        masks,
+        local_time_ns,
+        clip_scale,
+        clip_pos_x,
+        clip_pos_y,
+        clip_rotation_deg,
+        CanvasTransformSpace::ClipPlacement,
+    )
+}
+
+pub fn prepare_adjustment_canvas_masks(
+    masks: &[ClipMask],
+    local_time_ns: u64,
+    clip_scale: f64,
+    clip_pos_x: f64,
+    clip_pos_y: f64,
+    clip_rotation_deg: f64,
+) -> Option<PreparedCanvasMasks> {
+    prepare_canvas_masks_with_space(
+        masks,
+        local_time_ns,
+        clip_scale,
+        clip_pos_x,
+        clip_pos_y,
+        clip_rotation_deg,
+        CanvasTransformSpace::AdjustmentLayer,
+    )
+}
+
+fn prepare_canvas_masks_with_space(
+    masks: &[ClipMask],
+    local_time_ns: u64,
+    clip_scale: f64,
+    clip_pos_x: f64,
+    clip_pos_y: f64,
+    clip_rotation_deg: f64,
+    transform_space: CanvasTransformSpace,
+) -> Option<PreparedCanvasMasks> {
+    let resolved: Vec<ResolvedCanvasMask> = masks
+        .iter()
+        .filter(|mask| mask.enabled)
+        .map(|mask| {
+            let path_polyline = if mask.shape == MaskShape::Path {
+                mask.path.as_ref().and_then(|path| {
+                    if path.points.len() >= 3 {
+                        Some(subdivide_path(path, 20))
+                    } else {
+                        None
+                    }
+                })
+            } else {
+                None
+            };
+            let path_aabb = path_polyline
+                .as_ref()
+                .map(|polyline| polyline_aabb(polyline));
+
+            ResolvedCanvasMask {
+                shape: mask.shape,
+                center_x: interpolate_keyframed(
+                    &mask.center_x_keyframes,
+                    local_time_ns,
+                    mask.center_x,
+                ),
+                center_y: interpolate_keyframed(
+                    &mask.center_y_keyframes,
+                    local_time_ns,
+                    mask.center_y,
+                ),
+                width: interpolate_keyframed(&mask.width_keyframes, local_time_ns, mask.width),
+                height: interpolate_keyframed(&mask.height_keyframes, local_time_ns, mask.height),
+                rotation_rad: interpolate_keyframed(
+                    &mask.rotation_keyframes,
+                    local_time_ns,
+                    mask.rotation,
+                )
+                .to_radians(),
+                feather: interpolate_keyframed(
+                    &mask.feather_keyframes,
+                    local_time_ns,
+                    mask.feather,
+                )
+                .max(0.0),
+                expansion: interpolate_keyframed(
+                    &mask.expansion_keyframes,
+                    local_time_ns,
+                    mask.expansion,
+                ),
+                invert: mask.invert,
+                path_polyline,
+                path_aabb,
+            }
+        })
+        .collect();
+
+    if resolved.is_empty() {
+        return None;
+    }
+
+    Some(PreparedCanvasMasks {
+        clip_scale,
+        clip_pos_x,
+        clip_pos_y,
+        clip_rotation_rad: clip_rotation_deg.to_radians(),
+        transform_space,
+        masks: resolved,
+    })
+}
+
+fn build_canvas_normalized_coord_expressions(
+    out_w: u32,
+    out_h: u32,
+    clip_scale: f64,
+    clip_pos_x: f64,
+    clip_pos_y: f64,
+    clip_rotation_deg: f64,
+) -> (String, String) {
+    let fw = out_w.max(1) as f64;
+    let fh = out_h.max(1) as f64;
+    let clip_scale = clip_scale.max(1e-6);
+    let clip_center_x = fw / 2.0 + clip_pos_x * fw * (1.0 - clip_scale) / 2.0;
+    let clip_center_y = fh / 2.0 + clip_pos_y * fh * (1.0 - clip_scale) / 2.0;
+    let clip_width = (fw * clip_scale).max(1e-6);
+    let clip_height = (fh * clip_scale).max(1e-6);
+    let clip_left = clip_center_x - clip_width / 2.0;
+    let clip_top = clip_center_y - clip_height / 2.0;
+    let clip_rotation_rad = clip_rotation_deg.to_radians();
+    let ux_expr = format!(
+        "({clip_center_x:.10})+(X-({clip_center_x:.10}))*{cos_r:.10}-(Y-({clip_center_y:.10}))*{sin_r:.10}",
+        cos_r = clip_rotation_rad.cos(),
+        sin_r = clip_rotation_rad.sin(),
+    );
+    let uy_expr = format!(
+        "({clip_center_y:.10})+(X-({clip_center_x:.10}))*{sin_r:.10}+(Y-({clip_center_y:.10}))*{cos_r:.10}",
+        cos_r = clip_rotation_rad.cos(),
+        sin_r = clip_rotation_rad.sin(),
+    );
+    (
+        format!("(({ux_expr})-({clip_left:.10}))/({clip_width:.10})"),
+        format!("(({uy_expr})-({clip_top:.10}))/({clip_height:.10})"),
+    )
+}
+
 /// Build an FFmpeg `geq` alpha sub-expression for a single mask.
 ///
 /// The `geq` filter runs on the composited output canvas (after the clip
@@ -694,6 +1053,57 @@ pub enum FfmpegMaskAlphaResult {
     RasterFile(NamedTempFile),
 }
 
+pub fn build_combined_transformed_mask_ffmpeg_alpha(
+    masks: &[ClipMask],
+    out_w: u32,
+    out_h: u32,
+    local_time_ns: u64,
+    clip_scale: f64,
+    clip_pos_x: f64,
+    clip_pos_y: f64,
+    clip_rotation_deg: f64,
+) -> Option<FfmpegMaskAlphaResult> {
+    let prepared = prepare_canvas_masks(
+        masks,
+        local_time_ns,
+        clip_scale,
+        clip_pos_x,
+        clip_pos_y,
+        clip_rotation_deg,
+    )?;
+
+    if prepared.has_path_masks() {
+        let buf = prepared.rasterize_to_grayscale(out_w as usize, out_h as usize);
+        if let Ok(mut file) = NamedTempFile::new() {
+            let header = format!("P5\n{} {}\n255\n", out_w, out_h);
+            if file.write_all(header.as_bytes()).is_ok() && file.write_all(&buf).is_ok() {
+                return Some(FfmpegMaskAlphaResult::RasterFile(file));
+            }
+        }
+        return Some(FfmpegMaskAlphaResult::GeqExpression("1".to_string()));
+    }
+
+    let (npx_expr, npy_expr) = build_canvas_normalized_coord_expressions(
+        out_w,
+        out_h,
+        clip_scale,
+        clip_pos_x,
+        clip_pos_y,
+        clip_rotation_deg,
+    );
+    let exprs: Vec<String> = prepared
+        .masks
+        .iter()
+        .map(|mask| mask.build_ffmpeg_expression(&npx_expr, &npy_expr))
+        .collect();
+    let combined = if exprs.len() == 1 {
+        exprs.into_iter().next().unwrap_or_else(|| "1".to_string())
+    } else {
+        exprs.join("*")
+    };
+    Some(FfmpegMaskAlphaResult::GeqExpression(combined))
+}
+
 /// Build a combined FFmpeg mask representation for the given clip transform.
 pub fn build_combined_mask_ffmpeg_alpha(
     masks: &[ClipMask],
@@ -743,7 +1153,64 @@ pub fn build_combined_mask_ffmpeg_alpha(
     Some(FfmpegMaskAlphaResult::GeqExpression(combined))
 }
 
+fn build_rect_geq_expr_for_coords(
+    px_expr: &str,
+    py_expr: &str,
+    cx: f64,
+    cy: f64,
+    hw: f64,
+    hh: f64,
+    rot_rad: f64,
+    feather: f64,
+    invert: bool,
+) -> String {
+    let cos_r = rot_rad.cos();
+    let sin_r = rot_rad.sin();
+    let ux = format!("((({px_expr})-{cx:.10})*{cos_r:.10})+((({py_expr})-{cy:.10})*{sin_r:.10})");
+    let uy =
+        format!("(-((({px_expr})-{cx:.10})*{sin_r:.10}))+((({py_expr})-{cy:.10})*{cos_r:.10})");
+
+    if feather < 0.5 {
+        let expr = format!(
+            "between(abs({ux}),0,{hw:.10})*between(abs({uy}),0,{hh:.10})",
+            hw = hw.max(0.0),
+            hh = hh.max(0.0),
+        );
+        if invert {
+            format!("(1-{})", expr)
+        } else {
+            expr
+        }
+    } else {
+        let f2 = feather * 2.0;
+        let ax = format!("clip(({hw:.10}+{feather:.10}-abs({ux}))/{f2:.10},0,1)");
+        let ay = format!("clip(({hh:.10}+{feather:.10}-abs({uy}))/{f2:.10},0,1)");
+        let sax = format!("({ax}*{ax}*(3-2*{ax}))");
+        let say = format!("({ay}*{ay}*(3-2*{ay}))");
+        let expr = format!("{sax}*{say}");
+        if invert {
+            format!("(1-{})", expr)
+        } else {
+            expr
+        }
+    }
+}
+
 fn build_rect_geq_expr(
+    cx: f64,
+    cy: f64,
+    hw: f64,
+    hh: f64,
+    rot_rad: f64,
+    feather: f64,
+    invert: bool,
+) -> String {
+    build_rect_geq_expr_for_coords("X", "Y", cx, cy, hw, hh, rot_rad, feather, invert)
+}
+
+fn build_ellipse_geq_expr_for_coords(
+    px_expr: &str,
+    py_expr: &str,
     cx: f64,
     cy: f64,
     hw: f64,
@@ -755,40 +1222,30 @@ fn build_rect_geq_expr(
     let cos_r = rot_rad.cos();
     let sin_r = rot_rad.sin();
 
-    // Unrotate pixel into rect-local space:
-    // ux = (X - cx) * cos + (Y - cy) * sin
-    // uy = -(X - cx) * sin + (Y - cy) * cos
-    let ux = format!("((X-{cx:.1})*{cos_r:.6}+(Y-{cy:.1})*{sin_r:.6})");
-    let uy = format!("(-(X-{cx:.1})*{sin_r:.6}+(Y-{cy:.1})*{cos_r:.6})");
+    let ux = format!("((({px_expr})-{cx:.10})*{cos_r:.10})+((({py_expr})-{cy:.10})*{sin_r:.10})");
+    let uy =
+        format!("(-((({px_expr})-{cx:.10})*{sin_r:.10}))+((({py_expr})-{cy:.10})*{cos_r:.10})");
 
-    // SDF for axis-aligned rect: max(abs(ux)-hw, abs(uy)-hh)
-    // Simplified for geq: use between() for hard edge, or smoothstep for feathered.
+    let hw_safe = hw.max(0.1);
+    let hh_safe = hh.max(0.1);
+
+    let r_expr = format!(
+        "sqrt({ux}*{ux}/({hw_safe:.10}*{hw_safe:.10})+{uy}*{uy}/({hh_safe:.10}*{hh_safe:.10}))"
+    );
+
     if feather < 0.5 {
-        // Hard edge.
-        let expr = format!(
-            "between(abs({ux}),0,{hw:.1})*between(abs({uy}),0,{hh:.1})",
-            ux = ux,
-            uy = uy,
-            hw = hw,
-            hh = hh,
-        );
+        let expr = format!("lte({r_expr},1)");
         if invert {
             format!("(1-{})", expr)
         } else {
             expr
         }
     } else {
-        // Feathered edge using smooth clamp.
-        // alpha_x = clip((hw + feather - abs(ux)) / (2*feather), 0, 1)
-        // alpha_y = clip((hh + feather - abs(uy)) / (2*feather), 0, 1)
-        // alpha = alpha_x * alpha_y (smoothed by squaring for hermite-like)
-        let f2 = feather * 2.0;
-        let ax = format!("clip(({hw:.1}+{feather:.1}-abs({ux}))/{f2:.1},0,1)");
-        let ay = format!("clip(({hh:.1}+{feather:.1}-abs({uy}))/{f2:.1},0,1)");
-        // Apply hermite smoothstep: t*t*(3-2*t)
-        let sax = format!("({ax}*{ax}*(3-2*{ax}))");
-        let say = format!("({ay}*{ay}*(3-2*{ay}))");
-        let expr = format!("{sax}*{say}");
+        let min_axis = hw_safe.min(hh_safe);
+        let f_norm = feather / min_axis;
+        let inner = 1.0 - f_norm;
+        let t_expr = format!("clip(({inner:.10}-{r_expr}+{f_norm:.10})/{f_norm:.10},0,1)");
+        let expr = format!("({t_expr}*{t_expr}*(3-2*{t_expr}))");
         if invert {
             format!("(1-{})", expr)
         } else {
@@ -806,42 +1263,7 @@ fn build_ellipse_geq_expr(
     feather: f64,
     invert: bool,
 ) -> String {
-    let cos_r = rot_rad.cos();
-    let sin_r = rot_rad.sin();
-
-    let ux = format!("((X-{cx:.1})*{cos_r:.6}+(Y-{cy:.1})*{sin_r:.6})");
-    let uy = format!("(-(X-{cx:.1})*{sin_r:.6}+(Y-{cy:.1})*{cos_r:.6})");
-
-    let hw_safe = hw.max(0.1);
-    let hh_safe = hh.max(0.1);
-
-    // Normalized radius: r = sqrt((ux/hw)^2 + (uy/hh)^2)
-    let r_expr = format!(
-        "sqrt({ux}*{ux}/({hw_safe:.1}*{hw_safe:.1})+{uy}*{uy}/({hh_safe:.1}*{hh_safe:.1}))"
-    );
-
-    if feather < 0.5 {
-        // Hard edge: inside when r <= 1.
-        let expr = format!("lte({r_expr},1)");
-        if invert {
-            format!("(1-{})", expr)
-        } else {
-            expr
-        }
-    } else {
-        // Feathered: smooth transition from r=1-f_norm to r=1.
-        let min_axis = hw_safe.min(hh_safe);
-        let f_norm = feather / min_axis;
-        let inner = 1.0 - f_norm;
-        // alpha = clip((1 - r) / f_norm, 0, 1), smoothstepped.
-        let t_expr = format!("clip(({inner:.4}-{r_expr}+{f_norm:.4})/{f_norm:.4},0,1)");
-        let expr = format!("({t_expr}*{t_expr}*(3-2*{t_expr}))");
-        if invert {
-            format!("(1-{})", expr)
-        } else {
-            expr
-        }
-    }
+    build_ellipse_geq_expr_for_coords("X", "Y", cx, cy, hw, hh, rot_rad, feather, invert)
 }
 
 #[cfg(test)]
@@ -1096,5 +1518,53 @@ mod tests {
         assert_eq!(buf[50 * 100 + 50], 255);
         // Corner pixel should be transparent (0).
         assert_eq!(buf[5 * 100 + 5], 0);
+    }
+
+    #[test]
+    fn prepared_canvas_masks_follow_current_frame_resolution() {
+        let mut mask = default_ellipse_mask();
+        mask.enabled = true;
+        mask.center_x = 0.26;
+        mask.center_y = 0.21;
+        mask.width = 0.17;
+        mask.height = 0.15;
+
+        let prepared =
+            prepare_canvas_masks(&[mask], 0, 1.0, 0.0, 0.0, 0.0).expect("prepared masks");
+
+        assert!(
+            prepared.alpha_at_canvas_pixel(26, 21, 100, 100) > 0.99,
+            "100x100 center should stay inside the mask"
+        );
+        assert!(
+            prepared.alpha_at_canvas_pixel(52, 42, 200, 200) > 0.99,
+            "200x200 center should stay inside the mask"
+        );
+        assert!(
+            prepared.alpha_at_canvas_pixel(52, 42, 100, 100) < 0.01,
+            "sampling the doubled-resolution point on 100x100 should be outside"
+        );
+    }
+
+    #[test]
+    fn prepared_adjustment_masks_translate_even_at_full_scale() {
+        let mut mask = default_ellipse_mask();
+        mask.enabled = true;
+        mask.center_x = 0.5;
+        mask.center_y = 0.5;
+        mask.width = 0.1;
+        mask.height = 0.1;
+
+        let prepared = prepare_adjustment_canvas_masks(&[mask], 0, 1.0, 0.5, 0.0, 0.0)
+            .expect("prepared masks");
+
+        assert!(
+            prepared.alpha_at_canvas_pixel(75, 50, 100, 100) > 0.99,
+            "translated adjustment mask should move right at full scale"
+        );
+        assert!(
+            prepared.alpha_at_canvas_pixel(50, 50, 100, 100) < 0.01,
+            "original center should be outside after translation"
+        );
     }
 }

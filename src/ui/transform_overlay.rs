@@ -104,6 +104,7 @@ pub struct TransformOverlay {
     mask_hh: Rc<Cell<f64>>,
     mask_rotation: Rc<Cell<f64>>,
     mask_path_points: Rc<RefCell<Vec<crate::model::clip::BezierPoint>>>,
+    adjustment_mode: Rc<Cell<bool>>,
     content_inset_x: Rc<Cell<f64>>,
     content_inset_y: Rc<Cell<f64>>,
     tracking_region_enabled: Rc<Cell<bool>>,
@@ -154,6 +155,7 @@ impl TransformOverlay {
         let mask_rotation = Rc::new(Cell::new(0.0f64));
         let mask_path_points: Rc<RefCell<Vec<crate::model::clip::BezierPoint>>> =
             Rc::new(RefCell::new(Vec::new()));
+        let adjustment_mode = Rc::new(Cell::new(false));
         let tracking_region_enabled = Rc::new(Cell::new(false));
         let tracking_region_editing = Rc::new(Cell::new(false));
         let tracking_center_x = Rc::new(Cell::new(0.5f64));
@@ -193,6 +195,7 @@ impl TransformOverlay {
             let mask_hh = mask_hh.clone();
             let mask_rotation_d = mask_rotation.clone();
             let mask_path_points_clone = mask_path_points.clone();
+            let adjustment_mode = adjustment_mode.clone();
             let tracking_region_enabled = tracking_region_enabled.clone();
             let tracking_region_editing = tracking_region_editing.clone();
             let tracking_center_x = tracking_center_x.clone();
@@ -226,6 +229,7 @@ impl TransformOverlay {
                     s,
                     px,
                     py,
+                    adjustment_mode.get(),
                     rotation.get(),
                     crop_left.get(),
                     crop_right.get(),
@@ -247,6 +251,7 @@ impl TransformOverlay {
                         s,
                         px,
                         py,
+                        adjustment_mode.get(),
                         rotation.get(),
                         mask_shape.get(),
                         mask_cx.get(),
@@ -311,6 +316,7 @@ impl TransformOverlay {
             let on_drag_begin = on_drag_begin.clone();
             let da_ref = da.clone();
             let canvas_widget = canvas_widget.clone();
+            let adjustment_mode = adjustment_mode.clone();
             let mask_enabled_d = mask_enabled.clone();
             let mask_shape_d = mask_shape.clone();
             let mask_path_points_d = mask_path_points.clone();
@@ -344,15 +350,13 @@ impl TransformOverlay {
                 let py = position_y.get();
                 let rot_rad = (-rotation.get()).to_radians();
 
-                // Clip bounding box in widget space (same formula as draw_overlay)
-                let cx = vx + vw / 2.0 + px * vw * (1.0 - s) / 2.0;
-                let cy = vy + vh / 2.0 + py * vh * (1.0 - s) / 2.0;
-                let hw = vw * s / 2.0;
-                let hh = vh * s / 2.0;
-                let left = cx - hw;
-                let right = cx + hw;
-                let top = cy - hh;
-                let bottom = cy + hh;
+                let adjustment_mode = adjustment_mode.get();
+                let (cx, cy, clip_w, clip_h, left, top) =
+                    clip_canvas_geometry(vx, vy, vw, vh, s, px, py, adjustment_mode);
+                let hw = clip_w / 2.0;
+                let hh = clip_h / 2.0;
+                let right = left + clip_w;
+                let bottom = top + clip_h;
                 let (crop_l_px, crop_r_px, crop_t_px, crop_b_px) = crop_insets_to_overlay_px(
                     crop_left.get(),
                     crop_right.get(),
@@ -537,12 +541,8 @@ impl TransformOverlay {
                     let pts = mask_path_points_d.borrow();
                     if pts.len() >= 3 {
                         // Compute clip region for mapping normalized→widget coords.
-                        let clip_cx_w = vx + vw / 2.0 + px * vw * (1.0 - s) / 2.0;
-                        let clip_cy_w = vy + vh / 2.0 + py * vh * (1.0 - s) / 2.0;
-                        let clip_w = vw * s;
-                        let clip_h = vh * s;
-                        let clip_left_w = clip_cx_w - clip_w / 2.0;
-                        let clip_top_w = clip_cy_w - clip_h / 2.0;
+                        let (clip_cx_w, clip_cy_w, clip_w, clip_h, clip_left_w, clip_top_w) =
+                            clip_canvas_geometry(vx, vy, vw, vh, s, px, py, adjustment_mode);
                         // The drawing applies clip rotation around clip_cx_w/clip_cy_w,
                         // so drawn positions are rotated.  Map normalized→widget using
                         // the same rotation so hit-test matches drawn positions.
@@ -670,6 +670,7 @@ impl TransformOverlay {
             let on_tracking_region_change = on_tracking_region_change.clone();
             let mask_path_points_drag = mask_path_points.clone();
             let mask_enabled_drag = mask_enabled.clone();
+            let adjustment_mode = adjustment_mode.clone();
             let tracking_region_enabled_drag = tracking_region_enabled.clone();
             let tracking_region_editing_drag = tracking_region_editing.clone();
             let tracking_center_x_drag = tracking_center_x.clone();
@@ -690,12 +691,16 @@ impl TransformOverlay {
 
                 match ds.handle {
                     Handle::Rotate => {
-                        let clip_cx = ds.vx
-                            + ds.vw / 2.0
-                            + ds.start_px * ds.vw * (1.0 - ds.start_scale) / 2.0;
-                        let clip_cy = ds.vy
-                            + ds.vh / 2.0
-                            + ds.start_py * ds.vh * (1.0 - ds.start_scale) / 2.0;
+                        let (clip_cx, clip_cy, _, _, _, _) = clip_canvas_geometry(
+                            ds.vx,
+                            ds.vy,
+                            ds.vw,
+                            ds.vh,
+                            ds.start_scale,
+                            ds.start_px,
+                            ds.start_py,
+                            adjustment_mode.get(),
+                        );
                         let cur_x = ds.start_wx + off_x;
                         let cur_y = ds.start_wy + off_y;
                         let mut deg = ((cur_y - clip_cy).atan2(cur_x - clip_cx).to_degrees()
@@ -715,12 +720,14 @@ impl TransformOverlay {
                         // pos_x — which is correct because at scale>1, pos_x controls which
                         // part of the clip is visible (higher pos_x = viewport panned right
                         // = clip appears shifted left).
-                        let h_range = ds.vw * (1.0 - ds.start_scale) / 2.0;
-                        let v_range = ds.vh * (1.0 - ds.start_scale) / 2.0;
+                        let h_range =
+                            clip_position_range(ds.vw, ds.start_scale, adjustment_mode.get());
+                        let v_range =
+                            clip_position_range(ds.vh, ds.start_scale, adjustment_mode.get());
                         let new_px = if h_range.abs() > 0.5 {
                             (ds.start_px + off_x / h_range).clamp(-1.0, 1.0)
                         } else {
-                            ds.start_px // scale≈1.0: position has no effect
+                            ds.start_px
                         };
                         let new_py = if v_range.abs() > 0.5 {
                             (ds.start_py + off_y / v_range).clamp(-1.0, 1.0)
@@ -737,12 +744,16 @@ impl TransformOverlay {
                     | Handle::BottomRight => {
                         // Scale: ratio of distance from clip centre to current vs. start.
                         // Holding Shift uses constrained scaling (same X/Y scale factor).
-                        let clip_cx = ds.vx
-                            + ds.vw / 2.0
-                            + ds.start_px * ds.vw * (1.0 - ds.start_scale) / 2.0;
-                        let clip_cy = ds.vy
-                            + ds.vh / 2.0
-                            + ds.start_py * ds.vh * (1.0 - ds.start_scale) / 2.0;
+                        let (clip_cx, clip_cy, _, _, _, _) = clip_canvas_geometry(
+                            ds.vx,
+                            ds.vy,
+                            ds.vw,
+                            ds.vh,
+                            ds.start_scale,
+                            ds.start_px,
+                            ds.start_py,
+                            adjustment_mode.get(),
+                        );
                         let cur_x = ds.start_wx + off_x;
                         let cur_y = ds.start_wy + off_y;
                         let orig_dx = (ds.start_wx - clip_cx).abs();
@@ -950,6 +961,7 @@ impl TransformOverlay {
             let scale_dc = scale.clone();
             let position_x_dc = position_x.clone();
             let position_y_dc = position_y.clone();
+            let adjustment_mode_dc = adjustment_mode.clone();
             let proj_w_dc = proj_w.clone();
             let proj_h_dc = proj_h.clone();
             let rotation_dc = rotation.clone();
@@ -981,13 +993,8 @@ impl TransformOverlay {
                 let px = position_x_dc.get();
                 let py = position_y_dc.get();
 
-                // Compute clip region — same formulas as draw_mask_outline.
-                let clip_cx_w = vx + vw / 2.0 + px * vw * (1.0 - s) / 2.0;
-                let clip_cy_w = vy + vh / 2.0 + py * vh * (1.0 - s) / 2.0;
-                let clip_w = vw * s;
-                let clip_h = vh * s;
-                let clip_left_w = clip_cx_w - clip_w / 2.0;
-                let clip_top_w = clip_cy_w - clip_h / 2.0;
+                let (clip_cx_w, clip_cy_w, clip_w, clip_h, clip_left_w, clip_top_w) =
+                    clip_canvas_geometry(vx, vy, vw, vh, s, px, py, adjustment_mode_dc.get());
                 let clip_rot = (-rotation_dc.get()).to_radians();
 
                 // Forward transform: normalized → widget (matches draw_mask_outline).
@@ -1173,6 +1180,7 @@ impl TransformOverlay {
             mask_hh,
             mask_rotation,
             mask_path_points,
+            adjustment_mode,
             content_inset_x,
             content_inset_y,
             tracking_region_enabled,
@@ -1265,6 +1273,11 @@ impl TransformOverlay {
         } else {
             self.mask_path_points.borrow_mut().clear();
         }
+        self.drawing_area.queue_draw();
+    }
+
+    pub fn set_adjustment_mode(&self, enabled: bool) {
+        self.adjustment_mode.set(enabled);
         self.drawing_area.queue_draw();
     }
 
@@ -1563,6 +1576,42 @@ fn draw_tracking_region_outline(
     cr.restore().ok();
 }
 
+fn clip_canvas_geometry(
+    vx: f64,
+    vy: f64,
+    vw: f64,
+    vh: f64,
+    scale: f64,
+    pos_x: f64,
+    pos_y: f64,
+    adjustment_mode: bool,
+) -> (f64, f64, f64, f64, f64, f64) {
+    let scale = scale.max(1e-6);
+    let (cx, cy, clip_w, clip_h) = if adjustment_mode {
+        let (cx, cy, clip_w, clip_h) =
+            crate::media::adjustment_scope::adjustment_canvas_geometry(vw, vh, scale, pos_x, pos_y);
+        (vx + cx, vy + cy, clip_w, clip_h)
+    } else {
+        (
+            vx + vw / 2.0 + pos_x * vw * (1.0 - scale) / 2.0,
+            vy + vh / 2.0 + pos_y * vh * (1.0 - scale) / 2.0,
+            vw * scale,
+            vh * scale,
+        )
+    };
+    let left = cx - clip_w / 2.0;
+    let top = cy - clip_h / 2.0;
+    (cx, cy, clip_w, clip_h, left, top)
+}
+
+fn clip_position_range(axis_size: f64, scale: f64, adjustment_mode: bool) -> f64 {
+    if adjustment_mode {
+        axis_size / 2.0
+    } else {
+        axis_size * (1.0 - scale) / 2.0
+    }
+}
+
 fn draw_overlay(
     cr: &gtk4::cairo::Context,
     vx_full: f64,
@@ -1572,6 +1621,7 @@ fn draw_overlay(
     scale: f64,
     pos_x: f64,
     pos_y: f64,
+    adjustment_mode: bool,
     rotation_deg: f64,
     crop_left: i32,
     crop_right: i32,
@@ -1592,15 +1642,13 @@ fn draw_overlay(
     // GStreamer's videobox pads/crops (1-scale)*pw*(1+pos_x)/2 on the left, so the
     // clip centre = canvas_centre + pos_x * canvas_half * (1-scale).
     // This formula is valid for both zoom-in (scale>1) and zoom-out (scale<1).
-    let cx = vx + vw / 2.0 + pos_x * vw * (1.0 - scale) / 2.0;
-    let cy = vy + vh / 2.0 + pos_y * vh * (1.0 - scale) / 2.0;
-    let hw = vw * scale / 2.0;
-    let hh = vh * scale / 2.0;
+    let (cx, cy, clip_w, clip_h, left, top) =
+        clip_canvas_geometry(vx, vy, vw, vh, scale, pos_x, pos_y, adjustment_mode);
+    let hw = clip_w / 2.0;
+    let hh = clip_h / 2.0;
 
-    let left = cx - hw;
-    let right = cx + hw;
-    let top = cy - hh;
-    let bottom = cy + hh;
+    let right = left + clip_w;
+    let bottom = top + clip_h;
     let rot_rad = (-rotation_deg).to_radians();
     let (crop_l_px, crop_r_px, crop_t_px, crop_b_px) = crop_insets_to_overlay_px(
         crop_left,
@@ -1746,6 +1794,7 @@ fn draw_mask_outline(
     clip_scale: f64,
     clip_px: f64,
     clip_py: f64,
+    adjustment_mode: bool,
     clip_rotation_deg: f64,
     shape: u8,
     mask_cx: f64,
@@ -1757,12 +1806,16 @@ fn draw_mask_outline(
 ) {
     // The clip occupies a region within the canvas defined by its scale/position.
     // Clip centre in widget coords (same formula as draw_overlay):
-    let clip_cx = vx + vw / 2.0 + clip_px * vw * (1.0 - clip_scale) / 2.0;
-    let clip_cy = vy + vh / 2.0 + clip_py * vh * (1.0 - clip_scale) / 2.0;
-    let clip_w = vw * clip_scale;
-    let clip_h = vh * clip_scale;
-    let clip_left = clip_cx - clip_w / 2.0;
-    let clip_top = clip_cy - clip_h / 2.0;
+    let (clip_cx, clip_cy, clip_w, clip_h, clip_left, clip_top) = clip_canvas_geometry(
+        vx,
+        vy,
+        vw,
+        vh,
+        clip_scale,
+        clip_px,
+        clip_py,
+        adjustment_mode,
+    );
 
     // Map mask normalized coords (0..1 within the clip frame) to widget coords.
     let cx = clip_left + mask_cx * clip_w;

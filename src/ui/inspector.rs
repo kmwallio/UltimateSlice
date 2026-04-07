@@ -2027,7 +2027,7 @@ impl InspectorView {
                         .set_rgba(&gdk4::RGBA::new(bhr, bhg, bhb, bha));
                 }
                 self.mask_section
-                    .set_visible(is_video || is_image || is_title_clip);
+                    .set_visible(is_video || is_image || is_title_clip || is_adjustment);
                 self.frei0r_effects_section
                     .set_visible(is_visual && !is_compound && !is_multicam);
 

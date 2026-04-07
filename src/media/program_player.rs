@@ -1638,13 +1638,26 @@ fn apply_adjustment_overlays_rgba(
         if overlay.opacity <= f64::EPSILON {
             continue;
         }
-        let Some((x0, y0, x1, y1)) = overlay.scope.pixel_bounds(width, height) else {
+        let resolved_scope = overlay.scope.resolve(width, height);
+        let Some((x0, y0, x1, y1)) = resolved_scope.pixel_bounds(width, height) else {
             continue;
         };
         for y in y0..y1 {
             let row_start = y * width * 4;
             for x in x0..x1 {
-                if !overlay.scope.contains_pixel(x, y) {
+                if !resolved_scope.contains_pixel(x, y) {
+                    continue;
+                }
+                let mask_alpha = overlay
+                    .mask
+                    .as_ref()
+                    .map(|mask| mask.alpha_at_canvas_pixel(x, y, width, height))
+                    .unwrap_or(1.0);
+                if mask_alpha <= f64::EPSILON {
+                    continue;
+                }
+                let effective_opacity = (overlay.opacity * mask_alpha).clamp(0.0, 1.0);
+                if effective_opacity <= f64::EPSILON {
                     continue;
                 }
                 let idx = row_start + x * 4;
@@ -1674,11 +1687,11 @@ fn apply_adjustment_overlays_rgba(
                     out_g = apply_three_point_channel(out_g, &parabola.g);
                     out_b = apply_three_point_channel(out_b, &parabola.b);
                 }
-                pixel[0] = ((base_r + (out_r - base_r) * overlay.opacity).clamp(0.0, 1.0) * 255.0)
+                pixel[0] = ((base_r + (out_r - base_r) * effective_opacity).clamp(0.0, 1.0) * 255.0)
                     .round() as u8;
-                pixel[1] = ((base_g + (out_g - base_g) * overlay.opacity).clamp(0.0, 1.0) * 255.0)
+                pixel[1] = ((base_g + (out_g - base_g) * effective_opacity).clamp(0.0, 1.0) * 255.0)
                     .round() as u8;
-                pixel[2] = ((base_b + (out_b - base_b) * overlay.opacity).clamp(0.0, 1.0) * 255.0)
+                pixel[2] = ((base_b + (out_b - base_b) * effective_opacity).clamp(0.0, 1.0) * 255.0)
                     .round() as u8;
             }
         }
@@ -1702,6 +1715,7 @@ struct BlendOverlay {
 struct AdjustmentOverlay {
     track_index: usize,
     scope: AdjustmentScopeShape,
+    mask: Option<crate::media::mask_alpha::PreparedCanvasMasks>,
     opacity: f64,
     vb_params: Option<VBParams>,
     coloradj_params: Option<ColorAdjRGBParams>,
@@ -3474,6 +3488,10 @@ impl ProgramPlayer {
         self.state == PlayerState::Playing
     }
 
+    pub fn visual_clip_snapshot(&self, clip_id: &str) -> Option<ProgramClip> {
+        self.clips.iter().find(|clip| clip.id == clip_id).cloned()
+    }
+
     // ── Clip loading ───────────────────────────────────────────────────────
 
     pub fn load_clips(&mut self, mut clips: Vec<ProgramClip>) {
@@ -3549,6 +3567,15 @@ impl ProgramPlayer {
                 continue;
             }
 
+            let local_time_ns = clip.local_timeline_position_ns(pos);
+            let scale = clip.scale_at_timeline_ns(pos);
+            let position_x = clip.position_x_at_timeline_ns(pos);
+            let position_y = clip.position_y_at_timeline_ns(pos);
+            let rotate = clip.rotate_at_timeline_ns(pos) as f64;
+            let crop_left = clip.crop_left_at_timeline_ns(pos);
+            let crop_right = clip.crop_right_at_timeline_ns(pos);
+            let crop_top = clip.crop_top_at_timeline_ns(pos);
+            let crop_bottom = clip.crop_bottom_at_timeline_ns(pos);
             let brightness = clip.brightness_at_timeline_ns(pos);
             let contrast = clip.contrast_at_timeline_ns(pos);
             let saturation = clip.saturation_at_timeline_ns(pos);
@@ -3639,14 +3666,22 @@ impl ProgramPlayer {
                 scope: AdjustmentScopeShape::from_transform(
                     self.project_width,
                     self.project_height,
-                    clip.scale_at_timeline_ns(pos),
-                    clip.position_x_at_timeline_ns(pos),
-                    clip.position_y_at_timeline_ns(pos),
-                    clip.rotate_at_timeline_ns(pos) as f64,
-                    clip.crop_left_at_timeline_ns(pos),
-                    clip.crop_right_at_timeline_ns(pos),
-                    clip.crop_top_at_timeline_ns(pos),
-                    clip.crop_bottom_at_timeline_ns(pos),
+                    scale,
+                    position_x,
+                    position_y,
+                    rotate,
+                    crop_left,
+                    crop_right,
+                    crop_top,
+                    crop_bottom,
+                ),
+                mask: crate::media::mask_alpha::prepare_adjustment_canvas_masks(
+                    &clip.masks,
+                    local_time_ns,
+                    scale,
+                    position_x,
+                    position_y,
+                    rotate,
                 ),
                 opacity,
                 vb_params,
@@ -4992,6 +5027,36 @@ impl ProgramPlayer {
         // Force frame redraw when paused.
         if self.current_idx.is_some() && self.state != PlayerState::Playing {
             self.reseek_slot_for_current();
+        }
+    }
+
+    pub fn update_masks_for_clip(&mut self, clip_id: &str, masks: &[crate::model::clip::ClipMask]) {
+        let Some(clip_idx) = self.clips.iter().position(|clip| clip.id == clip_id) else {
+            return;
+        };
+
+        let is_adjustment = if let Some(clip) = self.clips.get_mut(clip_idx) {
+            clip.masks = masks.to_vec();
+            clip.is_adjustment
+        } else {
+            false
+        };
+
+        if is_adjustment {
+            self.rebuild_adjustment_overlays();
+            if self.state != PlayerState::Playing {
+                self.reseek_slot_by_clip_idx(clip_idx);
+            }
+            return;
+        }
+
+        if let Some(slot) = self.slot_for_clip(clip_idx) {
+            if let Ok(mut guard) = slot.mask_data.lock() {
+                *guard = masks.to_vec();
+            }
+            if self.state != PlayerState::Playing {
+                self.reseek_slot_by_clip_idx(clip_idx);
+            }
         }
     }
 
@@ -6902,19 +6967,20 @@ impl ProgramPlayer {
             clip.is_adjustment
                 && timeline_pos_ns >= clip.timeline_start_ns
                 && timeline_pos_ns < clip.timeline_end_ns()
-                && !AdjustmentScopeShape::from_transform(
-                    self.project_width,
-                    self.project_height,
-                    clip.scale_at_timeline_ns(timeline_pos_ns),
-                    clip.position_x_at_timeline_ns(timeline_pos_ns),
-                    clip.position_y_at_timeline_ns(timeline_pos_ns),
-                    clip.rotate_at_timeline_ns(timeline_pos_ns) as f64,
-                    clip.crop_left_at_timeline_ns(timeline_pos_ns),
-                    clip.crop_right_at_timeline_ns(timeline_pos_ns),
-                    clip.crop_top_at_timeline_ns(timeline_pos_ns),
-                    clip.crop_bottom_at_timeline_ns(timeline_pos_ns),
-                )
-                .is_full_frame(self.project_width, self.project_height)
+                && (clip.masks.iter().any(|mask| mask.enabled)
+                    || !AdjustmentScopeShape::from_transform(
+                        self.project_width,
+                        self.project_height,
+                        clip.scale_at_timeline_ns(timeline_pos_ns),
+                        clip.position_x_at_timeline_ns(timeline_pos_ns),
+                        clip.position_y_at_timeline_ns(timeline_pos_ns),
+                        clip.rotate_at_timeline_ns(timeline_pos_ns) as f64,
+                        clip.crop_left_at_timeline_ns(timeline_pos_ns),
+                        clip.crop_right_at_timeline_ns(timeline_pos_ns),
+                        clip.crop_top_at_timeline_ns(timeline_pos_ns),
+                        clip.crop_bottom_at_timeline_ns(timeline_pos_ns),
+                    )
+                    .is_full_frame(self.project_width, self.project_height))
         });
         if has_scoped_adjustment {
             return false;
@@ -15585,9 +15651,11 @@ fn clip_can_fully_occlude(clip: &ProgramClip) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        clip_can_fully_occlude, CachedPlayheadFrame, ProgramClip, ProgramPlayer, ScopeFrame,
-        ShortFrameCache, ThreePointParabola, TransitionPrerenderSpec, TransitionRole, VideoSlot,
+        apply_adjustment_overlays_rgba, clip_can_fully_occlude, AdjustmentOverlay,
+        CachedPlayheadFrame, ProgramClip, ProgramPlayer, ScopeFrame, ShortFrameCache,
+        ThreePointParabola, TransitionPrerenderSpec, TransitionRole, VBParams, VideoSlot,
     };
+    use crate::media::adjustment_scope::AdjustmentScopeShape;
     use crate::model::clip::{KeyframeInterpolation, MaskShape, NumericKeyframe};
     use crate::model::transition::TransitionAlignment;
     use crate::ui_state::{PrerenderEncodingPreset, DEFAULT_PRERENDER_CRF};
@@ -15881,6 +15949,68 @@ mod tests {
             width: 2,
             height: 2,
         }
+    }
+
+    #[test]
+    fn adjustment_overlay_masks_limit_preview_effect_area() {
+        let width = 8usize;
+        let height = 8usize;
+        let mut data = vec![0u8; width * height * 4];
+        for px in data.chunks_exact_mut(4) {
+            px[3] = 255;
+        }
+
+        let mut mask = crate::model::clip::ClipMask::new(MaskShape::Rectangle);
+        mask.enabled = true;
+        mask.width = 0.2;
+        mask.height = 0.2;
+
+        let overlay = AdjustmentOverlay {
+            track_index: 0,
+            scope: AdjustmentScopeShape::from_transform(
+                width as u32,
+                height as u32,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0,
+                0,
+                0,
+                0,
+            ),
+            mask: crate::media::mask_alpha::prepare_adjustment_canvas_masks(
+                &[mask],
+                0,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+            ),
+            opacity: 1.0,
+            vb_params: Some(VBParams {
+                brightness: 0.25,
+                contrast: 1.0,
+                saturation: 1.0,
+                hue: 0.0,
+            }),
+            coloradj_params: None,
+            three_point: None,
+            lut: None,
+        };
+
+        apply_adjustment_overlays_rgba(&mut data, width, height, &[overlay]);
+
+        let center_idx = (4 * width + 4) * 4;
+        let corner_idx = 0;
+        assert!(
+            data[center_idx] > 0,
+            "masked center pixel should be adjusted"
+        );
+        assert_eq!(
+            data[corner_idx], 0,
+            "pixels outside the mask should stay unchanged"
+        );
     }
 
     #[test]

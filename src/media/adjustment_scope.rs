@@ -1,12 +1,37 @@
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct AdjustmentScopeShape {
-    pub(crate) center_x: f64,
-    pub(crate) center_y: f64,
-    pub(crate) left: f64,
-    pub(crate) right: f64,
-    pub(crate) top: f64,
-    pub(crate) bottom: f64,
+    pub(crate) scale: f64,
+    pub(crate) position_x: f64,
+    pub(crate) position_y: f64,
+    pub(crate) crop_left_norm: f64,
+    pub(crate) crop_right_norm: f64,
+    pub(crate) crop_top_norm: f64,
+    pub(crate) crop_bottom_norm: f64,
     pub(crate) rotation_deg: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ResolvedAdjustmentScopeShape {
+    center_x: f64,
+    center_y: f64,
+    left: f64,
+    right: f64,
+    top: f64,
+    bottom: f64,
+    rotation_deg: f64,
+}
+
+pub(crate) fn adjustment_canvas_geometry(
+    width: f64,
+    height: f64,
+    scale: f64,
+    position_x: f64,
+    position_y: f64,
+) -> (f64, f64, f64, f64) {
+    let scale = scale.clamp(0.1, 4.0);
+    let center_x = width / 2.0 + position_x.clamp(-1.0, 1.0) * width / 2.0;
+    let center_y = height / 2.0 + position_y.clamp(-1.0, 1.0) * height / 2.0;
+    (center_x, center_y, width * scale, height * scale)
 }
 
 impl AdjustmentScopeShape {
@@ -24,41 +49,69 @@ impl AdjustmentScopeShape {
     ) -> Self {
         let pw = out_w.max(1) as f64;
         let ph = out_h.max(1) as f64;
-        let scale = scale.clamp(0.1, 4.0);
-        let position_x = position_x.clamp(-1.0, 1.0);
-        let position_y = position_y.clamp(-1.0, 1.0);
-        let crop_left = crop_left.max(0) as f64;
-        let crop_right = crop_right.max(0) as f64;
-        let crop_top = crop_top.max(0) as f64;
-        let crop_bottom = crop_bottom.max(0) as f64;
+        Self {
+            scale: scale.clamp(0.1, 4.0),
+            position_x: position_x.clamp(-1.0, 1.0),
+            position_y: position_y.clamp(-1.0, 1.0),
+            crop_left_norm: crop_left.max(0) as f64 / pw,
+            crop_right_norm: crop_right.max(0) as f64 / pw,
+            crop_top_norm: crop_top.max(0) as f64 / ph,
+            crop_bottom_norm: crop_bottom.max(0) as f64 / ph,
+            rotation_deg,
+        }
+    }
 
-        let center_x = pw / 2.0 + position_x * pw * (1.0 - scale) / 2.0;
-        let center_y = ph / 2.0 + position_y * ph * (1.0 - scale) / 2.0;
-        let half_w = pw * scale / 2.0;
-        let half_h = ph * scale / 2.0;
+    pub(crate) fn is_full_frame(&self, out_w: u32, out_h: u32) -> bool {
+        self.resolve(out_w as usize, out_h as usize)
+            .is_full_frame(out_w, out_h)
+    }
 
-        let left = center_x - half_w + crop_left * scale;
-        let mut right = center_x + half_w - crop_right * scale;
-        let top = center_y - half_h + crop_top * scale;
-        let mut bottom = center_y + half_h - crop_bottom * scale;
+    pub(crate) fn pixel_bounds(
+        &self,
+        width: usize,
+        height: usize,
+    ) -> Option<(usize, usize, usize, usize)> {
+        self.resolve(width, height).pixel_bounds(width, height)
+    }
+
+    pub(crate) fn contains_pixel(&self, x: usize, y: usize, width: usize, height: usize) -> bool {
+        self.resolve(width, height).contains_pixel(x, y)
+    }
+
+    pub(crate) fn resolve(&self, width: usize, height: usize) -> ResolvedAdjustmentScopeShape {
+        let pw = width.max(1) as f64;
+        let ph = height.max(1) as f64;
+        let (center_x, center_y, clip_width, clip_height) =
+            adjustment_canvas_geometry(pw, ph, self.scale, self.position_x, self.position_y);
+        let half_w = clip_width / 2.0;
+        let half_h = clip_height / 2.0;
+        let crop_left = self.crop_left_norm * pw;
+        let crop_right = self.crop_right_norm * pw;
+        let crop_top = self.crop_top_norm * ph;
+        let crop_bottom = self.crop_bottom_norm * ph;
+        let left = center_x - half_w + crop_left * self.scale;
+        let mut right = center_x + half_w - crop_right * self.scale;
+        let top = center_y - half_h + crop_top * self.scale;
+        let mut bottom = center_y + half_h - crop_bottom * self.scale;
         if right < left {
             right = left;
         }
         if bottom < top {
             bottom = top;
         }
-
-        Self {
+        ResolvedAdjustmentScopeShape {
             center_x,
             center_y,
             left,
             right,
             top,
             bottom,
-            rotation_deg,
+            rotation_deg: self.rotation_deg,
         }
     }
+}
 
+impl ResolvedAdjustmentScopeShape {
     pub(crate) fn is_full_frame(&self, out_w: u32, out_h: u32) -> bool {
         const EPS: f64 = 0.5;
         self.rotation_deg.abs() < f64::EPSILON
@@ -157,8 +210,8 @@ mod tests {
         let scope =
             AdjustmentScopeShape::from_transform(1920, 1080, 1.0, 0.0, 0.0, 0.0, 0, 0, 0, 0);
         assert!(scope.is_full_frame(1920, 1080));
-        assert!(scope.contains_pixel(0, 0));
-        assert!(scope.contains_pixel(1919, 1079));
+        assert!(scope.contains_pixel(0, 0, 1920, 1080));
+        assert!(scope.contains_pixel(1919, 1079, 1920, 1080));
     }
 
     #[test]
@@ -166,9 +219,9 @@ mod tests {
         let scope =
             AdjustmentScopeShape::from_transform(1000, 500, 0.5, 1.0, 0.0, 0.0, 100, 0, 0, 50);
         assert!(!scope.is_full_frame(1000, 500));
-        assert_eq!(scope.pixel_bounds(1000, 500), Some((550, 125, 1000, 350)));
-        assert!(scope.contains_pixel(600, 150));
-        assert!(!scope.contains_pixel(525, 150));
+        assert_eq!(scope.pixel_bounds(1000, 500), Some((800, 125, 1000, 350)));
+        assert!(scope.contains_pixel(850, 150, 1000, 500));
+        assert!(!scope.contains_pixel(775, 150, 1000, 500));
     }
 
     #[test]
@@ -180,6 +233,40 @@ mod tests {
             .expect("rotated scope bounds");
         assert!(bounds.0 < 250);
         assert!(bounds.2 > 750);
-        assert!(scope.contains_pixel(500, 500));
+        assert!(scope.contains_pixel(500, 500, 1000, 1000));
+    }
+
+    #[test]
+    fn scope_scales_with_preview_resolution() {
+        let scope =
+            AdjustmentScopeShape::from_transform(1920, 1080, 0.5, 0.5, -0.25, 0.0, 120, 60, 30, 0);
+        let full_bounds = scope.pixel_bounds(1920, 1080).expect("full-res bounds");
+        let half_bounds = scope.pixel_bounds(960, 540).expect("half-res bounds");
+        let expected_half = (
+            full_bounds.0 / 2,
+            full_bounds.1 / 2,
+            full_bounds.2 / 2,
+            full_bounds.3 / 2,
+        );
+        assert!((half_bounds.0 as isize - expected_half.0 as isize).abs() <= 1);
+        assert!((half_bounds.1 as isize - expected_half.1 as isize).abs() <= 1);
+        assert!((half_bounds.2 as isize - expected_half.2 as isize).abs() <= 1);
+        assert!((half_bounds.3 as isize - expected_half.3 as isize).abs() <= 1);
+        assert!(scope.contains_pixel(half_bounds.0 + 5, half_bounds.1 + 5, 960, 540));
+        assert!(!scope.contains_pixel(
+            half_bounds.0.saturating_sub(5),
+            half_bounds.1 + 5,
+            960,
+            540
+        ));
+    }
+
+    #[test]
+    fn translated_full_frame_scope_moves_off_center() {
+        let scope =
+            AdjustmentScopeShape::from_transform(1000, 500, 1.0, 0.5, -0.5, 0.0, 0, 0, 0, 0);
+        assert_eq!(scope.pixel_bounds(1000, 500), Some((250, 0, 1000, 375)));
+        assert!(scope.contains_pixel(750, 125, 1000, 500));
+        assert!(!scope.contains_pixel(200, 450, 1000, 500));
     }
 }

@@ -216,6 +216,7 @@ Keyframes are evaluated in clip-local timeline time and rendered directly into f
 
 - Adjustment layers export as post-compositor effect passes over the assembled timeline image.
 - The exported effect region uses the same **scale / position / crop / rotate / opacity** scope model as the Program Monitor overlay for adjustment clips.
+- If an adjustment layer has an enabled shape mask, export intersects that mask alpha with the adjustment scope so the rendered effect region matches Program Monitor preview. Rectangle/ellipse masks stay inline in the FFmpeg graph; path masks rasterize to a temporary grayscale mask and are transformed with the adjustment clip before blending.
 - Each adjustment layer is trimmed to its own clip-local time before FFmpeg evaluates keyframed effect expressions, so adjustment-layer keyframes animate relative to the adjustment clip instead of the global timeline.
 - Overlapping adjustment layers stack in track order, matching Program Monitor preview.
 

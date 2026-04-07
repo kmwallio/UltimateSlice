@@ -616,6 +616,7 @@ fn sync_transform_overlay_to_playhead(
         Some(cid) => {
             if let Some(c) = project.clip_ref(cid) {
                 if c.kind != ClipKind::Audio {
+                    transform_overlay.set_adjustment_mode(c.kind == ClipKind::Adjustment);
                     let (scale, pos_x, pos_y, rotate, cl, cr, ct, cb) =
                         evaluate_clip_transform_at(c, playhead_ns);
                     transform_overlay.set_transform(scale, pos_x, pos_y);
@@ -644,13 +645,16 @@ fn sync_transform_overlay_to_playhead(
                     }
                     transform_overlay.set_clip_selected(true);
                 } else {
+                    transform_overlay.set_adjustment_mode(false);
                     transform_overlay.set_clip_selected(false);
                 }
             } else {
+                transform_overlay.set_adjustment_mode(false);
                 transform_overlay.set_clip_selected(false);
             }
         }
         None => {
+            transform_overlay.set_adjustment_mode(false);
             transform_overlay.set_clip_selected(false);
         }
     }
@@ -667,6 +671,7 @@ fn sync_transform_overlay_to_playhead_from_program_clips(
         Some(cid) => {
             if let Some(clip) = clips.iter().find(|clip| clip.id == cid) {
                 if !clip.is_audio_only {
+                    transform_overlay.set_adjustment_mode(clip.is_adjustment);
                     transform_overlay.set_transform(
                         clip.scale_at_timeline_ns(playhead_ns),
                         clip.position_x_at_timeline_ns(playhead_ns),
@@ -708,6 +713,28 @@ fn sync_transform_overlay_to_playhead_from_program_clips(
         None => {}
     }
     transform_overlay.set_clip_selected(false);
+    transform_overlay.set_adjustment_mode(false);
+}
+
+fn sync_transform_overlay_to_playhead_resolved(
+    transform_overlay: &crate::ui::transform_overlay::TransformOverlay,
+    project: &Project,
+    program_player: &ProgramPlayer,
+    selected_clip_id: Option<&str>,
+    playhead_ns: u64,
+) {
+    if let Some(cid) = selected_clip_id {
+        if let Some(runtime_clip) = program_player.visual_clip_snapshot(cid) {
+            sync_transform_overlay_to_playhead_from_program_clips(
+                transform_overlay,
+                std::slice::from_ref(&runtime_clip),
+                Some(cid),
+                playhead_ns,
+            );
+            return;
+        }
+    }
+    sync_transform_overlay_to_playhead(transform_overlay, project, selected_clip_id, playhead_ns);
 }
 
 fn sync_transform_overlay_tracking_region(
@@ -4917,14 +4944,18 @@ pub fn build_window(
                 {
                     let proj = project.borrow();
                     let selected = timeline_state.borrow().selected_clip_id.clone();
-                    if let Some(masks) = selected.and_then(|cid| {
-                        proj.tracks
+                    if let Some(clip_id) = selected {
+                        if let Some(masks) = proj
+                            .tracks
                             .iter()
                             .flat_map(|t| t.clips.iter())
-                            .find(|c| c.id == cid)
+                            .find(|c| c.id == clip_id)
                             .map(|c| c.masks.clone())
-                    }) {
-                        prog_player.borrow_mut().update_current_masks(&masks);
+                        {
+                            prog_player
+                                .borrow_mut()
+                                .update_masks_for_clip(&clip_id, &masks);
+                        }
                     }
                 }
                 if let Some(effects) = effects {
@@ -5462,6 +5493,26 @@ pub fn build_window(
                 .set_text(&status_message);
         })
     };
+    let schedule_tracking_binding_refresh: Rc<dyn Fn()> = {
+        let pending = Rc::new(Cell::new(false));
+        let on_project_changed = on_project_changed.clone();
+        let sync_tracking_controls = sync_tracking_controls.clone();
+        Rc::new(move || {
+            if pending.replace(true) {
+                return;
+            }
+            let pending = pending.clone();
+            let on_project_changed = on_project_changed.clone();
+            let sync_tracking_controls = sync_tracking_controls.clone();
+            // Rebuilding the tracking dropdown models during their own
+            // selected-notify signal can leave GTK touching stale row objects.
+            glib::idle_add_local_once(move || {
+                pending.set(false);
+                on_project_changed();
+                sync_tracking_controls();
+            });
+        })
+    };
 
     {
         let inspector_view = inspector_view.clone();
@@ -5683,8 +5734,7 @@ pub fn build_window(
     {
         let inspector_view = inspector_view.clone();
         let project = project.clone();
-        let on_project_changed = on_project_changed.clone();
-        let sync_tracking_controls = sync_tracking_controls.clone();
+        let schedule_tracking_binding_refresh = schedule_tracking_binding_refresh.clone();
         let tracking_target_dropdown = inspector_view.tracking_target_dropdown.clone();
         tracking_target_dropdown.connect_selected_notify(move |_| {
             if *inspector_view.updating.borrow() {
@@ -5709,15 +5759,13 @@ pub fn build_window(
                     }
                 }
             }
-            on_project_changed();
-            sync_tracking_controls();
+            schedule_tracking_binding_refresh();
         });
     }
     {
         let inspector_view = inspector_view.clone();
         let project = project.clone();
-        let on_project_changed = on_project_changed.clone();
-        let sync_tracking_controls = sync_tracking_controls.clone();
+        let schedule_tracking_binding_refresh = schedule_tracking_binding_refresh.clone();
         let tracking_reference_dropdown = inspector_view.tracking_reference_dropdown.clone();
         tracking_reference_dropdown.connect_selected_notify(move |_| {
             if *inspector_view.updating.borrow() {
@@ -5742,15 +5790,13 @@ pub fn build_window(
                     }
                 }
             }
-            on_project_changed();
-            sync_tracking_controls();
+            schedule_tracking_binding_refresh();
         });
     }
     {
         let inspector_view = inspector_view.clone();
         let project = project.clone();
-        let on_project_changed = on_project_changed.clone();
-        let sync_tracking_controls = sync_tracking_controls.clone();
+        let schedule_tracking_binding_refresh = schedule_tracking_binding_refresh.clone();
         let tracking_clear_binding_btn = inspector_view.tracking_clear_binding_btn.clone();
         tracking_clear_binding_btn.connect_clicked(move |_| {
             let clip_id = inspector_view.selected_clip_id.borrow().clone();
@@ -5767,8 +5813,7 @@ pub fn build_window(
                     }
                 }
             }
-            on_project_changed();
-            sync_tracking_controls();
+            schedule_tracking_binding_refresh();
         });
     }
     {
@@ -6815,6 +6860,7 @@ pub fn build_window(
     {
         let inspector_view = inspector_view.clone();
         let project = project.clone();
+        let prog_player_for_sel = prog_player.clone();
         let transform_overlay_cell = transform_overlay_cell.clone();
         let keyframe_editor_cell = keyframe_editor_cell.clone();
         let timeline_state_for_sel = timeline_state.clone();
@@ -6836,7 +6882,14 @@ pub fn build_window(
                 // Sync transform overlay handles with selection state,
                 // using keyframe-interpolated values at the current playhead.
                 if let Some(ref to) = *transform_overlay_cell.borrow() {
-                    sync_transform_overlay_to_playhead(to, &proj, clip_id.as_deref(), playhead_ns);
+                    let pp = prog_player_for_sel.borrow();
+                    sync_transform_overlay_to_playhead_resolved(
+                        to,
+                        &proj,
+                        &pp,
+                        clip_id.as_deref(),
+                        playhead_ns,
+                    );
                 }
                 if let Some(ref editor) = *keyframe_editor_cell.borrow() {
                     editor.clear_selection();
@@ -8899,7 +8952,9 @@ pub fn build_window(
                                 .map(|c| c.masks.clone())
                                 .unwrap_or_default()
                         };
-                        prog_player.borrow_mut().update_current_masks(&masks);
+                        prog_player
+                            .borrow_mut()
+                            .update_masks_for_clip(clip_id, &masks);
                     }
                 }
             },
@@ -8930,7 +8985,9 @@ pub fn build_window(
                                 .map(|c| c.masks.clone())
                                 .unwrap_or_default()
                         };
-                        prog_player.borrow_mut().update_current_masks(&masks);
+                        prog_player
+                            .borrow_mut()
+                            .update_masks_for_clip(clip_id, &masks);
                         on_project_changed();
                     }
                 }
@@ -9411,8 +9468,15 @@ pub fn build_window(
                     let selected = timeline_state_poll.borrow().selected_clip_id.clone();
                     if selected.is_some() {
                         let proj = project.borrow();
-                        sync_transform_overlay_to_playhead(to, &proj, selected.as_deref(), pos_ns);
-                        let (ix, iy) = pp.borrow().content_inset();
+                        let pp_ref = pp.borrow();
+                        sync_transform_overlay_to_playhead_resolved(
+                            to,
+                            &proj,
+                            &pp_ref,
+                            selected.as_deref(),
+                            pos_ns,
+                        );
+                        let (ix, iy) = pp_ref.content_inset();
                         to.set_content_inset(ix, iy);
                     }
                 }

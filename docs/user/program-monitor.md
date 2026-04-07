@@ -62,7 +62,8 @@ When a visual timeline clip or adjustment layer is selected, the Program Monitor
 - **Edge midpoint handles**: drag top/bottom/left/right handles to adjust crop directly in preview.
 - Keyboard nudges work when the overlay has focus (click the monitor once).
 - Starting an overlay drag pauses playback and keeps the current frame locked while editing; playback remains paused after you release.
-- For **adjustment layers**, these controls edit the scoped effect region instead of moving source pixels. The overlay box is the exact region used for live scoped adjustment preview.
+- For **adjustment layers**, these controls edit the scoped effect region instead of moving source pixels. The overlay box is the exact region used for live scoped adjustment preview, and any enabled shape mask further trims that region instead of replacing it.
+- Adjustment-layer **Position X/Y** offsets translate that scoped region directly, so tracked or keyframed adjustments still move visibly even when the layer stays at full-frame scale (`Scale = 1.0`).
 
 ## Motion Tracking Region Overlay
 
@@ -97,7 +98,8 @@ When **Motion Tracking → Edit Region in Monitor** is enabled for the selected 
 - During those boundary rebuilds, audio-only preview playback is paused/re-synced to the current timeline position before resume so audio does not run ahead and end earlier than video.
 - All per-clip effects (color, denoise, sharpness, crop, rotate, flip, scale, position, title overlay, speed) are applied per-slot during playback.
 - Motion-tracked clip and first-mask attachments are resolved into the same transform/mask evaluation path used by normal preview playback, so tracked overlays in Program Monitor match export timing and placement.
-- Adjustment layers are applied post-compositor. Supported scoped preview effects (including LUTs, primary color, temperature/tint, and three-point grading) are limited to the selected adjustment clip's transformed bounding box, and overlapping adjustment layers stack by track order.
+- Adjustment layers are applied post-compositor. Supported scoped preview effects (including LUTs, primary color, temperature/tint, and three-point grading) are limited to the selected adjustment clip's transformed bounding box, and any enabled adjustment-layer shape mask is intersected with that scope before the effect is blended in. Overlapping adjustment layers still stack by track order.
+- Motion-tracked adjustment layers use that same scoped-region transform path, so clip-level tracking can move a masked adjustment across the frame even when the adjustment starts as a full-frame layer.
 - **Transitions** are previewed natively in real time during both playback and scrubbing. `Cross-dissolve` fades compositor pad alpha between clips, `Fade to black` and `Fade to white` fade against the compositor background, `Wipe left/right/up/down` use videocrop animation on the incoming clip, `Circle open` / `Circle close` animate a live ellipse mask on the incoming clip even when the clip has no authored masks, and `Cover`, `Reveal`, and `Slide` left/right/up/down variants animate clip motion across the canvas. Export and prerender use the same supported transition set.
 - Transition **Alignment** (`End on cut`, `Center on cut`, `Start on cut`) shifts when the overlap begins and ends relative to the edit. For the post-cut portion of an overlap, Program Monitor keeps the outgoing clip visible by holding its last frame so preview matches export and prerender.
 - Changing a transition's type, duration, or alignment invalidates any matching cached boundary prerender so Program Monitor refreshes to the new transition instead of replaying an older overlap render.
@@ -140,7 +142,7 @@ When **Motion Tracking → Edit Region in Monitor** is enabled for the selected 
 - Background prerender encoding quality is configurable from Preferences via x264 preset + CRF. Lower CRF and slower presets improve fidelity, and those settings are part of the prerender cache identity so mismatched-quality cached segments are not reused.
 - Prerender cache lookups now track hit/miss telemetry (with hit-rate summaries), and `get_performance_snapshot` includes `prerender_cache_hits`, `prerender_cache_misses`, and `prerender_cache_hit_rate_percent`.
 - For proxy-backed prerender inputs, LUT is not re-applied in the prerender FFmpeg graph, preventing double LUT grading when the proxy media is already LUT-baked.
-- When a **scoped** adjustment layer is active, background prerender falls back to the live compositor-output path so the Program Monitor does not show stale full-frame adjustment renders.
+- When a **scoped or masked** adjustment layer is active, background prerender falls back to the live compositor-output path so the Program Monitor does not show stale full-frame adjustment renders.
 - Background prerender now preserves animated **brightness / contrast / saturation / temperature / tint** keyframes, so overlap playback stays closer to the final export when those color controls are keyframed.
 - Transparent title clips keep their alpha in background prerender, so prerendered title overlays show the lower video tracks behind the text instead of flattening to black.
 - Title fonts in background prerender now reuse the selected family plus structured weight/slant/width selectors, so bold and italic title faces stay closer to the live Program Monitor preview instead of falling back to a regular face.

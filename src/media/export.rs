@@ -663,6 +663,7 @@ pub fn export_project(
             out_w,
             out_h,
             &color_caps,
+            &mut _mask_temp_files,
         ) {
             filter.push_str(&graph);
             prev_label = next_label;
@@ -1040,8 +1041,12 @@ pub fn export_project(
         (filter, vout_label)
     };
 
-    cmd.arg("-filter_complex")
-        .arg(&filter)
+    use std::io::Write;
+    let mut filter_script_file = tempfile::NamedTempFile::new()?;
+    filter_script_file.write_all(filter.as_bytes())?;
+
+    cmd.arg("-filter_complex_script")
+        .arg(filter_script_file.path())
         .arg("-map")
         .arg(format!("[{map_label}]"));
 
@@ -1576,8 +1581,8 @@ fn build_adjustment_scope_alpha_expression(
         time_var,
     );
 
-    let cx_expr = format!("{pw:.10}/2+({pos_x_expr})*{pw:.10}*(1-({scale_expr}))/2");
-    let cy_expr = format!("{ph:.10}/2+({pos_y_expr})*{ph:.10}*(1-({scale_expr}))/2");
+    let cx_expr = format!("{pw:.10}/2+({pos_x_expr})*{pw:.10}/2");
+    let cy_expr = format!("{ph:.10}/2+({pos_y_expr})*{ph:.10}/2");
     let half_w_expr = format!("{pw:.10}*({scale_expr})/2");
     let half_h_expr = format!("{ph:.10}*({scale_expr})/2");
     let left_raw_expr = format!("({cx_expr})-({half_w_expr})+({crop_left_expr})*({scale_expr})");
@@ -1595,6 +1600,238 @@ fn build_adjustment_scope_alpha_expression(
 
     format!(
         "between({ux_expr},{left_raw_expr},({right_expr})-0.000001)*between({uy_expr},{top_raw_expr},({bottom_expr})-0.000001)"
+    )
+}
+
+struct AdjustmentTransformExpressions {
+    scale_expr: String,
+    rotate_expr: String,
+    center_x_expr: String,
+    center_y_expr: String,
+    clip_width_expr: String,
+    clip_height_expr: String,
+    clip_left_expr: String,
+    clip_top_expr: String,
+}
+
+fn build_adjustment_transform_expressions(
+    clip: &Clip,
+    out_w: u32,
+    out_h: u32,
+    time_var: &str,
+) -> AdjustmentTransformExpressions {
+    let pw = out_w.max(1) as f64;
+    let ph = out_h.max(1) as f64;
+    let scale_expr =
+        build_keyframed_property_expression(&clip.scale_keyframes, clip.scale, 0.1, 4.0, time_var);
+    let pos_x_expr = build_keyframed_property_expression(
+        &clip.position_x_keyframes,
+        clip.position_x,
+        -1.0,
+        1.0,
+        time_var,
+    );
+    let pos_y_expr = build_keyframed_property_expression(
+        &clip.position_y_keyframes,
+        clip.position_y,
+        -1.0,
+        1.0,
+        time_var,
+    );
+    let rotate_expr = build_keyframed_property_expression(
+        &clip.rotate_keyframes,
+        clip.rotate as f64,
+        -180.0,
+        180.0,
+        time_var,
+    );
+    let center_x_expr = format!("{pw:.10}/2+({pos_x_expr})*{pw:.10}/2");
+    let center_y_expr = format!("{ph:.10}/2+({pos_y_expr})*{ph:.10}/2");
+    let clip_width_expr = format!("{pw:.10}*({scale_expr})");
+    let clip_height_expr = format!("{ph:.10}*({scale_expr})");
+    let clip_left_expr = format!("({center_x_expr})-({clip_width_expr})/2");
+    let clip_top_expr = format!("({center_y_expr})-({clip_height_expr})/2");
+
+    AdjustmentTransformExpressions {
+        scale_expr,
+        rotate_expr,
+        center_x_expr,
+        center_y_expr,
+        clip_width_expr,
+        clip_height_expr,
+        clip_left_expr,
+        clip_top_expr,
+    }
+}
+
+fn build_adjustment_mask_coordinate_expressions(
+    clip: &Clip,
+    out_w: u32,
+    out_h: u32,
+    time_var: &str,
+) -> (String, String, AdjustmentTransformExpressions) {
+    let transform = build_adjustment_transform_expressions(clip, out_w, out_h, time_var);
+    let rad_expr = format!("({})*PI/180", transform.rotate_expr);
+    let ux_expr = format!(
+        "({cx})+(X-({cx}))*cos({rad})-(Y-({cy}))*sin({rad})",
+        cx = transform.center_x_expr,
+        cy = transform.center_y_expr,
+        rad = rad_expr
+    );
+    let uy_expr = format!(
+        "({cy})+(X-({cx}))*sin({rad})+(Y-({cy}))*cos({rad})",
+        cx = transform.center_x_expr,
+        cy = transform.center_y_expr,
+        rad = rad_expr
+    );
+    let npx_expr = format!(
+        "(({ux_expr})-({clip_left}))/({clip_width})",
+        clip_left = transform.clip_left_expr,
+        clip_width = transform.clip_width_expr
+    );
+    let npy_expr = format!(
+        "(({uy_expr})-({clip_top}))/({clip_height})",
+        clip_top = transform.clip_top_expr,
+        clip_height = transform.clip_height_expr
+    );
+    (npx_expr, npy_expr, transform)
+}
+
+fn build_adjustment_rect_mask_alpha_expression(
+    npx_expr: &str,
+    npy_expr: &str,
+    mask: &crate::model::clip::ClipMask,
+) -> String {
+    let hw = (mask.width + mask.expansion).max(0.0);
+    let hh = (mask.height + mask.expansion).max(0.0);
+    let feather = mask.feather.max(0.0);
+    let rot_rad = mask.rotation.to_radians();
+    let cos_r = rot_rad.cos();
+    let sin_r = rot_rad.sin();
+    let ux = format!(
+        "((({npx_expr})-{cx:.10})*{cos_r:.10})+((({npy_expr})-{cy:.10})*{sin_r:.10})",
+        cx = mask.center_x,
+        cy = mask.center_y,
+    );
+    let uy = format!(
+        "(-((({npx_expr})-{cx:.10})*{sin_r:.10}))+((({npy_expr})-{cy:.10})*{cos_r:.10})",
+        cx = mask.center_x,
+        cy = mask.center_y,
+    );
+    let expr = if feather < 0.5 {
+        format!("between(abs({ux}),0,{hw:.10})*between(abs({uy}),0,{hh:.10})")
+    } else {
+        let f2 = feather * 2.0;
+        let ax = format!("clip(({hw:.10}+{feather:.10}-abs({ux}))/{f2:.10},0,1)");
+        let ay = format!("clip(({hh:.10}+{feather:.10}-abs({uy}))/{f2:.10},0,1)");
+        let sax = format!("({ax}*{ax}*(3-2*{ax}))");
+        let say = format!("({ay}*{ay}*(3-2*{ay}))");
+        format!("{sax}*{say}")
+    };
+    if mask.invert {
+        format!("(1-{})", expr)
+    } else {
+        expr
+    }
+}
+
+fn build_adjustment_ellipse_mask_alpha_expression(
+    npx_expr: &str,
+    npy_expr: &str,
+    mask: &crate::model::clip::ClipMask,
+) -> String {
+    let hw = (mask.width + mask.expansion).max(0.1);
+    let hh = (mask.height + mask.expansion).max(0.1);
+    let feather = mask.feather.max(0.0);
+    let rot_rad = mask.rotation.to_radians();
+    let cos_r = rot_rad.cos();
+    let sin_r = rot_rad.sin();
+    let ux = format!(
+        "((({npx_expr})-{cx:.10})*{cos_r:.10})+((({npy_expr})-{cy:.10})*{sin_r:.10})",
+        cx = mask.center_x,
+        cy = mask.center_y,
+    );
+    let uy = format!(
+        "(-((({npx_expr})-{cx:.10})*{sin_r:.10}))+((({npy_expr})-{cy:.10})*{cos_r:.10})",
+        cx = mask.center_x,
+        cy = mask.center_y,
+    );
+    let r_expr = format!("sqrt({ux}*{ux}/({hw:.10}*{hw:.10})+{uy}*{uy}/({hh:.10}*{hh:.10}))");
+    let expr = if feather < 0.5 {
+        format!("lte({r_expr},1)")
+    } else {
+        let min_axis = hw.min(hh);
+        let f_norm = feather / min_axis;
+        let inner = 1.0 - f_norm;
+        let t_expr = format!("clip(({inner:.10}-{r_expr}+{f_norm:.10})/{f_norm:.10},0,1)");
+        format!("({t_expr}*{t_expr}*(3-2*{t_expr}))")
+    };
+    if mask.invert {
+        format!("(1-{})", expr)
+    } else {
+        expr
+    }
+}
+
+fn build_adjustment_mask_alpha_expression(
+    clip: &Clip,
+    out_w: u32,
+    out_h: u32,
+    time_var: &str,
+) -> Option<String> {
+    let active_masks: Vec<&crate::model::clip::ClipMask> =
+        clip.masks.iter().filter(|mask| mask.enabled).collect();
+    if active_masks.is_empty()
+        || active_masks
+            .iter()
+            .any(|mask| mask.shape == crate::model::clip::MaskShape::Path)
+    {
+        return None;
+    }
+
+    let (npx_expr, npy_expr, _) =
+        build_adjustment_mask_coordinate_expressions(clip, out_w, out_h, time_var);
+    let exprs: Vec<String> = active_masks
+        .iter()
+        .map(|mask| match mask.shape {
+            crate::model::clip::MaskShape::Rectangle => {
+                build_adjustment_rect_mask_alpha_expression(&npx_expr, &npy_expr, mask)
+            }
+            crate::model::clip::MaskShape::Ellipse => {
+                build_adjustment_ellipse_mask_alpha_expression(&npx_expr, &npy_expr, mask)
+            }
+            crate::model::clip::MaskShape::Path => unreachable!(),
+        })
+        .collect();
+
+    Some(if exprs.len() == 1 {
+        exprs.into_iter().next().unwrap_or_else(|| "1".to_string())
+    } else {
+        exprs.join("*")
+    })
+}
+
+fn build_adjustment_path_mask_alpha(
+    clip: &Clip,
+    out_w: u32,
+    out_h: u32,
+) -> Option<crate::media::mask_alpha::FfmpegMaskAlphaResult> {
+    if !clip
+        .masks
+        .iter()
+        .any(|mask| mask.enabled && mask.shape == crate::model::clip::MaskShape::Path)
+    {
+        return None;
+    }
+
+    crate::media::mask_alpha::build_combined_mask_ffmpeg_alpha(
+        &clip.masks,
+        out_w,
+        out_h,
+        0,
+        1.0,
+        0.0,
+        0.0,
     )
 }
 
@@ -2237,6 +2474,7 @@ fn build_adjustment_layer_filter_graph(
     out_w: u32,
     out_h: u32,
     color_caps: &ColorFilterCapabilities,
+    mask_temp_files: &mut Vec<tempfile::NamedTempFile>,
 ) -> Option<String> {
     let effects_chain = build_adjustment_effects_chain_filter(adj_clip, color_caps);
     if effects_chain.is_empty() {
@@ -2252,6 +2490,7 @@ fn build_adjustment_layer_filter_graph(
     let end_s = (adj_clip.timeline_start + adj_clip.duration()) as f64 / 1_000_000_000.0;
     let orig_label = format!("vadj{adj_idx}orig");
     let work_label = format!("vadj{adj_idx}work");
+    let work_raw_label = format!("vadj{adj_idx}raw");
     let fx_label = format!("vadj{adj_idx}fx");
     let scope_alpha = build_adjustment_scope_alpha_expression(adj_clip, out_w, out_h, "T");
     let scope_alpha = if opacity < 1.0 - f64::EPSILON {
@@ -2259,11 +2498,52 @@ fn build_adjustment_layer_filter_graph(
     } else {
         scope_alpha
     };
+    let path_mask_alpha = build_adjustment_path_mask_alpha(adj_clip, out_w, out_h);
+    let adjustment_mask_alpha = if path_mask_alpha.is_none() {
+        build_adjustment_mask_alpha_expression(adj_clip, out_w, out_h, "T")
+    } else {
+        None
+    };
+    let alpha_expr = if let Some(mask_alpha) = adjustment_mask_alpha {
+        format!("({scope_alpha})*({mask_alpha})")
+    } else {
+        scope_alpha.clone()
+    };
+
+    if let Some(crate::media::mask_alpha::FfmpegMaskAlphaResult::RasterFile(mask_file)) =
+        path_mask_alpha
+    {
+        let mask_path_str = mask_file.path().display().to_string();
+        mask_temp_files.push(mask_file);
+        let transform = build_adjustment_transform_expressions(adj_clip, out_w, out_h, "T");
+        let clip_duration_s = adj_clip.duration() as f64 / 1_000_000_000.0;
+        let mask_source_label = format!("vadj{adj_idx}masksrc");
+        let mask_fg_label = format!("vadj{adj_idx}maskfg");
+        let mask_bg_label = format!("vadj{adj_idx}maskbg");
+        let mask_label = format!("vadj{adj_idx}mask");
+
+        return Some(format!(
+            ";[{input_label}]split[{orig_label}][{work_label}];\
+             [{work_label}]trim=start={start_s:.6}:end={end_s:.6},setpts=PTS-STARTPTS,{effects_chain},format=yuva420p[{work_raw_label}];\
+             movie='{mask_path_str}',format=gray,scale={out_w}:{out_h}[{mask_source_label}];\
+             [{mask_source_label}]rotate='-({rotate_expr})*PI/180':fillcolor=black,scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[{mask_fg_label}];\
+             color=c=black:size={out_w}x{out_h}:r=1:d={clip_duration_s:.6}[{mask_bg_label}];\
+             [{mask_bg_label}][{mask_fg_label}]overlay=x='{clip_left_expr}':y='{clip_top_expr}':eval=frame,format=gray[{mask_label}];\
+             [{work_raw_label}][{mask_label}]alphamerge,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({scope_alpha})',\
+             setpts=PTS+{start_s:.6}/TB[{fx_label}];\
+             [{orig_label}][{fx_label}]overlay=x=0:y=0:eof_action=pass[{output_label}]",
+            rotate_expr = transform.rotate_expr,
+            scale_expr = transform.scale_expr,
+            clip_left_expr = transform.clip_left_expr,
+            clip_top_expr = transform.clip_top_expr,
+            scope_alpha = scope_alpha,
+        ));
+    }
 
     Some(format!(
         ";[{input_label}]split[{orig_label}][{work_label}];\
          [{work_label}]trim=start={start_s:.6}:end={end_s:.6},setpts=PTS-STARTPTS,{effects_chain},format=yuva420p,\
-         geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({scope_alpha})',\
+         geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({alpha_expr})',\
          setpts=PTS+{start_s:.6}/TB[{fx_label}];\
          [{orig_label}][{fx_label}]overlay=x=0:y=0:eof_action=pass[{output_label}]"
     ))
@@ -5110,6 +5390,15 @@ mod tests {
     }
 
     #[test]
+    fn adjustment_scope_alpha_expression_moves_full_frame_scope_when_translated() {
+        let mut clip = Clip::new_adjustment(0, 2_000_000_000);
+        clip.position_x = 0.5;
+        let expr = build_adjustment_scope_alpha_expression(&clip, 1920, 1080, "T");
+        assert_ne!(expr, "1");
+        assert!(expr.contains("between("));
+    }
+
+    #[test]
     fn adjustment_layer_filter_graph_uses_clip_local_time_and_scope_mask() {
         let mut clip = Clip::new_adjustment(5_000_000_000, 2_000_000_000);
         clip.brightness_keyframes = vec![
@@ -5153,6 +5442,7 @@ mod tests {
             1920,
             1080,
             &ColorFilterCapabilities::default(),
+            &mut Vec::new(),
         )
         .expect("adjustment graph");
 
@@ -5161,6 +5451,70 @@ mod tests {
         assert!(graph.contains("a='alpha(X,Y)*("));
         assert!(graph.contains("if(lt(T,"));
         assert!(graph.contains("overlay=x=0:y=0:eof_action=pass[vout]"));
+    }
+
+    #[test]
+    fn adjustment_layer_filter_graph_combines_rect_mask_alpha() {
+        let mut clip = Clip::new_adjustment(0, 2_000_000_000);
+        clip.brightness = 0.2;
+        let mut mask = crate::model::clip::ClipMask::new(crate::model::clip::MaskShape::Rectangle);
+        mask.enabled = true;
+        mask.width = 0.2;
+        mask.height = 0.2;
+        clip.masks.push(mask);
+
+        let mut mask_files = Vec::new();
+        let graph = build_adjustment_layer_filter_graph(
+            "vin",
+            "vout",
+            &clip,
+            0,
+            1920,
+            1080,
+            &ColorFilterCapabilities::default(),
+            &mut mask_files,
+        )
+        .expect("adjustment graph");
+
+        assert!(
+            mask_files.is_empty(),
+            "rect masks should stay inline in the graph"
+        );
+        assert!(
+            graph.contains("between(abs("),
+            "expected inline rect mask alpha in `{graph}`"
+        );
+        assert!(!graph.contains("alphamerge"));
+    }
+
+    #[test]
+    fn adjustment_layer_filter_graph_rasterizes_path_masks() {
+        let mut clip = Clip::new_adjustment(0, 2_000_000_000);
+        clip.brightness = 0.2;
+        let mut mask = crate::model::clip::ClipMask::new(crate::model::clip::MaskShape::Path);
+        mask.enabled = true;
+        mask.path = Some(crate::model::clip::default_diamond_path());
+        clip.masks.push(mask);
+
+        let mut mask_files = Vec::new();
+        let graph = build_adjustment_layer_filter_graph(
+            "vin",
+            "vout",
+            &clip,
+            0,
+            1920,
+            1080,
+            &ColorFilterCapabilities::default(),
+            &mut mask_files,
+        )
+        .expect("adjustment graph");
+
+        assert!(
+            !mask_files.is_empty(),
+            "path masks should create a temporary raster mask"
+        );
+        assert!(graph.contains("alphamerge"));
+        assert!(graph.contains("movie='"));
     }
 
     #[test]

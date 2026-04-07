@@ -166,7 +166,7 @@ Applied via GStreamer `videocrop`, `videoflip`, `videoscale`, and `videobox` (pr
 | **Flip H** | Toggle | Mirror horizontally |
 | **Flip V** | Toggle | Mirror vertically |
 
-> **Adjustment layers:** the same transform controls define the adjustment clip's scoped effect region in preview and export. **Scale, Position, Crop, Rotate, and Opacity** stay active; **Blend Mode**, **Anamorphic Desqueeze**, and **Flip H/V** are shown but disabled because adjustment clips do not create their own image layer.
+> **Adjustment layers:** the same transform controls define the adjustment clip's scoped effect region in preview and export. **Scale, Position, Crop, Rotate, and Opacity** stay active; **Blend Mode**, **Anamorphic Desqueeze**, and **Flip H/V** are shown but disabled because adjustment clips do not create their own image layer. Adjustment clips now also expose the normal **Shape Mask** section, and that mask is intersected with the transform/crop scope instead of replacing it. On adjustment clips, **Position X/Y** move the scoped region itself, so tracked/full-frame masked adjustments still translate visibly at `Scale = 1.0`.
 
 ### Transform keyframes (phase 1)
 
@@ -465,6 +465,8 @@ Restricts the visible area of a clip using a geometric shape. Pixels outside the
 All numeric mask properties (rect/ellipse) support keyframe animation via the Phase 1 keyframe system.
 
 > **Motion tracking** — The first rectangle/ellipse mask can be attached to a tracker from the **Motion Tracking** section so it follows tracked translation in preview and export. Path masks are still manual/keyframed only.
+
+> **Adjustment layers** — On adjustment clips, the mask limits where the grading/effect pass is applied. The final affected area is the intersection of the adjustment layer's transform/crop scope and the authored mask alpha, so existing scoped-adjustment projects keep the same overall region semantics.
 
 The Program Monitor transform overlay shows a cyan dashed outline of the active mask shape with a center crosshair.
 
