@@ -1,6 +1,7 @@
 use crate::media::{adjustment_scope::AdjustmentScopeShape, program_player::ProgramPlayer};
 use crate::model::clip::{Clip, ClipKind, NumericKeyframe, SlowMotionInterp};
 use crate::model::project::Project;
+use crate::model::track::{Track, TrackKind};
 use crate::model::transition::{max_transition_duration_ns, transition_xfade_name_for_kind};
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
@@ -89,6 +90,57 @@ impl Default for ExportOptions {
     }
 }
 
+struct ActiveVideoTrackExportLayout<'a> {
+    primary_clips: Vec<&'a Clip>,
+    secondary_track_clips: Vec<Vec<&'a Clip>>,
+    adjustment_clips: Vec<&'a Clip>,
+}
+
+fn sorted_non_adjustment_track_clips<'a>(track: &'a Track) -> Vec<&'a Clip> {
+    let mut clips: Vec<&Clip> = track
+        .clips
+        .iter()
+        .filter(|clip| clip.kind != ClipKind::Adjustment)
+        .collect();
+    clips.sort_by_key(|clip| clip.timeline_start);
+    clips
+}
+
+fn split_active_video_tracks_for_export<'a>(
+    project: &Project,
+    flattened_project_tracks: &'a [Track],
+) -> Option<ActiveVideoTrackExportLayout<'a>> {
+    let active_video_tracks: Vec<&Track> = flattened_project_tracks
+        .iter()
+        .filter(|track| track.kind == TrackKind::Video)
+        .filter(|track| project.track_is_active_for_output(track))
+        .collect();
+    let primary_track_idx = active_video_tracks.iter().position(|track| {
+        track
+            .clips
+            .iter()
+            .any(|clip| clip.kind != ClipKind::Adjustment)
+    })?;
+
+    Some(ActiveVideoTrackExportLayout {
+        primary_clips: sorted_non_adjustment_track_clips(active_video_tracks[primary_track_idx]),
+        secondary_track_clips: active_video_tracks
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| *idx != primary_track_idx)
+            .filter_map(|(_, track)| {
+                let clips = sorted_non_adjustment_track_clips(track);
+                (!clips.is_empty()).then_some(clips)
+            })
+            .collect(),
+        adjustment_clips: active_video_tracks
+            .iter()
+            .flat_map(|track| track.clips.iter())
+            .filter(|clip| clip.kind == ClipKind::Adjustment)
+            .collect(),
+    })
+}
+
 /// Export the project to a file at `output_path` using `options`.
 /// Sends progress to `tx`. Call this from a background thread.
 pub fn export_project(
@@ -121,52 +173,21 @@ pub fn export_project(
     // recursively expanded into its constituent leaf clips with rebased
     // timeline positions. The rest of the export pipeline operates on this
     // flat representation unchanged.
-    let flattened_tracks = flatten_compound_tracks(&project.tracks);
+    let mut flattened_tracks = flatten_compound_tracks(&project.tracks);
+    crate::media::tracking::apply_tracking_bindings_to_tracks(&mut flattened_tracks);
     let flattened_project_tracks = &flattened_tracks;
 
-    // Primary video track (first active video track) — forms the base concat sequence.
-    // Secondary active video tracks are composited on top with overlay.
-    let active_video_tracks: Vec<_> = flattened_project_tracks
-        .iter()
-        .filter(|t| t.kind == crate::model::track::TrackKind::Video)
-        .filter(|t| project.track_is_active_for_output(t))
-        .collect();
-    let mut primary_clips: Vec<&crate::model::clip::Clip> = active_video_tracks
-        .first()
-        .map(|t| {
-            t.clips
-                .iter()
-                .filter(|c| c.kind != ClipKind::Adjustment)
-                .collect()
-        })
-        .unwrap_or_default();
-    primary_clips.sort_by_key(|c| c.timeline_start);
-
-    // Remaining video tracks: each is a list of (overlay) clips
-    // Collect adjustment clips from ALL tracks before filtering them out.
-    let all_adjustment_clips: Vec<&Clip> = active_video_tracks
-        .iter()
-        .flat_map(|t| t.clips.iter())
-        .filter(|c| c.kind == ClipKind::Adjustment)
-        .collect();
-
-    let secondary_track_clips: Vec<Vec<&crate::model::clip::Clip>> = active_video_tracks
-        .into_iter()
-        .skip(1)
-        .map(|t| {
-            let mut clips: Vec<&Clip> = t
-                .clips
-                .iter()
-                .filter(|c| c.kind != ClipKind::Adjustment)
-                .collect();
-            clips.sort_by_key(|c| c.timeline_start);
-            clips
-        })
-        .collect();
-
-    if primary_clips.is_empty() {
+    // Primary video track: the first active video track that actually contains
+    // non-adjustment clips. This keeps upper-track image/title overlays
+    // exportable even when lower video tracks are empty.
+    let Some(video_layout) =
+        split_active_video_tracks_for_export(project, flattened_project_tracks)
+    else {
         return Err(anyhow!("No video clips to export"));
-    }
+    };
+    let primary_clips = video_layout.primary_clips;
+    let all_adjustment_clips = video_layout.adjustment_clips;
+    let secondary_track_clips = video_layout.secondary_track_clips;
 
     // Collect audio-only clips from active audio tracks.
     let audio_track_clips: Vec<Vec<&crate::model::clip::Clip>> = flattened_project_tracks
@@ -1329,6 +1350,73 @@ fn build_custom_eased_t_expr(
     expr
 }
 
+fn build_keyframed_segment_expression(
+    left_ns: u64,
+    left_value: f64,
+    interp: crate::model::clip::KeyframeInterpolation,
+    controls: Option<(f64, f64, f64, f64)>,
+    right_ns: u64,
+    right_value: f64,
+    time_var: &str,
+) -> String {
+    let left_s = left_ns as f64 / 1_000_000_000.0;
+    let right_s = right_ns as f64 / 1_000_000_000.0;
+    let span_s = (right_s - left_s).max(1e-9);
+    let t_expr = format!("(({time_var})-{left_s:.9})/{span_s:.9}");
+    let eased_t = if let Some(controls) = controls {
+        build_custom_eased_t_expr(&t_expr, controls, 8)
+    } else {
+        match interp {
+            crate::model::clip::KeyframeInterpolation::Linear => t_expr.clone(),
+            crate::model::clip::KeyframeInterpolation::EaseIn => format!("pow({t_expr},2)"),
+            crate::model::clip::KeyframeInterpolation::EaseOut => {
+                format!("(1-pow(1-({t_expr}),2))")
+            }
+            crate::model::clip::KeyframeInterpolation::EaseInOut => {
+                format!("if(lt({t_expr},0.5),2*pow({t_expr},2),1-pow(-2*({t_expr})+2,2)/2)")
+            }
+        }
+    };
+    format!("{left_value:.10}+({right_value:.10}-{left_value:.10})*{eased_t}")
+}
+
+fn build_flat_keyframed_property_expression(
+    deduped: &[(
+        u64,
+        f64,
+        crate::model::clip::KeyframeInterpolation,
+        Option<(f64, f64, f64, f64)>,
+    )],
+    time_var: &str,
+) -> String {
+    let (first_ns, first_value, _, _) = deduped[0];
+    let (last_ns, last_value, _, _) = deduped[deduped.len() - 1];
+    let first_s = first_ns as f64 / 1_000_000_000.0;
+    let last_s = last_ns as f64 / 1_000_000_000.0;
+    let mut terms = Vec::with_capacity(deduped.len() + 1);
+    terms.push(format!("lt({time_var},{first_s:.9})*{first_value:.10}"));
+    for i in 1..deduped.len() {
+        let (left_ns, left_value, interp, controls) = deduped[i - 1];
+        let (right_ns, right_value, _, _) = deduped[i];
+        let left_s = left_ns as f64 / 1_000_000_000.0;
+        let right_s = right_ns as f64 / 1_000_000_000.0;
+        let segment_expr = build_keyframed_segment_expression(
+            left_ns,
+            left_value,
+            interp,
+            controls,
+            right_ns,
+            right_value,
+            time_var,
+        );
+        terms.push(format!(
+            "(gte({time_var},{left_s:.9})*lt({time_var},{right_s:.9}))*({segment_expr})"
+        ));
+    }
+    terms.push(format!("gte({time_var},{last_s:.9})*{last_value:.10}"));
+    terms.join("+")
+}
+
 pub(crate) fn build_keyframed_property_expression(
     keyframes: &[NumericKeyframe],
     default_value: f64,
@@ -1372,6 +1460,14 @@ pub(crate) fn build_keyframed_property_expression(
         return format!("{:.10}", deduped[0].1);
     }
 
+    const MAX_NESTED_KEYFRAME_SEGMENTS: usize = 48;
+    if deduped.len() > MAX_NESTED_KEYFRAME_SEGMENTS {
+        // FFmpeg starts rejecting very deep nested `if()` expressions from dense
+        // tracking/keyframe data. Flatten large keyframe sets into a gated
+        // piecewise sum so export remains compatible with high-sample trackers.
+        return build_flat_keyframed_property_expression(&deduped, time_var);
+    }
+
     let mut expr = format!(
         "{:.10}",
         deduped
@@ -1382,26 +1478,16 @@ pub(crate) fn build_keyframed_property_expression(
     for i in (1..deduped.len()).rev() {
         let (left_ns, left_value, interp, controls) = deduped[i - 1];
         let (right_ns, right_value, _, _) = deduped[i];
-        let left_s = left_ns as f64 / 1_000_000_000.0;
         let right_s = right_ns as f64 / 1_000_000_000.0;
-        let span_s = (right_s - left_s).max(1e-9);
-        // Compute normalized t for this segment
-        let t_expr = format!("(({time_var})-{left_s:.9})/{span_s:.9}");
-        // Apply easing to t
-        let eased_t = if let Some(controls) = controls {
-            build_custom_eased_t_expr(&t_expr, controls, 8)
-        } else {
-            match interp {
-                KeyframeInterpolation::Linear => t_expr.clone(),
-                KeyframeInterpolation::EaseIn => format!("pow({t_expr},2)"),
-                KeyframeInterpolation::EaseOut => format!("(1-pow(1-({t_expr}),2))"),
-                KeyframeInterpolation::EaseInOut => {
-                    format!("if(lt({t_expr},0.5),2*pow({t_expr},2),1-pow(-2*({t_expr})+2,2)/2)")
-                }
-            }
-        };
-        let segment_expr =
-            format!("{left_value:.10}+({right_value:.10}-{left_value:.10})*{eased_t}");
+        let segment_expr = build_keyframed_segment_expression(
+            left_ns,
+            left_value,
+            interp,
+            controls,
+            right_ns,
+            right_value,
+            time_var,
+        );
         expr = format!(
             "if(lt({time_var},{right_s:.9}),{segment_expr},{expr})",
             right_s = right_s
@@ -4160,7 +4246,7 @@ fn write_chapter_metadata(
 /// Each compound clip is replaced by its internal clips with timeline positions
 /// rebased to the compound clip's position on the parent timeline.
 /// Returns a new `Vec<Track>` containing only leaf (non-compound) clips.
-fn flatten_compound_tracks(
+pub(crate) fn flatten_compound_tracks(
     tracks: &[crate::model::track::Track],
 ) -> Vec<crate::model::track::Track> {
     let mut result: Vec<crate::model::track::Track> = Vec::new();
@@ -4349,10 +4435,11 @@ mod tests {
         build_temperature_tint_filter, build_timing_filter, build_title_filter,
         build_volume_filter, clamped_primary_transition_timing, clamped_primary_xfade_duration_s,
         compute_clip_audio_fades, compute_export_coloradj_params, estimate_export_size_bytes,
-        flatten_compound_tracks, has_linked_audio_peer, has_transform_keyframes,
+        find_ffmpeg, flatten_compound_tracks, has_linked_audio_peer, has_transform_keyframes,
         parse_progress_line, primary_clip_transition_stop_pad_ns, resolve_subtitle_font_style,
-        video_input_seek_and_duration, write_chapter_metadata, AudioCodec, ClipAudioFade,
-        ColorFilterCapabilities, ExportOptions, VideoCodec,
+        split_active_video_tracks_for_export, video_input_seek_and_duration,
+        write_chapter_metadata, AudioCodec, ClipAudioFade, ColorFilterCapabilities, ExportOptions,
+        VideoCodec,
     };
     use crate::media::program_player::ProgramPlayer;
     use crate::model::clip::{
@@ -4361,6 +4448,7 @@ mod tests {
     use crate::model::project::Project;
     use crate::ui_state::CrossfadeCurve;
     use gstreamer as gst;
+    use std::process::Command;
 
     fn extract_colorbalance_component(filter: &str, key: &str) -> f32 {
         let needle = format!("{key}=");
@@ -4423,6 +4511,59 @@ mod tests {
         };
         let est = estimate_export_size_bytes(&project, &options, project.width, project.height);
         assert!(est.unwrap_or(0) > 0);
+    }
+
+    #[test]
+    fn export_video_layout_skips_empty_lower_video_tracks() {
+        use crate::model::track::Track;
+
+        let mut project = Project::new("Test");
+        project.tracks.clear();
+
+        let empty_lower = Track::new_video("V1");
+        let mut base_track = Track::new_video("V2");
+        base_track.add_clip(Clip::new(
+            "/tmp/base.png",
+            4_000_000_000,
+            1_000_000_000,
+            ClipKind::Image,
+        ));
+        let mut overlay_track = Track::new_video("V3");
+        overlay_track.add_clip(Clip::new(
+            "/tmp/overlay.png",
+            2_000_000_000,
+            1_500_000_000,
+            ClipKind::Image,
+        ));
+
+        project.tracks.push(empty_lower);
+        project.tracks.push(base_track);
+        project.tracks.push(overlay_track);
+
+        let layout =
+            split_active_video_tracks_for_export(&project, &project.tracks).expect("video layout");
+        assert_eq!(layout.primary_clips.len(), 1);
+        assert_eq!(layout.primary_clips[0].source_path, "/tmp/base.png");
+        assert_eq!(layout.secondary_track_clips.len(), 1);
+        assert_eq!(layout.secondary_track_clips[0].len(), 1);
+        assert_eq!(
+            layout.secondary_track_clips[0][0].source_path,
+            "/tmp/overlay.png"
+        );
+    }
+
+    #[test]
+    fn export_video_layout_rejects_adjustment_only_video_tracks() {
+        use crate::model::track::Track;
+
+        let mut project = Project::new("Test");
+        project.tracks.clear();
+
+        let mut adjustment_track = Track::new_video("V1");
+        adjustment_track.add_clip(Clip::new_adjustment(0, 2_000_000_000));
+        project.tracks.push(adjustment_track);
+
+        assert!(split_active_video_tracks_for_export(&project, &project.tracks).is_none());
     }
 
     #[test]
@@ -4682,6 +4823,66 @@ mod tests {
             "t",
         );
         assert!(expr.starts_with("if(lt(t,0.500000000),0.5000000000,"));
+    }
+
+    #[test]
+    fn keyframed_expression_flattens_large_keyframe_sets() {
+        let keyframes = (0..240)
+            .map(|i| NumericKeyframe {
+                time_ns: i * 41_666_667,
+                value: -0.8 + (i as f64 / 239.0) * 1.6,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            })
+            .collect::<Vec<_>>();
+        let expr = build_keyframed_property_expression(&keyframes, 0.0, -1.0, 1.0, "t");
+        assert!(expr.contains("gte(t,"));
+        assert!(!expr.contains("if(lt(t,"));
+    }
+
+    #[test]
+    fn large_keyframed_overlay_expression_is_ffmpeg_compatible() {
+        let Ok(ffmpeg) = find_ffmpeg() else {
+            return;
+        };
+        let keyframes = (0..240)
+            .map(|i| NumericKeyframe {
+                time_ns: i * 41_666_667,
+                value: -0.8 + (i as f64 / 239.0) * 1.6,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            })
+            .collect::<Vec<_>>();
+        let expr = build_keyframed_property_expression(&keyframes, 0.0, -1.0, 1.0, "t");
+        let filter = format!(
+            "[0:v][1:v]overlay=x='(W-w)*(1+({expr}))/2':y='(H-h)*0.25':eval=frame,format=yuv420p[vout]"
+        );
+        let status = Command::new(ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=320x240:r=24:d=10",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=white:s=64x64:r=24:d=10",
+                "-filter_complex",
+                &filter,
+                "-map",
+                "[vout]",
+                "-frames:v",
+                "12",
+                "-f",
+                "null",
+                "-",
+            ])
+            .status()
+            .expect("ffmpeg should start");
+        assert!(status.success(), "ffmpeg rejected filter: {filter}");
     }
 
     #[test]

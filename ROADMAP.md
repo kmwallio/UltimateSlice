@@ -28,7 +28,11 @@ Tracking docs:
 - [x] `Project` — title, frame rate, resolution, tracks, dirty flag
 - [x] `MediaItem` — library entry (path, duration, label); separate from timeline clips
 - [x] `SourceMarks` — shared in/out selection state for the source monitor
+- [x] Phase-2 motion-tracking schema groundwork: source clips can now own sampled `motion_trackers`, overlay clips or individual masks can store `tracking_binding` attachments, and clip ids now persist through UltimateSlice vendor attrs so saved tracking references reconnect after reload
 - [x] Unit tests for model, undo, and FCPXML parser (62 tests)
+
+### Tracking Backend
+- [x] Phase-2 motion-tracking backend groundwork: background `TrackingCache` with cancellable jobs, progress/error polling, disk-backed JSON results, and low-resolution translation analysis that produces `MotionTracker` sample data for future tracked clip/mask attachments
 
 ### Media Library Browser
 - [x] Import media via file chooser (video/audio/image MIME filter)
@@ -87,6 +91,7 @@ Tracking docs:
 - [x] Right-side inspector showing selected clip properties
 - [x] Fields: clip name, source path, source in/out, duration, timeline start
 - [x] Outgoing transition editor in the Inspector with editable type/duration/alignment, remove action, shared duration clamping across Inspector/timeline/MCP, alignment-aware preview/export/prerender timing, collapsed-below-Transform placement, preview-supported transition catalog (including fade-to-white, circle-open/close, and directional cover/reveal/slide live preview), plus a scrollable, resizable transitions pane whose split is saved with workspace layouts
+- [x] Motion Tracking inspector workflow: create/remove multiple trackers per clip, label them, edit the analysis region numerically or in Program Monitor, run/cancel tracking jobs, and attach a project tracker to the selected clip transform or first mask
 
 ### Toolbar / Header
 - [x] New / Open / Save / Export MP4 buttons
@@ -98,7 +103,7 @@ Tracking docs:
 ### Append to Timeline
 - [x] "Append to Timeline" button in media browser
 - [x] Appends marked region (in → out) of selected source clip
-- [x] Placed at end of first Video track
+- [x] Targets the selected matching track or first matching track, auto-creating one when needed
 
 ### Export
 - [x] MP4/H.264 + AAC export via ffmpeg (`-filter_complex` concat + adelay/amix for audio)
@@ -113,6 +118,8 @@ Tracking docs:
 - [x] Warmth slider direction consistency: midtones/highlights warmth now follow standard grading direction (left cooler, right warmer) in both preview and export
 - [x] Shadows warmth deep-shadow direction consistency: 3-point mapping now inverts shadows warmth in curve-space so slider direction remains conventional (left cooler, right warmer) in preview/export bridge
 - [x] Stronger shadows endpoint range: shadows warmth/tint endpoint gain increased to allow more pronounced blue/gold shadow looks near slider extremes while preserving directional semantics
+- [x] Empty lower video tracks no longer block layered exports: export now promotes the first non-empty active video track to the base layer so upper-track PNG/title overlays still render correctly
+- [x] Motion-tracked preview/export parity groundwork: Program Monitor and FFmpeg export now resolve clip and first-mask tracking bindings through the normal transform/mask evaluation path so tracked overlays stay aligned between preview and export
 
 ### FCPXML
 - [x] FCPXML 1.10-1.14 import (`quick-xml`) — parses assets, spine, asset-clip elements
@@ -147,6 +154,7 @@ Tracking docs:
 - [x] Import fallback for spine `ref-clip` and `sync-clip`: parse `ref-clip@ref` via asset mapping and traverse `sync-clip`/nested `spine` containers to import nested clip items
 - [x] Import source-time normalization: rebase `asset-clip@start` by `asset@start` for absolute timecode-domain assets so layered video/audio lane clips seek correctly in Program Monitor
 - [x] Export transform overflow clipping: overlay clips with positions exceeding the frame boundary now crop overflow edges before padding, so exported PIP positions match the Program Monitor preview exactly
+- [x] Motion-tracking vendor-attr persistence groundwork: `.uspxml` save/load now preserves clip ids, source `motion_trackers`, clip transform `tracking_binding`, and mask bindings through UltimateSlice `us:*` attributes so tracked overlays survive project reopen
 - [x] Background-threaded project open (file I/O + XML parsing off main thread)
 
 ### MCP Server (`--mcp` flag)

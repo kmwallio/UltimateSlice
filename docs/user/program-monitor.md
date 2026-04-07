@@ -64,6 +64,16 @@ When a visual timeline clip or adjustment layer is selected, the Program Monitor
 - Starting an overlay drag pauses playback and keeps the current frame locked while editing; playback remains paused after you release.
 - For **adjustment layers**, these controls edit the scoped effect region instead of moving source pixels. The overlay box is the exact region used for live scoped adjustment preview.
 
+## Motion Tracking Region Overlay
+
+When **Motion Tracking → Edit Region in Monitor** is enabled for the selected clip:
+
+- Program Monitor draws a **green tracking rectangle** over the current clip.
+- Drag **inside** the rectangle to reposition the analysis region.
+- Drag the **corner handles** to resize the tracked region.
+- The Motion Tracking sliders in the Inspector stay in sync with those overlay edits.
+- If the selected clip or its first rectangle/ellipse mask is attached to a tracker, Program Monitor uses the resolved tracked motion at the current playhead position.
+
 ## Safe Area Guides
 
 - Use **Safe Areas** in the Program Monitor header to toggle framing guides.
@@ -86,6 +96,7 @@ When a visual timeline clip or adjustment layer is selected, the Program Monitor
 - When clip boundaries are crossed during playback (a clip starts or ends), the pipeline is briefly rebuilt with the new set of active clips.
 - During those boundary rebuilds, audio-only preview playback is paused/re-synced to the current timeline position before resume so audio does not run ahead and end earlier than video.
 - All per-clip effects (color, denoise, sharpness, crop, rotate, flip, scale, position, title overlay, speed) are applied per-slot during playback.
+- Motion-tracked clip and first-mask attachments are resolved into the same transform/mask evaluation path used by normal preview playback, so tracked overlays in Program Monitor match export timing and placement.
 - Adjustment layers are applied post-compositor. Supported scoped preview effects (including LUTs, primary color, temperature/tint, and three-point grading) are limited to the selected adjustment clip's transformed bounding box, and overlapping adjustment layers stack by track order.
 - **Transitions** are previewed natively in real time during both playback and scrubbing. `Cross-dissolve` fades compositor pad alpha between clips, `Fade to black` and `Fade to white` fade against the compositor background, `Wipe left/right/up/down` use videocrop animation on the incoming clip, `Circle open` / `Circle close` animate a live ellipse mask on the incoming clip even when the clip has no authored masks, and `Cover`, `Reveal`, and `Slide` left/right/up/down variants animate clip motion across the canvas. Export and prerender use the same supported transition set.
 - Transition **Alignment** (`End on cut`, `Center on cut`, `Start on cut`) shifts when the overlap begins and ends relative to the edit. For the post-cut portion of an overlap, Program Monitor keeps the outgoing clip visible by holding its last frame so preview matches export and prerender.

@@ -13,6 +13,8 @@ Use the toolbar linked split control **Export | ▼** (styled as one control):
 
 Animated SVG clips are rendered to cached silent video during export. Static image clips still use single-frame hold behavior, while animated SVG clips preserve authored motion and hold on the last frame if the clip was extended on the timeline.
 
+Tracked clip transforms and first-mask attachments use the same motion data during export as they do in Program Monitor preview, including trackers with dense sample counts.
+
 ## Export Dialog Options
 
 ### Video Codec
@@ -279,6 +281,7 @@ Also available via MCP: `save_otio` and `open_otio` tools. `save_otio` accepts `
 - Export requires **ffmpeg** to be installed and on `$PATH`.
 - All video tracks are processed in timeline order, with letterbox/pillarbox padding applied to each clip.
 - Secondary-track overlays keep transparent padding when zoomed out and honor per-clip opacity, so layered composites export closer to Program Monitor preview.
+- If lower video tracks are empty, export automatically promotes the first non-empty active video track to the base layer so upper-track PNG/title overlays still render instead of failing with “No video clips to export”.
 - Overlay clips positioned near frame edges (where the PIP extends beyond the output boundary) are correctly clipped to match the preview — the export pre-crops overflow before padding so the visible portion and position match exactly.
 - Primary static color controls (`brightness`, `contrast`, `saturation`, plus static `exposure`) are mapped through the same calibrated primary-color model used by Program Monitor preview, including contrast-dependent brightness compensation, to improve low/high-contrast parity.
 - Extended grading sliders (`shadows`, `midtones`, `highlights`, `exposure`, `black point`, and per-tone warmth/tint) now prioritize preview/export parity. When FFmpeg frei0r modules are available, export uses a bridge path aligned with Program Monitor’s calibrated grading mapping; otherwise it falls back to native FFmpeg grading filters. Tonal warmth/tint controls use stronger non-linear endpoint response (with gentler center response) for more creative looks while staying parity-aligned.

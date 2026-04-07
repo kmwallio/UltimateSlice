@@ -961,6 +961,9 @@ fn parse_asset_clip(
         clip.source_out = source_in.saturating_add(duration);
         clip.timeline_start = timeline_start;
         clip.label = label;
+        if let Some(v) = attrs.get("us:clip-id") {
+            clip.id = v.clone();
+        }
         clip.fcpxml_original_source_path = Some(asset.src.clone());
         clip.fcpxml_asset_ref = Some(asset_ref.clone());
         clip.fcpxml_unknown_asset_attrs = asset.unknown_attrs.clone();
@@ -1047,6 +1050,14 @@ fn parse_asset_clip(
         if let Some(v) = attrs.get("us:frei0r-effects") {
             let json_str = v.replace("&quot;", "\"");
             clip.frei0r_effects = serde_json::from_str(&json_str).unwrap_or_default();
+        }
+        if let Some(v) = attrs.get("us:motion-trackers") {
+            let json_str = v.replace("&quot;", "\"");
+            clip.motion_trackers = serde_json::from_str(&json_str).unwrap_or_default();
+        }
+        if let Some(v) = attrs.get("us:tracking-binding") {
+            let json_str = v.replace("&quot;", "\"");
+            clip.tracking_binding = serde_json::from_str(&json_str).ok();
         }
         if let Some(v) = attrs.get("us:masks") {
             let json_str = v.replace("&quot;", "\"");
@@ -2607,6 +2618,7 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:track-duck"
             | "us:track-duck-amount-db"
             | "us:track-height"
+            | "us:clip-id"
             | "us:color-label"
             | "us:brightness"
             | "us:contrast"
@@ -2625,6 +2637,8 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:vidstab-smoothing"
             | "us:blur-keyframes"
             | "us:frei0r-effects"
+            | "us:motion-trackers"
+            | "us:tracking-binding"
             | "us:volume"
             | "us:voice-isolation"
             | "us:volume-keyframes"
@@ -3136,25 +3150,27 @@ fn parse_attrs(e: &quick_xml::events::BytesStart) -> Result<HashMap<String, Stri
 }
 
 fn sanitize_unescaped_keyframe_attr_json(xml: &str) -> Cow<'_, str> {
-    const KEYFRAME_ATTR_PREFIXES: [&str; 18] = [
-        "us:brightness-keyframes=\"",
-        "us:contrast-keyframes=\"",
-        "us:saturation-keyframes=\"",
-        "us:temperature-keyframes=\"",
-        "us:tint-keyframes=\"",
-        "us:scale-keyframes=\"",
-        "us:opacity-keyframes=\"",
-        "us:position-x-keyframes=\"",
-        "us:position-y-keyframes=\"",
-        "us:volume-keyframes=\"",
-        "us:pan-keyframes=\"",
-        "us:rotate-keyframes=\"",
-        "us:crop-left-keyframes=\"",
-        "us:crop-right-keyframes=\"",
-        "us:crop-top-keyframes=\"",
-        "us:crop-bottom-keyframes=\"",
-        "us:frei0r-effects=\"",
-        "us:masks=\"",
+    const JSON_ATTRS: [(&str, &str); 20] = [
+        ("us:brightness-keyframes=\"", "]\""),
+        ("us:contrast-keyframes=\"", "]\""),
+        ("us:saturation-keyframes=\"", "]\""),
+        ("us:temperature-keyframes=\"", "]\""),
+        ("us:tint-keyframes=\"", "]\""),
+        ("us:scale-keyframes=\"", "]\""),
+        ("us:opacity-keyframes=\"", "]\""),
+        ("us:position-x-keyframes=\"", "]\""),
+        ("us:position-y-keyframes=\"", "]\""),
+        ("us:volume-keyframes=\"", "]\""),
+        ("us:pan-keyframes=\"", "]\""),
+        ("us:rotate-keyframes=\"", "]\""),
+        ("us:crop-left-keyframes=\"", "]\""),
+        ("us:crop-right-keyframes=\"", "]\""),
+        ("us:crop-top-keyframes=\"", "]\""),
+        ("us:crop-bottom-keyframes=\"", "]\""),
+        ("us:frei0r-effects=\"", "]\""),
+        ("us:motion-trackers=\"", "]\""),
+        ("us:tracking-binding=\"", "}\""),
+        ("us:masks=\"", "]\""),
     ];
 
     let mut cursor = 0usize;
@@ -3163,19 +3179,23 @@ fn sanitize_unescaped_keyframe_attr_json(xml: &str) -> Cow<'_, str> {
 
     while cursor < xml.len() {
         let remainder = &xml[cursor..];
-        let next = KEYFRAME_ATTR_PREFIXES
+        let next = JSON_ATTRS
             .iter()
-            .filter_map(|prefix| remainder.find(prefix).map(|idx| (cursor + idx, *prefix)))
-            .min_by_key(|(idx, _)| *idx);
+            .filter_map(|(prefix, suffix)| {
+                remainder
+                    .find(prefix)
+                    .map(|idx| (cursor + idx, *prefix, *suffix))
+            })
+            .min_by_key(|(idx, _, _)| *idx);
 
-        let Some((attr_start, attr_prefix)) = next else {
+        let Some((attr_start, attr_prefix, attr_suffix)) = next else {
             break;
         };
 
         let value_start = attr_start + attr_prefix.len();
         out.push_str(&xml[cursor..value_start]);
 
-        let Some(rel_end) = xml[value_start..].find("]\"") else {
+        let Some(rel_end) = xml[value_start..].find(attr_suffix) else {
             cursor = value_start;
             break;
         };

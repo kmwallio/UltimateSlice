@@ -930,6 +930,8 @@ pub struct ProgramClip {
     pub bg_removal_threshold: f64,
     /// User-applied frei0r filter effects, ordered first-to-last.
     pub frei0r_effects: Vec<crate::model::clip::Frei0rEffect>,
+    /// Optional motion-tracking attachment for the clip transform.
+    pub tracking_binding: Option<crate::model::clip::TrackingBinding>,
     /// Shape masks applied to this clip.
     pub masks: Vec<crate::model::clip::ClipMask>,
 }
@@ -15855,6 +15857,7 @@ mod tests {
             bg_removal_enabled: false,
             bg_removal_threshold: 0.5,
             frei0r_effects: Vec::new(),
+            tracking_binding: None,
             title_outline_color: 0x000000FF,
             title_outline_width: 0.0,
             title_shadow: false,

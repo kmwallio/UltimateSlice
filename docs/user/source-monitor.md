@@ -89,7 +89,7 @@ Dragging directly from the Source Monitor video display also exports the current
   - **Enabled**: append creates a linked A/V pair when matching video and audio tracks exist. UltimateSlice places picture on video, sound on audio, links the clips automatically, and mutes the video clip's embedded audio while the linked audio-track peer exists.
   - **Disabled**: append uses single-clip placement behavior.
 
-If an active track of the matching kind is highlighted in the timeline, that track is preferred; otherwise UltimateSlice falls back to the first matching track of that kind.
+If an active track of the matching kind is highlighted in the timeline, that track is preferred; otherwise UltimateSlice falls back to the first matching track of that kind. If no matching track exists yet, UltimateSlice creates one automatically before placing the clip.
 
 ## Match Frame
 
@@ -109,7 +109,7 @@ For eligible sources with both video and audio streams, Insert and Overwrite fol
 - **Enabled**: creates a linked A/V pair across matching video and audio tracks, and mutes the video clip's embedded audio while the linked audio-track peer exists.
 - **Disabled**: uses single-clip placement behavior.
 
-Both operations target the active track (if its kind matches), or fall back to the first matching track of each required kind. If only one required track kind is available, UltimateSlice falls back to placing a single clip on that available track kind. If no compatible track exists, the operation is skipped. Both support full undo/redo.
+Both operations target the active track (if its kind matches), or fall back to the first matching track of each required kind. If only one required track kind is available, UltimateSlice falls back to placing a single clip on that available track kind. If no compatible matching track exists for the placement, UltimateSlice creates the needed audio or video track automatically instead of skipping the edit. Both support full undo/redo.
 
 ## Closing the Source Monitor
 

@@ -455,7 +455,9 @@ pub fn build_preview(
     btn_next_frame.set_tooltip_text(Some("Step forward one frame (→)"));
     // "Add to Timeline" split button — primary action (Append) + ▼ dropdown.
     let btn_add = Button::with_label("⬇ Add");
-    btn_add.set_tooltip_text(Some("Append clip selection to the timeline"));
+    btn_add.set_tooltip_text(Some(
+        "Append clip selection to a matching timeline track, creating one if needed",
+    ));
     btn_add.set_sensitive(false);
 
     let btn_add_more = Button::with_label("▼");
@@ -472,16 +474,20 @@ pub fn build_preview(
 
     let btn_pop_append = Button::with_label("⬇ Append");
     btn_pop_append.add_css_class("flat");
-    btn_pop_append.set_tooltip_text(Some("Append selection to end of timeline"));
+    btn_pop_append.set_tooltip_text(Some(
+        "Append selection to a matching timeline track, creating one if needed",
+    ));
 
     let btn_pop_insert = Button::with_label("⤵ Insert");
     btn_pop_insert.add_css_class("flat");
-    btn_pop_insert.set_tooltip_text(Some("Insert at playhead, shifting subsequent clips (,)"));
+    btn_pop_insert.set_tooltip_text(Some(
+        "Insert at playhead on a matching track, creating one if needed (,)",
+    ));
 
     let btn_pop_overwrite = Button::with_label("⏺ Overwrite");
     btn_pop_overwrite.add_css_class("flat");
     btn_pop_overwrite.set_tooltip_text(Some(
-        "Overwrite at playhead, replacing existing material (.)",
+        "Overwrite at playhead on a matching track, creating one if needed (.)",
     ));
 
     add_pop_box.append(&btn_pop_append);

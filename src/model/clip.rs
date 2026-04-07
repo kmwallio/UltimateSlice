@@ -728,6 +728,236 @@ fn default_mask_center() -> f64 {
 fn default_mask_half_size() -> f64 {
     0.25
 }
+fn default_tracking_confidence() -> f64 {
+    1.0
+}
+fn default_tracking_strength() -> f64 {
+    1.0
+}
+fn default_motion_tracker_label() -> String {
+    "Tracker".to_string()
+}
+
+/// Normalized tracking analysis region in clip-local space.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TrackingRegion {
+    /// Region center X in normalized clip coordinates (0 = left, 1 = right).
+    #[serde(default = "default_mask_center")]
+    pub center_x: f64,
+    /// Region center Y in normalized clip coordinates (0 = top, 1 = bottom).
+    #[serde(default = "default_mask_center")]
+    pub center_y: f64,
+    /// Half-width in normalized clip coordinates.
+    #[serde(default = "default_mask_half_size")]
+    pub width: f64,
+    /// Half-height in normalized clip coordinates.
+    #[serde(default = "default_mask_half_size")]
+    pub height: f64,
+    /// Clockwise rotation in degrees.
+    #[serde(default)]
+    pub rotation_deg: f64,
+}
+
+impl Default for TrackingRegion {
+    fn default() -> Self {
+        Self {
+            center_x: default_mask_center(),
+            center_y: default_mask_center(),
+            width: default_mask_half_size(),
+            height: default_mask_half_size(),
+            rotation_deg: 0.0,
+        }
+    }
+}
+
+/// One sampled motion value from a tracker, relative to the tracked region's
+/// starting pose in clip-local space.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TrackingSample {
+    /// Clip-local sample time in nanoseconds.
+    pub time_ns: u64,
+    /// Horizontal normalized motion delta from the initial tracked region.
+    #[serde(default)]
+    pub offset_x: f64,
+    /// Vertical normalized motion delta from the initial tracked region.
+    #[serde(default)]
+    pub offset_y: f64,
+    /// Relative scale multiplier. `1.0` preserves the original size.
+    #[serde(default = "default_scale")]
+    pub scale_multiplier: f64,
+    /// Relative rotation delta in degrees.
+    #[serde(default)]
+    pub rotation_deg: f64,
+    /// Tracker confidence for this sample, normalized to 0..1.
+    #[serde(default = "default_tracking_confidence")]
+    pub confidence: f64,
+}
+
+impl TrackingSample {
+    pub fn identity(time_ns: u64) -> Self {
+        Self {
+            time_ns,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            scale_multiplier: 1.0,
+            rotation_deg: 0.0,
+            confidence: 1.0,
+        }
+    }
+
+    fn interpolate(self, next: Self, local_timeline_ns: u64) -> Self {
+        if next.time_ns <= self.time_ns {
+            let mut sample = next;
+            sample.time_ns = local_timeline_ns;
+            return sample;
+        }
+        let span = next.time_ns.saturating_sub(self.time_ns);
+        let t = local_timeline_ns.saturating_sub(self.time_ns) as f64 / span as f64;
+        Self {
+            time_ns: local_timeline_ns,
+            offset_x: self.offset_x + (next.offset_x - self.offset_x) * t,
+            offset_y: self.offset_y + (next.offset_y - self.offset_y) * t,
+            scale_multiplier: self.scale_multiplier
+                + (next.scale_multiplier - self.scale_multiplier) * t,
+            rotation_deg: self.rotation_deg + (next.rotation_deg - self.rotation_deg) * t,
+            confidence: self.confidence + (next.confidence - self.confidence) * t,
+        }
+    }
+}
+
+/// Stored motion-tracking data for a source clip.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MotionTracker {
+    /// Unique tracker identifier (UUID v4).
+    pub id: String,
+    /// User-visible tracker label.
+    #[serde(default = "default_motion_tracker_label")]
+    pub label: String,
+    /// Whether this tracker is enabled for downstream attachments.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Source analysis region in clip-local normalized coordinates.
+    #[serde(default)]
+    pub analysis_region: TrackingRegion,
+    /// Optional clip-local analysis window start.
+    #[serde(default)]
+    pub analysis_start_ns: u64,
+    /// Optional clip-local analysis window end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analysis_end_ns: Option<u64>,
+    /// Sampled motion values in clip-local time.
+    #[serde(default)]
+    pub samples: Vec<TrackingSample>,
+}
+
+impl MotionTracker {
+    pub fn new(label: impl Into<String>) -> Self {
+        let label = label.into();
+        Self {
+            id: Uuid::new_v4().to_string(),
+            label: if label.trim().is_empty() {
+                default_motion_tracker_label()
+            } else {
+                label
+            },
+            enabled: true,
+            analysis_region: TrackingRegion::default(),
+            analysis_start_ns: 0,
+            analysis_end_ns: None,
+            samples: Vec::new(),
+        }
+    }
+
+    pub fn retain_samples_in_local_range(&mut self, start_ns: u64, end_ns: u64) {
+        self.samples
+            .retain(|sample| sample.time_ns >= start_ns && sample.time_ns < end_ns);
+        for sample in &mut self.samples {
+            sample.time_ns = sample.time_ns.saturating_sub(start_ns);
+        }
+
+        let clamped_start = self.analysis_start_ns.clamp(start_ns, end_ns);
+        self.analysis_start_ns = clamped_start.saturating_sub(start_ns);
+        if let Some(analysis_end_ns) = self.analysis_end_ns {
+            let clamped_end = analysis_end_ns.clamp(clamped_start, end_ns);
+            self.analysis_end_ns = Some(clamped_end.saturating_sub(start_ns));
+        }
+    }
+
+    pub fn sample_at_local_ns(&self, local_timeline_ns: u64) -> Option<TrackingSample> {
+        if self.samples.is_empty() {
+            return None;
+        }
+        let mut sorted = self.samples.clone();
+        sorted.sort_by_key(|sample| sample.time_ns);
+        let first = sorted[0];
+        if local_timeline_ns <= first.time_ns {
+            return Some(first);
+        }
+
+        let mut prev = first;
+        for next in sorted.iter().skip(1) {
+            if local_timeline_ns < next.time_ns {
+                return Some(prev.interpolate(*next, local_timeline_ns));
+            }
+            prev = *next;
+        }
+        Some(prev)
+    }
+}
+
+/// Attachment from a clip transform or mask to a tracker stored on another clip.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrackingBinding {
+    /// The clip that owns the referenced tracker.
+    pub source_clip_id: String,
+    /// The specific tracker on the source clip.
+    pub tracker_id: String,
+    /// When true, apply tracked translation deltas.
+    #[serde(default = "default_true")]
+    pub apply_translation: bool,
+    /// When true, apply tracked scale changes.
+    #[serde(default)]
+    pub apply_scale: bool,
+    /// When true, apply tracked rotation changes.
+    #[serde(default)]
+    pub apply_rotation: bool,
+    /// Additional X offset in normalized coordinates after tracked translation.
+    #[serde(default)]
+    pub offset_x: f64,
+    /// Additional Y offset in normalized coordinates after tracked translation.
+    #[serde(default)]
+    pub offset_y: f64,
+    /// Multiplier applied after tracked scale changes.
+    #[serde(default = "default_scale")]
+    pub scale_multiplier: f64,
+    /// Additional rotation offset in degrees after tracked rotation.
+    #[serde(default)]
+    pub rotation_offset_deg: f64,
+    /// Global blend amount for the tracking result, 0 = ignore, 1 = full effect.
+    #[serde(default = "default_tracking_strength")]
+    pub strength: f64,
+    /// Optional smoothing amount for downstream consumers.
+    #[serde(default)]
+    pub smoothing: f64,
+}
+
+impl TrackingBinding {
+    pub fn new(source_clip_id: impl Into<String>, tracker_id: impl Into<String>) -> Self {
+        Self {
+            source_clip_id: source_clip_id.into(),
+            tracker_id: tracker_id.into(),
+            apply_translation: true,
+            apply_scale: false,
+            apply_rotation: false,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            scale_multiplier: 1.0,
+            rotation_offset_deg: 0.0,
+            strength: 1.0,
+            smoothing: 0.0,
+        }
+    }
+}
 
 /// A shape mask applied to a clip to restrict visible area via alpha.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -781,6 +1011,9 @@ pub struct ClipMask {
     /// Bezier path data (only used when `shape == MaskShape::Path`).
     #[serde(default)]
     pub path: Option<MaskPath>,
+    /// Optional motion-tracking attachment for this specific mask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracking_binding: Option<TrackingBinding>,
 }
 
 impl ClipMask {
@@ -806,6 +1039,7 @@ impl ClipMask {
             expansion_keyframes: Vec::new(),
             invert: false,
             path: None,
+            tracking_binding: None,
         }
     }
 
@@ -826,6 +1060,10 @@ impl ClipMask {
         Clip::retain_and_rebase_keyframes(&mut self.rotation_keyframes, start_ns, end_ns);
         Clip::retain_and_rebase_keyframes(&mut self.feather_keyframes, start_ns, end_ns);
         Clip::retain_and_rebase_keyframes(&mut self.expansion_keyframes, start_ns, end_ns);
+    }
+
+    pub fn has_tracking_binding(&self) -> bool {
+        self.tracking_binding.is_some()
     }
 }
 fn default_bg_removal_threshold() -> f64 {
@@ -1313,6 +1551,12 @@ pub struct Clip {
     /// Shape masks applied to this clip (empty = no mask).
     #[serde(default)]
     pub masks: Vec<ClipMask>,
+    /// Motion trackers authored on this source clip.
+    #[serde(default)]
+    pub motion_trackers: Vec<MotionTracker>,
+    /// Optional transform-level motion-tracking attachment for this clip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracking_binding: Option<TrackingBinding>,
     // ── Subtitles (speech-to-text) ───────────────────────────────────────
     /// Timed subtitle segments generated by STT.
     #[serde(default)]
@@ -1538,6 +1782,9 @@ impl Clip {
         for mask in &mut self.masks {
             mask.retain_keyframes_in_local_range(start_ns, end_ns);
         }
+        for tracker in &mut self.motion_trackers {
+            tracker.retain_samples_in_local_range(start_ns, end_ns);
+        }
     }
 
     /// Filter subtitle segments to the clip-local time range `[start_ns, end_ns)`,
@@ -1563,6 +1810,12 @@ impl Clip {
     /// Returns `true` when any mask is present and enabled.
     pub fn has_mask(&self) -> bool {
         self.masks.iter().any(|m| m.enabled)
+    }
+
+    pub fn has_tracking_data(&self) -> bool {
+        !self.motion_trackers.is_empty()
+            || self.tracking_binding.is_some()
+            || self.masks.iter().any(ClipMask::has_tracking_binding)
     }
 
     pub fn has_outgoing_transition(&self) -> bool {
@@ -1698,6 +1951,8 @@ impl Clip {
             frei0r_effects: Vec::new(),
             ladspa_effects: Vec::new(),
             masks: Vec::new(),
+            motion_trackers: Vec::new(),
+            tracking_binding: None,
             subtitle_segments: Vec::new(),
             subtitles_language: String::new(),
             subtitle_font: default_subtitle_font(),
@@ -1811,6 +2066,18 @@ impl Clip {
                     .map(|s| s.angle_index)
             })
             .unwrap_or(0)
+    }
+
+    pub fn motion_tracker_ref(&self, tracker_id: &str) -> Option<&MotionTracker> {
+        self.motion_trackers
+            .iter()
+            .find(|tracker| tracker.id == tracker_id)
+    }
+
+    pub fn motion_tracker_mut(&mut self, tracker_id: &str) -> Option<&mut MotionTracker> {
+        self.motion_trackers
+            .iter_mut()
+            .find(|tracker| tracker.id == tracker_id)
     }
 
     /// Return the MulticamAngle for the active angle at a given local position.
@@ -2816,11 +3083,81 @@ mod tests {
         assert!(clip.lut_paths.is_empty());
         assert!(clip.group_id.is_none());
         assert!(clip.link_group_id.is_none());
+        assert!(clip.motion_trackers.is_empty());
+        assert!(clip.tracking_binding.is_none());
         assert!(clip.source_timecode_base_ns.is_none());
         assert!(!clip.outgoing_transition.is_active());
         assert!(clip.fcpxml_unknown_attrs.is_empty());
         assert!(clip.fcpxml_unknown_children.is_empty());
         assert!(clip.fcpxml_original_source_path.is_none());
+    }
+
+    #[test]
+    fn test_motion_tracker_interpolates_samples() {
+        let mut tracker = MotionTracker::new("Face");
+        tracker.samples = vec![
+            TrackingSample::identity(0),
+            TrackingSample {
+                time_ns: 1_000_000_000,
+                offset_x: 0.4,
+                offset_y: -0.2,
+                scale_multiplier: 1.5,
+                rotation_deg: 45.0,
+                confidence: 0.5,
+            },
+        ];
+
+        let sample = tracker
+            .sample_at_local_ns(500_000_000)
+            .expect("interpolated sample should exist");
+        assert!((sample.offset_x - 0.2).abs() < 1e-9);
+        assert!((sample.offset_y + 0.1).abs() < 1e-9);
+        assert!((sample.scale_multiplier - 1.25).abs() < 1e-9);
+        assert!((sample.rotation_deg - 22.5).abs() < 1e-9);
+        assert!((sample.confidence - 0.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_clip_retain_keyframes_rebases_motion_tracker_samples() {
+        let mut clip = make_test_clip(5_000_000_000, 0);
+        let mut tracker = MotionTracker::new("Subject");
+        tracker.analysis_start_ns = 1_000_000_000;
+        tracker.analysis_end_ns = Some(4_000_000_000);
+        tracker.samples = vec![
+            TrackingSample::identity(500_000_000),
+            TrackingSample::identity(1_500_000_000),
+            TrackingSample::identity(2_500_000_000),
+        ];
+        clip.motion_trackers.push(tracker);
+
+        clip.retain_keyframes_in_local_range(1_000_000_000, 3_000_000_000);
+
+        let tracker = &clip.motion_trackers[0];
+        assert_eq!(tracker.analysis_start_ns, 0);
+        assert_eq!(tracker.analysis_end_ns, Some(2_000_000_000));
+        assert_eq!(
+            tracker
+                .samples
+                .iter()
+                .map(|sample| sample.time_ns)
+                .collect::<Vec<_>>(),
+            vec![500_000_000, 1_500_000_000]
+        );
+    }
+
+    #[test]
+    fn test_tracking_binding_defaults_and_clip_mask_attachment() {
+        let binding = TrackingBinding::new("source-clip", "tracker-1");
+        assert!(binding.apply_translation);
+        assert!(!binding.apply_scale);
+        assert!(!binding.apply_rotation);
+        assert!((binding.scale_multiplier - 1.0).abs() < 1e-9);
+        assert!((binding.strength - 1.0).abs() < 1e-9);
+
+        let mut mask = ClipMask::new(MaskShape::Rectangle);
+        assert!(!mask.has_tracking_binding());
+        mask.tracking_binding = Some(binding);
+        assert!(mask.has_tracking_binding());
     }
 
     #[test]
@@ -3119,6 +3456,9 @@ mod tests {
         assert!(clip.crop_right_keyframes.is_empty());
         assert!(clip.crop_top_keyframes.is_empty());
         assert!(clip.crop_bottom_keyframes.is_empty());
+        assert!(clip.motion_trackers.is_empty());
+        assert!(clip.tracking_binding.is_none());
+        assert!(!clip.has_tracking_data());
     }
 
     #[test]

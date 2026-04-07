@@ -140,6 +140,16 @@ pub struct Project {
     pub parsed_media_annotations_json: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MotionTrackerReference {
+    pub source_clip_id: String,
+    pub clip_label: String,
+    pub tracker_id: String,
+    pub tracker_label: String,
+    pub enabled: bool,
+    pub sample_count: usize,
+}
+
 impl Project {
     pub fn new(title: impl Into<String>) -> Self {
         let mut project = Self {
@@ -310,6 +320,88 @@ impl Project {
         None
     }
 
+    pub fn motion_tracker_references(&self) -> Vec<MotionTrackerReference> {
+        let mut references = Vec::new();
+        Self::collect_motion_tracker_references_recursive(&self.tracks, &mut references);
+        references
+    }
+
+    fn collect_motion_tracker_references_recursive(
+        tracks: &[Track],
+        references: &mut Vec<MotionTrackerReference>,
+    ) {
+        for track in tracks {
+            for clip in &track.clips {
+                for tracker in &clip.motion_trackers {
+                    references.push(MotionTrackerReference {
+                        source_clip_id: clip.id.clone(),
+                        clip_label: clip.label.clone(),
+                        tracker_id: tracker.id.clone(),
+                        tracker_label: tracker.label.clone(),
+                        enabled: tracker.enabled,
+                        sample_count: tracker.samples.len(),
+                    });
+                }
+                if let Some(ref compound_tracks) = clip.compound_tracks {
+                    Self::collect_motion_tracker_references_recursive(compound_tracks, references);
+                }
+            }
+        }
+    }
+
+    pub fn clear_tracking_bindings_for_tracker(
+        &mut self,
+        source_clip_id: &str,
+        tracker_id: &str,
+    ) -> usize {
+        Self::clear_tracking_bindings_recursive(&mut self.tracks, source_clip_id, tracker_id)
+    }
+
+    fn clear_tracking_bindings_recursive(
+        tracks: &mut [Track],
+        source_clip_id: &str,
+        tracker_id: &str,
+    ) -> usize {
+        let mut cleared = 0usize;
+        for track in tracks {
+            for clip in &mut track.clips {
+                let clip_binding_matches = clip
+                    .tracking_binding
+                    .as_ref()
+                    .map(|binding| {
+                        binding.source_clip_id == source_clip_id && binding.tracker_id == tracker_id
+                    })
+                    .unwrap_or(false);
+                if clip_binding_matches {
+                    clip.tracking_binding = None;
+                    cleared += 1;
+                }
+                for mask in &mut clip.masks {
+                    let mask_binding_matches = mask
+                        .tracking_binding
+                        .as_ref()
+                        .map(|binding| {
+                            binding.source_clip_id == source_clip_id
+                                && binding.tracker_id == tracker_id
+                        })
+                        .unwrap_or(false);
+                    if mask_binding_matches {
+                        mask.tracking_binding = None;
+                        cleared += 1;
+                    }
+                }
+                if let Some(ref mut compound_tracks) = clip.compound_tracks {
+                    cleared += Self::clear_tracking_bindings_recursive(
+                        compound_tracks,
+                        source_clip_id,
+                        tracker_id,
+                    );
+                }
+            }
+        }
+        cleared
+    }
+
     /// Add a marker at the given position. Returns the new marker's id.
     pub fn add_marker(&mut self, position_ns: u64, label: impl Into<String>) -> String {
         let m = Marker::new(position_ns, label);
@@ -330,7 +422,7 @@ impl Project {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::clip::{Clip, ClipKind};
+    use crate::model::clip::{Clip, ClipKind, ClipMask, MotionTracker, TrackingBinding};
 
     #[test]
     fn test_project_new_defaults() {
@@ -588,5 +680,71 @@ mod tests {
         let found = p.clip_ref("compound-1");
         assert!(found.is_some());
         assert!(found.unwrap().is_compound());
+    }
+
+    #[test]
+    fn test_motion_tracker_references_collect_root_and_nested_trackers() {
+        let mut p = make_project_with_compound();
+        let mut root_tracker = MotionTracker::new("Root Track");
+        root_tracker.id = "root-tracker".into();
+        root_tracker
+            .samples
+            .push(crate::model::clip::TrackingSample::identity(0));
+        p.clip_mut("regular-1")
+            .unwrap()
+            .motion_trackers
+            .push(root_tracker);
+
+        let mut nested_tracker = MotionTracker::new("Nested Track");
+        nested_tracker.id = "nested-tracker".into();
+        nested_tracker.enabled = false;
+        nested_tracker
+            .samples
+            .push(crate::model::clip::TrackingSample::identity(1_000_000_000));
+        nested_tracker
+            .samples
+            .push(crate::model::clip::TrackingSample::identity(2_000_000_000));
+        p.clip_mut("inner-clip-1")
+            .unwrap()
+            .motion_trackers
+            .push(nested_tracker);
+
+        let references = p.motion_tracker_references();
+        assert_eq!(references.len(), 2);
+        assert!(references.iter().any(|reference| {
+            reference.source_clip_id == "regular-1"
+                && reference.clip_label == "regular"
+                && reference.tracker_id == "root-tracker"
+                && reference.tracker_label == "Root Track"
+                && reference.enabled
+                && reference.sample_count == 1
+        }));
+        assert!(references.iter().any(|reference| {
+            reference.source_clip_id == "inner-clip-1"
+                && reference.clip_label == "inner"
+                && reference.tracker_id == "nested-tracker"
+                && reference.tracker_label == "Nested Track"
+                && !reference.enabled
+                && reference.sample_count == 2
+        }));
+    }
+
+    #[test]
+    fn test_clear_tracking_bindings_for_tracker_removes_clip_and_mask_bindings_recursively() {
+        let mut p = make_project_with_compound();
+        p.clip_mut("regular-1").unwrap().tracking_binding =
+            Some(TrackingBinding::new("inner-clip-1", "nested-tracker"));
+
+        let nested_clip = p.clip_mut("inner-clip-1").unwrap();
+        let mut mask = ClipMask::new(crate::model::clip::MaskShape::Rectangle);
+        mask.tracking_binding = Some(TrackingBinding::new("inner-clip-1", "nested-tracker"));
+        nested_clip.masks.push(mask);
+
+        let cleared = p.clear_tracking_bindings_for_tracker("inner-clip-1", "nested-tracker");
+        assert_eq!(cleared, 2);
+        assert!(p.clip_ref("regular-1").unwrap().tracking_binding.is_none());
+        assert!(p.clip_ref("inner-clip-1").unwrap().masks[0]
+            .tracking_binding
+            .is_none());
     }
 }

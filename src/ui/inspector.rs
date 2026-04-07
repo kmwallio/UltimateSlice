@@ -31,7 +31,7 @@ pub struct SubtitleStyleClipboard {
     pub highlight_flags: crate::model::clip::SubtitleHighlightFlags,
     pub bg_highlight_color: u32,
 }
-use crate::model::project::{FrameRate, Project};
+use crate::model::project::{FrameRate, MotionTrackerReference, Project};
 use gdk4;
 use gio;
 use gtk4::prelude::*;
@@ -122,6 +122,43 @@ fn audio_match_clip_label(label: &str, clip_id: &str) -> String {
         clip_id.to_string()
     } else {
         trimmed.to_string()
+    }
+}
+
+fn clip_supports_tracking_analysis(clip: &crate::model::clip::Clip) -> Result<(), &'static str> {
+    match clip.kind {
+        crate::model::clip::ClipKind::Video => {}
+        _ => {
+            return Err("Tracking analysis currently requires a video clip with decodable frames.")
+        }
+    }
+    if clip.source_path.trim().is_empty() {
+        return Err("Tracking analysis is unavailable because this clip has no source media path.");
+    }
+    if (clip.speed - 1.0).abs() > f64::EPSILON || !clip.speed_keyframes.is_empty() {
+        return Err("Tracking analysis currently requires an unretimed source clip.");
+    }
+    if clip.source_duration() == 0 {
+        return Err("Tracking analysis needs a clip with visible source duration.");
+    }
+    Ok(())
+}
+
+fn tracking_reference_label(reference: &MotionTrackerReference) -> String {
+    let clip_label = reference.clip_label.trim();
+    let tracker_label = reference.tracker_label.trim();
+    let base = match (clip_label.is_empty(), tracker_label.is_empty()) {
+        (true, true) => reference.source_clip_id.clone(),
+        (true, false) => tracker_label.to_string(),
+        (false, true) => clip_label.to_string(),
+        (false, false) => format!("{clip_label} — {tracker_label}"),
+    };
+    if !reference.enabled {
+        format!("{base} (disabled)")
+    } else if reference.sample_count == 0 {
+        format!("{base} (run Track Region first)")
+    } else {
+        base
     }
 }
 
@@ -393,6 +430,28 @@ pub struct InspectorView {
     pub mask_invert_check: CheckButton,
     pub mask_path_editor_box: GBox,
     pub mask_rect_ellipse_controls: GBox,
+    // Motion tracking
+    pub tracking_section: GBox,
+    pub tracking_tracker_dropdown: gtk4::DropDown,
+    pub tracking_add_btn: Button,
+    pub tracking_remove_btn: Button,
+    pub tracking_label_entry: Entry,
+    pub tracking_edit_region_btn: gtk4::ToggleButton,
+    pub tracking_center_x_slider: Scale,
+    pub tracking_center_y_slider: Scale,
+    pub tracking_width_slider: Scale,
+    pub tracking_height_slider: Scale,
+    pub tracking_rotation_spin: gtk4::SpinButton,
+    pub tracking_run_btn: Button,
+    pub tracking_cancel_btn: Button,
+    pub tracking_status_label: Label,
+    pub tracking_target_dropdown: gtk4::DropDown,
+    pub tracking_reference_dropdown: gtk4::DropDown,
+    pub tracking_clear_binding_btn: Button,
+    pub tracking_binding_status_label: Label,
+    pub selected_motion_tracker_id: Rc<RefCell<Option<String>>>,
+    pub tracking_tracker_ids: Rc<RefCell<Vec<Option<String>>>>,
+    pub tracking_reference_choices: Rc<RefCell<Vec<Option<MotionTrackerReference>>>>,
     // Applied frei0r effects
     pub frei0r_effects_section: GBox,
     pub frei0r_effects_list: GBox,
@@ -430,6 +489,270 @@ impl InspectorView {
             2 => KeyframeInterpolation::EaseOut,
             3 => KeyframeInterpolation::EaseInOut,
             _ => KeyframeInterpolation::Linear,
+        }
+    }
+
+    pub fn current_motion_tracker_id(&self) -> Option<String> {
+        self.tracking_tracker_ids
+            .borrow()
+            .get(self.tracking_tracker_dropdown.selected() as usize)
+            .cloned()
+            .flatten()
+            .or_else(|| self.selected_motion_tracker_id.borrow().clone())
+    }
+
+    pub fn selected_tracking_reference_choice(&self) -> Option<MotionTrackerReference> {
+        self.tracking_reference_choices
+            .borrow()
+            .get(self.tracking_reference_dropdown.selected() as usize)
+            .cloned()
+            .flatten()
+    }
+
+    pub fn tracking_target_is_mask(&self) -> bool {
+        self.tracking_target_dropdown.selected() == 1
+    }
+
+    fn sync_tracking_tracker_controls(&self, clip: &crate::model::clip::Clip) {
+        let selected_tracker_id = self
+            .selected_motion_tracker_id
+            .borrow()
+            .clone()
+            .filter(|tracker_id| clip.motion_tracker_ref(tracker_id).is_some())
+            .or_else(|| {
+                clip.motion_trackers
+                    .first()
+                    .map(|tracker| tracker.id.clone())
+            });
+        *self.selected_motion_tracker_id.borrow_mut() = selected_tracker_id.clone();
+
+        let tracker_labels: Vec<String> = if clip.motion_trackers.is_empty() {
+            vec!["No trackers yet".to_string()]
+        } else {
+            clip.motion_trackers
+                .iter()
+                .map(|tracker| tracker.label.clone())
+                .collect()
+        };
+        let tracker_label_refs = tracker_labels
+            .iter()
+            .map(|label| label.as_str())
+            .collect::<Vec<_>>();
+        let tracker_model = gtk4::StringList::new(&tracker_label_refs);
+        self.tracking_tracker_dropdown
+            .set_model(Some(&tracker_model));
+
+        let tracker_ids: Vec<Option<String>> = if clip.motion_trackers.is_empty() {
+            vec![None]
+        } else {
+            clip.motion_trackers
+                .iter()
+                .map(|tracker| Some(tracker.id.clone()))
+                .collect()
+        };
+        *self.tracking_tracker_ids.borrow_mut() = tracker_ids;
+
+        let selected_index = selected_tracker_id
+            .as_ref()
+            .and_then(|tracker_id| {
+                clip.motion_trackers
+                    .iter()
+                    .position(|tracker| tracker.id == *tracker_id)
+            })
+            .unwrap_or(0);
+        self.tracking_tracker_dropdown
+            .set_selected(selected_index.min(u32::MAX as usize) as u32);
+
+        let can_analyze = clip_supports_tracking_analysis(clip).is_ok();
+        let selected_tracker = selected_tracker_id
+            .as_ref()
+            .and_then(|tracker_id| clip.motion_tracker_ref(tracker_id));
+
+        self.tracking_add_btn.set_sensitive(can_analyze);
+        self.tracking_remove_btn
+            .set_sensitive(can_analyze && selected_tracker.is_some());
+        self.tracking_label_entry
+            .set_sensitive(can_analyze && selected_tracker.is_some());
+        self.tracking_edit_region_btn
+            .set_sensitive(can_analyze && selected_tracker.is_some());
+        self.tracking_center_x_slider
+            .set_sensitive(can_analyze && selected_tracker.is_some());
+        self.tracking_center_y_slider
+            .set_sensitive(can_analyze && selected_tracker.is_some());
+        self.tracking_width_slider
+            .set_sensitive(can_analyze && selected_tracker.is_some());
+        self.tracking_height_slider
+            .set_sensitive(can_analyze && selected_tracker.is_some());
+        self.tracking_rotation_spin
+            .set_sensitive(can_analyze && selected_tracker.is_some());
+        self.tracking_run_btn
+            .set_sensitive(can_analyze && selected_tracker.is_some());
+        self.tracking_cancel_btn.set_sensitive(false);
+        if !can_analyze || selected_tracker.is_none() {
+            self.tracking_edit_region_btn.set_active(false);
+        }
+
+        if let Some(tracker) = selected_tracker {
+            self.tracking_label_entry.set_text(&tracker.label);
+            self.tracking_center_x_slider
+                .set_value(tracker.analysis_region.center_x);
+            self.tracking_center_y_slider
+                .set_value(tracker.analysis_region.center_y);
+            self.tracking_width_slider
+                .set_value(tracker.analysis_region.width);
+            self.tracking_height_slider
+                .set_value(tracker.analysis_region.height);
+            self.tracking_rotation_spin
+                .set_value(tracker.analysis_region.rotation_deg);
+            self.tracking_run_btn.set_label(
+                if tracker.samples.is_empty() && tracker.analysis_end_ns.is_none() {
+                    "Track Region"
+                } else {
+                    "Re-run Tracking"
+                },
+            );
+        } else {
+            let default_region = crate::model::clip::TrackingRegion::default();
+            self.tracking_label_entry.set_text("");
+            self.tracking_center_x_slider
+                .set_value(default_region.center_x);
+            self.tracking_center_y_slider
+                .set_value(default_region.center_y);
+            self.tracking_width_slider.set_value(default_region.width);
+            self.tracking_height_slider.set_value(default_region.height);
+            self.tracking_rotation_spin
+                .set_value(default_region.rotation_deg);
+            self.tracking_run_btn.set_label("Track Region");
+        }
+    }
+
+    fn sync_tracking_reference_controls(&self, project: &Project, clip: &crate::model::clip::Clip) {
+        let target_labels = if clip.masks.is_empty() {
+            vec!["Clip Transform"]
+        } else {
+            vec!["Clip Transform", "First Mask"]
+        };
+        let target_model = gtk4::StringList::new(&target_labels);
+        self.tracking_target_dropdown.set_model(Some(&target_model));
+        let mask_binding = clip
+            .masks
+            .first()
+            .and_then(|mask| mask.tracking_binding.clone());
+        let clip_binding = clip.tracking_binding.clone();
+        let active_binding = mask_binding.clone().or(clip_binding.clone());
+        let target_is_mask = mask_binding.is_some() && !clip.masks.is_empty();
+        self.tracking_target_dropdown
+            .set_selected(if target_is_mask { 1 } else { 0 });
+        self.tracking_target_dropdown
+            .set_sensitive(!clip.masks.is_empty());
+
+        let available_references = project.motion_tracker_references();
+        let has_usable_reference = available_references
+            .iter()
+            .any(|reference| reference.enabled && reference.sample_count > 0);
+        let mut reference_choices = vec![None];
+        let mut reference_labels = vec!["None".to_string()];
+        for reference in available_references.iter().cloned() {
+            reference_labels.push(tracking_reference_label(&reference));
+            reference_choices.push(Some(reference));
+        }
+        let reference_label_refs = reference_labels
+            .iter()
+            .map(|label| label.as_str())
+            .collect::<Vec<_>>();
+        let reference_model = gtk4::StringList::new(&reference_label_refs);
+        self.tracking_reference_dropdown
+            .set_model(Some(&reference_model));
+
+        let selected_index = active_binding
+            .as_ref()
+            .and_then(|binding| {
+                reference_choices.iter().position(|choice| {
+                    choice
+                        .as_ref()
+                        .map(|reference| {
+                            reference.source_clip_id == binding.source_clip_id
+                                && reference.tracker_id == binding.tracker_id
+                        })
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(0);
+        *self.tracking_reference_choices.borrow_mut() = reference_choices;
+        self.tracking_reference_dropdown
+            .set_selected(selected_index.min(u32::MAX as usize) as u32);
+        self.tracking_clear_binding_btn
+            .set_sensitive(active_binding.is_some());
+        self.tracking_binding_status_label.remove_css_class("error");
+
+        if let Some(binding) = active_binding {
+            let binding_reference = available_references
+                .iter()
+                .find(|reference| {
+                    reference.source_clip_id == binding.source_clip_id
+                        && reference.tracker_id == binding.tracker_id
+                })
+                .cloned();
+            let binding_label = binding_reference
+                .as_ref()
+                .map(tracking_reference_label)
+                .unwrap_or_else(|| format!("{} — {}", binding.source_clip_id, binding.tracker_id));
+            let target_label = if target_is_mask {
+                "first mask"
+            } else {
+                "clip transform"
+            };
+            match project
+                .clip_ref(&binding.source_clip_id)
+                .and_then(|source_clip| source_clip.motion_tracker_ref(&binding.tracker_id))
+            {
+                Some(tracker) if !tracker.enabled => {
+                    self.tracking_binding_status_label.add_css_class("error");
+                    self.tracking_binding_status_label.set_text(&format!(
+                        "Attached to {binding_label} on the {target_label}, but that tracker is disabled."
+                    ));
+                }
+                Some(tracker) if tracker.samples.is_empty() => {
+                    self.tracking_binding_status_label.add_css_class("error");
+                    let source_label = project
+                        .clip_ref(&binding.source_clip_id)
+                        .map(|source_clip| {
+                            let label = source_clip.label.trim();
+                            if label.is_empty() {
+                                binding.source_clip_id.clone()
+                            } else {
+                                label.to_string()
+                            }
+                        })
+                        .unwrap_or_else(|| binding.source_clip_id.clone());
+                    self.tracking_binding_status_label.set_text(&format!(
+                        "Attached to {binding_label} on the {target_label}, but that tracker has no motion samples. Select {source_label} and run Track Region again."
+                    ));
+                }
+                Some(_) => {
+                    self.tracking_binding_status_label.set_text(&format!(
+                        "Attached to {binding_label} on the {target_label}."
+                    ));
+                }
+                None => {
+                    self.tracking_binding_status_label.add_css_class("error");
+                    self.tracking_binding_status_label.set_text(&format!(
+                        "Attached to {binding_label} on the {target_label}, but that tracker no longer exists."
+                    ));
+                }
+            }
+        } else if !has_usable_reference {
+            self.tracking_binding_status_label.set_text(
+                "No motion trackers with sampled motion are available in the project yet. Select a source clip and run Track Region first.",
+            );
+        } else if clip.masks.is_empty() {
+            self.tracking_binding_status_label
+                .set_text("Choose a tracker with sampled motion to drive this clip transform.");
+        } else {
+            self.tracking_binding_status_label
+                .set_text(
+                    "Choose a tracker with sampled motion to drive this clip transform or the first mask.",
+                );
         }
     }
 
@@ -1389,6 +1712,7 @@ impl InspectorView {
                     .set_visible((is_video || is_image) && self.bg_removal_model_available.get());
                 self.subtitle_section
                     .set_visible(is_video || is_audio || is_compound);
+                self.tracking_section.set_visible(is_visual);
                 let has_stt_model = self.stt_model_available.get();
                 let generating = self.stt_generating.get();
                 // For compound clips, hide the per-clip generate/clear controls;
@@ -1740,6 +2064,9 @@ impl InspectorView {
                     self.mask_expansion_slider.set_value(0.0);
                     self.mask_invert_check.set_active(false);
                 }
+
+                self.sync_tracking_tracker_controls(c);
+                self.sync_tracking_reference_controls(project, c);
 
                 // Populate applied frei0r effects list.
                 self.rebuild_frei0r_effects_list(&c.frei0r_effects);
@@ -2480,6 +2807,43 @@ impl InspectorView {
                 // Background Removal defaults
                 self.bg_removal_enable.set_active(false);
                 self.bg_removal_threshold_slider.set_value(0.5);
+                *self.selected_motion_tracker_id.borrow_mut() = None;
+                self.tracking_tracker_dropdown
+                    .set_model(Some(&gtk4::StringList::new(&["No trackers yet"])));
+                self.tracking_tracker_dropdown.set_selected(0);
+                *self.tracking_tracker_ids.borrow_mut() = vec![None];
+                self.tracking_add_btn.set_sensitive(false);
+                self.tracking_remove_btn.set_sensitive(false);
+                self.tracking_label_entry.set_text("");
+                self.tracking_label_entry.set_sensitive(false);
+                self.tracking_edit_region_btn.set_active(false);
+                self.tracking_edit_region_btn.set_sensitive(false);
+                self.tracking_center_x_slider.set_value(0.5);
+                self.tracking_center_y_slider.set_value(0.5);
+                self.tracking_width_slider.set_value(0.25);
+                self.tracking_height_slider.set_value(0.25);
+                self.tracking_rotation_spin.set_value(0.0);
+                self.tracking_center_x_slider.set_sensitive(false);
+                self.tracking_center_y_slider.set_sensitive(false);
+                self.tracking_width_slider.set_sensitive(false);
+                self.tracking_height_slider.set_sensitive(false);
+                self.tracking_rotation_spin.set_sensitive(false);
+                self.tracking_run_btn.set_label("Track Region");
+                self.tracking_run_btn.set_sensitive(false);
+                self.tracking_cancel_btn.set_sensitive(false);
+                self.tracking_status_label
+                    .set_text("Select a visual clip to create or attach motion tracking.");
+                self.tracking_target_dropdown
+                    .set_model(Some(&gtk4::StringList::new(&["Clip Transform"])));
+                self.tracking_target_dropdown.set_selected(0);
+                self.tracking_target_dropdown.set_sensitive(false);
+                self.tracking_reference_dropdown
+                    .set_model(Some(&gtk4::StringList::new(&["None"])));
+                self.tracking_reference_dropdown.set_selected(0);
+                *self.tracking_reference_choices.borrow_mut() = vec![None];
+                self.tracking_clear_binding_btn.set_sensitive(false);
+                self.tracking_binding_status_label
+                    .set_text("No motion trackers are available in the project yet.");
             }
         }
         *self.updating.borrow_mut() = false;
@@ -3474,6 +3838,134 @@ pub fn build_inspector(
 
     // Create shared state needed by effects and later sections.
     let selected_clip_id: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let selected_motion_tracker_id: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let tracking_tracker_ids: Rc<RefCell<Vec<Option<String>>>> = Rc::new(RefCell::new(vec![None]));
+    let tracking_reference_choices: Rc<RefCell<Vec<Option<MotionTrackerReference>>>> =
+        Rc::new(RefCell::new(vec![None]));
+
+    // ── Motion Tracking section ───────────────────────────────────────────────
+    let tracking_section = GBox::new(Orientation::Vertical, 8);
+    content_box.append(&tracking_section);
+    tracking_section.append(&Separator::new(Orientation::Horizontal));
+    let tracking_expander = Expander::new(Some("Motion Tracking"));
+    tracking_expander.set_expanded(false);
+    tracking_section.append(&tracking_expander);
+    let tracking_inner = GBox::new(Orientation::Vertical, 8);
+    tracking_expander.set_child(Some(&tracking_inner));
+
+    row_label(&tracking_inner, "Tracker");
+    let tracking_tracker_row = GBox::new(Orientation::Horizontal, 6);
+    let tracking_tracker_dropdown = gtk4::DropDown::new(
+        Some(gtk4::StringList::new(&["No trackers yet"])),
+        Option::<gtk4::Expression>::None,
+    );
+    tracking_tracker_dropdown.set_hexpand(true);
+    tracking_tracker_row.append(&tracking_tracker_dropdown);
+    let tracking_add_btn = Button::from_icon_name("list-add-symbolic");
+    tracking_add_btn.set_tooltip_text(Some("Add a motion tracker to this clip"));
+    tracking_add_btn.add_css_class("flat");
+    tracking_tracker_row.append(&tracking_add_btn);
+    let tracking_remove_btn = Button::from_icon_name("edit-delete-symbolic");
+    tracking_remove_btn.set_tooltip_text(Some("Remove the selected motion tracker"));
+    tracking_remove_btn.add_css_class("flat");
+    tracking_tracker_row.append(&tracking_remove_btn);
+    tracking_inner.append(&tracking_tracker_row);
+
+    row_label(&tracking_inner, "Label");
+    let tracking_label_entry = Entry::new();
+    tracking_label_entry.set_placeholder_text(Some("Tracker label"));
+    tracking_inner.append(&tracking_label_entry);
+
+    let tracking_edit_region_btn = gtk4::ToggleButton::with_label("Edit Region in Monitor");
+    tracking_edit_region_btn.set_tooltip_text(Some(
+        "Show the analysis rectangle in the Program Monitor and drag it to position the tracker",
+    ));
+    tracking_inner.append(&tracking_edit_region_btn);
+
+    row_label(&tracking_inner, "Region Center X");
+    let tracking_center_x_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    tracking_center_x_slider.set_value(0.5);
+    tracking_center_x_slider.set_draw_value(true);
+    tracking_center_x_slider.set_digits(2);
+    tracking_center_x_slider.add_mark(0.5, gtk4::PositionType::Bottom, None);
+    tracking_inner.append(&tracking_center_x_slider);
+
+    row_label(&tracking_inner, "Region Center Y");
+    let tracking_center_y_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    tracking_center_y_slider.set_value(0.5);
+    tracking_center_y_slider.set_draw_value(true);
+    tracking_center_y_slider.set_digits(2);
+    tracking_center_y_slider.add_mark(0.5, gtk4::PositionType::Bottom, None);
+    tracking_inner.append(&tracking_center_y_slider);
+
+    row_label(&tracking_inner, "Region Width");
+    let tracking_width_slider = Scale::with_range(Orientation::Horizontal, 0.05, 1.0, 0.01);
+    tracking_width_slider.set_value(0.25);
+    tracking_width_slider.set_draw_value(true);
+    tracking_width_slider.set_digits(2);
+    tracking_inner.append(&tracking_width_slider);
+
+    row_label(&tracking_inner, "Region Height");
+    let tracking_height_slider = Scale::with_range(Orientation::Horizontal, 0.05, 1.0, 0.01);
+    tracking_height_slider.set_value(0.25);
+    tracking_height_slider.set_draw_value(true);
+    tracking_height_slider.set_digits(2);
+    tracking_inner.append(&tracking_height_slider);
+
+    row_label(&tracking_inner, "Region Rotation");
+    let tracking_rotation_spin = gtk4::SpinButton::with_range(-180.0, 180.0, 1.0);
+    tracking_rotation_spin.set_value(0.0);
+    tracking_rotation_spin.set_digits(0);
+    tracking_inner.append(&tracking_rotation_spin);
+
+    let tracking_job_row = GBox::new(Orientation::Horizontal, 6);
+    let tracking_run_btn = Button::with_label("Track Region");
+    tracking_run_btn.set_tooltip_text(Some(
+        "Analyze the selected clip and generate motion samples for the current region",
+    ));
+    tracking_job_row.append(&tracking_run_btn);
+    let tracking_cancel_btn = Button::with_label("Cancel");
+    tracking_cancel_btn.set_sensitive(false);
+    tracking_job_row.append(&tracking_cancel_btn);
+    tracking_inner.append(&tracking_job_row);
+
+    let tracking_status_label = Label::new(Some(
+        "Select a visual clip to create or attach motion tracking.",
+    ));
+    tracking_status_label.set_wrap(true);
+    tracking_status_label.set_halign(gtk4::Align::Start);
+    tracking_status_label.add_css_class("dim-label");
+    tracking_inner.append(&tracking_status_label);
+
+    tracking_inner.append(&Separator::new(Orientation::Horizontal));
+
+    row_label(&tracking_inner, "Attach To");
+    let tracking_target_dropdown = gtk4::DropDown::new(
+        Some(gtk4::StringList::new(&["Clip Transform"])),
+        Option::<gtk4::Expression>::None,
+    );
+    tracking_target_dropdown.set_selected(0);
+    tracking_target_dropdown.set_sensitive(false);
+    tracking_inner.append(&tracking_target_dropdown);
+
+    row_label(&tracking_inner, "Follow Tracker");
+    let tracking_reference_dropdown = gtk4::DropDown::new(
+        Some(gtk4::StringList::new(&["None"])),
+        Option::<gtk4::Expression>::None,
+    );
+    tracking_reference_dropdown.set_selected(0);
+    tracking_inner.append(&tracking_reference_dropdown);
+
+    let tracking_clear_binding_btn = Button::with_label("Clear Attachment");
+    tracking_clear_binding_btn.set_sensitive(false);
+    tracking_inner.append(&tracking_clear_binding_btn);
+
+    let tracking_binding_status_label =
+        Label::new(Some("No motion trackers are available in the project yet."));
+    tracking_binding_status_label.set_wrap(true);
+    tracking_binding_status_label.set_halign(gtk4::Align::Start);
+    tracking_binding_status_label.add_css_class("dim-label");
+    tracking_inner.append(&tracking_binding_status_label);
 
     // ── Applied Frei0r Effects section (Video + Image only) ──────────────
     let frei0r_effects_section = GBox::new(Orientation::Vertical, 8);
@@ -8675,6 +9167,27 @@ pub fn build_inspector(
         mask_invert_check,
         mask_path_editor_box,
         mask_rect_ellipse_controls,
+        tracking_section,
+        tracking_tracker_dropdown,
+        tracking_add_btn,
+        tracking_remove_btn,
+        tracking_label_entry,
+        tracking_edit_region_btn,
+        tracking_center_x_slider,
+        tracking_center_y_slider,
+        tracking_width_slider,
+        tracking_height_slider,
+        tracking_rotation_spin,
+        tracking_run_btn,
+        tracking_cancel_btn,
+        tracking_status_label,
+        tracking_target_dropdown,
+        tracking_reference_dropdown,
+        tracking_clear_binding_btn,
+        tracking_binding_status_label,
+        selected_motion_tracker_id,
+        tracking_tracker_ids,
+        tracking_reference_choices,
         frei0r_effects_section,
         frei0r_effects_list,
         frei0r_effects_clipboard: frei0r_effects_clipboard.clone(),

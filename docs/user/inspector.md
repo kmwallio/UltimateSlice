@@ -231,6 +231,34 @@ Program Monitor overlay integration:
 
 ---
 
+## Motion Tracking
+
+The **Motion Tracking** section is available on visual clips and covers both tracker authoring and tracker attachments.
+
+| Control | Description |
+|---|---|
+| **Tracker** | Select which tracker on the current clip to edit. Use **+** to add a tracker to this clip and **Delete** to remove the selected tracker |
+| **Label** | Rename the selected tracker |
+| **Edit Region in Monitor** | Shows the tracker region in the Program Monitor so you can drag it into place visually |
+| **Region Center X / Y** | Normalized tracker region center |
+| **Region Width / Height** | Normalized half-size of the tracked region |
+| **Region Rotation** | Rotation of the analysis rectangle |
+| **Track Region / Re-run Tracking** | Run motion analysis for the selected tracker on the current clip, or regenerate samples after changing the tracker region |
+| **Cancel** | Stop an in-progress tracking analysis job |
+| **Attach To** | Choose whether a tracker drives the **Clip Transform** or the clip's **First Mask** |
+| **Follow Tracker** | Attach this clip or mask to a tracker created on another clip in the project |
+| **Clear Attachment** | Remove the current tracker attachment from the clip or mask |
+
+- Trackers are stored on the source clip that was analyzed.
+- Attachments are stored on the follower clip transform or its first mask.
+- If you move or resize the tracker region after analysis, UltimateSlice keeps the attachment but clears the old samples; run **Re-run Tracking** on the source clip again before expecting preview/export motion.
+- The **Follow Tracker** picker labels trackers that have no samples yet, and attached clips/masks warn when their source tracker is empty or disabled.
+- The built-in tracker currently analyzes **translation** motion, so tracked overlays and masks follow position but do not yet infer scale or rotation automatically.
+- Tracker attachments are resolved in both Program Monitor preview and export, and they persist through UltimateSlice project save/load (`.uspxml` vendor-attribute workflow).
+- Mask attachments currently target the **first rectangle or ellipse mask** on the clip. **Path masks** still need to be animated manually with their own controls/keyframes.
+
+---
+
 ## Subtitles / Captions
 
 Clips with subtitle segments show subtitle style controls in the Inspector.
@@ -435,6 +463,8 @@ Restricts the visible area of a clip using a geometric shape. Pixels outside the
 > **Pipeline placement** — The mask is applied after crop and LUT but before color effects and chroma key. It operates in pre-transform clip space, so the mask moves with the clip's scale/position/rotation. Preview uses a GStreamer RGBA pad probe with SDF alpha computation; export uses FFmpeg `geq` expressions (rect/ellipse) or rasterized grayscale PGM with `movie`/`alphamerge` (path).
 
 All numeric mask properties (rect/ellipse) support keyframe animation via the Phase 1 keyframe system.
+
+> **Motion tracking** — The first rectangle/ellipse mask can be attached to a tracker from the **Motion Tracking** section so it follows tracked translation in preview and export. Path masks are still manual/keyframed only.
 
 The Program Monitor transform overlay shows a cyan dashed outline of the active mask shape with a center crosshair.
 

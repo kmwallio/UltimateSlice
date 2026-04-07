@@ -638,6 +638,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                             crate::model::clip::ClipColorLabel::Magenta => "magenta",
                         },
                     ));
+                    asset_clip.push_attribute(("us:clip-id", clip.id.as_str()));
                     if clip.blend_mode != crate::model::clip::BlendMode::Normal {
                         asset_clip.push_attribute((
                             "us:blend-mode",
@@ -721,6 +722,16 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     if !clip.frei0r_effects.is_empty() {
                         if let Ok(json) = serde_json::to_string(&clip.frei0r_effects) {
                             asset_clip.push_attribute(("us:frei0r-effects", json.as_str()));
+                        }
+                    }
+                    if !clip.motion_trackers.is_empty() {
+                        if let Ok(json) = serde_json::to_string(&clip.motion_trackers) {
+                            asset_clip.push_attribute(("us:motion-trackers", json.as_str()));
+                        }
+                    }
+                    if let Some(binding) = &clip.tracking_binding {
+                        if let Ok(json) = serde_json::to_string(binding) {
+                            asset_clip.push_attribute(("us:tracking-binding", json.as_str()));
                         }
                     }
                     if !clip.masks.is_empty() {
@@ -2906,6 +2917,44 @@ fn patch_asset_clip_block_transform(
         updated_start = next;
     }
 
+    // Patch motion trackers JSON attribute.
+    {
+        let motion_trackers_value = if clip.motion_trackers.is_empty() {
+            None
+        } else {
+            serde_json::to_string(&clip.motion_trackers)
+                .ok()
+                .map(|s| s.replace('"', "&quot;"))
+        };
+        let next = if let Some(v) = motion_trackers_value {
+            replace_or_insert_attr(&updated_start, "us:motion-trackers", &v)?
+        } else {
+            remove_attr(&updated_start, "us:motion-trackers")
+        };
+        if next != updated_start {
+            changed = true;
+        }
+        updated_start = next;
+    }
+
+    // Patch clip tracking binding JSON attribute.
+    {
+        let tracking_binding_value = clip
+            .tracking_binding
+            .as_ref()
+            .and_then(|binding| serde_json::to_string(binding).ok())
+            .map(|s| s.replace('"', "&quot;"));
+        let next = if let Some(v) = tracking_binding_value {
+            replace_or_insert_attr(&updated_start, "us:tracking-binding", &v)?
+        } else {
+            remove_attr(&updated_start, "us:tracking-binding")
+        };
+        if next != updated_start {
+            changed = true;
+        }
+        updated_start = next;
+    }
+
     // Patch masks JSON attribute.
     {
         let masks_value = if clip.masks.is_empty() {
@@ -4248,6 +4297,7 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:shadows-tint"
             | "us:bg-removal-enabled"
             | "us:bg-removal-threshold"
+            | "us:clip-id"
             | "us:title-template"
             | "us:title-outline-color"
             | "us:title-outline-width"
@@ -4269,6 +4319,8 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:pitch-preserve"
             | "us:audio-channel-mode"
             | "us:ladspa-effects"
+            | "us:motion-trackers"
+            | "us:tracking-binding"
             | "us:masks"
             | "us:measured-loudness-lufs"
             | "us:subtitle-segments"
@@ -6031,6 +6083,101 @@ mod tests {
         assert_eq!(loaded_clip.opacity_keyframes.len(), 2);
         assert_eq!(loaded_clip.opacity_keyframes[0].time_ns, 0);
         assert_eq!(loaded_clip.opacity_keyframes[1].time_ns, 2_000_000_000);
+    }
+
+    #[test]
+    fn test_write_read_motion_tracking_round_trip() {
+        let mut project = Project::new("Tracking RT");
+        project.tracks.clear();
+
+        let mut track = Track::new_video("Video 1");
+
+        let mut source = Clip::new("/tmp/source.mp4", 2_000_000_000, 0, ClipKind::Video);
+        source.id = "source-clip".to_string();
+        let mut tracker = crate::model::clip::MotionTracker::new("Subject");
+        tracker.id = "tracker-1".to_string();
+        tracker.analysis_region = crate::model::clip::TrackingRegion {
+            center_x: 0.4,
+            center_y: 0.6,
+            width: 0.2,
+            height: 0.3,
+            rotation_deg: 12.0,
+        };
+        tracker.analysis_end_ns = Some(1_800_000_000);
+        tracker.samples = vec![
+            crate::model::clip::TrackingSample::identity(0),
+            crate::model::clip::TrackingSample {
+                time_ns: 1_000_000_000,
+                offset_x: 0.15,
+                offset_y: -0.08,
+                scale_multiplier: 1.1,
+                rotation_deg: 6.0,
+                confidence: 0.9,
+            },
+        ];
+        source.motion_trackers.push(tracker);
+
+        let mut target = Clip::new(
+            "/tmp/overlay.png",
+            2_500_000_000,
+            500_000_000,
+            ClipKind::Image,
+        );
+        target.id = "target-clip".to_string();
+        let mut binding = crate::model::clip::TrackingBinding::new("source-clip", "tracker-1");
+        binding.apply_scale = true;
+        binding.apply_rotation = true;
+        binding.offset_x = 0.05;
+        binding.offset_y = -0.03;
+        binding.scale_multiplier = 1.2;
+        binding.rotation_offset_deg = 8.0;
+        binding.strength = 0.75;
+        binding.smoothing = 0.25;
+        target.tracking_binding = Some(binding.clone());
+        let mut mask = crate::model::clip::ClipMask::new(crate::model::clip::MaskShape::Rectangle);
+        mask.tracking_binding = Some(binding);
+        target.masks.push(mask);
+
+        track.add_clip(source);
+        track.add_clip(target);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(xml.contains("us:clip-id=\"source-clip\""));
+        assert!(xml.contains("us:motion-trackers=\""));
+        assert!(xml.contains("us:tracking-binding=\""));
+
+        let loaded = parse_fcpxml(&xml).expect("parse written xml");
+        let loaded_source = loaded
+            .clip_ref("source-clip")
+            .expect("source clip id should persist");
+        assert_eq!(loaded_source.motion_trackers.len(), 1);
+        assert_eq!(loaded_source.motion_trackers[0].id, "tracker-1");
+        assert_eq!(
+            loaded_source.motion_trackers[0].analysis_end_ns,
+            Some(1_800_000_000)
+        );
+        assert_eq!(loaded_source.motion_trackers[0].samples.len(), 2);
+
+        let loaded_target = loaded
+            .clip_ref("target-clip")
+            .expect("target clip id should persist");
+        let loaded_binding = loaded_target
+            .tracking_binding
+            .as_ref()
+            .expect("clip tracking binding should round-trip");
+        assert_eq!(loaded_binding.source_clip_id, "source-clip");
+        assert_eq!(loaded_binding.tracker_id, "tracker-1");
+        assert!(loaded_binding.apply_scale);
+        assert!(loaded_binding.apply_rotation);
+        assert!((loaded_binding.strength - 0.75).abs() < 1e-6);
+        assert_eq!(loaded_target.masks.len(), 1);
+        let loaded_mask_binding = loaded_target.masks[0]
+            .tracking_binding
+            .as_ref()
+            .expect("mask tracking binding should round-trip");
+        assert_eq!(loaded_mask_binding.source_clip_id, "source-clip");
+        assert_eq!(loaded_mask_binding.tracker_id, "tracker-1");
     }
 
     #[test]
