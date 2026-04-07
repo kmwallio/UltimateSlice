@@ -200,8 +200,11 @@ compound's internal tracks. Key rules:
   (`+ st.breadcrumb_bar_height()`)
 - **Track Y positions** (`track_row_top_in_tracks`, `track_index_at_y`) must
   offset by `breadcrumb_bar_height()` so hit testing aligns with drawing
-- **Playhead** must be translated to compound-internal time via
-  `editing_playhead_ns()`: `(playhead - compound.timeline_start) + compound.source_in`
+- **Playhead** in drill-down mode uses the compound editor's full internal
+  timeline, not the parent clip's visible window. Translate via
+  `editing_playhead_ns()`: `playhead - compound.timeline_start`
+- **Seek / stop / ruler coordinates** must stay in that same full internal
+  timebase so a trimmed compound still stops at 0 inside the editor
 - **Razor cuts** inside compounds use the translated playhead
 
 ### Clip lookup — always use recursive methods

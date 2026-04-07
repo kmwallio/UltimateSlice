@@ -1033,11 +1033,8 @@ impl ProgramClip {
 
     pub fn volume_at_timeline_ns(&self, timeline_pos_ns: u64) -> f64 {
         let local_ns = self.local_timeline_position_ns(timeline_pos_ns);
-        let base_vol = ModelClip::evaluate_keyframed_value(
-            &self.volume_keyframes,
-            local_ns,
-            self.volume,
-        );
+        let base_vol =
+            ModelClip::evaluate_keyframed_value(&self.volume_keyframes, local_ns, self.volume);
         if self.voice_isolation > 0.0 && !self.subtitle_segments.is_empty() {
             let rel_ns = timeline_pos_ns.saturating_sub(self.timeline_start_ns);
             let clip_local_ns = (rel_ns as f64 * self.speed) as u64;
@@ -1052,7 +1049,11 @@ impl ProgramClip {
                         min_dist = 0;
                         break;
                     }
-                    let d = if clip_local_ns < start { start - clip_local_ns } else { clip_local_ns - end };
+                    let d = if clip_local_ns < start {
+                        start - clip_local_ns
+                    } else {
+                        clip_local_ns - end
+                    };
                     min_dist = min_dist.min(d);
                 } else {
                     for w in &seg.words {
@@ -1062,7 +1063,11 @@ impl ProgramClip {
                             min_dist = 0;
                             break 'outer;
                         }
-                        let d = if clip_local_ns < start { start - clip_local_ns } else { clip_local_ns - end };
+                        let d = if clip_local_ns < start {
+                            start - clip_local_ns
+                        } else {
+                            clip_local_ns - end
+                        };
                         min_dist = min_dist.min(d);
                     }
                 }
@@ -5127,7 +5132,13 @@ impl ProgramPlayer {
         self.sync_preview_audio_levels(self.timeline_pos_ns);
     }
 
-    pub fn update_audio_for_clip(&mut self, clip_id: &str, volume: f64, pan: f64, voice_isolation: f64) {
+    pub fn update_audio_for_clip(
+        &mut self,
+        clip_id: &str,
+        volume: f64,
+        pan: f64,
+        voice_isolation: f64,
+    ) {
         let volume = volume.clamp(0.0, MAX_PREVIEW_AUDIO_GAIN);
         let pan = pan.clamp(-1.0, 1.0);
         let mut video_found = false;
@@ -5144,7 +5155,10 @@ impl ProgramPlayer {
         // For audio-only clips, update the stored volume and, if actively playing,
         // update the dedicated volume element (avoids playbin StreamVolume crosstalk).
         // Collect matching indices first to avoid holding iter_mut borrow across &self calls.
-        let matched_indices: Vec<usize> = self.audio_clips.iter().enumerate()
+        let matched_indices: Vec<usize> = self
+            .audio_clips
+            .iter()
+            .enumerate()
             .filter(|(_, c)| c.id == clip_id)
             .map(|(i, _)| i)
             .collect();

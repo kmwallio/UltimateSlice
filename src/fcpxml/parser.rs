@@ -820,649 +820,645 @@ fn parse_asset_clip(
         } else {
             return None;
         };
-            let raw_offset = attrs
-                .get("offset")
-                .and_then(|t| parse_fcpxml_time(t))
-                .unwrap_or(0);
-            let lane = attrs.get("lane").and_then(|s| s.parse::<i32>().ok());
+        let raw_offset = attrs
+            .get("offset")
+            .and_then(|t| parse_fcpxml_time(t))
+            .unwrap_or(0);
+        let lane = attrs.get("lane").and_then(|s| s.parse::<i32>().ok());
 
-            // Connected clips (lane != 0) use offset in parent's source time
-            // space. Convert to timeline: parent_timeline + (offset - parent_start).
-            let timeline_start = if lane.is_some() {
-                if let Some(parent) = parent_ctx {
-                    parent
-                        .timeline_start
-                        .saturating_add(raw_offset.saturating_sub(parent.raw_source_start_ns))
-                } else {
-                    raw_offset
-                }
+        // Connected clips (lane != 0) use offset in parent's source time
+        // space. Convert to timeline: parent_timeline + (offset - parent_start).
+        let timeline_start = if lane.is_some() {
+            if let Some(parent) = parent_ctx {
+                parent
+                    .timeline_start
+                    .saturating_add(raw_offset.saturating_sub(parent.raw_source_start_ns))
             } else {
                 raw_offset
-            };
-            let raw_source_start = attrs
-                .get("start")
-                .and_then(|t| parse_fcpxml_time(t))
-                .unwrap_or(asset.start_ns);
-            let vendor_source_timecode_base_ns = attrs
-                .get("us:source-timecode-base-ns")
-                .and_then(|t| t.parse::<u64>().ok());
-            let source_in = if let Some(base_ns) = vendor_source_timecode_base_ns {
-                raw_source_start.saturating_sub(base_ns)
-            } else if raw_source_start >= asset.start_ns {
-                raw_source_start - asset.start_ns
+            }
+        } else {
+            raw_offset
+        };
+        let raw_source_start = attrs
+            .get("start")
+            .and_then(|t| parse_fcpxml_time(t))
+            .unwrap_or(asset.start_ns);
+        let vendor_source_timecode_base_ns = attrs
+            .get("us:source-timecode-base-ns")
+            .and_then(|t| t.parse::<u64>().ok());
+        let source_in = if let Some(base_ns) = vendor_source_timecode_base_ns {
+            raw_source_start.saturating_sub(base_ns)
+        } else if raw_source_start >= asset.start_ns {
+            raw_source_start - asset.start_ns
+        } else {
+            raw_source_start
+        };
+        let duration = attrs
+            .get("duration")
+            .and_then(|t| parse_fcpxml_time(t))
+            .unwrap_or(asset.duration_ns);
+        let label = attrs
+            .get("name")
+            .cloned()
+            .unwrap_or_else(|| asset.name.clone());
+
+        let explicit_track_idx = attrs.get("us:track-idx").and_then(|s| s.parse().ok());
+        let clip_kind = match attrs.get("us:track-kind").map(|s| s.as_str()) {
+            Some("audio") => ClipKind::Audio,
+            Some(_) => ClipKind::Video,
+            None => {
+                if !asset.has_video && asset.has_audio {
+                    ClipKind::Audio
+                } else if lane.unwrap_or(0) < 0 {
+                    ClipKind::Audio
+                } else {
+                    ClipKind::Video
+                }
+            }
+        };
+        let inferred_track_idx = match clip_kind {
+            ClipKind::Audio => lane
+                .filter(|l| *l < 0)
+                .map(|l| (-l - 1) as usize)
+                .unwrap_or(0),
+            ClipKind::Video
+            | ClipKind::Image
+            | ClipKind::Title
+            | ClipKind::Adjustment
+            | ClipKind::Compound
+            | ClipKind::Multicam => lane.filter(|l| *l > 0).map(|l| l as usize).unwrap_or(0),
+        };
+        let track_idx = explicit_track_idx.unwrap_or(inferred_track_idx);
+        let track_name = attrs.get("us:track-name").cloned().unwrap_or_else(|| {
+            if clip_kind == ClipKind::Audio {
+                format!("Audio {}", track_idx + 1)
             } else {
-                raw_source_start
-            };
-            let duration = attrs
-                .get("duration")
-                .and_then(|t| parse_fcpxml_time(t))
-                .unwrap_or(asset.duration_ns);
-            let label = attrs
-                .get("name")
-                .cloned()
-                .unwrap_or_else(|| asset.name.clone());
+                format!("Video {}", track_idx + 1)
+            }
+        });
+        let track_muted = attrs
+            .get("us:track-muted")
+            .and_then(|s| s.parse::<bool>().ok())
+            .unwrap_or(false);
+        let track_locked = attrs
+            .get("us:track-locked")
+            .and_then(|s| s.parse::<bool>().ok())
+            .unwrap_or(false);
+        let track_soloed = attrs
+            .get("us:track-soloed")
+            .and_then(|s| s.parse::<bool>().ok())
+            .unwrap_or(false);
+        let track_height_preset = match attrs.get("us:track-height").map(|s| s.as_str()) {
+            Some("small") => TrackHeightPreset::Small,
+            Some("large") => TrackHeightPreset::Large,
+            _ => TrackHeightPreset::Medium,
+        };
+        let track_key = (if clip_kind == ClipKind::Audio { 1 } else { 0 }, track_idx);
 
-            let explicit_track_idx = attrs.get("us:track-idx").and_then(|s| s.parse().ok());
-            let clip_kind = match attrs.get("us:track-kind").map(|s| s.as_str()) {
-                Some("audio") => ClipKind::Audio,
-                Some(_) => ClipKind::Video,
-                None => {
-                    if !asset.has_video && asset.has_audio {
-                        ClipKind::Audio
-                    } else if lane.unwrap_or(0) < 0 {
-                        ClipKind::Audio
-                    } else {
-                        ClipKind::Video
+        // Get or create the target track
+        let track = track_map.entry(track_key).or_insert_with(|| {
+            let mut track = if clip_kind == ClipKind::Audio {
+                Track::new_audio(&track_name)
+            } else {
+                Track::new_video(&track_name)
+            };
+            track.muted = track_muted;
+            track.locked = track_locked;
+            track.soloed = track_soloed;
+            track.height_preset = track_height_preset;
+            track
+        });
+        if attrs.contains_key("us:track-muted") {
+            track.muted = track_muted;
+        }
+        if attrs.contains_key("us:track-locked") {
+            track.locked = track_locked;
+        }
+        if attrs.contains_key("us:track-soloed") {
+            track.soloed = track_soloed;
+        }
+        if let Some(v) = attrs.get("us:track-audio-role") {
+            track.audio_role = crate::model::track::AudioRole::from_str(v);
+        }
+        if let Some(v) = attrs.get("us:track-duck") {
+            track.duck = v == "true";
+        }
+        if let Some(v) = attrs.get("us:track-duck-amount-db") {
+            track.duck_amount_db = v.parse().unwrap_or(-6.0);
+        }
+        if attrs.contains_key("us:track-height") {
+            track.height_preset = track_height_preset;
+        }
+
+        let resolved_source_path = resolve_import_source_path(&asset.src, mount_root, mount_users);
+        let mut clip = Clip::new(
+            &resolved_source_path,
+            source_in.saturating_add(duration),
+            timeline_start,
+            clip_kind,
+        );
+        clip.source_in = source_in;
+        clip.source_out = source_in.saturating_add(duration);
+        clip.timeline_start = timeline_start;
+        clip.label = label;
+        clip.fcpxml_original_source_path = Some(asset.src.clone());
+        clip.fcpxml_asset_ref = Some(asset_ref.clone());
+        clip.fcpxml_unknown_asset_attrs = asset.unknown_attrs.clone();
+        clip.fcpxml_unknown_asset_children = asset.unknown_children.clone();
+        // Restore color/effects from vendor attributes
+        if let Some(v) = attrs.get("us:brightness") {
+            clip.brightness = v.parse().unwrap_or(0.0);
+        }
+        if let Some(v) = attrs.get("us:contrast") {
+            clip.contrast = v.parse().unwrap_or(1.0);
+        }
+        if let Some(v) = attrs.get("us:saturation") {
+            clip.saturation = v.parse().unwrap_or(1.0);
+        }
+        if let Some(v) = attrs.get("us:color-label") {
+            clip.color_label = match v.as_str() {
+                "red" => ClipColorLabel::Red,
+                "orange" => ClipColorLabel::Orange,
+                "yellow" => ClipColorLabel::Yellow,
+                "green" => ClipColorLabel::Green,
+                "teal" => ClipColorLabel::Teal,
+                "blue" => ClipColorLabel::Blue,
+                "purple" => ClipColorLabel::Purple,
+                "magenta" => ClipColorLabel::Magenta,
+                _ => ClipColorLabel::None,
+            };
+        }
+        if let Some(v) = attrs.get("us:blend-mode") {
+            clip.blend_mode = match v.as_str() {
+                "multiply" => crate::model::clip::BlendMode::Multiply,
+                "screen" => crate::model::clip::BlendMode::Screen,
+                "overlay" => crate::model::clip::BlendMode::Overlay,
+                "add" => crate::model::clip::BlendMode::Add,
+                "difference" => crate::model::clip::BlendMode::Difference,
+                "soft_light" => crate::model::clip::BlendMode::SoftLight,
+                _ => crate::model::clip::BlendMode::Normal,
+            };
+        }
+        if let Some(v) = attrs.get("us:temperature") {
+            clip.temperature = v.parse().unwrap_or(6500.0);
+        }
+        if let Some(v) = attrs.get("us:tint") {
+            clip.tint = v.parse().unwrap_or(0.0);
+        }
+        if let Some(v) = attrs.get("us:brightness-keyframes") {
+            clip.brightness_keyframes =
+                serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
+        }
+        if let Some(v) = attrs.get("us:contrast-keyframes") {
+            clip.contrast_keyframes =
+                serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
+        }
+        if let Some(v) = attrs.get("us:saturation-keyframes") {
+            clip.saturation_keyframes =
+                serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
+        }
+        if let Some(v) = attrs.get("us:temperature-keyframes") {
+            clip.temperature_keyframes =
+                serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
+        }
+        if let Some(v) = attrs.get("us:tint-keyframes") {
+            clip.tint_keyframes =
+                serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
+        }
+        if let Some(v) = attrs.get("us:denoise") {
+            clip.denoise = v.parse().unwrap_or(0.0);
+        }
+        if let Some(v) = attrs.get("us:sharpness") {
+            clip.sharpness = v.parse().unwrap_or(0.0);
+        }
+        if let Some(v) = attrs.get("us:blur") {
+            clip.blur = v.parse().unwrap_or(0.0);
+        }
+        if let Some(v) = attrs.get("us:vidstab-enabled") {
+            clip.vidstab_enabled = v == "true";
+        }
+        if let Some(v) = attrs.get("us:vidstab-smoothing") {
+            clip.vidstab_smoothing = v.parse().unwrap_or(0.5);
+        }
+        if let Some(v) = attrs.get("us:blur-keyframes") {
+            let json_str = v.replace("&quot;", "\"");
+            clip.blur_keyframes = serde_json::from_str(&json_str).unwrap_or_default();
+        }
+        if let Some(v) = attrs.get("us:frei0r-effects") {
+            let json_str = v.replace("&quot;", "\"");
+            clip.frei0r_effects = serde_json::from_str(&json_str).unwrap_or_default();
+        }
+        if let Some(v) = attrs.get("us:masks") {
+            let json_str = v.replace("&quot;", "\"");
+            if let Ok(masks) = serde_json::from_str::<Vec<crate::model::clip::ClipMask>>(&json_str)
+            {
+                clip.masks = masks;
+            }
+        }
+        // Subtitle segments + style
+        if let Some(v) = attrs.get("us:subtitle-segments") {
+            let json_str = v.replace("&quot;", "\"");
+            clip.subtitle_segments = serde_json::from_str(&json_str).unwrap_or_default();
+        }
+        if let Some(v) = attrs.get("us:subtitles-language") {
+            clip.subtitles_language = v.clone();
+        }
+        if let Some(v) = attrs.get("us:subtitle-font") {
+            clip.subtitle_font = v.clone();
+        }
+        if let Some(v) = attrs.get("us:subtitle-color") {
+            clip.subtitle_color = v.parse().unwrap_or(0xFFFFFFFF);
+        }
+        if let Some(v) = attrs.get("us:subtitle-outline-color") {
+            clip.subtitle_outline_color = v.parse().unwrap_or(0x000000FF);
+        }
+        if let Some(v) = attrs.get("us:subtitle-outline-width") {
+            clip.subtitle_outline_width = v.parse().unwrap_or(2.0);
+        }
+        if let Some(v) = attrs.get("us:subtitle-bg-box") {
+            clip.subtitle_bg_box = v != "false";
+        }
+        if let Some(v) = attrs.get("us:subtitle-bg-box-color") {
+            clip.subtitle_bg_box_color = v.parse().unwrap_or(0x00000099);
+        }
+        if let Some(v) = attrs.get("us:subtitle-highlight-mode") {
+            clip.subtitle_highlight_mode = match v.as_str() {
+                "bold" => crate::model::clip::SubtitleHighlightMode::Bold,
+                "color" => crate::model::clip::SubtitleHighlightMode::Color,
+                "underline" => crate::model::clip::SubtitleHighlightMode::Underline,
+                "stroke" => crate::model::clip::SubtitleHighlightMode::Stroke,
+                _ => crate::model::clip::SubtitleHighlightMode::None,
+            };
+        }
+        if let Some(v) = attrs.get("us:subtitle-highlight-color") {
+            clip.subtitle_highlight_color = v.parse().unwrap_or(0xFFFF00FF);
+        }
+        if let Some(v) = attrs.get("us:subtitle-word-window-secs") {
+            clip.subtitle_word_window_secs = v.parse().unwrap_or(2.0);
+        }
+        if let Some(v) = attrs.get("us:subtitle-position-y") {
+            clip.subtitle_position_y = v.parse().unwrap_or(0.85);
+        }
+        if let Some(v) = attrs.get("us:ladspa-effects") {
+            let json_str = v.replace("&quot;", "\"");
+            clip.ladspa_effects = serde_json::from_str(&json_str).unwrap_or_default();
+        }
+        if let Some(v) = attrs.get("us:volume") {
+            clip.volume = v.parse().unwrap_or(1.0);
+        }
+        if let Some(v) = attrs.get("us:voice-isolation") {
+            clip.voice_isolation = v.parse().unwrap_or(0.0);
+        }
+        if let Some(v) = attrs.get("us:volume-keyframes") {
+            clip.volume_keyframes =
+                serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
+        }
+        if let Some(v) = attrs.get("us:pan") {
+            clip.pan = v.parse().unwrap_or(0.0);
+        }
+        if let Some(v) = attrs.get("us:pan-keyframes") {
+            clip.pan_keyframes =
+                serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
+        }
+        if let Some(v) = attrs.get("us:eq-bands") {
+            let json_str = v.replace("&quot;", "\"");
+            if let Ok(bands) = serde_json::from_str::<[crate::model::clip::EqBand; 3]>(&json_str) {
+                clip.eq_bands = bands;
+            }
+        }
+        if let Some(v) = attrs.get("us:eq-low-gain-keyframes") {
+            let json_str = v.replace("&quot;", "\"");
+            clip.eq_low_gain_keyframes =
+                serde_json::from_str::<Vec<NumericKeyframe>>(&json_str).unwrap_or_default();
+        }
+        if let Some(v) = attrs.get("us:eq-mid-gain-keyframes") {
+            let json_str = v.replace("&quot;", "\"");
+            clip.eq_mid_gain_keyframes =
+                serde_json::from_str::<Vec<NumericKeyframe>>(&json_str).unwrap_or_default();
+        }
+        if let Some(v) = attrs.get("us:eq-high-gain-keyframes") {
+            let json_str = v.replace("&quot;", "\"");
+            clip.eq_high_gain_keyframes =
+                serde_json::from_str::<Vec<NumericKeyframe>>(&json_str).unwrap_or_default();
+        }
+        if let Some(v) = attrs.get("us:pitch-shift-semitones") {
+            clip.pitch_shift_semitones = v.parse().unwrap_or(0.0);
+        }
+        if let Some(v) = attrs.get("us:pitch-preserve") {
+            clip.pitch_preserve = v == "true";
+        }
+        if let Some(v) = attrs.get("us:audio-channel-mode") {
+            clip.audio_channel_mode = crate::model::clip::AudioChannelMode::from_str(v);
+        }
+        if let Some(v) = attrs.get("us:measured-loudness-lufs") {
+            clip.measured_loudness_lufs = v.parse().ok();
+        }
+        if let Some(v) = attrs.get("us:rotate-keyframes") {
+            clip.rotate_keyframes =
+                serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
+        }
+        if let Some(v) = attrs.get("us:crop-left") {
+            clip.crop_left = v.parse().unwrap_or(0);
+        }
+        if let Some(v) = attrs.get("us:crop-right") {
+            clip.crop_right = v.parse().unwrap_or(0);
+        }
+        if let Some(v) = attrs.get("us:crop-top") {
+            clip.crop_top = v.parse().unwrap_or(0);
+        }
+        if let Some(v) = attrs.get("us:crop-bottom") {
+            clip.crop_bottom = v.parse().unwrap_or(0);
+        }
+        if let Some(v) = attrs.get("us:crop-left-keyframes") {
+            clip.crop_left_keyframes =
+                serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
+        }
+        if let Some(v) = attrs.get("us:crop-right-keyframes") {
+            clip.crop_right_keyframes =
+                serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
+        }
+        if let Some(v) = attrs.get("us:crop-top-keyframes") {
+            clip.crop_top_keyframes =
+                serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
+        }
+        if let Some(v) = attrs.get("us:crop-bottom-keyframes") {
+            clip.crop_bottom_keyframes =
+                serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
+        }
+        if let Some(v) = attrs.get("us:rotate") {
+            clip.rotate = v.parse().unwrap_or(0);
+        }
+        if let Some(v) = attrs.get("us:flip-h") {
+            clip.flip_h = v.parse().unwrap_or(false);
+        }
+        if let Some(v) = attrs.get("us:flip-v") {
+            clip.flip_v = v.parse().unwrap_or(false);
+        }
+        if let Some(v) = attrs.get("us:anamorphic-desqueeze") {
+            clip.anamorphic_desqueeze = v.parse().unwrap_or(1.0);
+        }
+        if let Some(v) = attrs.get("us:scale") {
+            clip.scale = v.parse().unwrap_or(1.0);
+        }
+        if let Some(v) = attrs.get("us:scale-keyframes") {
+            clip.scale_keyframes =
+                serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
+        }
+        if let Some(v) = attrs.get("us:opacity") {
+            clip.opacity = v.parse().unwrap_or(1.0);
+        }
+        if let Some(v) = attrs.get("us:opacity-keyframes") {
+            clip.opacity_keyframes =
+                serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
+        }
+        if let Some(v) = attrs.get("us:position-x") {
+            clip.position_x = v.parse().unwrap_or(0.0);
+        }
+        if let Some(v) = attrs.get("us:position-x-keyframes") {
+            clip.position_x_keyframes =
+                serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
+        }
+        if let Some(v) = attrs.get("us:position-y") {
+            clip.position_y = v.parse().unwrap_or(0.0);
+        }
+        if let Some(v) = attrs.get("us:position-y-keyframes") {
+            clip.position_y_keyframes =
+                serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
+        }
+        if let Some(v) = attrs.get("us:title-text") {
+            clip.title_text = v.clone();
+        }
+        if let Some(v) = attrs.get("us:title-font") {
+            clip.title_font = v.clone();
+        }
+        if let Some(v) = attrs.get("us:title-color") {
+            clip.title_color = u32::from_str_radix(v, 16).unwrap_or(0xFFFFFFFF);
+        }
+        if let Some(v) = attrs.get("us:title-x") {
+            clip.title_x = v.parse().unwrap_or(0.5);
+        }
+        if let Some(v) = attrs.get("us:title-y") {
+            clip.title_y = v.parse().unwrap_or(0.9);
+        }
+        if let Some(v) = attrs.get("us:title-template") {
+            clip.title_template = v.clone();
+        }
+        if let Some(v) = attrs.get("us:title-outline-color") {
+            clip.title_outline_color = u32::from_str_radix(v, 16).unwrap_or(0x000000FF);
+        }
+        if let Some(v) = attrs.get("us:title-outline-width") {
+            clip.title_outline_width = v.parse().unwrap_or(0.0);
+        }
+        if let Some(v) = attrs.get("us:title-shadow") {
+            clip.title_shadow = v == "true" || v == "1";
+        }
+        if let Some(v) = attrs.get("us:title-shadow-color") {
+            clip.title_shadow_color = u32::from_str_radix(v, 16).unwrap_or(0x000000AA);
+        }
+        if let Some(v) = attrs.get("us:title-shadow-offset-x") {
+            clip.title_shadow_offset_x = v.parse().unwrap_or(2.0);
+        }
+        if let Some(v) = attrs.get("us:title-shadow-offset-y") {
+            clip.title_shadow_offset_y = v.parse().unwrap_or(2.0);
+        }
+        if let Some(v) = attrs.get("us:title-bg-box") {
+            clip.title_bg_box = v == "true" || v == "1";
+        }
+        if let Some(v) = attrs.get("us:title-bg-box-color") {
+            clip.title_bg_box_color = u32::from_str_radix(v, 16).unwrap_or(0x00000088);
+        }
+        if let Some(v) = attrs.get("us:title-bg-box-padding") {
+            clip.title_bg_box_padding = v.parse().unwrap_or(8.0);
+        }
+        if let Some(v) = attrs.get("us:title-clip-bg-color") {
+            clip.title_clip_bg_color = u32::from_str_radix(v, 16).unwrap_or(0);
+        }
+        if let Some(v) = attrs.get("us:title-secondary-text") {
+            clip.title_secondary_text = v.clone();
+        }
+        if let Some(v) = attrs.get("us:clip-kind") {
+            match v.as_str() {
+                "title" => clip.kind = ClipKind::Title,
+                "adjustment" => clip.kind = ClipKind::Adjustment,
+                "compound" => {
+                    clip.kind = ClipKind::Compound;
+                    if let Some(tracks_json) = attrs.get("us:compound-tracks") {
+                        let json_str = tracks_json.replace("&quot;", "\"");
+                        clip.compound_tracks = serde_json::from_str(&json_str).ok();
                     }
                 }
-            };
-            let inferred_track_idx = match clip_kind {
-                ClipKind::Audio => lane
-                    .filter(|l| *l < 0)
-                    .map(|l| (-l - 1) as usize)
-                    .unwrap_or(0),
-                ClipKind::Video
-                | ClipKind::Image
-                | ClipKind::Title
-                | ClipKind::Adjustment
-                | ClipKind::Compound
-                | ClipKind::Multicam => lane.filter(|l| *l > 0).map(|l| l as usize).unwrap_or(0),
-            };
-            let track_idx = explicit_track_idx.unwrap_or(inferred_track_idx);
-            let track_name = attrs.get("us:track-name").cloned().unwrap_or_else(|| {
-                if clip_kind == ClipKind::Audio {
-                    format!("Audio {}", track_idx + 1)
-                } else {
-                    format!("Video {}", track_idx + 1)
-                }
-            });
-            let track_muted = attrs
-                .get("us:track-muted")
-                .and_then(|s| s.parse::<bool>().ok())
-                .unwrap_or(false);
-            let track_locked = attrs
-                .get("us:track-locked")
-                .and_then(|s| s.parse::<bool>().ok())
-                .unwrap_or(false);
-            let track_soloed = attrs
-                .get("us:track-soloed")
-                .and_then(|s| s.parse::<bool>().ok())
-                .unwrap_or(false);
-            let track_height_preset = match attrs.get("us:track-height").map(|s| s.as_str()) {
-                Some("small") => TrackHeightPreset::Small,
-                Some("large") => TrackHeightPreset::Large,
-                _ => TrackHeightPreset::Medium,
-            };
-            let track_key = (if clip_kind == ClipKind::Audio { 1 } else { 0 }, track_idx);
-
-            // Get or create the target track
-            let track = track_map.entry(track_key).or_insert_with(|| {
-                let mut track = if clip_kind == ClipKind::Audio {
-                    Track::new_audio(&track_name)
-                } else {
-                    Track::new_video(&track_name)
-                };
-                track.muted = track_muted;
-                track.locked = track_locked;
-                track.soloed = track_soloed;
-                track.height_preset = track_height_preset;
-                track
-            });
-            if attrs.contains_key("us:track-muted") {
-                track.muted = track_muted;
-            }
-            if attrs.contains_key("us:track-locked") {
-                track.locked = track_locked;
-            }
-            if attrs.contains_key("us:track-soloed") {
-                track.soloed = track_soloed;
-            }
-            if let Some(v) = attrs.get("us:track-audio-role") {
-                track.audio_role = crate::model::track::AudioRole::from_str(v);
-            }
-            if let Some(v) = attrs.get("us:track-duck") {
-                track.duck = v == "true";
-            }
-            if let Some(v) = attrs.get("us:track-duck-amount-db") {
-                track.duck_amount_db = v.parse().unwrap_or(-6.0);
-            }
-            if attrs.contains_key("us:track-height") {
-                track.height_preset = track_height_preset;
-            }
-
-            let resolved_source_path =
-                resolve_import_source_path(&asset.src, mount_root, mount_users);
-            let mut clip = Clip::new(
-                &resolved_source_path,
-                source_in.saturating_add(duration),
-                timeline_start,
-                clip_kind,
-            );
-            clip.source_in = source_in;
-            clip.source_out = source_in.saturating_add(duration);
-            clip.timeline_start = timeline_start;
-            clip.label = label;
-            clip.fcpxml_original_source_path = Some(asset.src.clone());
-            clip.fcpxml_asset_ref = Some(asset_ref.clone());
-            clip.fcpxml_unknown_asset_attrs = asset.unknown_attrs.clone();
-            clip.fcpxml_unknown_asset_children = asset.unknown_children.clone();
-            // Restore color/effects from vendor attributes
-            if let Some(v) = attrs.get("us:brightness") {
-                clip.brightness = v.parse().unwrap_or(0.0);
-            }
-            if let Some(v) = attrs.get("us:contrast") {
-                clip.contrast = v.parse().unwrap_or(1.0);
-            }
-            if let Some(v) = attrs.get("us:saturation") {
-                clip.saturation = v.parse().unwrap_or(1.0);
-            }
-            if let Some(v) = attrs.get("us:color-label") {
-                clip.color_label = match v.as_str() {
-                    "red" => ClipColorLabel::Red,
-                    "orange" => ClipColorLabel::Orange,
-                    "yellow" => ClipColorLabel::Yellow,
-                    "green" => ClipColorLabel::Green,
-                    "teal" => ClipColorLabel::Teal,
-                    "blue" => ClipColorLabel::Blue,
-                    "purple" => ClipColorLabel::Purple,
-                    "magenta" => ClipColorLabel::Magenta,
-                    _ => ClipColorLabel::None,
-                };
-            }
-            if let Some(v) = attrs.get("us:blend-mode") {
-                clip.blend_mode = match v.as_str() {
-                    "multiply" => crate::model::clip::BlendMode::Multiply,
-                    "screen" => crate::model::clip::BlendMode::Screen,
-                    "overlay" => crate::model::clip::BlendMode::Overlay,
-                    "add" => crate::model::clip::BlendMode::Add,
-                    "difference" => crate::model::clip::BlendMode::Difference,
-                    "soft_light" => crate::model::clip::BlendMode::SoftLight,
-                    _ => crate::model::clip::BlendMode::Normal,
-                };
-            }
-            if let Some(v) = attrs.get("us:temperature") {
-                clip.temperature = v.parse().unwrap_or(6500.0);
-            }
-            if let Some(v) = attrs.get("us:tint") {
-                clip.tint = v.parse().unwrap_or(0.0);
-            }
-            if let Some(v) = attrs.get("us:brightness-keyframes") {
-                clip.brightness_keyframes =
-                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
-            }
-            if let Some(v) = attrs.get("us:contrast-keyframes") {
-                clip.contrast_keyframes =
-                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
-            }
-            if let Some(v) = attrs.get("us:saturation-keyframes") {
-                clip.saturation_keyframes =
-                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
-            }
-            if let Some(v) = attrs.get("us:temperature-keyframes") {
-                clip.temperature_keyframes =
-                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
-            }
-            if let Some(v) = attrs.get("us:tint-keyframes") {
-                clip.tint_keyframes =
-                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
-            }
-            if let Some(v) = attrs.get("us:denoise") {
-                clip.denoise = v.parse().unwrap_or(0.0);
-            }
-            if let Some(v) = attrs.get("us:sharpness") {
-                clip.sharpness = v.parse().unwrap_or(0.0);
-            }
-            if let Some(v) = attrs.get("us:blur") {
-                clip.blur = v.parse().unwrap_or(0.0);
-            }
-            if let Some(v) = attrs.get("us:vidstab-enabled") {
-                clip.vidstab_enabled = v == "true";
-            }
-            if let Some(v) = attrs.get("us:vidstab-smoothing") {
-                clip.vidstab_smoothing = v.parse().unwrap_or(0.5);
-            }
-            if let Some(v) = attrs.get("us:blur-keyframes") {
-                let json_str = v.replace("&quot;", "\"");
-                clip.blur_keyframes = serde_json::from_str(&json_str).unwrap_or_default();
-            }
-            if let Some(v) = attrs.get("us:frei0r-effects") {
-                let json_str = v.replace("&quot;", "\"");
-                clip.frei0r_effects = serde_json::from_str(&json_str).unwrap_or_default();
-            }
-            if let Some(v) = attrs.get("us:masks") {
-                let json_str = v.replace("&quot;", "\"");
-                if let Ok(masks) =
-                    serde_json::from_str::<Vec<crate::model::clip::ClipMask>>(&json_str)
-                {
-                    clip.masks = masks;
-                }
-            }
-            // Subtitle segments + style
-            if let Some(v) = attrs.get("us:subtitle-segments") {
-                let json_str = v.replace("&quot;", "\"");
-                clip.subtitle_segments = serde_json::from_str(&json_str).unwrap_or_default();
-            }
-            if let Some(v) = attrs.get("us:subtitles-language") {
-                clip.subtitles_language = v.clone();
-            }
-            if let Some(v) = attrs.get("us:subtitle-font") {
-                clip.subtitle_font = v.clone();
-            }
-            if let Some(v) = attrs.get("us:subtitle-color") {
-                clip.subtitle_color = v.parse().unwrap_or(0xFFFFFFFF);
-            }
-            if let Some(v) = attrs.get("us:subtitle-outline-color") {
-                clip.subtitle_outline_color = v.parse().unwrap_or(0x000000FF);
-            }
-            if let Some(v) = attrs.get("us:subtitle-outline-width") {
-                clip.subtitle_outline_width = v.parse().unwrap_or(2.0);
-            }
-            if let Some(v) = attrs.get("us:subtitle-bg-box") {
-                clip.subtitle_bg_box = v != "false";
-            }
-            if let Some(v) = attrs.get("us:subtitle-bg-box-color") {
-                clip.subtitle_bg_box_color = v.parse().unwrap_or(0x00000099);
-            }
-            if let Some(v) = attrs.get("us:subtitle-highlight-mode") {
-                clip.subtitle_highlight_mode = match v.as_str() {
-                    "bold" => crate::model::clip::SubtitleHighlightMode::Bold,
-                    "color" => crate::model::clip::SubtitleHighlightMode::Color,
-                    "underline" => crate::model::clip::SubtitleHighlightMode::Underline,
-                    "stroke" => crate::model::clip::SubtitleHighlightMode::Stroke,
-                    _ => crate::model::clip::SubtitleHighlightMode::None,
-                };
-            }
-            if let Some(v) = attrs.get("us:subtitle-highlight-color") {
-                clip.subtitle_highlight_color = v.parse().unwrap_or(0xFFFF00FF);
-            }
-            if let Some(v) = attrs.get("us:subtitle-word-window-secs") {
-                clip.subtitle_word_window_secs = v.parse().unwrap_or(2.0);
-            }
-            if let Some(v) = attrs.get("us:subtitle-position-y") {
-                clip.subtitle_position_y = v.parse().unwrap_or(0.85);
-            }
-            if let Some(v) = attrs.get("us:ladspa-effects") {
-                let json_str = v.replace("&quot;", "\"");
-                clip.ladspa_effects = serde_json::from_str(&json_str).unwrap_or_default();
-            }
-            if let Some(v) = attrs.get("us:volume") {
-                clip.volume = v.parse().unwrap_or(1.0);
-            }
-            if let Some(v) = attrs.get("us:voice-isolation") {
-                clip.voice_isolation = v.parse().unwrap_or(0.0);
-            }
-            if let Some(v) = attrs.get("us:volume-keyframes") {
-                clip.volume_keyframes =
-                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
-            }
-            if let Some(v) = attrs.get("us:pan") {
-                clip.pan = v.parse().unwrap_or(0.0);
-            }
-            if let Some(v) = attrs.get("us:pan-keyframes") {
-                clip.pan_keyframes =
-                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
-            }
-            if let Some(v) = attrs.get("us:eq-bands") {
-                let json_str = v.replace("&quot;", "\"");
-                if let Ok(bands) =
-                    serde_json::from_str::<[crate::model::clip::EqBand; 3]>(&json_str)
-                {
-                    clip.eq_bands = bands;
-                }
-            }
-            if let Some(v) = attrs.get("us:eq-low-gain-keyframes") {
-                let json_str = v.replace("&quot;", "\"");
-                clip.eq_low_gain_keyframes =
-                    serde_json::from_str::<Vec<NumericKeyframe>>(&json_str).unwrap_or_default();
-            }
-            if let Some(v) = attrs.get("us:eq-mid-gain-keyframes") {
-                let json_str = v.replace("&quot;", "\"");
-                clip.eq_mid_gain_keyframes =
-                    serde_json::from_str::<Vec<NumericKeyframe>>(&json_str).unwrap_or_default();
-            }
-            if let Some(v) = attrs.get("us:eq-high-gain-keyframes") {
-                let json_str = v.replace("&quot;", "\"");
-                clip.eq_high_gain_keyframes =
-                    serde_json::from_str::<Vec<NumericKeyframe>>(&json_str).unwrap_or_default();
-            }
-            if let Some(v) = attrs.get("us:pitch-shift-semitones") {
-                clip.pitch_shift_semitones = v.parse().unwrap_or(0.0);
-            }
-            if let Some(v) = attrs.get("us:pitch-preserve") {
-                clip.pitch_preserve = v == "true";
-            }
-            if let Some(v) = attrs.get("us:audio-channel-mode") {
-                clip.audio_channel_mode = crate::model::clip::AudioChannelMode::from_str(v);
-            }
-            if let Some(v) = attrs.get("us:measured-loudness-lufs") {
-                clip.measured_loudness_lufs = v.parse().ok();
-            }
-            if let Some(v) = attrs.get("us:rotate-keyframes") {
-                clip.rotate_keyframes =
-                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
-            }
-            if let Some(v) = attrs.get("us:crop-left") {
-                clip.crop_left = v.parse().unwrap_or(0);
-            }
-            if let Some(v) = attrs.get("us:crop-right") {
-                clip.crop_right = v.parse().unwrap_or(0);
-            }
-            if let Some(v) = attrs.get("us:crop-top") {
-                clip.crop_top = v.parse().unwrap_or(0);
-            }
-            if let Some(v) = attrs.get("us:crop-bottom") {
-                clip.crop_bottom = v.parse().unwrap_or(0);
-            }
-            if let Some(v) = attrs.get("us:crop-left-keyframes") {
-                clip.crop_left_keyframes =
-                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
-            }
-            if let Some(v) = attrs.get("us:crop-right-keyframes") {
-                clip.crop_right_keyframes =
-                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
-            }
-            if let Some(v) = attrs.get("us:crop-top-keyframes") {
-                clip.crop_top_keyframes =
-                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
-            }
-            if let Some(v) = attrs.get("us:crop-bottom-keyframes") {
-                clip.crop_bottom_keyframes =
-                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
-            }
-            if let Some(v) = attrs.get("us:rotate") {
-                clip.rotate = v.parse().unwrap_or(0);
-            }
-            if let Some(v) = attrs.get("us:flip-h") {
-                clip.flip_h = v.parse().unwrap_or(false);
-            }
-            if let Some(v) = attrs.get("us:flip-v") {
-                clip.flip_v = v.parse().unwrap_or(false);
-            }
-            if let Some(v) = attrs.get("us:anamorphic-desqueeze") {
-                clip.anamorphic_desqueeze = v.parse().unwrap_or(1.0);
-            }
-            if let Some(v) = attrs.get("us:scale") {
-                clip.scale = v.parse().unwrap_or(1.0);
-            }
-            if let Some(v) = attrs.get("us:scale-keyframes") {
-                clip.scale_keyframes =
-                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
-            }
-            if let Some(v) = attrs.get("us:opacity") {
-                clip.opacity = v.parse().unwrap_or(1.0);
-            }
-            if let Some(v) = attrs.get("us:opacity-keyframes") {
-                clip.opacity_keyframes =
-                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
-            }
-            if let Some(v) = attrs.get("us:position-x") {
-                clip.position_x = v.parse().unwrap_or(0.0);
-            }
-            if let Some(v) = attrs.get("us:position-x-keyframes") {
-                clip.position_x_keyframes =
-                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
-            }
-            if let Some(v) = attrs.get("us:position-y") {
-                clip.position_y = v.parse().unwrap_or(0.0);
-            }
-            if let Some(v) = attrs.get("us:position-y-keyframes") {
-                clip.position_y_keyframes =
-                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
-            }
-            if let Some(v) = attrs.get("us:title-text") {
-                clip.title_text = v.clone();
-            }
-            if let Some(v) = attrs.get("us:title-font") {
-                clip.title_font = v.clone();
-            }
-            if let Some(v) = attrs.get("us:title-color") {
-                clip.title_color = u32::from_str_radix(v, 16).unwrap_or(0xFFFFFFFF);
-            }
-            if let Some(v) = attrs.get("us:title-x") {
-                clip.title_x = v.parse().unwrap_or(0.5);
-            }
-            if let Some(v) = attrs.get("us:title-y") {
-                clip.title_y = v.parse().unwrap_or(0.9);
-            }
-            if let Some(v) = attrs.get("us:title-template") {
-                clip.title_template = v.clone();
-            }
-            if let Some(v) = attrs.get("us:title-outline-color") {
-                clip.title_outline_color = u32::from_str_radix(v, 16).unwrap_or(0x000000FF);
-            }
-            if let Some(v) = attrs.get("us:title-outline-width") {
-                clip.title_outline_width = v.parse().unwrap_or(0.0);
-            }
-            if let Some(v) = attrs.get("us:title-shadow") {
-                clip.title_shadow = v == "true" || v == "1";
-            }
-            if let Some(v) = attrs.get("us:title-shadow-color") {
-                clip.title_shadow_color = u32::from_str_radix(v, 16).unwrap_or(0x000000AA);
-            }
-            if let Some(v) = attrs.get("us:title-shadow-offset-x") {
-                clip.title_shadow_offset_x = v.parse().unwrap_or(2.0);
-            }
-            if let Some(v) = attrs.get("us:title-shadow-offset-y") {
-                clip.title_shadow_offset_y = v.parse().unwrap_or(2.0);
-            }
-            if let Some(v) = attrs.get("us:title-bg-box") {
-                clip.title_bg_box = v == "true" || v == "1";
-            }
-            if let Some(v) = attrs.get("us:title-bg-box-color") {
-                clip.title_bg_box_color = u32::from_str_radix(v, 16).unwrap_or(0x00000088);
-            }
-            if let Some(v) = attrs.get("us:title-bg-box-padding") {
-                clip.title_bg_box_padding = v.parse().unwrap_or(8.0);
-            }
-            if let Some(v) = attrs.get("us:title-clip-bg-color") {
-                clip.title_clip_bg_color = u32::from_str_radix(v, 16).unwrap_or(0);
-            }
-            if let Some(v) = attrs.get("us:title-secondary-text") {
-                clip.title_secondary_text = v.clone();
-            }
-            if let Some(v) = attrs.get("us:clip-kind") {
-                match v.as_str() {
-                    "title" => clip.kind = ClipKind::Title,
-                    "adjustment" => clip.kind = ClipKind::Adjustment,
-                    "compound" => {
-                        clip.kind = ClipKind::Compound;
-                        if let Some(tracks_json) = attrs.get("us:compound-tracks") {
-                            let json_str = tracks_json.replace("&quot;", "\"");
-                            clip.compound_tracks = serde_json::from_str(&json_str).ok();
-                        }
+                "multicam" => {
+                    clip.kind = ClipKind::Multicam;
+                    if let Some(angles_json) = attrs.get("us:multicam-angles") {
+                        let json_str = angles_json.replace("&quot;", "\"");
+                        clip.multicam_angles = serde_json::from_str(&json_str).ok();
                     }
-                    "multicam" => {
-                        clip.kind = ClipKind::Multicam;
-                        if let Some(angles_json) = attrs.get("us:multicam-angles") {
-                            let json_str = angles_json.replace("&quot;", "\"");
-                            clip.multicam_angles = serde_json::from_str(&json_str).ok();
-                        }
-                        if let Some(switches_json) = attrs.get("us:multicam-switches") {
-                            let json_str = switches_json.replace("&quot;", "\"");
-                            clip.multicam_switches = serde_json::from_str(&json_str).ok();
-                        }
+                    if let Some(switches_json) = attrs.get("us:multicam-switches") {
+                        let json_str = switches_json.replace("&quot;", "\"");
+                        clip.multicam_switches = serde_json::from_str(&json_str).ok();
                     }
-                    _ => {}
                 }
+                _ => {}
             }
-            if let Some(v) = attrs.get("us:speed") {
-                clip.speed = v.parse().unwrap_or(1.0);
+        }
+        if let Some(v) = attrs.get("us:speed") {
+            clip.speed = v.parse().unwrap_or(1.0);
+        }
+        if let Some(v) = attrs.get("us:speed-keyframes") {
+            clip.speed_keyframes =
+                serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
+        }
+        if let Some(v) = attrs.get("us:reverse") {
+            clip.reverse = v.parse().unwrap_or(false);
+        }
+        if let Some(v) = attrs.get("us:slow-motion-interp") {
+            clip.slow_motion_interp = match v.as_str() {
+                "blend" => SlowMotionInterp::Blend,
+                "optical-flow" => SlowMotionInterp::OpticalFlow,
+                _ => SlowMotionInterp::Off,
+            };
+        }
+        if let Some(v) = attrs.get("us:freeze-frame") {
+            clip.freeze_frame = v == "true" || v == "1";
+        }
+        if let Some(v) = attrs.get("us:freeze-source-ns") {
+            clip.freeze_frame_source_ns = v.parse().ok();
+        }
+        if let Some(v) = attrs.get("us:freeze-hold-duration-ns") {
+            clip.freeze_frame_hold_duration_ns = v.parse().ok();
+        }
+        if let Some(v) = attrs.get("us:group-id") {
+            clip.group_id = if v.is_empty() { None } else { Some(v.clone()) };
+        }
+        if let Some(v) = attrs.get("us:link-group-id") {
+            clip.link_group_id = if v.is_empty() { None } else { Some(v.clone()) };
+        }
+        clip.source_timecode_base_ns = vendor_source_timecode_base_ns.or_else(|| {
+            if asset.start_ns > 0 {
+                Some(asset.start_ns)
+            } else {
+                None
             }
-            if let Some(v) = attrs.get("us:speed-keyframes") {
-                clip.speed_keyframes =
-                    serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
+        });
+        if let Some(v) = attrs.get("us:shadows") {
+            clip.shadows = v.parse().unwrap_or(0.0);
+        }
+        if let Some(v) = attrs.get("us:midtones") {
+            clip.midtones = v.parse().unwrap_or(0.0);
+        }
+        if let Some(v) = attrs.get("us:highlights") {
+            clip.highlights = v.parse().unwrap_or(0.0);
+        }
+        if let Some(v) = attrs.get("us:exposure") {
+            clip.exposure = v.parse().unwrap_or(0.0);
+        }
+        if let Some(v) = attrs.get("us:black-point") {
+            clip.black_point = v.parse().unwrap_or(0.0);
+        }
+        if let Some(v) = attrs.get("us:highlights-warmth") {
+            clip.highlights_warmth = v.parse().unwrap_or(0.0);
+        }
+        if let Some(v) = attrs.get("us:highlights-tint") {
+            clip.highlights_tint = v.parse().unwrap_or(0.0);
+        }
+        if let Some(v) = attrs.get("us:midtones-warmth") {
+            clip.midtones_warmth = v.parse().unwrap_or(0.0);
+        }
+        if let Some(v) = attrs.get("us:midtones-tint") {
+            clip.midtones_tint = v.parse().unwrap_or(0.0);
+        }
+        if let Some(v) = attrs.get("us:shadows-warmth") {
+            clip.shadows_warmth = v.parse().unwrap_or(0.0);
+        }
+        if let Some(v) = attrs.get("us:shadows-tint") {
+            clip.shadows_tint = v.parse().unwrap_or(0.0);
+        }
+        if let Some(v) = attrs.get("us:chroma-key-enabled") {
+            clip.chroma_key_enabled = v == "true" || v == "1";
+        }
+        if let Some(v) = attrs.get("us:chroma-key-color") {
+            clip.chroma_key_color =
+                u32::from_str_radix(v.trim_start_matches("0x").trim_start_matches("0X"), 16)
+                    .unwrap_or(0x00FF00);
+        }
+        if let Some(v) = attrs.get("us:chroma-key-tolerance") {
+            clip.chroma_key_tolerance = v.parse().unwrap_or(0.3);
+        }
+        if let Some(v) = attrs.get("us:chroma-key-softness") {
+            clip.chroma_key_softness = v.parse().unwrap_or(0.1);
+        }
+        if let Some(v) = attrs.get("us:bg-removal-enabled") {
+            clip.bg_removal_enabled = v == "true" || v == "1";
+        }
+        if let Some(v) = attrs.get("us:bg-removal-threshold") {
+            clip.bg_removal_threshold = v.parse().unwrap_or(0.5);
+        }
+        if let Some(v) = attrs.get("us:lut-paths") {
+            // New multi-LUT format: JSON array of paths
+            if let Ok(paths) = serde_json::from_str::<Vec<String>>(v) {
+                clip.lut_paths = paths;
             }
-            if let Some(v) = attrs.get("us:reverse") {
-                clip.reverse = v.parse().unwrap_or(false);
+        } else if let Some(v) = attrs.get("us:lut-path") {
+            // Backward compat: old single-LUT format
+            clip.lut_paths = vec![v.clone()];
+        }
+        if let Some(v) = attrs.get("us:transition-after") {
+            clip.outgoing_transition.kind = canonicalize_transition_kind(v);
+        }
+        if let Some(v) = attrs.get("us:transition-after-ns") {
+            clip.outgoing_transition.duration_ns = v.parse().unwrap_or(0);
+        }
+        if let Some(v) = attrs.get("us:transition-after-alignment") {
+            if let Some(alignment) = TransitionAlignment::from_str(v) {
+                clip.outgoing_transition.alignment = alignment;
             }
-            if let Some(v) = attrs.get("us:slow-motion-interp") {
-                clip.slow_motion_interp = match v.as_str() {
-                    "blend" => SlowMotionInterp::Blend,
-                    "optical-flow" => SlowMotionInterp::OpticalFlow,
-                    _ => SlowMotionInterp::Off,
-                };
+        }
+        for (k, v) in attrs {
+            if !is_known_asset_clip_attr(k) {
+                clip.fcpxml_unknown_attrs.push((k.clone(), v.clone()));
             }
-            if let Some(v) = attrs.get("us:freeze-frame") {
-                clip.freeze_frame = v == "true" || v == "1";
-            }
-            if let Some(v) = attrs.get("us:freeze-source-ns") {
-                clip.freeze_frame_source_ns = v.parse().ok();
-            }
-            if let Some(v) = attrs.get("us:freeze-hold-duration-ns") {
-                clip.freeze_frame_hold_duration_ns = v.parse().ok();
-            }
-            if let Some(v) = attrs.get("us:group-id") {
-                clip.group_id = if v.is_empty() { None } else { Some(v.clone()) };
-            }
-            if let Some(v) = attrs.get("us:link-group-id") {
-                clip.link_group_id = if v.is_empty() { None } else { Some(v.clone()) };
-            }
-            clip.source_timecode_base_ns = vendor_source_timecode_base_ns.or_else(|| {
-                if asset.start_ns > 0 {
-                    Some(asset.start_ns)
-                } else {
-                    None
-                }
-            });
-            if let Some(v) = attrs.get("us:shadows") {
-                clip.shadows = v.parse().unwrap_or(0.0);
-            }
-            if let Some(v) = attrs.get("us:midtones") {
-                clip.midtones = v.parse().unwrap_or(0.0);
-            }
-            if let Some(v) = attrs.get("us:highlights") {
-                clip.highlights = v.parse().unwrap_or(0.0);
-            }
-            if let Some(v) = attrs.get("us:exposure") {
-                clip.exposure = v.parse().unwrap_or(0.0);
-            }
-            if let Some(v) = attrs.get("us:black-point") {
-                clip.black_point = v.parse().unwrap_or(0.0);
-            }
-            if let Some(v) = attrs.get("us:highlights-warmth") {
-                clip.highlights_warmth = v.parse().unwrap_or(0.0);
-            }
-            if let Some(v) = attrs.get("us:highlights-tint") {
-                clip.highlights_tint = v.parse().unwrap_or(0.0);
-            }
-            if let Some(v) = attrs.get("us:midtones-warmth") {
-                clip.midtones_warmth = v.parse().unwrap_or(0.0);
-            }
-            if let Some(v) = attrs.get("us:midtones-tint") {
-                clip.midtones_tint = v.parse().unwrap_or(0.0);
-            }
-            if let Some(v) = attrs.get("us:shadows-warmth") {
-                clip.shadows_warmth = v.parse().unwrap_or(0.0);
-            }
-            if let Some(v) = attrs.get("us:shadows-tint") {
-                clip.shadows_tint = v.parse().unwrap_or(0.0);
-            }
-            if let Some(v) = attrs.get("us:chroma-key-enabled") {
-                clip.chroma_key_enabled = v == "true" || v == "1";
-            }
-            if let Some(v) = attrs.get("us:chroma-key-color") {
-                clip.chroma_key_color =
-                    u32::from_str_radix(v.trim_start_matches("0x").trim_start_matches("0X"), 16)
-                        .unwrap_or(0x00FF00);
-            }
-            if let Some(v) = attrs.get("us:chroma-key-tolerance") {
-                clip.chroma_key_tolerance = v.parse().unwrap_or(0.3);
-            }
-            if let Some(v) = attrs.get("us:chroma-key-softness") {
-                clip.chroma_key_softness = v.parse().unwrap_or(0.1);
-            }
-            if let Some(v) = attrs.get("us:bg-removal-enabled") {
-                clip.bg_removal_enabled = v == "true" || v == "1";
-            }
-            if let Some(v) = attrs.get("us:bg-removal-threshold") {
-                clip.bg_removal_threshold = v.parse().unwrap_or(0.5);
-            }
-            if let Some(v) = attrs.get("us:lut-paths") {
-                // New multi-LUT format: JSON array of paths
-                if let Ok(paths) = serde_json::from_str::<Vec<String>>(v) {
-                    clip.lut_paths = paths;
-                }
-            } else if let Some(v) = attrs.get("us:lut-path") {
-                // Backward compat: old single-LUT format
-                clip.lut_paths = vec![v.clone()];
-            }
-            if let Some(v) = attrs.get("us:transition-after") {
-                clip.outgoing_transition.kind = canonicalize_transition_kind(v);
-            }
-            if let Some(v) = attrs.get("us:transition-after-ns") {
-                clip.outgoing_transition.duration_ns = v.parse().unwrap_or(0);
-            }
-            if let Some(v) = attrs.get("us:transition-after-alignment") {
-                if let Some(alignment) = TransitionAlignment::from_str(v) {
-                    clip.outgoing_transition.alignment = alignment;
-                }
-            }
-            for (k, v) in attrs {
-                if !is_known_asset_clip_attr(k) {
-                    clip.fcpxml_unknown_attrs.push((k.clone(), v.clone()));
-                }
-            }
-            // The FCPXML `duration` attribute is the *timeline* duration.
-            // For sped-up clips, the source range is larger: source_dur = timeline_dur × speed.
-            // With speed keyframes, compute via integration over the timeline duration.
-            if !clip.speed_keyframes.is_empty() {
-                let timeline_dur = duration; // = source_out - source_in as originally parsed
-                let source_dur =
-                    clip.integrated_source_distance_for_local_timeline_ns(timeline_dur) as u64;
-                clip.source_out = clip.source_in.saturating_add(source_dur);
-            } else if (clip.speed - 1.0).abs() > 0.001 {
-                let timeline_dur = duration as f64;
-                let source_dur = (timeline_dur * clip.speed) as u64;
-                clip.source_out = clip.source_in.saturating_add(source_dur);
-            }
+        }
+        // The FCPXML `duration` attribute is the *timeline* duration.
+        // For sped-up clips, the source range is larger: source_dur = timeline_dur × speed.
+        // With speed keyframes, compute via integration over the timeline duration.
+        if !clip.speed_keyframes.is_empty() {
+            let timeline_dur = duration; // = source_out - source_in as originally parsed
+            let source_dur =
+                clip.integrated_source_distance_for_local_timeline_ns(timeline_dur) as u64;
+            clip.source_out = clip.source_in.saturating_add(source_dur);
+        } else if (clip.speed - 1.0).abs() > 0.001 {
+            let timeline_dur = duration as f64;
+            let source_dur = (timeline_dur * clip.speed) as u64;
+            clip.source_out = clip.source_in.saturating_add(source_dur);
+        }
 
-            let clip_index = track.clips.len();
-            track.push_unsorted(clip);
-            return Some(ActiveClipContext {
-                track_key,
-                clip_index,
-                timeline_start,
-                source_in,
-                raw_source_start_ns: raw_source_start,
-                has_us_position: attrs.contains_key("us:position-x")
-                    || attrs.contains_key("us:position-y"),
-                has_us_scale: attrs.contains_key("us:scale"),
-                has_us_rotate: attrs.contains_key("us:rotate"),
-                has_us_anamorphic_desqueeze: attrs.contains_key("us:anamorphic-desqueeze"),
-                has_us_position_keyframes: attrs.contains_key("us:position-x-keyframes")
-                    || attrs.contains_key("us:position-y-keyframes"),
-                has_us_scale_keyframes: attrs.contains_key("us:scale-keyframes"),
-                has_us_rotate_keyframes: attrs.contains_key("us:rotate-keyframes"),
-                has_us_opacity_keyframes: attrs.contains_key("us:opacity-keyframes"),
-                has_us_volume_keyframes: attrs.contains_key("us:volume-keyframes"),
-                has_us_pan_keyframes: attrs.contains_key("us:pan-keyframes"),
-                has_us_speed: attrs.contains_key("us:speed"),
-                has_us_speed_keyframes: attrs.contains_key("us:speed-keyframes"),
-                has_us_reverse: attrs.contains_key("us:reverse"),
-                has_us_freeze_frame: attrs.contains_key("us:freeze-frame"),
-                has_us_freeze_source_ns: attrs.contains_key("us:freeze-source-ns"),
-                has_us_freeze_hold_duration_ns: attrs.contains_key("us:freeze-hold-duration-ns"),
-            });
+        let clip_index = track.clips.len();
+        track.push_unsorted(clip);
+        return Some(ActiveClipContext {
+            track_key,
+            clip_index,
+            timeline_start,
+            source_in,
+            raw_source_start_ns: raw_source_start,
+            has_us_position: attrs.contains_key("us:position-x")
+                || attrs.contains_key("us:position-y"),
+            has_us_scale: attrs.contains_key("us:scale"),
+            has_us_rotate: attrs.contains_key("us:rotate"),
+            has_us_anamorphic_desqueeze: attrs.contains_key("us:anamorphic-desqueeze"),
+            has_us_position_keyframes: attrs.contains_key("us:position-x-keyframes")
+                || attrs.contains_key("us:position-y-keyframes"),
+            has_us_scale_keyframes: attrs.contains_key("us:scale-keyframes"),
+            has_us_rotate_keyframes: attrs.contains_key("us:rotate-keyframes"),
+            has_us_opacity_keyframes: attrs.contains_key("us:opacity-keyframes"),
+            has_us_volume_keyframes: attrs.contains_key("us:volume-keyframes"),
+            has_us_pan_keyframes: attrs.contains_key("us:pan-keyframes"),
+            has_us_speed: attrs.contains_key("us:speed"),
+            has_us_speed_keyframes: attrs.contains_key("us:speed-keyframes"),
+            has_us_reverse: attrs.contains_key("us:reverse"),
+            has_us_freeze_frame: attrs.contains_key("us:freeze-frame"),
+            has_us_freeze_source_ns: attrs.contains_key("us:freeze-source-ns"),
+            has_us_freeze_hold_duration_ns: attrs.contains_key("us:freeze-hold-duration-ns"),
+        });
     }
     None
 }
@@ -1665,10 +1661,7 @@ fn apply_adjust_voice_isolation(
     track_map: &mut BTreeMap<(u8, usize), Track>,
 ) {
     if let Some(clip) = current_clip_mut(track_map, active_ctx) {
-        if let Some(amount) = attrs
-            .get("amount")
-            .and_then(|s| s.parse::<f32>().ok())
-        {
+        if let Some(amount) = attrs.get("amount").and_then(|s| s.parse::<f32>().ok()) {
             clip.voice_isolation = (amount / 100.0).clamp(0.0, 1.0);
         }
     }

@@ -1255,15 +1255,12 @@ impl InspectorView {
                 {
                     let mut proj = project.borrow_mut();
                     if let Some(clip) = proj.clip_mut(&cid) {
-                        if let Some(e) =
-                            clip.frei0r_effects.iter_mut().find(|e| e.id == effect_id)
+                        if let Some(e) = clip.frei0r_effects.iter_mut().find(|e| e.id == effect_id)
                         {
                             e.params.insert("channel".to_string(), ch_val);
                             e.params.insert("show-curves".to_string(), 0.0);
-                            e.params.insert(
-                                "curve-point-number".to_string(),
-                                pts.len() as f64 / 10.0,
-                            );
+                            e.params
+                                .insert("curve-point-number".to_string(), pts.len() as f64 / 10.0);
                             for (i, &(inp, out)) in pts.iter().enumerate() {
                                 e.params.insert(format!("point-{}-input-value", i + 1), inp);
                                 e.params
@@ -1390,15 +1387,18 @@ impl InspectorView {
                 self.chroma_key_section.set_visible(is_video || is_image);
                 self.bg_removal_section
                     .set_visible((is_video || is_image) && self.bg_removal_model_available.get());
-                self.subtitle_section.set_visible(is_video || is_audio || is_compound);
+                self.subtitle_section
+                    .set_visible(is_video || is_audio || is_compound);
                 let has_stt_model = self.stt_model_available.get();
                 let generating = self.stt_generating.get();
                 // For compound clips, hide the per-clip generate/clear controls;
                 // the aggregated segment list shows below via subtitle_segments_section.
                 self.subtitle_no_model_box
                     .set_visible(!is_compound && (!has_stt_model && !generating));
-                self.subtitle_controls_box
-                    .set_visible(!is_compound && (has_stt_model || !c.subtitle_segments.is_empty() || generating));
+                self.subtitle_controls_box.set_visible(
+                    !is_compound
+                        && (has_stt_model || !c.subtitle_segments.is_empty() || generating),
+                );
                 self.subtitle_generate_btn
                     .set_sensitive(has_stt_model && c.subtitle_segments.is_empty() && !generating);
                 self.subtitle_generate_spinner.set_visible(generating);
@@ -1447,17 +1447,22 @@ impl InspectorView {
                 let has_subtitles = !visible_segments.is_empty();
                 log::debug!(
                     "inspector subtitle: clip={} kind={:?} own={} visible={} has_subtitles={}",
-                    c.id, c.kind, c.subtitle_segments.len(), visible_segments.len(), has_subtitles,
+                    c.id,
+                    c.kind,
+                    c.subtitle_segments.len(),
+                    visible_segments.len(),
+                    has_subtitles,
                 );
                 {
-                    use gtk4::prelude::TextViewExt;
                     use gtk4::prelude::TextBufferExt;
+                    use gtk4::prelude::TextViewExt;
                     if is_compound {
                         // Hide the expander and separate segments section; show
                         // the aggregated info directly in the subtitle_section.
                         self.subtitle_expander.set_visible(false);
                         self.subtitle_segments_section.set_visible(false);
-                        let mut info = format!("Subtitles ({} segments)\n\n", visible_segments.len());
+                        let mut info =
+                            format!("Subtitles ({} segments)\n\n", visible_segments.len());
                         for seg in &visible_segments {
                             let s = seg.start_ns as f64 / 1e9;
                             let e = seg.end_ns as f64 / 1e9;
@@ -1469,11 +1474,14 @@ impl InspectorView {
                             info.push_str(&format!("{:.1}s – {:.1}s  {}\n", s, e, txt));
                         }
                         if visible_segments.is_empty() {
-                            info = "No subtitles.\nDouble-click compound to edit individual clips.".into();
+                            info = "No subtitles.\nDouble-click compound to edit individual clips."
+                                .into();
                         } else {
                             info.push_str("\nDouble-click compound to edit segments.");
                         }
-                        self.compound_subtitle_label.buffer().set_text(info.trim_end());
+                        self.compound_subtitle_label
+                            .buffer()
+                            .set_text(info.trim_end());
                         self.compound_subtitle_label.set_visible(true);
                     } else {
                         self.subtitle_expander.set_visible(true);
@@ -1655,7 +1663,8 @@ impl InspectorView {
                 self.subtitle_word_window_slider
                     .set_value(c.subtitle_word_window_secs);
                 // Show word window slider only when any highlight flag is set.
-                self.subtitle_word_window_slider.set_visible(!flags.is_none());
+                self.subtitle_word_window_slider
+                    .set_visible(!flags.is_none());
                 self.subtitle_position_slider
                     .set_value(c.subtitle_position_y);
                 let oc = c.subtitle_outline_color;
@@ -1928,11 +1937,15 @@ impl InspectorView {
                     playhead_ns,
                 );
                 self.volume_slider.set_value(linear_to_db_volume(vol_val));
-                self.voice_isolation_slider.set_value((c.voice_isolation * 100.0) as f64);
+                self.voice_isolation_slider
+                    .set_value((c.voice_isolation * 100.0) as f64);
                 self.voice_isolation_slider.set_sensitive(true);
-                self.vi_pad_slider.set_value(c.voice_isolation_pad_ms as f64);
-                self.vi_fade_slider.set_value(c.voice_isolation_fade_ms as f64);
-                self.vi_floor_slider.set_value((c.voice_isolation_floor * 100.0) as f64);
+                self.vi_pad_slider
+                    .set_value(c.voice_isolation_pad_ms as f64);
+                self.vi_fade_slider
+                    .set_value(c.voice_isolation_fade_ms as f64);
+                self.vi_floor_slider
+                    .set_value((c.voice_isolation_floor * 100.0) as f64);
                 let vi_detail_visible = c.voice_isolation > 0.0;
                 self.vi_pad_slider.set_visible(vi_detail_visible);
                 self.vi_fade_slider.set_visible(vi_detail_visible);
@@ -2351,7 +2364,9 @@ impl InspectorView {
                     .set_value(c.bg_removal_threshold);
             }
             None => {
-                log::debug!("inspector subtitle: update called with clip=None → hiding content_box");
+                log::debug!(
+                    "inspector subtitle: update called with clip=None → hiding content_box"
+                );
                 self.name_entry.set_text("");
                 self.clip_color_label_combo
                     .set_selected(clip_color_label_index(ClipColorLabel::None));
@@ -2472,9 +2487,11 @@ impl InspectorView {
 
     /// Update the keyframe indicator label based on the playhead position.
     pub fn update_keyframe_indicator(&self, project: &Project, playhead_ns: u64) {
-        let clip = self.selected_clip_id.borrow().clone().and_then(|id| {
-            project.clip_ref(&id).cloned()
-        });
+        let clip = self
+            .selected_clip_id
+            .borrow()
+            .clone()
+            .and_then(|id| project.clip_ref(&id).cloned());
         match clip {
             Some(c) => {
                 let local = c.local_timeline_position_ns(playhead_ns);
@@ -2539,9 +2556,11 @@ impl InspectorView {
     /// indicators.  Called when the playhead moves (scrub, nav, playback) without
     /// a full clip re-selection.
     pub fn update_keyframed_sliders(&self, project: &Project, playhead_ns: u64) {
-        let clip = self.selected_clip_id.borrow().clone().and_then(|id| {
-            project.clip_ref(&id).cloned()
-        });
+        let clip = self
+            .selected_clip_id
+            .borrow()
+            .clone()
+            .and_then(|id| project.clip_ref(&id).cloned());
         if let Some(c) = clip {
             *self.updating.borrow_mut() = true;
             self.volume_slider.set_value(linear_to_db_volume(
@@ -2550,7 +2569,8 @@ impl InspectorView {
                     playhead_ns,
                 ),
             ));
-            self.voice_isolation_slider.set_value((c.voice_isolation * 100.0) as f64);
+            self.voice_isolation_slider
+                .set_value((c.voice_isolation * 100.0) as f64);
             self.pan_slider
                 .set_value(c.value_for_phase1_property_at_timeline_ns(
                     Phase1KeyframeProperty::Pan,
@@ -3266,7 +3286,8 @@ pub fn build_inspector(
     row_label(&subtitle_bg_highlight_color_row, "BG Highlight Color");
     let sub_bg_hl_color_dialog = gtk4::ColorDialog::new();
     sub_bg_hl_color_dialog.set_with_alpha(true);
-    let subtitle_bg_highlight_color_btn = gtk4::ColorDialogButton::new(Some(sub_bg_hl_color_dialog));
+    let subtitle_bg_highlight_color_btn =
+        gtk4::ColorDialogButton::new(Some(sub_bg_hl_color_dialog));
     subtitle_bg_highlight_color_btn.set_rgba(&gdk4::RGBA::new(1.0, 1.0, 0.0, 0.5));
     subtitle_bg_highlight_color_row.append(&subtitle_bg_highlight_color_btn);
     subtitle_bg_highlight_color_row.set_visible(false);
@@ -3606,7 +3627,9 @@ pub fn build_inspector(
     voice_isolation_slider.set_digits(0);
     voice_isolation_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("Off"));
     voice_isolation_slider.add_mark(100.0, gtk4::PositionType::Bottom, Some("Max"));
-    voice_isolation_slider.set_tooltip_text(Some("Duck volume between spoken words (requires generated subtitles)"));
+    voice_isolation_slider.set_tooltip_text(Some(
+        "Duck volume between spoken words (requires generated subtitles)",
+    ));
     audio_inner.append(&voice_isolation_slider);
 
     row_label(&audio_inner, "  Padding (ms)");
@@ -3614,7 +3637,9 @@ pub fn build_inspector(
     vi_pad_slider.set_value(80.0);
     vi_pad_slider.set_draw_value(true);
     vi_pad_slider.set_digits(0);
-    vi_pad_slider.set_tooltip_text(Some("Extend word boundaries to merge close words into continuous speech"));
+    vi_pad_slider.set_tooltip_text(Some(
+        "Extend word boundaries to merge close words into continuous speech",
+    ));
     audio_inner.append(&vi_pad_slider);
 
     row_label(&audio_inner, "  Fade (ms)");
@@ -3622,7 +3647,9 @@ pub fn build_inspector(
     vi_fade_slider.set_value(25.0);
     vi_fade_slider.set_draw_value(true);
     vi_fade_slider.set_digits(0);
-    vi_fade_slider.set_tooltip_text(Some("Smooth transition time between speech and ducked regions"));
+    vi_fade_slider.set_tooltip_text(Some(
+        "Smooth transition time between speech and ducked regions",
+    ));
     audio_inner.append(&vi_fade_slider);
 
     row_label(&audio_inner, "  Floor");
@@ -3632,7 +3659,9 @@ pub fn build_inspector(
     vi_floor_slider.set_digits(0);
     vi_floor_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("Silent"));
     vi_floor_slider.add_mark(100.0, gtk4::PositionType::Bottom, Some("Full"));
-    vi_floor_slider.set_tooltip_text(Some("Minimum volume during ducked regions (preserves room tone)"));
+    vi_floor_slider.set_tooltip_text(Some(
+        "Minimum volume during ducked regions (preserves room tone)",
+    ));
     audio_inner.append(&vi_floor_slider);
 
     let normalize_row = GBox::new(Orientation::Horizontal, 6);
@@ -4951,7 +4980,8 @@ pub fn build_inspector(
                 if let Some(cid) = cid {
                     let mut proj = project.borrow_mut();
                     if let Some(clip) = proj.clip_mut(&cid) {
-                        *voice_iso_snap.borrow_mut() = Some((cid.clone(), String::new(), clip.voice_isolation));
+                        *voice_iso_snap.borrow_mut() =
+                            Some((cid.clone(), String::new(), clip.voice_isolation));
                     }
                 }
             }
@@ -4966,7 +4996,9 @@ pub fn build_inspector(
                 if let Some((clip_id, track_id, old_amount)) = entry {
                     let new_amount = {
                         let mut proj = project.borrow_mut();
-                        proj.clip_mut(&clip_id).map(|c| c.voice_isolation).unwrap_or(old_amount)
+                        proj.clip_mut(&clip_id)
+                            .map(|c| c.voice_isolation)
+                            .unwrap_or(old_amount)
                     };
                     on_execute_command(Box::new(crate::undo::SetClipVoiceIsolationCommand {
                         clip_id,
@@ -6505,8 +6537,8 @@ pub fn build_inspector(
                 {
                     let mut proj = project.borrow_mut();
                     if let Some(clip) = proj.clip_mut(&clip_id) {
-                        removed = clip
-                            .remove_phase1_keyframe_at_timeline_ns(property, timeline_pos_ns);
+                        removed =
+                            clip.remove_phase1_keyframe_at_timeline_ns(property, timeline_pos_ns);
                     }
                     if removed {
                         proj.dirty = true;
@@ -6834,8 +6866,8 @@ pub fn build_inspector(
             let proj = project.borrow();
             if let Some(clip) = proj.clip_ref(&clip_id) {
                 let local = clip.local_timeline_position_ns(playhead);
-                if let Some(prev_local) = clip
-                    .prev_keyframe_local_ns_for_property(Phase1KeyframeProperty::Speed, local)
+                if let Some(prev_local) =
+                    clip.prev_keyframe_local_ns_for_property(Phase1KeyframeProperty::Speed, local)
                 {
                     let timeline_ns = clip.timeline_start.saturating_add(prev_local);
                     let speed_at_kf = clip.speed_at_local_timeline_ns(prev_local);
@@ -6863,8 +6895,8 @@ pub fn build_inspector(
             let proj = project.borrow();
             if let Some(clip) = proj.clip_ref(&clip_id) {
                 let local = clip.local_timeline_position_ns(playhead);
-                if let Some(next_local) = clip
-                    .next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Speed, local)
+                if let Some(next_local) =
+                    clip.next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Speed, local)
                 {
                     let timeline_ns = clip.timeline_start.saturating_add(next_local);
                     let speed_at_kf = clip.speed_at_local_timeline_ns(next_local);
@@ -6914,10 +6946,10 @@ pub fn build_inspector(
             let proj = project.borrow();
             if let Some(clip) = proj.clip_ref(&clip_id) {
                 let local = clip.local_timeline_position_ns(playhead);
-                let prev_volume = clip
-                    .prev_keyframe_local_ns_for_property(Phase1KeyframeProperty::Volume, local);
-                let prev_pan = clip
-                    .prev_keyframe_local_ns_for_property(Phase1KeyframeProperty::Pan, local);
+                let prev_volume =
+                    clip.prev_keyframe_local_ns_for_property(Phase1KeyframeProperty::Volume, local);
+                let prev_pan =
+                    clip.prev_keyframe_local_ns_for_property(Phase1KeyframeProperty::Pan, local);
                 let prev_local = match (prev_volume, prev_pan) {
                     (Some(a), Some(b)) => Some(a.max(b)),
                     (Some(a), None) => Some(a),
@@ -6944,10 +6976,10 @@ pub fn build_inspector(
             let proj = project.borrow();
             if let Some(clip) = proj.clip_ref(&clip_id) {
                 let local = clip.local_timeline_position_ns(playhead);
-                let next_volume = clip
-                    .next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Volume, local);
-                let next_pan = clip
-                    .next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Pan, local);
+                let next_volume =
+                    clip.next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Volume, local);
+                let next_pan =
+                    clip.next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Pan, local);
                 let next_local = match (next_volume, next_pan) {
                     (Some(a), Some(b)) => Some(a.min(b)),
                     (Some(a), None) => Some(a),
@@ -7850,7 +7882,11 @@ pub fn build_inspector(
                             && (clip.kind == crate::model::clip::ClipKind::Video
                                 || clip.kind == crate::model::clip::ClipKind::Image)
                         {
-                            candidates.push((clip.id.clone(), clip.label.clone(), track.id.clone()));
+                            candidates.push((
+                                clip.id.clone(),
+                                clip.label.clone(),
+                                track.id.clone(),
+                            ));
                         }
                         if let Some(ref inner) = clip.compound_tracks {
                             collect_color_candidates(inner, source_id, candidates);
@@ -7951,11 +7987,8 @@ pub fn build_inspector(
                 let clip_info = {
                     let proj = project.borrow();
                     let find = |id: &str| -> Option<(String, u64, u64)> {
-                        proj.clip_ref(id).map(|c| (
-                            c.source_path.clone(),
-                            c.source_in,
-                            c.source_out,
-                        ))
+                        proj.clip_ref(id)
+                            .map(|c| (c.source_path.clone(), c.source_in, c.source_out))
                     };
                     let ref_grading = proj
                         .clip_ref(&ref_clip_id)
@@ -8370,8 +8403,7 @@ pub fn build_inspector(
                                 2 => {
                                     m.shape = crate::model::clip::MaskShape::Path;
                                     if m.path.is_none() {
-                                        m.path =
-                                            Some(crate::model::clip::default_diamond_path());
+                                        m.path = Some(crate::model::clip::default_diamond_path());
                                     }
                                 }
                                 _ => {

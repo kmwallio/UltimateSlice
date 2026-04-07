@@ -417,6 +417,8 @@ pub struct TimelineState {
     /// Empty = editing root project timeline.
     /// Each entry is the clip ID of a compound clip being edited.
     pub compound_nav_stack: Vec<String>,
+    /// Saved scroll offset from root level, restored on exit_compound.
+    pub compound_saved_scroll: Option<f64>,
 }
 
 impl TimelineState {
@@ -468,6 +470,7 @@ impl TimelineState {
             on_match_frame: None,
             on_create_multicam: None,
             compound_nav_stack: Vec::new(),
+            compound_saved_scroll: None,
         }
     }
 
@@ -2135,13 +2138,12 @@ impl TimelineState {
         }
     }
 
-    /// Translate the main-timeline playhead to compound-internal time when
-    /// in drill-down mode.  At root level this is a no-op.
+    /// Translate the root-timeline playhead into the timebase shown while
+    /// drill-editing a compound clip. At root level this is a no-op.
     ///
-    /// When viewing a compound clip that starts at `T` on the parent
-    /// timeline with `source_in = S`, internal position =
-    /// `(playhead - T) + S`.  This makes the playhead align with the
-    /// compound's internal clips.
+    /// The compound editor always shows the full internal timeline, so 0 is
+    /// the first frame of the compound contents even when the parent clip has
+    /// a non-zero `source_in` window.
     pub fn editing_playhead_ns(&self) -> u64 {
         if self.compound_nav_stack.is_empty() {
             return self.playhead_ns;
@@ -2155,9 +2157,7 @@ impl TimelineState {
                 .flat_map(|t| t.clips.iter())
                 .find(|c| c.id == *compound_id && c.is_compound());
             if let Some(compound) = found {
-                playhead = playhead
-                    .saturating_sub(compound.timeline_start)
-                    .saturating_add(compound.source_in);
+                playhead = playhead.saturating_sub(compound.timeline_start);
                 if let Some(ref inner) = compound.compound_tracks {
                     tracks = inner;
                 } else {
@@ -2168,6 +2168,54 @@ impl TimelineState {
             }
         }
         playhead
+    }
+
+    /// Convert a compound-internal position (0-based, matching the internal
+    /// clips' timeline_start values) to root-timeline coordinates.
+    /// Returns `internal_ns` unchanged when not inside a compound.
+    pub fn root_playhead_from_internal_ns(&self, internal_ns: u64) -> u64 {
+        if self.compound_nav_stack.is_empty() {
+            return internal_ns;
+        }
+        let proj = self.project.borrow();
+        let mut entries: Vec<u64> = Vec::new();
+        let mut tracks: &[crate::model::track::Track] = &proj.tracks;
+        for compound_id in &self.compound_nav_stack {
+            let found = tracks
+                .iter()
+                .flat_map(|t| t.clips.iter())
+                .find(|c| c.id == *compound_id && c.is_compound());
+            if let Some(compound) = found {
+                entries.push(compound.timeline_start);
+                if let Some(ref inner) = compound.compound_tracks {
+                    tracks = inner;
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        // Reverse: add back each compound's timeline_start
+        let mut playhead = internal_ns;
+        for timeline_start in entries.iter().rev() {
+            playhead += timeline_start;
+        }
+        playhead
+    }
+
+    /// Alias for `editing_playhead_ns()` when call sites want to emphasize
+    /// that the returned position is in full compound-internal time.
+    pub fn internal_playhead_ns(&self) -> u64 {
+        self.editing_playhead_ns()
+    }
+
+    /// Set playhead from a visual/compound-internal position.
+    /// Translates to root coordinates so `playhead_ns` stays in root space.
+    /// The returned value is the compound-internal position (for `on_seek`).
+    pub fn set_playhead_visual(&mut self, visual_ns: u64) -> u64 {
+        self.playhead_ns = self.root_playhead_from_internal_ns(visual_ns);
+        visual_ns
     }
 
     /// Resolve the currently-editing tracks based on the navigation stack.
@@ -2232,10 +2280,14 @@ impl TimelineState {
 
     /// Enter a compound clip for drill-down editing.
     pub fn enter_compound(&mut self, clip_id: String) {
+        // Save scroll state so we can restore it on exit.
+        self.compound_saved_scroll = Some(self.scroll_offset);
         self.compound_nav_stack.push(clip_id);
         self.selected_clip_id = None;
         self.selected_clip_ids.clear();
         self.selected_track_id = None;
+        // Reset scroll so the internal timeline starts at the left edge.
+        self.scroll_offset = 0.0;
     }
 
     /// Recompute compound clip duration after internal edits.
@@ -2261,6 +2313,12 @@ impl TimelineState {
         self.selected_clip_id = None;
         self.selected_clip_ids.clear();
         self.selected_track_id = None;
+        // Restore saved scroll position when returning to root.
+        if self.compound_nav_stack.is_empty() {
+            if let Some(saved) = self.compound_saved_scroll.take() {
+                self.scroll_offset = saved;
+            }
+        }
     }
 
     /// Navigate back to the root project timeline.
@@ -2269,6 +2327,9 @@ impl TimelineState {
         self.selected_clip_id = None;
         self.selected_clip_ids.clear();
         self.selected_track_id = None;
+        if let Some(saved) = self.compound_saved_scroll.take() {
+            self.scroll_offset = saved;
+        }
     }
 
     /// Get breadcrumb labels for the current navigation path.
@@ -2637,8 +2698,7 @@ impl TimelineState {
             }
             // Trim clips that partially overlap window boundaries
             let orig_duration = clip.duration();
-            let left_trim =
-                compound_source_in.saturating_sub(clip.timeline_start);
+            let left_trim = compound_source_in.saturating_sub(clip.timeline_start);
             if left_trim > 0 {
                 clip.source_in = clip.source_in.saturating_add(left_trim);
                 clip.timeline_start = compound_source_in;
@@ -4419,9 +4479,8 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             let content_height = {
                 let proj = st.project.borrow();
                 let editing_tracks = st.resolve_editing_tracks(&proj);
-                (timeline_content_height_for_tracks(editing_tracks)
-                    + st.breadcrumb_bar_height())
-                .ceil() as i32
+                (timeline_content_height_for_tracks(editing_tracks) + st.breadcrumb_bar_height())
+                    .ceil() as i32
             };
             area.set_content_height(content_height.max(1));
             draw_timeline(cr, width, height, &st, &mut tcache, &mut wcache);
@@ -4513,7 +4572,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 } else {
                     // Left-click in ruler → seek
                     let ns = st.x_to_ns(x);
-                    st.playhead_ns = ns;
+                    st.set_playhead_visual(ns);
                     let seek_cb = st.on_seek.clone();
                     drop(st);
                     if let Some(cb) = seek_cb {
@@ -4525,7 +4584,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     ActiveTool::Razor => {
                         // Razor cut at click position on the clicked track
                         let ns = st.x_to_ns(x);
-                        st.playhead_ns = ns;
+                        st.set_playhead_visual(ns);
                         let track_idx = st.track_index_at_y(y);
                         let seek_cb = st.on_seek.clone();
                         st.razor_cut_at_playhead_on_track(track_idx);
@@ -4600,7 +4659,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                     kf_hit.local_time_ns,
                                 );
                             }
-                            st.playhead_ns = kf_hit.timeline_ns;
+                            st.set_playhead_visual(kf_hit.timeline_ns);
                             let seek_cb = st.on_seek.clone();
                             let sel_cb = st.on_clip_selected.clone();
                             let new_sel = st.selected_clip_id.clone();
@@ -4838,7 +4897,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     // On drag-begin in ruler: record start offset for panning;
                     // also seek playhead to clicked position.
                     let ns = st.x_to_ns(x);
-                    st.playhead_ns = ns;
+                    st.set_playhead_visual(ns);
                     st.ruler_pan_start_offset = st.scroll_offset;
                     let seek_cb = st.on_seek.clone();
                     drop(st);
@@ -5110,7 +5169,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         // Left drag on ruler = continuous scrubbing.
                         let mut st = state.borrow_mut();
                         let ns = st.x_to_ns(current_x);
-                        st.playhead_ns = ns;
+                        st.set_playhead_visual(ns);
                         let seek_cb = st.on_seek.clone();
                         drop(st);
                         if let Some(cb) = seek_cb {
@@ -9019,6 +9078,59 @@ mod tests {
             TimelineState::new(Rc::new(RefCell::new(project))),
             "through-edit-track".to_string(),
         )
+    }
+
+    fn timeline_state_with_windowed_compound(
+        compound_timeline_start: u64,
+        compound_source_in: u64,
+    ) -> (TimelineState, String) {
+        let mut project = Project::new("Compound playhead tests");
+        let video_idx = project
+            .tracks
+            .iter()
+            .position(|t| t.kind == TrackKind::Video)
+            .expect("default project should include a video track");
+        let track = &mut project.tracks[video_idx];
+        track.clips.clear();
+
+        let mut inner_track = crate::model::track::Track::new_video("Inner Video");
+        let mut inner_clip = Clip::new("inner.mov", 30_000_000_000, 0, ClipKind::Video);
+        inner_clip.id = "inner".to_string();
+        inner_track.add_clip(inner_clip);
+
+        let mut compound = Clip::new_compound(compound_timeline_start, vec![inner_track]);
+        compound.id = "compound".to_string();
+        compound.source_in = compound_source_in;
+        compound.source_out = 30_000_000_000;
+        track.add_clip(compound);
+
+        let mut state = TimelineState::new(Rc::new(RefCell::new(project)));
+        state.enter_compound("compound".to_string());
+        (state, "compound".to_string())
+    }
+
+    #[test]
+    fn editing_playhead_uses_full_internal_time_for_windowed_compounds() {
+        let compound_timeline_start = 10_000_000_000;
+        let compound_source_in = 10_000_000_000;
+        let (mut st, compound_id) =
+            timeline_state_with_windowed_compound(compound_timeline_start, compound_source_in);
+
+        assert_eq!(
+            st.root_playhead_from_internal_ns(0),
+            compound_timeline_start
+        );
+
+        st.playhead_ns = compound_timeline_start;
+        assert_eq!(st.editing_playhead_ns(), 0);
+        assert_eq!(st.internal_playhead_ns(), 0);
+
+        st.set_playhead_visual(2_000_000_000);
+        assert_eq!(st.playhead_ns, compound_timeline_start + 2_000_000_000);
+        assert_eq!(st.editing_playhead_ns(), 2_000_000_000);
+        assert_eq!(st.internal_playhead_ns(), 2_000_000_000);
+
+        assert_eq!(st.compound_nav_stack, vec![compound_id]);
     }
 
     #[test]

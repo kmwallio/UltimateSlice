@@ -687,10 +687,7 @@ pub fn build_program_monitor(
                                     subtitle_preview_underline_metrics(font_size);
                                 cr.set_line_width(underline_thickness);
                                 let _ = cr.move_to(word_x, ty + underline_offset);
-                                let _ = cr.line_to(
-                                    word_x + we.x_advance(),
-                                    ty + underline_offset,
-                                );
+                                let _ = cr.line_to(word_x + we.x_advance(), ty + underline_offset);
                                 cr.stroke().ok();
                             }
                         } else {
@@ -713,10 +710,7 @@ pub fn build_program_monitor(
                                     subtitle_preview_underline_metrics(font_size);
                                 cr.set_line_width(underline_thickness);
                                 let _ = cr.move_to(word_x, ty + underline_offset);
-                                let _ = cr.line_to(
-                                    word_x + we.x_advance(),
-                                    ty + underline_offset,
-                                );
+                                let _ = cr.line_to(word_x + we.x_advance(), ty + underline_offset);
                                 cr.stroke().ok();
                             }
                         }

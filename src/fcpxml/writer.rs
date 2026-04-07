@@ -808,7 +808,10 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     }
                     asset_clip.push_attribute(("us:volume", clip.volume.to_string().as_str()));
                     if clip.voice_isolation > 0.0 {
-                        asset_clip.push_attribute(("us:voice-isolation", clip.voice_isolation.to_string().as_str()));
+                        asset_clip.push_attribute((
+                            "us:voice-isolation",
+                            clip.voice_isolation.to_string().as_str(),
+                        ));
                     }
                     let volume_keyframes_json = if clip.volume_keyframes.is_empty() {
                         None

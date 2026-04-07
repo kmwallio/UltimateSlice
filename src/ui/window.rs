@@ -3403,8 +3403,7 @@ fn clip_to_program_clips(
                     // Trim clips that partially overlap the window boundaries
                     let mut windowed = inner_clip.clone();
                     let orig_duration = windowed.duration();
-                    let left_trim =
-                        window_start.saturating_sub(windowed.timeline_start);
+                    let left_trim = window_start.saturating_sub(windowed.timeline_start);
                     if left_trim > 0 {
                         windowed.source_in = windowed.source_in.saturating_add(left_trim);
                         windowed.timeline_start = window_start;
@@ -3421,8 +3420,7 @@ fn clip_to_program_clips(
                         windowed.retain_subtitles_in_local_range(left_trim, range_end);
                     }
                     // Rebase: offset from window start + compound parent pos
-                    windowed.timeline_start =
-                        windowed.timeline_start.saturating_sub(window_start);
+                    windowed.timeline_start = windowed.timeline_start.saturating_sub(window_start);
                     result.extend(clip_to_program_clips(
                         &windowed,
                         inner_audio,
@@ -4201,14 +4199,20 @@ pub fn build_window(
                                 player_clip.voice_isolation = voice_isolation as f64;
                             }
                             // Sync to audio-only clips
-                            for audio_clip in pp.audio_clips.iter_mut().filter(|c| c.id == clip_id) {
+                            for audio_clip in pp.audio_clips.iter_mut().filter(|c| c.id == clip_id)
+                            {
                                 audio_clip.volume_keyframes = model_clip.volume_keyframes.clone();
                                 audio_clip.pan_keyframes = model_clip.pan_keyframes.clone();
                                 audio_clip.voice_isolation = voice_isolation as f64;
                             }
                         }
                     }
-                    pp.update_audio_for_clip(clip_id, vol as f64, pan as f64, voice_isolation as f64);
+                    pp.update_audio_for_clip(
+                        clip_id,
+                        vol as f64,
+                        pan as f64,
+                        voice_isolation as f64,
+                    );
                 }
                 if let Some(win) = window_weak.upgrade() {
                     let proj = project.borrow();
@@ -4237,8 +4241,7 @@ pub fn build_window(
                     {
                         let proj = project.borrow();
                         if let Some(model_clip) = proj.clip_ref(&clip_id) {
-                            if let Some(player_clip) =
-                                pp.clips.iter_mut().find(|c| c.id == clip_id)
+                            if let Some(player_clip) = pp.clips.iter_mut().find(|c| c.id == clip_id)
                             {
                                 player_clip.eq_bands = model_clip.eq_bands;
                                 player_clip.eq_low_gain_keyframes =
@@ -5457,24 +5460,22 @@ pub fn build_window(
         let timeline_state = timeline_state.clone();
         let on_project_changed = on_project_changed.clone();
         let updating = inspector_view.updating.clone();
-        inspector_view
-            .hl_italic_check
-            .connect_toggled(move |btn| {
-                if *updating.borrow() {
-                    return;
+        inspector_view.hl_italic_check.connect_toggled(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let active = btn.is_active();
+            let selected = timeline_state.borrow().selected_clip_id.clone();
+            if let Some(ref clip_id) = selected {
+                let mut proj = project.borrow_mut();
+                if let Some(clip) = proj.clip_mut(clip_id) {
+                    clip.subtitle_highlight_flags.italic = active;
                 }
-                let active = btn.is_active();
-                let selected = timeline_state.borrow().selected_clip_id.clone();
-                if let Some(ref clip_id) = selected {
-                    let mut proj = project.borrow_mut();
-                    if let Some(clip) = proj.clip_mut(clip_id) {
-                        clip.subtitle_highlight_flags.italic = active;
-                    }
-                    proj.dirty = true;
-                    drop(proj);
-                    on_project_changed();
-                }
-            });
+                proj.dirty = true;
+                drop(proj);
+                on_project_changed();
+            }
+        });
     }
     {
         let project = project.clone();
@@ -5503,24 +5504,22 @@ pub fn build_window(
         let timeline_state = timeline_state.clone();
         let on_project_changed = on_project_changed.clone();
         let updating = inspector_view.updating.clone();
-        inspector_view
-            .hl_shadow_check
-            .connect_toggled(move |btn| {
-                if *updating.borrow() {
-                    return;
+        inspector_view.hl_shadow_check.connect_toggled(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let active = btn.is_active();
+            let selected = timeline_state.borrow().selected_clip_id.clone();
+            if let Some(ref clip_id) = selected {
+                let mut proj = project.borrow_mut();
+                if let Some(clip) = proj.clip_mut(clip_id) {
+                    clip.subtitle_highlight_flags.shadow = active;
                 }
-                let active = btn.is_active();
-                let selected = timeline_state.borrow().selected_clip_id.clone();
-                if let Some(ref clip_id) = selected {
-                    let mut proj = project.borrow_mut();
-                    if let Some(clip) = proj.clip_mut(clip_id) {
-                        clip.subtitle_highlight_flags.shadow = active;
-                    }
-                    proj.dirty = true;
-                    drop(proj);
-                    on_project_changed();
-                }
-            });
+                proj.dirty = true;
+                drop(proj);
+                on_project_changed();
+            }
+        });
     }
 
     // Wire subtitle background highlight color button.
@@ -8057,7 +8056,13 @@ pub fn build_window(
                         cb(false);
                     }
                     pp.borrow_mut().stop();
-                    ts.borrow_mut().playhead_ns = 0;
+                    // When inside a compound deep-dive, set the root playhead
+                    // to the compound's start so editing_playhead_ns() maps to 0.
+                    let root_pos = {
+                        let st = ts.borrow();
+                        st.root_playhead_from_internal_ns(0)
+                    };
+                    ts.borrow_mut().playhead_ns = root_pos;
                     if let Some(ref w) = *cell.borrow() {
                         w.queue_draw();
                     }
@@ -8416,8 +8421,21 @@ pub fn build_window(
             }
             if pos_ns != last_pos_ns_c.get() {
                 let frame_rate = { project.borrow().frame_rate.clone() };
+                // When inside a compound deep-dive, the program player reports
+                // positions in compound-internal coordinates.  Translate back
+                // to root-timeline coordinates so playhead_ns stays in root
+                // space (editing_playhead_ns handles the forward translation
+                // when drawing).
+                let root_pos = {
+                    let st = ts.borrow();
+                    if st.compound_nav_stack.is_empty() {
+                        pos_ns
+                    } else {
+                        st.root_playhead_from_internal_ns(pos_ns)
+                    }
+                };
                 pos_label.set_text(&program_monitor::format_timecode(pos_ns, &frame_rate));
-                ts.borrow_mut().playhead_ns = pos_ns;
+                ts.borrow_mut().playhead_ns = root_pos;
                 let should_draw = if !playing {
                     true
                 } else {
@@ -8459,135 +8477,154 @@ pub fn build_window(
                         pos_ns: u64,
                         lines: &mut Vec<crate::ui::program_monitor::SubtitleLine>,
                     ) {
-                    for track in tracks {
-                        for clip in &track.clips {
-                            // Recurse into compound clips with translated time
-                            if let Some(ref inner) = clip.compound_tracks {
+                        for track in tracks {
+                            for clip in &track.clips {
+                                // Recurse into compound clips with translated time
+                                if let Some(ref inner) = clip.compound_tracks {
+                                    let clip_end = clip.timeline_start + clip.duration();
+                                    if pos_ns >= clip.timeline_start && pos_ns < clip_end {
+                                        let internal_pos = pos_ns
+                                            .saturating_sub(clip.timeline_start)
+                                            .saturating_add(clip.source_in);
+                                        collect_subtitle_lines(inner, internal_pos, lines);
+                                    }
+                                    continue;
+                                }
+                                if clip.subtitle_segments.is_empty() {
+                                    continue;
+                                }
                                 let clip_end = clip.timeline_start + clip.duration();
                                 if pos_ns >= clip.timeline_start && pos_ns < clip_end {
-                                    let internal_pos = pos_ns
-                                        .saturating_sub(clip.timeline_start)
-                                        .saturating_add(clip.source_in);
-                                    collect_subtitle_lines(inner, internal_pos, lines);
-                                }
-                                continue;
-                            }
-                            if clip.subtitle_segments.is_empty() {
-                                continue;
-                            }
-                            let clip_end = clip.timeline_start + clip.duration();
-                            if pos_ns >= clip.timeline_start && pos_ns < clip_end {
-                                let local_ns = ((pos_ns - clip.timeline_start) as f64 * clip.speed)
-                                    as u64;
-                                for seg in &clip.subtitle_segments {
-                                    if local_ns >= seg.start_ns && local_ns < seg.end_ns {
-                                        let c = clip.subtitle_color;
-                                        let oc = clip.subtitle_outline_color;
-                                        let bc = clip.subtitle_bg_box_color;
-                                        let hc = clip.subtitle_highlight_color;
-                                        let base_size =
-                                            crate::media::title_font::parse_subtitle_font(
-                                                &clip.subtitle_font,
-                                            )
-                                            .size_points();
-                                        let font_desc =
+                                    let local_ns =
+                                        ((pos_ns - clip.timeline_start) as f64 * clip.speed) as u64;
+                                    for seg in &clip.subtitle_segments {
+                                        if local_ns >= seg.start_ns && local_ns < seg.end_ns {
+                                            let c = clip.subtitle_color;
+                                            let oc = clip.subtitle_outline_color;
+                                            let bc = clip.subtitle_bg_box_color;
+                                            let hc = clip.subtitle_highlight_color;
+                                            let base_size =
+                                                crate::media::title_font::parse_subtitle_font(
+                                                    &clip.subtitle_font,
+                                                )
+                                                .size_points();
+                                            let font_desc =
                                             crate::media::title_font::build_preview_subtitle_font_desc(
                                                 &clip.subtitle_font,
                                                 base_size,
                                             );
 
-                                        // Build word-level display with active word highlighting.
-                                        // Fixed groups: divide words into groups of N, show the
-                                        // group containing the active word. The group stays on
-                                        // screen until its last word finishes, then advances.
-                                        let group_size =
-                                            (clip.subtitle_word_window_secs as usize).max(2);
-                                        let mut word_displays = Vec::new();
-                                        if !seg.words.is_empty()
-                                            && !clip.subtitle_highlight_flags.is_none()
-                                        {
-                                            // Find which word is active.
-                                            let active_idx = seg.words.iter().position(|w| {
-                                                local_ns >= w.start_ns && local_ns < w.end_ns
-                                            });
-                                            // Determine which fixed group the active word belongs to.
-                                            let center = active_idx.unwrap_or(0);
-                                            let group_start = (center / group_size) * group_size;
-                                            let group_end =
-                                                (group_start + group_size).min(seg.words.len());
-                                            for (wi, word) in
-                                                seg.words[group_start..group_end].iter().enumerate()
+                                            // Build word-level display with active word highlighting.
+                                            // Fixed groups: divide words into groups of N, show the
+                                            // group containing the active word. The group stays on
+                                            // screen until its last word finishes, then advances.
+                                            let group_size =
+                                                (clip.subtitle_word_window_secs as usize).max(2);
+                                            let mut word_displays = Vec::new();
+                                            if !seg.words.is_empty()
+                                                && !clip.subtitle_highlight_flags.is_none()
                                             {
-                                                word_displays.push(crate::ui::program_monitor::SubtitleWordDisplay {
+                                                // Find which word is active.
+                                                let active_idx = seg.words.iter().position(|w| {
+                                                    local_ns >= w.start_ns && local_ns < w.end_ns
+                                                });
+                                                // Determine which fixed group the active word belongs to.
+                                                let center = active_idx.unwrap_or(0);
+                                                let group_start =
+                                                    (center / group_size) * group_size;
+                                                let group_end =
+                                                    (group_start + group_size).min(seg.words.len());
+                                                for (wi, word) in seg.words[group_start..group_end]
+                                                    .iter()
+                                                    .enumerate()
+                                                {
+                                                    word_displays.push(crate::ui::program_monitor::SubtitleWordDisplay {
                                                     text: word.text.clone(),
                                                     active: Some(group_start + wi) == active_idx,
                                                 });
+                                                }
                                             }
-                                        }
 
-                                        let sc = clip.subtitle_shadow_color;
-                                        let bhc = clip.subtitle_bg_highlight_color;
-                                        lines.push(crate::ui::program_monitor::SubtitleLine {
-                                            words: word_displays,
-                                            text: seg.text.clone(),
-                                            color: (
-                                                ((c >> 24) & 0xFF) as f64 / 255.0,
-                                                ((c >> 16) & 0xFF) as f64 / 255.0,
-                                                ((c >> 8) & 0xFF) as f64 / 255.0,
-                                                (c & 0xFF) as f64 / 255.0,
-                                            ),
-                                            highlight_color: (
-                                                ((hc >> 24) & 0xFF) as f64 / 255.0,
-                                                ((hc >> 16) & 0xFF) as f64 / 255.0,
-                                                ((hc >> 8) & 0xFF) as f64 / 255.0,
-                                                (hc & 0xFF) as f64 / 255.0,
-                                            ),
-                                            highlight_flags: clip.subtitle_highlight_flags,
-                                            outline_color: (
-                                                ((oc >> 24) & 0xFF) as f64 / 255.0,
-                                                ((oc >> 16) & 0xFF) as f64 / 255.0,
-                                                ((oc >> 8) & 0xFF) as f64 / 255.0,
-                                                (oc & 0xFF) as f64 / 255.0,
-                                            ),
-                                            outline_width: clip.subtitle_outline_width,
-                                            bg_box: clip.subtitle_bg_box,
-                                            bg_box_color: (
-                                                ((bc >> 24) & 0xFF) as f64 / 255.0,
-                                                ((bc >> 16) & 0xFF) as f64 / 255.0,
-                                                ((bc >> 8) & 0xFF) as f64 / 255.0,
-                                                (bc & 0xFF) as f64 / 255.0,
-                                            ),
-                                            font_desc,
-                                            position_y: clip.subtitle_position_y,
-                                            subtitle_bold: clip.subtitle_bold,
-                                            subtitle_italic: clip.subtitle_italic,
-                                            subtitle_underline: clip.subtitle_underline,
-                                            subtitle_shadow: clip.subtitle_shadow,
-                                            subtitle_shadow_color: (
-                                                ((sc >> 24) & 0xFF) as f64 / 255.0,
-                                                ((sc >> 16) & 0xFF) as f64 / 255.0,
-                                                ((sc >> 8) & 0xFF) as f64 / 255.0,
-                                                (sc & 0xFF) as f64 / 255.0,
-                                            ),
-                                            subtitle_shadow_offset: (
-                                                clip.subtitle_shadow_offset_x,
-                                                clip.subtitle_shadow_offset_y,
-                                            ),
-                                            bg_highlight_color: (
-                                                ((bhc >> 24) & 0xFF) as f64 / 255.0,
-                                                ((bhc >> 16) & 0xFF) as f64 / 255.0,
-                                                ((bhc >> 8) & 0xFF) as f64 / 255.0,
-                                                (bhc & 0xFF) as f64 / 255.0,
-                                            ),
-                                        });
-                                        break;
+                                            let sc = clip.subtitle_shadow_color;
+                                            let bhc = clip.subtitle_bg_highlight_color;
+                                            lines.push(crate::ui::program_monitor::SubtitleLine {
+                                                words: word_displays,
+                                                text: seg.text.clone(),
+                                                color: (
+                                                    ((c >> 24) & 0xFF) as f64 / 255.0,
+                                                    ((c >> 16) & 0xFF) as f64 / 255.0,
+                                                    ((c >> 8) & 0xFF) as f64 / 255.0,
+                                                    (c & 0xFF) as f64 / 255.0,
+                                                ),
+                                                highlight_color: (
+                                                    ((hc >> 24) & 0xFF) as f64 / 255.0,
+                                                    ((hc >> 16) & 0xFF) as f64 / 255.0,
+                                                    ((hc >> 8) & 0xFF) as f64 / 255.0,
+                                                    (hc & 0xFF) as f64 / 255.0,
+                                                ),
+                                                highlight_flags: clip.subtitle_highlight_flags,
+                                                outline_color: (
+                                                    ((oc >> 24) & 0xFF) as f64 / 255.0,
+                                                    ((oc >> 16) & 0xFF) as f64 / 255.0,
+                                                    ((oc >> 8) & 0xFF) as f64 / 255.0,
+                                                    (oc & 0xFF) as f64 / 255.0,
+                                                ),
+                                                outline_width: clip.subtitle_outline_width,
+                                                bg_box: clip.subtitle_bg_box,
+                                                bg_box_color: (
+                                                    ((bc >> 24) & 0xFF) as f64 / 255.0,
+                                                    ((bc >> 16) & 0xFF) as f64 / 255.0,
+                                                    ((bc >> 8) & 0xFF) as f64 / 255.0,
+                                                    (bc & 0xFF) as f64 / 255.0,
+                                                ),
+                                                font_desc,
+                                                position_y: clip.subtitle_position_y,
+                                                subtitle_bold: clip.subtitle_bold,
+                                                subtitle_italic: clip.subtitle_italic,
+                                                subtitle_underline: clip.subtitle_underline,
+                                                subtitle_shadow: clip.subtitle_shadow,
+                                                subtitle_shadow_color: (
+                                                    ((sc >> 24) & 0xFF) as f64 / 255.0,
+                                                    ((sc >> 16) & 0xFF) as f64 / 255.0,
+                                                    ((sc >> 8) & 0xFF) as f64 / 255.0,
+                                                    (sc & 0xFF) as f64 / 255.0,
+                                                ),
+                                                subtitle_shadow_offset: (
+                                                    clip.subtitle_shadow_offset_x,
+                                                    clip.subtitle_shadow_offset_y,
+                                                ),
+                                                bg_highlight_color: (
+                                                    ((bhc >> 24) & 0xFF) as f64 / 255.0,
+                                                    ((bhc >> 16) & 0xFF) as f64 / 255.0,
+                                                    ((bhc >> 8) & 0xFF) as f64 / 255.0,
+                                                    (bhc & 0xFF) as f64 / 255.0,
+                                                ),
+                                            });
+                                            break;
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-                    }
-                    collect_subtitle_lines(&proj.tracks, pos_ns, &mut lines);
+                    // When inside a compound deep-dive, collect subtitles
+                    // from the internal tracks using the player's compound-
+                    // internal position (pos_ns) directly.
+                    // When inside a compound deep-dive, collect subtitles
+                    // from the internal tracks using the player's compound-
+                    // internal position (pos_ns) directly.
+                    let editing_ptr = {
+                        let st = ts.borrow();
+                        if st.compound_nav_stack.is_empty() {
+                            proj.tracks.as_slice() as *const [crate::model::track::Track]
+                        } else {
+                            st.resolve_editing_tracks(&proj)
+                                as *const [crate::model::track::Track]
+                        }
+                    };
+                    // SAFETY: proj is borrowed immutably for this block.
+                    let editing: &[crate::model::track::Track] = unsafe { &*editing_ptr };
+                    collect_subtitle_lines(editing, pos_ns, &mut lines);
                     prog_subtitle_setter_poll(lines);
                 }
                 if let Some(ref editor) = *keyframe_editor_poll.borrow() {
@@ -10237,8 +10274,17 @@ pub fn build_window(
                     .map(|clip| clip.id.clone())
                     .collect();
 
-                let clips = proj
-                    .tracks
+                // When inside a compound deep-dive, play only the
+                // compound's internal tracks instead of the full root
+                // timeline so the program monitor shows compound content.
+                let editing_tracks = {
+                    let st = timeline_state.borrow();
+                    st.resolve_editing_tracks(&proj) as *const [crate::model::track::Track]
+                };
+                // SAFETY: proj is borrowed immutably for the duration of this block;
+                // the raw pointer just avoids a lifetime conflict with the RefCell borrow.
+                let editing_tracks: &[crate::model::track::Track] = unsafe { &*editing_tracks };
+                let clips = editing_tracks
                     .iter()
                     .enumerate()
                     .filter(|(_, t)| proj.track_is_active_for_output(t))
@@ -10321,11 +10367,19 @@ pub fn build_window(
             let suppress_resume = suppress_resume_on_next_reload.replace(false);
             let (prev_pos, was_playing) = {
                 let pp = prog_player.borrow();
-                (
-                    pp.timeline_pos_ns,
-                    !suppress_resume
-                        && matches!(pp.state(), crate::media::player::PlayerState::Playing),
-                )
+                let raw_pos = pp.timeline_pos_ns;
+                let playing = !suppress_resume
+                    && matches!(pp.state(), crate::media::player::PlayerState::Playing);
+                // When inside a compound deep-dive, translate the root-level
+                // playhead into compound-internal coordinates so the seek
+                // targets the correct position within the internal clips.
+                let st = timeline_state.borrow();
+                let pos = if st.compound_nav_stack.is_empty() {
+                    raw_pos
+                } else {
+                    st.internal_playhead_ns()
+                };
+                (pos, playing)
             };
             let (proj_w, proj_h) = project_dims;
             let (fr_num, fr_den) = project_frame_rate;
@@ -13114,8 +13168,7 @@ fn handle_mcp_command(
         } => {
             let mut proj = project.borrow_mut();
             let found = if let Some(clip) = proj.clip_mut(&clip_id) {
-                if let Some(effect) = clip.ladspa_effects.iter_mut().find(|e| e.id == effect_id)
-                {
+                if let Some(effect) = clip.ladspa_effects.iter_mut().find(|e| e.id == effect_id) {
                     for (k, v) in &params {
                         effect.params.insert(k.clone(), *v);
                     }
@@ -14504,18 +14557,16 @@ fn handle_mcp_command(
                     if let Some(ref s) = shape {
                         if s == "path" {
                             if let Some(ref path_val) = path {
-                                if let Ok(points) = serde_json::from_value::<
-                                    Vec<crate::model::clip::BezierPoint>,
-                                >(
-                                    path_val.clone()
-                                ) {
-                                    mask.path =
-                                        Some(crate::model::clip::MaskPath { points });
+                                if let Ok(points) =
+                                    serde_json::from_value::<Vec<crate::model::clip::BezierPoint>>(
+                                        path_val.clone(),
+                                    )
+                                {
+                                    mask.path = Some(crate::model::clip::MaskPath { points });
                                 }
                             }
                             if mask.path.is_none() {
-                                mask.path =
-                                    Some(crate::model::clip::default_diamond_path());
+                                mask.path = Some(crate::model::clip::default_diamond_path());
                             }
                         }
                     }
@@ -14751,21 +14802,17 @@ fn handle_mcp_command(
             // Extract clip info from the model.
             let clip_info = {
                 let proj = project.borrow();
-                proj.clip_ref(&clip_id).map(|clip| (
-                    clip.source_path.clone(),
-                    clip.source_in,
-                    clip.source_out,
-                    clip.volume,
-                    clip.measured_loudness_lufs,
-                ))
+                proj.clip_ref(&clip_id).map(|clip| {
+                    (
+                        clip.source_path.clone(),
+                        clip.source_in,
+                        clip.source_out,
+                        clip.volume,
+                        clip.measured_loudness_lufs,
+                    )
+                })
             };
-            if let Some((
-                source_path,
-                source_in,
-                source_out,
-                old_volume,
-                _old_measured,
-            )) = clip_info
+            if let Some((source_path, source_in, source_out, old_volume, _old_measured)) = clip_info
             {
                 // Run analysis synchronously (blocks GTK main loop for a few seconds,
                 // acceptable for MCP tool calls — same pattern as export_mp4).
@@ -15226,9 +15273,7 @@ fn handle_mcp_command(
                         (keyframe_time_ns, bezier_controls)
                     {
                         let keyframes = clip.keyframes_for_phase1_property_mut(property);
-                        if let Some(kf) =
-                            keyframes.iter_mut().find(|kf| kf.time_ns == local_ns)
-                        {
+                        if let Some(kf) = keyframes.iter_mut().find(|kf| kf.time_ns == local_ns) {
                             kf.bezier_controls = Some(crate::model::clip::BezierControls {
                                 x1: x1.clamp(0.0, 1.0),
                                 y1: y1.clamp(0.0, 1.0),
@@ -15280,8 +15325,7 @@ fn handle_mcp_command(
             {
                 let mut proj = project.borrow_mut();
                 if let Some(clip) = proj.clip_mut(&clip_id) {
-                    removed = clip
-                        .remove_phase1_keyframe_at_timeline_ns(property, timeline_pos_ns);
+                    removed = clip.remove_phase1_keyframe_at_timeline_ns(property, timeline_pos_ns);
                     if removed {
                         proj.dirty = true;
                     }
@@ -17461,9 +17505,7 @@ fn handle_mcp_command(
         } => {
             let mut proj = project.borrow_mut();
             let found = if let Some(clip) = proj.clip_mut(&clip_id) {
-                if let Some(pos) =
-                    clip.frei0r_effects.iter().position(|e| e.id == effect_id)
-                {
+                if let Some(pos) = clip.frei0r_effects.iter().position(|e| e.id == effect_id) {
                     clip.frei0r_effects.remove(pos);
                     proj.dirty = true;
                     true
@@ -17489,9 +17531,7 @@ fn handle_mcp_command(
         } => {
             let mut proj = project.borrow_mut();
             let found = if let Some(clip) = proj.clip_mut(&clip_id) {
-                if let Some(effect) =
-                    clip.frei0r_effects.iter_mut().find(|e| e.id == effect_id)
-                {
+                if let Some(effect) = clip.frei0r_effects.iter_mut().find(|e| e.id == effect_id) {
                     for (k, v) in params {
                         effect.params.insert(k, v);
                     }
@@ -17525,8 +17565,7 @@ fn handle_mcp_command(
                 // Build new order from effect_ids.
                 let mut reordered = Vec::with_capacity(effect_ids.len());
                 for eid in &effect_ids {
-                    if let Some(pos) = clip.frei0r_effects.iter().position(|e| &e.id == eid)
-                    {
+                    if let Some(pos) = clip.frei0r_effects.iter().position(|e| &e.id == eid) {
                         reordered.push(clip.frei0r_effects[pos].clone());
                     }
                 }

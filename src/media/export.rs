@@ -674,10 +674,9 @@ pub fn export_project(
                     .subtitle_segments
                     .iter()
                     .map(|seg| {
-                        let abs_start = clip.timeline_start
-                            + (seg.start_ns as f64 / clip.speed) as u64;
-                        let abs_end = clip.timeline_start
-                            + (seg.end_ns as f64 / clip.speed) as u64;
+                        let abs_start =
+                            clip.timeline_start + (seg.start_ns as f64 / clip.speed) as u64;
+                        let abs_end = clip.timeline_start + (seg.end_ns as f64 / clip.speed) as u64;
                         (abs_start, abs_end, seg.text.clone(), clip)
                     })
                     .collect();
@@ -1638,7 +1637,10 @@ fn build_volume_filter(clip: &Clip) -> String {
                 .map(|(s, e)| format!("between(t,{:.3},{:.3})", s, e))
                 .collect::<Vec<_>>()
                 .join("+");
-            let expr = format!("({}) * if({}, 1.0, {:.4})", base_expr, condition, duck_ratio);
+            let expr = format!(
+                "({}) * if({}, 1.0, {:.4})",
+                base_expr, condition, duck_ratio
+            );
             return format!("volume='{}':eval=frame", expr);
         }
     }
@@ -2433,8 +2435,16 @@ fn build_subtitle_filter_composited(
                 outline_color = format!("&H00{obb:02X}{obg:02X}{obr:02X}");
                 outline_w = (style_clip.subtitle_outline_width * scale_factor).round() as u32;
             }
-            let mut shadow_depth = if style_clip.subtitle_shadow { 2u32 } else { 0u32 };
-            let ass_underline = if style_clip.subtitle_underline { -1i32 } else { 0i32 };
+            let mut shadow_depth = if style_clip.subtitle_shadow {
+                2u32
+            } else {
+                0u32
+            };
+            let ass_underline = if style_clip.subtitle_underline {
+                -1i32
+            } else {
+                0i32
+            };
             if style_clip.subtitle_bg_box {
                 let bc = style_clip.subtitle_bg_box_color;
                 let bbr = ((bc >> 24) & 0xFF) as u8;
@@ -2468,10 +2478,10 @@ fn build_subtitle_filter_composited(
 
             for seg in &style_clip.subtitle_segments {
                 if seg.words.is_empty() {
-                    let abs_start = style_clip.timeline_start
-                        + (seg.start_ns as f64 / style_clip.speed) as u64;
-                    let abs_end = style_clip.timeline_start
-                        + (seg.end_ns as f64 / style_clip.speed) as u64;
+                    let abs_start =
+                        style_clip.timeline_start + (seg.start_ns as f64 / style_clip.speed) as u64;
+                    let abs_end =
+                        style_clip.timeline_start + (seg.end_ns as f64 / style_clip.speed) as u64;
                     let _ = writeln!(
                         sub_file,
                         "Dialogue: 0,{},{},Default,,0,0,0,,{}",
@@ -2488,8 +2498,8 @@ fn build_subtitle_filter_composited(
                 for (wi, word) in seg.words.iter().enumerate() {
                     let w_abs_start = style_clip.timeline_start
                         + (word.start_ns as f64 / style_clip.speed) as u64;
-                    let w_abs_end = style_clip.timeline_start
-                        + (word.end_ns as f64 / style_clip.speed) as u64;
+                    let w_abs_end =
+                        style_clip.timeline_start + (word.end_ns as f64 / style_clip.speed) as u64;
 
                     // Determine which fixed group this word belongs to.
                     let group_start = (wi / group_size) * group_size;
@@ -2503,23 +2513,34 @@ fn build_subtitle_filter_composited(
                         if group_start + owi == wi {
                             // Build combined ASS override tags from highlight flags.
                             let mut overrides = String::new();
-                            if flags.bold { overrides.push_str("\\b1"); }
-                            if flags.italic { overrides.push_str("\\i1"); }
-                            if flags.underline { overrides.push_str("\\u1"); }
+                            if flags.bold {
+                                overrides.push_str("\\b1");
+                            }
+                            if flags.italic {
+                                overrides.push_str("\\i1");
+                            }
+                            if flags.underline {
+                                overrides.push_str("\\u1");
+                            }
                             if flags.color {
                                 overrides.push_str(&format!("\\c&H{hb:02X}{hg:02X}{hr:02X}&"));
                             }
                             if flags.stroke {
-                                overrides.push_str(&format!("\\bord4\\3c&H{hb:02X}{hg:02X}{hr:02X}&"));
+                                overrides
+                                    .push_str(&format!("\\bord4\\3c&H{hb:02X}{hg:02X}{hr:02X}&"));
                             }
                             if flags.background {
                                 let bhc = style_clip.subtitle_bg_highlight_color;
                                 let bhr = ((bhc >> 24) & 0xFF) as u8;
                                 let bhg = ((bhc >> 16) & 0xFF) as u8;
                                 let bhb = ((bhc >> 8) & 0xFF) as u8;
-                                overrides.push_str(&format!("\\4c&H{bhb:02X}{bhg:02X}{bhr:02X}&\\shad2"));
+                                overrides.push_str(&format!(
+                                    "\\4c&H{bhb:02X}{bhg:02X}{bhr:02X}&\\shad2"
+                                ));
                             }
-                            if flags.shadow { overrides.push_str("\\shad2"); }
+                            if flags.shadow {
+                                overrides.push_str("\\shad2");
+                            }
 
                             if overrides.is_empty() {
                                 text.push_str(&ow.text);
@@ -2570,10 +2591,9 @@ pub fn export_srt(project: &Project, output_path: &str) -> Result<()> {
             for seg in &clip.subtitle_segments {
                 // Convert clip-local to timeline-absolute timestamps.
                 // Subtitle start_ns/end_ns are relative to clip start (0 = source_in).
-                let timeline_start = clip.timeline_start
-                    + (seg.start_ns as f64 / clip.speed) as u64;
-                let timeline_end = clip.timeline_start
-                    + (seg.end_ns as f64 / clip.speed) as u64;
+                let timeline_start =
+                    clip.timeline_start + (seg.start_ns as f64 / clip.speed) as u64;
+                let timeline_end = clip.timeline_start + (seg.end_ns as f64 / clip.speed) as u64;
                 segments.push((timeline_start, timeline_end, seg.text.clone()));
             }
         }
@@ -4203,8 +4223,7 @@ fn flatten_clips(clips: &[Clip], timeline_offset: u64, depth: usize) -> Vec<Clip
                 // so subtracting source_in gives the offset from the visible
                 // start. Adding the compound's parent position avoids u64
                 // underflow that saturating_sub would cause.
-                let compound_offset = timeline_offset
-                    .saturating_add(clip.timeline_start);
+                let compound_offset = timeline_offset.saturating_add(clip.timeline_start);
                 let window_start = clip.source_in;
                 let window_end = clip.source_out;
                 for inner_track in internal_tracks {
@@ -4218,8 +4237,7 @@ fn flatten_clips(clips: &[Clip], timeline_offset: u64, depth: usize) -> Vec<Clip
                         let mut rebased = inner_clip.clone();
                         // Trim clips that partially overlap window boundaries
                         let orig_duration = rebased.duration();
-                        let left_trim =
-                            window_start.saturating_sub(rebased.timeline_start);
+                        let left_trim = window_start.saturating_sub(rebased.timeline_start);
                         if left_trim > 0 {
                             rebased.source_in = rebased.source_in.saturating_add(left_trim);
                             rebased.timeline_start = window_start;
@@ -4236,9 +4254,8 @@ fn flatten_clips(clips: &[Clip], timeline_offset: u64, depth: usize) -> Vec<Clip
                             rebased.retain_subtitles_in_local_range(left_trim, range_end);
                         }
                         // Rebase: offset from window start + compound parent pos
-                        rebased.timeline_start = compound_offset.saturating_add(
-                            rebased.timeline_start.saturating_sub(window_start),
-                        );
+                        rebased.timeline_start = compound_offset
+                            .saturating_add(rebased.timeline_start.saturating_sub(window_start));
                         if rebased.kind == ClipKind::Compound || rebased.kind == ClipKind::Multicam
                         {
                             result.extend(flatten_clips(&[rebased], 0, depth + 1));
@@ -5675,15 +5692,13 @@ mod tests {
 
         // Write subtitles via clip_mut (same path as STT result handler)
         if let Some(clip) = project.clip_mut("ac") {
-            clip.subtitle_segments = vec![
-                crate::model::clip::SubtitleSegment {
-                    id: "s1".into(),
-                    start_ns: 1_000,
-                    end_ns: 5_000,
-                    text: "hello from clip_mut".into(),
-                    words: vec![],
-                },
-            ];
+            clip.subtitle_segments = vec![crate::model::clip::SubtitleSegment {
+                id: "s1".into(),
+                start_ns: 1_000,
+                end_ns: 5_000,
+                text: "hello from clip_mut".into(),
+                words: vec![],
+            }];
         }
 
         // Verify the subtitle was written
@@ -5691,7 +5706,10 @@ mod tests {
             .clip_ref("ac")
             .map(|c| c.subtitle_segments.len())
             .unwrap_or(0);
-        assert_eq!(subs, 1, "subtitle should be written to clip inside compound");
+        assert_eq!(
+            subs, 1,
+            "subtitle should be written to clip inside compound"
+        );
 
         // Flatten and verify subtitles survive
         let flattened = flatten_compound_tracks(&project.tracks);
@@ -5706,7 +5724,10 @@ mod tests {
             1,
             "subtitle should survive flattening"
         );
-        assert_eq!(audio_clips[0].subtitle_segments[0].text, "hello from clip_mut");
+        assert_eq!(
+            audio_clips[0].subtitle_segments[0].text,
+            "hello from clip_mut"
+        );
     }
 
     #[test]

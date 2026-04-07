@@ -1546,11 +1546,13 @@ impl Clip {
     /// segments have their start/end clamped and rebased. Word-level timings
     /// within each segment are adjusted the same way.
     pub fn retain_subtitles_in_local_range(&mut self, start_ns: u64, end_ns: u64) {
-        self.subtitle_segments.retain(|s| s.end_ns > start_ns && s.start_ns < end_ns);
+        self.subtitle_segments
+            .retain(|s| s.end_ns > start_ns && s.start_ns < end_ns);
         for seg in &mut self.subtitle_segments {
             seg.start_ns = seg.start_ns.max(start_ns).saturating_sub(start_ns);
             seg.end_ns = seg.end_ns.min(end_ns).saturating_sub(start_ns);
-            seg.words.retain(|w| w.end_ns > start_ns && w.start_ns < end_ns);
+            seg.words
+                .retain(|w| w.end_ns > start_ns && w.start_ns < end_ns);
             for word in &mut seg.words {
                 word.start_ns = word.start_ns.max(start_ns).saturating_sub(start_ns);
                 word.end_ns = word.end_ns.min(end_ns).saturating_sub(start_ns);
