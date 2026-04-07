@@ -1038,15 +1038,44 @@ impl ProgramClip {
         if self.voice_isolation > 0.0 && !self.subtitle_segments.is_empty() {
             let rel_ns = timeline_pos_ns.saturating_sub(self.timeline_start_ns);
             let clip_local_ns = (rel_ns as f64 * self.speed) as u64;
-            let in_speech = self.subtitle_segments.iter().any(|seg| {
+            // Padding extends each word boundary so close words merge into
+            // continuous speech regions, preventing ducking in tiny gaps.
+            const PAD_NS: u64 = 80_000_000; // 80 ms each side
+            // Fade ramp smooths the transition instead of instant on/off.
+            const FADE_NS: u64 = 25_000_000; // 25 ms fade
+            let mut min_dist: u64 = u64::MAX;
+            'outer: for seg in &self.subtitle_segments {
                 if seg.words.is_empty() {
-                    clip_local_ns >= seg.start_ns && clip_local_ns <= seg.end_ns
+                    let start = seg.start_ns.saturating_sub(PAD_NS);
+                    let end = seg.end_ns + PAD_NS;
+                    if clip_local_ns >= start && clip_local_ns <= end {
+                        min_dist = 0;
+                        break;
+                    }
+                    let d = if clip_local_ns < start { start - clip_local_ns } else { clip_local_ns - end };
+                    min_dist = min_dist.min(d);
                 } else {
-                    seg.words.iter().any(|w| clip_local_ns >= w.start_ns && clip_local_ns <= w.end_ns)
+                    for w in &seg.words {
+                        let start = w.start_ns.saturating_sub(PAD_NS);
+                        let end = w.end_ns + PAD_NS;
+                        if clip_local_ns >= start && clip_local_ns <= end {
+                            min_dist = 0;
+                            break 'outer;
+                        }
+                        let d = if clip_local_ns < start { start - clip_local_ns } else { clip_local_ns - end };
+                        min_dist = min_dist.min(d);
+                    }
                 }
-            });
-            if !in_speech {
-                return base_vol * (1.0 - self.voice_isolation);
+            }
+            if min_dist > 0 {
+                let duck = self.voice_isolation;
+                if min_dist <= FADE_NS {
+                    // Cosine ease: smooth ramp from full volume into ducked level
+                    let t = min_dist as f64 / FADE_NS as f64;
+                    let smooth = 0.5 * (1.0 - (t * std::f64::consts::PI).cos());
+                    return base_vol * (1.0 - duck * smooth);
+                }
+                return base_vol * (1.0 - duck);
             }
         }
         base_vol

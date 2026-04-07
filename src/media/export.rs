@@ -1600,19 +1600,44 @@ fn build_volume_filter(clip: &Clip) -> String {
     };
 
     if clip.voice_isolation > 0.0 && !clip.subtitle_segments.is_empty() {
-        let mut intervals = Vec::new();
+        // Padding matches the preview path (80 ms each side) so close words
+        // merge into continuous speech regions during export.
+        const PAD_S: f64 = 0.080;
+        let mut intervals: Vec<(f64, f64)> = Vec::new();
         for seg in &clip.subtitle_segments {
             if seg.words.is_empty() {
-                intervals.push(format!("between(t,{:.3},{:.3})", seg.start_ns as f64 / 1e9, seg.end_ns as f64 / 1e9));
+                intervals.push((
+                    (seg.start_ns as f64 / 1e9 - PAD_S).max(0.0),
+                    seg.end_ns as f64 / 1e9 + PAD_S,
+                ));
             } else {
                 for w in &seg.words {
-                    intervals.push(format!("between(t,{:.3},{:.3})", w.start_ns as f64 / 1e9, w.end_ns as f64 / 1e9));
+                    intervals.push((
+                        (w.start_ns as f64 / 1e9 - PAD_S).max(0.0),
+                        w.end_ns as f64 / 1e9 + PAD_S,
+                    ));
                 }
             }
         }
+        // Merge overlapping padded intervals so ffmpeg gets fewer, cleaner regions.
+        intervals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let mut merged: Vec<(f64, f64)> = Vec::new();
+        for iv in &intervals {
+            if let Some(last) = merged.last_mut() {
+                if iv.0 <= last.1 {
+                    last.1 = last.1.max(iv.1);
+                    continue;
+                }
+            }
+            merged.push(*iv);
+        }
         let duck_ratio = 1.0 - clip.voice_isolation;
-        if !intervals.is_empty() {
-            let condition = intervals.join("+");
+        if !merged.is_empty() {
+            let condition: String = merged
+                .iter()
+                .map(|(s, e)| format!("between(t,{:.3},{:.3})", s, e))
+                .collect::<Vec<_>>()
+                .join("+");
             let expr = format!("({}) * if({}, 1.0, {:.4})", base_expr, condition, duck_ratio);
             return format!("volume='{}':eval=frame", expr);
         }
