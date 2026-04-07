@@ -236,6 +236,9 @@ pub struct InspectorView {
     // Audio sliders
     pub volume_slider: Scale,
     pub voice_isolation_slider: Scale,
+    pub vi_pad_slider: Scale,
+    pub vi_fade_slider: Scale,
+    pub vi_floor_slider: Scale,
     pub pan_slider: Scale,
     pub normalize_btn: Button,
     pub match_audio_btn: Button,
@@ -334,10 +337,11 @@ pub struct InspectorView {
     pub subtitle_generate_spinner: gtk4::Spinner,
     pub subtitle_generate_label: Label,
     pub subtitle_language_dropdown: gtk4::DropDown,
+    pub subtitle_expander: Expander,
     pub subtitle_segments_section: GBox,
+    pub compound_subtitle_label: gtk4::TextView,
     pub subtitle_segments_expander: Expander,
     pub subtitle_list_box: GBox,
-    pub subtitle_scroll: gtk4::ScrolledWindow,
     /// Tracks displayed segment IDs to avoid rebuilding on every update tick.
     pub subtitle_segments_snapshot: Rc<RefCell<Vec<String>>>,
     pub subtitle_clear_btn: Button,
@@ -1386,13 +1390,15 @@ impl InspectorView {
                 self.chroma_key_section.set_visible(is_video || is_image);
                 self.bg_removal_section
                     .set_visible((is_video || is_image) && self.bg_removal_model_available.get());
-                self.subtitle_section.set_visible(is_video || is_audio);
+                self.subtitle_section.set_visible(is_video || is_audio || is_compound);
                 let has_stt_model = self.stt_model_available.get();
                 let generating = self.stt_generating.get();
+                // For compound clips, hide the per-clip generate/clear controls;
+                // the aggregated segment list shows below via subtitle_segments_section.
                 self.subtitle_no_model_box
-                    .set_visible(!has_stt_model && !generating);
+                    .set_visible(!is_compound && (!has_stt_model && !generating));
                 self.subtitle_controls_box
-                    .set_visible(has_stt_model || !c.subtitle_segments.is_empty() || generating);
+                    .set_visible(!is_compound && (has_stt_model || !c.subtitle_segments.is_empty() || generating));
                 self.subtitle_generate_btn
                     .set_sensitive(has_stt_model && c.subtitle_segments.is_empty() && !generating);
                 self.subtitle_generate_spinner.set_visible(generating);
@@ -1405,20 +1411,82 @@ impl InspectorView {
                 self.subtitle_clear_btn
                     .set_sensitive(!c.subtitle_segments.is_empty() && !generating);
                 // Show segment list and style controls when subtitles exist.
-                // Filter to only show segments within the active source range (respects trim).
-                let visible_segments: Vec<crate::model::clip::SubtitleSegment> = c
-                    .subtitle_segments
-                    .iter()
-                    .filter(|s| s.start_ns < c.source_out && s.end_ns > c.source_in)
-                    .cloned()
-                    .collect();
+                // For compound clips, collect subtitle segments from all
+                // internal clips so the user can see them at root level.
+                let visible_segments: Vec<crate::model::clip::SubtitleSegment> = if is_compound {
+                    fn collect_compound_segments(
+                        tracks: &[crate::model::track::Track],
+                    ) -> Vec<crate::model::clip::SubtitleSegment> {
+                        let mut segs = Vec::new();
+                        for track in tracks {
+                            for clip in &track.clips {
+                                if let Some(ref inner) = clip.compound_tracks {
+                                    segs.extend(collect_compound_segments(inner));
+                                } else {
+                                    segs.extend(clip.subtitle_segments.iter().cloned());
+                                }
+                            }
+                        }
+                        segs
+                    }
+                    c.compound_tracks
+                        .as_deref()
+                        .map(collect_compound_segments)
+                        .unwrap_or_default()
+                } else {
+                    // Filter to only show segments within the visible duration.
+                    // Subtitle times are clip-local (0 = source_in), so compare
+                    // against source_duration rather than source-absolute bounds.
+                    let src_dur = c.source_duration();
+                    c.subtitle_segments
+                        .iter()
+                        .filter(|s| s.start_ns < src_dur && s.end_ns > 0)
+                        .cloned()
+                        .collect()
+                };
                 let has_subtitles = !visible_segments.is_empty();
-                self.subtitle_segments_section.set_visible(has_subtitles);
-                if has_subtitles {
-                    self.subtitle_segments_expander.set_label(Some(&format!(
-                        "Subtitle Segments ({})",
-                        visible_segments.len()
-                    )));
+                log::debug!(
+                    "inspector subtitle: clip={} kind={:?} own={} visible={} has_subtitles={}",
+                    c.id, c.kind, c.subtitle_segments.len(), visible_segments.len(), has_subtitles,
+                );
+                {
+                    use gtk4::prelude::TextViewExt;
+                    use gtk4::prelude::TextBufferExt;
+                    if is_compound {
+                        // Hide the expander and separate segments section; show
+                        // the aggregated info directly in the subtitle_section.
+                        self.subtitle_expander.set_visible(false);
+                        self.subtitle_segments_section.set_visible(false);
+                        let mut info = format!("Subtitles ({} segments)\n\n", visible_segments.len());
+                        for seg in &visible_segments {
+                            let s = seg.start_ns as f64 / 1e9;
+                            let e = seg.end_ns as f64 / 1e9;
+                            let txt = if seg.text.len() > 50 {
+                                format!("{}…", &seg.text[..50])
+                            } else {
+                                seg.text.clone()
+                            };
+                            info.push_str(&format!("{:.1}s – {:.1}s  {}\n", s, e, txt));
+                        }
+                        if visible_segments.is_empty() {
+                            info = "No subtitles.\nDouble-click compound to edit individual clips.".into();
+                        } else {
+                            info.push_str("\nDouble-click compound to edit segments.");
+                        }
+                        self.compound_subtitle_label.buffer().set_text(info.trim_end());
+                        self.compound_subtitle_label.set_visible(true);
+                    } else {
+                        self.subtitle_expander.set_visible(true);
+                        self.compound_subtitle_label.set_visible(false);
+                        self.compound_subtitle_label.buffer().set_text("");
+                        self.subtitle_segments_section.set_visible(has_subtitles);
+                        if has_subtitles {
+                            self.subtitle_segments_expander.set_label(Some(&format!(
+                                "Subtitle Segments ({})",
+                                visible_segments.len()
+                            )));
+                        }
+                    }
                 }
 
                 // Only rebuild the segment list if the visible segment IDs changed.
@@ -1862,6 +1930,13 @@ impl InspectorView {
                 self.volume_slider.set_value(linear_to_db_volume(vol_val));
                 self.voice_isolation_slider.set_value((c.voice_isolation * 100.0) as f64);
                 self.voice_isolation_slider.set_sensitive(true);
+                self.vi_pad_slider.set_value(c.voice_isolation_pad_ms as f64);
+                self.vi_fade_slider.set_value(c.voice_isolation_fade_ms as f64);
+                self.vi_floor_slider.set_value((c.voice_isolation_floor * 100.0) as f64);
+                let vi_detail_visible = c.voice_isolation > 0.0;
+                self.vi_pad_slider.set_visible(vi_detail_visible);
+                self.vi_fade_slider.set_visible(vi_detail_visible);
+                self.vi_floor_slider.set_visible(vi_detail_visible);
                 self.pan_slider
                     .set_value(c.value_for_phase1_property_at_timeline_ns(
                         Phase1KeyframeProperty::Pan,
@@ -2276,6 +2351,7 @@ impl InspectorView {
                     .set_value(c.bg_removal_threshold);
             }
             None => {
+                log::debug!("inspector subtitle: update called with clip=None → hiding content_box");
                 self.name_entry.set_text("");
                 self.clip_color_label_combo
                     .set_selected(clip_color_label_index(ClipColorLabel::None));
@@ -3044,6 +3120,18 @@ pub fn build_inspector(
     let subtitle_inner = GBox::new(Orientation::Vertical, 8);
     subtitle_expander.set_child(Some(&subtitle_inner));
 
+    // TextView for compound clips showing aggregated subtitle info from
+    // internal clips.  Placed directly in subtitle_section (NOT inside the
+    // expander) so it renders without any expander-related layout issues.
+    let compound_subtitle_buf = gtk4::TextBuffer::new(None::<&gtk4::TextTagTable>);
+    let compound_subtitle_label = gtk4::TextView::with_buffer(&compound_subtitle_buf);
+    compound_subtitle_label.set_editable(false);
+    compound_subtitle_label.set_cursor_visible(false);
+    compound_subtitle_label.set_wrap_mode(gtk4::WrapMode::WordChar);
+    compound_subtitle_label.add_css_class("dim-label");
+    compound_subtitle_label.set_vexpand(false);
+    subtitle_section.append(&compound_subtitle_label);
+
     // "No model" warning box — shown when whisper model is not installed.
     let subtitle_no_model_box = GBox::new(Orientation::Vertical, 6);
     let no_model_icon_label = Label::new(Some("Speech-to-text model not installed"));
@@ -3268,13 +3356,8 @@ pub fn build_inspector(
     segments_expander.set_expanded(false);
     subtitle_segments_section.append(&segments_expander);
 
-    let subtitle_scroll = gtk4::ScrolledWindow::new();
-    subtitle_scroll.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
-    subtitle_scroll.set_max_content_height(300);
-    subtitle_scroll.set_propagate_natural_height(true);
     let subtitle_list_box = GBox::new(Orientation::Vertical, 2);
-    subtitle_scroll.set_child(Some(&subtitle_list_box));
-    segments_expander.set_child(Some(&subtitle_scroll));
+    segments_expander.set_child(Some(&subtitle_list_box));
 
     // ── Shape Mask section (Video + Image + Title only) ──────────────
     let mask_section = GBox::new(Orientation::Vertical, 8);
@@ -3525,6 +3608,32 @@ pub fn build_inspector(
     voice_isolation_slider.add_mark(100.0, gtk4::PositionType::Bottom, Some("Max"));
     voice_isolation_slider.set_tooltip_text(Some("Duck volume between spoken words (requires generated subtitles)"));
     audio_inner.append(&voice_isolation_slider);
+
+    row_label(&audio_inner, "  Padding (ms)");
+    let vi_pad_slider = Scale::with_range(Orientation::Horizontal, 0.0, 500.0, 5.0);
+    vi_pad_slider.set_value(80.0);
+    vi_pad_slider.set_draw_value(true);
+    vi_pad_slider.set_digits(0);
+    vi_pad_slider.set_tooltip_text(Some("Extend word boundaries to merge close words into continuous speech"));
+    audio_inner.append(&vi_pad_slider);
+
+    row_label(&audio_inner, "  Fade (ms)");
+    let vi_fade_slider = Scale::with_range(Orientation::Horizontal, 0.0, 200.0, 1.0);
+    vi_fade_slider.set_value(25.0);
+    vi_fade_slider.set_draw_value(true);
+    vi_fade_slider.set_digits(0);
+    vi_fade_slider.set_tooltip_text(Some("Smooth transition time between speech and ducked regions"));
+    audio_inner.append(&vi_fade_slider);
+
+    row_label(&audio_inner, "  Floor");
+    let vi_floor_slider = Scale::with_range(Orientation::Horizontal, 0.0, 100.0, 1.0);
+    vi_floor_slider.set_value(0.0);
+    vi_floor_slider.set_draw_value(true);
+    vi_floor_slider.set_digits(0);
+    vi_floor_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("Silent"));
+    vi_floor_slider.add_mark(100.0, gtk4::PositionType::Bottom, Some("Full"));
+    vi_floor_slider.set_tooltip_text(Some("Minimum volume during ducked regions (preserves room tone)"));
+    audio_inner.append(&vi_floor_slider);
 
     let normalize_row = GBox::new(Orientation::Horizontal, 6);
     let normalize_btn = Button::with_label("Normalize\u{2026}");
@@ -4897,11 +5006,18 @@ pub fn build_inspector(
         let on_audio_changed_c = on_audio_changed.clone();
         let volume_slider_c = volume_slider.clone();
         let pan_slider_c = pan_slider.clone();
+        let vi_pad_vis = vi_pad_slider.clone();
+        let vi_fade_vis = vi_fade_slider.clone();
+        let vi_floor_vis = vi_floor_slider.clone();
         voice_isolation_slider.connect_value_changed(move |s| {
             if *updating_c.borrow() {
                 return;
             }
             let val = (s.value() / 100.0) as f32;
+            let show_detail = val > 0.0;
+            vi_pad_vis.set_visible(show_detail);
+            vi_fade_vis.set_visible(show_detail);
+            vi_floor_vis.set_visible(show_detail);
             let id = selected_clip_id_c.borrow().clone();
             if let Some(ref clip_id) = id {
                 {
@@ -4917,6 +5033,52 @@ pub fn build_inspector(
                     pan_slider_c.value() as f32,
                     val,
                 );
+            }
+        });
+    }
+
+    // Wire voice isolation detail sliders (pad, fade, floor).
+    // These update the model and mark dirty; the next on_project_changed
+    // rebuilds ProgramClips with the new values.
+    for (slider, apply_fn) in [
+        (
+            &vi_pad_slider as &Scale,
+            (|clip: &mut crate::model::clip::Clip, v: f64| {
+                clip.voice_isolation_pad_ms = v as f32;
+            }) as fn(&mut crate::model::clip::Clip, f64),
+        ),
+        (
+            &vi_fade_slider as &Scale,
+            (|clip: &mut crate::model::clip::Clip, v: f64| {
+                clip.voice_isolation_fade_ms = v as f32;
+            }) as fn(&mut crate::model::clip::Clip, f64),
+        ),
+        (
+            &vi_floor_slider as &Scale,
+            (|clip: &mut crate::model::clip::Clip, v: f64| {
+                clip.voice_isolation_floor = (v / 100.0) as f32;
+            }) as fn(&mut crate::model::clip::Clip, f64),
+        ),
+    ] {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_clip_changed = on_clip_changed.clone();
+        let slider = slider.clone();
+        slider.connect_value_changed(move |s| {
+            if *updating.borrow() {
+                return;
+            }
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        apply_fn(clip, s.value());
+                    }
+                    proj.dirty = true;
+                }
+                on_clip_changed();
             }
         });
     }
@@ -8344,6 +8506,9 @@ pub fn build_inspector(
         shadows_tint_slider,
         volume_slider,
         voice_isolation_slider,
+        vi_pad_slider,
+        vi_fade_slider,
+        vi_floor_slider,
         pan_slider,
         normalize_btn,
         match_audio_btn,
@@ -8426,10 +8591,11 @@ pub fn build_inspector(
         subtitle_generate_spinner,
         subtitle_generate_label,
         subtitle_language_dropdown,
+        subtitle_expander,
         subtitle_segments_section,
+        compound_subtitle_label,
         subtitle_segments_expander: segments_expander,
         subtitle_list_box,
-        subtitle_scroll,
         subtitle_segments_snapshot: Rc::new(RefCell::new(Vec::new())),
         subtitle_clear_btn,
         subtitle_error_label,

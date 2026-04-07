@@ -585,6 +585,12 @@ fn default_saturation() -> f32 {
 fn default_volume() -> f32 {
     1.0
 }
+fn default_voice_iso_pad_ms() -> f32 {
+    80.0
+}
+fn default_voice_iso_fade_ms() -> f32 {
+    25.0
+}
 fn default_vidstab_smoothing() -> f32 {
     0.5
 }
@@ -1036,6 +1042,17 @@ pub struct Clip {
     /// Voice Isolation (Smart Noise Gating via Whisper timings): 0.0 (off) to 1.0 (full ducking)
     #[serde(default)]
     pub voice_isolation: f32,
+    /// Voice isolation padding in milliseconds added around each word boundary.
+    /// Prevents ducking in short natural pauses between words. Default 80 ms.
+    #[serde(default = "default_voice_iso_pad_ms")]
+    pub voice_isolation_pad_ms: f32,
+    /// Voice isolation fade ramp in milliseconds for smooth transitions. Default 25 ms.
+    #[serde(default = "default_voice_iso_fade_ms")]
+    pub voice_isolation_fade_ms: f32,
+    /// Voice isolation floor: minimum volume during ducked regions.
+    /// 0.0 = full silence, 1.0 = no ducking. Default 0.0.
+    #[serde(default)]
+    pub voice_isolation_floor: f32,
     /// Last measured integrated loudness in LUFS (informational, from normalization analysis).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measured_loudness_lufs: Option<f64>,
@@ -1593,6 +1610,9 @@ impl Clip {
             vidstab_smoothing: default_vidstab_smoothing(),
             volume: 1.0,
             voice_isolation: 0.0,
+            voice_isolation_pad_ms: default_voice_iso_pad_ms(),
+            voice_isolation_fade_ms: default_voice_iso_fade_ms(),
+            voice_isolation_floor: 0.0,
             measured_loudness_lufs: None,
             volume_keyframes: Vec::new(),
             pan: 0.0,

@@ -1600,21 +1600,19 @@ fn build_volume_filter(clip: &Clip) -> String {
     };
 
     if clip.voice_isolation > 0.0 && !clip.subtitle_segments.is_empty() {
-        // Padding matches the preview path (80 ms each side) so close words
-        // merge into continuous speech regions during export.
-        const PAD_S: f64 = 0.080;
+        let pad_s = clip.voice_isolation_pad_ms as f64 / 1000.0;
         let mut intervals: Vec<(f64, f64)> = Vec::new();
         for seg in &clip.subtitle_segments {
             if seg.words.is_empty() {
                 intervals.push((
-                    (seg.start_ns as f64 / 1e9 - PAD_S).max(0.0),
-                    seg.end_ns as f64 / 1e9 + PAD_S,
+                    (seg.start_ns as f64 / 1e9 - pad_s).max(0.0),
+                    seg.end_ns as f64 / 1e9 + pad_s,
                 ));
             } else {
                 for w in &seg.words {
                     intervals.push((
-                        (w.start_ns as f64 / 1e9 - PAD_S).max(0.0),
-                        w.end_ns as f64 / 1e9 + PAD_S,
+                        (w.start_ns as f64 / 1e9 - pad_s).max(0.0),
+                        w.end_ns as f64 / 1e9 + pad_s,
                     ));
                 }
             }
@@ -1631,7 +1629,9 @@ fn build_volume_filter(clip: &Clip) -> String {
             }
             merged.push(*iv);
         }
-        let duck_ratio = 1.0 - clip.voice_isolation;
+        // Duck towards floor instead of silence.
+        let duck_ratio = (1.0 - clip.voice_isolation) * (1.0 - clip.voice_isolation_floor)
+            + clip.voice_isolation_floor;
         if !merged.is_empty() {
             let condition: String = merged
                 .iter()

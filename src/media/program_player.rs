@@ -783,6 +783,9 @@ pub struct ProgramClip {
     /// Volume multiplier: 0.0 (silent) to 2.0 (double), default 1.0
     pub volume: f64,
     pub voice_isolation: f64,
+    pub voice_isolation_pad_ns: u64,
+    pub voice_isolation_fade_ns: u64,
+    pub voice_isolation_floor: f64,
     pub volume_keyframes: Vec<NumericKeyframe>,
     pub subtitle_segments: Vec<crate::model::clip::SubtitleSegment>,
     /// Audio pan: -1.0 (full left) to 1.0 (full right), default 0.0
@@ -1038,16 +1041,13 @@ impl ProgramClip {
         if self.voice_isolation > 0.0 && !self.subtitle_segments.is_empty() {
             let rel_ns = timeline_pos_ns.saturating_sub(self.timeline_start_ns);
             let clip_local_ns = (rel_ns as f64 * self.speed) as u64;
-            // Padding extends each word boundary so close words merge into
-            // continuous speech regions, preventing ducking in tiny gaps.
-            const PAD_NS: u64 = 80_000_000; // 80 ms each side
-            // Fade ramp smooths the transition instead of instant on/off.
-            const FADE_NS: u64 = 25_000_000; // 25 ms fade
+            let pad_ns = self.voice_isolation_pad_ns;
+            let fade_ns = self.voice_isolation_fade_ns;
             let mut min_dist: u64 = u64::MAX;
             'outer: for seg in &self.subtitle_segments {
                 if seg.words.is_empty() {
-                    let start = seg.start_ns.saturating_sub(PAD_NS);
-                    let end = seg.end_ns + PAD_NS;
+                    let start = seg.start_ns.saturating_sub(pad_ns);
+                    let end = seg.end_ns + pad_ns;
                     if clip_local_ns >= start && clip_local_ns <= end {
                         min_dist = 0;
                         break;
@@ -1056,8 +1056,8 @@ impl ProgramClip {
                     min_dist = min_dist.min(d);
                 } else {
                     for w in &seg.words {
-                        let start = w.start_ns.saturating_sub(PAD_NS);
-                        let end = w.end_ns + PAD_NS;
+                        let start = w.start_ns.saturating_sub(pad_ns);
+                        let end = w.end_ns + pad_ns;
                         if clip_local_ns >= start && clip_local_ns <= end {
                             min_dist = 0;
                             break 'outer;
@@ -1068,14 +1068,14 @@ impl ProgramClip {
                 }
             }
             if min_dist > 0 {
-                let duck = self.voice_isolation;
-                if min_dist <= FADE_NS {
-                    // Cosine ease: smooth ramp from full volume into ducked level
-                    let t = min_dist as f64 / FADE_NS as f64;
+                // Duck towards floor instead of silence.
+                let duck_range = self.voice_isolation * (1.0 - self.voice_isolation_floor);
+                if fade_ns > 0 && min_dist <= fade_ns {
+                    let t = min_dist as f64 / fade_ns as f64;
                     let smooth = 0.5 * (1.0 - (t * std::f64::consts::PI).cos());
-                    return base_vol * (1.0 - duck * smooth);
+                    return base_vol * (1.0 - duck_range * smooth);
                 }
-                return base_vol * (1.0 - duck);
+                return base_vol * (1.0 - duck_range);
             }
         }
         base_vol
@@ -15729,6 +15729,9 @@ mod tests {
             vidstab_smoothing: 0.5,
             volume: 1.0,
             voice_isolation: 0.0,
+            voice_isolation_pad_ns: 80_000_000,
+            voice_isolation_fade_ns: 25_000_000,
+            voice_isolation_floor: 0.0,
             volume_keyframes: Vec::new(),
             subtitle_segments: Vec::new(),
             pan: 0.0,
