@@ -1119,7 +1119,10 @@ impl ProgramClip {
             self.rotate as f64,
         )
         .round()
-        .clamp(-180.0, 180.0) as i32
+        .clamp(
+            crate::model::transform_bounds::ROTATE_MIN_DEG,
+            crate::model::transform_bounds::ROTATE_MAX_DEG,
+        ) as i32
     }
 
     pub fn crop_left_at_timeline_ns(&self, timeline_pos_ns: u64) -> i32 {
@@ -1129,7 +1132,10 @@ impl ProgramClip {
             self.crop_left as f64,
         )
         .round()
-        .clamp(0.0, 500.0) as i32
+        .clamp(
+            crate::model::transform_bounds::CROP_MIN_PX,
+            crate::model::transform_bounds::CROP_MAX_PX,
+        ) as i32
     }
 
     pub fn crop_right_at_timeline_ns(&self, timeline_pos_ns: u64) -> i32 {
@@ -1139,7 +1145,10 @@ impl ProgramClip {
             self.crop_right as f64,
         )
         .round()
-        .clamp(0.0, 500.0) as i32
+        .clamp(
+            crate::model::transform_bounds::CROP_MIN_PX,
+            crate::model::transform_bounds::CROP_MAX_PX,
+        ) as i32
     }
 
     pub fn crop_top_at_timeline_ns(&self, timeline_pos_ns: u64) -> i32 {
@@ -1149,7 +1158,10 @@ impl ProgramClip {
             self.crop_top as f64,
         )
         .round()
-        .clamp(0.0, 500.0) as i32
+        .clamp(
+            crate::model::transform_bounds::CROP_MIN_PX,
+            crate::model::transform_bounds::CROP_MAX_PX,
+        ) as i32
     }
 
     pub fn crop_bottom_at_timeline_ns(&self, timeline_pos_ns: u64) -> i32 {
@@ -1159,7 +1171,10 @@ impl ProgramClip {
             self.crop_bottom as f64,
         )
         .round()
-        .clamp(0.0, 500.0) as i32
+        .clamp(
+            crate::model::transform_bounds::CROP_MIN_PX,
+            crate::model::transform_bounds::CROP_MAX_PX,
+        ) as i32
     }
 
     pub fn speed_at_local_timeline_ns(&self, local_timeline_ns: u64) -> f64 {
@@ -3939,10 +3954,22 @@ impl ProgramPlayer {
         }
         // Ensure playback starts with playback-rate seeks (including reverse)
         // even when slots were already loaded by paused-seek paths.
+        //
+        // Skip still-image clips: their source decoder has already EOSed into
+        // `imagefreeze`, so a FLUSH|ACCURATE seek here is racy — it can clear
+        // the imagefreeze cached buffer without managing to pull a fresh one
+        // from the parked decoder, leaving the still's compositor pad empty
+        // for the entire playback.  imagefreeze in PLAYING state will keep
+        // re-emitting its cached buffer at the configured rate as long as we
+        // don't disturb it.  Animated SVGs that have already been prerendered
+        // to a video file behave like normal video and are reseeked.
         for slot in &self.slots {
             let Some(clip) = self.clips.get(slot.clip_idx) else {
                 continue;
             };
+            if clip.is_image && !clip.animated_svg && !slot.animated_svg_rendered {
+                continue;
+            }
             let _ = Self::seek_slot_decoder_with_retry(
                 slot,
                 clip,
@@ -5103,27 +5130,39 @@ impl ProgramPlayer {
         tolerance: f32,
         softness: f32,
     ) {
-        if let Some(slot) = self.current_idx.and_then(|idx| self.slot_for_clip(idx)) {
-            if let Some(ref ck) = slot.alpha_chroma_key {
-                let r = ((color >> 16) & 0xFF) as u32;
-                let g = ((color >> 8) & 0xFF) as u32;
-                let b = (color & 0xFF) as u32;
-                ck.set_property("target-r", r);
-                ck.set_property("target-g", g);
-                ck.set_property("target-b", b);
-                ck.set_property("angle", (tolerance * 90.0).clamp(0.0, 90.0));
-                ck.set_property("noise-level", (softness * 64.0).clamp(0.0, 64.0));
-                // If the alpha element is in the pipeline but now disabled, we
-                // cannot remove it without a rebuild — but the clip model
-                // controls whether build_effects_bin creates it, so a full
-                // rebuild (on_project_changed) handles enable/disable.  For
-                // live slider updates while already enabled, just update props.
-                let _ = enabled; // rebuild handles toggle; see on_project_changed
+        let mut is_static_image = false;
+        if let Some(idx) = self.current_idx {
+            if let Some(clip) = self.clips.get(idx) {
+                is_static_image = Self::clip_requires_live_transform_refresh(clip);
+            }
+            if let Some(slot) = self.slot_for_clip(idx) {
+                if let Some(ref ck) = slot.alpha_chroma_key {
+                    let r = ((color >> 16) & 0xFF) as u32;
+                    let g = ((color >> 8) & 0xFF) as u32;
+                    let b = (color & 0xFF) as u32;
+                    ck.set_property("target-r", r);
+                    ck.set_property("target-g", g);
+                    ck.set_property("target-b", b);
+                    ck.set_property("angle", (tolerance * 90.0).clamp(0.0, 90.0));
+                    ck.set_property("noise-level", (softness * 64.0).clamp(0.0, 64.0));
+                    // If the alpha element is in the pipeline but now disabled, we
+                    // cannot remove it without a rebuild — but the clip model
+                    // controls whether build_effects_bin creates it, so a full
+                    // rebuild (on_project_changed) handles enable/disable.  For
+                    // live slider updates while already enabled, just update props.
+                    let _ = enabled; // rebuild handles toggle; see on_project_changed
+                }
             }
         }
-        // Force frame redraw when paused.
+        // Force frame redraw when paused.  Stills use the lighter compositor
+        // flush instead of `reseek_slot_for_current` (which would re-seek the
+        // imagefreeze decoder racily — see `flush_compositor_for_still_refresh`).
         if self.current_idx.is_some() && self.state != PlayerState::Playing {
-            self.reseek_slot_for_current();
+            if is_static_image {
+                self.flush_compositor_for_still_refresh();
+            } else {
+                self.reseek_slot_for_current();
+            }
         }
     }
 
@@ -5523,11 +5562,14 @@ impl ProgramPlayer {
     }
 
     /// Fire-and-forget compositor flush.  Sends a FLUSH seek so the
-    /// compositor re-aggregates a frame with updated textoverlay properties.
-    /// Does NOT block — the new frame arrives asynchronously via the
-    /// gtk4paintablesink.  Much cheaper than `reseek_slot_for_current()`
-    /// because the decoders are already at the correct position.
-    pub fn flush_compositor_for_title_update(&self) {
+    /// compositor re-aggregates a frame using each pad's currently-cached
+    /// buffer, picking up any pad property updates (transform/crop, title
+    /// text/style, …) without involving upstream decoders.  Does NOT block
+    /// — the new frame arrives asynchronously via the gtk4paintablesink.
+    /// Much cheaper than `reseek_slot_for_current()` because the decoders
+    /// are already at the correct position.  Returns silently if there are
+    /// no slots or the pipeline is playing (live frames are already flowing).
+    fn flush_compositor_for_property_update(&self) {
         if self.slots.is_empty() {
             return;
         }
@@ -5538,6 +5580,62 @@ impl ProgramPlayer {
         let _ = self
             .compositor
             .seek_simple(gst::SeekFlags::FLUSH, gst::ClockTime::ZERO);
+    }
+
+    /// Public entry point used by title text/style updates.  See
+    /// `flush_compositor_for_property_update`.
+    pub fn flush_compositor_for_title_update(&self) {
+        self.flush_compositor_for_property_update();
+    }
+
+    /// Public entry point used by still-image transform/crop edits.
+    ///
+    /// A FLUSH seek on the compositor clears every sink pad's queued
+    /// buffer.  For a *bare* still that would be enough — the still's
+    /// `imagefreeze` element keeps a cached buffer and re-emits it on
+    /// the next aggregate cycle.  But the same flush also strips the
+    /// underlying video tracks of their parked frame, and those
+    /// decoders are paused so they will not push a fresh buffer until
+    /// somebody explicitly seeks them.  If we just flush, the next
+    /// aggregate runs against empty video pads → underlying video
+    /// blanks until the user nudges the playhead.
+    ///
+    /// So: flush the compositor, then re-seek every *non-still*
+    /// decoder back to the current playhead so the underlying video
+    /// tracks re-prerolll and push fresh frames.  The still's own
+    /// decoder is intentionally **not** re-seeked — it has already
+    /// EOSed into imagefreeze, and a re-seek there would either fail
+    /// silently or race with the imagefreeze src loop (which is the
+    /// race the original `reseek_slot_by_clip_idx` was hitting).
+    /// Other stills on the timeline are skipped for the same reason.
+    ///
+    /// This is fire-and-forget: there is **no** blocking
+    /// `wait_for_compositor_arrivals` call, so the GTK drag handler
+    /// returns immediately and the new aggregate cycle picks up the
+    /// fresh frames asynchronously via the gtk4paintablesink.
+    pub fn flush_compositor_for_still_refresh(&self) {
+        if self.slots.is_empty() {
+            return;
+        }
+        if self.state == PlayerState::Playing {
+            return;
+        }
+        let _ = self
+            .compositor
+            .seek_simple(gst::SeekFlags::FLUSH, gst::ClockTime::ZERO);
+        for slot in &self.slots {
+            let clip = match self.clips.get(slot.clip_idx) {
+                Some(c) => c,
+                None => continue,
+            };
+            // Skip stills (the source decoder is parked at EOS into
+            // imagefreeze; the imagefreeze cache survives the flush
+            // and re-emits on the next aggregate cycle).
+            if clip.is_image && !clip.animated_svg {
+                continue;
+            }
+            let _ = Self::seek_slot_decoder_paused_with_retry(slot, clip, self.timeline_pos_ns);
+        }
     }
 
     pub fn update_current_transform(
@@ -5611,6 +5709,7 @@ impl ProgramPlayer {
         if let Some(i) = idx {
             let mut is_adjustment = false;
             let mut direct_translation = false;
+            let mut is_static_image = false;
             if let Some(clip) = self.clips.get_mut(i) {
                 is_adjustment = clip.is_adjustment;
                 clip.crop_left = crop_left;
@@ -5624,6 +5723,7 @@ impl ProgramPlayer {
                 clip.position_x = position_x;
                 clip.position_y = position_y;
                 direct_translation = Self::clip_uses_direct_canvas_translation(clip);
+                is_static_image = Self::clip_requires_live_transform_refresh(clip);
             }
             if is_adjustment {
                 self.rebuild_adjustment_overlays();
@@ -5659,7 +5759,18 @@ impl ProgramPlayer {
                 }
             }
             if self.state != PlayerState::Playing {
-                self.reseek_slot_by_clip_idx(i);
+                if is_static_image {
+                    // Stills: never per-decoder reseek.  The transform was
+                    // applied via compositor pad properties (xpos/ypos/
+                    // width/height) and the alpha-crop pad probe — none of
+                    // which need fresh upstream data.  A non-blocking
+                    // compositor flush is enough to make the next aggregate
+                    // cycle pick up the new properties using the buffer
+                    // imagefreeze already has parked on its src pad.
+                    self.flush_compositor_for_still_refresh();
+                } else {
+                    self.reseek_slot_by_clip_idx(i);
+                }
             }
         }
     }
@@ -5735,7 +5846,14 @@ impl ProgramPlayer {
                 }
             }
             if needs_live_refresh && self.state != PlayerState::Playing {
-                self.reseek_slot_by_clip_idx(i);
+                // `needs_live_refresh` is `clip.is_image && !clip.animated_svg`,
+                // so this branch is the still-image path.  Use the lightweight
+                // compositor flush instead of `reseek_slot_by_clip_idx`: the
+                // pad properties just changed, the buffer is parked on
+                // imagefreeze, and a per-decoder reseek would block on
+                // `wait_for_compositor_arrivals` and race with the imagefreeze
+                // src loop.
+                self.flush_compositor_for_still_refresh();
             }
         }
     }
@@ -8654,8 +8772,22 @@ impl ProgramPlayer {
             .seek_simple(gst::SeekFlags::FLUSH, gst::ClockTime::ZERO);
         // Seek every decoder to the new source position.  These FLUSH seeks
         // reset each compositor pad individually and position the decoders.
+        //
+        // Skip still-image clips: their source decoder has already EOSed into
+        // `imagefreeze`, so a per-decoder reseek here is racy — `imagefreeze`
+        // sometimes re-emits its cached buffer cleanly after the compositor
+        // flush, sometimes it doesn't, leaving the still's compositor pad
+        // empty until the next scrub.  Letting the imagefreeze element
+        // re-push its parked buffer in response to the compositor flush
+        // (without disturbing the upstream EOSed decoder) is the only path
+        // that doesn't intermittently drop the still.  Animated SVGs that
+        // were pre-rendered to a video file behave like normal video and
+        // are reseeked.
         for slot in &self.slots {
             let clip = &self.clips[slot.clip_idx];
+            if clip.is_image && !clip.animated_svg && !slot.animated_svg_rendered {
+                continue;
+            }
             let _ = Self::seek_slot_decoder_paused_with_retry(slot, clip, timeline_pos_ns);
         }
         // Wait for decoders to reach Paused (internal preroll).
@@ -8907,7 +9039,10 @@ impl ProgramPlayer {
         extra_x_px: i32,
         extra_y_px: i32,
     ) {
-        let scale = scale.clamp(0.1, 4.0);
+        let scale = scale.clamp(
+            crate::model::transform_bounds::SCALE_MIN,
+            crate::model::transform_bounds::SCALE_MAX,
+        );
         let pw = project_width as f64;
         let ph = project_height as f64;
         let sw = (pw * scale).round().max(1.0) as i32;
@@ -8987,8 +9122,15 @@ impl ProgramPlayer {
     }
 
     fn direct_canvas_origin(axis_size: f64, scaled_axis_size: f64, position: f64) -> i32 {
-        (((axis_size - scaled_axis_size) / 2.0) + position.clamp(-1.0, 1.0) * axis_size / 2.0)
-            .round() as i32
+        // Allow positions past ±1.0 so titles, adjustment scopes, and
+        // tracker-followed clips can be moved fully off-canvas; the
+        // downstream `videobox` element handles negative offsets by
+        // padding/cropping past the frame edges.
+        let clamped = position.clamp(
+            crate::model::transform_bounds::POSITION_MIN,
+            crate::model::transform_bounds::POSITION_MAX,
+        );
+        (((axis_size - scaled_axis_size) / 2.0) + clamped * axis_size / 2.0).round() as i32
     }
 
     fn videobox_axis_from_origin(canvas_size: i32, scaled_size: i32, origin: i32) -> (i32, i32) {
@@ -9866,17 +10008,30 @@ impl ProgramPlayer {
 
         // Alpha filter: skipped — opacity is applied via compositor pad property.
         // Chroma key alpha: conditionally created when chroma key is enabled.
+        //
+        // The `alpha` element with `method=custom` accepts RGBA but its src
+        // pad output format depends on negotiation with downstream.  The next
+        // downstream cap constraint is `capsfilter_zoom` which forces RGBA at
+        // the project resolution.  Without an explicit videoconvert *after*
+        // `alpha`, format negotiation through the chroma-key chain can fail
+        // — and on a still PNG (where `imagefreeze` only ever pushes its one
+        // cached buffer) there's no recovery: the pad sits empty for the
+        // entire playback and the still vanishes.  Bracketing the alpha
+        // element with `conv_ck` (RGBA → alpha-friendly) and `conv_post_ck`
+        // (back → RGBA) keeps the negotiation stable for both stills and
+        // continuously-decoding video.
         let need_chroma_key = clip.chroma_key_enabled;
-        let (conv_ck, alpha_chroma_key) = if need_chroma_key {
+        let (conv_ck, alpha_chroma_key, conv_post_ck) = if need_chroma_key {
             (
                 gst::ElementFactory::make("videoconvert").build().ok(),
                 gst::ElementFactory::make("alpha")
                     .property_from_str("method", "custom")
                     .build()
                     .ok(),
+                gst::ElementFactory::make("videoconvert").build().ok(),
             )
         } else {
-            (None, None)
+            (None, None, None)
         };
         let alpha_filter: Option<gst::Element> = None;
 
@@ -10389,10 +10544,17 @@ impl ProgramPlayer {
             chain.push(e.clone());
         }
         // 3b. Chroma key (after color/blur, before zoom).
+        //
+        // Bracketed by videoconvert on both sides so the format negotiation
+        // through the alpha element stays stable — see the comment on
+        // `let need_chroma_key = …` above for why this matters for stills.
         if let Some(ref e) = conv_ck {
             chain.push(e.clone());
         }
         if let Some(ref e) = alpha_chroma_key {
+            chain.push(e.clone());
+        }
+        if let Some(ref e) = conv_post_ck {
             chain.push(e.clone());
         }
         if let Some(ref e) = alpha_filter {
@@ -11637,6 +11799,9 @@ impl ProgramPlayer {
         let has_color = clip.brightness != 0.0 || clip.contrast != 1.0 || clip.saturation != 1.0;
         let has_exposure = clip.exposure.abs() > f64::EPSILON;
         if has_color_keyframes {
+            // Brightness is bounded ±1.0 (a normalized value range, not a
+            // transform property — kept as a literal here because it's not
+            // shared with anything else).
             let brightness_expr = crate::media::export::build_keyframed_property_expression(
                 &clip.brightness_keyframes,
                 clip.brightness,
@@ -11928,7 +12093,10 @@ impl ProgramPlayer {
         out_h: u32,
         transparent_pad: bool,
     ) -> String {
-        let scale = clip.scale.clamp(0.1, 4.0);
+        let scale = clip.scale.clamp(
+            crate::model::transform_bounds::SCALE_MIN,
+            crate::model::transform_bounds::SCALE_MAX,
+        );
         if (scale - 1.0).abs() < 0.001
             && clip.position_x.abs() < 0.001
             && clip.position_y.abs() < 0.001

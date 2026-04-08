@@ -323,13 +323,20 @@ fn resolve_translation_keyframes(
             .chain(keyframes_y.iter())
             .map(|keyframe| keyframe.time_ns),
     );
+    // Position values past ±1.0 push the clip off-canvas; the rendering
+    // pipeline (preview compositor + export ffmpeg graph) handles the
+    // overflow by cropping/padding past the frame edges.  Use the shared
+    // `POSITION_MIN`/`POSITION_MAX` bounds so attaching a tracker to a clip
+    // that already has off-canvas position values doesn't silently snap it
+    // back inside the canvas.
+    use crate::model::transform_bounds::{POSITION_MAX, POSITION_MIN};
     let position_x_keyframes = make_linear_keyframes(&times, |time_ns| {
         let base = Clip::evaluate_keyframed_value(keyframes_x, time_ns, default_x);
         let tracked =
             tracking_sample_for_target_local_ns(target_timeline_start_ns, source, tracker, time_ns)
                 .map(|sample| sample.offset_x * strength)
                 .unwrap_or(0.0);
-        (base + tracked + binding.offset_x).clamp(-1.0, 1.0)
+        (base + tracked + binding.offset_x).clamp(POSITION_MIN, POSITION_MAX)
     });
     let position_y_keyframes = make_linear_keyframes(&times, |time_ns| {
         let base = Clip::evaluate_keyframed_value(keyframes_y, time_ns, default_y);
@@ -337,7 +344,7 @@ fn resolve_translation_keyframes(
             tracking_sample_for_target_local_ns(target_timeline_start_ns, source, tracker, time_ns)
                 .map(|sample| sample.offset_y * strength)
                 .unwrap_or(0.0);
-        (base + tracked + binding.offset_y).clamp(-1.0, 1.0)
+        (base + tracked + binding.offset_y).clamp(POSITION_MIN, POSITION_MAX)
     });
     Some((position_x_keyframes, position_y_keyframes))
 }
@@ -404,7 +411,10 @@ fn resolve_rotation_keyframes(
             tracking_sample_for_target_local_ns(target_timeline_start_ns, source, tracker, time_ns)
                 .map(|sample| sample.rotation_deg * strength)
                 .unwrap_or(0.0);
-        (base + tracked + binding.rotation_offset_deg).clamp(-180.0, 180.0)
+        (base + tracked + binding.rotation_offset_deg).clamp(
+            crate::model::transform_bounds::ROTATE_MIN_DEG,
+            crate::model::transform_bounds::ROTATE_MAX_DEG,
+        )
     }))
 }
 
@@ -437,8 +447,8 @@ fn apply_tracking_binding_to_clip(
         binding,
         source,
         tracker,
-        0.1,
-        4.0,
+        crate::model::transform_bounds::SCALE_MIN,
+        crate::model::transform_bounds::SCALE_MAX,
     ) {
         clip.scale_keyframes = scale_keyframes;
     }
@@ -484,8 +494,8 @@ fn apply_tracking_binding_to_program_clip(
         binding,
         source,
         tracker,
-        0.1,
-        4.0,
+        crate::model::transform_bounds::SCALE_MIN,
+        crate::model::transform_bounds::SCALE_MAX,
     ) {
         clip.scale_keyframes = scale_keyframes;
     }

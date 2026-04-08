@@ -1889,39 +1889,72 @@ impl InspectorView {
                             entry.add_css_class("flat");
 
                             let seg_id = seg.id.clone();
-                            let old_text = Rc::new(RefCell::new(seg.text.clone()));
+                            // `last_committed_text` tracks the last value that was
+                            // pushed to the undo stack. `connect_changed` mutates
+                            // the model directly on every keystroke (so preview /
+                            // export reflect edits without waiting for a commit
+                            // boundary), and Enter / focus-out push a single
+                            // EditSubtitleTextCommand spanning from the last
+                            // committed text to the current text so undo works at
+                            // sentence-level granularity instead of per-keystroke.
+                            let last_committed_text =
+                                Rc::new(RefCell::new(seg.text.clone()));
                             let clip_id_c = clip_id.clone();
                             let project_c = project.clone();
                             let on_cmd_c = on_cmd.clone();
 
+                            // Live model update on every keystroke. Bypasses the
+                            // undo system on purpose: per-keystroke commands would
+                            // make undo unusable. The commit handlers below push
+                            // a consolidated command for undo.
+                            //
+                            // We re-sync per-word entries so karaoke / word
+                            // highlight rendering uses the edited text instead
+                            // of the original Whisper tokens.
+                            {
+                                let project_live = project_c.clone();
+                                let clip_id_live = clip_id_c.clone();
+                                let seg_id_live = seg_id.clone();
+                                entry.connect_changed(move |e| {
+                                    let new_text = e.text().to_string();
+                                    let mut proj = project_live.borrow_mut();
+                                    if let Some(clip) = proj.clip_mut(&clip_id_live) {
+                                        if let Some(seg) = clip
+                                            .subtitle_segments
+                                            .iter_mut()
+                                            .find(|s| s.id == seg_id_live)
+                                        {
+                                            if seg.text != new_text {
+                                                seg.set_text_and_resync_words(new_text);
+                                                proj.dirty = true;
+                                            }
+                                        }
+                                    }
+                                });
+                            }
+
                             // Shared commit logic for both Enter and focus-out.
+                            // Pushes a single EditSubtitleTextCommand from the
+                            // last committed value to the current value, so undo
+                            // collapses an entire typing session into one entry.
                             let commit_edit = {
                                 let seg_id = seg_id.clone();
-                                let old_text = old_text.clone();
+                                let last_committed_text = last_committed_text.clone();
                                 let clip_id_c = clip_id_c.clone();
-                                let project_c = project_c.clone();
                                 let on_cmd_c = on_cmd_c.clone();
                                 Rc::new(move |new_text: String| {
-                                    let prev = old_text.borrow().clone();
+                                    let prev = last_committed_text.borrow().clone();
                                     if new_text == prev {
                                         return;
                                     }
-                                    let track_id = {
-                                        let proj = project_c.borrow();
-                                        proj.tracks
-                                            .iter()
-                                            .find(|t| t.clips.iter().any(|c| c.id == clip_id_c))
-                                            .map(|t| t.id.clone())
-                                            .unwrap_or_default()
-                                    };
                                     on_cmd_c(Box::new(crate::undo::EditSubtitleTextCommand {
                                         clip_id: clip_id_c.clone(),
-                                        track_id,
+                                        track_id: String::new(),
                                         segment_id: seg_id.clone(),
                                         old_text: prev.clone(),
                                         new_text: new_text.clone(),
                                     }));
-                                    *old_text.borrow_mut() = new_text;
+                                    *last_committed_text.borrow_mut() = new_text;
                                 })
                             };
 
@@ -3055,6 +3088,14 @@ pub fn build_inspector(
     on_role_changed: impl Fn(&str, &str) + 'static,
     on_execute_command: impl Fn(Box<dyn crate::undo::EditCommand>) + 'static,
 ) -> (GBox, Rc<InspectorView>) {
+    // Bring transform-bound constants into scope so the slider/range/clamp
+    // sites below can use them by short name instead of literal magic
+    // numbers.  See `src/model/transform_bounds.rs` for the canonical
+    // values.
+    use crate::model::transform_bounds::{
+        CROP_MAX_PX, CROP_MIN_PX, POSITION_MAX, POSITION_MIN, ROTATE_MAX_DEG, ROTATE_MIN_DEG,
+        SCALE_MAX, SCALE_MIN,
+    };
     // Wrap frei0r callbacks in Rc so they can be cloned into multiple closures.
     let on_normalize_audio: Rc<dyn Fn(&str)> = Rc::new(on_normalize_audio);
     let on_match_audio: Rc<
@@ -4425,7 +4466,7 @@ pub fn build_inspector(
     transform_inner.append(&anamorphic_desqueeze_dropdown);
 
     row_label(&transform_inner, "Scale");
-    let scale_slider = Scale::with_range(Orientation::Horizontal, 0.1, 4.0, 0.05);
+    let scale_slider = Scale::with_range(Orientation::Horizontal, SCALE_MIN, SCALE_MAX, 0.05);
     scale_slider.set_value(1.0);
     scale_slider.set_draw_value(true);
     scale_slider.set_digits(2);
@@ -4460,16 +4501,19 @@ pub fn build_inspector(
     transform_inner.append(&opacity_keyframe_row);
 
     row_label(&transform_inner, "Position X");
-    let position_x_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let position_x_slider =
+        Scale::with_range(Orientation::Horizontal, POSITION_MIN, POSITION_MAX, 0.01);
     position_x_slider.set_value(0.0);
     position_x_slider.set_draw_value(true);
     position_x_slider.set_digits(2);
+    position_x_slider.add_mark(POSITION_MIN, gtk4::PositionType::Bottom, Some("⇤"));
     position_x_slider.add_mark(-1.0, gtk4::PositionType::Bottom, Some("←"));
     position_x_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("·"));
     position_x_slider.add_mark(1.0, gtk4::PositionType::Bottom, Some("→"));
+    position_x_slider.add_mark(POSITION_MAX, gtk4::PositionType::Bottom, Some("⇥"));
     position_x_slider.set_hexpand(true);
     position_x_slider.set_tooltip_text(Some(
-        "Horizontal position: −1 = left, 0 = center, +1 = right",
+        "Horizontal position: −1 = canvas left edge, 0 = center, +1 = canvas right edge. Values past ±1 push the clip off-canvas.",
     ));
     transform_inner.append(&position_x_slider);
     let position_x_keyframe_row = GBox::new(Orientation::Horizontal, 6);
@@ -4480,16 +4524,20 @@ pub fn build_inspector(
     transform_inner.append(&position_x_keyframe_row);
 
     row_label(&transform_inner, "Position Y");
-    let position_y_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let position_y_slider =
+        Scale::with_range(Orientation::Horizontal, POSITION_MIN, POSITION_MAX, 0.01);
     position_y_slider.set_value(0.0);
     position_y_slider.set_draw_value(true);
     position_y_slider.set_digits(2);
+    position_y_slider.add_mark(POSITION_MIN, gtk4::PositionType::Bottom, Some("⤒"));
     position_y_slider.add_mark(-1.0, gtk4::PositionType::Bottom, Some("↑"));
     position_y_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("·"));
     position_y_slider.add_mark(1.0, gtk4::PositionType::Bottom, Some("↓"));
+    position_y_slider.add_mark(POSITION_MAX, gtk4::PositionType::Bottom, Some("⤓"));
     position_y_slider.set_hexpand(true);
-    position_y_slider
-        .set_tooltip_text(Some("Vertical position: −1 = top, 0 = center, +1 = bottom"));
+    position_y_slider.set_tooltip_text(Some(
+        "Vertical position: −1 = canvas top edge, 0 = center, +1 = canvas bottom edge. Values past ±1 push the clip off-canvas.",
+    ));
     transform_inner.append(&position_y_slider);
     let position_y_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let position_y_set_keyframe_btn = Button::with_label("Set Position Y Keyframe");
@@ -4499,10 +4547,12 @@ pub fn build_inspector(
     transform_inner.append(&position_y_keyframe_row);
 
     row_label(&transform_inner, "Crop Left");
-    let crop_left_slider = Scale::with_range(Orientation::Horizontal, 0.0, 500.0, 2.0);
+    let crop_left_slider =
+        Scale::with_range(Orientation::Horizontal, CROP_MIN_PX, CROP_MAX_PX, 2.0);
     crop_left_slider.set_value(0.0);
     crop_left_slider.set_draw_value(true);
     crop_left_slider.set_digits(0);
+    crop_left_slider.set_tooltip_text(Some("Crop from the left edge, in project pixels (0–4000)."));
     transform_inner.append(&crop_left_slider);
     let crop_left_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let crop_left_set_keyframe_btn = Button::with_label("Set Crop Left Keyframe");
@@ -4512,10 +4562,13 @@ pub fn build_inspector(
     transform_inner.append(&crop_left_keyframe_row);
 
     row_label(&transform_inner, "Crop Right");
-    let crop_right_slider = Scale::with_range(Orientation::Horizontal, 0.0, 500.0, 2.0);
+    let crop_right_slider =
+        Scale::with_range(Orientation::Horizontal, CROP_MIN_PX, CROP_MAX_PX, 2.0);
     crop_right_slider.set_value(0.0);
     crop_right_slider.set_draw_value(true);
     crop_right_slider.set_digits(0);
+    crop_right_slider
+        .set_tooltip_text(Some("Crop from the right edge, in project pixels (0–4000)."));
     transform_inner.append(&crop_right_slider);
     let crop_right_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let crop_right_set_keyframe_btn = Button::with_label("Set Crop Right Keyframe");
@@ -4525,10 +4578,12 @@ pub fn build_inspector(
     transform_inner.append(&crop_right_keyframe_row);
 
     row_label(&transform_inner, "Crop Top");
-    let crop_top_slider = Scale::with_range(Orientation::Horizontal, 0.0, 500.0, 2.0);
+    let crop_top_slider =
+        Scale::with_range(Orientation::Horizontal, CROP_MIN_PX, CROP_MAX_PX, 2.0);
     crop_top_slider.set_value(0.0);
     crop_top_slider.set_draw_value(true);
     crop_top_slider.set_digits(0);
+    crop_top_slider.set_tooltip_text(Some("Crop from the top edge, in project pixels (0–4000)."));
     transform_inner.append(&crop_top_slider);
     let crop_top_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let crop_top_set_keyframe_btn = Button::with_label("Set Crop Top Keyframe");
@@ -4538,10 +4593,13 @@ pub fn build_inspector(
     transform_inner.append(&crop_top_keyframe_row);
 
     row_label(&transform_inner, "Crop Bottom");
-    let crop_bottom_slider = Scale::with_range(Orientation::Horizontal, 0.0, 500.0, 2.0);
+    let crop_bottom_slider =
+        Scale::with_range(Orientation::Horizontal, CROP_MIN_PX, CROP_MAX_PX, 2.0);
     crop_bottom_slider.set_value(0.0);
     crop_bottom_slider.set_draw_value(true);
     crop_bottom_slider.set_digits(0);
+    crop_bottom_slider
+        .set_tooltip_text(Some("Crop from the bottom edge, in project pixels (0–4000)."));
     transform_inner.append(&crop_bottom_slider);
     let crop_bottom_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let crop_bottom_set_keyframe_btn = Button::with_label("Set Crop Bottom Keyframe");
@@ -4592,7 +4650,7 @@ pub fn build_inspector(
             cr.restore().ok();
         });
     }
-    let rotate_spin = gtk4::SpinButton::with_range(-180.0, 180.0, 1.0);
+    let rotate_spin = gtk4::SpinButton::with_range(ROTATE_MIN_DEG, ROTATE_MAX_DEG, 1.0);
     rotate_spin.set_digits(0);
     rotate_spin.set_value(0.0);
     rotate_spin.set_hexpand(true);
@@ -6479,7 +6537,7 @@ pub fn build_inspector(
         let pos_x_s = position_x_slider.clone();
         let pos_y_s = position_y_slider.clone();
         rotate_spin.connect_value_changed(move |spin| {
-            let rot = spin.value().clamp(-180.0, 180.0).round() as i32;
+            let rot = spin.value().clamp(ROTATE_MIN_DEG, ROTATE_MAX_DEG).round() as i32;
             rotate_value.set(rot as f64);
             rotate_dial.queue_draw();
             if *updating.borrow() {
@@ -7154,7 +7212,7 @@ pub fn build_inspector(
         on_clip_changed.clone(),
         Rc::new({
             let crop_left_slider = crop_left_slider.clone();
-            move || crop_left_slider.value().clamp(0.0, 500.0).round()
+            move || crop_left_slider.value().clamp(CROP_MIN_PX, CROP_MAX_PX).round()
         }),
         interp_provider.clone(),
     );
@@ -7169,7 +7227,12 @@ pub fn build_inspector(
         on_clip_changed.clone(),
         Rc::new({
             let crop_right_slider = crop_right_slider.clone();
-            move || crop_right_slider.value().clamp(0.0, 500.0).round()
+            move || {
+                crop_right_slider
+                    .value()
+                    .clamp(CROP_MIN_PX, CROP_MAX_PX)
+                    .round()
+            }
         }),
         interp_provider.clone(),
     );
@@ -7184,7 +7247,7 @@ pub fn build_inspector(
         on_clip_changed.clone(),
         Rc::new({
             let crop_top_slider = crop_top_slider.clone();
-            move || crop_top_slider.value().clamp(0.0, 500.0).round()
+            move || crop_top_slider.value().clamp(CROP_MIN_PX, CROP_MAX_PX).round()
         }),
         interp_provider.clone(),
     );
@@ -7199,7 +7262,12 @@ pub fn build_inspector(
         on_clip_changed.clone(),
         Rc::new({
             let crop_bottom_slider = crop_bottom_slider.clone();
-            move || crop_bottom_slider.value().clamp(0.0, 500.0).round()
+            move || {
+                crop_bottom_slider
+                    .value()
+                    .clamp(CROP_MIN_PX, CROP_MAX_PX)
+                    .round()
+            }
         }),
         interp_provider.clone(),
     );
@@ -7214,7 +7282,7 @@ pub fn build_inspector(
         on_clip_changed.clone(),
         Rc::new({
             let rotate_spin = rotate_spin.clone();
-            move || rotate_spin.value().clamp(-180.0, 180.0).round()
+            move || rotate_spin.value().clamp(ROTATE_MIN_DEG, ROTATE_MAX_DEG).round()
         }),
         interp_provider.clone(),
     );
@@ -9216,7 +9284,10 @@ fn dial_point_to_degrees(x: f64, y: f64, width: f64, height: f64) -> i32 {
     if deg > 180.0 {
         deg -= 360.0;
     }
-    -(deg.round().clamp(-180.0, 180.0) as i32)
+    -(deg.round().clamp(
+        crate::model::transform_bounds::ROTATE_MIN_DEG,
+        crate::model::transform_bounds::ROTATE_MAX_DEG,
+    ) as i32)
 }
 
 fn row_label(parent: &GBox, text: &str) {

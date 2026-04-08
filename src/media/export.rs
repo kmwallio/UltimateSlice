@@ -5,6 +5,10 @@ use crate::media::{
 use crate::model::clip::{Clip, ClipKind, MaskShape, NumericKeyframe, SlowMotionInterp};
 use crate::model::project::Project;
 use crate::model::track::{Track, TrackKind};
+use crate::model::transform_bounds::{
+    CROP_MAX_PX, CROP_MIN_PX, OPACITY_MAX, OPACITY_MIN, POSITION_MAX, POSITION_MIN, ROTATE_MAX_DEG,
+    ROTATE_MIN_DEG, SCALE_MAX, SCALE_MIN,
+};
 use crate::model::transition::{max_transition_duration_ns, transition_xfade_name_for_kind};
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
@@ -396,7 +400,8 @@ pub fn export_project(
             project.frame_rate.denominator,
         );
         let lut_prefix = build_lut_filter_prefix(clip);
-        let crop_filter = build_crop_filter(clip, out_w, out_h, false);
+        let crop_filter =
+            build_crop_filter(clip, out_w, out_h, project.width, project.height, false);
         let rotate_filter = build_rotation_filter(clip, false);
         let transition_stop_pad_filter = if can_render_primary_transitions {
             build_primary_clip_transition_stop_pad_filter(&primary_transition_timings, i)
@@ -410,29 +415,29 @@ pub fn export_project(
             let scale_expr = build_keyframed_property_expression(
                 &clip.scale_keyframes,
                 clip.scale,
-                0.1,
-                4.0,
+                SCALE_MIN,
+                SCALE_MAX,
                 "t",
             );
             let pos_x_expr = build_keyframed_property_expression(
                 &clip.position_x_keyframes,
                 clip.position_x,
-                -1.0,
-                1.0,
+                POSITION_MIN,
+                POSITION_MAX,
                 "t",
             );
             let pos_y_expr = build_keyframed_property_expression(
                 &clip.position_y_keyframes,
                 clip.position_y,
-                -1.0,
-                1.0,
+                POSITION_MIN,
+                POSITION_MAX,
                 "t",
             );
             let opacity_expr = build_keyframed_property_expression(
                 &clip.opacity_keyframes,
                 clip.opacity,
-                0.0,
-                1.0,
+                OPACITY_MIN,
+                OPACITY_MAX,
                 "T",
             );
             let mask_result = build_combined_mask_alpha(clip, out_w, out_h);
@@ -443,11 +448,27 @@ pub fn export_project(
                 Some(MaskAlphaResult::GeqExpression(expr)) => expr.clone(),
                 Some(MaskAlphaResult::RasterFile(_)) | None => "1".to_string(),
             };
+            // Direct canvas translation for tracker-bound, title, and
+            // adjustment clips uses a different overlay position formula
+            // than normal clips, matching the preview's
+            // `direct_canvas_origin` math. See secondary chain for the
+            // longer comment.
+            let (overlay_x_expr, overlay_y_expr) = if clip_uses_direct_canvas_translation(clip) {
+                (
+                    format!("(W*(1+({pos_x_expr}))-w)/2"),
+                    format!("(H*(1+({pos_y_expr}))-h)/2"),
+                )
+            } else {
+                (
+                    format!("(W-w)*(1+({pos_x_expr}))/2"),
+                    format!("(H-h)*(1+({pos_y_expr}))/2"),
+                )
+            };
             filter.push_str(&format!(
                 "[{i}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{speed_filter}\
                  ,scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[pv{i}fg];\
                  color=c=black:size={out_w}x{out_h}:r={}/{}:d={clip_duration_s:.6}[pv{i}bg];\
-                 [pv{i}bg][pv{i}fg]overlay=x='(W-w)*(1+({pos_x_expr}))/2':y='(H-h)*(1+({pos_y_expr}))/2':eval=frame\
+                 [pv{i}bg][pv{i}fg]overlay=x='{overlay_x_expr}':y='{overlay_y_expr}':eval=frame\
                   ,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({opacity_expr})*({mask_alpha_expr})'[pv{i}raw];\
                  [pv{i}raw]format=yuv420p{transition_stop_pad_filter}[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
@@ -555,7 +576,8 @@ pub fn export_project(
             project.frame_rate.denominator,
         );
         let lut_prefix = build_lut_filter_prefix(clip);
-        let crop_filter = build_crop_filter(clip, out_w, out_h, true);
+        let crop_filter =
+            build_crop_filter(clip, out_w, out_h, project.width, project.height, true);
         let rotate_filter = build_rotation_filter(clip, true);
         let has_transform_keyframes = has_transform_keyframes(clip);
         let has_opacity_keyframes = !clip.opacity_keyframes.is_empty();
@@ -570,29 +592,29 @@ pub fn export_project(
             let scale_expr = build_keyframed_property_expression(
                 &clip.scale_keyframes,
                 clip.scale,
-                0.1,
-                4.0,
+                SCALE_MIN,
+                SCALE_MAX,
                 "t",
             );
             let pos_x_expr = build_keyframed_property_expression(
                 &clip.position_x_keyframes,
                 clip.position_x,
-                -1.0,
-                1.0,
+                POSITION_MIN,
+                POSITION_MAX,
                 "t",
             );
             let pos_y_expr = build_keyframed_property_expression(
                 &clip.position_y_keyframes,
                 clip.position_y,
-                -1.0,
-                1.0,
+                POSITION_MIN,
+                POSITION_MAX,
                 "t",
             );
             let opacity_expr = build_keyframed_property_expression(
                 &clip.opacity_keyframes,
                 clip.opacity,
-                0.0,
-                1.0,
+                OPACITY_MIN,
+                OPACITY_MAX,
                 "T",
             );
             let ov_mask_result = build_combined_mask_alpha(clip, out_w, out_h);
@@ -602,11 +624,32 @@ pub fn export_project(
             };
             let clip_duration_s = clip.duration() as f64 / 1_000_000_000.0;
             let anamorphic_filter = build_anamorphic_filter(clip);
+            // Direct canvas translation for tracker-bound, title, and
+            // adjustment clips uses a different overlay position formula
+            // than normal clips, matching the preview's
+            // `direct_canvas_origin` math:
+            //   normal: x = (W-w)*(1+pos_x)/2
+            //   direct: x = (W-w)/2 + pos_x*W/2 = (W*(1+pos_x) - w)/2
+            // Without this branch, tracker-bound clips end up at a
+            // different horizontal position in the export than in the
+            // preview (the tracker baking encodes positions in
+            // direct-canvas-relative space).
+            let (overlay_x_expr, overlay_y_expr) = if clip_uses_direct_canvas_translation(clip) {
+                (
+                    format!("(W*(1+({pos_x_expr}))-w)/2"),
+                    format!("(H*(1+({pos_y_expr}))-h)/2"),
+                )
+            } else {
+                (
+                    format!("(W-w)*(1+({pos_x_expr}))/2"),
+                    format!("(H-h)*(1+({pos_y_expr}))/2"),
+                )
+            };
             filter.push_str(&format!(
                 ";[{in_idx}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{crop_filter}{rotate_filter}{speed_filter}\
                  ,scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[ov{k}fg];\
                  color=c=black@0:size={out_w}x{out_h}:r={}/{}:d={clip_duration_s:.6}[ov{k}bg];\
-                 [ov{k}bg][ov{k}fg]overlay=x='(W-w)*(1+({pos_x_expr}))/2':y='(H-h)*(1+({pos_y_expr}))/2':eval=frame\
+                 [ov{k}bg][ov{k}fg]overlay=x='{overlay_x_expr}':y='{overlay_y_expr}':eval=frame\
                  ,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({opacity_expr})*({mask_alpha_expr})'[{ov_label}raw]"
                 , project.frame_rate.numerator, project.frame_rate.denominator
                 , project.frame_rate.numerator, project.frame_rate.denominator
@@ -1664,55 +1707,58 @@ fn resolve_adjustment_transform_at_local_time(
     clip: &Clip,
     local_time_ns: u64,
 ) -> ResolvedAdjustmentTransform {
+    use crate::model::transform_bounds::*;
     ResolvedAdjustmentTransform {
         scale: Clip::evaluate_keyframed_value(&clip.scale_keyframes, local_time_ns, clip.scale)
-            .clamp(0.1, 4.0),
+            .clamp(SCALE_MIN, SCALE_MAX),
+        // Adjustment scope positions stay clamped to ±1.0 — moving the
+        // adjustment region off-canvas has no useful semantic.
         position_x: Clip::evaluate_keyframed_value(
             &clip.position_x_keyframes,
             local_time_ns,
             clip.position_x,
         )
-        .clamp(-1.0, 1.0),
+        .clamp(ADJUSTMENT_POSITION_MIN, ADJUSTMENT_POSITION_MAX),
         position_y: Clip::evaluate_keyframed_value(
             &clip.position_y_keyframes,
             local_time_ns,
             clip.position_y,
         )
-        .clamp(-1.0, 1.0),
+        .clamp(ADJUSTMENT_POSITION_MIN, ADJUSTMENT_POSITION_MAX),
         rotate_deg: Clip::evaluate_keyframed_value(
             &clip.rotate_keyframes,
             local_time_ns,
             clip.rotate as f64,
         )
-        .clamp(-180.0, 180.0),
+        .clamp(ROTATE_MIN_DEG, ROTATE_MAX_DEG),
         crop_left: Clip::evaluate_keyframed_value(
             &clip.crop_left_keyframes,
             local_time_ns,
             clip.crop_left as f64,
         )
         .round()
-        .clamp(0.0, 500.0) as i32,
+        .clamp(CROP_MIN_PX, CROP_MAX_PX) as i32,
         crop_right: Clip::evaluate_keyframed_value(
             &clip.crop_right_keyframes,
             local_time_ns,
             clip.crop_right as f64,
         )
         .round()
-        .clamp(0.0, 500.0) as i32,
+        .clamp(CROP_MIN_PX, CROP_MAX_PX) as i32,
         crop_top: Clip::evaluate_keyframed_value(
             &clip.crop_top_keyframes,
             local_time_ns,
             clip.crop_top as f64,
         )
         .round()
-        .clamp(0.0, 500.0) as i32,
+        .clamp(CROP_MIN_PX, CROP_MAX_PX) as i32,
         crop_bottom: Clip::evaluate_keyframed_value(
             &clip.crop_bottom_keyframes,
             local_time_ns,
             clip.crop_bottom as f64,
         )
         .round()
-        .clamp(0.0, 500.0) as i32,
+        .clamp(CROP_MIN_PX, CROP_MAX_PX) as i32,
     }
 }
 
@@ -2009,55 +2055,60 @@ fn build_adjustment_scope_alpha_expression_for_coords(
 
     let pw = out_w.max(1) as f64;
     let ph = out_h.max(1) as f64;
-    let scale_expr =
-        build_keyframed_property_expression(&clip.scale_keyframes, clip.scale, 0.1, 4.0, time_var);
+    let scale_expr = build_keyframed_property_expression(
+        &clip.scale_keyframes,
+        clip.scale,
+        SCALE_MIN,
+        SCALE_MAX,
+        time_var,
+    );
     let pos_x_expr = build_keyframed_property_expression(
         &clip.position_x_keyframes,
         clip.position_x,
-        -1.0,
-        1.0,
+        POSITION_MIN,
+        POSITION_MAX,
         time_var,
     );
     let pos_y_expr = build_keyframed_property_expression(
         &clip.position_y_keyframes,
         clip.position_y,
-        -1.0,
-        1.0,
+        POSITION_MIN,
+        POSITION_MAX,
         time_var,
     );
     let rotate_expr = build_keyframed_property_expression(
         &clip.rotate_keyframes,
         clip.rotate as f64,
-        -180.0,
-        180.0,
+        ROTATE_MIN_DEG,
+        ROTATE_MAX_DEG,
         time_var,
     );
     let crop_left_expr = build_keyframed_property_expression(
         &clip.crop_left_keyframes,
         clip.crop_left as f64,
-        0.0,
-        500.0,
+        CROP_MIN_PX,
+        CROP_MAX_PX,
         time_var,
     );
     let crop_right_expr = build_keyframed_property_expression(
         &clip.crop_right_keyframes,
         clip.crop_right as f64,
-        0.0,
-        500.0,
+        CROP_MIN_PX,
+        CROP_MAX_PX,
         time_var,
     );
     let crop_top_expr = build_keyframed_property_expression(
         &clip.crop_top_keyframes,
         clip.crop_top as f64,
-        0.0,
-        500.0,
+        CROP_MIN_PX,
+        CROP_MAX_PX,
         time_var,
     );
     let crop_bottom_expr = build_keyframed_property_expression(
         &clip.crop_bottom_keyframes,
         clip.crop_bottom as f64,
-        0.0,
-        500.0,
+        CROP_MIN_PX,
+        CROP_MAX_PX,
         time_var,
     );
 
@@ -2102,29 +2153,35 @@ fn build_adjustment_transform_expressions(
     out_h: u32,
     time_var: &str,
 ) -> AdjustmentTransformExpressions {
+    use crate::model::transform_bounds::{ADJUSTMENT_POSITION_MAX, ADJUSTMENT_POSITION_MIN};
     let pw = out_w.max(1) as f64;
     let ph = out_h.max(1) as f64;
-    let scale_expr =
-        build_keyframed_property_expression(&clip.scale_keyframes, clip.scale, 0.1, 4.0, time_var);
+    let scale_expr = build_keyframed_property_expression(
+        &clip.scale_keyframes,
+        clip.scale,
+        SCALE_MIN,
+        SCALE_MAX,
+        time_var,
+    );
     let pos_x_expr = build_keyframed_property_expression(
         &clip.position_x_keyframes,
         clip.position_x,
-        -1.0,
-        1.0,
+        ADJUSTMENT_POSITION_MIN,
+        ADJUSTMENT_POSITION_MAX,
         time_var,
     );
     let pos_y_expr = build_keyframed_property_expression(
         &clip.position_y_keyframes,
         clip.position_y,
-        -1.0,
-        1.0,
+        ADJUSTMENT_POSITION_MIN,
+        ADJUSTMENT_POSITION_MAX,
         time_var,
     );
     let rotate_expr = build_keyframed_property_expression(
         &clip.rotate_keyframes,
         clip.rotate as f64,
-        -180.0,
-        180.0,
+        ROTATE_MIN_DEG,
+        ROTATE_MAX_DEG,
         time_var,
     );
     let center_x_expr = format!("{pw:.10}/2+({pos_x_expr})*{pw:.10}/2");
@@ -3995,39 +4052,62 @@ fn build_crop_filter(
     clip: &crate::model::clip::Clip,
     out_w: u32,
     out_h: u32,
+    project_w: u32,
+    project_h: u32,
     transparent_pad: bool,
 ) -> String {
+    // Crop values are stored in PROJECT pixels, but the export filter chain
+    // operates on a canvas at `out_w × out_h` (which can differ from
+    // `project_w × project_h` when an export preset upscales/downscales the
+    // project). Scale every crop value by the (out / project) ratio so the
+    // exported visible region matches the proportional crop the user sees in
+    // the preview (which scales crop the same way against the preview
+    // buffer's processing dimensions).
+    let scale_x = if project_w > 0 {
+        out_w as f64 / project_w as f64
+    } else {
+        1.0
+    };
+    let scale_y = if project_h > 0 {
+        out_h as f64 / project_h as f64
+    } else {
+        1.0
+    };
     let has_crop_keyframes = !clip.crop_left_keyframes.is_empty()
         || !clip.crop_right_keyframes.is_empty()
         || !clip.crop_top_keyframes.is_empty()
         || !clip.crop_bottom_keyframes.is_empty();
     if has_crop_keyframes {
-        let cl_expr = build_keyframed_property_expression(
+        let cl_expr = build_keyframed_property_expression_scaled(
             &clip.crop_left_keyframes,
             clip.crop_left as f64,
-            0.0,
-            500.0,
+            CROP_MIN_PX,
+            CROP_MAX_PX,
+            scale_x,
             "T",
         );
-        let cr_expr = build_keyframed_property_expression(
+        let cr_expr = build_keyframed_property_expression_scaled(
             &clip.crop_right_keyframes,
             clip.crop_right as f64,
-            0.0,
-            500.0,
+            CROP_MIN_PX,
+            CROP_MAX_PX,
+            scale_x,
             "T",
         );
-        let ct_expr = build_keyframed_property_expression(
+        let ct_expr = build_keyframed_property_expression_scaled(
             &clip.crop_top_keyframes,
             clip.crop_top as f64,
-            0.0,
-            500.0,
+            CROP_MIN_PX,
+            CROP_MAX_PX,
+            scale_y,
             "T",
         );
-        let cb_expr = build_keyframed_property_expression(
+        let cb_expr = build_keyframed_property_expression_scaled(
             &clip.crop_bottom_keyframes,
             clip.crop_bottom as f64,
-            0.0,
-            500.0,
+            CROP_MIN_PX,
+            CROP_MAX_PX,
+            scale_y,
             "T",
         );
         // Dynamic crop via alpha masking (per-frame expressions). This avoids relying on
@@ -4036,10 +4116,10 @@ fn build_crop_filter(
             ",geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='if(between(X,({cl_expr}),{out_w}-({cr_expr})-1)*between(Y,({ct_expr}),{out_h}-({cb_expr})-1),alpha(X,Y),0)'"
         );
     }
-    let cl = clip.crop_left.max(0) as u32;
-    let cr = clip.crop_right.max(0) as u32;
-    let ct = clip.crop_top.max(0) as u32;
-    let cb = clip.crop_bottom.max(0) as u32;
+    let cl = ((clip.crop_left.max(0) as f64 * scale_x).round() as u32).min(out_w);
+    let cr = ((clip.crop_right.max(0) as f64 * scale_x).round() as u32).min(out_w);
+    let ct = ((clip.crop_top.max(0) as f64 * scale_y).round() as u32).min(out_h);
+    let cb = ((clip.crop_bottom.max(0) as f64 * scale_y).round() as u32).min(out_h);
     if cl == 0 && cr == 0 && ct == 0 && cb == 0 {
         return String::new();
     }
@@ -4051,6 +4131,34 @@ fn build_crop_filter(
         "black"
     };
     format!(",crop={cw}:{ch}:{cl}:{ct},pad={out_w}:{out_h}:{cl}:{ct}:{pad_color}")
+}
+
+/// Like `build_keyframed_property_expression` but multiplies the clamped
+/// per-keyframe value by `output_scale` before serializing into the ffmpeg
+/// expression. Used for crop expressions where the stored values are in
+/// project pixels but the filter graph operates at the export resolution.
+pub(crate) fn build_keyframed_property_expression_scaled(
+    keyframes: &[NumericKeyframe],
+    default_value: f64,
+    min_value: f64,
+    max_value: f64,
+    output_scale: f64,
+    time_var: &str,
+) -> String {
+    // Build the unscaled expression and wrap it in a multiplication. Cheap
+    // and avoids duplicating the (large) keyframe-walk code paths.
+    let inner = build_keyframed_property_expression(
+        keyframes,
+        default_value,
+        min_value,
+        max_value,
+        time_var,
+    );
+    if (output_scale - 1.0).abs() < 1e-9 {
+        inner
+    } else {
+        format!("({inner})*{output_scale:.10}")
+    }
 }
 
 /// Build a rotation filter for arbitrary-angle clip rotation.
@@ -4095,7 +4203,10 @@ fn build_scale_position_filter(
     out_h: u32,
     transparent_pad: bool,
 ) -> String {
-    let scale = clip.scale.clamp(0.1, 4.0);
+    let scale = clip.scale.clamp(
+        crate::model::transform_bounds::SCALE_MIN,
+        crate::model::transform_bounds::SCALE_MAX,
+    );
     if (scale - 1.0).abs() < 0.001 && clip.position_x.abs() < 0.001 && clip.position_y.abs() < 0.001
     {
         return String::new(); // passthrough when scale=1 and position=0
@@ -4142,8 +4253,14 @@ fn clip_uses_direct_canvas_translation(clip: &crate::model::clip::Clip) -> bool 
 }
 
 fn direct_canvas_origin(axis_size: f64, scaled_axis_size: f64, position: f64) -> i32 {
-    (((axis_size - scaled_axis_size) / 2.0) + position.clamp(-1.0, 1.0) * axis_size / 2.0).round()
-        as i32
+    // Mirror `program_player::direct_canvas_origin`'s relaxed clamp so titles,
+    // adjustment scopes, and tracker-followed clips can be moved off-canvas
+    // in export the same way they appear in preview.
+    let clamped = position.clamp(
+        crate::model::transform_bounds::POSITION_MIN,
+        crate::model::transform_bounds::POSITION_MAX,
+    );
+    (((axis_size - scaled_axis_size) / 2.0) + clamped * axis_size / 2.0).round() as i32
 }
 
 fn build_scale_translate_filter(
@@ -5952,10 +6069,75 @@ mod tests {
                 bezier_controls: None,
             },
         ];
-        let f = build_crop_filter(&clip, 1920, 1080, false);
+        let f = build_crop_filter(&clip, 1920, 1080, 1920, 1080, false);
         assert!(f.contains(",geq=lum='lum(X,Y)'"));
         assert!(f.contains("alpha(X,Y)"));
         assert!(f.contains("between(X,("));
+    }
+
+    #[test]
+    fn build_crop_filter_still_image_static_crop_emits_filter() {
+        let mut clip = Clip::new("/tmp/test.png", 2_000_000_000, 0, ClipKind::Image);
+        clip.crop_left = 400;
+        clip.crop_right = 400;
+        clip.crop_top = 200;
+        clip.crop_bottom = 200;
+        let f = build_crop_filter(&clip, 1920, 1080, 1920, 1080, true);
+        // Expect a static crop+pad filter, NOT empty.
+        assert!(!f.is_empty(), "crop filter was empty for crop=(400,400,200,200): {f}");
+        assert!(f.contains("crop=1120:680:400:200"), "unexpected crop filter: {f}");
+        assert!(
+            f.contains("pad=1920:1080:400:200:black@0.0"),
+            "unexpected pad in filter: {f}"
+        );
+    }
+
+    #[test]
+    fn keyframed_overlay_uses_direct_canvas_formula_for_tracker_bound_clips() {
+        // A clip with a tracking_binding (or kind=Title/Adjustment) uses
+        // direct_canvas_origin in the preview, not the normal
+        // (W-w)*(1+pos_x)/2 formula. The export's keyframed branch must
+        // emit the matching direct formula `(W*(1+pos_x)-w)/2` when the
+        // clip has direct canvas translation, otherwise the export ends up
+        // at a different horizontal position than the preview for any
+        // pos_x ≠ 0.
+        let mut clip = Clip::new("/tmp/test.png", 5_000_000_000, 0, ClipKind::Image);
+        clip.tracking_binding = Some(crate::model::clip::TrackingBinding::new(
+            "source-clip-1",
+            "tracker-1",
+        ));
+        // Force the keyframed branch by giving the clip a position keyframe.
+        clip.position_x_keyframes = vec![NumericKeyframe {
+            time_ns: 0,
+            value: 0.25,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        }];
+        assert!(super::clip_uses_direct_canvas_translation(&clip));
+    }
+
+    #[test]
+    fn build_crop_filter_scales_when_export_resolution_differs_from_project() {
+        // Project is 1920x1080. Export is 3840x2160 (2x in each dimension).
+        // The user's stored crop is 153 px (from the left, in PROJECT pixels)
+        // = 8% of the project canvas. The export must apply 306 px = 8% of
+        // the export canvas, NOT the literal 153.
+        let mut clip = Clip::new("/tmp/test.png", 2_000_000_000, 0, ClipKind::Image);
+        clip.crop_left = 153;
+        clip.crop_right = 1340;
+        clip.crop_top = 78;
+        clip.crop_bottom = 598;
+        let f = build_crop_filter(&clip, 3840, 2160, 1920, 1080, true);
+        // Expected scaled values: 153*2=306, 1340*2=2680, 78*2=156, 598*2=1196
+        // Visible region: 3840-306-2680=854 wide, 2160-156-1196=808 tall
+        assert!(
+            f.contains("crop=854:808:306:156"),
+            "unexpected scaled crop filter: {f}"
+        );
+        assert!(
+            f.contains("pad=3840:2160:306:156:black@0.0"),
+            "unexpected scaled pad in filter: {f}"
+        );
     }
 
     #[test]

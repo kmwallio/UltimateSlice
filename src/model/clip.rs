@@ -117,6 +117,63 @@ pub struct SubtitleSegment {
     pub words: Vec<SubtitleWord>,
 }
 
+impl SubtitleSegment {
+    /// Apply a new full-text value to this segment and re-sync the
+    /// per-word entries used by karaoke / word-highlight rendering so
+    /// the highlighted text matches what the user typed instead of the
+    /// original Whisper tokenization.
+    ///
+    /// Word timings are preserved 1:1 when the whitespace-split word
+    /// count matches the existing entries; otherwise the segment's
+    /// total time range is redistributed evenly across the new words so
+    /// the karaoke timeline still spans the segment.
+    pub fn set_text_and_resync_words(&mut self, new_text: String) {
+        let new_words: Vec<String> = new_text
+            .split_whitespace()
+            .map(|s| s.to_string())
+            .collect();
+        self.text = new_text;
+
+        if self.words.is_empty() {
+            // No karaoke data to maintain — nothing else to do.
+            return;
+        }
+        if new_words.is_empty() {
+            // Edited text is empty — clear stale word tokens so karaoke
+            // doesn't keep showing the previous Whisper output.
+            self.words.clear();
+            return;
+        }
+
+        if new_words.len() == self.words.len() {
+            // Word counts match — replace texts in place so the existing
+            // per-word timings (originally from Whisper token timestamps)
+            // keep working untouched.
+            for (slot, word) in self.words.iter_mut().zip(new_words.into_iter()) {
+                slot.text = word;
+            }
+        } else {
+            // Word count changed — redistribute the segment's time range
+            // evenly across the new word list. Granularity drops a bit
+            // but karaoke highlighting still tracks the segment.
+            let total = self.end_ns.saturating_sub(self.start_ns).max(1);
+            let n = new_words.len() as u64;
+            let mut rebuilt: Vec<SubtitleWord> = Vec::with_capacity(new_words.len());
+            for (i, w) in new_words.into_iter().enumerate() {
+                let i = i as u64;
+                let w_start = self.start_ns + (total * i) / n;
+                let w_end = self.start_ns + (total * (i + 1)) / n;
+                rebuilt.push(SubtitleWord {
+                    start_ns: w_start,
+                    end_ns: w_end,
+                    text: w,
+                });
+            }
+            self.words = rebuilt;
+        }
+    }
+}
+
 fn default_true() -> bool {
     true
 }
@@ -2447,12 +2504,13 @@ impl Clip {
     }
 
     pub fn clamp_phase1_property_value(property: Phase1KeyframeProperty, value: f64) -> f64 {
+        use crate::model::transform_bounds::*;
         match property {
             Phase1KeyframeProperty::PositionX | Phase1KeyframeProperty::PositionY => {
-                value.clamp(-1.0, 1.0)
+                value.clamp(POSITION_MIN, POSITION_MAX)
             }
-            Phase1KeyframeProperty::Scale => value.clamp(0.1, 4.0),
-            Phase1KeyframeProperty::Opacity => value.clamp(0.0, 1.0),
+            Phase1KeyframeProperty::Scale => value.clamp(SCALE_MIN, SCALE_MAX),
+            Phase1KeyframeProperty::Opacity => value.clamp(OPACITY_MIN, OPACITY_MAX),
             Phase1KeyframeProperty::Brightness => value.clamp(-1.0, 1.0),
             Phase1KeyframeProperty::Contrast => value.clamp(0.0, 2.0),
             Phase1KeyframeProperty::Saturation => value.clamp(0.0, 2.0),
@@ -2461,11 +2519,11 @@ impl Clip {
             Phase1KeyframeProperty::Volume => value.clamp(0.0, 4.0),
             Phase1KeyframeProperty::Pan => value.clamp(-1.0, 1.0),
             Phase1KeyframeProperty::Speed => value.clamp(0.05, 16.0),
-            Phase1KeyframeProperty::Rotate => value.clamp(-180.0, 180.0),
+            Phase1KeyframeProperty::Rotate => value.clamp(ROTATE_MIN_DEG, ROTATE_MAX_DEG),
             Phase1KeyframeProperty::CropLeft
             | Phase1KeyframeProperty::CropRight
             | Phase1KeyframeProperty::CropTop
-            | Phase1KeyframeProperty::CropBottom => value.clamp(0.0, 500.0),
+            | Phase1KeyframeProperty::CropBottom => value.clamp(CROP_MIN_PX, CROP_MAX_PX),
             Phase1KeyframeProperty::Blur => value.clamp(0.0, 1.0),
             Phase1KeyframeProperty::EqLowGain
             | Phase1KeyframeProperty::EqMidGain
@@ -2476,7 +2534,7 @@ impl Clip {
             Phase1KeyframeProperty::MaskWidth | Phase1KeyframeProperty::MaskHeight => {
                 value.clamp(0.01, 0.5)
             }
-            Phase1KeyframeProperty::MaskRotation => value.clamp(-180.0, 180.0),
+            Phase1KeyframeProperty::MaskRotation => value.clamp(ROTATE_MIN_DEG, ROTATE_MAX_DEG),
             Phase1KeyframeProperty::MaskFeather => value.clamp(0.0, 0.5),
             Phase1KeyframeProperty::MaskExpansion => value.clamp(-0.5, 0.5),
         }
@@ -3699,21 +3757,35 @@ mod tests {
             Clip::clamp_phase1_property_value(Phase1KeyframeProperty::Tint, -4.0),
             -1.0
         );
+        use crate::model::transform_bounds::*;
         assert_eq!(
             Clip::clamp_phase1_property_value(Phase1KeyframeProperty::Rotate, 500.0),
-            180.0
+            ROTATE_MAX_DEG
         );
         assert_eq!(
             Clip::clamp_phase1_property_value(Phase1KeyframeProperty::Rotate, -500.0),
-            -180.0
+            ROTATE_MIN_DEG
         );
         assert_eq!(
             Clip::clamp_phase1_property_value(Phase1KeyframeProperty::CropLeft, -10.0),
-            0.0
+            CROP_MIN_PX
         );
         assert_eq!(
             Clip::clamp_phase1_property_value(Phase1KeyframeProperty::CropBottom, 999.0),
-            500.0
+            999.0
+        );
+        assert_eq!(
+            Clip::clamp_phase1_property_value(Phase1KeyframeProperty::CropTop, CROP_MAX_PX + 1000.0),
+            CROP_MAX_PX
+        );
+        // Position can now be pushed past ±1 so clips can swing off-canvas.
+        assert_eq!(
+            Clip::clamp_phase1_property_value(Phase1KeyframeProperty::PositionX, 2.5),
+            2.5
+        );
+        assert_eq!(
+            Clip::clamp_phase1_property_value(Phase1KeyframeProperty::PositionY, POSITION_MIN - 10.0),
+            POSITION_MIN
         );
     }
 

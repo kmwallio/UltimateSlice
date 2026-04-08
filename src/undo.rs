@@ -1625,7 +1625,10 @@ impl EditCommand for EditSubtitleTextCommand {
                 .iter_mut()
                 .find(|s| s.id == self.segment_id)
             {
-                seg.text = self.new_text.clone();
+                // Re-sync per-word entries so karaoke / word highlight
+                // rendering uses the edited text instead of the original
+                // Whisper tokens.
+                seg.set_text_and_resync_words(self.new_text.clone());
             }
         }
         project.dirty = true;
@@ -1637,7 +1640,7 @@ impl EditCommand for EditSubtitleTextCommand {
                 .iter_mut()
                 .find(|s| s.id == self.segment_id)
             {
-                seg.text = self.old_text.clone();
+                seg.set_text_and_resync_words(self.old_text.clone());
             }
         }
         project.dirty = true;

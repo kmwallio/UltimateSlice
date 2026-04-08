@@ -627,16 +627,74 @@ fn extract_audio_for_stt(path: &str, source_in_ns: u64, source_out_ns: u64) -> O
 
     let mut samples: Vec<f32> = Vec::new();
     let bus = pipeline.bus()?;
-
+    // Whisper transcribes a contiguous mono f32 stream and emits timestamps
+    // measured from the first sample it sees. If the GStreamer extraction
+    // emits any audio with PTS *before* `source_in_ns` (e.g. a preroll buffer
+    // that survived the FLUSH seek, or an audio decoder that streams from
+    // the previous keyframe before catching up), Whisper's "0s" maps to a
+    // file position earlier than the clip's source-in. The resulting subtitle
+    // timestamps then play ahead of the audio when overlaid back onto the
+    // clip-local timeline. Defend against that here by inspecting the PTS of
+    // every buffer we pull and discarding any leading samples that come from
+    // before `source_in_ns`. We also log the actual first PTS so future
+    // mismatches are easy to diagnose.
+    let mut first_pts_logged = false;
     loop {
         if let Some(s) = appsink.try_pull_sample(gst::ClockTime::from_mseconds(100)) {
             let buffer = s.buffer()?;
+            let buffer_pts_ns = buffer.pts().map(|pts| pts.nseconds());
             let map = buffer.map_readable().ok()?;
             let raw_bytes = map.as_slice();
             let floats: &[f32] = unsafe {
                 std::slice::from_raw_parts(raw_bytes.as_ptr() as *const f32, raw_bytes.len() / 4)
             };
-            samples.extend_from_slice(floats);
+
+            let mut floats_to_append: &[f32] = floats;
+            if let Some(pts_ns) = buffer_pts_ns {
+                if !first_pts_logged {
+                    log::info!(
+                        "SttCache: first audio buffer PTS={}ns (target source_in={}ns) for {}",
+                        pts_ns,
+                        source_in_ns,
+                        path
+                    );
+                    first_pts_logged = true;
+                }
+                if pts_ns < source_in_ns {
+                    let lag_ns = source_in_ns - pts_ns;
+                    // Convert lag (in ns) to a sample count at the whisper rate.
+                    let lag_samples = ((lag_ns as f64 / 1_000_000_000.0)
+                        * WHISPER_SAMPLE_RATE as f64)
+                        .round() as usize;
+                    if lag_samples >= floats.len() {
+                        // Whole buffer is from before source_in — drop it.
+                        log::warn!(
+                            "SttCache: dropping {} pre-source samples (buffer PTS {}ns < source_in {}ns)",
+                            floats.len(),
+                            pts_ns,
+                            source_in_ns
+                        );
+                        floats_to_append = &[];
+                    } else if lag_samples > 0 {
+                        log::warn!(
+                            "SttCache: trimming {} pre-source samples from buffer (PTS {}ns < source_in {}ns)",
+                            lag_samples,
+                            pts_ns,
+                            source_in_ns
+                        );
+                        floats_to_append = &floats[lag_samples..];
+                    }
+                }
+            } else if !first_pts_logged {
+                log::info!(
+                    "SttCache: first audio buffer has no PTS (target source_in={}ns) for {}",
+                    source_in_ns,
+                    path
+                );
+                first_pts_logged = true;
+            }
+
+            samples.extend_from_slice(floats_to_append);
 
             if samples.len() >= max_samples {
                 break;

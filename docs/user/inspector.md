@@ -159,9 +159,9 @@ Applied via GStreamer `videocrop`, `videoflip`, `videoscale`, and `videobox` (pr
 | **Anamorphic Desqueeze** | Dropdown | Lens desqueeze factor: None (1.0x), 1.33x, 1.5x, 1.8x, 2.0x. Applies non-square pixel aspect ratio for anamorphic footage |
 | **Scale** | 0.1 → 4.0 | Zoom factor. 1.0 = normal, 2.0 = 2× zoom in (crops), 0.5 = half size (letterbox/pillarbox) |
 | **Opacity** | 0.0 → 1.0 | Layer blend amount. 1.0 = fully opaque, 0.0 = fully transparent |
-| **Position X** | −1.0 → 1.0 | Horizontal offset within the frame. 0.0 = center, −1.0 = full left, 1.0 = full right |
-| **Position Y** | −1.0 → 1.0 | Vertical offset within the frame. 0.0 = center, −1.0 = full top, 1.0 = full bottom |
-| **Crop Left/Right/Top/Bottom** | 0 → 500 px | Crop pixels from each edge |
+| **Position X** | −3.0 → 3.0 | Horizontal offset. 0.0 = center, ±1.0 = clip edge touches the canvas edge, values past ±1.0 push the clip off-canvas (the preview compositor and export ffmpeg graph crop/pad past the frame edges) |
+| **Position Y** | −3.0 → 3.0 | Vertical offset. 0.0 = center, ±1.0 = clip edge touches the canvas edge, values past ±1.0 push the clip off-canvas |
+| **Crop Left/Right/Top/Bottom** | 0 → 4000 px | Crop pixels from each edge (in project pixels). The transform overlay also clamps each edge against the actual project resolution at runtime so opposing crops can never exceed the frame width/height |
 | **Rotate** | Dial/knob + numeric angle (−180° → 180°) | Arbitrary-angle rotation |
 | **Flip H** | Toggle | Mirror horizontally |
 | **Flip V** | Toggle | Mirror vertically |

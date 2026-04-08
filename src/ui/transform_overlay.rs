@@ -18,7 +18,12 @@ const HANDLE_R: f64 = 7.0;
 /// Hit-test radius for corner handles (a bit larger than drawn for ease of use).
 const HANDLE_HIT: f64 = 16.0;
 /// Inspector crop slider max (pixels).
-const CROP_MAX: i32 = 500;
+///
+/// Sourced from `crate::model::transform_bounds::CROP_MAX_PX_I32` so the
+/// slider, the transform-overlay drag clamps, the model-level keyframe
+/// clamp, the runtime evaluators in `program_player`, and the export
+/// keyframe evaluators all share a single source of truth.
+const CROP_MAX: i32 = crate::model::transform_bounds::CROP_MAX_PX_I32;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Handle {
@@ -709,7 +714,10 @@ impl TransformOverlay {
                         if deg > 180.0 {
                             deg -= 360.0;
                         }
-                        let deg = -(deg.round().clamp(-180.0, 180.0));
+                        let deg = -(deg.round().clamp(
+                            crate::model::transform_bounds::ROTATE_MIN_DEG,
+                            crate::model::transform_bounds::ROTATE_MAX_DEG,
+                        ));
                         rotation_for_drag.set(deg);
                         on_rotate_change(deg as i32);
                     }
@@ -720,17 +728,24 @@ impl TransformOverlay {
                         // pos_x — which is correct because at scale>1, pos_x controls which
                         // part of the clip is visible (higher pos_x = viewport panned right
                         // = clip appears shifted left).
+                        //
+                        // Clamp at POSITION_MIN/POSITION_MAX so users can drag a
+                        // clip fully off-canvas; the rendering math
+                        // (`apply_zoom_to_slot` and the export
+                        // `build_scale_translate_filter`) already handles overflow
+                        // by cropping/padding past the frame edges.
+                        use crate::model::transform_bounds::{POSITION_MAX, POSITION_MIN};
                         let h_range =
                             clip_position_range(ds.vw, ds.start_scale, adjustment_mode.get());
                         let v_range =
                             clip_position_range(ds.vh, ds.start_scale, adjustment_mode.get());
                         let new_px = if h_range.abs() > 0.5 {
-                            (ds.start_px + off_x / h_range).clamp(-1.0, 1.0)
+                            (ds.start_px + off_x / h_range).clamp(POSITION_MIN, POSITION_MAX)
                         } else {
                             ds.start_px
                         };
                         let new_py = if v_range.abs() > 0.5 {
-                            (ds.start_py + off_y / v_range).clamp(-1.0, 1.0)
+                            (ds.start_py + off_y / v_range).clamp(POSITION_MIN, POSITION_MAX)
                         } else {
                             ds.start_py
                         };
@@ -767,7 +782,10 @@ impl TransformOverlay {
                                 .current_event_state()
                                 .contains(gtk::gdk::ModifierType::SHIFT_MASK);
                             let factor = if shift { sx.max(sy) } else { (sx + sy) * 0.5 };
-                            let new_s = (ds.start_scale * factor).clamp(0.1, 4.0);
+                            let new_s = (ds.start_scale * factor).clamp(
+                                crate::model::transform_bounds::SCALE_MIN,
+                                crate::model::transform_bounds::SCALE_MAX,
+                            );
                             scale.set(new_s);
                             on_change(new_s, position_x.get(), position_y.get());
                         }
@@ -1111,37 +1129,50 @@ impl TransformOverlay {
                 }
                 let shift = mods.contains(ModifierType::SHIFT_MASK);
                 let mut handled = false;
+                use crate::model::transform_bounds::{
+                    POSITION_MAX, POSITION_MIN, SCALE_MAX, SCALE_MIN,
+                };
                 match key {
                     Key::Left => {
                         position_x.set(
-                            (position_x.get() - if shift { 0.1 } else { 0.01 }).clamp(-1.0, 1.0),
+                            (position_x.get() - if shift { 0.1 } else { 0.01 })
+                                .clamp(POSITION_MIN, POSITION_MAX),
                         );
                         handled = true;
                     }
                     Key::Right => {
                         position_x.set(
-                            (position_x.get() + if shift { 0.1 } else { 0.01 }).clamp(-1.0, 1.0),
+                            (position_x.get() + if shift { 0.1 } else { 0.01 })
+                                .clamp(POSITION_MIN, POSITION_MAX),
                         );
                         handled = true;
                     }
                     Key::Up => {
                         position_y.set(
-                            (position_y.get() - if shift { 0.1 } else { 0.01 }).clamp(-1.0, 1.0),
+                            (position_y.get() - if shift { 0.1 } else { 0.01 })
+                                .clamp(POSITION_MIN, POSITION_MAX),
                         );
                         handled = true;
                     }
                     Key::Down => {
                         position_y.set(
-                            (position_y.get() + if shift { 0.1 } else { 0.01 }).clamp(-1.0, 1.0),
+                            (position_y.get() + if shift { 0.1 } else { 0.01 })
+                                .clamp(POSITION_MIN, POSITION_MAX),
                         );
                         handled = true;
                     }
                     Key::plus | Key::equal | Key::KP_Add => {
-                        scale.set((scale.get() + if shift { 0.10 } else { 0.05 }).clamp(0.1, 4.0));
+                        scale.set(
+                            (scale.get() + if shift { 0.10 } else { 0.05 })
+                                .clamp(SCALE_MIN, SCALE_MAX),
+                        );
                         handled = true;
                     }
                     Key::minus | Key::underscore | Key::KP_Subtract => {
-                        scale.set((scale.get() - if shift { 0.10 } else { 0.05 }).clamp(0.1, 4.0));
+                        scale.set(
+                            (scale.get() - if shift { 0.10 } else { 0.05 })
+                                .clamp(SCALE_MIN, SCALE_MAX),
+                        );
                         handled = true;
                     }
                     _ => {}
@@ -1297,8 +1328,10 @@ impl TransformOverlay {
         self.tracking_center_y.set(center_y.clamp(0.0, 1.0));
         self.tracking_width.set(width.clamp(0.05, 0.5));
         self.tracking_height.set(height.clamp(0.05, 0.5));
-        self.tracking_rotation
-            .set(rotation_deg.clamp(-180.0, 180.0));
+        self.tracking_rotation.set(rotation_deg.clamp(
+            crate::model::transform_bounds::ROTATE_MIN_DEG,
+            crate::model::transform_bounds::ROTATE_MAX_DEG,
+        ));
         self.drawing_area.queue_draw();
     }
 

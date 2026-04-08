@@ -557,26 +557,29 @@ fn evaluate_clip_transform_at(
         .value_for_phase1_property_at_timeline_ns(Phase1KeyframeProperty::PositionX, playhead_ns);
     let pos_y = clip
         .value_for_phase1_property_at_timeline_ns(Phase1KeyframeProperty::PositionY, playhead_ns);
+    use crate::model::transform_bounds::{
+        CROP_MAX_PX, CROP_MIN_PX, ROTATE_MAX_DEG, ROTATE_MIN_DEG,
+    };
     let rotate = clip
         .value_for_phase1_property_at_timeline_ns(Phase1KeyframeProperty::Rotate, playhead_ns)
         .round()
-        .clamp(-180.0, 180.0) as i32;
+        .clamp(ROTATE_MIN_DEG, ROTATE_MAX_DEG) as i32;
     let crop_left = clip
         .value_for_phase1_property_at_timeline_ns(Phase1KeyframeProperty::CropLeft, playhead_ns)
         .round()
-        .clamp(0.0, 500.0) as i32;
+        .clamp(CROP_MIN_PX, CROP_MAX_PX) as i32;
     let crop_right = clip
         .value_for_phase1_property_at_timeline_ns(Phase1KeyframeProperty::CropRight, playhead_ns)
         .round()
-        .clamp(0.0, 500.0) as i32;
+        .clamp(CROP_MIN_PX, CROP_MAX_PX) as i32;
     let crop_top = clip
         .value_for_phase1_property_at_timeline_ns(Phase1KeyframeProperty::CropTop, playhead_ns)
         .round()
-        .clamp(0.0, 500.0) as i32;
+        .clamp(CROP_MIN_PX, CROP_MAX_PX) as i32;
     let crop_bottom = clip
         .value_for_phase1_property_at_timeline_ns(Phase1KeyframeProperty::CropBottom, playhead_ns)
         .round()
-        .clamp(0.0, 500.0) as i32;
+        .clamp(CROP_MIN_PX, CROP_MAX_PX) as i32;
     (
         scale,
         pos_x,
@@ -4005,7 +4008,28 @@ fn clip_to_program_clips(
             && c.kind != ClipKind::Compound
             && c.kind != ClipKind::Multicam
             && !suppress_embedded_audio_ids.contains(&c.id),
-        is_image: c.kind == ClipKind::Image,
+        // Defensive: ClipKind::Image is the source of truth, but also fall
+        // back to extension sniffing in case the kind drifted on a stale or
+        // hand-edited project. A still that loses its `is_image` flag would
+        // be sent down the time-based decoder path and disappear during
+        // playback/reseeks. Only override for Video/Image kinds — Title /
+        // Adjustment / Compound / Multicam each have their own pipeline
+        // branches and must not be retagged based on a source extension.
+        is_image: {
+            let kind_says_image = c.kind == ClipKind::Image;
+            let path_says_image = crate::model::clip::is_image_file(&c.source_path);
+            let kind_is_videoish = matches!(c.kind, ClipKind::Image | ClipKind::Video);
+            if kind_is_videoish && kind_says_image != path_says_image {
+                log::warn!(
+                    "clip_to_program_clips: is_image kind/extension mismatch for clip {} ({}): kind={:?} path_is_image={} — preferring extension",
+                    c.id,
+                    c.source_path,
+                    c.kind,
+                    path_says_image,
+                );
+            }
+            kind_says_image || (kind_is_videoish && path_says_image)
+        },
         animated_svg: c.animated_svg,
         media_duration_ns: c.media_duration_ns,
         is_adjustment: c.kind == ClipKind::Adjustment,
@@ -6921,6 +6945,10 @@ pub fn build_window(
                 inspector_view.update_keyframe_indicator(&proj, playhead_ns);
                 // Sync transform overlay handles with selection state,
                 // using keyframe-interpolated values at the current playhead.
+                // Also refresh the content-inset so a freshly selected still
+                // image gets its own preview framing immediately, instead of
+                // inheriting whatever inset the previous selection had until
+                // the next 100 ms playhead poll lands.
                 if let Some(ref to) = *transform_overlay_cell.borrow() {
                     let pp = prog_player_for_sel.borrow();
                     sync_transform_overlay_to_playhead_resolved(
@@ -6930,6 +6958,19 @@ pub fn build_window(
                         clip_id.as_deref(),
                         playhead_ns,
                     );
+                    let (ix, iy) = pp.content_inset_for_clip(clip_id.as_deref());
+                    to.set_content_inset(ix, iy);
+                }
+                // When the user selects a static image while paused, force a
+                // paused frame refresh so the Program Monitor actually shows
+                // the still instead of leaving whatever frame was previously
+                // on screen. (For video clips the existing playhead-driven
+                // refresh path already covers this.)
+                if selected_clip_is_static_image(&proj, clip_id.as_deref()) {
+                    let pp = prog_player_for_sel.borrow();
+                    if !matches!(pp.state(), crate::media::player::PlayerState::Playing) {
+                        pp.reseek_paused();
+                    }
                 }
                 if let Some(ref editor) = *keyframe_editor_cell.borrow() {
                     editor.clear_selection();
@@ -9562,14 +9603,20 @@ pub fn build_window(
                     let proj = project.borrow();
                     inspector_view_poll.update_keyframed_sliders(&proj, pos_ns);
                 }
-                // Update subtitle overlay text for current playhead position.
-                // Collect active subtitles from ALL clips at the playhead, with per-clip styling.
-                // Searches recursively through compound clips, translating the playhead into
-                // each compound's internal time.
-                {
-                    let proj = project.borrow();
-                    let mut lines: Vec<crate::ui::program_monitor::SubtitleLine> = Vec::new();
-                    fn collect_subtitle_lines(
+                if let Some(ref editor) = *keyframe_editor_poll.borrow() {
+                    editor.queue_redraw();
+                }
+                last_pos_ns_c.set(pos_ns);
+            }
+            // Update subtitle overlay text for the current playhead position.
+            // Runs every poll iteration (not gated on position change) so that
+            // subtitle text edits made while paused are reflected immediately
+            // and so the overlay re-evaluates when project state changes
+            // without waiting for the next playhead movement.
+            {
+                let proj = project.borrow();
+                let mut lines: Vec<crate::ui::program_monitor::SubtitleLine> = Vec::new();
+                fn collect_subtitle_lines(
                         tracks: &[crate::model::track::Track],
                         pos_ns: u64,
                         lines: &mut Vec<crate::ui::program_monitor::SubtitleLine>,
@@ -9723,11 +9770,6 @@ pub fn build_window(
                     let editing: &[crate::model::track::Track] = unsafe { &*editing_ptr };
                     collect_subtitle_lines(editing, pos_ns, &mut lines);
                     prog_subtitle_setter_poll(lines);
-                }
-                if let Some(ref editor) = *keyframe_editor_poll.borrow() {
-                    editor.queue_redraw();
-                }
-                last_pos_ns_c.set(pos_ns);
             }
             glib::ControlFlow::Continue
         });
@@ -13899,14 +13941,11 @@ pub fn build_window(
         let close_approved = Rc::new(Cell::new(false));
         let close_approved_for_signal = close_approved.clone();
         window.connect_close_request(move |w| {
-            let preserve_sidecar_proxies = {
-                let prefs = preferences_state.borrow();
-                prefs.proxy_mode.is_enabled() && prefs.persist_proxies_next_to_original_media
-            };
+            // Second pass through the handler — the deferred `win.close()`
+            // scheduled by `on_continue` triggered a fresh close_request.
+            // Cleanup already ran in on_continue, so just let the close
+            // proceed.
             if close_approved_for_signal.get() {
-                proxy_cache
-                    .borrow_mut()
-                    .cleanup_for_unload(preserve_sidecar_proxies);
                 return glib::Propagation::Proceed;
             }
             let close_approved_for_continue = close_approved.clone();
@@ -13922,9 +13961,21 @@ pub fn build_window(
                 proxy_cache_for_continue
                     .borrow_mut()
                     .cleanup_for_unload(preserve_sidecar_proxies);
-                if let Some(win) = weak.upgrade() {
-                    win.close();
-                }
+                // Defer `win.close()` to the next main-loop iteration so the
+                // original `close_request` handler can fully return Stop
+                // before a fresh `close_request` is emitted. Otherwise
+                // calling `win.close()` synchronously from inside the
+                // close_request handler re-enters the handler recursively;
+                // the inner invocation returns Proceed but the outer
+                // invocation's Stop overrides it, leaving the window open
+                // and forcing the user to click the close button a second
+                // time.
+                let weak = weak.clone();
+                glib::idle_add_local_once(move || {
+                    if let Some(win) = weak.upgrade() {
+                        win.close();
+                    }
+                });
             });
             crate::ui::toolbar::confirm_unsaved_then(
                 Some(w.clone().upcast::<gtk::Window>()),
@@ -15773,7 +15824,10 @@ fn handle_mcp_command(
                         mask.height = v.clamp(0.01, 0.5);
                     }
                     if let Some(v) = rotation {
-                        mask.rotation = v.clamp(-180.0, 180.0);
+                        mask.rotation = v.clamp(
+                            crate::model::transform_bounds::ROTATE_MIN_DEG,
+                            crate::model::transform_bounds::ROTATE_MAX_DEG,
+                        );
                     }
                     if let Some(v) = feather {
                         mask.feather = v.clamp(0.0, 0.5);
@@ -15852,13 +15906,17 @@ fn handle_mcp_command(
             anamorphic_desqueeze,
             reply,
         } => {
+            use crate::model::transform_bounds::{
+                POSITION_MAX, POSITION_MIN, ROTATE_MAX_DEG_I32, ROTATE_MIN_DEG_I32, SCALE_MAX,
+                SCALE_MIN,
+            };
             let mut proj = project.borrow_mut();
             let found = if let Some(clip) = proj.clip_mut(&clip_id) {
-                clip.scale = scale.clamp(0.1, 4.0);
-                clip.position_x = position_x.clamp(-1.0, 1.0);
-                clip.position_y = position_y.clamp(-1.0, 1.0);
+                clip.scale = scale.clamp(SCALE_MIN, SCALE_MAX);
+                clip.position_x = position_x.clamp(POSITION_MIN, POSITION_MAX);
+                clip.position_y = position_y.clamp(POSITION_MIN, POSITION_MAX);
                 if let Some(rot) = rotate {
-                    clip.rotate = rot.clamp(-180, 180);
+                    clip.rotate = rot.clamp(ROTATE_MIN_DEG_I32, ROTATE_MAX_DEG_I32);
                 }
                 if let Some(a) = anamorphic_desqueeze {
                     clip.anamorphic_desqueeze = a;

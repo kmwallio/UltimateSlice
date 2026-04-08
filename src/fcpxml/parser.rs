@@ -1074,6 +1074,29 @@ fn parse_asset_clip(
         if let Some(v) = attrs.get("us:subtitle-segments") {
             let json_str = v.replace("&quot;", "\"");
             clip.subtitle_segments = serde_json::from_str(&json_str).unwrap_or_default();
+            // Migration: older saves stored the original Whisper word
+            // tokens in `words[]` even after the user edited `text`, so
+            // karaoke / word-highlight rendering kept showing the old
+            // text. Detect that mismatch on load and resync the words
+            // to match the edited text. Comparison is done on
+            // whitespace-joined words vs whitespace-normalised text so
+            // we don't migrate when only punctuation/spacing differs.
+            for seg in clip.subtitle_segments.iter_mut() {
+                if seg.words.is_empty() {
+                    continue;
+                }
+                let words_joined = seg
+                    .words
+                    .iter()
+                    .map(|w| w.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let text_normalized = seg.text.split_whitespace().collect::<Vec<_>>().join(" ");
+                if words_joined != text_normalized {
+                    let new_text = seg.text.clone();
+                    seg.set_text_and_resync_words(new_text);
+                }
+            }
         }
         if let Some(v) = attrs.get("us:subtitles-language") {
             clip.subtitles_language = v.clone();

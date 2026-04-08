@@ -28,9 +28,14 @@ pub(crate) fn adjustment_canvas_geometry(
     position_x: f64,
     position_y: f64,
 ) -> (f64, f64, f64, f64) {
-    let scale = scale.clamp(0.1, 4.0);
-    let center_x = width / 2.0 + position_x.clamp(-1.0, 1.0) * width / 2.0;
-    let center_y = height / 2.0 + position_y.clamp(-1.0, 1.0) * height / 2.0;
+    use crate::model::transform_bounds::{
+        ADJUSTMENT_POSITION_MAX, ADJUSTMENT_POSITION_MIN, SCALE_MAX, SCALE_MIN,
+    };
+    let scale = scale.clamp(SCALE_MIN, SCALE_MAX);
+    let center_x = width / 2.0
+        + position_x.clamp(ADJUSTMENT_POSITION_MIN, ADJUSTMENT_POSITION_MAX) * width / 2.0;
+    let center_y = height / 2.0
+        + position_y.clamp(ADJUSTMENT_POSITION_MIN, ADJUSTMENT_POSITION_MAX) * height / 2.0;
     (center_x, center_y, width * scale, height * scale)
 }
 
@@ -49,10 +54,13 @@ impl AdjustmentScopeShape {
     ) -> Self {
         let pw = out_w.max(1) as f64;
         let ph = out_h.max(1) as f64;
+        use crate::model::transform_bounds::{
+            ADJUSTMENT_POSITION_MAX, ADJUSTMENT_POSITION_MIN, SCALE_MAX, SCALE_MIN,
+        };
         Self {
-            scale: scale.clamp(0.1, 4.0),
-            position_x: position_x.clamp(-1.0, 1.0),
-            position_y: position_y.clamp(-1.0, 1.0),
+            scale: scale.clamp(SCALE_MIN, SCALE_MAX),
+            position_x: position_x.clamp(ADJUSTMENT_POSITION_MIN, ADJUSTMENT_POSITION_MAX),
+            position_y: position_y.clamp(ADJUSTMENT_POSITION_MIN, ADJUSTMENT_POSITION_MAX),
             crop_left_norm: crop_left.max(0) as f64 / pw,
             crop_right_norm: crop_right.max(0) as f64 / pw,
             crop_top_norm: crop_top.max(0) as f64 / ph,
