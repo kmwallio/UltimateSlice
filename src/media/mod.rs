@@ -1,5 +1,6 @@
 pub mod adjustment_scope;
 pub mod animated_svg;
+pub mod audio_features;
 pub mod audio_match;
 pub mod audio_sync;
 pub mod bg_removal_cache;

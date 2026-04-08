@@ -8670,12 +8670,198 @@ pub fn build_window(
                     body.append(&dur_spin);
                 }
                 body.append(&hint);
+
+                // ── Reference audio (optional) ─────────────────────────
+                // Lets the user point at an existing audio/video clip; we
+                // analyze BPM/key/brightness/dynamics and append the result
+                // as a natural-language hint to the MusicGen prompt. The
+                // model itself is unchanged — this is purely text augmentation.
+                let ref_separator = gtk::Separator::new(gtk::Orientation::Horizontal);
+                ref_separator.set_margin_top(8);
+                ref_separator.set_margin_bottom(4);
+                body.append(&ref_separator);
+
+                let ref_label = gtk::Label::new(Some("Reference audio (optional):"));
+                ref_label.set_halign(gtk::Align::Start);
+                body.append(&ref_label);
+
+                let ref_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+                let choose_ref_btn = gtk::Button::with_label("Choose Reference Audio…");
+                let clear_ref_btn = gtk::Button::with_label("Clear");
+                clear_ref_btn.set_visible(false);
+                let ref_path_label = gtk::Label::new(Some("None"));
+                ref_path_label.set_halign(gtk::Align::Start);
+                ref_path_label.set_hexpand(true);
+                ref_path_label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+                ref_path_label.set_max_width_chars(32);
+                ref_path_label.add_css_class("dim-label");
+                ref_row.append(&choose_ref_btn);
+                ref_row.append(&clear_ref_btn);
+                ref_row.append(&ref_path_label);
+                body.append(&ref_row);
+
+                let ref_status_label = gtk::Label::new(None);
+                ref_status_label.set_halign(gtk::Align::Start);
+                ref_status_label.set_wrap(true);
+                ref_status_label.add_css_class("dim-label");
+                body.append(&ref_status_label);
+
+                let hints_label = gtk::Label::new(Some("Style hints (appended to prompt):"));
+                hints_label.set_halign(gtk::Align::Start);
+                body.append(&hints_label);
+                let hints_entry = gtk::Entry::new();
+                hints_entry.set_placeholder_text(Some(
+                    "e.g. around 120 BPM, in the key of C major, bright timbre",
+                ));
+                body.append(&hints_entry);
+
                 dialog.content_area().append(&body);
+
+                let chosen_ref_path: Rc<RefCell<Option<std::path::PathBuf>>> =
+                    Rc::new(RefCell::new(None));
+                let analysis_generation: Rc<Cell<u64>> = Rc::new(Cell::new(0));
+
+                // Choose Reference Audio button — opens a file picker, then
+                // kicks off background analysis on a worker thread and polls
+                // the result via a glib timeout so we never block the UI.
+                {
+                    let chosen_ref_path = chosen_ref_path.clone();
+                    let analysis_generation = analysis_generation.clone();
+                    let ref_path_label_inner = ref_path_label.clone();
+                    let ref_status_label_inner = ref_status_label.clone();
+                    let hints_entry_inner = hints_entry.clone();
+                    let clear_ref_btn_inner = clear_ref_btn.clone();
+                    let win_for_picker = win.clone();
+                    choose_ref_btn.connect_clicked(move |_| {
+                        let file_dialog = gtk::FileDialog::new();
+                        file_dialog.set_title("Choose Reference Audio");
+                        let filter = gtk::FileFilter::new();
+                        filter.add_mime_type("audio/*");
+                        filter.add_mime_type("video/*");
+                        filter.set_name(Some("Audio / Video"));
+                        let filters = gio::ListStore::new::<gtk::FileFilter>();
+                        filters.append(&filter);
+                        file_dialog.set_filters(Some(&filters));
+
+                        let chosen_ref_path = chosen_ref_path.clone();
+                        let analysis_generation = analysis_generation.clone();
+                        let ref_path_label = ref_path_label_inner.clone();
+                        let ref_status_label = ref_status_label_inner.clone();
+                        let hints_entry = hints_entry_inner.clone();
+                        let clear_ref_btn = clear_ref_btn_inner.clone();
+                        file_dialog.open(
+                            Some(&win_for_picker),
+                            gio::Cancellable::NONE,
+                            move |res| {
+                                let file = match res {
+                                    Ok(f) => f,
+                                    Err(_) => return,
+                                };
+                                let path = match file.path() {
+                                    Some(p) => p,
+                                    None => return,
+                                };
+                                let basename = path
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("(unknown)")
+                                    .to_string();
+                                ref_path_label.set_text(&basename);
+                                ref_path_label.set_tooltip_text(Some(&path.to_string_lossy()));
+                                *chosen_ref_path.borrow_mut() = Some(path.clone());
+                                clear_ref_btn.set_visible(true);
+                                ref_status_label.set_text("Analyzing reference…");
+
+                                // Generation guard: bumping invalidates any
+                                // in-flight result so a stale analysis from
+                                // a previously-picked file cannot overwrite
+                                // the current selection.
+                                let gen_id =
+                                    analysis_generation.get().wrapping_add(1);
+                                analysis_generation.set(gen_id);
+
+                                let path_str = path.to_string_lossy().to_string();
+                                let (tx, rx) = std::sync::mpsc::sync_channel::<
+                                    Result<
+                                        crate::media::audio_features::AudioFeatures,
+                                        crate::media::audio_features::AudioFeaturesError,
+                                    >,
+                                >(1);
+                                std::thread::spawn(move || {
+                                    let r = crate::media::audio_features::analyze_audio_file(
+                                        &path_str, 0, u64::MAX,
+                                    );
+                                    let _ = tx.send(r);
+                                });
+
+                                let analysis_generation_poll = analysis_generation.clone();
+                                let ref_status_label_poll = ref_status_label.clone();
+                                let hints_entry_poll = hints_entry.clone();
+                                glib::timeout_add_local(
+                                    std::time::Duration::from_millis(150),
+                                    move || match rx.try_recv() {
+                                        Ok(Ok(features)) => {
+                                            if analysis_generation_poll.get() != gen_id {
+                                                return glib::ControlFlow::Break;
+                                            }
+                                            let hint =
+                                                crate::media::audio_features::features_to_prompt_hint(
+                                                    &features,
+                                                );
+                                            ref_status_label_poll
+                                                .set_text(&format!("Detected: {hint}"));
+                                            hints_entry_poll.set_text(&hint);
+                                            glib::ControlFlow::Break
+                                        }
+                                        Ok(Err(e)) => {
+                                            if analysis_generation_poll.get() != gen_id {
+                                                return glib::ControlFlow::Break;
+                                            }
+                                            ref_status_label_poll
+                                                .set_text(&format!(
+                                                    "Reference analysis failed: {e}"
+                                                ));
+                                            glib::ControlFlow::Break
+                                        }
+                                        Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                            glib::ControlFlow::Continue
+                                        }
+                                        Err(_) => glib::ControlFlow::Break,
+                                    },
+                                );
+                            },
+                        );
+                    });
+                }
+
+                // Clear button — drops the reference, blanks the hints
+                // entry, and bumps the generation so any in-flight analysis
+                // result will be ignored.
+                {
+                    let chosen_ref_path = chosen_ref_path.clone();
+                    let analysis_generation = analysis_generation.clone();
+                    let ref_path_label_inner = ref_path_label.clone();
+                    let ref_status_label_inner = ref_status_label.clone();
+                    let hints_entry_inner = hints_entry.clone();
+                    let clear_ref_btn_inner = clear_ref_btn.clone();
+                    clear_ref_btn.connect_clicked(move |_| {
+                        *chosen_ref_path.borrow_mut() = None;
+                        ref_path_label_inner.set_text("None");
+                        ref_path_label_inner.set_tooltip_text(None);
+                        ref_status_label_inner.set_text("");
+                        hints_entry_inner.set_text("");
+                        clear_ref_btn_inner.set_visible(false);
+                        analysis_generation
+                            .set(analysis_generation.get().wrapping_add(1));
+                    });
+                }
 
                 let music_gen_cache = music_gen_cache.clone();
                 let timeline_state = timeline_state_for_music.clone();
                 let timeline_panel_cell = timeline_panel_cell.clone();
                 let _project = project.clone();
+                let chosen_ref_path_for_response = chosen_ref_path.clone();
+                let hints_entry_for_response = hints_entry.clone();
                 dialog.connect_response(move |d, resp| {
                     if resp == gtk::ResponseType::Accept {
                         let buffer = prompt_entry.buffer();
@@ -8686,6 +8872,16 @@ pub fn build_window(
                             d.close();
                             return;
                         }
+                        // Append the (possibly user-edited) style hints to
+                        // the prompt before sending it to MusicGen.
+                        let hints = hints_entry_for_response.text().to_string();
+                        let final_prompt = if hints.trim().is_empty() {
+                            prompt.trim().to_string()
+                        } else {
+                            format!("{}, {}", prompt.trim(), hints.trim())
+                        };
+                        let reference_audio_path =
+                            chosen_ref_path_for_response.borrow().clone();
                         let duration_secs = fixed_duration_secs.unwrap_or_else(|| dur_spin.value());
                         let requested_end_ns = target.timeline_end_ns.unwrap_or_else(|| {
                             target
@@ -8707,11 +8903,12 @@ pub fn build_window(
                         }
                         let job = crate::media::music_gen::MusicGenJob {
                             job_id,
-                            prompt,
+                            prompt: final_prompt,
                             duration_secs,
                             output_path: std::path::PathBuf::new(),
                             track_id: target.track_id.clone(),
                             timeline_start_ns: target.timeline_start_ns,
+                            reference_audio_path,
                         };
                         music_gen_cache.borrow_mut().request(job);
                     }
@@ -16295,6 +16492,7 @@ fn handle_mcp_command(
             duration_secs,
             track_index,
             timeline_start_ns,
+            reference_audio_path,
             reply,
         } => {
             let music_cache = music_gen_cache.borrow();
@@ -16323,16 +16521,64 @@ fn handle_mcp_command(
                     track
                 };
                 if let Some(track_id) = track_id {
+                    // If a reference audio file was supplied, analyze it
+                    // synchronously here (the MCP request is already
+                    // serialized) and append the derived hint to the
+                    // prompt.  Failures degrade gracefully — the original
+                    // prompt is used and a warning is logged so the tool
+                    // never fails just because the reference was unreadable.
+                    let final_prompt =
+                        if let Some(ref ref_path) = reference_audio_path {
+                            match crate::media::audio_features::analyze_audio_file(
+                                ref_path,
+                                0,
+                                u64::MAX,
+                            ) {
+                                Ok(features) => {
+                                    let hint = crate::media::audio_features::features_to_prompt_hint(
+                                        &features,
+                                    );
+                                    if hint.is_empty() {
+                                        prompt.clone()
+                                    } else {
+                                        let augmented =
+                                            format!("{}, {}", prompt.trim(), hint);
+                                        log::info!(
+                                            "generate_music: reference analysis OK for {}: \
+                                             augmented prompt = {:?}",
+                                            ref_path,
+                                            augmented
+                                        );
+                                        augmented
+                                    }
+                                }
+                                Err(e) => {
+                                    log::warn!(
+                                        "generate_music: reference analysis failed for {}: {}; \
+                                         falling back to original prompt",
+                                        ref_path,
+                                        e
+                                    );
+                                    prompt.clone()
+                                }
+                            }
+                        } else {
+                            prompt.clone()
+                        };
+
                     let playhead_ns = timeline_state.borrow().playhead_ns;
                     let start_ns = timeline_start_ns.unwrap_or(playhead_ns);
                     let job_id = uuid::Uuid::new_v4().to_string();
                     let job = crate::media::music_gen::MusicGenJob {
                         job_id: job_id.clone(),
-                        prompt,
+                        prompt: final_prompt,
                         duration_secs,
                         output_path: std::path::PathBuf::new(), // will be set by cache
                         track_id,
                         timeline_start_ns: start_ns,
+                        reference_audio_path: reference_audio_path
+                            .as_ref()
+                            .map(std::path::PathBuf::from),
                     };
                     music_gen_cache.borrow_mut().request(job);
                     reply

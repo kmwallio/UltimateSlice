@@ -452,6 +452,13 @@ pub enum McpCommand {
         duration_secs: f64,
         track_index: Option<usize>,
         timeline_start_ns: Option<u64>,
+        /// Optional path to a reference audio file. When provided, the
+        /// handler runs `audio_features::analyze_audio_file` and appends
+        /// the derived natural-language style hints (BPM, key/mode,
+        /// brightness, dynamics) to `prompt` before queuing the job.
+        /// Analysis failures degrade gracefully — the original prompt is
+        /// used and a warning is logged.
+        reference_audio_path: Option<String>,
         reply: SyncSender<Value>,
     },
     RecordVoiceover {

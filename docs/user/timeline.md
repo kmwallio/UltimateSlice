@@ -144,6 +144,7 @@ Use MusicGen to fill an empty span on an audio track with generated background m
 - Regions must stay in **empty audio-track space**; drawing across an existing clip is rejected.
 - Press **Escape** to cancel an armed region draw before you start dragging.
 - The existing **Generate Music…** track action still works when you want a playhead-based generation instead of drawing a region first.
+- **Reference audio (optional):** click **Choose Reference Audio…** in the dialog to point at any audio or video file. UltimateSlice analyzes its tempo (BPM), musical key/mode, brightness, and dynamics, then prefills a **Style hints** field with a natural-language descriptor (e.g. *"around 128 BPM, in the key of C major, bright timbre, dynamic energy"*). The hints are appended to your prompt before generation; you can edit or clear them in place. Analysis runs in the background and only the first 30 seconds of the reference are inspected. The MusicGen model itself is unchanged — this is text-prompt augmentation on top of the existing musicgen-small model. The MCP `generate_music` tool accepts an equivalent `reference_audio_path` argument.
 - Music generation requires the MusicGen ONNX models under `~/.local/share/ultimateslice/models/musicgen-small/` and a build with the `ai-inference` feature enabled.
 
 ## Image Clips

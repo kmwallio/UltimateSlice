@@ -1153,14 +1153,15 @@ fn tools_list() -> Value {
         },
         {
             "name": "generate_music",
-            "description": "Generate music from a text prompt using MusicGen AI. Places the generated WAV clip on an audio track. Requires MusicGen ONNX models to be installed. Returns immediately with a job_id; poll list_clips to see the clip when generation completes.",
+            "description": "Generate music from a text prompt using MusicGen AI. Places the generated WAV clip on an audio track. Requires MusicGen ONNX models to be installed. Returns immediately with a job_id; poll list_clips to see the clip when generation completes. When `reference_audio_path` is provided, UltimateSlice analyzes the reference clip locally (BPM, key/mode, brightness, dynamics) and appends the derived natural-language style hints to the prompt before queuing the job; analysis failures degrade gracefully and the original prompt is used.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "prompt":           { "type": "string", "description": "Text description of the music to generate (e.g. 'upbeat jazz piano')." },
                     "duration_secs":    { "type": "number", "description": "Duration of generated audio in seconds (1-30, default 10)." },
                     "track_index":      { "type": "integer", "description": "Audio track index to place the clip (default: first audio track)." },
-                    "timeline_start_ns": { "type": "integer", "description": "Timeline position in nanoseconds (default: current playhead)." }
+                    "timeline_start_ns": { "type": "integer", "description": "Timeline position in nanoseconds (default: current playhead)." },
+                    "reference_audio_path": { "type": "string", "description": "Optional path to a reference audio (or video with audio) file. UltimateSlice will analyze BPM, key/mode, brightness, and dynamics from the reference and append the derived natural-language style hints to the prompt." }
                 },
                 "required": ["prompt"]
             }
@@ -2760,6 +2761,10 @@ fn dispatch_tool_payload(
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize),
             timeline_start_ns: args.get("timeline_start_ns").and_then(|v| v.as_u64()),
+            reference_audio_path: args
+                .get("reference_audio_path")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
             reply: tx,
         },
         "record_voiceover" => McpCommand::RecordVoiceover {

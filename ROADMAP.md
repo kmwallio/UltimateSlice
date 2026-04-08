@@ -665,7 +665,7 @@ Tracking docs:
   - [x] Phase 1 — Draw-region UX: draw a time-range box on an audio track to define a generated-audio region (reusable for silence/tone generation too)
   - [x] Phase 2 — Local model backend: MusicGen-small ONNX via `ort` with background generation worker thread and status-bar progress; MCP `generate_music` tool for automation; generated WAV clips placed on audio tracks with undo support
   - [x] Phase 3 — Region-aware prompt UI and inline timeline lifecycle: the existing Generate Music dialog now accepts track/playhead targets or drawn audio regions, auto-fills requested duration from the selected range, shows pending/failed overlays inline on the timeline, and inserts generated WAV clips back into the requested region with undo support
-  - [ ] Follow-up — Reference-audio conditioning / style guidance input for MusicGen prompts
+  - [x] Follow-up — Reference-audio style guidance for MusicGen prompts: optional **Choose Reference Audio…** picker in the Generate Music dialog (and `reference_audio_path` argument on the `generate_music` MCP tool) analyzes BPM, key/mode, brightness, and dynamics from the reference clip via the new `audio_features` module and appends the derived natural-language descriptors to the text prompt. The musicgen-small model itself is unchanged — this is prompt augmentation, since musicgen-melody (the only variant with native audio conditioning) currently has no off-the-shelf ONNX export.
 
 ### Script-to-Timeline (Create Project from Script & Clips)
 - [ ] **Script import**: parse Final Draft (FDX) and Fountain screenplay files to extract scene headings, dialogue lines, and scene order

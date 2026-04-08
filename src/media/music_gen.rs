@@ -14,11 +14,19 @@ use std::sync::mpsc;
 
 pub struct MusicGenJob {
     pub job_id: String,
+    /// Final text prompt fed to the model. When the user supplies a
+    /// reference audio file, the caller pre-augments this string with
+    /// style hints derived from `audio_features::analyze_audio_file`;
+    /// the inference loop sees only the augmented prompt.
     pub prompt: String,
     pub duration_secs: f64,
     pub output_path: PathBuf,
     pub track_id: String,
     pub timeline_start_ns: u64,
+    /// Path to the reference audio file used to derive style hints, if any.
+    /// Stored for telemetry/log purposes only — the inference loop does
+    /// not read it.
+    pub reference_audio_path: Option<PathBuf>,
 }
 
 pub struct MusicGenResult {
@@ -236,6 +244,13 @@ pub fn music_gen_cache_dir() -> PathBuf {
 // ── Inference ─────────────────────────────────────────────────────────────
 
 fn run_music_gen(job: &MusicGenJob) -> MusicGenResult {
+    if let Some(ref ref_path) = job.reference_audio_path {
+        log::info!(
+            "MusicGen job {}: prompt augmented from reference audio {}",
+            job.job_id,
+            ref_path.display()
+        );
+    }
     let result = run_music_gen_inner(job);
     match result {
         Ok((path, duration_ns)) => MusicGenResult {
@@ -714,6 +729,7 @@ mod tests {
             output_path: out.clone(),
             track_id: "t".into(),
             timeline_start_ns: 0,
+            reference_audio_path: None,
         };
         let result = run_music_gen(&job);
         eprintln!("success={} error={:?}", result.success, result.error);

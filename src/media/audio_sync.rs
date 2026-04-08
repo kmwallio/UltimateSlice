@@ -318,7 +318,7 @@ pub(crate) fn extract_interleaved_audio_channel(
         .collect()
 }
 
-pub(crate) fn extract_mono_audio_samples(
+pub fn extract_mono_audio_samples(
     path: &str,
     source_in_ns: u64,
     source_out_ns: u64,
