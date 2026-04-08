@@ -2483,43 +2483,20 @@ fn build_volume_filter(clip: &Clip) -> String {
         )
     };
 
-    if clip.voice_isolation > 0.0 && !clip.subtitle_segments.is_empty() {
-        let pad_s = clip.voice_isolation_pad_ms as f64 / 1000.0;
-        let mut intervals: Vec<(f64, f64)> = Vec::new();
-        for seg in &clip.subtitle_segments {
-            if seg.words.is_empty() {
-                intervals.push((
-                    (seg.start_ns as f64 / 1e9 - pad_s).max(0.0),
-                    seg.end_ns as f64 / 1e9 + pad_s,
-                ));
-            } else {
-                for w in &seg.words {
-                    intervals.push((
-                        (w.start_ns as f64 / 1e9 - pad_s).max(0.0),
-                        w.end_ns as f64 / 1e9 + pad_s,
-                    ));
-                }
-            }
-        }
-        // Merge overlapping padded intervals so ffmpeg gets fewer, cleaner regions.
-        intervals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-        let mut merged: Vec<(f64, f64)> = Vec::new();
-        for iv in &intervals {
-            if let Some(last) = merged.last_mut() {
-                if iv.0 <= last.1 {
-                    last.1 = last.1.max(iv.1);
-                    continue;
-                }
-            }
-            merged.push(*iv);
-        }
+    if clip.has_voice_isolation_data() {
+        let pad_ns = (clip.voice_isolation_pad_ms as f64 * 1_000_000.0) as u64;
+        let merged_ns = clip.voice_isolation_speech_intervals_ns(pad_ns);
         // Duck towards floor instead of silence.
         let duck_ratio = (1.0 - clip.voice_isolation) * (1.0 - clip.voice_isolation_floor)
             + clip.voice_isolation_floor;
-        if !merged.is_empty() {
-            let condition: String = merged
+        if !merged_ns.is_empty() {
+            let condition: String = merged_ns
                 .iter()
-                .map(|(s, e)| format!("between(t,{:.3},{:.3})", s, e))
+                .map(|(s_ns, e_ns)| {
+                    let s = *s_ns as f64 / 1_000_000_000.0;
+                    let e = *e_ns as f64 / 1_000_000_000.0;
+                    format!("between(t,{:.3},{:.3})", s, e)
+                })
                 .collect::<Vec<_>>()
                 .join("+");
             let expr = format!(
@@ -4934,6 +4911,123 @@ pub(crate) fn detect_silence(
         intervals.push((start_val, duration_sec));
     }
     Ok(intervals)
+}
+
+/// Convert silent intervals (returned by `detect_silence`) into the inverse:
+/// **speech intervals** in clip-local nanoseconds, suitable for storing in
+/// `Clip::voice_isolation_speech_intervals`.
+///
+/// `silences` is a sorted list of `(start_sec, end_sec)` pairs relative to
+/// `source_in`. `clip_duration_ns` is `source_out_ns - source_in_ns`. Speech
+/// regions are everything between/around the silences.
+pub(crate) fn invert_silences_to_speech(
+    silences: &[(f64, f64)],
+    clip_duration_ns: u64,
+) -> Vec<(u64, u64)> {
+    let mut speech: Vec<(u64, u64)> = Vec::new();
+    let mut cursor_ns: u64 = 0;
+    for (s, e) in silences {
+        let s_ns = (s.max(0.0) * 1_000_000_000.0) as u64;
+        let e_ns = (e.max(0.0) * 1_000_000_000.0) as u64;
+        if s_ns > cursor_ns {
+            speech.push((cursor_ns, s_ns.min(clip_duration_ns)));
+        }
+        cursor_ns = e_ns;
+    }
+    if cursor_ns < clip_duration_ns {
+        speech.push((cursor_ns, clip_duration_ns));
+    }
+    // Drop zero-length intervals that can occur at clip boundaries.
+    speech.retain(|(s, e)| e > s);
+    speech
+}
+
+/// Analyze a clip's audio and suggest a silence-detection threshold (in dB)
+/// based on the noise floor.
+///
+/// Uses FFmpeg's `astats` filter with windowed RMS measurements (0.5 s windows)
+/// and computes the **5th percentile** of the windowed RMS levels — a robust
+/// noise-floor estimate that ignores both intro/outro silences (which would
+/// pull a naive mean toward `-inf`) and loud transients during speech.
+///
+/// Returns the suggested threshold = noise_floor + 6 dB headroom, clamped to
+/// the inspector's slider range `[-60.0, -10.0]`.
+///
+/// Returns an error if ffmpeg is missing, the source has no audio, or no RMS
+/// samples were measurable.
+pub(crate) fn suggest_silence_threshold_db(
+    source_path: &str,
+    source_in_ns: u64,
+    source_out_ns: u64,
+) -> Result<f32> {
+    let ffmpeg = find_ffmpeg()?;
+    if !probe_has_audio(&ffmpeg, source_path) {
+        return Err(anyhow!("source has no audio stream"));
+    }
+    let src_in_sec = source_in_ns as f64 / 1_000_000_000.0;
+    let duration_sec = source_out_ns.saturating_sub(source_in_ns) as f64 / 1_000_000_000.0;
+    if duration_sec <= 0.0 {
+        return Err(anyhow!("clip duration is zero"));
+    }
+    // astats with reset=0.5 gives one measurement per 0.5 s window. ametadata=print
+    // emits the RMS_level metadata to stderr (alongside other lavfi.astats keys).
+    // We're only interested in lavfi.astats.Overall.RMS_level lines.
+    let af =
+        "astats=metadata=1:reset=0.5,ametadata=print:key=lavfi.astats.Overall.RMS_level".to_string();
+    let output = Command::new(&ffmpeg)
+        .args([
+            "-nostats",
+            "-hide_banner",
+            "-ss",
+            &format!("{src_in_sec}"),
+            "-t",
+            &format!("{duration_sec}"),
+            "-i",
+            source_path,
+            "-vn",
+            "-af",
+            &af,
+            "-f",
+            "null",
+            "-",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| anyhow!("Failed to run ffmpeg astats: {e}"))?;
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut rms_levels: Vec<f64> = Vec::new();
+    for line in stderr.lines() {
+        // ametadata=print emits lines like:
+        //   [Parsed_ametadata_1 @ 0x...] lavfi.astats.Overall.RMS_level=-42.123456
+        if let Some(pos) = line.find("lavfi.astats.Overall.RMS_level=") {
+            let val_str = &line[pos + "lavfi.astats.Overall.RMS_level=".len()..];
+            if let Some(val) = val_str
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse::<f64>().ok())
+            {
+                // -inf shows up as a very large negative — skip these (silent windows).
+                if val.is_finite() && val > -200.0 {
+                    rms_levels.push(val);
+                }
+            }
+        }
+    }
+
+    if rms_levels.is_empty() {
+        return Err(anyhow!("no RMS samples produced by astats"));
+    }
+
+    // 5th percentile of windowed RMS = robust noise-floor estimate.
+    rms_levels.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let idx = ((rms_levels.len() as f64) * 0.05) as usize;
+    let noise_floor = rms_levels[idx.min(rms_levels.len() - 1)];
+
+    // Suggested threshold sits 6 dB above the noise floor.
+    let suggested = (noise_floor + 6.0) as f32;
+    Ok(suggested.clamp(-60.0, -10.0))
 }
 
 /// Detect scene/shot changes in a video clip using ffmpeg's `scdet` filter.

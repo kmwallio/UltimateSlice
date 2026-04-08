@@ -119,6 +119,19 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 - Join Through Edit is unavailable when metadata/effect settings have diverged between the two segments or when the selection resolves to multiple candidate boundaries.
 - Also available from the right-click clip context menu as **Join Through Edit**.
 
+### Remove Silent Parts
+
+Cut out long silences from a clip using ffmpeg `silencedetect`.
+
+1. Right-click an audio-bearing clip on the timeline and choose **Remove Silent Parts…**
+2. Set the **Silence threshold (dBFS)** — audio below this level counts as silence. Default −50 dBFS works well for clean speech; try −40 for noisier rooms.
+3. Set the **Minimum silence duration (seconds)** — short pauses below this length are kept. Default 0.5 s.
+4. Click **Suggest** to auto-pick the threshold from the clip's measured noise floor (uses ffmpeg `astats`, 5th-percentile RMS + 6 dB headroom). The suggestion appears in the spinner with a status label below.
+5. Click **Remove** — ffmpeg analyzes the clip in a background thread and the silent segments are removed (the clip is split into back-to-back sub-clips around the speech regions, preserving the speech timing).
+6. **Undo** with `Ctrl+Z` to restore the original clip.
+
+The Suggest button shares its analysis logic with the Inspector's voice-isolation Suggest button. If the suggested threshold seems too aggressive (cutting real audio) or too lax (leaving silences), nudge the spinner manually before clicking Remove.
+
 ### Detect Scene Cuts
 
 Automatically find scene/shot boundaries in a clip using ffmpeg video analysis.

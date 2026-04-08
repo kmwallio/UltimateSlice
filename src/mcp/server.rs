@@ -1077,7 +1077,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "set_clip_voice_isolation",
-            "description": "Set voice isolation (smart noise gating based on Whisper timings). 0.0 is off, 1.0 is full gating.",
+            "description": "Set voice isolation (smart noise gating). 0.0 is off, 1.0 is full gating. Requires either generated subtitles (default source) or analyzed silence intervals (set source via set_voice_isolation_source).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1085,6 +1085,53 @@ fn tools_list() -> Value {
                     "voice_isolation": { "type": "number", "description": "Isolation amount 0.0 to 1.0" }
                 },
                 "required": ["clip_id", "voice_isolation"]
+            }
+        },
+        {
+            "name": "set_voice_isolation_source",
+            "description": "Choose the source of voice-isolation gate intervals. 'subtitles' uses Whisper word timings (default, requires generated subtitles). 'silence' uses ffmpeg silencedetect intervals (requires analyze_voice_isolation_silence first).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id" },
+                    "source": { "type": "string", "enum": ["subtitles", "silence"], "description": "Interval source" }
+                },
+                "required": ["clip_id", "source"]
+            }
+        },
+        {
+            "name": "set_voice_isolation_silence_params",
+            "description": "Set the silence-detect parameters used by analyze_voice_isolation_silence. Threshold is in dB (more negative = stricter). Min gap is in milliseconds. Either parameter is optional; the unset one keeps its current value. Changing either invalidates any cached analysis.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id" },
+                    "threshold_db": { "type": "number", "description": "Silence threshold (-60 to -10 dB)" },
+                    "min_ms": { "type": "integer", "description": "Minimum silence duration in milliseconds (50 to 2000)" }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "suggest_voice_isolation_threshold",
+            "description": "Analyze the clip's noise floor with ffmpeg astats and return a suggested silence-detect threshold (dB). Uses 5th percentile of windowed RMS + 6 dB headroom. Does not mutate the clip — caller can pass the result to set_voice_isolation_silence_params.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id" }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "analyze_voice_isolation_silence",
+            "description": "Run ffmpeg silencedetect on the clip's source audio with the clip's current threshold and min-gap parameters, and store the inverted speech intervals on the clip. Required before silence-mode voice isolation can take effect.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id" }
+                },
+                "required": ["clip_id"]
             }
         },
         {
@@ -2693,6 +2740,28 @@ fn dispatch_tool_payload(
         "set_clip_voice_isolation" => McpCommand::SetClipVoiceIsolation {
             clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
             voice_isolation: args["voice_isolation"].as_f64().unwrap_or(0.0),
+            reply: tx,
+        },
+        "set_voice_isolation_source" => McpCommand::SetVoiceIsolationSource {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            source: args["source"].as_str().unwrap_or("subtitles").to_string(),
+            reply: tx,
+        },
+        "set_voice_isolation_silence_params" => McpCommand::SetVoiceIsolationSilenceParams {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            threshold_db: args.get("threshold_db").and_then(|v| v.as_f64()),
+            min_ms: args
+                .get("min_ms")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32),
+            reply: tx,
+        },
+        "suggest_voice_isolation_threshold" => McpCommand::SuggestVoiceIsolationThreshold {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            reply: tx,
+        },
+        "analyze_voice_isolation_silence" => McpCommand::AnalyzeVoiceIsolationSilence {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
             reply: tx,
         },
         "set_clip_eq" => McpCommand::SetClipEq {

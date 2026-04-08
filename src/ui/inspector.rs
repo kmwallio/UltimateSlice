@@ -276,6 +276,13 @@ pub struct InspectorView {
     pub vi_pad_slider: Scale,
     pub vi_fade_slider: Scale,
     pub vi_floor_slider: Scale,
+    pub vi_source_dropdown: gtk4::DropDown,
+    pub vi_silence_threshold_slider: Scale,
+    pub vi_silence_min_ms_slider: Scale,
+    pub vi_silence_actions_row: GBox,
+    pub vi_suggest_btn: Button,
+    pub vi_analyze_btn: Button,
+    pub vi_intervals_label: Label,
     pub pan_slider: Scale,
     pub normalize_btn: Button,
     pub match_audio_btn: Button,
@@ -2310,6 +2317,29 @@ impl InspectorView {
                 self.vi_pad_slider.set_visible(vi_detail_visible);
                 self.vi_fade_slider.set_visible(vi_detail_visible);
                 self.vi_floor_slider.set_visible(vi_detail_visible);
+                self.vi_source_dropdown.set_visible(vi_detail_visible);
+                let is_silence_mode = matches!(
+                    c.voice_isolation_source,
+                    crate::model::clip::VoiceIsolationSource::Silence
+                );
+                self.vi_source_dropdown
+                    .set_selected(if is_silence_mode { 1 } else { 0 });
+                self.vi_silence_threshold_slider
+                    .set_value(c.voice_isolation_silence_threshold_db as f64);
+                self.vi_silence_min_ms_slider
+                    .set_value(c.voice_isolation_silence_min_ms as f64);
+                let silence_visible = vi_detail_visible && is_silence_mode;
+                self.vi_silence_threshold_slider.set_visible(silence_visible);
+                self.vi_silence_min_ms_slider.set_visible(silence_visible);
+                self.vi_silence_actions_row.set_visible(silence_visible);
+                if c.voice_isolation_speech_intervals.is_empty() {
+                    self.vi_intervals_label.set_text("Not analyzed");
+                } else {
+                    self.vi_intervals_label.set_text(&format!(
+                        "Speech intervals: {}",
+                        c.voice_isolation_speech_intervals.len()
+                    ));
+                }
                 self.pan_slider
                     .set_value(c.value_for_phase1_property_at_timeline_ns(
                         Phase1KeyframeProperty::Pan,
@@ -2775,6 +2805,11 @@ impl InspectorView {
                 self.highlights_slider.set_value(0.0);
                 self.volume_slider.set_value(0.0);
                 self.voice_isolation_slider.set_value(0.0);
+                self.vi_source_dropdown.set_visible(false);
+                self.vi_silence_threshold_slider.set_visible(false);
+                self.vi_silence_min_ms_slider.set_visible(false);
+                self.vi_silence_actions_row.set_visible(false);
+                self.vi_intervals_label.set_text("Not analyzed");
                 self.pan_slider.set_value(0.0);
                 self.measured_loudness_label.set_text("");
                 let eq_defaults = crate::model::clip::default_eq_bands();
@@ -3076,6 +3111,8 @@ pub fn build_inspector(
     current_playhead_ns: impl Fn() -> u64 + 'static,
     on_seek_to: impl Fn(u64) + 'static,
     on_normalize_audio: impl Fn(&str) + 'static,
+    on_analyze_voice_isolation_silence: impl Fn(&str) + 'static,
+    on_suggest_voice_isolation_threshold: impl Fn(&str) -> Option<f32> + 'static,
     on_match_audio: impl Fn(
             &str,
             Option<crate::media::audio_match::AnalysisRegionNs>,
@@ -3098,6 +3135,10 @@ pub fn build_inspector(
     };
     // Wrap frei0r callbacks in Rc so they can be cloned into multiple closures.
     let on_normalize_audio: Rc<dyn Fn(&str)> = Rc::new(on_normalize_audio);
+    let on_analyze_voice_isolation_silence: Rc<dyn Fn(&str)> =
+        Rc::new(on_analyze_voice_isolation_silence);
+    let on_suggest_voice_isolation_threshold: Rc<dyn Fn(&str) -> Option<f32>> =
+        Rc::new(on_suggest_voice_isolation_threshold);
     let on_match_audio: Rc<
         dyn Fn(
             &str,
@@ -4196,6 +4237,67 @@ pub fn build_inspector(
         "Minimum volume during ducked regions (preserves room tone)",
     ));
     audio_inner.append(&vi_floor_slider);
+
+    // ── Voice isolation source: Subtitles (default) or Silence-detect ──
+    row_label(&audio_inner, "  Source");
+    let vi_source_dropdown =
+        gtk4::DropDown::from_strings(&["Subtitles", "Silence Detect"]);
+    vi_source_dropdown.set_tooltip_text(Some(
+        "Where to derive speech regions from. Subtitles uses generated word timings. \
+         Silence Detect uses ffmpeg silencedetect — works without subtitles.",
+    ));
+    audio_inner.append(&vi_source_dropdown);
+
+    // Silence-mode-only controls (visible only when source = Silence Detect)
+    row_label(&audio_inner, "  Silence threshold");
+    let vi_silence_threshold_slider =
+        Scale::with_range(Orientation::Horizontal, -60.0, -10.0, 1.0);
+    vi_silence_threshold_slider.set_value(-30.0);
+    vi_silence_threshold_slider.set_draw_value(true);
+    vi_silence_threshold_slider.set_digits(0);
+    vi_silence_threshold_slider
+        .add_mark(-60.0, gtk4::PositionType::Bottom, Some("-60 dB"));
+    vi_silence_threshold_slider
+        .add_mark(-30.0, gtk4::PositionType::Bottom, Some("-30 dB"));
+    vi_silence_threshold_slider
+        .add_mark(-10.0, gtk4::PositionType::Bottom, Some("-10 dB"));
+    vi_silence_threshold_slider.set_tooltip_text(Some(
+        "Audio below this dB level is treated as silence. Lower = stricter \
+         (only treat near-silence as gaps). Click Suggest to auto-pick.",
+    ));
+    audio_inner.append(&vi_silence_threshold_slider);
+
+    row_label(&audio_inner, "  Min gap (ms)");
+    let vi_silence_min_ms_slider =
+        Scale::with_range(Orientation::Horizontal, 50.0, 2000.0, 10.0);
+    vi_silence_min_ms_slider.set_value(200.0);
+    vi_silence_min_ms_slider.set_draw_value(true);
+    vi_silence_min_ms_slider.set_digits(0);
+    vi_silence_min_ms_slider.set_tooltip_text(Some(
+        "Minimum silence duration to count as a gap. Higher = ignore \
+         brief pauses between words.",
+    ));
+    audio_inner.append(&vi_silence_min_ms_slider);
+
+    let vi_silence_actions_row = GBox::new(Orientation::Horizontal, 6);
+    let vi_suggest_btn = Button::with_label("Suggest");
+    vi_suggest_btn.set_tooltip_text(Some(
+        "Analyze the clip's noise floor with ffmpeg astats and pick a \
+         threshold automatically (5th percentile RMS + 6 dB headroom).",
+    ));
+    let vi_analyze_btn = Button::with_label("Analyze Audio");
+    vi_analyze_btn.set_tooltip_text(Some(
+        "Run silencedetect to find speech regions. Required before \
+         silence-mode voice isolation can take effect.",
+    ));
+    let vi_intervals_label = Label::new(Some("Not analyzed"));
+    vi_intervals_label.add_css_class("dim-label");
+    vi_intervals_label.set_halign(gtk4::Align::Start);
+    vi_intervals_label.set_hexpand(true);
+    vi_silence_actions_row.append(&vi_suggest_btn);
+    vi_silence_actions_row.append(&vi_analyze_btn);
+    vi_silence_actions_row.append(&vi_intervals_label);
+    audio_inner.append(&vi_silence_actions_row);
 
     let normalize_row = GBox::new(Orientation::Horizontal, 6);
     let normalize_btn = Button::with_label("Normalize\u{2026}");
@@ -5661,6 +5763,257 @@ pub fn build_inspector(
                     proj.dirty = true;
                 }
                 on_clip_changed();
+            }
+        });
+    }
+
+    // Wire voice isolation source dropdown — toggles silence-mode controls,
+    // updates the model, and pushes an undo command.
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_clip_changed = on_clip_changed.clone();
+        let on_execute_command = on_execute_command.clone();
+        let vi_silence_threshold_vis = vi_silence_threshold_slider.clone();
+        let vi_silence_min_ms_vis = vi_silence_min_ms_slider.clone();
+        let vi_silence_actions_vis = vi_silence_actions_row.clone();
+        let vi_intervals_label_c = vi_intervals_label.clone();
+        vi_source_dropdown.connect_selected_notify(move |dd| {
+            if *updating.borrow() {
+                return;
+            }
+            let new_source = if dd.selected() == 1 {
+                crate::model::clip::VoiceIsolationSource::Silence
+            } else {
+                crate::model::clip::VoiceIsolationSource::Subtitles
+            };
+            let is_silence = matches!(
+                new_source,
+                crate::model::clip::VoiceIsolationSource::Silence
+            );
+            vi_silence_threshold_vis.set_visible(is_silence);
+            vi_silence_min_ms_vis.set_visible(is_silence);
+            vi_silence_actions_vis.set_visible(is_silence);
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                let old_source = {
+                    let proj = project.borrow();
+                    proj.clip_ref(clip_id)
+                        .map(|c| c.voice_isolation_source)
+                        .unwrap_or_default()
+                };
+                if old_source == new_source {
+                    return;
+                }
+                {
+                    let mut proj = project.borrow_mut();
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.voice_isolation_source = new_source;
+                    }
+                    proj.dirty = true;
+                }
+                // Refresh the intervals label for the new source.
+                {
+                    let proj = project.borrow();
+                    if let Some(c) = proj.clip_ref(clip_id) {
+                        if is_silence && c.voice_isolation_speech_intervals.is_empty() {
+                            vi_intervals_label_c.set_text("Not analyzed");
+                        } else if is_silence {
+                            vi_intervals_label_c.set_text(&format!(
+                                "Speech intervals: {}",
+                                c.voice_isolation_speech_intervals.len()
+                            ));
+                        } else {
+                            vi_intervals_label_c.set_text("Not analyzed");
+                        }
+                    }
+                }
+                on_execute_command(Box::new(
+                    crate::undo::SetClipVoiceIsolationSourceCommand {
+                        clip_id: clip_id.clone(),
+                        track_id: String::new(),
+                        old_source,
+                        new_source,
+                    },
+                ));
+                on_clip_changed();
+            }
+        });
+    }
+
+    // Wire silence-mode threshold + min-gap sliders. Param changes invalidate
+    // the cached intervals so the user must re-Analyze.
+    {
+        type SilenceParamsSnap =
+            Rc<RefCell<Option<(String, f32, u32, Vec<(u64, u64)>)>>>;
+        let snap: SilenceParamsSnap = Rc::new(RefCell::new(None));
+
+        let do_snap = {
+            let project = project.clone();
+            let selected_clip_id = selected_clip_id.clone();
+            let snap = snap.clone();
+            move || {
+                let cid = selected_clip_id.borrow().clone();
+                if let Some(cid) = cid {
+                    let proj = project.borrow();
+                    if let Some(clip) = proj.clip_ref(&cid) {
+                        *snap.borrow_mut() = Some((
+                            cid.clone(),
+                            clip.voice_isolation_silence_threshold_db,
+                            clip.voice_isolation_silence_min_ms,
+                            clip.voice_isolation_speech_intervals.clone(),
+                        ));
+                    }
+                }
+            }
+        };
+        let do_commit = {
+            let project = project.clone();
+            let snap = snap.clone();
+            let on_execute_command = on_execute_command.clone();
+            move || {
+                let entry = snap.borrow_mut().take();
+                if let Some((clip_id, old_threshold, old_min_ms, old_intervals)) = entry {
+                    let (new_threshold, new_min_ms) = {
+                        let proj = project.borrow();
+                        proj.clip_ref(&clip_id)
+                            .map(|c| {
+                                (
+                                    c.voice_isolation_silence_threshold_db,
+                                    c.voice_isolation_silence_min_ms,
+                                )
+                            })
+                            .unwrap_or((old_threshold, old_min_ms))
+                    };
+                    if (new_threshold - old_threshold).abs() < f32::EPSILON
+                        && new_min_ms == old_min_ms
+                    {
+                        return;
+                    }
+                    on_execute_command(Box::new(
+                        crate::undo::SetClipVoiceIsolationSilenceParamsCommand {
+                            clip_id,
+                            track_id: String::new(),
+                            old_threshold_db: old_threshold,
+                            new_threshold_db: new_threshold,
+                            old_min_ms,
+                            new_min_ms,
+                            old_intervals,
+                        },
+                    ));
+                }
+            }
+        };
+
+        // Live model write + cache invalidation on every value change so the
+        // playhead reflects the new params immediately. Undo capture happens
+        // at gesture end via the click controller below.
+        for (slider, apply_fn) in [
+            (
+                &vi_silence_threshold_slider as &Scale,
+                (|clip: &mut crate::model::clip::Clip, v: f64| {
+                    clip.voice_isolation_silence_threshold_db = v as f32;
+                    clip.voice_isolation_speech_intervals.clear();
+                }) as fn(&mut crate::model::clip::Clip, f64),
+            ),
+            (
+                &vi_silence_min_ms_slider as &Scale,
+                (|clip: &mut crate::model::clip::Clip, v: f64| {
+                    clip.voice_isolation_silence_min_ms = v as u32;
+                    clip.voice_isolation_speech_intervals.clear();
+                }) as fn(&mut crate::model::clip::Clip, f64),
+            ),
+        ] {
+            let project = project.clone();
+            let selected_clip_id = selected_clip_id.clone();
+            let updating = updating.clone();
+            let on_clip_changed = on_clip_changed.clone();
+            let slider = slider.clone();
+            let vi_intervals_label_c = vi_intervals_label.clone();
+            slider.connect_value_changed(move |s| {
+                if *updating.borrow() {
+                    return;
+                }
+                let id = selected_clip_id.borrow().clone();
+                if let Some(ref clip_id) = id {
+                    {
+                        let mut proj = project.borrow_mut();
+                        if let Some(clip) = proj.clip_mut(clip_id) {
+                            apply_fn(clip, s.value());
+                        }
+                        proj.dirty = true;
+                    }
+                    vi_intervals_label_c.set_text("Not analyzed");
+                    on_clip_changed();
+                }
+            });
+        }
+
+        for slider in [&vi_silence_threshold_slider, &vi_silence_min_ms_slider] {
+            let ges = gtk4::GestureClick::new();
+            let snap_c = do_snap.clone();
+            let commit_c = do_commit.clone();
+            ges.connect_pressed(move |_, _, _, _| {
+                snap_c();
+            });
+            ges.connect_released(move |_, _, _, _| {
+                commit_c();
+            });
+            slider.add_controller(ges);
+
+            let focus_ctrl = gtk4::EventControllerFocus::new();
+            let snap_c = do_snap.clone();
+            let commit_c = do_commit.clone();
+            focus_ctrl.connect_enter(move |_| {
+                snap_c();
+            });
+            focus_ctrl.connect_leave(move |_| {
+                commit_c();
+            });
+            slider.add_controller(focus_ctrl);
+        }
+    }
+
+    // Suggest button — analyze noise floor via astats and update the threshold
+    // slider. The slider's value-changed handler then propagates to the model
+    // and invalidates the intervals cache.
+    {
+        let selected_clip_id = selected_clip_id.clone();
+        let on_suggest_voice_isolation_threshold = on_suggest_voice_isolation_threshold.clone();
+        let vi_silence_threshold_slider_c = vi_silence_threshold_slider.clone();
+        vi_suggest_btn.connect_clicked(move |_| {
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                if let Some(suggested_db) = on_suggest_voice_isolation_threshold(clip_id) {
+                    vi_silence_threshold_slider_c.set_value(suggested_db as f64);
+                }
+            }
+        });
+    }
+
+    // Analyze Audio button — runs silencedetect, stores intervals, refreshes label.
+    // The callback handles ffmpeg shell-out, undo push, and on_project_changed.
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let on_analyze_voice_isolation_silence = on_analyze_voice_isolation_silence.clone();
+        let vi_intervals_label_c = vi_intervals_label.clone();
+        vi_analyze_btn.connect_clicked(move |_| {
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                on_analyze_voice_isolation_silence(clip_id);
+                let proj = project.borrow();
+                if let Some(c) = proj.clip_ref(clip_id) {
+                    if c.voice_isolation_speech_intervals.is_empty() {
+                        vi_intervals_label_c.set_text("Analysis returned no speech");
+                    } else {
+                        vi_intervals_label_c.set_text(&format!(
+                            "Speech intervals: {}",
+                            c.voice_isolation_speech_intervals.len()
+                        ));
+                    }
+                }
             }
         });
     }
@@ -9101,6 +9454,13 @@ pub fn build_inspector(
         vi_pad_slider,
         vi_fade_slider,
         vi_floor_slider,
+        vi_source_dropdown,
+        vi_silence_threshold_slider,
+        vi_silence_min_ms_slider,
+        vi_silence_actions_row,
+        vi_suggest_btn,
+        vi_analyze_btn,
+        vi_intervals_label,
         pan_slider,
         normalize_btn,
         match_audio_btn,

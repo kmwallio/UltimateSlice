@@ -3526,11 +3526,22 @@ pub fn open_remove_silent_parts_dialog(state: Rc<RefCell<TimelineState>>) {
 
     let noise_label = gtk::Label::new(Some("Silence threshold (dBFS):"));
     noise_label.set_halign(gtk::Align::Start);
+    let noise_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     let noise_spin = gtk::SpinButton::with_range(-60.0, -10.0, 1.0);
     noise_spin.set_digits(0);
     noise_spin.set_value(-50.0);
     noise_spin.set_halign(gtk::Align::Start);
     noise_spin.set_hexpand(false);
+    let suggest_btn = gtk::Button::with_label("Suggest");
+    suggest_btn.set_tooltip_text(Some(
+        "Analyze the clip's noise floor with ffmpeg astats and pick a threshold automatically",
+    ));
+    let suggest_status = gtk::Label::new(None);
+    suggest_status.add_css_class("dim-label");
+    suggest_status.set_halign(gtk::Align::Start);
+    noise_row.append(&noise_spin);
+    noise_row.append(&suggest_btn);
+    noise_row.append(&suggest_status);
 
     let dur_label = gtk::Label::new(Some("Minimum silence duration (seconds):"));
     dur_label.set_halign(gtk::Align::Start);
@@ -3542,17 +3553,50 @@ pub fn open_remove_silent_parts_dialog(state: Rc<RefCell<TimelineState>>) {
 
     let hint = gtk::Label::new(Some(
         "Audio below the threshold is considered silence (VU meter scale).\n\
-         Green zone starts at \u{2212}18 dBFS. Try \u{2212}50 for speech, \u{2212}40 for noisy rooms.",
+         Green zone starts at \u{2212}18 dBFS. Try \u{2212}50 for speech, \u{2212}40 for noisy rooms.\n\
+         Click Suggest to auto-pick from the clip's measured noise floor.",
     ));
     hint.set_halign(gtk::Align::Start);
     hint.add_css_class("dim-label");
 
     body.append(&noise_label);
-    body.append(&noise_spin);
+    body.append(&noise_row);
     body.append(&dur_label);
     body.append(&dur_spin);
     body.append(&hint);
     dialog.content_area().append(&body);
+
+    // Wire Suggest button — runs ffmpeg astats synchronously and updates the
+    // threshold spin button. Uses the same helper as the inspector's voice
+    // isolation Suggest button.
+    {
+        let noise_spin_c = noise_spin.clone();
+        let suggest_status_c = suggest_status.clone();
+        let source_path_c = source_path.clone();
+        let source_in_c = source_in;
+        let source_out_c = source_out;
+        suggest_btn.connect_clicked(move |btn| {
+            btn.set_sensitive(false);
+            suggest_status_c.set_text("Analyzing\u{2026}");
+            // Process pending GTK events so the status label paints before we block.
+            while gtk::glib::MainContext::default().iteration(false) {}
+            match crate::media::export::suggest_silence_threshold_db(
+                &source_path_c,
+                source_in_c,
+                source_out_c,
+            ) {
+                Ok(db) => {
+                    noise_spin_c.set_value(db as f64);
+                    suggest_status_c.set_text(&format!("Suggested: {db:.0} dBFS"));
+                }
+                Err(e) => {
+                    log::warn!("remove silent parts: suggest failed: {e}");
+                    suggest_status_c.set_text("Analysis failed");
+                }
+            }
+            btn.set_sensitive(true);
+        });
+    }
 
     dialog.connect_response(move |d, resp| {
         if resp == gtk::ResponseType::Accept {

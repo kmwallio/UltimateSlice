@@ -97,8 +97,32 @@ Video stabilization compensates camera shake using ffmpeg's libvidstab (two-pass
 | Slider | Range | Default | Effect |
 |---|---|---|---|
 | **Volume** | −100 dB → +12 dB | 0 dB | Per-clip gain (`0 dB = 1.0x`, `-96 dB`/`-100 dB` ≈ mute) |
-| **Voice Isolation** | 0% → 100% | Off | Ducks volume between spoken words (requires generated subtitles) |
+| **Voice Isolation** | 0% → 100% | Off | Ducks volume between spoken words. See **Voice Isolation Source** below. |
 | **Pan** | −1.0 → 1.0 | 0.0 | Stereo position (−1 = full left, +1 = full right) |
+
+#### Voice Isolation Source
+
+Voice isolation needs to know *when* the speech is happening so it can duck audio in the gaps. UltimateSlice supports two ways to provide that timing:
+
+- **Subtitles** (default) — uses Whisper-generated word timings. Requires running **Generate Subtitles** on the clip first. Best precision when the audio transcribes well.
+- **Silence Detect** — uses ffmpeg's `silencedetect` filter to find speech regions automatically, **without subtitles**. Use this for clips that don't transcribe well (music beds, ambient/B-roll, foreign-language clips) or when running Whisper is overkill.
+
+When **Silence Detect** is selected, three additional controls appear:
+
+| Control | Range | Default | Effect |
+|---|---|---|---|
+| **Silence threshold** | −60 dB → −10 dB | −30 dB | Audio below this level is treated as silence. Lower = stricter (only true near-silence counts as a gap). |
+| **Min gap** | 50 ms → 2000 ms | 200 ms | Minimum silence duration to count as a gap. Higher = ignore brief pauses between words. |
+| **Suggest** button | — | — | Analyzes the clip's noise floor with `astats` and auto-picks a threshold (5th-percentile RMS + 6 dB headroom). |
+| **Analyze Audio** button | — | — | Runs `silencedetect` with the current threshold + min-gap settings, stores the resulting speech intervals on the clip. **Required** before silence-mode voice isolation takes effect. |
+
+The detected speech intervals are cached on the clip but **not** persisted in `.fcpxml` — the source path, threshold, min-gap, and source mode round-trip, but the intervals themselves are re-analyzed on demand after reload (click **Analyze Audio** again). Threshold/min-gap edits and trim edits both invalidate the cache.
+
+MCP tools:
+- `set_voice_isolation_source` — switch between `"subtitles"` and `"silence"`
+- `set_voice_isolation_silence_params` — set `threshold_db` and/or `min_ms`
+- `suggest_voice_isolation_threshold` — returns a suggested threshold without mutating the clip
+- `analyze_voice_isolation_silence` — runs the analysis and stores intervals
 
 ### Normalize Audio
 

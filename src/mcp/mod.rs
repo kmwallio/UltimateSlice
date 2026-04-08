@@ -411,6 +411,26 @@ pub enum McpCommand {
         voice_isolation: f64,
         reply: SyncSender<Value>,
     },
+    SetVoiceIsolationSource {
+        clip_id: String,
+        /// `"subtitles"` or `"silence"`
+        source: String,
+        reply: SyncSender<Value>,
+    },
+    SetVoiceIsolationSilenceParams {
+        clip_id: String,
+        threshold_db: Option<f64>,
+        min_ms: Option<u32>,
+        reply: SyncSender<Value>,
+    },
+    SuggestVoiceIsolationThreshold {
+        clip_id: String,
+        reply: SyncSender<Value>,
+    },
+    AnalyzeVoiceIsolationSilence {
+        clip_id: String,
+        reply: SyncSender<Value>,
+    },
     SetClipEq {
         clip_id: String,
         low_freq: Option<f64>,

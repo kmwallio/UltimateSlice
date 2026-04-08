@@ -824,6 +824,28 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                             clip.voice_isolation.to_string().as_str(),
                         ));
                     }
+                    if clip.voice_isolation_source
+                        != crate::model::clip::VoiceIsolationSource::default()
+                    {
+                        asset_clip.push_attribute((
+                            "us:voice-isolation-source",
+                            clip.voice_isolation_source.as_str(),
+                        ));
+                    }
+                    if (clip.voice_isolation_silence_threshold_db - (-30.0)).abs() > 0.01 {
+                        asset_clip.push_attribute((
+                            "us:voice-isolation-silence-threshold-db",
+                            clip.voice_isolation_silence_threshold_db
+                                .to_string()
+                                .as_str(),
+                        ));
+                    }
+                    if clip.voice_isolation_silence_min_ms != 200 {
+                        asset_clip.push_attribute((
+                            "us:voice-isolation-silence-min-ms",
+                            clip.voice_isolation_silence_min_ms.to_string().as_str(),
+                        ));
+                    }
                     let volume_keyframes_json = if clip.volume_keyframes.is_empty() {
                         None
                     } else {
@@ -1290,10 +1312,40 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                         writer.write_event(Event::Empty(adjust_volume))?;
                     }
 
-                    if clip.voice_isolation > 0.0 {
+                    // Emit `<adjust-voiceIsolation>` when the gate is active OR when
+                    // any of our silence-mode settings differ from defaults, so the
+                    // source/threshold/min_ms vendor attrs round-trip even if the user
+                    // configured silence mode without setting an isolation amount yet.
+                    let vi_silence_active = clip.voice_isolation_source
+                        != crate::model::clip::VoiceIsolationSource::default()
+                        || (clip.voice_isolation_silence_threshold_db - (-30.0)).abs() > 0.01
+                        || clip.voice_isolation_silence_min_ms != 200;
+                    if clip.voice_isolation > 0.0 || vi_silence_active {
                         let mut adjust_vi = BytesStart::new("adjust-voiceIsolation");
                         let vi_amount = format!("{:.0}", clip.voice_isolation * 100.0);
                         adjust_vi.push_attribute(("amount", vi_amount.as_str()));
+                        if clip.voice_isolation_source
+                            != crate::model::clip::VoiceIsolationSource::default()
+                        {
+                            adjust_vi.push_attribute((
+                                "us:source",
+                                clip.voice_isolation_source.as_str(),
+                            ));
+                        }
+                        if (clip.voice_isolation_silence_threshold_db - (-30.0)).abs() > 0.01 {
+                            adjust_vi.push_attribute((
+                                "us:silence-threshold-db",
+                                clip.voice_isolation_silence_threshold_db
+                                    .to_string()
+                                    .as_str(),
+                            ));
+                        }
+                        if clip.voice_isolation_silence_min_ms != 200 {
+                            adjust_vi.push_attribute((
+                                "us:silence-min-ms",
+                                clip.voice_isolation_silence_min_ms.to_string().as_str(),
+                            ));
+                        }
                         writer.write_event(Event::Empty(adjust_vi))?;
                     }
 
@@ -2301,8 +2353,15 @@ fn write_strict_audio_channel_sources(
     let has_vol_kf = !clip.volume_keyframes.is_empty();
     let has_pan_kf = !clip.pan_keyframes.is_empty();
     let has_voice_isolation = clip.voice_isolation > 0.0;
+    // Also include the audio-channel-source block when silence-mode settings
+    // differ from defaults so the vendor attrs round-trip even without an
+    // active gate amount.
+    let vi_silence_active = clip.voice_isolation_source
+        != crate::model::clip::VoiceIsolationSource::default()
+        || (clip.voice_isolation_silence_threshold_db - (-30.0)).abs() > 0.01
+        || clip.voice_isolation_silence_min_ms != 200;
 
-    if !has_vol_kf && !has_pan_kf && !has_voice_isolation {
+    if !has_vol_kf && !has_pan_kf && !has_voice_isolation && !vi_silence_active {
         return Ok(());
     }
 
@@ -2322,10 +2381,27 @@ fn write_strict_audio_channel_sources(
         writer.write_event(Event::End(BytesEnd::new("adjust-volume")))?;
     }
 
-    if has_voice_isolation {
+    if has_voice_isolation || vi_silence_active {
         let mut adjust_vi = BytesStart::new("adjust-voiceIsolation");
         let vi_amount = format!("{:.0}", clip.voice_isolation * 100.0);
         adjust_vi.push_attribute(("amount", vi_amount.as_str()));
+        if clip.voice_isolation_source
+            != crate::model::clip::VoiceIsolationSource::default()
+        {
+            adjust_vi.push_attribute(("us:source", clip.voice_isolation_source.as_str()));
+        }
+        if (clip.voice_isolation_silence_threshold_db - (-30.0)).abs() > 0.01 {
+            adjust_vi.push_attribute((
+                "us:silence-threshold-db",
+                clip.voice_isolation_silence_threshold_db.to_string().as_str(),
+            ));
+        }
+        if clip.voice_isolation_silence_min_ms != 200 {
+            adjust_vi.push_attribute((
+                "us:silence-min-ms",
+                clip.voice_isolation_silence_min_ms.to_string().as_str(),
+            ));
+        }
         writer.write_event(Event::Empty(adjust_vi))?;
     }
 
@@ -4239,6 +4315,9 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:frei0r-effects"
             | "us:volume"
             | "us:voice-isolation"
+            | "us:voice-isolation-source"
+            | "us:voice-isolation-silence-threshold-db"
+            | "us:voice-isolation-silence-min-ms"
             | "us:volume-keyframes"
             | "us:pan"
             | "us:pan-keyframes"

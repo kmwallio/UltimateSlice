@@ -3926,7 +3926,9 @@ fn clip_to_program_clips(
         voice_isolation_fade_ns: (c.voice_isolation_fade_ms as f64 * 1_000_000.0) as u64,
         voice_isolation_floor: c.voice_isolation_floor as f64,
         volume_keyframes: c.volume_keyframes.clone(),
-        subtitle_segments: c.subtitle_segments.clone(),
+        voice_isolation_merged_intervals_ns: c.voice_isolation_speech_intervals_ns(
+            (c.voice_isolation_pad_ms as f64 * 1_000_000.0) as u64,
+        ),
         pan: c.pan as f64,
         pan_keyframes: c.pan_keyframes.clone(),
         audio_channel_mode: c.audio_channel_mode,
@@ -5223,6 +5225,123 @@ pub fn build_window(
                         Err(e) => Err(e.to_string()),
                     });
                 });
+            }
+        },
+        // on_analyze_voice_isolation_silence: run silencedetect, store inverted
+        // speech intervals on the clip, push undo command. Synchronous (mirrors
+        // the Normalize/silencedetect pattern; detect_silence is fast for typical clips).
+        {
+            let project = project.clone();
+            let timeline_state = timeline_state.clone();
+            let on_project_changed = on_project_changed.clone();
+            let window_weak = window_weak.clone();
+            move |clip_id: &str| {
+                let clip_info = {
+                    let proj = project.borrow();
+                    proj.clip_ref(clip_id).map(|c| {
+                        (
+                            c.source_path.clone(),
+                            c.source_in,
+                            c.source_out,
+                            c.voice_isolation_silence_threshold_db,
+                            c.voice_isolation_silence_min_ms,
+                            c.voice_isolation_speech_intervals.clone(),
+                        )
+                    })
+                };
+                let Some((
+                    source_path,
+                    source_in,
+                    source_out,
+                    threshold_db,
+                    min_ms,
+                    old_intervals,
+                )) = clip_info
+                else {
+                    return;
+                };
+                let min_duration = (min_ms as f64) / 1000.0;
+                let result = crate::media::export::detect_silence(
+                    &source_path,
+                    source_in,
+                    source_out,
+                    threshold_db as f64,
+                    min_duration,
+                );
+                match result {
+                    Ok(silences) => {
+                        let clip_duration_ns = source_out.saturating_sub(source_in);
+                        let new_intervals = crate::media::export::invert_silences_to_speech(
+                            &silences,
+                            clip_duration_ns,
+                        );
+                        log::info!(
+                            "voice_iso analyze: clip={} silences={} speech_intervals={}",
+                            clip_id,
+                            silences.len(),
+                            new_intervals.len()
+                        );
+                        {
+                            let mut proj = project.borrow_mut();
+                            let cmd = crate::undo::AnalyzeVoiceIsolationSilenceCommand {
+                                clip_id: clip_id.to_string(),
+                                track_id: String::new(),
+                                old_intervals,
+                                new_intervals,
+                            };
+                            let mut ts = timeline_state.borrow_mut();
+                            ts.history.execute(Box::new(cmd), &mut proj);
+                        }
+                        on_project_changed();
+                    }
+                    Err(e) => {
+                        log::warn!("voice_iso analyze failed for {clip_id}: {e}");
+                        if let Some(win) = window_weak.upgrade() {
+                            flash_window_status_title(
+                                &win,
+                                &project,
+                                &format!("Voice isolation analysis failed: {e}"),
+                            );
+                        }
+                    }
+                }
+            }
+        },
+        // on_suggest_voice_isolation_threshold: run astats on the clip and
+        // return a suggested silence-detect threshold (dB) based on the noise
+        // floor. Returns None on failure (logged); the inspector leaves the
+        // slider unchanged.
+        {
+            let project = project.clone();
+            let window_weak = window_weak.clone();
+            move |clip_id: &str| -> Option<f32> {
+                let info = {
+                    let proj = project.borrow();
+                    proj.clip_ref(clip_id)
+                        .map(|c| (c.source_path.clone(), c.source_in, c.source_out))
+                };
+                let (source_path, source_in, source_out) = info?;
+                match crate::media::export::suggest_silence_threshold_db(
+                    &source_path,
+                    source_in,
+                    source_out,
+                ) {
+                    Ok(db) => {
+                        log::info!("voice_iso suggest: clip={clip_id} threshold={db:.1} dB");
+                        Some(db)
+                    }
+                    Err(e) => {
+                        log::warn!("voice_iso suggest failed for {clip_id}: {e}");
+                        if let Some(win) = window_weak.upgrade() {
+                            flash_window_status_title(
+                                &win,
+                                &project,
+                                &format!("Voice isolation suggest failed: {e}"),
+                            );
+                        }
+                        None
+                    }
+                }
             }
         },
         // on_match_audio: analyse source/reference audio and apply volume + EQ together
@@ -16167,6 +16286,174 @@ fn handle_mcp_command(
             reply.send(json!({"success": found})).ok();
             if found {
                 on_project_changed();
+            }
+        }
+
+        McpCommand::SetVoiceIsolationSource {
+            clip_id,
+            source,
+            reply,
+        } => {
+            let new_source = crate::model::clip::VoiceIsolationSource::from_str(&source);
+            let mut proj = project.borrow_mut();
+            let found = if let Some(clip) = proj.clip_mut(&clip_id) {
+                clip.voice_isolation_source = new_source;
+                proj.dirty = true;
+                true
+            } else {
+                false
+            };
+            drop(proj);
+            reply
+                .send(json!({"success": found, "source": new_source.as_str()}))
+                .ok();
+            if found {
+                on_project_changed();
+            }
+        }
+
+        McpCommand::SetVoiceIsolationSilenceParams {
+            clip_id,
+            threshold_db,
+            min_ms,
+            reply,
+        } => {
+            let mut proj = project.borrow_mut();
+            let updated = if let Some(clip) = proj.clip_mut(&clip_id) {
+                if let Some(t) = threshold_db {
+                    clip.voice_isolation_silence_threshold_db =
+                        (t as f32).clamp(-60.0, -10.0);
+                }
+                if let Some(m) = min_ms {
+                    clip.voice_isolation_silence_min_ms = m.clamp(50, 2000);
+                }
+                // Param change invalidates the cached analysis.
+                clip.voice_isolation_speech_intervals.clear();
+                Some((
+                    clip.voice_isolation_silence_threshold_db,
+                    clip.voice_isolation_silence_min_ms,
+                ))
+            } else {
+                None
+            };
+            if updated.is_some() {
+                proj.dirty = true;
+            }
+            drop(proj);
+            match updated {
+                Some((t, m)) => {
+                    reply
+                        .send(json!({
+                            "success": true,
+                            "threshold_db": t,
+                            "min_ms": m
+                        }))
+                        .ok();
+                    on_project_changed();
+                }
+                None => {
+                    reply.send(json!({"success": false})).ok();
+                }
+            }
+        }
+
+        McpCommand::SuggestVoiceIsolationThreshold { clip_id, reply } => {
+            let info = {
+                let proj = project.borrow();
+                proj.clip_ref(&clip_id)
+                    .map(|c| (c.source_path.clone(), c.source_in, c.source_out))
+            };
+            match info {
+                None => {
+                    reply
+                        .send(json!({"success": false, "error": "clip not found"}))
+                        .ok();
+                }
+                Some((source_path, source_in, source_out)) => {
+                    match crate::media::export::suggest_silence_threshold_db(
+                        &source_path,
+                        source_in,
+                        source_out,
+                    ) {
+                        Ok(db) => {
+                            reply
+                                .send(json!({"success": true, "threshold_db": db}))
+                                .ok();
+                        }
+                        Err(e) => {
+                            reply
+                                .send(json!({"success": false, "error": e.to_string()}))
+                                .ok();
+                        }
+                    }
+                }
+            }
+        }
+
+        McpCommand::AnalyzeVoiceIsolationSilence { clip_id, reply } => {
+            let info = {
+                let proj = project.borrow();
+                proj.clip_ref(&clip_id).map(|c| {
+                    (
+                        c.source_path.clone(),
+                        c.source_in,
+                        c.source_out,
+                        c.voice_isolation_silence_threshold_db,
+                        c.voice_isolation_silence_min_ms,
+                    )
+                })
+            };
+            match info {
+                None => {
+                    reply
+                        .send(json!({"success": false, "error": "clip not found"}))
+                        .ok();
+                }
+                Some((source_path, source_in, source_out, threshold_db, min_ms)) => {
+                    let min_duration = (min_ms as f64) / 1000.0;
+                    match crate::media::export::detect_silence(
+                        &source_path,
+                        source_in,
+                        source_out,
+                        threshold_db as f64,
+                        min_duration,
+                    ) {
+                        Ok(silences) => {
+                            let clip_duration_ns = source_out.saturating_sub(source_in);
+                            let new_intervals =
+                                crate::media::export::invert_silences_to_speech(
+                                    &silences,
+                                    clip_duration_ns,
+                                );
+                            let count = new_intervals.len();
+                            let intervals_json: Vec<_> = new_intervals
+                                .iter()
+                                .map(|(s, e)| json!([s, e]))
+                                .collect();
+                            {
+                                let mut proj = project.borrow_mut();
+                                if let Some(clip) = proj.clip_mut(&clip_id) {
+                                    clip.voice_isolation_speech_intervals =
+                                        new_intervals;
+                                    proj.dirty = true;
+                                }
+                            }
+                            reply
+                                .send(json!({
+                                    "success": true,
+                                    "count": count,
+                                    "intervals_ns": intervals_json
+                                }))
+                                .ok();
+                            on_project_changed();
+                        }
+                        Err(e) => {
+                            reply
+                                .send(json!({"success": false, "error": e.to_string()}))
+                                .ok();
+                        }
+                    }
+                }
             }
         }
 

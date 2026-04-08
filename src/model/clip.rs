@@ -337,6 +337,46 @@ impl AudioChannelMode {
     pub const ALL: [AudioChannelMode; 4] = [Self::Stereo, Self::Left, Self::Right, Self::MonoMix];
 }
 
+/// Source of speech-region intervals used by the voice-isolation gate.
+///
+/// `Subtitles` walks the clip's `subtitle_segments` (current behavior, requires
+/// running speech-to-text first). `Silence` reads the cached
+/// `voice_isolation_speech_intervals` populated by an ffmpeg `silencedetect`
+/// analysis pass — used for clips that don't transcribe well or where running
+/// Whisper is undesirable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceIsolationSource {
+    #[default]
+    Subtitles,
+    Silence,
+}
+
+impl VoiceIsolationSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Subtitles => "Subtitles",
+            Self::Silence => "Silence Detect",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Subtitles => "subtitles",
+            Self::Silence => "silence",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "silence" => Self::Silence,
+            _ => Self::Subtitles,
+        }
+    }
+
+    pub const ALL: [VoiceIsolationSource; 2] = [Self::Subtitles, Self::Silence];
+}
+
 /// Compositing blend mode for a clip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -647,6 +687,12 @@ fn default_voice_iso_pad_ms() -> f32 {
 }
 fn default_voice_iso_fade_ms() -> f32 {
     25.0
+}
+fn default_vi_silence_threshold_db() -> f32 {
+    -30.0
+}
+fn default_vi_silence_min_ms() -> u32 {
+    200
 }
 fn default_vidstab_smoothing() -> f32 {
     0.5
@@ -1348,6 +1394,23 @@ pub struct Clip {
     /// 0.0 = full silence, 1.0 = no ducking. Default 0.0.
     #[serde(default)]
     pub voice_isolation_floor: f32,
+    /// Source for voice-isolation gate intervals: subtitles (default, requires
+    /// generated subtitles) or silence-detect (requires Analyze Audio).
+    #[serde(default)]
+    pub voice_isolation_source: VoiceIsolationSource,
+    /// Silence-detection threshold in dB (more negative = stricter). Default -30.
+    /// Used only when `voice_isolation_source` is `Silence`.
+    #[serde(default = "default_vi_silence_threshold_db")]
+    pub voice_isolation_silence_threshold_db: f32,
+    /// Minimum silence duration to count as a gap, in milliseconds. Default 200.
+    /// Used only when `voice_isolation_source` is `Silence`.
+    #[serde(default = "default_vi_silence_min_ms")]
+    pub voice_isolation_silence_min_ms: u32,
+    /// Cached speech intervals (clip-local source-time nanoseconds, [start, end] pairs)
+    /// computed from `silencedetect` analysis. NOT serialized — re-analyzed on demand
+    /// via the inspector "Analyze Audio" button after project reload or trim edits.
+    #[serde(skip)]
+    pub voice_isolation_speech_intervals: Vec<(u64, u64)>,
     /// Last measured integrated loudness in LUFS (informational, from normalization analysis).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measured_loudness_lufs: Option<f64>,
@@ -1844,6 +1907,71 @@ impl Clip {
         }
     }
 
+    /// Returns `true` when voice isolation has a usable data source (subtitles
+    /// when `voice_isolation_source` is `Subtitles`, or analyzed speech intervals
+    /// when `Silence`) AND the gate amount is non-zero.
+    pub fn has_voice_isolation_data(&self) -> bool {
+        if self.voice_isolation <= 0.0 {
+            return false;
+        }
+        match self.voice_isolation_source {
+            VoiceIsolationSource::Subtitles => !self.subtitle_segments.is_empty(),
+            VoiceIsolationSource::Silence => !self.voice_isolation_speech_intervals.is_empty(),
+        }
+    }
+
+    /// Returns merged speech intervals in clip-local source-time nanoseconds,
+    /// padded by `pad_ns` on each side, for the active `voice_isolation_source`.
+    /// This is the single source of truth used by both real-time preview
+    /// (`program_player`) and export (`build_volume_filter`).
+    /// Returns an empty Vec when isolation is off or there is no source data.
+    pub fn voice_isolation_speech_intervals_ns(&self, pad_ns: u64) -> Vec<(u64, u64)> {
+        if !self.has_voice_isolation_data() {
+            return Vec::new();
+        }
+        let mut intervals: Vec<(u64, u64)> = Vec::new();
+        match self.voice_isolation_source {
+            VoiceIsolationSource::Subtitles => {
+                for seg in &self.subtitle_segments {
+                    if seg.words.is_empty() {
+                        intervals.push((seg.start_ns.saturating_sub(pad_ns), seg.end_ns + pad_ns));
+                    } else {
+                        for w in &seg.words {
+                            intervals
+                                .push((w.start_ns.saturating_sub(pad_ns), w.end_ns + pad_ns));
+                        }
+                    }
+                }
+            }
+            VoiceIsolationSource::Silence => {
+                for &(s, e) in &self.voice_isolation_speech_intervals {
+                    intervals.push((s.saturating_sub(pad_ns), e + pad_ns));
+                }
+            }
+        }
+        // Sort by start, then merge any overlaps so consumers see clean,
+        // non-overlapping ranges.
+        intervals.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut merged: Vec<(u64, u64)> = Vec::new();
+        for iv in intervals {
+            if let Some(last) = merged.last_mut() {
+                if iv.0 <= last.1 {
+                    last.1 = last.1.max(iv.1);
+                    continue;
+                }
+            }
+            merged.push(iv);
+        }
+        merged
+    }
+
+    /// Clear the cached silence-detected speech intervals. Call this whenever
+    /// the underlying source window changes (`source_in`/`source_out` edits)
+    /// or the threshold/min-gap parameters change, so the user must re-Analyze.
+    pub fn invalidate_voice_isolation_silence_cache(&mut self) {
+        self.voice_isolation_speech_intervals.clear();
+    }
+
     /// Filter subtitle segments to the clip-local time range `[start_ns, end_ns)`,
     /// rebasing retained segments so `start_ns` maps to time 0.
     /// Segments entirely outside the range are removed; partially overlapping
@@ -1925,6 +2053,10 @@ impl Clip {
             voice_isolation_pad_ms: default_voice_iso_pad_ms(),
             voice_isolation_fade_ms: default_voice_iso_fade_ms(),
             voice_isolation_floor: 0.0,
+            voice_isolation_source: VoiceIsolationSource::default(),
+            voice_isolation_silence_threshold_db: default_vi_silence_threshold_db(),
+            voice_isolation_silence_min_ms: default_vi_silence_min_ms(),
+            voice_isolation_speech_intervals: Vec::new(),
             measured_loudness_lufs: None,
             volume_keyframes: Vec::new(),
             pan: 0.0,

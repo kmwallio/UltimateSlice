@@ -412,6 +412,7 @@ Tracking docs:
 
 ### Audio
 - [x] Voice Isolation (Smart Noise Gating) based on Whisper STT subtitle timestamps
+  - [x] No-subtitle silence-detect mode (ffmpeg `silencedetect`) with auto-suggested threshold from astats noise-floor analysis
 - [x] Audio track clip display with waveform (see Timeline Improvements above)
 - [x] Volume / pan controls per clip in the inspector (volume slider now dB-based: `-100 dB` to `+12 dB`, mapped to linear gain for playback/export, persisted in FCPXML)
 - [x] Basic audio mixing (level meters)

@@ -1,4 +1,4 @@
-use crate::model::clip::Clip;
+use crate::model::clip::{Clip, VoiceIsolationSource};
 use crate::model::project::Project;
 use crate::model::transition::OutgoingTransition;
 
@@ -821,6 +821,96 @@ impl EditCommand for SetClipVoiceIsolationCommand {
     }
     fn description(&self) -> &str {
         "Set clip voice isolation"
+    }
+}
+
+/// Switch the source of voice-isolation gate intervals between subtitles and
+/// silence-detect analysis.
+pub struct SetClipVoiceIsolationSourceCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_source: VoiceIsolationSource,
+    pub new_source: VoiceIsolationSource,
+}
+
+impl EditCommand for SetClipVoiceIsolationSourceCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.voice_isolation_source = self.new_source;
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.voice_isolation_source = self.old_source;
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set voice isolation source"
+    }
+}
+
+/// Update the silence-detect threshold and/or minimum gap parameters used to
+/// produce voice-isolation speech intervals. Also captures the cached intervals
+/// before/after so undo restores prior analysis without forcing a re-Analyze.
+pub struct SetClipVoiceIsolationSilenceParamsCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_threshold_db: f32,
+    pub new_threshold_db: f32,
+    pub old_min_ms: u32,
+    pub new_min_ms: u32,
+    pub old_intervals: Vec<(u64, u64)>,
+}
+
+impl EditCommand for SetClipVoiceIsolationSilenceParamsCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.voice_isolation_silence_threshold_db = self.new_threshold_db;
+            clip.voice_isolation_silence_min_ms = self.new_min_ms;
+            // Parameter change invalidates the cached analysis.
+            clip.voice_isolation_speech_intervals.clear();
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.voice_isolation_silence_threshold_db = self.old_threshold_db;
+            clip.voice_isolation_silence_min_ms = self.old_min_ms;
+            clip.voice_isolation_speech_intervals = self.old_intervals.clone();
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set voice isolation silence params"
+    }
+}
+
+/// Capture the result of running silencedetect analysis on a clip so the
+/// resulting cached intervals can be undone.
+pub struct AnalyzeVoiceIsolationSilenceCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_intervals: Vec<(u64, u64)>,
+    pub new_intervals: Vec<(u64, u64)>,
+}
+
+impl EditCommand for AnalyzeVoiceIsolationSilenceCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.voice_isolation_speech_intervals = self.new_intervals.clone();
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.voice_isolation_speech_intervals = self.old_intervals.clone();
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Analyze voice isolation"
     }
 }
 

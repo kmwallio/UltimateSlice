@@ -787,7 +787,12 @@ pub struct ProgramClip {
     pub voice_isolation_fade_ns: u64,
     pub voice_isolation_floor: f64,
     pub volume_keyframes: Vec<NumericKeyframe>,
-    pub subtitle_segments: Vec<crate::model::clip::SubtitleSegment>,
+    /// Pre-merged speech intervals (clip-local source-time ns), padded by
+    /// `voice_isolation_pad_ns`. Computed from either subtitle word timings
+    /// or silence-detect analysis depending on the source clip's
+    /// `voice_isolation_source`. Used by `volume_at_timeline_ns` to apply
+    /// the gate during real-time playback.
+    pub voice_isolation_merged_intervals_ns: Vec<(u64, u64)>,
     /// Audio pan: -1.0 (full left) to 1.0 (full right), default 0.0
     pub pan: f64,
     pub pan_keyframes: Vec<NumericKeyframe>,
@@ -1037,42 +1042,24 @@ impl ProgramClip {
         let local_ns = self.local_timeline_position_ns(timeline_pos_ns);
         let base_vol =
             ModelClip::evaluate_keyframed_value(&self.volume_keyframes, local_ns, self.volume);
-        if self.voice_isolation > 0.0 && !self.subtitle_segments.is_empty() {
+        if self.voice_isolation > 0.0 && !self.voice_isolation_merged_intervals_ns.is_empty() {
             let rel_ns = timeline_pos_ns.saturating_sub(self.timeline_start_ns);
             let clip_local_ns = (rel_ns as f64 * self.speed) as u64;
-            let pad_ns = self.voice_isolation_pad_ns;
             let fade_ns = self.voice_isolation_fade_ns;
+            // Merged intervals are already padded — find the nearest boundary
+            // for cosine fade. Distance 0 means we're inside a speech region.
             let mut min_dist: u64 = u64::MAX;
-            'outer: for seg in &self.subtitle_segments {
-                if seg.words.is_empty() {
-                    let start = seg.start_ns.saturating_sub(pad_ns);
-                    let end = seg.end_ns + pad_ns;
-                    if clip_local_ns >= start && clip_local_ns <= end {
-                        min_dist = 0;
-                        break;
-                    }
-                    let d = if clip_local_ns < start {
-                        start - clip_local_ns
-                    } else {
-                        clip_local_ns - end
-                    };
-                    min_dist = min_dist.min(d);
-                } else {
-                    for w in &seg.words {
-                        let start = w.start_ns.saturating_sub(pad_ns);
-                        let end = w.end_ns + pad_ns;
-                        if clip_local_ns >= start && clip_local_ns <= end {
-                            min_dist = 0;
-                            break 'outer;
-                        }
-                        let d = if clip_local_ns < start {
-                            start - clip_local_ns
-                        } else {
-                            clip_local_ns - end
-                        };
-                        min_dist = min_dist.min(d);
-                    }
+            for &(start, end) in &self.voice_isolation_merged_intervals_ns {
+                if clip_local_ns >= start && clip_local_ns <= end {
+                    min_dist = 0;
+                    break;
                 }
+                let d = if clip_local_ns < start {
+                    start - clip_local_ns
+                } else {
+                    clip_local_ns - end
+                };
+                min_dist = min_dist.min(d);
             }
             if min_dist > 0 {
                 // Duck towards floor instead of silence.
@@ -16191,7 +16178,7 @@ mod tests {
             voice_isolation_fade_ns: 25_000_000,
             voice_isolation_floor: 0.0,
             volume_keyframes: Vec::new(),
-            subtitle_segments: Vec::new(),
+            voice_isolation_merged_intervals_ns: Vec::new(),
             pan: 0.0,
             pan_keyframes: Vec::new(),
             audio_channel_mode: crate::model::clip::AudioChannelMode::default(),

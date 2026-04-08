@@ -390,9 +390,18 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                         if let Some(ctx) = clip_stack.last() {
                             apply_native_volume_keyframes(&native, ctx, &mut track_map);
                             apply_native_pan_keyframes(&native, ctx, &mut track_map);
-                            if let Some(vi) = native.voice_isolation {
-                                if let Some(clip) = current_clip_mut(&mut track_map, Some(ctx)) {
+                            if let Some(clip) = current_clip_mut(&mut track_map, Some(ctx)) {
+                                if let Some(vi) = native.voice_isolation {
                                     clip.voice_isolation = vi;
+                                }
+                                if let Some(src) = native.voice_isolation_source {
+                                    clip.voice_isolation_source = src;
+                                }
+                                if let Some(t) = native.voice_isolation_silence_threshold_db {
+                                    clip.voice_isolation_silence_threshold_db = t;
+                                }
+                                if let Some(m) = native.voice_isolation_silence_min_ms {
+                                    clip.voice_isolation_silence_min_ms = m;
                                 }
                             }
                         }
@@ -1147,6 +1156,16 @@ fn parse_asset_clip(
         if let Some(v) = attrs.get("us:voice-isolation") {
             clip.voice_isolation = v.parse().unwrap_or(0.0);
         }
+        if let Some(v) = attrs.get("us:voice-isolation-source") {
+            clip.voice_isolation_source =
+                crate::model::clip::VoiceIsolationSource::from_str(v);
+        }
+        if let Some(v) = attrs.get("us:voice-isolation-silence-threshold-db") {
+            clip.voice_isolation_silence_threshold_db = v.parse().unwrap_or(-30.0);
+        }
+        if let Some(v) = attrs.get("us:voice-isolation-silence-min-ms") {
+            clip.voice_isolation_silence_min_ms = v.parse().unwrap_or(200);
+        }
         if let Some(v) = attrs.get("us:volume-keyframes") {
             clip.volume_keyframes =
                 serde_json::from_str::<Vec<NumericKeyframe>>(v).unwrap_or_default();
@@ -1703,6 +1722,23 @@ fn apply_adjust_voice_isolation(
         if let Some(amount) = attrs.get("amount").and_then(|s| s.parse::<f32>().ok()) {
             clip.voice_isolation = (amount / 100.0).clamp(0.0, 1.0);
         }
+        // Vendor attrs for silence-detect source mode (UltimateSlice extension).
+        if let Some(s) = attrs.get("us:source") {
+            clip.voice_isolation_source =
+                crate::model::clip::VoiceIsolationSource::from_str(s);
+        }
+        if let Some(t) = attrs
+            .get("us:silence-threshold-db")
+            .and_then(|s| s.parse::<f32>().ok())
+        {
+            clip.voice_isolation_silence_threshold_db = t;
+        }
+        if let Some(m) = attrs
+            .get("us:silence-min-ms")
+            .and_then(|s| s.parse::<u32>().ok())
+        {
+            clip.voice_isolation_silence_min_ms = m;
+        }
     }
 }
 
@@ -2027,6 +2063,9 @@ struct NativeKeyframeParams {
     volume_keyframes: Vec<NumericKeyframe>,
     pan_keyframes: Vec<NumericKeyframe>,
     voice_isolation: Option<f32>,
+    voice_isolation_source: Option<crate::model::clip::VoiceIsolationSource>,
+    voice_isolation_silence_threshold_db: Option<f32>,
+    voice_isolation_silence_min_ms: Option<u32>,
     unknown_fragments: Vec<String>,
 }
 
@@ -2222,6 +2261,22 @@ fn parse_audio_channel_source_children(reader: &mut Reader<&[u8]>) -> Result<Nat
                     let attrs = parse_attrs(e)?;
                     if let Some(amount) = attrs.get("amount").and_then(|s| s.parse::<f32>().ok()) {
                         result.voice_isolation = Some((amount / 100.0).clamp(0.0, 1.0));
+                    }
+                    if let Some(s) = attrs.get("us:source") {
+                        result.voice_isolation_source =
+                            Some(crate::model::clip::VoiceIsolationSource::from_str(s));
+                    }
+                    if let Some(t) = attrs
+                        .get("us:silence-threshold-db")
+                        .and_then(|s| s.parse::<f32>().ok())
+                    {
+                        result.voice_isolation_silence_threshold_db = Some(t);
+                    }
+                    if let Some(m) = attrs
+                        .get("us:silence-min-ms")
+                        .and_then(|s| s.parse::<u32>().ok())
+                    {
+                        result.voice_isolation_silence_min_ms = Some(m);
                     }
                 }
             }
@@ -2669,6 +2724,9 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:tracking-binding"
             | "us:volume"
             | "us:voice-isolation"
+            | "us:voice-isolation-source"
+            | "us:voice-isolation-silence-threshold-db"
+            | "us:voice-isolation-silence-min-ms"
             | "us:volume-keyframes"
             | "us:pan"
             | "us:pan-keyframes"
