@@ -80,6 +80,8 @@ Tracking docs:
 - [x] **Play/Pause** — Space bar toggles player
 - [x] Tool indicator overlay (Razor mode)
 - [x] **Image clips** — still images (PNG, JPEG, etc.) placed as `ClipKind::Image` with 4 s default, unlimited trim-out, `imagefreeze` playback, and `tpad`-based export
+- [x] **Still-image transform overlay alignment** — Program Monitor now uses the selected still-image clip's own preview inset for transform handles, so PNG/JPEG/WebP/SVG overlays stay aligned even when the base video under them has a different aspect ratio
+- [x] **Tracked overlay movement parity** — Program Monitor, transform-overlay sync, background prerender, and export now use direct canvas translation for titles, adjustment layers, and tracker-followed clips so `Position X/Y` keeps moving at `Scale = 1.0` and near frame edges, while normal still-image clips stay on the existing safe preview path, pin to their source-in frame during playback/transform reseeks, and force a paused-frame refresh during transform drags
 
 ### Undo / Redo System
 - [x] `EditCommand` trait with `execute` / `undo` / `description`
@@ -108,7 +110,7 @@ Tracking docs:
 ### Export
 - [x] MP4/H.264 + AAC export via ffmpeg (`-filter_complex` concat + adelay/amix for audio)
 - [x] Background thread with `mpsc::channel` progress reporting
-- [x] Progress estimate based on ffmpeg `total_size` versus largest imported library file, capped to 99% until completion (100% only on successful finish)
+- [x] Progress estimate based on ffmpeg `total_size` with automatic `out_time_*` fallback when size-based progress has not advanced yet, capped to 99% until completion (100% only on successful finish)
 - [x] Audio from embedded video-clip streams and standalone audio-track clips included in export
 - [x] Clips without audio streams safely skipped via `ffprobe` probe
 - [x] Extended grading parity bridge: export prefers FFmpeg frei0r (`coloradj_RGB`, `three_point_balance`) using the same calibrated mapping as Program Monitor preview, with automatic native-filter fallback when frei0r modules are unavailable
@@ -120,6 +122,8 @@ Tracking docs:
 - [x] Stronger shadows endpoint range: shadows warmth/tint endpoint gain increased to allow more pronounced blue/gold shadow looks near slider extremes while preserving directional semantics
 - [x] Empty lower video tracks no longer block layered exports: export now promotes the first non-empty active video track to the base layer so upper-track PNG/title overlays still render correctly
 - [x] Motion-tracked preview/export parity groundwork: Program Monitor and FFmpeg export now resolve clip and first-mask tracking bindings through the normal transform/mask evaluation path so tracked overlays stay aligned between preview and export
+- [x] Bounded tracked-adjustment export fast path: safe rect/ellipse adjustment passes now crop to a conservative tracked ROI before running the expensive post-compositor effect chain, reducing export cost for small moving adjustment regions while preserving the existing full-frame fallback for path masks and higher-risk effect stacks
+- [x] Precomputed tracked-adjustment export mattes: safe moving rect/ellipse adjustment passes now render a temporary grayscale matte stream from the same Rust-side scope/mask geometry used by preview, then `alphamerge` it back into the ROI-scoped effect pass so export avoids giant per-pixel tracked `geq` expressions without reducing quality
 
 ### FCPXML
 - [x] FCPXML 1.10-1.14 import (`quick-xml`) — parses assets, spine, asset-clip elements
@@ -155,6 +159,7 @@ Tracking docs:
 - [x] Import source-time normalization: rebase `asset-clip@start` by `asset@start` for absolute timecode-domain assets so layered video/audio lane clips seek correctly in Program Monitor
 - [x] Export transform overflow clipping: overlay clips with positions exceeding the frame boundary now crop overflow edges before padding, so exported PIP positions match the Program Monitor preview exactly
 - [x] Motion-tracking vendor-attr persistence groundwork: `.uspxml` save/load now preserves clip ids, source `motion_trackers`, clip transform `tracking_binding`, and mask bindings through UltimateSlice `us:*` attributes so tracked overlays survive project reopen
+- [x] Still-image round-trip parity for timeline overlays: FCPXML/`.uspxml` import now infers `ClipKind::Image` from PNG/JPEG/WebP/SVG source paths, and save persists that kind explicitly so reopened projects keep imagefreeze-based Program Monitor playback for still overlays
 - [x] Background-threaded project open (file I/O + XML parsing off main thread)
 
 ### MCP Server (`--mcp` flag)

@@ -138,7 +138,7 @@ For automation workflows, MCP also exposes preset operations:
 ## Export Progress
 
 After choosing the output file, an export progress dialog shows:
-- A progress bar driven by ffmpeg progress output. It estimates final file size from bitrate × duration and then tracks ffmpeg `total_size` against that estimate.
+- A progress bar driven by ffmpeg progress output. It estimates final file size from bitrate × duration and tracks ffmpeg `total_size` against that estimate when possible, then automatically falls back to ffmpeg `out_time_*` progress while the muxed file size is still too small to be a useful signal.
 - Progress is capped at **99%** while encoding/muxing is still running, then switches to **100%** only after export completes successfully.
 - A status label showing the output path.
 - A **Close** button (available once export completes or errors).
@@ -217,6 +217,9 @@ Keyframes are evaluated in clip-local timeline time and rendered directly into f
 - Adjustment layers export as post-compositor effect passes over the assembled timeline image.
 - The exported effect region uses the same **scale / position / crop / rotate / opacity** scope model as the Program Monitor overlay for adjustment clips.
 - If an adjustment layer has an enabled shape mask, export intersects that mask alpha with the adjustment scope so the rendered effect region matches Program Monitor preview. Rectangle/ellipse masks stay inline in the FFmpeg graph; path masks rasterize to a temporary grayscale mask and are transformed with the adjustment clip before blending.
+- For safe tracked/scoped adjustment cases, export now crops the work area down to a conservative bounded ROI before running the adjustment effect chain, which keeps exact output quality while avoiding needless full-frame processing for small moving masks.
+- When that safe ROI path still has moving tracked geometry, UltimateSlice now pre-renders the resolved adjustment alpha as a temporary grayscale matte stream and `alphamerge`s it back into the cropped effect pass. This preserves preview/export parity while avoiding very large per-pixel tracked `geq` expressions in FFmpeg.
+- Adjustment passes that still rely on the full-frame path (for example path masks or higher-risk effect combinations) fall back automatically.
 - Each adjustment layer is trimmed to its own clip-local time before FFmpeg evaluates keyframed effect expressions, so adjustment-layer keyframes animate relative to the adjustment clip instead of the global timeline.
 - Overlapping adjustment layers stack in track order, matching Program Monitor preview.
 
@@ -282,6 +285,7 @@ Also available via MCP: `save_otio` and `open_otio` tools. `save_otio` accepts `
 - Export requires **ffmpeg** to be installed and on `$PATH`.
 - All video tracks are processed in timeline order, with letterbox/pillarbox padding applied to each clip.
 - Secondary-track overlays keep transparent padding when zoomed out and honor per-clip opacity, so layered composites export closer to Program Monitor preview.
+- Title clips and other tracker-followed clips now use direct canvas translation for `Position X/Y`, so export keeps them moving at `Scale = 1.0` and stays aligned with the Program Monitor near frame edges. Normal still-image clips keep the existing non-tracked image path unless they are actually following a tracker.
 - If lower video tracks are empty, export automatically promotes the first non-empty active video track to the base layer so upper-track PNG/title overlays still render instead of failing with “No video clips to export”.
 - Overlay clips positioned near frame edges (where the PIP extends beyond the output boundary) are correctly clipped to match the preview — the export pre-crops overflow before padding so the visible portion and position match exactly.
 - Primary static color controls (`brightness`, `contrast`, `saturation`, plus static `exposure`) are mapped through the same calibrated primary-color model used by Program Monitor preview, including contrast-dependent brightness compensation, to improve low/high-contrast parity.

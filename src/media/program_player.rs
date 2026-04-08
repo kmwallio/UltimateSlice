@@ -3425,41 +3425,77 @@ impl ProgramPlayer {
     /// Each value is 0.0–0.5 representing the fraction of the canvas that is letterbox.
     /// Returns (0.0, 0.0) if no slot is active or source matches project aspect ratio.
     pub fn content_inset(&self) -> (f64, f64) {
-        if let Some(slot) = self.slots.first() {
-            // Get source dimensions from effects_bin ghost sink pad
-            let src_dims = slot
-                .effects_bin
-                .static_pad("sink")
-                .and_then(|ghost| {
-                    ghost
-                        .peer()
-                        .and_then(|p| p.current_caps())
-                        .or_else(|| ghost.current_caps())
-                })
-                .and_then(|c| {
-                    c.structure(0).map(|s| {
-                        (
-                            s.get::<i32>("width").unwrap_or(0),
-                            s.get::<i32>("height").unwrap_or(0),
-                        )
-                    })
-                });
-            if let Some((src_w, src_h)) = src_dims {
-                if src_w > 0 && src_h > 0 && self.project_width > 0 && self.project_height > 0 {
-                    let pw = self.project_width as f64;
-                    let ph = self.project_height as f64;
-                    let sw = src_w as f64;
-                    let sh = src_h as f64;
-                    let scale = (pw / sw).min(ph / sh);
-                    let scaled_w = sw * scale;
-                    let scaled_h = sh * scale;
-                    let ix = ((pw - scaled_w) / 2.0) / pw;
-                    let iy = ((ph - scaled_h) / 2.0) / ph;
-                    return (ix.clamp(0.0, 0.5), iy.clamp(0.0, 0.5));
+        self.slots
+            .first()
+            .map(|slot| Self::content_inset_for_slot(slot, self.project_width, self.project_height))
+            .unwrap_or((0.0, 0.0))
+    }
+
+    /// Return the letterbox inset fractions for a specific clip's live preview slot.
+    /// Falls back to the first active video slot when the clip is not currently loaded.
+    pub fn content_inset_for_clip(&self, clip_id: Option<&str>) -> (f64, f64) {
+        if let Some(clip_id) = clip_id {
+            if let Some(clip_idx) = self.clips.iter().position(|clip| clip.id == clip_id) {
+                if let Some(slot) = self.slot_for_clip(clip_idx) {
+                    return Self::content_inset_for_slot(
+                        slot,
+                        self.project_width,
+                        self.project_height,
+                    );
                 }
             }
         }
-        (0.0, 0.0)
+        self.content_inset()
+    }
+
+    fn content_inset_for_slot(
+        slot: &VideoSlot,
+        project_width: u32,
+        project_height: u32,
+    ) -> (f64, f64) {
+        let src_dims = slot
+            .effects_bin
+            .static_pad("sink")
+            .and_then(|ghost| {
+                ghost
+                    .peer()
+                    .and_then(|p| p.current_caps())
+                    .or_else(|| ghost.current_caps())
+            })
+            .and_then(|caps| {
+                caps.structure(0).map(|s| {
+                    (
+                        s.get::<i32>("width").unwrap_or(0),
+                        s.get::<i32>("height").unwrap_or(0),
+                    )
+                })
+            });
+        src_dims
+            .map(|(src_w, src_h)| {
+                Self::content_inset_from_dimensions(src_w, src_h, project_width, project_height)
+            })
+            .unwrap_or((0.0, 0.0))
+    }
+
+    fn content_inset_from_dimensions(
+        src_w: i32,
+        src_h: i32,
+        project_width: u32,
+        project_height: u32,
+    ) -> (f64, f64) {
+        if src_w <= 0 || src_h <= 0 || project_width == 0 || project_height == 0 {
+            return (0.0, 0.0);
+        }
+        let pw = project_width as f64;
+        let ph = project_height as f64;
+        let sw = src_w as f64;
+        let sh = src_h as f64;
+        let scale = (pw / sw).min(ph / sh);
+        let scaled_w = sw * scale;
+        let scaled_h = sh * scale;
+        let ix = ((pw - scaled_w) / 2.0) / pw;
+        let iy = ((ph - scaled_h) / 2.0) / ph;
+        (ix.clamp(0.0, 0.5), iy.clamp(0.0, 0.5))
     }
 
     pub fn preview_divisor(&self) -> u32 {
@@ -5352,7 +5388,21 @@ impl ProgramPlayer {
             );
             if let Some(ref pad) = slot.compositor_pad {
                 let (proc_w, proc_h) = self.preview_processing_dimensions();
-                Self::apply_zoom_to_slot(slot, pad, scale, position_x, position_y, proc_w, proc_h);
+                let direct_translation = self
+                    .current_idx
+                    .and_then(|idx| self.clips.get(idx))
+                    .map(Self::clip_uses_direct_canvas_translation)
+                    .unwrap_or(false);
+                Self::apply_zoom_to_slot(
+                    slot,
+                    pad,
+                    scale,
+                    position_x,
+                    position_y,
+                    direct_translation,
+                    proc_w,
+                    proc_h,
+                );
             }
         }
     }
@@ -5560,6 +5610,7 @@ impl ProgramPlayer {
         let idx = self.clips.iter().position(|c| c.id == clip_id);
         if let Some(i) = idx {
             let mut is_adjustment = false;
+            let mut direct_translation = false;
             if let Some(clip) = self.clips.get_mut(i) {
                 is_adjustment = clip.is_adjustment;
                 clip.crop_left = crop_left;
@@ -5572,6 +5623,7 @@ impl ProgramPlayer {
                 clip.scale = scale;
                 clip.position_x = position_x;
                 clip.position_y = position_y;
+                direct_translation = Self::clip_uses_direct_canvas_translation(clip);
             }
             if is_adjustment {
                 self.rebuild_adjustment_overlays();
@@ -5595,7 +5647,14 @@ impl ProgramPlayer {
                 if let Some(ref pad) = slot.compositor_pad {
                     let (proc_w, proc_h) = self.preview_processing_dimensions();
                     Self::apply_zoom_to_slot(
-                        slot, pad, scale, position_x, position_y, proc_w, proc_h,
+                        slot,
+                        pad,
+                        scale,
+                        position_x,
+                        position_y,
+                        direct_translation,
+                        proc_w,
+                        proc_h,
                     );
                 }
             }
@@ -5629,6 +5688,8 @@ impl ProgramPlayer {
         };
         if let Some(i) = idx {
             let mut is_adjustment = false;
+            let mut direct_translation = false;
+            let mut needs_live_refresh = false;
             if let Some(clip) = self.clips.get_mut(i) {
                 is_adjustment = clip.is_adjustment;
                 clip.crop_left = crop_left;
@@ -5641,6 +5702,8 @@ impl ProgramPlayer {
                 clip.scale = scale;
                 clip.position_x = position_x;
                 clip.position_y = position_y;
+                direct_translation = Self::clip_uses_direct_canvas_translation(clip);
+                needs_live_refresh = Self::clip_requires_live_transform_refresh(clip);
             }
             if is_adjustment {
                 self.rebuild_adjustment_overlays();
@@ -5660,9 +5723,19 @@ impl ProgramPlayer {
                 if let Some(ref pad) = slot.compositor_pad {
                     let (proc_w, proc_h) = self.preview_processing_dimensions();
                     Self::apply_zoom_to_slot(
-                        slot, pad, scale, position_x, position_y, proc_w, proc_h,
+                        slot,
+                        pad,
+                        scale,
+                        position_x,
+                        position_y,
+                        direct_translation,
+                        proc_w,
+                        proc_h,
                     );
                 }
+            }
+            if needs_live_refresh && self.state != PlayerState::Playing {
+                self.reseek_slot_by_clip_idx(i);
             }
         }
     }
@@ -6103,7 +6176,16 @@ impl ProgramPlayer {
                 } else {
                     pad.set_property("alpha", alpha);
                 }
-                Self::apply_zoom_to_slot(slot, pad, scale, pos_x, pos_y, proc_w, proc_h);
+                Self::apply_zoom_to_slot(
+                    slot,
+                    pad,
+                    scale,
+                    pos_x,
+                    pos_y,
+                    Self::clip_uses_direct_canvas_translation(clip),
+                    proc_w,
+                    proc_h,
+                );
             }
         }
     }
@@ -6208,6 +6290,7 @@ impl ProgramPlayer {
                         scale,
                         pos_x,
                         pos_y,
+                        Self::clip_uses_direct_canvas_translation(clip),
                         proc_w,
                         proc_h,
                         (canvas_x * proc_w as f64).round() as i32,
@@ -7040,12 +7123,8 @@ impl ProgramPlayer {
         let _ = sidecar.set_state(gst::State::Paused);
         // Seek to the clip's source position so the decoder decodes from
         // the right keyframe, not from position 0.
-        let source_ns = if animated_svg_rendered {
-            clip.source_pos_ns(timeline_pos)
-                .saturating_sub(clip.source_in_ns)
-        } else {
-            clip.source_pos_ns(timeline_pos)
-        };
+        let source_ns =
+            Self::effective_source_pos_ns_for_clip(clip, timeline_pos, animated_svg_rendered);
         let _ = decoder.seek(
             1.0,
             gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
@@ -7469,12 +7548,11 @@ impl ProgramPlayer {
                     let c = clip.clone();
                     let (path, source_is_proxy, _, animated_svg_rendered) =
                         self.resolve_source_path_for_clip(&c);
-                    let source_ns = if animated_svg_rendered {
-                        c.source_pos_ns(segment_start_ns)
-                            .saturating_sub(c.source_in_ns)
-                    } else {
-                        c.source_pos_ns(segment_start_ns)
-                    };
+                    let source_ns = Self::effective_source_pos_ns_for_clip(
+                        &c,
+                        segment_start_ns,
+                        animated_svg_rendered,
+                    );
                     let has_audio = self.has_audio_for_path_fast(&path, c.has_embedded_audio());
                     Some((c, path, source_ns, has_audio, source_is_proxy))
                 })
@@ -8335,9 +8413,19 @@ impl ProgramPlayer {
         clip: &ProgramClip,
         timeline_pos_ns: u64,
     ) -> u64 {
+        Self::effective_source_pos_ns_for_clip(clip, timeline_pos_ns, slot.animated_svg_rendered)
+    }
+
+    fn effective_source_pos_ns_for_clip(
+        clip: &ProgramClip,
+        timeline_pos_ns: u64,
+        animated_svg_rendered: bool,
+    ) -> u64 {
         let source_ns = clip.source_pos_ns(timeline_pos_ns);
-        if slot.animated_svg_rendered {
+        if animated_svg_rendered {
             source_ns.saturating_sub(clip.source_in_ns)
+        } else if clip.is_image {
+            clip.source_in_ns
         } else {
             source_ns
         }
@@ -8789,6 +8877,7 @@ impl ProgramPlayer {
         scale: f64,
         position_x: f64,
         position_y: f64,
+        direct_translation: bool,
         project_width: u32,
         project_height: u32,
     ) {
@@ -8798,6 +8887,7 @@ impl ProgramPlayer {
             scale,
             position_x,
             position_y,
+            direct_translation,
             project_width,
             project_height,
             0,
@@ -8811,6 +8901,7 @@ impl ProgramPlayer {
         scale: f64,
         position_x: f64,
         position_y: f64,
+        direct_translation: bool,
         project_width: u32,
         project_height: u32,
         extra_x_px: i32,
@@ -8836,10 +8927,19 @@ impl ProgramPlayer {
             pad.set_property("width", sw);
             pad.set_property("height", sh);
             if pad.find_property("xpos").is_some() && pad.find_property("ypos").is_some() {
-                let total_x = pw * (scale - 1.0);
-                let total_y = ph * (scale - 1.0);
-                let xpos = (-(total_x * (1.0 + position_x) / 2.0)).round() as i32 + extra_x_px;
-                let ypos = (-(total_y * (1.0 + position_y) / 2.0)).round() as i32 + extra_y_px;
+                let (xpos, ypos) = if direct_translation {
+                    (
+                        Self::direct_canvas_origin(pw, sw as f64, position_x) + extra_x_px,
+                        Self::direct_canvas_origin(ph, sh as f64, position_y) + extra_y_px,
+                    )
+                } else {
+                    let total_x = pw * (scale - 1.0);
+                    let total_y = ph * (scale - 1.0);
+                    (
+                        (-(total_x * (1.0 + position_x) / 2.0)).round() as i32 + extra_x_px,
+                        (-(total_y * (1.0 + position_y) / 2.0)).round() as i32 + extra_y_px,
+                    )
+                };
                 pad.set_property("xpos", xpos);
                 pad.set_property("ypos", ypos);
             }
@@ -8856,14 +8956,24 @@ impl ProgramPlayer {
             cf.set_property("caps", &caps);
         }
 
-        let pos_x = position_x;
-        let pos_y = position_y;
-        let total_x = pw * (scale - 1.0);
-        let total_y = ph * (scale - 1.0);
-        let box_left = (total_x * (1.0 + pos_x) / 2.0) as i32;
-        let box_right = (total_x * (1.0 - pos_x) / 2.0) as i32;
-        let box_top = (total_y * (1.0 + pos_y) / 2.0) as i32;
-        let box_bottom = (total_y * (1.0 - pos_y) / 2.0) as i32;
+        let (box_left, box_right, box_top, box_bottom) = if direct_translation {
+            let xpos = Self::direct_canvas_origin(pw, sw as f64, position_x) + extra_x_px;
+            let ypos = Self::direct_canvas_origin(ph, sh as f64, position_y) + extra_y_px;
+            let (left, right) = Self::videobox_axis_from_origin(project_width as i32, sw, xpos);
+            let (top, bottom) = Self::videobox_axis_from_origin(project_height as i32, sh, ypos);
+            (left, right, top, bottom)
+        } else {
+            let pos_x = position_x;
+            let pos_y = position_y;
+            let total_x = pw * (scale - 1.0);
+            let total_y = ph * (scale - 1.0);
+            (
+                (total_x * (1.0 + pos_x) / 2.0) as i32,
+                (total_x * (1.0 - pos_x) / 2.0) as i32,
+                (total_y * (1.0 + pos_y) / 2.0) as i32,
+                (total_y * (1.0 - pos_y) / 2.0) as i32,
+            )
+        };
 
         if let Some(ref vb) = slot.videobox_zoom {
             vb.set_property("left", box_left);
@@ -8874,6 +8984,27 @@ impl ProgramPlayer {
         }
         // Fallback: use compositor pad xpos/ypos for simple positioning.
         let _ = pad;
+    }
+
+    fn direct_canvas_origin(axis_size: f64, scaled_axis_size: f64, position: f64) -> i32 {
+        (((axis_size - scaled_axis_size) / 2.0) + position.clamp(-1.0, 1.0) * axis_size / 2.0)
+            .round() as i32
+    }
+
+    fn videobox_axis_from_origin(canvas_size: i32, scaled_size: i32, origin: i32) -> (i32, i32) {
+        let crop_start = (-origin).max(0);
+        let crop_end = (origin + scaled_size - canvas_size).max(0);
+        let pad_start = origin.max(0);
+        let pad_end = (canvas_size - (origin + scaled_size)).max(0);
+        (crop_start - pad_start, crop_end - pad_end)
+    }
+
+    fn clip_uses_direct_canvas_translation(clip: &ProgramClip) -> bool {
+        clip.is_adjustment || clip.is_title || clip.tracking_binding.is_some()
+    }
+
+    fn clip_requires_live_transform_refresh(clip: &ProgramClip) -> bool {
+        clip.is_image && !clip.animated_svg
     }
 
     #[allow(dead_code)]
@@ -11808,55 +11939,79 @@ impl ProgramPlayer {
         let ph = out_h as f64;
         let pos_x = clip.position_x;
         let pos_y = clip.position_y;
+        let sw = (pw * scale).round() as u32;
+        let sh = (ph * scale).round() as u32;
+
+        if Self::clip_uses_direct_canvas_translation(clip) {
+            let raw_x = Self::direct_canvas_origin(pw, sw as f64, pos_x) as i64;
+            let raw_y = Self::direct_canvas_origin(ph, sh as f64, pos_y) as i64;
+            return Self::prerender_build_scale_translate_filter(
+                sw,
+                sh,
+                raw_x,
+                raw_y,
+                out_w,
+                out_h,
+                transparent_pad,
+            );
+        }
 
         if scale >= 1.0 {
-            let sw = (pw * scale).round() as u32;
-            let sh = (ph * scale).round() as u32;
             let total_x = pw * (scale - 1.0);
             let total_y = ph * (scale - 1.0);
             let cx = (total_x * (1.0 + pos_x) / 2.0).round() as i64;
             let cy = (total_y * (1.0 + pos_y) / 2.0).round() as i64;
             format!(",scale={sw}:{sh},crop={out_w}:{out_h}:{cx}:{cy}")
         } else {
-            let sw = (pw * scale).round() as u32;
-            let sh = (ph * scale).round() as u32;
             let total_x = pw * (1.0 - scale);
             let total_y = ph * (1.0 - scale);
             let raw_pad_x = (total_x * (1.0 + pos_x) / 2.0).round() as i64;
             let raw_pad_y = (total_y * (1.0 + pos_y) / 2.0).round() as i64;
-            let crop_left = if raw_pad_x < 0 {
-                (-raw_pad_x) as u32
-            } else {
-                0
-            };
-            let crop_top = if raw_pad_y < 0 {
-                (-raw_pad_y) as u32
-            } else {
-                0
-            };
-            let crop_right = if raw_pad_x + sw as i64 > out_w as i64 {
-                (raw_pad_x + sw as i64 - out_w as i64) as u32
-            } else {
-                0
-            };
-            let crop_bottom = if raw_pad_y + sh as i64 > out_h as i64 {
-                (raw_pad_y + sh as i64 - out_h as i64) as u32
-            } else {
-                0
-            };
-            let pad_x = raw_pad_x.max(0) as u32;
-            let pad_y = raw_pad_y.max(0) as u32;
-            let pad_color = if transparent_pad { "black@0" } else { "black" };
-            let needs_crop = crop_left > 0 || crop_top > 0 || crop_right > 0 || crop_bottom > 0;
-            if needs_crop {
-                let vis_w = sw.saturating_sub(crop_left + crop_right).max(1);
-                let vis_h = sh.saturating_sub(crop_top + crop_bottom).max(1);
-                format!(
-                    ",scale={sw}:{sh},crop={vis_w}:{vis_h}:{crop_left}:{crop_top},pad={out_w}:{out_h}:{pad_x}:{pad_y}:{pad_color}"
-                )
-            } else {
-                format!(",scale={sw}:{sh},pad={out_w}:{out_h}:{pad_x}:{pad_y}:{pad_color}")
-            }
+            Self::prerender_build_scale_translate_filter(
+                sw,
+                sh,
+                raw_pad_x,
+                raw_pad_y,
+                out_w,
+                out_h,
+                transparent_pad,
+            )
+        }
+    }
+
+    fn prerender_build_scale_translate_filter(
+        sw: u32,
+        sh: u32,
+        raw_x: i64,
+        raw_y: i64,
+        out_w: u32,
+        out_h: u32,
+        transparent_pad: bool,
+    ) -> String {
+        let crop_left = if raw_x < 0 { (-raw_x) as u32 } else { 0 };
+        let crop_top = if raw_y < 0 { (-raw_y) as u32 } else { 0 };
+        let crop_right = if raw_x + sw as i64 > out_w as i64 {
+            (raw_x + sw as i64 - out_w as i64) as u32
+        } else {
+            0
+        };
+        let crop_bottom = if raw_y + sh as i64 > out_h as i64 {
+            (raw_y + sh as i64 - out_h as i64) as u32
+        } else {
+            0
+        };
+        let pad_x = raw_x.max(0) as u32;
+        let pad_y = raw_y.max(0) as u32;
+        let pad_color = if transparent_pad { "black@0" } else { "black" };
+        let needs_crop = crop_left > 0 || crop_top > 0 || crop_right > 0 || crop_bottom > 0;
+        if needs_crop {
+            let vis_w = sw.saturating_sub(crop_left + crop_right).max(1);
+            let vis_h = sh.saturating_sub(crop_top + crop_bottom).max(1);
+            format!(
+                ",scale={sw}:{sh},crop={vis_w}:{vis_h}:{crop_left}:{crop_top},pad={out_w}:{out_h}:{pad_x}:{pad_y}:{pad_color}"
+            )
+        } else {
+            format!(",scale={sw}:{sh},pad={out_w}:{out_h}:{pad_x}:{pad_y}:{pad_color}")
         }
     }
 
@@ -12365,6 +12520,7 @@ impl ProgramPlayer {
                 clip.scale_at_timeline_ns(self.timeline_pos_ns),
                 clip.position_x_at_timeline_ns(self.timeline_pos_ns),
                 clip.position_y_at_timeline_ns(self.timeline_pos_ns),
+                Self::clip_uses_direct_canvas_translation(&clip),
                 proc_w,
                 proc_h,
             );
@@ -12892,6 +13048,7 @@ impl ProgramPlayer {
             clip.scale_at_timeline_ns(self.timeline_pos_ns),
             clip.position_x_at_timeline_ns(self.timeline_pos_ns),
             clip.position_y_at_timeline_ns(self.timeline_pos_ns),
+            Self::clip_uses_direct_canvas_translation(&clip),
             proc_w,
             proc_h,
         );
@@ -13868,6 +14025,7 @@ impl ProgramPlayer {
                 clip.scale_at_timeline_ns(self.timeline_pos_ns),
                 clip.position_x_at_timeline_ns(self.timeline_pos_ns),
                 clip.position_y_at_timeline_ns(self.timeline_pos_ns),
+                Self::clip_uses_direct_canvas_translation(clip),
                 proc_w,
                 proc_h,
             );
@@ -15715,6 +15873,21 @@ mod tests {
     }
 
     #[test]
+    fn content_inset_from_dimensions_reflects_selected_clip_aspect() {
+        let base = ProgramPlayer::content_inset_from_dimensions(5320, 2280, 1920, 1080);
+        let png = ProgramPlayer::content_inset_from_dimensions(1600, 844, 1920, 1080);
+
+        assert_eq!(base.0, 0.0);
+        assert_eq!(png.0, 0.0);
+        assert!((base.1 - 0.119_047_619).abs() < 1e-6);
+        assert!((png.1 - 0.031_111_111).abs() < 1e-6);
+        assert!(
+            png.1 < base.1,
+            "selected PNG overlay should use its own inset, not the wider base clip's inset"
+        );
+    }
+
+    #[test]
     fn smooth_single_slot_no_transition_preserves_backpressure() {
         // Single-slot playback must NOT enable drop-late: the leaky queue
         // removes backpressure, letting the compositor spin at thousands of
@@ -16136,6 +16309,63 @@ mod tests {
         assert!(filter.contains("color=c=#112233"));
         assert!(filter.contains("format=yuv420p"));
         assert!(!filter.contains("black@0.0"));
+    }
+
+    #[test]
+    fn prerender_scale_position_filter_moves_title_at_unit_scale() {
+        let mut clip = make_clip();
+        clip.is_title = true;
+        clip.position_x = 0.5;
+
+        let filter = ProgramPlayer::prerender_build_scale_position_filter(&clip, 1920, 1080, true);
+
+        assert!(filter.contains("scale=1920:1080"));
+        assert!(filter.contains("crop=1440:1080:0:0"));
+        assert!(filter.contains("pad=1920:1080:480:0:black@0"));
+    }
+
+    #[test]
+    fn direct_canvas_translation_skips_untracked_images() {
+        let mut clip = make_clip();
+        clip.is_image = true;
+        assert!(!ProgramPlayer::clip_uses_direct_canvas_translation(&clip));
+
+        clip.tracking_binding = Some(crate::model::clip::TrackingBinding::new(
+            "source-clip",
+            "tracker-1",
+        ));
+        assert!(ProgramPlayer::clip_uses_direct_canvas_translation(&clip));
+    }
+
+    #[test]
+    fn live_transform_refresh_targets_static_images_only() {
+        let mut clip = make_clip();
+        clip.is_image = true;
+        assert!(ProgramPlayer::clip_requires_live_transform_refresh(&clip));
+
+        clip.animated_svg = true;
+        assert!(!ProgramPlayer::clip_requires_live_transform_refresh(&clip));
+
+        clip.is_image = false;
+        clip.is_title = true;
+        clip.animated_svg = false;
+        assert!(!ProgramPlayer::clip_requires_live_transform_refresh(&clip));
+    }
+
+    #[test]
+    fn prerender_scale_position_filter_moves_tracked_clip_at_unit_scale() {
+        let mut clip = make_clip();
+        clip.position_x = 0.5;
+        clip.tracking_binding = Some(crate::model::clip::TrackingBinding::new(
+            "source-clip",
+            "tracker-1",
+        ));
+
+        let filter = ProgramPlayer::prerender_build_scale_position_filter(&clip, 1920, 1080, false);
+
+        assert!(filter.contains("scale=1920:1080"));
+        assert!(filter.contains("crop=1440:1080:0:0"));
+        assert!(filter.contains("pad=1920:1080:480:0:black"));
     }
 
     #[test]
@@ -16906,6 +17136,39 @@ mod tests {
         let source = clip.source_pos_ns(0);
         let stop = ProgramPlayer::effective_video_seek_stop_ns(&slot, &clip, source, 0);
         assert_eq!(stop, source + 1);
+    }
+
+    #[test]
+    fn effective_source_pos_pins_static_images_to_source_in() {
+        let mut clip = make_clip();
+        clip.is_image = true;
+        clip.source_in_ns = 123_000_000;
+        clip.source_out_ns = 4_123_000_000;
+
+        let slot = make_test_slot_ext(false, false, false, false, false, false, false, false, true);
+
+        assert_eq!(
+            ProgramPlayer::effective_slot_source_pos_ns(&slot, &clip, 2_000_000_000),
+            123_000_000
+        );
+    }
+
+    #[test]
+    fn effective_source_pos_keeps_animated_svg_clip_local_timing() {
+        let mut clip = make_clip();
+        clip.is_image = true;
+        clip.animated_svg = true;
+        clip.source_in_ns = 500_000_000;
+        clip.source_out_ns = 4_500_000_000;
+
+        let mut slot =
+            make_test_slot_ext(false, false, false, false, false, false, false, false, true);
+        slot.animated_svg_rendered = true;
+
+        assert_eq!(
+            ProgramPlayer::effective_slot_source_pos_ns(&slot, &clip, 2_000_000_000),
+            2_000_000_000
+        );
     }
 
     #[test]

@@ -1044,7 +1044,9 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                             clip.title_secondary_text.as_str(),
                         ));
                     }
-                    if clip.kind == crate::model::clip::ClipKind::Title {
+                    if clip.kind == crate::model::clip::ClipKind::Image {
+                        asset_clip.push_attribute(("us:clip-kind", "image"));
+                    } else if clip.kind == crate::model::clip::ClipKind::Title {
                         asset_clip.push_attribute(("us:clip-kind", "title"));
                     } else if clip.kind == crate::model::clip::ClipKind::Adjustment {
                         asset_clip.push_attribute(("us:clip-kind", "adjustment"));
@@ -2845,6 +2847,7 @@ fn patch_asset_clip_block_transform(
         (
             "us:clip-kind",
             match clip.kind {
+                crate::model::clip::ClipKind::Image => Some("image".to_string()),
                 crate::model::clip::ClipKind::Title => Some("title".to_string()),
                 crate::model::clip::ClipKind::Adjustment => Some("adjustment".to_string()),
                 crate::model::clip::ClipKind::Compound => Some("compound".to_string()),
@@ -6146,6 +6149,7 @@ mod tests {
         assert!(xml.contains("us:clip-id=\"source-clip\""));
         assert!(xml.contains("us:motion-trackers=\""));
         assert!(xml.contains("us:tracking-binding=\""));
+        assert!(xml.contains("us:clip-kind=\"image\""));
 
         let loaded = parse_fcpxml(&xml).expect("parse written xml");
         let loaded_source = loaded
@@ -6162,6 +6166,7 @@ mod tests {
         let loaded_target = loaded
             .clip_ref("target-clip")
             .expect("target clip id should persist");
+        assert_eq!(loaded_target.kind, ClipKind::Image);
         let loaded_binding = loaded_target
             .tracking_binding
             .as_ref()

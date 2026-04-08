@@ -62,6 +62,9 @@ When a visual timeline clip or adjustment layer is selected, the Program Monitor
 - **Edge midpoint handles**: drag top/bottom/left/right handles to adjust crop directly in preview.
 - Keyboard nudges work when the overlay has focus (click the monitor once).
 - Starting an overlay drag pauses playback and keeps the current frame locked while editing; playback remains paused after you release.
+- Still-image overlays use the selected clip's own preview framing for the transform box, so a PNG/JPEG/WebP/SVG overlay stays aligned with its handles even if the video clip underneath has a different aspect ratio.
+- Static still-image overlays trigger an immediate paused-frame refresh during transform drags, so a PNG stays visible while you move, scale, or crop it in the Program Monitor.
+- Titles and tracker-followed clips use direct canvas translation for **Position X/Y**, so movement still works at `Scale = 1.0` instead of collapsing when the visible content reaches a frame edge. Normal still-image clips keep the existing still-image preview path unless they are actually following a tracker.
 - For **adjustment layers**, these controls edit the scoped effect region instead of moving source pixels. The overlay box is the exact region used for live scoped adjustment preview, and any enabled shape mask further trims that region instead of replacing it.
 - Adjustment-layer **Position X/Y** offsets translate that scoped region directly, so tracked or keyframed adjustments still move visibly even when the layer stays at full-frame scale (`Scale = 1.0`).
 
@@ -74,6 +77,7 @@ When **Motion Tracking → Edit Region in Monitor** is enabled for the selected 
 - Drag the **corner handles** to resize the tracked region.
 - The Motion Tracking sliders in the Inspector stay in sync with those overlay edits.
 - If the selected clip or its first rectangle/ellipse mask is attached to a tracker, Program Monitor uses the resolved tracked motion at the current playhead position.
+- That tracked follow path also applies to title clips and still-image overlays, so follower motion keeps translating across the canvas even when the clip is full-frame or reaches an edge.
 
 ## Safe Area Guides
 
@@ -90,6 +94,7 @@ When **Motion Tracking → Edit Region in Monitor** is enabled for the selected 
 - Audio from active video clips is mixed through an **audiomixer** element (except freeze-frame video holds, which are intentionally silent); audio-only tracks use a separate playbin.
 - Before clip audio reaches the preview mixer, UltimateSlice normalizes it to a fixed 48 kHz stereo raw-audio format. This keeps lower-rate camera AAC sources (such as 16 kHz mono Ring clips) from tripping GStreamer `not-negotiated` playback errors in the Program Monitor.
 - Animated SVG clips play through a cached silent rendered derivative so authored motion appears in preview, while timeline extensions beyond the authored duration hold on the last frame.
+- Still-image timeline clips loaded from `.uspxml` or imported FCPXML keep their held-image preview path after reopen, and live playback/transform reseeks pin them to their source-in frame, so PNG/JPEG/WebP/SVG overlays continue to display in Program Monitor instead of behaving like one-frame video decodes or disappearing once playback starts.
 - Program Monitor shows a **master stereo meter** (L/R), updated from GStreamer `level` elements.
 - During prerender playback, per-track timeline meters remain active by mapping prerender audio-level telemetry to the currently active prerender track set.
 - Timeline position is tracked via wall-clock timing for reliable playhead movement — no seek-anchor heuristics needed.

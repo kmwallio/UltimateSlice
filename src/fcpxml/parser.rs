@@ -862,8 +862,9 @@ fn parse_asset_clip(
             .cloned()
             .unwrap_or_else(|| asset.name.clone());
 
+        let resolved_source_path = resolve_import_source_path(&asset.src, mount_root, mount_users);
         let explicit_track_idx = attrs.get("us:track-idx").and_then(|s| s.parse().ok());
-        let clip_kind = match attrs.get("us:track-kind").map(|s| s.as_str()) {
+        let mut clip_kind = match attrs.get("us:track-kind").map(|s| s.as_str()) {
             Some("audio") => ClipKind::Audio,
             Some(_) => ClipKind::Video,
             None => {
@@ -876,6 +877,10 @@ fn parse_asset_clip(
                 }
             }
         };
+        if clip_kind != ClipKind::Audio && crate::model::clip::is_image_file(&resolved_source_path)
+        {
+            clip_kind = ClipKind::Image;
+        }
         let inferred_track_idx = match clip_kind {
             ClipKind::Audio => lane
                 .filter(|l| *l < 0)
@@ -950,7 +955,6 @@ fn parse_asset_clip(
             track.height_preset = track_height_preset;
         }
 
-        let resolved_source_path = resolve_import_source_path(&asset.src, mount_root, mount_users);
         let mut clip = Clip::new(
             &resolved_source_path,
             source_in.saturating_add(duration),
@@ -1289,6 +1293,7 @@ fn parse_asset_clip(
         }
         if let Some(v) = attrs.get("us:clip-kind") {
             match v.as_str() {
+                "image" => clip.kind = ClipKind::Image,
                 "title" => clip.kind = ClipKind::Title,
                 "adjustment" => clip.kind = ClipKind::Adjustment,
                 "compound" => {
@@ -4180,6 +4185,34 @@ mod tests {
         assert_eq!(audio_tracks.len(), 1);
         assert_eq!(video_tracks[0].clips[0].label, "video");
         assert_eq!(audio_tracks[0].clips[0].label, "audio");
+    }
+
+    #[test]
+    fn test_parse_fcpxml_infers_image_clip_kind_from_source_path() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<fcpxml version="1.14">
+  <resources>
+    <format id="r1" frameDuration="1/24s" width="1920" height="1080"/>
+    <asset id="a1" src="file:///overlay.png" name="overlay" duration="240/24s" hasVideo="1" hasAudio="1"/>
+  </resources>
+  <library>
+    <event>
+      <project name="ImageInference">
+        <sequence duration="240/24s" format="r1">
+          <spine>
+            <asset-clip ref="a1" offset="0s" start="0s" duration="240/24s" name="overlay"/>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>"#;
+
+        let project = parse_fcpxml(xml).expect("parse should succeed");
+        let video_tracks: Vec<_> = project.video_tracks().collect();
+        assert_eq!(video_tracks.len(), 1);
+        assert_eq!(video_tracks[0].clips[0].kind, ClipKind::Image);
+        assert_eq!(video_tracks[0].clips[0].source_path, "/overlay.png");
     }
 
     #[test]

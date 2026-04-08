@@ -1,11 +1,14 @@
-use crate::media::{adjustment_scope::AdjustmentScopeShape, program_player::ProgramPlayer};
-use crate::model::clip::{Clip, ClipKind, NumericKeyframe, SlowMotionInterp};
+use crate::media::{
+    adjustment_scope::AdjustmentScopeShape, mask_alpha::prepare_adjustment_canvas_masks,
+    program_player::ProgramPlayer,
+};
+use crate::model::clip::{Clip, ClipKind, MaskShape, NumericKeyframe, SlowMotionInterp};
 use crate::model::project::Project;
 use crate::model::track::{Track, TrackKind};
 use crate::model::transition::{max_transition_duration_ns, transition_xfade_name_for_kind};
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 
@@ -344,6 +347,9 @@ pub fn export_project(
         cmd.arg("-map_metadata")
             .arg(format!("{metadata_input_idx}"));
     }
+    let mut adjustment_matte_temp_files: Vec<tempfile::NamedTempFile> = Vec::new();
+    let mut next_extra_input_idx =
+        audio_base + audio_clips.len() + usize::from(_chapter_metadata.is_some());
 
     let mut filter = String::new();
     let color_caps = detect_color_filter_capabilities(&ffmpeg);
@@ -654,14 +660,36 @@ pub fn export_project(
     // Each adjustment layer applies its effects (color, LUT, blur, frei0r) to the
     // composite output, time-gated to the adjustment clip's duration.
     for (adj_idx, adj_clip) in adjustment_clips.iter().enumerate() {
+        if build_adjustment_effects_chain_filter(adj_clip, &color_caps).is_empty()
+            || adj_clip.opacity.clamp(0.0, 1.0) <= f64::EPSILON
+        {
+            continue;
+        }
         let next_label = format!("vadj{adj_idx}");
+        let matte_input = prepare_adjustment_export_matte_input(
+            &ffmpeg,
+            &mut cmd,
+            adj_clip,
+            out_w,
+            out_h,
+            project.frame_rate.frame_duration_ns(),
+            project.frame_rate.numerator.max(1),
+            project.frame_rate.denominator.max(1),
+            next_extra_input_idx,
+            &mut adjustment_matte_temp_files,
+        )?;
+        if matte_input.is_some() {
+            next_extra_input_idx += 1;
+        }
         if let Some(graph) = build_adjustment_layer_filter_graph(
             &prev_label,
             &next_label,
             adj_clip,
+            matte_input,
             adj_idx,
             out_w,
             out_h,
+            project.frame_rate.frame_duration_ns(),
             &color_caps,
             &mut _mask_temp_files,
         ) {
@@ -1041,7 +1069,6 @@ pub fn export_project(
         (filter, vout_label)
     };
 
-    use std::io::Write;
     let mut filter_script_file = tempfile::NamedTempFile::new()?;
     filter_script_file.write_all(filter.as_bytes())?;
 
@@ -1503,11 +1530,464 @@ pub(crate) fn build_keyframed_property_expression(
     format!("if(lt({time_var},{first_s:.9}),{first_value:.10},{expr})")
 }
 
+#[derive(Debug, Clone, Copy)]
+struct AdjustmentExportRoi {
+    left: usize,
+    top: usize,
+    right: usize,
+    bottom: usize,
+}
+
+impl AdjustmentExportRoi {
+    fn width(self) -> usize {
+        self.right.saturating_sub(self.left)
+    }
+
+    fn height(self) -> usize {
+        self.bottom.saturating_sub(self.top)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AdjustmentMatteInput {
+    input_index: usize,
+    roi: AdjustmentExportRoi,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResolvedAdjustmentTransform {
+    scale: f64,
+    position_x: f64,
+    position_y: f64,
+    rotate_deg: f64,
+    crop_left: i32,
+    crop_right: i32,
+    crop_top: i32,
+    crop_bottom: i32,
+}
+
+impl ResolvedAdjustmentTransform {
+    fn scope(self, out_w: u32, out_h: u32) -> AdjustmentScopeShape {
+        AdjustmentScopeShape::from_transform(
+            out_w,
+            out_h,
+            self.scale,
+            self.position_x,
+            self.position_y,
+            self.rotate_deg,
+            self.crop_left,
+            self.crop_right,
+            self.crop_top,
+            self.crop_bottom,
+        )
+    }
+}
+
+fn intersect_bounds(
+    a: (usize, usize, usize, usize),
+    b: (usize, usize, usize, usize),
+) -> Option<(usize, usize, usize, usize)> {
+    let left = a.0.max(b.0);
+    let top = a.1.max(b.1);
+    let right = a.2.min(b.2);
+    let bottom = a.3.min(b.3);
+    if left >= right || top >= bottom {
+        None
+    } else {
+        Some((left, top, right, bottom))
+    }
+}
+
+fn union_bounds(
+    a: (usize, usize, usize, usize),
+    b: (usize, usize, usize, usize),
+) -> (usize, usize, usize, usize) {
+    (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3))
+}
+
+fn expand_bounds(
+    bounds: (usize, usize, usize, usize),
+    padding: usize,
+    frame_width: usize,
+    frame_height: usize,
+) -> Option<AdjustmentExportRoi> {
+    let left = bounds.0.saturating_sub(padding);
+    let top = bounds.1.saturating_sub(padding);
+    let right = bounds.2.saturating_add(padding).min(frame_width);
+    let bottom = bounds.3.saturating_add(padding).min(frame_height);
+    if left >= right || top >= bottom {
+        None
+    } else {
+        Some(AdjustmentExportRoi {
+            left,
+            top,
+            right,
+            bottom,
+        })
+    }
+}
+
+fn adjustment_supports_roi_fast_path(clip: &Clip) -> bool {
+    clip.denoise <= f32::EPSILON
+        && !clip.has_frei0r_effects()
+        && !clip
+            .masks
+            .iter()
+            .any(|mask| mask.enabled && mask.shape == MaskShape::Path)
+}
+
+fn mask_has_dynamic_geometry(mask: &crate::model::clip::ClipMask) -> bool {
+    !mask.center_x_keyframes.is_empty()
+        || !mask.center_y_keyframes.is_empty()
+        || !mask.width_keyframes.is_empty()
+        || !mask.height_keyframes.is_empty()
+        || !mask.rotation_keyframes.is_empty()
+        || !mask.feather_keyframes.is_empty()
+        || !mask.expansion_keyframes.is_empty()
+}
+
+fn adjustment_needs_resolved_matte(clip: &Clip) -> bool {
+    has_transform_keyframes(clip) || clip.masks.iter().any(mask_has_dynamic_geometry)
+}
+
+fn adjustment_roi_padding_px(clip: &Clip) -> usize {
+    let blur_padding = if clip.blur > 0.0 {
+        (clip.blur.clamp(0.0, 1.0) * 10.0).round().max(0.0) as usize
+    } else {
+        0
+    };
+    let sharpen_padding = if clip.sharpness != 0.0 { 3 } else { 0 };
+    blur_padding.max(sharpen_padding)
+}
+
+fn resolve_adjustment_transform_at_local_time(
+    clip: &Clip,
+    local_time_ns: u64,
+) -> ResolvedAdjustmentTransform {
+    ResolvedAdjustmentTransform {
+        scale: Clip::evaluate_keyframed_value(&clip.scale_keyframes, local_time_ns, clip.scale)
+            .clamp(0.1, 4.0),
+        position_x: Clip::evaluate_keyframed_value(
+            &clip.position_x_keyframes,
+            local_time_ns,
+            clip.position_x,
+        )
+        .clamp(-1.0, 1.0),
+        position_y: Clip::evaluate_keyframed_value(
+            &clip.position_y_keyframes,
+            local_time_ns,
+            clip.position_y,
+        )
+        .clamp(-1.0, 1.0),
+        rotate_deg: Clip::evaluate_keyframed_value(
+            &clip.rotate_keyframes,
+            local_time_ns,
+            clip.rotate as f64,
+        )
+        .clamp(-180.0, 180.0),
+        crop_left: Clip::evaluate_keyframed_value(
+            &clip.crop_left_keyframes,
+            local_time_ns,
+            clip.crop_left as f64,
+        )
+        .round()
+        .clamp(0.0, 500.0) as i32,
+        crop_right: Clip::evaluate_keyframed_value(
+            &clip.crop_right_keyframes,
+            local_time_ns,
+            clip.crop_right as f64,
+        )
+        .round()
+        .clamp(0.0, 500.0) as i32,
+        crop_top: Clip::evaluate_keyframed_value(
+            &clip.crop_top_keyframes,
+            local_time_ns,
+            clip.crop_top as f64,
+        )
+        .round()
+        .clamp(0.0, 500.0) as i32,
+        crop_bottom: Clip::evaluate_keyframed_value(
+            &clip.crop_bottom_keyframes,
+            local_time_ns,
+            clip.crop_bottom as f64,
+        )
+        .round()
+        .clamp(0.0, 500.0) as i32,
+    }
+}
+
+fn build_adjustment_export_roi(
+    clip: &Clip,
+    out_w: u32,
+    out_h: u32,
+    frame_duration_ns: u64,
+) -> Option<AdjustmentExportRoi> {
+    if !adjustment_supports_roi_fast_path(clip) {
+        return None;
+    }
+
+    let frame_width = out_w.max(1) as usize;
+    let frame_height = out_h.max(1) as usize;
+    let duration_ns = clip.duration();
+    let last_sample_ns = duration_ns.saturating_sub(1);
+    let sample_step_ns = frame_duration_ns.max(1);
+    let roi_masks: Vec<_> = clip
+        .masks
+        .iter()
+        .filter(|mask| mask.enabled && !mask.invert)
+        .cloned()
+        .collect();
+    let mut union: Option<(usize, usize, usize, usize)> = None;
+    let mut local_time_ns = 0u64;
+
+    loop {
+        let resolved = resolve_adjustment_transform_at_local_time(clip, local_time_ns);
+        let scope_bounds = resolved
+            .scope(out_w, out_h)
+            .pixel_bounds(frame_width, frame_height);
+        let sample_bounds = if roi_masks.is_empty() {
+            scope_bounds
+        } else {
+            scope_bounds.and_then(|scope_bounds| {
+                prepare_adjustment_canvas_masks(
+                    &roi_masks,
+                    local_time_ns,
+                    resolved.scale,
+                    resolved.position_x,
+                    resolved.position_y,
+                    resolved.rotate_deg,
+                )
+                .and_then(|prepared| prepared.pixel_bounds(frame_width, frame_height))
+                .and_then(|mask_bounds| intersect_bounds(scope_bounds, mask_bounds))
+            })
+        };
+        if let Some(bounds) = sample_bounds {
+            union = Some(match union {
+                Some(existing) => union_bounds(existing, bounds),
+                None => bounds,
+            });
+        }
+        if local_time_ns >= last_sample_ns {
+            break;
+        }
+        let next_time_ns = local_time_ns
+            .saturating_add(sample_step_ns)
+            .min(last_sample_ns);
+        if next_time_ns == local_time_ns {
+            break;
+        }
+        local_time_ns = next_time_ns;
+    }
+
+    let union = union?;
+    let padded = expand_bounds(
+        union,
+        adjustment_roi_padding_px(clip),
+        frame_width,
+        frame_height,
+    )?;
+    if padded.left == 0
+        && padded.top == 0
+        && padded.right == frame_width
+        && padded.bottom == frame_height
+    {
+        None
+    } else {
+        Some(padded)
+    }
+}
+
+fn render_adjustment_export_matte_file(
+    ffmpeg: &str,
+    clip: &Clip,
+    out_w: u32,
+    out_h: u32,
+    frame_duration_ns: u64,
+    fps_num: u32,
+    fps_den: u32,
+    roi: AdjustmentExportRoi,
+) -> Result<tempfile::NamedTempFile> {
+    let roi_w = roi.width();
+    let roi_h = roi.height();
+    if roi_w == 0 || roi_h == 0 {
+        return Err(anyhow!("Adjustment matte ROI is empty"));
+    }
+
+    let duration_ns = clip.duration().max(1);
+    let sample_step_ns = frame_duration_ns.max(1);
+    let last_sample_ns = duration_ns.saturating_sub(1);
+    let frame_count = last_sample_ns / sample_step_ns + 1;
+    let full_w = out_w.max(1) as usize;
+    let full_h = out_h.max(1) as usize;
+    let roi_rect = (roi.left, roi.top, roi.right, roi.bottom);
+    let matte_alpha_scale = clip.opacity.clamp(0.0, 1.0);
+    let roi_masks: Vec<_> = clip
+        .masks
+        .iter()
+        .filter(|mask| mask.enabled && !mask.invert)
+        .cloned()
+        .collect();
+
+    let output_file = tempfile::Builder::new().suffix(".mkv").tempfile()?;
+    let mut child = Command::new(ffmpeg)
+        .arg("-y")
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-f")
+        .arg("rawvideo")
+        .arg("-pix_fmt")
+        .arg("gray")
+        .arg("-video_size")
+        .arg(format!("{roi_w}x{roi_h}"))
+        .arg("-framerate")
+        .arg(format!("{fps_num}/{fps_den}"))
+        .arg("-i")
+        .arg("-")
+        .arg("-an")
+        .arg("-c:v")
+        .arg("ffv1")
+        .arg("-pix_fmt")
+        .arg("gray")
+        .arg(output_file.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| anyhow!("Failed to start adjustment matte ffmpeg: {e}"))?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("Failed to open adjustment matte stdin"))?;
+    let mut frame = vec![0u8; roi_w.saturating_mul(roi_h)];
+
+    for frame_idx in 0..frame_count {
+        frame.fill(0);
+        let local_time_ns = frame_idx.saturating_mul(sample_step_ns).min(last_sample_ns);
+        let resolved = resolve_adjustment_transform_at_local_time(clip, local_time_ns);
+        let resolved_scope = resolved.scope(out_w, out_h).resolve(full_w, full_h);
+        let scope_bounds = resolved_scope.pixel_bounds(full_w, full_h);
+        let prepared_masks = if roi_masks.is_empty() {
+            None
+        } else {
+            prepare_adjustment_canvas_masks(
+                &roi_masks,
+                local_time_ns,
+                resolved.scale,
+                resolved.position_x,
+                resolved.position_y,
+                resolved.rotate_deg,
+            )
+        };
+        let sample_bounds = if roi_masks.is_empty() {
+            scope_bounds
+        } else {
+            scope_bounds.and_then(|scope_bounds| {
+                prepared_masks
+                    .as_ref()
+                    .and_then(|prepared| prepared.pixel_bounds(full_w, full_h))
+                    .and_then(|mask_bounds| intersect_bounds(scope_bounds, mask_bounds))
+            })
+        }
+        .and_then(|bounds| intersect_bounds(bounds, roi_rect));
+
+        if let Some((x0, y0, x1, y1)) = sample_bounds {
+            for y in y0..y1 {
+                let roi_y = y - roi.top;
+                let row_start = roi_y * roi_w;
+                for x in x0..x1 {
+                    if !resolved_scope.contains_pixel(x, y) {
+                        continue;
+                    }
+                    let mask_alpha = prepared_masks
+                        .as_ref()
+                        .map(|mask| mask.alpha_at_canvas_pixel(x, y, full_w, full_h))
+                        .unwrap_or(1.0);
+                    if mask_alpha <= f64::EPSILON {
+                        continue;
+                    }
+                    frame[row_start + (x - roi.left)] = (mask_alpha * matte_alpha_scale * 255.0)
+                        .round()
+                        .clamp(0.0, 255.0)
+                        as u8;
+                }
+            }
+        }
+
+        stdin
+            .write_all(&frame)
+            .map_err(|e| anyhow!("Failed writing adjustment matte frame: {e}"))?;
+    }
+    drop(stdin);
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| anyhow!("Failed finalizing adjustment matte: {e}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(anyhow!(
+            "Failed to render adjustment matte: {}",
+            if detail.is_empty() {
+                "unknown ffmpeg error"
+            } else {
+                detail.as_str()
+            }
+        ));
+    }
+
+    Ok(output_file)
+}
+
+fn prepare_adjustment_export_matte_input(
+    ffmpeg: &str,
+    cmd: &mut Command,
+    clip: &Clip,
+    out_w: u32,
+    out_h: u32,
+    frame_duration_ns: u64,
+    fps_num: u32,
+    fps_den: u32,
+    input_index: usize,
+    matte_temp_files: &mut Vec<tempfile::NamedTempFile>,
+) -> Result<Option<AdjustmentMatteInput>> {
+    if !adjustment_needs_resolved_matte(clip) {
+        return Ok(None);
+    }
+    let Some(roi) = build_adjustment_export_roi(clip, out_w, out_h, frame_duration_ns) else {
+        return Ok(None);
+    };
+    let matte_file = render_adjustment_export_matte_file(
+        ffmpeg,
+        clip,
+        out_w,
+        out_h,
+        frame_duration_ns,
+        fps_num,
+        fps_den,
+        roi,
+    )?;
+    cmd.arg("-i").arg(matte_file.path());
+    matte_temp_files.push(matte_file);
+    Ok(Some(AdjustmentMatteInput { input_index, roi }))
+}
+
 fn build_adjustment_scope_alpha_expression(
     clip: &Clip,
     out_w: u32,
     out_h: u32,
     time_var: &str,
+) -> String {
+    build_adjustment_scope_alpha_expression_for_coords(clip, out_w, out_h, time_var, "X", "Y")
+}
+
+fn build_adjustment_scope_alpha_expression_for_coords(
+    clip: &Clip,
+    out_w: u32,
+    out_h: u32,
+    time_var: &str,
+    x_var: &str,
+    y_var: &str,
 ) -> String {
     if !has_transform_keyframes(clip) {
         let scope = AdjustmentScopeShape::from_transform(
@@ -1593,10 +2073,12 @@ fn build_adjustment_scope_alpha_expression(
     let right_expr = format!("max({right_raw_expr},{left_raw_expr})");
     let bottom_expr = format!("max({bottom_raw_expr},{top_raw_expr})");
     let rad_expr = format!("({rotate_expr})*PI/180");
-    let ux_expr =
-        format!("({cx_expr})+(X-({cx_expr}))*cos({rad_expr})-(Y-({cy_expr}))*sin({rad_expr})");
-    let uy_expr =
-        format!("({cy_expr})+(X-({cx_expr}))*sin({rad_expr})+(Y-({cy_expr}))*cos({rad_expr})");
+    let ux_expr = format!(
+        "({cx_expr})+(({x_var})-({cx_expr}))*cos({rad_expr})-(({y_var})-({cy_expr}))*sin({rad_expr})"
+    );
+    let uy_expr = format!(
+        "({cy_expr})+(({x_var})-({cx_expr}))*sin({rad_expr})+(({y_var})-({cy_expr}))*cos({rad_expr})"
+    );
 
     format!(
         "between({ux_expr},{left_raw_expr},({right_expr})-0.000001)*between({uy_expr},{top_raw_expr},({bottom_expr})-0.000001)"
@@ -1670,16 +2152,27 @@ fn build_adjustment_mask_coordinate_expressions(
     out_h: u32,
     time_var: &str,
 ) -> (String, String, AdjustmentTransformExpressions) {
+    build_adjustment_mask_coordinate_expressions_for_coords(clip, out_w, out_h, time_var, "X", "Y")
+}
+
+fn build_adjustment_mask_coordinate_expressions_for_coords(
+    clip: &Clip,
+    out_w: u32,
+    out_h: u32,
+    time_var: &str,
+    x_var: &str,
+    y_var: &str,
+) -> (String, String, AdjustmentTransformExpressions) {
     let transform = build_adjustment_transform_expressions(clip, out_w, out_h, time_var);
     let rad_expr = format!("({})*PI/180", transform.rotate_expr);
     let ux_expr = format!(
-        "({cx})+(X-({cx}))*cos({rad})-(Y-({cy}))*sin({rad})",
+        "({cx})+(({x_var})-({cx}))*cos({rad})-(({y_var})-({cy}))*sin({rad})",
         cx = transform.center_x_expr,
         cy = transform.center_y_expr,
         rad = rad_expr
     );
     let uy_expr = format!(
-        "({cy})+(X-({cx}))*sin({rad})+(Y-({cy}))*cos({rad})",
+        "({cy})+(({x_var})-({cx}))*sin({rad})+(({y_var})-({cy}))*cos({rad})",
         cx = transform.center_x_expr,
         cy = transform.center_y_expr,
         rad = rad_expr
@@ -1779,6 +2272,17 @@ fn build_adjustment_mask_alpha_expression(
     out_h: u32,
     time_var: &str,
 ) -> Option<String> {
+    build_adjustment_mask_alpha_expression_for_coords(clip, out_w, out_h, time_var, "X", "Y")
+}
+
+fn build_adjustment_mask_alpha_expression_for_coords(
+    clip: &Clip,
+    out_w: u32,
+    out_h: u32,
+    time_var: &str,
+    x_var: &str,
+    y_var: &str,
+) -> Option<String> {
     let active_masks: Vec<&crate::model::clip::ClipMask> =
         clip.masks.iter().filter(|mask| mask.enabled).collect();
     if active_masks.is_empty()
@@ -1789,8 +2293,9 @@ fn build_adjustment_mask_alpha_expression(
         return None;
     }
 
-    let (npx_expr, npy_expr, _) =
-        build_adjustment_mask_coordinate_expressions(clip, out_w, out_h, time_var);
+    let (npx_expr, npy_expr, _) = build_adjustment_mask_coordinate_expressions_for_coords(
+        clip, out_w, out_h, time_var, x_var, y_var,
+    );
     let exprs: Vec<String> = active_masks
         .iter()
         .map(|mask| match mask.shape {
@@ -2470,9 +2975,11 @@ fn build_adjustment_layer_filter_graph(
     input_label: &str,
     output_label: &str,
     adj_clip: &Clip,
+    matte_input: Option<AdjustmentMatteInput>,
     adj_idx: usize,
     out_w: u32,
     out_h: u32,
+    frame_duration_ns: u64,
     color_caps: &ColorFilterCapabilities,
     mask_temp_files: &mut Vec<tempfile::NamedTempFile>,
 ) -> Option<String> {
@@ -2488,11 +2995,46 @@ fn build_adjustment_layer_filter_graph(
 
     let start_s = adj_clip.timeline_start as f64 / 1_000_000_000.0;
     let end_s = (adj_clip.timeline_start + adj_clip.duration()) as f64 / 1_000_000_000.0;
+    let clip_duration_s = adj_clip.duration() as f64 / 1_000_000_000.0;
     let orig_label = format!("vadj{adj_idx}orig");
     let work_label = format!("vadj{adj_idx}work");
     let work_raw_label = format!("vadj{adj_idx}raw");
     let fx_label = format!("vadj{adj_idx}fx");
-    let scope_alpha = build_adjustment_scope_alpha_expression(adj_clip, out_w, out_h, "T");
+    let roi = matte_input
+        .map(|matte| matte.roi)
+        .or_else(|| build_adjustment_export_roi(adj_clip, out_w, out_h, frame_duration_ns));
+
+    if let Some(matte_input) = matte_input {
+        let roi = matte_input.roi;
+        let matte_label = format!("vadj{adj_idx}matte");
+        return Some(format!(
+            ";[{input_label}]split[{orig_label}][{work_label}];\
+             [{work_label}]trim=start={start_s:.6}:end={end_s:.6},setpts=PTS-STARTPTS,crop={roi_w}:{roi_h}:{roi_x}:{roi_y},{effects_chain},format=yuva420p[{work_raw_label}];\
+             [{matte_idx}:v]trim=duration={clip_duration_s:.6},setpts=PTS-STARTPTS,format=gray[{matte_label}];\
+             [{work_raw_label}][{matte_label}]alphamerge,setpts=PTS+{start_s:.6}/TB[{fx_label}];\
+             [{orig_label}][{fx_label}]overlay=x={roi_x}:y={roi_y}:eof_action=pass[{output_label}]",
+            roi_w = roi.width(),
+            roi_h = roi.height(),
+            roi_x = roi.left,
+            roi_y = roi.top,
+            matte_idx = matte_input.input_index,
+        ));
+    }
+
+    let roi_x_expr = roi
+        .map(|roi| format!("X+{}", roi.left))
+        .unwrap_or_else(|| "X".to_string());
+    let roi_y_expr = roi
+        .map(|roi| format!("Y+{}", roi.top))
+        .unwrap_or_else(|| "Y".to_string());
+    let scope_alpha = build_adjustment_scope_alpha_expression_for_coords(
+        adj_clip,
+        out_w,
+        out_h,
+        "T",
+        &roi_x_expr,
+        &roi_y_expr,
+    );
     let scope_alpha = if opacity < 1.0 - f64::EPSILON {
         format!("({scope_alpha})*{opacity:.10}")
     } else {
@@ -2500,7 +3042,14 @@ fn build_adjustment_layer_filter_graph(
     };
     let path_mask_alpha = build_adjustment_path_mask_alpha(adj_clip, out_w, out_h);
     let adjustment_mask_alpha = if path_mask_alpha.is_none() {
-        build_adjustment_mask_alpha_expression(adj_clip, out_w, out_h, "T")
+        build_adjustment_mask_alpha_expression_for_coords(
+            adj_clip,
+            out_w,
+            out_h,
+            "T",
+            &roi_x_expr,
+            &roi_y_expr,
+        )
     } else {
         None
     };
@@ -2516,7 +3065,6 @@ fn build_adjustment_layer_filter_graph(
         let mask_path_str = mask_file.path().display().to_string();
         mask_temp_files.push(mask_file);
         let transform = build_adjustment_transform_expressions(adj_clip, out_w, out_h, "T");
-        let clip_duration_s = adj_clip.duration() as f64 / 1_000_000_000.0;
         let mask_source_label = format!("vadj{adj_idx}masksrc");
         let mask_fg_label = format!("vadj{adj_idx}maskfg");
         let mask_bg_label = format!("vadj{adj_idx}maskbg");
@@ -2540,13 +3088,28 @@ fn build_adjustment_layer_filter_graph(
         ));
     }
 
-    Some(format!(
-        ";[{input_label}]split[{orig_label}][{work_label}];\
-         [{work_label}]trim=start={start_s:.6}:end={end_s:.6},setpts=PTS-STARTPTS,{effects_chain},format=yuva420p,\
-         geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({alpha_expr})',\
-         setpts=PTS+{start_s:.6}/TB[{fx_label}];\
-         [{orig_label}][{fx_label}]overlay=x=0:y=0:eof_action=pass[{output_label}]"
-    ))
+    let graph = if let Some(roi) = roi {
+        format!(
+            ";[{input_label}]split[{orig_label}][{work_label}];\
+             [{work_label}]trim=start={start_s:.6}:end={end_s:.6},setpts=PTS-STARTPTS,crop={roi_w}:{roi_h}:{roi_x}:{roi_y},{effects_chain},format=yuva420p,\
+             geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({alpha_expr})',\
+             setpts=PTS+{start_s:.6}/TB[{fx_label}];\
+             [{orig_label}][{fx_label}]overlay=x={roi_x}:y={roi_y}:eof_action=pass[{output_label}]",
+            roi_w = roi.width(),
+            roi_h = roi.height(),
+            roi_x = roi.left,
+            roi_y = roi.top,
+        )
+    } else {
+        format!(
+            ";[{input_label}]split[{orig_label}][{work_label}];\
+             [{work_label}]trim=start={start_s:.6}:end={end_s:.6},setpts=PTS-STARTPTS,{effects_chain},format=yuva420p,\
+             geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({alpha_expr})',\
+             setpts=PTS+{start_s:.6}/TB[{fx_label}];\
+             [{orig_label}][{fx_label}]overlay=x=0:y=0:eof_action=pass[{output_label}]"
+        )
+    };
+    Some(graph)
 }
 
 const TITLE_REFERENCE_HEIGHT: f64 = 1080.0;
@@ -2775,8 +3338,6 @@ fn build_subtitle_filter_composited(
         let group_size = (style_clip.subtitle_word_window_secs as usize).max(2);
 
         {
-            use std::io::Write;
-
             // ASS header with default style matching our settings.
             let _ = writeln!(sub_file, "[Script Info]");
             let _ = writeln!(sub_file, "ScriptType: v4.00+");
@@ -2946,7 +3507,6 @@ fn build_subtitle_filter_composited(
 
 /// Export subtitles from all clips in the project as an SRT file.
 pub fn export_srt(project: &Project, output_path: &str) -> Result<()> {
-    use std::io::Write;
     let mut segments: Vec<(u64, u64, String)> = Vec::new();
 
     for track in &project.tracks {
@@ -3544,11 +4104,17 @@ fn build_scale_position_filter(
     let ph = out_h as f64;
     let pos_x = clip.position_x;
     let pos_y = clip.position_y;
+    let sw = (pw * scale).round() as u32;
+    let sh = (ph * scale).round() as u32;
+
+    if clip_uses_direct_canvas_translation(clip) {
+        let raw_x = direct_canvas_origin(pw, sw as f64, pos_x) as i64;
+        let raw_y = direct_canvas_origin(ph, sh as f64, pos_y) as i64;
+        return build_scale_translate_filter(sw, sh, raw_x, raw_y, out_w, out_h, transparent_pad);
+    }
 
     if scale >= 1.0 {
         // Zoom in: scale UP then crop to output size.
-        let sw = (pw * scale).round() as u32;
-        let sh = (ph * scale).round() as u32;
         let total_x = pw * (scale - 1.0);
         let total_y = ph * (scale - 1.0);
         let cx = (total_x * (1.0 + pos_x) / 2.0).round() as i64;
@@ -3560,49 +4126,60 @@ fn build_scale_position_filter(
         // When the PIP extends beyond the frame edge (position > 1.0 or < -1.0),
         // crop the overflow before padding — matching the preview's videobox
         // behavior which clips content past the frame boundary.
-        let sw = (pw * scale).round() as u32;
-        let sh = (ph * scale).round() as u32;
         let total_x = pw * (1.0 - scale);
         let total_y = ph * (1.0 - scale);
         let raw_pad_x = (total_x * (1.0 + pos_x) / 2.0).round() as i64;
         let raw_pad_y = (total_y * (1.0 + pos_y) / 2.0).round() as i64;
+        build_scale_translate_filter(sw, sh, raw_pad_x, raw_pad_y, out_w, out_h, transparent_pad)
+    }
+}
 
-        // Compute overflow on each edge
-        let crop_left = if raw_pad_x < 0 {
-            (-raw_pad_x) as u32
-        } else {
-            0
-        };
-        let crop_top = if raw_pad_y < 0 {
-            (-raw_pad_y) as u32
-        } else {
-            0
-        };
-        let crop_right = if raw_pad_x as i64 + sw as i64 > out_w as i64 {
-            (raw_pad_x as i64 + sw as i64 - out_w as i64) as u32
-        } else {
-            0
-        };
-        let crop_bottom = if raw_pad_y as i64 + sh as i64 > out_h as i64 {
-            (raw_pad_y as i64 + sh as i64 - out_h as i64) as u32
-        } else {
-            0
-        };
+fn clip_uses_direct_canvas_translation(clip: &crate::model::clip::Clip) -> bool {
+    matches!(
+        clip.kind,
+        crate::model::clip::ClipKind::Adjustment | crate::model::clip::ClipKind::Title
+    ) || clip.tracking_binding.is_some()
+}
 
-        let pad_x = raw_pad_x.max(0) as u32;
-        let pad_y = raw_pad_y.max(0) as u32;
-        let pad_color = if transparent_pad { "black@0" } else { "black" };
+fn direct_canvas_origin(axis_size: f64, scaled_axis_size: f64, position: f64) -> i32 {
+    (((axis_size - scaled_axis_size) / 2.0) + position.clamp(-1.0, 1.0) * axis_size / 2.0).round()
+        as i32
+}
 
-        let needs_crop = crop_left > 0 || crop_top > 0 || crop_right > 0 || crop_bottom > 0;
-        if needs_crop {
-            let vis_w = sw.saturating_sub(crop_left + crop_right).max(1);
-            let vis_h = sh.saturating_sub(crop_top + crop_bottom).max(1);
-            format!(
-                ",scale={sw}:{sh},crop={vis_w}:{vis_h}:{crop_left}:{crop_top},pad={out_w}:{out_h}:{pad_x}:{pad_y}:{pad_color}"
-            )
-        } else {
-            format!(",scale={sw}:{sh},pad={out_w}:{out_h}:{pad_x}:{pad_y}:{pad_color}")
-        }
+fn build_scale_translate_filter(
+    sw: u32,
+    sh: u32,
+    raw_x: i64,
+    raw_y: i64,
+    out_w: u32,
+    out_h: u32,
+    transparent_pad: bool,
+) -> String {
+    let crop_left = if raw_x < 0 { (-raw_x) as u32 } else { 0 };
+    let crop_top = if raw_y < 0 { (-raw_y) as u32 } else { 0 };
+    let crop_right = if raw_x + sw as i64 > out_w as i64 {
+        (raw_x + sw as i64 - out_w as i64) as u32
+    } else {
+        0
+    };
+    let crop_bottom = if raw_y + sh as i64 > out_h as i64 {
+        (raw_y + sh as i64 - out_h as i64) as u32
+    } else {
+        0
+    };
+
+    let pad_x = raw_x.max(0) as u32;
+    let pad_y = raw_y.max(0) as u32;
+    let pad_color = if transparent_pad { "black@0" } else { "black" };
+    let needs_crop = crop_left > 0 || crop_top > 0 || crop_right > 0 || crop_bottom > 0;
+    if needs_crop {
+        let vis_w = sw.saturating_sub(crop_left + crop_right).max(1);
+        let vis_h = sh.saturating_sub(crop_top + crop_bottom).max(1);
+        format!(
+            ",scale={sw}:{sh},crop={vis_w}:{vis_h}:{crop_left}:{crop_top},pad={out_w}:{out_h}:{pad_x}:{pad_y}:{pad_color}"
+        )
+    } else {
+        format!(",scale={sw}:{sh},pad={out_w}:{out_h}:{pad_x}:{pad_y}:{pad_color}")
     }
 }
 
@@ -3979,7 +4556,6 @@ fn parse_progress_line(
                 return Some((bytes as f64 / estimate as f64).clamp(0.0, 0.99));
             }
         }
-        return None;
     }
 
     if let Some(v) = line.strip_prefix("out_time_us=") {
@@ -4485,7 +5061,6 @@ fn write_chapter_metadata(
     if markers.is_empty() {
         return Ok(None);
     }
-    use std::io::Write;
     let mut file = tempfile::NamedTempFile::new()?;
     writeln!(file, ";FFMETADATA1")?;
     writeln!(file)?;
@@ -4708,17 +5283,19 @@ fn flatten_clips(clips: &[Clip], timeline_offset: u64, depth: usize) -> Vec<Clip
 #[cfg(test)]
 mod tests {
     use super::{
-        append_pan_filter_chain, audio_crossfade_curve_name, build_adjustment_layer_filter_graph,
+        adjustment_roi_padding_px, append_pan_filter_chain, audio_crossfade_curve_name,
+        build_adjustment_export_roi, build_adjustment_layer_filter_graph,
         build_adjustment_scope_alpha_expression, build_audio_crossfade_filters, build_color_filter,
         build_crop_filter, build_grading_filter, build_keyframed_property_expression,
-        build_pan_expression, build_rotation_filter, build_subtitle_filter_composited,
-        build_temperature_tint_filter, build_timing_filter, build_title_filter,
-        build_volume_filter, clamped_primary_transition_timing, clamped_primary_xfade_duration_s,
-        compute_clip_audio_fades, compute_export_coloradj_params, estimate_export_size_bytes,
-        find_ffmpeg, flatten_compound_tracks, has_linked_audio_peer, has_transform_keyframes,
-        parse_progress_line, primary_clip_transition_stop_pad_ns, resolve_subtitle_font_style,
-        split_active_video_tracks_for_export, video_input_seek_and_duration,
-        write_chapter_metadata, AudioCodec, ClipAudioFade, ColorFilterCapabilities, ExportOptions,
+        build_pan_expression, build_rotation_filter, build_scale_position_filter,
+        build_subtitle_filter_composited, build_temperature_tint_filter, build_timing_filter,
+        build_title_filter, build_volume_filter, clamped_primary_transition_timing,
+        clamped_primary_xfade_duration_s, compute_clip_audio_fades, compute_export_coloradj_params,
+        estimate_export_size_bytes, find_ffmpeg, flatten_compound_tracks, has_linked_audio_peer,
+        has_transform_keyframes, parse_progress_line, primary_clip_transition_stop_pad_ns,
+        resolve_subtitle_font_style, split_active_video_tracks_for_export,
+        video_input_seek_and_duration, write_chapter_metadata, AdjustmentExportRoi,
+        AdjustmentMatteInput, AudioCodec, ClipAudioFade, ColorFilterCapabilities, ExportOptions,
         VideoCodec,
     };
     use crate::media::program_player::ProgramPlayer;
@@ -4766,7 +5343,8 @@ mod tests {
 
     #[test]
     fn total_size_mode_ignores_out_time_lines() {
-        assert!(parse_progress_line("out_time_us=500000", 1_000_000, Some(1_000)).is_none());
+        let p = parse_progress_line("out_time_us=500000", 1_000_000, Some(1_000)).unwrap();
+        assert!((p - 0.5).abs() < 1e-6);
     }
 
     #[test]
@@ -5438,9 +6016,11 @@ mod tests {
             "vin",
             "vout",
             &clip,
+            None,
             0,
             1920,
             1080,
+            41_666_667,
             &ColorFilterCapabilities::default(),
             &mut Vec::new(),
         )
@@ -5450,7 +6030,8 @@ mod tests {
         assert!(graph.contains("eq=brightness='if(lt(t,"));
         assert!(graph.contains("a='alpha(X,Y)*("));
         assert!(graph.contains("if(lt(T,"));
-        assert!(graph.contains("overlay=x=0:y=0:eof_action=pass[vout]"));
+        assert!(graph.contains("crop="));
+        assert!(graph.contains("eof_action=pass[vout]"));
     }
 
     #[test]
@@ -5468,9 +6049,11 @@ mod tests {
             "vin",
             "vout",
             &clip,
+            None,
             0,
             1920,
             1080,
+            41_666_667,
             &ColorFilterCapabilities::default(),
             &mut mask_files,
         )
@@ -5485,6 +6068,7 @@ mod tests {
             "expected inline rect mask alpha in `{graph}`"
         );
         assert!(!graph.contains("alphamerge"));
+        assert!(graph.contains("crop="));
     }
 
     #[test]
@@ -5501,9 +6085,11 @@ mod tests {
             "vin",
             "vout",
             &clip,
+            None,
             0,
             1920,
             1080,
+            41_666_667,
             &ColorFilterCapabilities::default(),
             &mut mask_files,
         )
@@ -5515,6 +6101,82 @@ mod tests {
         );
         assert!(graph.contains("alphamerge"));
         assert!(graph.contains("movie='"));
+    }
+
+    #[test]
+    fn adjustment_layer_filter_graph_uses_precomputed_matte_input_when_available() {
+        let mut clip = Clip::new_adjustment(0, 2_000_000_000);
+        clip.brightness = 0.2;
+        clip.position_x_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: 0.0,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+            NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 0.5,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+        ];
+        let mut mask = crate::model::clip::ClipMask::new(crate::model::clip::MaskShape::Ellipse);
+        mask.enabled = true;
+        mask.width = 0.2;
+        mask.height = 0.2;
+        clip.masks.push(mask);
+
+        let graph = build_adjustment_layer_filter_graph(
+            "vin",
+            "vout",
+            &clip,
+            Some(AdjustmentMatteInput {
+                input_index: 7,
+                roi: AdjustmentExportRoi {
+                    left: 120,
+                    top: 80,
+                    right: 520,
+                    bottom: 460,
+                },
+            }),
+            0,
+            1920,
+            1080,
+            41_666_667,
+            &ColorFilterCapabilities::default(),
+            &mut Vec::new(),
+        )
+        .expect("adjustment graph");
+
+        assert!(graph.contains("[7:v]trim=duration=2.000000,setpts=PTS-STARTPTS,format=gray"));
+        assert!(graph.contains("crop=400:380:120:80"));
+        assert!(graph.contains("alphamerge"));
+        assert!(!graph.contains("geq=lum='lum(X,Y)'"));
+    }
+
+    #[test]
+    fn build_adjustment_export_roi_tracks_masked_region() {
+        let mut clip = Clip::new_adjustment(0, 2_000_000_000);
+        clip.brightness = 0.2;
+        clip.position_x = 0.5;
+        let mut mask = crate::model::clip::ClipMask::new(crate::model::clip::MaskShape::Ellipse);
+        mask.enabled = true;
+        mask.center_x = 0.5;
+        mask.center_y = 0.5;
+        mask.width = 0.1;
+        mask.height = 0.1;
+        clip.masks.push(mask);
+
+        let roi = build_adjustment_export_roi(&clip, 1920, 1080, 41_666_667).expect("roi");
+
+        assert_eq!(adjustment_roi_padding_px(&clip), 0);
+        assert!(
+            roi.left > 1000,
+            "expected translated ROI to move right: {roi:?}"
+        );
+        assert!(roi.width() < 500, "expected a tight masked ROI: {roi:?}");
+        assert!(roi.height() < 500, "expected a tight masked ROI: {roi:?}");
     }
 
     #[test]
@@ -5821,6 +6483,47 @@ mod tests {
         assert!(f.contains("fontcolor=ff3366@0.8000"));
         assert!(f.contains("x='(0.250000)*w-text_w/2'"));
         assert!(f.contains("y='(0.750000)*h-text_h/2'"));
+    }
+
+    #[test]
+    fn scale_position_filter_moves_title_at_unit_scale() {
+        let mut clip = Clip::new("", 2_000_000_000, 0, ClipKind::Title);
+        clip.position_x = 0.5;
+
+        let filter = build_scale_position_filter(&clip, 1920, 1080, true);
+
+        assert!(filter.contains("scale=1920:1080"));
+        assert!(filter.contains("crop=1440:1080:0:0"));
+        assert!(filter.contains("pad=1920:1080:480:0:black@0"));
+    }
+
+    #[test]
+    fn direct_canvas_translation_skips_untracked_images() {
+        let clip = Clip::new("/tmp/test.png", 2_000_000_000, 0, ClipKind::Image);
+        assert!(!super::clip_uses_direct_canvas_translation(&clip));
+
+        let mut tracked_clip = clip.clone();
+        tracked_clip.tracking_binding = Some(crate::model::clip::TrackingBinding::new(
+            "source-clip",
+            "tracker-1",
+        ));
+        assert!(super::clip_uses_direct_canvas_translation(&tracked_clip));
+    }
+
+    #[test]
+    fn scale_position_filter_moves_tracked_clip_at_unit_scale() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.position_x = 0.5;
+        clip.tracking_binding = Some(crate::model::clip::TrackingBinding::new(
+            "source-clip",
+            "tracker-1",
+        ));
+
+        let filter = build_scale_position_filter(&clip, 1920, 1080, false);
+
+        assert!(filter.contains("scale=1920:1080"));
+        assert!(filter.contains("crop=1440:1080:0:0"));
+        assert!(filter.contains("pad=1920:1080:480:0:black"));
     }
 
     #[test]

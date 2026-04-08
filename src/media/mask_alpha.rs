@@ -702,6 +702,45 @@ impl ResolvedCanvasMask {
             MaskShape::Path => "1".to_string(),
         }
     }
+
+    fn normalized_bounds(&self) -> Option<(f64, f64, f64, f64)> {
+        match self.shape {
+            MaskShape::Rectangle | MaskShape::Ellipse => {
+                let half_w = (self.width + self.expansion).max(0.0) + self.feather;
+                let half_h = (self.height + self.expansion).max(0.0) + self.feather;
+                let corners = [
+                    (-half_w, -half_h),
+                    (half_w, -half_h),
+                    (half_w, half_h),
+                    (-half_w, half_h),
+                ];
+                let cos_r = self.rotation_rad.cos();
+                let sin_r = self.rotation_rad.sin();
+                let mut min_x = f64::INFINITY;
+                let mut min_y = f64::INFINITY;
+                let mut max_x = f64::NEG_INFINITY;
+                let mut max_y = f64::NEG_INFINITY;
+                for (dx, dy) in corners {
+                    let x = self.center_x + dx * cos_r - dy * sin_r;
+                    let y = self.center_y + dx * sin_r + dy * cos_r;
+                    min_x = min_x.min(x);
+                    min_y = min_y.min(y);
+                    max_x = max_x.max(x);
+                    max_y = max_y.max(y);
+                }
+                Some((min_x, min_y, max_x, max_y))
+            }
+            MaskShape::Path => self.path_aabb.map(|(min_x, min_y, max_x, max_y)| {
+                let margin = self.feather + self.expansion.abs();
+                (
+                    min_x - margin,
+                    min_y - margin,
+                    max_x + margin,
+                    max_y + margin,
+                )
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -756,6 +795,56 @@ impl PreparedCanvasMasks {
         buf
     }
 
+    pub fn pixel_bounds(
+        &self,
+        frame_width: usize,
+        frame_height: usize,
+    ) -> Option<(usize, usize, usize, usize)> {
+        if self.masks.is_empty() || frame_width == 0 || frame_height == 0 {
+            return None;
+        }
+
+        let mut min_x = f64::INFINITY;
+        let mut min_y = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        let mut max_y = f64::NEG_INFINITY;
+
+        for mask in &self.masks {
+            let Some((mask_min_x, mask_min_y, mask_max_x, mask_max_y)) = mask.normalized_bounds()
+            else {
+                continue;
+            };
+            let corners = [
+                (mask_min_x, mask_min_y),
+                (mask_max_x, mask_min_y),
+                (mask_max_x, mask_max_y),
+                (mask_min_x, mask_max_y),
+            ];
+            for (npx, npy) in corners {
+                let (x, y) =
+                    self.normalized_point_to_canvas_coords(npx, npy, frame_width, frame_height);
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+
+        if !min_x.is_finite() || !min_y.is_finite() || !max_x.is_finite() || !max_y.is_finite() {
+            return None;
+        }
+
+        let x0 = min_x.floor().max(0.0).min(frame_width as f64) as usize;
+        let y0 = min_y.floor().max(0.0).min(frame_height as f64) as usize;
+        let x1 = max_x.ceil().max(0.0).min(frame_width as f64) as usize;
+        let y1 = max_y.ceil().max(0.0).min(frame_height as f64) as usize;
+        if x0 >= x1 || y0 >= y1 {
+            None
+        } else {
+            Some((x0, y0, x1, y1))
+        }
+    }
+
     fn canvas_pixel_to_normalized_coords(
         &self,
         x: usize,
@@ -801,6 +890,54 @@ impl PreparedCanvasMasks {
         let ux = clip_center_x + dx * cos_r - dy * sin_r;
         let uy = clip_center_y + dx * sin_r + dy * cos_r;
         ((ux - clip_left) / clip_width, (uy - clip_top) / clip_height)
+    }
+
+    fn normalized_point_to_canvas_coords(
+        &self,
+        npx: f64,
+        npy: f64,
+        frame_width: usize,
+        frame_height: usize,
+    ) -> (f64, f64) {
+        let fw = frame_width.max(1) as f64;
+        let fh = frame_height.max(1) as f64;
+        let clip_scale = self.clip_scale.max(1e-6);
+        let (clip_center_x, clip_center_y, clip_width, clip_height) = match self.transform_space {
+            CanvasTransformSpace::ClipPlacement => (
+                fw / 2.0 + self.clip_pos_x * fw * (1.0 - clip_scale) / 2.0,
+                fh / 2.0 + self.clip_pos_y * fh * (1.0 - clip_scale) / 2.0,
+                (fw * clip_scale).max(1e-6),
+                (fh * clip_scale).max(1e-6),
+            ),
+            CanvasTransformSpace::AdjustmentLayer => {
+                let (center_x, center_y, clip_width, clip_height) =
+                    crate::media::adjustment_scope::adjustment_canvas_geometry(
+                        fw,
+                        fh,
+                        clip_scale,
+                        self.clip_pos_x,
+                        self.clip_pos_y,
+                    );
+                (
+                    center_x,
+                    center_y,
+                    clip_width.max(1e-6),
+                    clip_height.max(1e-6),
+                )
+            }
+        };
+        let clip_left = clip_center_x - clip_width / 2.0;
+        let clip_top = clip_center_y - clip_height / 2.0;
+        let ux = clip_left + npx * clip_width;
+        let uy = clip_top + npy * clip_height;
+        let dx = ux - clip_center_x;
+        let dy = uy - clip_center_y;
+        let cos_r = self.clip_rotation_rad.cos();
+        let sin_r = self.clip_rotation_rad.sin();
+        (
+            clip_center_x + dx * cos_r + dy * sin_r,
+            clip_center_y - dx * sin_r + dy * cos_r,
+        )
     }
 
     fn has_path_masks(&self) -> bool {
@@ -1566,5 +1703,21 @@ mod tests {
             prepared.alpha_at_canvas_pixel(50, 50, 100, 100) < 0.01,
             "original center should be outside after translation"
         );
+    }
+
+    #[test]
+    fn prepared_adjustment_masks_report_translated_bounds() {
+        let mut mask = default_ellipse_mask();
+        mask.enabled = true;
+        mask.center_x = 0.5;
+        mask.center_y = 0.5;
+        mask.width = 0.1;
+        mask.height = 0.1;
+
+        let prepared = prepare_adjustment_canvas_masks(&[mask], 0, 1.0, 0.5, 0.0, 0.0)
+            .expect("prepared masks");
+        let bounds = prepared.pixel_bounds(100, 100).expect("mask bounds");
+
+        assert_eq!(bounds, (65, 40, 85, 60));
     }
 }

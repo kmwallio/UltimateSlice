@@ -616,7 +616,7 @@ fn sync_transform_overlay_to_playhead(
         Some(cid) => {
             if let Some(c) = project.clip_ref(cid) {
                 if c.kind != ClipKind::Audio {
-                    transform_overlay.set_adjustment_mode(c.kind == ClipKind::Adjustment);
+                    transform_overlay.set_adjustment_mode(clip_uses_direct_position_mode(c));
                     let (scale, pos_x, pos_y, rotate, cl, cr, ct, cb) =
                         evaluate_clip_transform_at(c, playhead_ns);
                     transform_overlay.set_transform(scale, pos_x, pos_y);
@@ -671,7 +671,8 @@ fn sync_transform_overlay_to_playhead_from_program_clips(
         Some(cid) => {
             if let Some(clip) = clips.iter().find(|clip| clip.id == cid) {
                 if !clip.is_audio_only {
-                    transform_overlay.set_adjustment_mode(clip.is_adjustment);
+                    transform_overlay
+                        .set_adjustment_mode(program_clip_uses_direct_position_mode(clip));
                     transform_overlay.set_transform(
                         clip.scale_at_timeline_ns(playhead_ns),
                         clip.position_x_at_timeline_ns(playhead_ns),
@@ -735,6 +736,14 @@ fn sync_transform_overlay_to_playhead_resolved(
         }
     }
     sync_transform_overlay_to_playhead(transform_overlay, project, selected_clip_id, playhead_ns);
+}
+
+fn clip_uses_direct_position_mode(clip: &Clip) -> bool {
+    matches!(clip.kind, ClipKind::Adjustment | ClipKind::Title) || clip.tracking_binding.is_some()
+}
+
+fn program_clip_uses_direct_position_mode(clip: &ProgramClip) -> bool {
+    clip.is_adjustment || clip.is_title || clip.tracking_binding.is_some()
 }
 
 fn sync_transform_overlay_tracking_region(
@@ -840,14 +849,15 @@ fn clip_supports_tracking_analysis(clip: &Clip) -> Result<(), &'static str> {
 
 fn selected_clip_is_adjustment(project: &Project, selected_clip_id: Option<&str>) -> bool {
     selected_clip_id
-        .and_then(|cid| {
-            project
-                .tracks
-                .iter()
-                .flat_map(|t| t.clips.iter())
-                .find(|c| c.id == cid)
-        })
+        .and_then(|cid| project.clip_ref(cid))
         .map(|clip| clip.kind == ClipKind::Adjustment)
+        .unwrap_or(false)
+}
+
+fn selected_clip_is_static_image(project: &Project, selected_clip_id: Option<&str>) -> bool {
+    selected_clip_id
+        .and_then(|cid| project.clip_ref(cid))
+        .map(|clip| clip.kind == ClipKind::Image && !clip.animated_svg)
         .unwrap_or(false)
 }
 
@@ -2667,6 +2677,36 @@ mod tests {
                 "tracker-1"
             ))
         );
+    }
+
+    #[test]
+    fn selected_clip_is_static_image_excludes_animated_svg() {
+        let mut project = Project::new("Test");
+
+        let static_image = Clip::new("/tmp/overlay.png", 1_000_000_000, 0, ClipKind::Image);
+        let static_image_id = static_image.id.clone();
+
+        let mut animated_svg = Clip::new(
+            "/tmp/overlay.svg",
+            1_000_000_000,
+            2_000_000_000,
+            ClipKind::Image,
+        );
+        animated_svg.animated_svg = true;
+        let animated_svg_id = animated_svg.id.clone();
+
+        project.tracks[0].clips.push(static_image);
+        project.tracks[0].clips.push(animated_svg);
+
+        assert!(selected_clip_is_static_image(
+            &project,
+            Some(&static_image_id)
+        ));
+        assert!(!selected_clip_is_static_image(
+            &project,
+            Some(&animated_svg_id)
+        ));
+        assert!(!selected_clip_is_static_image(&project, None));
     }
 }
 
@@ -8717,21 +8757,33 @@ pub fn build_window(
                     let rot = inspector_view.rotate_spin.value().round() as i32;
                     let fh = inspector_view.flip_h_btn.is_active();
                     let fv = inspector_view.flip_v_btn.is_active();
+                    let use_paused_refresh = {
+                        let proj = project.borrow();
+                        selected_clip_is_static_image(&proj, selected.as_deref())
+                    };
                     let mut pp = prog_player.borrow_mut();
-                    pp.enter_transform_live_mode();
-                    pp.set_transform_properties_only(
-                        selected.as_deref(),
-                        cl,
-                        crv,
-                        ct,
-                        cb,
-                        rot,
-                        fh,
-                        fv,
-                        sc,
-                        px,
-                        py,
-                    );
+                    if use_paused_refresh {
+                        if let Some(ref clip_id) = selected {
+                            pp.update_transform_for_clip(
+                                clip_id, cl, crv, ct, cb, rot, fh, fv, sc, px, py,
+                            );
+                        }
+                    } else {
+                        pp.enter_transform_live_mode();
+                        pp.set_transform_properties_only(
+                            selected.as_deref(),
+                            cl,
+                            crv,
+                            ct,
+                            cb,
+                            rot,
+                            fh,
+                            fv,
+                            sc,
+                            px,
+                            py,
+                        );
+                    }
                     // 4. Update window dirty marker
                     if let Some(win) = window_weak.upgrade() {
                         let proj = project.borrow();
@@ -8773,24 +8825,36 @@ pub fn build_window(
                         let proj = project.borrow();
                         selected_clip_is_adjustment(&proj, selected.as_deref())
                     };
+                    let use_paused_refresh = {
+                        let proj = project.borrow();
+                        selected_clip_is_static_image(&proj, selected.as_deref())
+                    };
                     if !is_adjustment {
                         player.borrow().set_transform(cl, cr, ct, cb, rot, fh, fv);
                     }
                     let mut pp = prog_player.borrow_mut();
-                    pp.enter_transform_live_mode();
-                    pp.set_transform_properties_only(
-                        selected.as_deref(),
-                        cl,
-                        cr,
-                        ct,
-                        cb,
-                        rot,
-                        fh,
-                        fv,
-                        sc,
-                        px,
-                        py,
-                    );
+                    if use_paused_refresh {
+                        if let Some(ref clip_id) = selected {
+                            pp.update_transform_for_clip(
+                                clip_id, cl, cr, ct, cb, rot, fh, fv, sc, px, py,
+                            );
+                        }
+                    } else {
+                        pp.enter_transform_live_mode();
+                        pp.set_transform_properties_only(
+                            selected.as_deref(),
+                            cl,
+                            cr,
+                            ct,
+                            cb,
+                            rot,
+                            fh,
+                            fv,
+                            sc,
+                            px,
+                            py,
+                        );
+                    }
                     if let Some(win) = window_weak.upgrade() {
                         let proj = project.borrow();
                         win.set_title(Some(&format!("UltimateSlice — {} •", proj.title)));
@@ -8834,24 +8898,36 @@ pub fn build_window(
                         let proj = project.borrow();
                         selected_clip_is_adjustment(&proj, selected.as_deref())
                     };
+                    let use_paused_refresh = {
+                        let proj = project.borrow();
+                        selected_clip_is_static_image(&proj, selected.as_deref())
+                    };
                     if !is_adjustment {
                         player.borrow().set_transform(cl, cr, ct, cb, rot, fh, fv);
                     }
                     let mut pp = prog_player.borrow_mut();
-                    pp.enter_transform_live_mode();
-                    pp.set_transform_properties_only(
-                        selected.as_deref(),
-                        cl,
-                        cr,
-                        ct,
-                        cb,
-                        rot,
-                        fh,
-                        fv,
-                        sc,
-                        px,
-                        py,
-                    );
+                    if use_paused_refresh {
+                        if let Some(ref clip_id) = selected {
+                            pp.update_transform_for_clip(
+                                clip_id, cl, cr, ct, cb, rot, fh, fv, sc, px, py,
+                            );
+                        }
+                    } else {
+                        pp.enter_transform_live_mode();
+                        pp.set_transform_properties_only(
+                            selected.as_deref(),
+                            cl,
+                            cr,
+                            ct,
+                            cb,
+                            rot,
+                            fh,
+                            fv,
+                            sc,
+                            px,
+                            py,
+                        );
+                    }
                     if let Some(win) = window_weak.upgrade() {
                         let proj = project.borrow();
                         win.set_title(Some(&format!("UltimateSlice — {} •", proj.title)));
@@ -9476,7 +9552,7 @@ pub fn build_window(
                             selected.as_deref(),
                             pos_ns,
                         );
-                        let (ix, iy) = pp_ref.content_inset();
+                        let (ix, iy) = pp_ref.content_inset_for_clip(selected.as_deref());
                         to.set_content_inset(ix, iy);
                     }
                 }
@@ -11280,7 +11356,9 @@ pub fn build_window(
                         prog_canvas_frame.set_ratio(proj.width as f32 / proj.height as f32);
                     }
                     sync_transform_overlay_to_playhead(to, &proj, selected.as_deref(), playhead_ns);
-                    let (ix, iy) = prog_player.borrow().content_inset();
+                    let (ix, iy) = prog_player
+                        .borrow()
+                        .content_inset_for_clip(selected.as_deref());
                     to.set_content_inset(ix, iy);
                 }
 
@@ -11341,7 +11419,9 @@ pub fn build_window(
                         selected.as_deref(),
                         playhead_ns,
                     );
-                    let (ix, iy) = prog_player.borrow().content_inset();
+                    let (ix, iy) = prog_player
+                        .borrow()
+                        .content_inset_for_clip(selected.as_deref());
                     to.set_content_inset(ix, iy);
                 }
                 // Keep media browser in sync with timeline clip sources after project open/load.
