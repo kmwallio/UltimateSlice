@@ -10931,11 +10931,23 @@ pub fn build_window(
                 let workspace_layouts_applying_c = workspace_layouts_applying.clone();
                 let sync_workspace_layout_state_c = sync_workspace_layout_state.clone();
                 pop_win.connect_close_request(move |w| {
-                    let mut state = monitor_state_c.borrow_mut();
-                    state.width = w.width().max(320);
-                    state.height = w.height().max(180);
-                    state.popped = false;
-                    crate::ui_state::save_program_monitor_state(&state);
+                    // Release the `monitor_state` borrow before touching
+                    // any widget that can fire signals which themselves
+                    // re-borrow `monitor_state` — notably
+                    // `docked_paned_c.set_start_child()` (via position-
+                    // notify) and `sync_workspace_layout_state_c()`
+                    // (which reads the monitor snapshot). A double-
+                    // borrow inside a GTK4 C trampoline aborts the
+                    // process without unwinding — see
+                    // docs/ARCHITECTURE.md "GTK4 C trampolines cannot
+                    // unwind".
+                    {
+                        let mut state = monitor_state_c.borrow_mut();
+                        state.width = w.width().max(320);
+                        state.height = w.height().max(180);
+                        state.popped = false;
+                        crate::ui_state::save_program_monitor_state(&state);
+                    }
                     w.set_child(Option::<&gtk::Widget>::None);
                     if monitor_c.parent().is_none() {
                         docked_paned_c.set_start_child(Some(&monitor_c));
