@@ -25,7 +25,7 @@ The **Timeline** panel (bottom) is where you arrange, trim, and edit clips into 
 There are several ways to get clips onto the timeline:
 
 - **Drag from Media Browser** — drag a clip from the media library panel and drop it onto a track at the desired position.
-- **Drag from File Manager** — drag files directly from Nautilus, Thunar, or any file manager onto the timeline. Files are automatically imported into the media library and placed as clips at the drop position. Multiple files are placed sequentially. Video files with audio create linked A/V clip pairs when auto-link is applicable.
+- **Drag from File Manager** — drag files directly from Nautilus, Thunar, or any file manager onto the timeline. Files are automatically imported into the media library and placed as clips at the drop position. Multiple files are placed sequentially. Video files with audio follow the same **Source Monitor A/V auto-link** setting as other source placements: enabled creates linked A/V clip pairs when matching tracks exist, while disabled uses single-clip placement behavior.
 - **Append to Timeline** — use the "Append to Timeline" button in the media browser to place the selected clip at the end of the first matching track.
 - **Insert / Overwrite** — use Insert (`,`) or Overwrite (`.`) to place the source monitor selection at the playhead position.
 - **Source Monitor drag** — drag from the source monitor preview directly onto a timeline track.
@@ -119,6 +119,68 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 - Join Through Edit is unavailable when metadata/effect settings have diverged between the two segments or when the selection resolves to multiple candidate boundaries.
 - Also available from the right-click clip context menu as **Join Through Edit**.
 
+### Remove Silent Parts
+
+Cut out long silences from a clip using ffmpeg `silencedetect`.
+
+1. Right-click an audio-bearing clip on the timeline and choose **Remove Silent Parts…**
+2. Set the **Silence threshold (dBFS)** — audio below this level counts as silence. Default −50 dBFS works well for clean speech; try −40 for noisier rooms.
+3. Set the **Minimum silence duration (seconds)** — short pauses below this length are kept. Default 0.5 s.
+4. Click **Suggest** to auto-pick the threshold from the clip's measured noise floor (uses ffmpeg `astats`, 5th-percentile RMS + 6 dB headroom). The suggestion appears in the spinner with a status label below.
+5. Click **Remove** — ffmpeg analyzes the clip in a background thread and the silent segments are removed (the clip is split into back-to-back sub-clips around the speech regions, preserving the speech timing).
+6. **Undo** with `Ctrl+Z` to restore the original clip.
+
+The Suggest button shares its analysis logic with the Inspector's voice-isolation Suggest button. If the suggested threshold seems too aggressive (cutting real audio) or too lax (leaving silences), nudge the spinner manually before clicking Remove.
+
+### Detect Scene Cuts
+
+Automatically find scene/shot boundaries in a clip using ffmpeg video analysis.
+
+1. Right-click a video or audio clip on the timeline and choose **Detect Scene Cuts…**
+2. Set the **threshold** (1–50, default 10). Lower values detect more cuts, including subtle transitions. Higher values only detect obvious hard cuts.
+3. Click **Detect** — ffmpeg analyzes the video in a background thread (title bar shows progress).
+4. The clip is split at each detected cut point into back-to-back sub-clips, preserving the total duration.
+5. **Undo** with `Ctrl+Z` to restore the original clip.
+
+Also available via MCP `detect_scene_cuts` tool for automation.
+
+### Convert LTC Audio to Timecode
+
+Decode **Linear Timecode (LTC)** from a clip's audio and turn it into normal clip/source timecode metadata.
+
+1. Right-click a single source-backed audio or video clip and choose **Convert LTC Audio to Timecode…**
+2. Pick the LTC source channel:
+   - **Auto Detect** tries left, right, then mono mix.
+   - **Left Channel** / **Right Channel** are best when one stereo side is known to carry LTC.
+   - **Mono Mix** is useful for mono LTC or already mixed-down recordings.
+3. Optionally override the LTC frame rate. **Project / Source Default** uses the source frame rate when known, otherwise the project frame rate.
+4. Click **Convert**.
+
+What happens next:
+
+- The decoded base timecode is stored on the media source and on every matching clip already in the project.
+- If LTC is on one stereo side, UltimateSlice routes the **other** side to both speakers using the existing clip channel-routing controls.
+- If the recording is effectively **mono LTC only**, the clip is muted after conversion.
+- You can then group clips and use **Align Grouped Clips by Timecode** normally.
+
+Also available via MCP `convert_ltc_audio_to_timecode` for automation.
+
+### Generate Music on an Audio Track
+
+Use MusicGen to fill an empty span on an audio track with generated background music.
+
+1. Right-click an **audio track header** and choose **Generate Music Region…**.
+2. Drag across **empty space on that same audio track** to define the target region.
+3. Enter a prompt in the MusicGen dialog and click **Generate**.
+4. UltimateSlice shows the requested region inline while generation is pending, then replaces it with the generated WAV clip when the job completes.
+
+- Regions must be **between 1 and 30 seconds**.
+- Regions must stay in **empty audio-track space**; drawing across an existing clip is rejected.
+- Press **Escape** to cancel an armed region draw before you start dragging.
+- The existing **Generate Music…** track action still works when you want a playhead-based generation instead of drawing a region first.
+- **Reference audio (optional):** click **Choose Reference Audio…** in the dialog to point at any audio or video file. UltimateSlice analyzes its tempo (BPM), musical key/mode, brightness, and dynamics, then prefills a **Style hints** field with a natural-language descriptor (e.g. *"around 128 BPM, in the key of C major, bright timbre, dynamic energy"*). The hints are appended to your prompt before generation; you can edit or clear them in place. Analysis runs in the background and only the first 30 seconds of the reference are inspected. The MusicGen model itself is unchanged — this is text-prompt augmentation on top of the existing musicgen-small model. The MCP `generate_music` tool accepts an equivalent `reference_audio_path` argument.
+- Music generation requires the MusicGen ONNX models under `~/.local/share/ultimateslice/models/musicgen-small/` and a build with the `ai-inference` feature enabled.
+
 ## Image Clips
 
 Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC, SVG) can be placed on the timeline like video clips.
@@ -203,7 +265,7 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC, SVG) can be placed on the t
 
 ### Clip Linking (`Ctrl+L`, `Ctrl+Shift+L`)
 
-- Dragging or MCP-placing a source that contains both video and audio auto-creates a linked A/V pair when matching video and audio tracks exist. Source Monitor Append/Insert/Overwrite do the same only when Source Monitor A/V auto-link is enabled; when disabled, those operations use single-clip placement behavior.
+- Dragging or MCP-placing a source that contains both video and audio follows **Source Monitor A/V auto-link**. When enabled, UltimateSlice auto-creates a linked A/V pair if matching video and audio tracks exist. When disabled, those operations use single-clip placement behavior.
 - Auto-linked pairs share the same clip link group immediately, so the picture and sound stay selected/moved/deleted together without requiring a manual `Ctrl+L`.
 - While a linked same-source audio-track peer exists, UltimateSlice suppresses the duplicate embedded audio from the linked video-track clip to avoid doubled playback/export audio. Unlinking restores the video clip's own embedded audio automatically.
 - **Link (`Ctrl+L`)** assigns the current multi-selection to a shared clip link group.
@@ -244,7 +306,7 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC, SVG) can be placed on the t
 | `Ctrl+Shift+G` | Ungroup selected clips |
 | `Ctrl+L` | Link selected clips |
 | `Ctrl+Shift+L` | Unlink selected clips |
-| `Right-click clip` | Open clip context menu with only currently actionable clip actions (join-through-edit, freeze-frame, link/unlink, grouped timecode-align, audio sync when applicable) |
+| `Right-click clip` | Open clip context menu with only currently actionable clip actions (join-through-edit, freeze-frame, link/unlink, grouped timecode-align, audio sync, detect scene cuts when applicable) |
 | `Shift+Click` (timeline) | Add range selection (same-track span, or cross-track time-range select) |
 | `Ctrl`/`Cmd` + Click (timeline) | Toggle clip in current selection |
 | `Ctrl+A` | Select all timeline clips |
@@ -291,12 +353,18 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC, SVG) can be placed on the t
 ## Transitions
 
 - Use the **Transitions** pane on the right (below Inspector) to browse available transitions.
+- The pane exposes the preview-supported transition set: `Cross-dissolve`, `Fade to black`, `Fade to white`, `Wipe left/right/up/down`, `Circle open/close`, `Cover left/right/up/down`, `Reveal left/right/up/down`, and `Slide left/right/up/down`.
+- The transition list scrolls, and the divider above it can be dragged to resize how much of the right sidebar the pane uses.
 - Use the pane's button to **hide/show** the transition list.
-- Drag **Cross-dissolve** from the pane and drop it near a clip boundary in the timeline to apply a transition marker.
+- Saved **Workspace** layouts remember the transitions-pane split height.
+- Drag a transition from the pane and drop it near a clip boundary in the timeline to apply a transition marker.
 - While dragging, the two clips that will receive the transition are highlighted as a live preview.
-- **Remove a transition** by right-clicking its boundary marker in the timeline.
-- Exports apply cross-dissolves on the primary video track.
-- Preview shows transition fade ramps at clip boundaries for cross-dissolve markers.
+- New drops start with a default **500 ms** duration and can be refined from the clip **Inspector → Transition** section.
+- The Inspector's **Alignment** control changes where the overlap sits relative to the cut: **End on cut** keeps the overlap before the cut, **Center on cut** straddles it, and **Start on cut** pushes the overlap after it.
+- **Remove a transition** by right-clicking its boundary marker in the timeline or by clicking **Remove Transition** in the Inspector.
+- Preview, export, and background prerender all follow the same transition duration/alignment timing.
+- Export and background prerender use the exact selected supported transition, matching the live Program Monitor preview.
+- For after-cut overlap, UltimateSlice keeps the outgoing clip visible by holding its final frame through the post-cut portion of the transition.
 - Transitions are designed to be extensible: future transition types will appear in the same pane.
 
 ## Keyframes panel (dopesheet)

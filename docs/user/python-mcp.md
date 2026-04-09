@@ -158,6 +158,53 @@ python3 tools/mcp_call.py reset_workspace_layout '{}'
 
 `list_workspace_layouts` returns the current live arrangement in `current`, saved presets in `layouts`, and the exact-matching saved preset name (if any) in `active_layout`. Saved layout names are app-global UI state, not project data.
 
+## Audio matching MCP example
+
+List clips first so you have the source and reference ids:
+
+```bash
+python3 tools/mcp_call.py list_clips '{}'
+```
+
+Then match the source clip toward the reference clip's loudness and tonal balance:
+
+```bash
+python3 tools/mcp_call.py match_clip_audio '{"source_clip_id":"clip-1","reference_clip_id":"clip-2"}'
+```
+
+Optional nanosecond offsets let you target only a selected subrange inside either clip:
+
+```bash
+python3 tools/mcp_call.py match_clip_audio '{"source_clip_id":"clip-1","source_start_ns":1000000000,"source_end_ns":3500000000,"reference_clip_id":"clip-2","reference_start_ns":2000000000,"reference_end_ns":4500000000}'
+```
+
+`match_clip_audio` applies an undoable loudness + adaptive built-in 3-band EQ adjustment to the source clip, including derived band frequency/gain/Q targets. If the clips already have subtitle/STT timing, the matcher prioritizes those dialogue regions; otherwise it falls back to voice-active frame weighting. Optional `source_*` / `reference_*` range arguments are relative to each clip's current in-point. It is designed for conservative dialogue/reference matching rather than full microphone or voice cloning.
+
+Optional channel overrides let you force how each side is analyzed when dealing with stereo or one-sided recordings:
+
+```bash
+python3 tools/mcp_call.py match_clip_audio '{"source_clip_id":"clip-1","source_channel_mode":"left","reference_clip_id":"clip-2","reference_channel_mode":"mono_mix"}'
+```
+
+When channel modes are omitted, `match_clip_audio` defaults to `auto`, which respects the clip's existing channel routing and automatically picks a dominant single side when the opposite channel is effectively silent.
+
+## LTC audio-to-timecode MCP example
+
+If a clip carries SMPTE LTC on one audio channel, decode it into normal source timecode metadata:
+
+```bash
+python3 tools/mcp_call.py convert_ltc_audio_to_timecode '{"clip_id":"clip-1","ltc_channel":"auto","frame_rate":"29.97"}'
+```
+
+Typical response fields:
+
+- `timecode` — decoded `HH:MM:SS:FF`
+- `resolved_ltc_channel` — which channel actually decoded (`left`, `right`, or `mono_mix`)
+- `applied_audio_channel_mode` — resulting program-audio routing (`left` or `right`) when stereo cleanup was possible
+- `muted` — `true` when the clip had only LTC audio and was muted after conversion
+
+After conversion, the clip can participate in grouped **Align Grouped Clips by Timecode** workflows just like media with imported source timecode.
+
 ## Project management examples
 
 Create a new empty project:

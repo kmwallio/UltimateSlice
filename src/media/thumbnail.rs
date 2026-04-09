@@ -6,6 +6,7 @@ use std::path::Path;
 
 /// Extract a single video frame from a file at `time_ns` nanoseconds.
 /// Returns the frame as a `gdk4::MemoryTexture`.
+// Planned for UI thumbnail previews (not yet wired into the media browser).
 #[allow(dead_code)]
 pub fn extract_frame(source_path: &str, time_ns: u64) -> Result<gdk4::MemoryTexture> {
     gst::init()?;

@@ -61,6 +61,10 @@ fn default_timeline_paned_pos() -> i32 {
     0
 }
 
+fn default_right_sidebar_paned_pos() -> i32 {
+    580
+}
+
 const WORKSPACE_SPLIT_RATIO_SCALE: i32 = 1000;
 
 fn default_workspace_panel_visible() -> bool {
@@ -194,6 +198,10 @@ pub struct WorkspaceArrangement {
     pub timeline_paned_pos: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeline_paned_ratio_permille: Option<u16>,
+    #[serde(default = "default_right_sidebar_paned_pos")]
+    pub right_sidebar_paned_pos: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right_sidebar_paned_ratio_permille: Option<u16>,
     #[serde(default = "default_workspace_panel_visible")]
     pub media_browser_visible: bool,
     #[serde(default = "default_workspace_panel_visible")]
@@ -219,6 +227,8 @@ impl Default for WorkspaceArrangement {
             left_vpaned_ratio_permille: None,
             timeline_paned_pos: default_timeline_paned_pos(),
             timeline_paned_ratio_permille: None,
+            right_sidebar_paned_pos: default_right_sidebar_paned_pos(),
+            right_sidebar_paned_ratio_permille: None,
             media_browser_visible: default_workspace_panel_visible(),
             inspector_visible: default_workspace_panel_visible(),
             keyframe_editor_visible: false,
@@ -1010,7 +1020,7 @@ pub struct PreferencesState {
     /// Show thumbnail preview strips on timeline video clips.
     #[serde(default = "default_show_timeline_preview")]
     pub show_timeline_preview: bool,
-    /// Auto-link source monitor A/V placements into paired video+audio clips when possible.
+    /// Auto-link source placements and timeline drops into paired video+audio clips when possible.
     #[serde(default = "default_source_monitor_auto_link_av")]
     pub source_monitor_auto_link_av: bool,
     /// Show per-track audio levels in timeline track labels.
@@ -1597,6 +1607,11 @@ mod tests {
         assert_eq!(decoded.root_hpaned_pos, 1596);
         assert!(decoded.root_hpaned_ratio_permille.is_none());
         assert!(decoded.root_vpaned_ratio_permille.is_none());
+        assert_eq!(
+            decoded.right_sidebar_paned_pos,
+            default_right_sidebar_paned_pos()
+        );
+        assert!(decoded.right_sidebar_paned_ratio_permille.is_none());
     }
 
     #[test]

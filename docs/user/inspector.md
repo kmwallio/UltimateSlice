@@ -2,7 +2,7 @@
 
 The **Inspector** panel (right side) shows and edits the properties of the currently selected timeline clip.
 
-Select a clip in the timeline to populate the Inspector. All changes apply immediately to the program monitor preview.
+Select a clip in the timeline to populate the Inspector. All changes apply immediately to the program monitor preview. Clips inside compound clips are fully supported -- double-click a compound clip to enter it, then select an internal clip to inspect and edit its properties.
 
 ---
 
@@ -18,6 +18,27 @@ Select a clip in the timeline to populate the Inspector. All changes apply immed
 | **Out** | Source Out-point |
 | **Duration** | Source duration |
 | **Timeline Start** | Position of the clip on the timeline |
+
+---
+
+## Transition
+
+The Inspector can edit the selected clip's **outgoing** transition when another clip follows it on the same track.
+
+- In the Inspector layout, the **Transition** section appears below **Transform** and starts collapsed by default.
+
+| Control | Description |
+|---|---|
+| **Type** | `None`, `Cross-dissolve`, `Fade to black`, `Fade to white`, `Wipe left/right/up/down`, `Circle open/close`, `Cover left/right/up/down`, `Reveal left/right/up/down`, or `Slide left/right/up/down` |
+| **Duration (ms)** | Transition length in milliseconds. Durations are clamped automatically to the boundary capacity of the two adjacent clips |
+| **Alignment** | Controls where the overlap sits relative to the edit (`End on cut`, `Center on cut`, `Start on cut`) |
+| **Remove Transition** | Clears the outgoing transition from the selected clip |
+
+- Dragging from the **Transitions** browser still creates a new transition with the default **500 ms** duration; use the Inspector to refine it after drop.
+- If the selected clip has no following clip on the same track, transition editing is disabled and the Inspector explains why.
+- Duration and alignment changes affect preview, export, and background prerender together.
+- Program Monitor keeps exact live previews for all supported transition types.
+- `Start on cut` and the after-cut half of `Center on cut` keep the outgoing clip visible by holding its last frame after the cut. UltimateSlice does this because trimmed clips do not currently expose hidden source handles past their out-point.
 
 ---
 
@@ -76,13 +97,56 @@ Video stabilization compensates camera shake using ffmpeg's libvidstab (two-pass
 | Slider | Range | Default | Effect |
 |---|---|---|---|
 | **Volume** | −100 dB → +12 dB | 0 dB | Per-clip gain (`0 dB = 1.0x`, `-96 dB`/`-100 dB` ≈ mute) |
+| **Voice Isolation** | 0% → 100% | Off | Ducks volume between spoken words. See **Voice Isolation Source** below. |
 | **Pan** | −1.0 → 1.0 | 0.0 | Stereo position (−1 = full left, +1 = full right) |
+
+#### Voice Isolation Source
+
+Voice isolation needs to know *when* the speech is happening so it can duck audio in the gaps. UltimateSlice supports two ways to provide that timing:
+
+- **Subtitles** (default) — uses Whisper-generated word timings. Requires running **Generate Subtitles** on the clip first. Best precision when the audio transcribes well.
+- **Silence Detect** — uses ffmpeg's `silencedetect` filter to find speech regions automatically, **without subtitles**. Use this for clips that don't transcribe well (music beds, ambient/B-roll, foreign-language clips) or when running Whisper is overkill.
+
+When **Silence Detect** is selected, three additional controls appear:
+
+| Control | Range | Default | Effect |
+|---|---|---|---|
+| **Silence threshold** | −60 dB → −10 dB | −30 dB | Audio below this level is treated as silence. Lower = stricter (only true near-silence counts as a gap). |
+| **Min gap** | 50 ms → 2000 ms | 200 ms | Minimum silence duration to count as a gap. Higher = ignore brief pauses between words. |
+| **Suggest** button | — | — | Analyzes the clip's noise floor with `astats` and auto-picks a threshold (5th-percentile RMS + 6 dB headroom). |
+| **Analyze Audio** button | — | — | Runs `silencedetect` with the current threshold + min-gap settings, stores the resulting speech intervals on the clip. **Required** before silence-mode voice isolation takes effect. |
+
+The detected speech intervals are cached on the clip but **not** persisted in `.fcpxml` — the source path, threshold, min-gap, and source mode round-trip, but the intervals themselves are re-analyzed on demand after reload (click **Analyze Audio** again). Threshold/min-gap edits and trim edits both invalidate the cache.
+
+MCP tools:
+- `set_voice_isolation_source` — switch between `"subtitles"` and `"silence"`
+- `set_voice_isolation_silence_params` — set `threshold_db` and/or `min_ms`
+- `suggest_voice_isolation_threshold` — returns a suggested threshold without mutating the clip
+- `analyze_voice_isolation_silence` — runs the analysis and stores intervals
 
 ### Normalize Audio
 
 The **Normalize...** button (next to the volume slider) analyzes the clip's loudness using FFmpeg's EBU R128 measurement and adjusts the volume to hit **-14 LUFS** (YouTube/streaming standard). After analysis, the measured loudness is displayed (e.g., "−18.3 LUFS") and the volume slider updates to the normalized value. Fully undo-able.
 
 MCP tool: `normalize_clip_audio` supports `mode` (`lufs` or `peak`) and `target_level` (e.g., `-14.0` for LUFS, `0.0` for peak dBFS).
+
+### Match Audio
+
+The **Match Audio...** button analyzes the selected clip against another audio-capable clip and applies a conservative reference match using integrated loudness plus the built-in **Low / Mid / High** EQ bands. It now derives the three bands' **frequency**, **gain**, and **Q** from a finer speech-focused spectrum analysis instead of only pushing fixed band gains. If the clips already have subtitle/STT timing, Match Audio prioritizes those dialogue regions; otherwise it falls back to voice-active frame weighting to reduce the influence of silence, room tone, and non-speech noise. This works best when both clips contain the same speaker or similar dialogue material, such as nudging a lav mic recording closer to a shotgun mic recording.
+
+- Pick the source clip in the timeline, click **Match Audio...**, then choose the reference clip.
+- **Match voice** is the default and recommended mode: it analyzes the full trimmed source/reference clips while still prioritizing dialogue or voice regions automatically.
+- **Channel handling** defaults to **Auto (Recommended)**, which respects each clip's current channel routing and automatically switches to a single side when the other stereo channel is effectively silent. You can also force **Mono Mix**, **Left Only**, or **Right Only** analysis.
+- Switch **Match mode** to **Choose region...** to reveal **Source In/Out** and **Reference In/Out** timecode fields when you want to match only a selected phrase. Those fields default to each clip's full trimmed duration and use the project frame rate for timecode entry.
+- UltimateSlice measures both clips in the background and applies one undoable update to the source clip's volume, measured loudness, **3-band EQ**, and a separate **7-band match EQ** (`match_eq_bands`) for finer mic matching.
+- The 7-band match EQ centers are at ~100 Hz, 200 Hz, 400 Hz, 800 Hz, 2 kHz, 5 kHz, and 9 kHz — covering body/clothing resonance, chest/proximity effect, low-mid muddiness, fundamental speech, presence, and air. Both EQs are applied in series during export AND in live preview (the program player wires a dedicated 7-band equalizer element into each slot's audio chain when match EQ is present). The 3-band EQ remains available for manual tweaks on top.
+- When match EQ is active, the inspector shows a small **frequency-response curve** below the **Match Audio…** button (log-frequency X axis, ±12 dB Y axis, with band markers). A **Clear Match EQ** button next to it resets just the 7-band match correction without touching your manual 3-band EQ.
+- While the analysis is running, the bottom status bar shows **Matching audio...** and the shared progress bar pulses until the result is applied or fails.
+- The result is a tonal nudge, not full microphone cloning: room reflections, de-reverb, compression, and noise reduction are out of scope.
+
+MCP tools:
+- `match_clip_audio` with `source_clip_id`, `reference_clip_id`, optional `source_start_ns`, `source_end_ns`, `reference_start_ns`, `reference_end_ns`, plus optional `source_channel_mode` / `reference_channel_mode`. The response includes both `eq_bands` (3-band) and `match_eq_bands` (7-band).
+- `clear_match_eq` with `clip_id` resets just the 7-band match EQ on a clip, leaving the user 3-band EQ untouched.
 
 ### Audio keyframes (phase 1)
 
@@ -123,14 +187,14 @@ Applied via GStreamer `videocrop`, `videoflip`, `videoscale`, and `videobox` (pr
 | **Anamorphic Desqueeze** | Dropdown | Lens desqueeze factor: None (1.0x), 1.33x, 1.5x, 1.8x, 2.0x. Applies non-square pixel aspect ratio for anamorphic footage |
 | **Scale** | 0.1 → 4.0 | Zoom factor. 1.0 = normal, 2.0 = 2× zoom in (crops), 0.5 = half size (letterbox/pillarbox) |
 | **Opacity** | 0.0 → 1.0 | Layer blend amount. 1.0 = fully opaque, 0.0 = fully transparent |
-| **Position X** | −1.0 → 1.0 | Horizontal offset within the frame. 0.0 = center, −1.0 = full left, 1.0 = full right |
-| **Position Y** | −1.0 → 1.0 | Vertical offset within the frame. 0.0 = center, −1.0 = full top, 1.0 = full bottom |
-| **Crop Left/Right/Top/Bottom** | 0 → 500 px | Crop pixels from each edge |
+| **Position X** | −3.0 → 3.0 | Horizontal offset. 0.0 = center, ±1.0 = clip edge touches the canvas edge, values past ±1.0 push the clip off-canvas (the preview compositor and export ffmpeg graph crop/pad past the frame edges) |
+| **Position Y** | −3.0 → 3.0 | Vertical offset. 0.0 = center, ±1.0 = clip edge touches the canvas edge, values past ±1.0 push the clip off-canvas |
+| **Crop Left/Right/Top/Bottom** | 0 → 4000 px | Crop pixels from each edge (in project pixels). The transform overlay also clamps each edge against the actual project resolution at runtime so opposing crops can never exceed the frame width/height |
 | **Rotate** | Dial/knob + numeric angle (−180° → 180°) | Arbitrary-angle rotation |
 | **Flip H** | Toggle | Mirror horizontally |
 | **Flip V** | Toggle | Mirror vertically |
 
-> **Adjustment layers:** the same transform controls define the adjustment clip's scoped effect region in preview and export. **Scale, Position, Crop, Rotate, and Opacity** stay active; **Blend Mode**, **Anamorphic Desqueeze**, and **Flip H/V** are shown but disabled because adjustment clips do not create their own image layer.
+> **Adjustment layers:** the same transform controls define the adjustment clip's scoped effect region in preview and export. **Scale, Position, Crop, Rotate, and Opacity** stay active; **Blend Mode**, **Anamorphic Desqueeze**, and **Flip H/V** are shown but disabled because adjustment clips do not create their own image layer. Adjustment clips now also expose the normal **Shape Mask** section, and that mask is intersected with the transform/crop scope instead of replacing it. On adjustment clips, **Position X/Y** move the scoped region itself, so tracked/full-frame masked adjustments still translate visibly at `Scale = 1.0`.
 
 ### Transform keyframes (phase 1)
 
@@ -195,6 +259,35 @@ Program Monitor overlay integration:
 
 ---
 
+## Motion Tracking
+
+The **Motion Tracking** section is available on visual clips and covers both tracker authoring and tracker attachments.
+
+| Control | Description |
+|---|---|
+| **Tracker** | Select which tracker on the current clip to edit. Use **+** to add a tracker to this clip and **Delete** to remove the selected tracker |
+| **Label** | Rename the selected tracker |
+| **Edit Region in Monitor** | Shows the tracker region in the Program Monitor so you can drag it into place visually |
+| **Region Center X / Y** | Normalized tracker region center |
+| **Region Width / Height** | Normalized half-size of the tracked region |
+| **Region Rotation** | Rotation of the analysis rectangle |
+| **Track Region / Re-run Tracking** | Run motion analysis for the selected tracker on the current clip, or regenerate samples after changing the tracker region |
+| **Cancel** | Stop an in-progress tracking analysis job |
+| **Attach To** | Choose whether a tracker drives the **Clip Transform** or the clip's **First Mask** |
+| **Follow Tracker** | Attach this clip or mask to a tracker created on another clip in the project |
+| **Clear Attachment** | Remove the current tracker attachment from the clip or mask |
+
+- Trackers are stored on the source clip that was analyzed.
+- Attachments are stored on the follower clip transform or its first mask.
+- If you move or resize the tracker region after analysis, UltimateSlice keeps the attachment but clears the old samples; run **Re-run Tracking** on the source clip again before expecting preview/export motion.
+- The **Follow Tracker** picker labels trackers that have no samples yet, and attached clips/masks warn when their source tracker is empty or disabled.
+- The built-in tracker currently analyzes **translation** motion, so tracked overlays and masks follow position but do not yet infer scale or rotation automatically.
+- Tracker attachments are resolved in both Program Monitor preview and export, and they persist through UltimateSlice project save/load (`.uspxml` vendor-attribute workflow).
+- Title clips and other tracker-followed clips now translate directly across the canvas in preview and export, so **Follow Tracker** still moves them at `Scale = 1.0` instead of appearing to stop at the frame edge. Normal still-image clips stay on the existing still-image preview path unless they are actually following a tracker.
+- Mask attachments currently target the **first rectangle or ellipse mask** on the clip. **Path masks** still need to be animated manually with their own controls/keyframes.
+
+---
+
 ## Subtitles / Captions
 
 Clips with subtitle segments show subtitle style controls in the Inspector.
@@ -202,9 +295,16 @@ Clips with subtitle segments show subtitle style controls in the Inspector.
 | Field | Description |
 |---|---|
 | **Font** | Subtitle font description (Pango-style, e.g. `Sans Bold 24`) |
+| **Bold** | Always-on bold for all subtitle text (independent of font description) |
+| **Italic** | Always-on italic for all subtitle text |
+| **Underline** | Always-on underline for all subtitle text |
+| **Shadow** | Draw a drop shadow behind all subtitle text |
+| **Shadow Color** | Shadow color (default: semi-transparent black) |
+| **Shadow Offset X/Y** | Shadow displacement in points (default: 1.5) |
 | **Text Color** | Main subtitle text color |
-| **Word Highlight** | `None`, `Bold`, `Color`, `Underline`, or `Stroke` |
-| **Highlight Color** | Active-word color for `Color` / `Stroke` highlight modes |
+| **Word Highlight Flags** | Multi-select checkboxes: combine Bold, Color, Underline, Stroke, Italic, Background, and Shadow effects on the active word (replaces old single-mode dropdown) |
+| **Highlight Color** | Active-word color for Color / Stroke highlight effects |
+| **BG Highlight Color** | Background highlight color behind the active word (default: semi-transparent yellow) |
 | **Word Window** | Number of nearby words grouped on screen around the active word |
 | **Vertical Position** | Subtitle placement from top (`0.0`) to bottom (`1.0`) |
 | **Outline Color** | Subtitle outline/stroke color |
@@ -259,18 +359,25 @@ Controls the playback speed and direction of the clip. Changing speed adjusts th
 |---|---|---|---|
 | **Speed Multiplier** | 0.25× → 4.0× | 1.0× | 0.5× = slow-motion, 2.0× = fast-forward |
 | **Reverse** | Checkbox | Off | Play the clip backwards (reversed frame order) |
-| **Slow-Motion Interpolation** | Off / Frame Blending / Optical Flow | Off | Synthesizes intermediate frames on export for smooth slow-motion (speed < 1.0 only) |
+| **Slow-Motion Interpolation** | Off / Frame Blending / Optical Flow / AI Interpolation (RIFE) | Off | Synthesizes intermediate frames for smooth slow-motion (speed < 1.0 only) |
 
 Marks at **½×**, **1×**, **2×** for quick snapping.
 
 ### Slow-motion interpolation
 
-When a clip's speed is below 1.0, the default behavior repeats frames to fill the longer duration, which can look stuttery. The **Slow-Motion Interpolation** dropdown offers two alternatives:
+When a clip's speed is below 1.0, the default behavior repeats frames to fill the longer duration, which can look stuttery. The **Slow-Motion Interpolation** dropdown offers three alternatives:
 
-- **Frame Blending** — fast temporal averaging (`minterpolate mi_mode=blend`). Produces a slight motion-blur effect between frames.
-- **Optical Flow** — motion-compensated interpolation (`minterpolate mi_mode=mci`). Slower to encode but produces the smoothest result by synthesizing true intermediate frames.
+- **Frame Blending** — fast temporal averaging (`minterpolate mi_mode=blend`). Produces a slight motion-blur effect between frames. Export-only.
+- **Optical Flow** — classical motion-compensated interpolation (`minterpolate mi_mode=mci`). Slower to encode but produces a smoother result than Frame Blending. Export-only.
+- **AI Interpolation (RIFE)** — learned frame interpolation via a RIFE ONNX model. Best quality on rapid motion / occlusion / non-rigid subjects, where classical motion compensation tends to warp or ghost. Unlike the other two modes, the AI sidecar is **shared between Program Monitor preview and export**, so what you scrub through in the monitor is exactly what you get in the rendered MP4.
 
-This is an **export-only** feature — `minterpolate` is too CPU-intensive for real-time preview. Background prerender includes it when enabled. The setting has no effect when speed is 1.0 or higher. Persists via FCPXML.
+#### How AI Interpolation works
+
+When you switch a slowed clip to **AI Interpolation**, a background worker decodes the source, runs RIFE pairwise to produce intermediate frames (multiplier `M = ceil(1 / min_speed)`, clamped to 2× / 4× / 8×), and writes a higher-fps H.264 sidecar to `~/.cache/ultimateslice/frame_interp/`. A status row beneath the dropdown shows **Generating…**, **Ready**, **Error**, or **Model not installed**. While generation is in progress the clip plays through the original source (so you keep working); once the sidecar is ready, the next preview rebuild and any export pick it up automatically.
+
+The AI mode requires a **RIFE ONNX model** in `~/.local/share/ultimateslice/models/rife.onnx` — see [Preferences → Models](preferences.md#models) for the install location and a download link. If the model is missing, the dropdown still accepts the AI option but the status row will say **Model not installed** and preview/export fall back to the original source. AI mode is also a no-op for clips with no slow-motion segment — it only does work when the speed curve dips below 1.0.
+
+The other two modes (Frame Blending / Optical Flow) remain export-only — they use ffmpeg `minterpolate`, which is too CPU-intensive for real-time preview, and are also picked up by background prerender when enabled. All four modes persist via the FCPXML `us:slow-motion-interp` vendor attribute.
 
 ### Variable speed ramps
 
@@ -392,6 +499,10 @@ Restricts the visible area of a clip using a geometric shape. Pixels outside the
 > **Pipeline placement** — The mask is applied after crop and LUT but before color effects and chroma key. It operates in pre-transform clip space, so the mask moves with the clip's scale/position/rotation. Preview uses a GStreamer RGBA pad probe with SDF alpha computation; export uses FFmpeg `geq` expressions (rect/ellipse) or rasterized grayscale PGM with `movie`/`alphamerge` (path).
 
 All numeric mask properties (rect/ellipse) support keyframe animation via the Phase 1 keyframe system.
+
+> **Motion tracking** — The first rectangle/ellipse mask can be attached to a tracker from the **Motion Tracking** section so it follows tracked translation in preview and export. Path masks are still manual/keyframed only.
+
+> **Adjustment layers** — On adjustment clips, the mask limits where the grading/effect pass is applied. The final affected area is the intersection of the adjustment layer's transform/crop scope and the authored mask alpha, so existing scoped-adjustment projects keep the same overall region semantics.
 
 The Program Monitor transform overlay shows a cyan dashed outline of the active mask shape with a center crosshair.
 

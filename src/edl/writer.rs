@@ -1,4 +1,4 @@
-use crate::model::clip::{Clip, ClipKind};
+use crate::model::clip::ClipKind;
 use crate::model::project::{FrameRate, Project};
 use crate::model::track::TrackKind;
 
@@ -89,7 +89,7 @@ fn edl_transition(transition: &str) -> (&'static str, u16) {
         "fade_to_black" => ("D", 0), // treated as dissolve to black
         "wipe_right" => ("W", 1),
         "wipe_left" => ("W", 2),
-        _ => ("C", 0),
+        _ => ("D", 0),
     }
 }
 
@@ -131,7 +131,7 @@ pub fn write_edl(project: &Project) -> String {
                 let audio_idx = project
                     .tracks
                     .iter()
-                    .filter(|t| t.kind == TrackKind::Audio)
+                    .filter(|t| t.is_audio())
                     .position(|t| t.id == track.id)
                     .unwrap_or(0);
                 if audio_idx == 0 {
@@ -169,11 +169,11 @@ pub fn write_edl(project: &Project) -> String {
             let rec_in_tc = frames_to_timecode(rec_in_frames, fps, drop);
             let rec_out_tc = frames_to_timecode(rec_out_frames, fps, drop);
 
-            // Determine transition type from the PREVIOUS clip's transition_after.
+            // Determine transition type from the PREVIOUS clip's outgoing transition.
             let (trans_type, trans_code) = if clip_idx > 0 {
                 let prev = &track.clips[clip_idx - 1];
-                if !prev.transition_after.is_empty() && prev.transition_after_ns > 0 {
-                    edl_transition(&prev.transition_after)
+                if prev.outgoing_transition.is_active() {
+                    edl_transition(prev.outgoing_transition.kind_trimmed())
                 } else {
                     ("C", 0)
                 }
@@ -186,7 +186,10 @@ pub fn write_edl(project: &Project) -> String {
                 "C        ".to_string()
             } else {
                 let dur_frames = if clip_idx > 0 {
-                    ns_to_frames(track.clips[clip_idx - 1].transition_after_ns, fps)
+                    ns_to_frames(
+                        track.clips[clip_idx - 1].outgoing_transition.duration_ns,
+                        fps,
+                    )
                 } else {
                     0
                 };
@@ -232,6 +235,7 @@ pub fn write_edl(project: &Project) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::clip::Clip;
     use crate::model::project::FrameRate;
 
     #[test]

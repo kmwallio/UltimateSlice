@@ -138,10 +138,28 @@ pub enum McpCommand {
         clip_ids: Vec<String>,
         reply: SyncSender<Value>,
     },
+    ConvertLtcAudioToTimecode {
+        clip_id: String,
+        ltc_channel: crate::media::ltc::LtcChannelSelection,
+        frame_rate: Option<crate::model::project::FrameRate>,
+        reply: SyncSender<Value>,
+    },
     TrimClip {
         clip_id: String,
         source_in_ns: u64,
         source_out_ns: u64,
+        reply: SyncSender<Value>,
+    },
+    /// Set per-clip playback speed and (optionally) the slow-motion frame
+    /// interpolation mode.  When `slow_motion_interp` is `"ai"`, the
+    /// FrameInterpCache is asked to precompute a higher-fps sidecar in the
+    /// background; preview/export consume the sidecar once it is ready.
+    SetClipSpeed {
+        clip_id: String,
+        speed: f64,
+        /// `"off"`, `"blend"`, `"optical-flow"`, or `"ai"`. Omit to leave
+        /// the existing interpolation mode unchanged.
+        slow_motion_interp: Option<String>,
         reply: SyncSender<Value>,
     },
     SetClipColor {
@@ -380,6 +398,7 @@ pub enum McpCommand {
         clip_index: usize,
         kind: String,
         duration_ns: u64,
+        alignment: String,
         reply: SyncSender<Value>,
     },
     CreateProject {
@@ -405,6 +424,31 @@ pub enum McpCommand {
         opacity: f64,
         reply: SyncSender<Value>,
     },
+    SetClipVoiceIsolation {
+        clip_id: String,
+        voice_isolation: f64,
+        reply: SyncSender<Value>,
+    },
+    SetVoiceIsolationSource {
+        clip_id: String,
+        /// `"subtitles"` or `"silence"`
+        source: String,
+        reply: SyncSender<Value>,
+    },
+    SetVoiceIsolationSilenceParams {
+        clip_id: String,
+        threshold_db: Option<f64>,
+        min_ms: Option<u32>,
+        reply: SyncSender<Value>,
+    },
+    SuggestVoiceIsolationThreshold {
+        clip_id: String,
+        reply: SyncSender<Value>,
+    },
+    AnalyzeVoiceIsolationSilence {
+        clip_id: String,
+        reply: SyncSender<Value>,
+    },
     SetClipEq {
         clip_id: String,
         low_freq: Option<f64>,
@@ -422,6 +466,41 @@ pub enum McpCommand {
         clip_id: String,
         mode: String,
         target_level: f64,
+        reply: SyncSender<Value>,
+    },
+    MatchClipAudio {
+        source_clip_id: String,
+        source_start_ns: Option<u64>,
+        source_end_ns: Option<u64>,
+        source_channel_mode: crate::media::audio_match::AudioMatchChannelMode,
+        reference_clip_id: String,
+        reference_start_ns: Option<u64>,
+        reference_end_ns: Option<u64>,
+        reference_channel_mode: crate::media::audio_match::AudioMatchChannelMode,
+        reply: SyncSender<Value>,
+    },
+    ClearMatchEq {
+        clip_id: String,
+        reply: SyncSender<Value>,
+    },
+    DetectSceneCuts {
+        clip_id: String,
+        track_id: String,
+        threshold: f64,
+        reply: SyncSender<Value>,
+    },
+    GenerateMusic {
+        prompt: String,
+        duration_secs: f64,
+        track_index: Option<usize>,
+        timeline_start_ns: Option<u64>,
+        /// Optional path to a reference audio file. When provided, the
+        /// handler runs `audio_features::analyze_audio_file` and appends
+        /// the derived natural-language style hints (BPM, key/mode,
+        /// brightness, dynamics) to `prompt` before queuing the job.
+        /// Analysis failures degrade gracefully — the original prompt is
+        /// used and a warning is logged.
+        reference_audio_path: Option<String>,
         reply: SyncSender<Value>,
     },
     RecordVoiceover {
@@ -550,6 +629,21 @@ pub enum McpCommand {
         reply: SyncSender<Value>,
     },
     ListBackups {
+        reply: SyncSender<Value>,
+    },
+    ListProjectSnapshots {
+        reply: SyncSender<Value>,
+    },
+    CreateProjectSnapshot {
+        name: String,
+        reply: SyncSender<Value>,
+    },
+    RestoreProjectSnapshot {
+        snapshot_id: String,
+        reply: SyncSender<Value>,
+    },
+    DeleteProjectSnapshot {
+        snapshot_id: String,
         reply: SyncSender<Value>,
     },
     SyncClipsByAudio {
@@ -718,6 +812,20 @@ pub enum McpCommand {
         bg_box_color: Option<u32>,
         highlight_mode: Option<String>,
         highlight_color: Option<u32>,
+        // New base style fields
+        bold: Option<bool>,
+        italic: Option<bool>,
+        underline: Option<bool>,
+        shadow: Option<bool>,
+        // New highlight flag fields
+        highlight_bold: Option<bool>,
+        highlight_color_flag: Option<bool>,
+        highlight_underline: Option<bool>,
+        highlight_stroke: Option<bool>,
+        highlight_italic: Option<bool>,
+        highlight_background: Option<bool>,
+        highlight_shadow: Option<bool>,
+        bg_highlight_color: Option<u32>,
         reply: SyncSender<Value>,
     },
     ExportSrt {
@@ -729,6 +837,8 @@ pub enum McpCommand {
 /// Spawn the MCP stdio server on a background thread.
 /// Returns the `Sender` (for sharing with other transports) and the `Receiver`
 /// that the GTK main thread should poll for commands.
+// Public convenience wrapper; currently unused (window.rs calls run_stdio_server
+// directly) but kept as a stable entry point for external / test consumers.
 #[allow(dead_code)]
 pub fn start_mcp_server() -> (
     std::sync::mpsc::Sender<McpCommand>,

@@ -9,8 +9,13 @@
 
 ### Linux (Ubuntu / Debian)
 
+The default feature set builds `whisper-rs` from source, so install the compiler toolchain, `pkg-config`, and `cmake` alongside the media libraries:
+
 ```bash
 sudo apt install \
+  build-essential \
+  cmake \
+  pkg-config \
   libgtk-4-dev \
   libgstreamer1.0-dev \
   libgstreamer-plugins-base1.0-dev \
@@ -22,10 +27,17 @@ sudo apt install \
 
 ### macOS (Homebrew)
 
-Install [Homebrew](https://brew.sh) if you haven't already, then:
+Install [Homebrew](https://brew.sh) if you haven't already, then install the Xcode Command Line Tools:
 
 ```bash
-brew install gtk4 \
+xcode-select --install
+```
+
+After that, install the Homebrew packages (the default speech-to-text feature needs `cmake` during `cargo build`):
+
+```bash
+brew install cmake \
+  gtk4 \
   gstreamer \
   gst-plugins-base \
   gst-plugins-good \

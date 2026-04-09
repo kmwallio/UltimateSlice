@@ -2,6 +2,54 @@ use crate::model::clip::{
     ClipColorLabel, KeyframeInterpolation, NumericKeyframe, Phase1KeyframeProperty,
     SubtitleHighlightMode,
 };
+use crate::model::transition::{
+    is_supported_transition_kind, max_transition_duration_ns, supported_transition_definitions,
+    validate_track_transition_request, TransitionAlignment, DEFAULT_TRANSITION_DURATION_NS,
+    MIN_TRANSITION_DURATION_NS,
+};
+
+// -----------------------------------------------------------------------
+// Inspector slider range constants (P2.7)
+// -----------------------------------------------------------------------
+//
+// Promotes the most-duplicated `Scale::with_range(…)` literal arguments
+// to named constants. The "rule of three" applies — only ranges used 3+
+// times or with clear semantic meaning are promoted. Single-use values
+// (mask feather, vi pad, eq Q, etc.) are intentionally left inline so
+// the magic-number list doesn't bloat.
+//
+// Existing transform-bounds constants from `model::transform_bounds`
+// (`SCALE_MIN/MAX`, `POSITION_MIN/MAX`, `CROP_MIN_PX/MAX_PX`, `OPACITY_*`,
+// `ROTATE_MIN_DEG/MAX_DEG`) cover the transform sliders and are not
+// duplicated here.
+
+/// Range for "color slider" inspector controls — symmetric ±1.0 with 0.01
+/// step. Used by brightness, exposure, tint, sharpness, and the eight
+/// grading sliders (shadows/midtones/highlights × value/warmth/tint).
+const COLOR_SLIDER_MIN: f64 = -1.0;
+const COLOR_SLIDER_MAX: f64 = 1.0;
+const COLOR_SLIDER_STEP: f64 = 0.01;
+
+/// Range for "unit slider" inspector controls — `[0.0, 1.0]` with 0.01 step.
+/// Used by denoise, blur, vidstab smoothing, chroma key tolerance/softness,
+/// background-removal threshold, mask center x/y, opacity, and title x/y.
+const UNIT_SLIDER_MIN: f64 = 0.0;
+const UNIT_SLIDER_MAX: f64 = 1.0;
+const UNIT_SLIDER_STEP: f64 = 0.01;
+
+/// Range for "double slider" inspector controls — `[0.0, 2.0]` with 0.01
+/// step. Used by contrast and saturation (where `1.0` is the neutral
+/// midpoint and `2.0` is doubled).
+const DOUBLE_SLIDER_MIN: f64 = 0.0;
+const DOUBLE_SLIDER_MAX: f64 = 2.0;
+const DOUBLE_SLIDER_STEP: f64 = 0.01;
+
+/// Range for the colour-temperature slider, in Kelvin. Spans tungsten to
+/// daylight (2000 K to 10000 K) with 100 K steps; the neutral default is
+/// 6500 K (D65).
+const COLOR_TEMPERATURE_MIN_K: f64 = 2000.0;
+const COLOR_TEMPERATURE_MAX_K: f64 = 10000.0;
+const COLOR_TEMPERATURE_STEP_K: f64 = 100.0;
 
 /// Clipboard for copy/paste subtitle style between clips.
 #[derive(Clone)]
@@ -16,8 +64,17 @@ pub struct SubtitleStyleClipboard {
     pub highlight_color: u32,
     pub position_y: f64,
     pub word_window_secs: f64,
+    pub subtitle_bold: bool,
+    pub subtitle_italic: bool,
+    pub subtitle_underline: bool,
+    pub subtitle_shadow: bool,
+    pub subtitle_shadow_color: u32,
+    pub subtitle_shadow_offset_x: f64,
+    pub subtitle_shadow_offset_y: f64,
+    pub highlight_flags: crate::model::clip::SubtitleHighlightFlags,
+    pub bg_highlight_color: u32,
 }
-use crate::model::project::Project;
+use crate::model::project::{FrameRate, MotionTrackerReference, Project};
 use gdk4;
 use gio;
 use gtk4::prelude::*;
@@ -63,6 +120,147 @@ fn linear_to_db_volume(linear: f64) -> f64 {
     } else {
         (20.0 * linear.log10()).clamp(VOLUME_DB_MIN, VOLUME_DB_MAX)
     }
+}
+
+#[derive(Clone)]
+struct MatchAudioCandidate {
+    clip_id: String,
+    label: String,
+    duration_ns: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MatchAudioDialogMode {
+    MatchVoice,
+    ChooseRegion,
+}
+
+impl MatchAudioDialogMode {
+    fn from_index(index: u32) -> Self {
+        match index {
+            1 => Self::ChooseRegion,
+            _ => Self::MatchVoice,
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::MatchVoice => {
+                "Recommended: match the full trimmed clips and prioritize dialogue or voice automatically."
+            }
+            Self::ChooseRegion => {
+                "Advanced: enter exact source/reference In/Out timecodes to match a specific phrase."
+            }
+        }
+    }
+
+    fn shows_region_fields(self) -> bool {
+        matches!(self, Self::ChooseRegion)
+    }
+}
+
+fn audio_match_clip_label(label: &str, clip_id: &str) -> String {
+    let trimmed = label.trim();
+    if trimmed.is_empty() {
+        clip_id.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn clip_supports_tracking_analysis(clip: &crate::model::clip::Clip) -> Result<(), &'static str> {
+    match clip.kind {
+        crate::model::clip::ClipKind::Video => {}
+        _ => {
+            return Err("Tracking analysis currently requires a video clip with decodable frames.")
+        }
+    }
+    if clip.source_path.trim().is_empty() {
+        return Err("Tracking analysis is unavailable because this clip has no source media path.");
+    }
+    if (clip.speed - 1.0).abs() > f64::EPSILON || !clip.speed_keyframes.is_empty() {
+        return Err("Tracking analysis currently requires an unretimed source clip.");
+    }
+    if clip.source_duration() == 0 {
+        return Err("Tracking analysis needs a clip with visible source duration.");
+    }
+    Ok(())
+}
+
+fn tracking_reference_label(reference: &MotionTrackerReference) -> String {
+    let clip_label = reference.clip_label.trim();
+    let tracker_label = reference.tracker_label.trim();
+    let base = match (clip_label.is_empty(), tracker_label.is_empty()) {
+        (true, true) => reference.source_clip_id.clone(),
+        (true, false) => tracker_label.to_string(),
+        (false, true) => clip_label.to_string(),
+        (false, false) => format!("{clip_label} — {tracker_label}"),
+    };
+    if !reference.enabled {
+        format!("{base} (disabled)")
+    } else if reference.sample_count == 0 {
+        format!("{base} (run Track Region first)")
+    } else {
+        base
+    }
+}
+
+fn set_audio_match_region_entries(
+    start_entry: &Entry,
+    end_entry: &Entry,
+    region: crate::media::audio_match::AnalysisRegionNs,
+    frame_rate: &FrameRate,
+) {
+    start_entry.set_text(&crate::ui::timecode::format_ns_as_timecode(
+        region.start_ns,
+        frame_rate,
+    ));
+    end_entry.set_text(&crate::ui::timecode::format_ns_as_timecode(
+        region.end_ns,
+        frame_rate,
+    ));
+}
+
+fn parse_audio_match_region_entries(
+    start_entry: &Entry,
+    end_entry: &Entry,
+    duration_ns: u64,
+    frame_rate: &FrameRate,
+    label: &str,
+) -> Result<crate::media::audio_match::AnalysisRegionNs, String> {
+    let start_ns =
+        crate::ui::timecode::parse_timecode_to_ns(start_entry.text().as_ref(), frame_rate)
+            .map_err(|e| format!("{label} in: {e}"))?;
+    let end_ns = crate::ui::timecode::parse_timecode_to_ns(end_entry.text().as_ref(), frame_rate)
+        .map_err(|e| format!("{label} out: {e}"))?;
+    if end_ns <= start_ns {
+        return Err(format!("{label} out must be after {label} in."));
+    }
+    if end_ns > duration_ns {
+        return Err(format!(
+            "{label} range exceeds clip duration ({}).",
+            crate::ui::timecode::format_ns_as_timecode(duration_ns, frame_rate)
+        ));
+    }
+    Ok(crate::media::audio_match::AnalysisRegionNs { start_ns, end_ns })
+}
+
+fn sync_match_audio_mode_ui(
+    dialog: &gtk4::Window,
+    description_label: &Label,
+    region_box: &GBox,
+    mode: MatchAudioDialogMode,
+) {
+    description_label.set_text(mode.description());
+    region_box.set_visible(mode.shows_region_fields());
+    dialog.set_default_size(460, if mode.shows_region_fields() { 420 } else { 260 });
+}
+
+fn sync_match_audio_channel_mode_ui(
+    description_label: &Label,
+    mode: crate::media::audio_match::AudioMatchChannelMode,
+) {
+    description_label.set_text(mode.description());
 }
 
 fn interp_idx_to_enum(idx: u32) -> KeyframeInterpolation {
@@ -117,8 +315,23 @@ pub struct InspectorView {
     pub shadows_tint_slider: Scale,
     // Audio sliders
     pub volume_slider: Scale,
+    pub voice_isolation_slider: Scale,
+    pub vi_pad_slider: Scale,
+    pub vi_fade_slider: Scale,
+    pub vi_floor_slider: Scale,
+    pub vi_source_dropdown: gtk4::DropDown,
+    pub vi_silence_threshold_slider: Scale,
+    pub vi_silence_min_ms_slider: Scale,
+    pub vi_silence_actions_row: GBox,
+    pub vi_suggest_btn: Button,
+    pub vi_analyze_btn: Button,
+    pub vi_intervals_label: Label,
     pub pan_slider: Scale,
     pub normalize_btn: Button,
+    pub match_audio_btn: Button,
+    pub clear_match_eq_btn: Button,
+    pub match_eq_curve: gtk4::DrawingArea,
+    pub match_eq_curve_state: Rc<RefCell<Vec<crate::model::clip::EqBand>>>,
     pub measured_loudness_label: Label,
     // LADSPA effects
     pub ladspa_effects_list: GBox,
@@ -168,6 +381,22 @@ pub struct InspectorView {
     pub speed_slider: Scale,
     pub reverse_check: CheckButton,
     pub slow_motion_dropdown: DropDown,
+    /// Backing model for `slow_motion_dropdown`. Held so the window glue
+    /// can append/remove the "AI Interpolation (RIFE)" entry when the RIFE
+    /// model is installed/removed at runtime.
+    pub slow_motion_model: StringList,
+    /// `true` while the dropdown contains the AI Interpolation entry. The
+    /// window glue toggles this in sync with the on-disk RIFE model.
+    pub slow_motion_has_ai: Cell<bool>,
+    /// Status row showing AI frame-interpolation sidecar progress
+    /// (`Generating…` / `Ready` / `Error` / `Model not installed`).
+    pub frame_interp_status: Label,
+    // Transitions
+    pub transition_kind_dropdown: gtk4::ComboBoxText,
+    pub transition_duration_ms: gtk4::SpinButton,
+    pub transition_alignment_dropdown: gtk4::ComboBoxText,
+    pub transition_clear_btn: Button,
+    pub transition_status_label: Label,
     // LUT (color grading)
     pub lut_display_box: GBox,
     pub lut_clear_btn: Button,
@@ -182,6 +411,7 @@ pub struct InspectorView {
     pub transform_section: GBox,
     pub title_section_box: GBox,
     pub speed_section_box: GBox,
+    pub transition_section: GBox,
     pub lut_section_box: GBox,
     // Chroma key
     pub chroma_key_section: GBox,
@@ -207,10 +437,11 @@ pub struct InspectorView {
     pub subtitle_generate_spinner: gtk4::Spinner,
     pub subtitle_generate_label: Label,
     pub subtitle_language_dropdown: gtk4::DropDown,
+    pub subtitle_expander: Expander,
     pub subtitle_segments_section: GBox,
+    pub compound_subtitle_label: gtk4::TextView,
     pub subtitle_segments_expander: Expander,
     pub subtitle_list_box: GBox,
-    pub subtitle_scroll: gtk4::ScrolledWindow,
     /// Tracks displayed segment IDs to avoid rebuilding on every update tick.
     pub subtitle_segments_snapshot: Rc<RefCell<Vec<String>>>,
     pub subtitle_clear_btn: Button,
@@ -218,6 +449,19 @@ pub struct InspectorView {
     pub subtitle_font_btn: gtk4::Button,
     pub subtitle_color_btn: gtk4::ColorDialogButton,
     pub subtitle_highlight_dropdown: gtk4::DropDown,
+    pub sub_bold_btn: gtk4::ToggleButton,
+    pub sub_italic_btn: gtk4::ToggleButton,
+    pub sub_underline_btn: gtk4::ToggleButton,
+    pub sub_shadow_btn: gtk4::ToggleButton,
+    pub hl_bold_check: CheckButton,
+    pub hl_color_check: CheckButton,
+    pub hl_underline_check: CheckButton,
+    pub hl_stroke_check: CheckButton,
+    pub hl_italic_check: CheckButton,
+    pub hl_bg_check: CheckButton,
+    pub hl_shadow_check: CheckButton,
+    pub subtitle_bg_highlight_color_btn: gtk4::ColorDialogButton,
+    pub subtitle_bg_highlight_color_row: GBox,
     pub subtitle_highlight_color_btn: gtk4::ColorDialogButton,
     pub subtitle_highlight_color_row: GBox,
     pub subtitle_word_window_slider: Scale,
@@ -249,6 +493,28 @@ pub struct InspectorView {
     pub mask_invert_check: CheckButton,
     pub mask_path_editor_box: GBox,
     pub mask_rect_ellipse_controls: GBox,
+    // Motion tracking
+    pub tracking_section: GBox,
+    pub tracking_tracker_dropdown: gtk4::DropDown,
+    pub tracking_add_btn: Button,
+    pub tracking_remove_btn: Button,
+    pub tracking_label_entry: Entry,
+    pub tracking_edit_region_btn: gtk4::ToggleButton,
+    pub tracking_center_x_slider: Scale,
+    pub tracking_center_y_slider: Scale,
+    pub tracking_width_slider: Scale,
+    pub tracking_height_slider: Scale,
+    pub tracking_rotation_spin: gtk4::SpinButton,
+    pub tracking_run_btn: Button,
+    pub tracking_cancel_btn: Button,
+    pub tracking_status_label: Label,
+    pub tracking_target_dropdown: gtk4::DropDown,
+    pub tracking_reference_dropdown: gtk4::DropDown,
+    pub tracking_clear_binding_btn: Button,
+    pub tracking_binding_status_label: Label,
+    pub selected_motion_tracker_id: Rc<RefCell<Option<String>>>,
+    pub tracking_tracker_ids: Rc<RefCell<Vec<Option<String>>>>,
+    pub tracking_reference_choices: Rc<RefCell<Vec<Option<MotionTrackerReference>>>>,
     // Applied frei0r effects
     pub frei0r_effects_section: GBox,
     pub frei0r_effects_list: GBox,
@@ -286,6 +552,270 @@ impl InspectorView {
             2 => KeyframeInterpolation::EaseOut,
             3 => KeyframeInterpolation::EaseInOut,
             _ => KeyframeInterpolation::Linear,
+        }
+    }
+
+    pub fn current_motion_tracker_id(&self) -> Option<String> {
+        self.tracking_tracker_ids
+            .borrow()
+            .get(self.tracking_tracker_dropdown.selected() as usize)
+            .cloned()
+            .flatten()
+            .or_else(|| self.selected_motion_tracker_id.borrow().clone())
+    }
+
+    pub fn selected_tracking_reference_choice(&self) -> Option<MotionTrackerReference> {
+        self.tracking_reference_choices
+            .borrow()
+            .get(self.tracking_reference_dropdown.selected() as usize)
+            .cloned()
+            .flatten()
+    }
+
+    pub fn tracking_target_is_mask(&self) -> bool {
+        self.tracking_target_dropdown.selected() == 1
+    }
+
+    fn sync_tracking_tracker_controls(&self, clip: &crate::model::clip::Clip) {
+        let selected_tracker_id = self
+            .selected_motion_tracker_id
+            .borrow()
+            .clone()
+            .filter(|tracker_id| clip.motion_tracker_ref(tracker_id).is_some())
+            .or_else(|| {
+                clip.motion_trackers
+                    .first()
+                    .map(|tracker| tracker.id.clone())
+            });
+        *self.selected_motion_tracker_id.borrow_mut() = selected_tracker_id.clone();
+
+        let tracker_labels: Vec<String> = if clip.motion_trackers.is_empty() {
+            vec!["No trackers yet".to_string()]
+        } else {
+            clip.motion_trackers
+                .iter()
+                .map(|tracker| tracker.label.clone())
+                .collect()
+        };
+        let tracker_label_refs = tracker_labels
+            .iter()
+            .map(|label| label.as_str())
+            .collect::<Vec<_>>();
+        let tracker_model = gtk4::StringList::new(&tracker_label_refs);
+        self.tracking_tracker_dropdown
+            .set_model(Some(&tracker_model));
+
+        let tracker_ids: Vec<Option<String>> = if clip.motion_trackers.is_empty() {
+            vec![None]
+        } else {
+            clip.motion_trackers
+                .iter()
+                .map(|tracker| Some(tracker.id.clone()))
+                .collect()
+        };
+        *self.tracking_tracker_ids.borrow_mut() = tracker_ids;
+
+        let selected_index = selected_tracker_id
+            .as_ref()
+            .and_then(|tracker_id| {
+                clip.motion_trackers
+                    .iter()
+                    .position(|tracker| tracker.id == *tracker_id)
+            })
+            .unwrap_or(0);
+        self.tracking_tracker_dropdown
+            .set_selected(selected_index.min(u32::MAX as usize) as u32);
+
+        let can_analyze = clip_supports_tracking_analysis(clip).is_ok();
+        let selected_tracker = selected_tracker_id
+            .as_ref()
+            .and_then(|tracker_id| clip.motion_tracker_ref(tracker_id));
+
+        self.tracking_add_btn.set_sensitive(can_analyze);
+        self.tracking_remove_btn
+            .set_sensitive(can_analyze && selected_tracker.is_some());
+        self.tracking_label_entry
+            .set_sensitive(can_analyze && selected_tracker.is_some());
+        self.tracking_edit_region_btn
+            .set_sensitive(can_analyze && selected_tracker.is_some());
+        self.tracking_center_x_slider
+            .set_sensitive(can_analyze && selected_tracker.is_some());
+        self.tracking_center_y_slider
+            .set_sensitive(can_analyze && selected_tracker.is_some());
+        self.tracking_width_slider
+            .set_sensitive(can_analyze && selected_tracker.is_some());
+        self.tracking_height_slider
+            .set_sensitive(can_analyze && selected_tracker.is_some());
+        self.tracking_rotation_spin
+            .set_sensitive(can_analyze && selected_tracker.is_some());
+        self.tracking_run_btn
+            .set_sensitive(can_analyze && selected_tracker.is_some());
+        self.tracking_cancel_btn.set_sensitive(false);
+        if !can_analyze || selected_tracker.is_none() {
+            self.tracking_edit_region_btn.set_active(false);
+        }
+
+        if let Some(tracker) = selected_tracker {
+            self.tracking_label_entry.set_text(&tracker.label);
+            self.tracking_center_x_slider
+                .set_value(tracker.analysis_region.center_x);
+            self.tracking_center_y_slider
+                .set_value(tracker.analysis_region.center_y);
+            self.tracking_width_slider
+                .set_value(tracker.analysis_region.width);
+            self.tracking_height_slider
+                .set_value(tracker.analysis_region.height);
+            self.tracking_rotation_spin
+                .set_value(tracker.analysis_region.rotation_deg);
+            self.tracking_run_btn.set_label(
+                if tracker.samples.is_empty() && tracker.analysis_end_ns.is_none() {
+                    "Track Region"
+                } else {
+                    "Re-run Tracking"
+                },
+            );
+        } else {
+            let default_region = crate::model::clip::TrackingRegion::default();
+            self.tracking_label_entry.set_text("");
+            self.tracking_center_x_slider
+                .set_value(default_region.center_x);
+            self.tracking_center_y_slider
+                .set_value(default_region.center_y);
+            self.tracking_width_slider.set_value(default_region.width);
+            self.tracking_height_slider.set_value(default_region.height);
+            self.tracking_rotation_spin
+                .set_value(default_region.rotation_deg);
+            self.tracking_run_btn.set_label("Track Region");
+        }
+    }
+
+    fn sync_tracking_reference_controls(&self, project: &Project, clip: &crate::model::clip::Clip) {
+        let target_labels = if clip.masks.is_empty() {
+            vec!["Clip Transform"]
+        } else {
+            vec!["Clip Transform", "First Mask"]
+        };
+        let target_model = gtk4::StringList::new(&target_labels);
+        self.tracking_target_dropdown.set_model(Some(&target_model));
+        let mask_binding = clip
+            .masks
+            .first()
+            .and_then(|mask| mask.tracking_binding.clone());
+        let clip_binding = clip.tracking_binding.clone();
+        let active_binding = mask_binding.clone().or(clip_binding.clone());
+        let target_is_mask = mask_binding.is_some() && !clip.masks.is_empty();
+        self.tracking_target_dropdown
+            .set_selected(if target_is_mask { 1 } else { 0 });
+        self.tracking_target_dropdown
+            .set_sensitive(!clip.masks.is_empty());
+
+        let available_references = project.motion_tracker_references();
+        let has_usable_reference = available_references
+            .iter()
+            .any(|reference| reference.enabled && reference.sample_count > 0);
+        let mut reference_choices = vec![None];
+        let mut reference_labels = vec!["None".to_string()];
+        for reference in available_references.iter().cloned() {
+            reference_labels.push(tracking_reference_label(&reference));
+            reference_choices.push(Some(reference));
+        }
+        let reference_label_refs = reference_labels
+            .iter()
+            .map(|label| label.as_str())
+            .collect::<Vec<_>>();
+        let reference_model = gtk4::StringList::new(&reference_label_refs);
+        self.tracking_reference_dropdown
+            .set_model(Some(&reference_model));
+
+        let selected_index = active_binding
+            .as_ref()
+            .and_then(|binding| {
+                reference_choices.iter().position(|choice| {
+                    choice
+                        .as_ref()
+                        .map(|reference| {
+                            reference.source_clip_id == binding.source_clip_id
+                                && reference.tracker_id == binding.tracker_id
+                        })
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(0);
+        *self.tracking_reference_choices.borrow_mut() = reference_choices;
+        self.tracking_reference_dropdown
+            .set_selected(selected_index.min(u32::MAX as usize) as u32);
+        self.tracking_clear_binding_btn
+            .set_sensitive(active_binding.is_some());
+        self.tracking_binding_status_label.remove_css_class("error");
+
+        if let Some(binding) = active_binding {
+            let binding_reference = available_references
+                .iter()
+                .find(|reference| {
+                    reference.source_clip_id == binding.source_clip_id
+                        && reference.tracker_id == binding.tracker_id
+                })
+                .cloned();
+            let binding_label = binding_reference
+                .as_ref()
+                .map(tracking_reference_label)
+                .unwrap_or_else(|| format!("{} — {}", binding.source_clip_id, binding.tracker_id));
+            let target_label = if target_is_mask {
+                "first mask"
+            } else {
+                "clip transform"
+            };
+            match project
+                .clip_ref(&binding.source_clip_id)
+                .and_then(|source_clip| source_clip.motion_tracker_ref(&binding.tracker_id))
+            {
+                Some(tracker) if !tracker.enabled => {
+                    self.tracking_binding_status_label.add_css_class("error");
+                    self.tracking_binding_status_label.set_text(&format!(
+                        "Attached to {binding_label} on the {target_label}, but that tracker is disabled."
+                    ));
+                }
+                Some(tracker) if tracker.samples.is_empty() => {
+                    self.tracking_binding_status_label.add_css_class("error");
+                    let source_label = project
+                        .clip_ref(&binding.source_clip_id)
+                        .map(|source_clip| {
+                            let label = source_clip.label.trim();
+                            if label.is_empty() {
+                                binding.source_clip_id.clone()
+                            } else {
+                                label.to_string()
+                            }
+                        })
+                        .unwrap_or_else(|| binding.source_clip_id.clone());
+                    self.tracking_binding_status_label.set_text(&format!(
+                        "Attached to {binding_label} on the {target_label}, but that tracker has no motion samples. Select {source_label} and run Track Region again."
+                    ));
+                }
+                Some(_) => {
+                    self.tracking_binding_status_label.set_text(&format!(
+                        "Attached to {binding_label} on the {target_label}."
+                    ));
+                }
+                None => {
+                    self.tracking_binding_status_label.add_css_class("error");
+                    self.tracking_binding_status_label.set_text(&format!(
+                        "Attached to {binding_label} on the {target_label}, but that tracker no longer exists."
+                    ));
+                }
+            }
+        } else if !has_usable_reference {
+            self.tracking_binding_status_label.set_text(
+                "No motion trackers with sampled motion are available in the project yet. Select a source clip and run Track Region first.",
+            );
+        } else if clip.masks.is_empty() {
+            self.tracking_binding_status_label
+                .set_text("Choose a tracker with sampled motion to drive this clip transform.");
+        } else {
+            self.tracking_binding_status_label
+                .set_text(
+                    "Choose a tracker with sampled motion to drive this clip transform or the first mask.",
+                );
         }
     }
 
@@ -349,14 +879,10 @@ impl InspectorView {
                     // Clone clip_id and drop the borrow BEFORE calling on_changed.
                     let cid = selected_clip_id.borrow().clone();
                     if let Some(cid) = cid {
-                        let track_id = {
-                            let proj = project.borrow();
-                            proj.tracks
-                                .iter()
-                                .find(|t| t.clips.iter().any(|c| c.id == cid))
-                                .map(|t| t.id.clone())
-                                .unwrap_or_default()
-                        };
+                        let track_id = project
+                            .borrow()
+                            .find_track_id_for_clip(&cid)
+                            .unwrap_or_default();
                         on_execute_command(Box::new(crate::undo::ToggleFrei0rEffectCommand {
                             clip_id: cid,
                             track_id,
@@ -477,14 +1003,10 @@ impl InspectorView {
                 remove_btn.connect_clicked(move |_| {
                     let cid = selected_clip_id.borrow().clone();
                     if let Some(cid) = cid {
-                        let track_id = {
-                            let proj = project.borrow();
-                            proj.tracks
-                                .iter()
-                                .find(|t| t.clips.iter().any(|c| c.id == cid))
-                                .map(|t| t.id.clone())
-                                .unwrap_or_default()
-                        };
+                        let track_id = project
+                            .borrow()
+                            .find_track_id_for_clip(&cid)
+                            .unwrap_or_default();
                         on_execute_command(Box::new(crate::undo::RemoveFrei0rEffectCommand {
                             clip_id: cid,
                             track_id,
@@ -579,18 +1101,13 @@ impl InspectorView {
                                     };
                                     {
                                         let mut proj = project.borrow_mut();
-                                        for track in &mut proj.tracks {
-                                            if let Some(clip) =
-                                                track.clips.iter_mut().find(|c| c.id == cid)
+                                        if let Some(clip) = proj.clip_mut(&cid) {
+                                            if let Some(e) = clip
+                                                .frei0r_effects
+                                                .iter_mut()
+                                                .find(|e| e.id == effect_id)
                                             {
-                                                if let Some(e) = clip
-                                                    .frei0r_effects
-                                                    .iter_mut()
-                                                    .find(|e| e.id == effect_id)
-                                                {
-                                                    e.params.insert(pname.clone(), val);
-                                                }
-                                                break;
+                                                e.params.insert(pname.clone(), val);
                                             }
                                         }
                                         proj.dirty = true;
@@ -673,18 +1190,13 @@ impl InspectorView {
                                 if let Some(cid) = cid {
                                     {
                                         let mut proj = project.borrow_mut();
-                                        for track in &mut proj.tracks {
-                                            if let Some(clip) =
-                                                track.clips.iter_mut().find(|c| c.id == cid)
+                                        if let Some(clip) = proj.clip_mut(&cid) {
+                                            if let Some(e) = clip
+                                                .frei0r_effects
+                                                .iter_mut()
+                                                .find(|e| e.id == effect_id)
                                             {
-                                                if let Some(e) = clip
-                                                    .frei0r_effects
-                                                    .iter_mut()
-                                                    .find(|e| e.id == effect_id)
-                                                {
-                                                    e.params.insert(pname.clone(), val);
-                                                }
-                                                break;
+                                                e.params.insert(pname.clone(), val);
                                             }
                                         }
                                         proj.dirty = true;
@@ -859,19 +1371,14 @@ impl InspectorView {
                                 if let Some(cid) = cid {
                                     {
                                         let mut proj = project.borrow_mut();
-                                        for track in &mut proj.tracks {
-                                            if let Some(clip) =
-                                                track.clips.iter_mut().find(|c| c.id == cid)
+                                        if let Some(clip) = proj.clip_mut(&cid) {
+                                            if let Some(e) = clip
+                                                .frei0r_effects
+                                                .iter_mut()
+                                                .find(|e| e.id == effect_id)
                                             {
-                                                if let Some(e) = clip
-                                                    .frei0r_effects
-                                                    .iter_mut()
-                                                    .find(|e| e.id == effect_id)
-                                                {
-                                                    e.string_params
-                                                        .insert(pname.clone(), new_val.clone());
-                                                }
-                                                break;
+                                                e.string_params
+                                                    .insert(pname.clone(), new_val.clone());
                                             }
                                         }
                                         proj.dirty = true;
@@ -902,19 +1409,14 @@ impl InspectorView {
                             if let Some(cid) = cid {
                                 {
                                     let mut proj = project.borrow_mut();
-                                    for track in &mut proj.tracks {
-                                        if let Some(clip) =
-                                            track.clips.iter_mut().find(|c| c.id == cid)
+                                    if let Some(clip) = proj.clip_mut(&cid) {
+                                        if let Some(eff) = clip
+                                            .frei0r_effects
+                                            .iter_mut()
+                                            .find(|eff| eff.id == effect_id)
                                         {
-                                            if let Some(eff) = clip
-                                                .frei0r_effects
-                                                .iter_mut()
-                                                .find(|eff| eff.id == effect_id)
-                                            {
-                                                eff.string_params
-                                                    .insert(pname.clone(), new_val.clone());
-                                            }
-                                            break;
+                                            eff.string_params
+                                                .insert(pname.clone(), new_val.clone());
                                         }
                                     }
                                     proj.dirty = true;
@@ -1018,16 +1520,13 @@ impl InspectorView {
                 if let Some(cid) = cid {
                     {
                         let mut proj = project.borrow_mut();
-                        for track in &mut proj.tracks {
-                            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == cid) {
-                                if let Some(e) =
-                                    clip.frei0r_effects.iter_mut().find(|e| e.id == effect_id)
-                                {
-                                    e.params.insert(rk.clone(), r);
-                                    e.params.insert(gk.clone(), g);
-                                    e.params.insert(bk.clone(), b);
-                                }
-                                break;
+                        if let Some(clip) = proj.clip_mut(&cid) {
+                            if let Some(e) =
+                                clip.frei0r_effects.iter_mut().find(|e| e.id == effect_id)
+                            {
+                                e.params.insert(rk.clone(), r);
+                                e.params.insert(gk.clone(), g);
+                                e.params.insert(bk.clone(), b);
                             }
                         }
                         proj.dirty = true;
@@ -1071,16 +1570,13 @@ impl InspectorView {
                     if let Some(cid) = cid {
                         {
                             let mut proj = project.borrow_mut();
-                            for track in &mut proj.tracks {
-                                if let Some(clip) = track.clips.iter_mut().find(|c| c.id == cid) {
-                                    if let Some(e) =
-                                        clip.frei0r_effects.iter_mut().find(|e| e.id == effect_id)
-                                    {
-                                        e.params.insert(rk.clone(), r);
-                                        e.params.insert(gk.clone(), g);
-                                        e.params.insert(bk.clone(), b);
-                                    }
-                                    break;
+                            if let Some(clip) = proj.clip_mut(&cid) {
+                                if let Some(e) =
+                                    clip.frei0r_effects.iter_mut().find(|e| e.id == effect_id)
+                                {
+                                    e.params.insert(rk.clone(), r);
+                                    e.params.insert(gk.clone(), g);
+                                    e.params.insert(bk.clone(), b);
                                 }
                             }
                             proj.dirty = true;
@@ -1136,29 +1632,23 @@ impl InspectorView {
             if let Some(cid) = cid {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == cid) {
-                            if let Some(e) =
-                                clip.frei0r_effects.iter_mut().find(|e| e.id == effect_id)
-                            {
-                                e.params.insert("channel".to_string(), ch_val);
-                                e.params.insert("show-curves".to_string(), 0.0);
-                                e.params.insert(
-                                    "curve-point-number".to_string(),
-                                    pts.len() as f64 / 10.0,
-                                );
-                                for (i, &(inp, out)) in pts.iter().enumerate() {
-                                    e.params.insert(format!("point-{}-input-value", i + 1), inp);
-                                    e.params
-                                        .insert(format!("point-{}-output-value", i + 1), out);
-                                }
-                                // Clear unused point slots
-                                for i in (pts.len() + 1)..=5 {
-                                    e.params.remove(&format!("point-{i}-input-value"));
-                                    e.params.remove(&format!("point-{i}-output-value"));
-                                }
+                    if let Some(clip) = proj.clip_mut(&cid) {
+                        if let Some(e) = clip.frei0r_effects.iter_mut().find(|e| e.id == effect_id)
+                        {
+                            e.params.insert("channel".to_string(), ch_val);
+                            e.params.insert("show-curves".to_string(), 0.0);
+                            e.params
+                                .insert("curve-point-number".to_string(), pts.len() as f64 / 10.0);
+                            for (i, &(inp, out)) in pts.iter().enumerate() {
+                                e.params.insert(format!("point-{}-input-value", i + 1), inp);
+                                e.params
+                                    .insert(format!("point-{}-output-value", i + 1), out);
                             }
-                            break;
+                            // Clear unused point slots
+                            for i in (pts.len() + 1)..=5 {
+                                e.params.remove(&format!("point-{i}-input-value"));
+                                e.params.remove(&format!("point-{i}-output-value"));
+                            }
                         }
                     }
                     proj.dirty = true;
@@ -1201,20 +1691,17 @@ impl InspectorView {
                 if let Some(cid) = cid {
                     {
                         let mut proj = project.borrow_mut();
-                        for track in &mut proj.tracks {
-                            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == cid) {
-                                if let Some(e) =
-                                    clip.frei0r_effects.iter_mut().find(|e| e.id == effect_id)
-                                {
-                                    e.params.insert("channel".to_string(), ch_val);
-                                    e.params.insert("input-black-level".to_string(), ib);
-                                    e.params.insert("input-white-level".to_string(), iw);
-                                    e.params.insert("gamma".to_string(), gamma);
-                                    e.params.insert("black-output".to_string(), ob);
-                                    e.params.insert("white-output".to_string(), ow);
-                                    e.params.insert("show-histogram".to_string(), 0.0);
-                                }
-                                break;
+                        if let Some(clip) = proj.clip_mut(&cid) {
+                            if let Some(e) =
+                                clip.frei0r_effects.iter_mut().find(|e| e.id == effect_id)
+                            {
+                                e.params.insert("channel".to_string(), ch_val);
+                                e.params.insert("input-black-level".to_string(), ib);
+                                e.params.insert("input-white-level".to_string(), iw);
+                                e.params.insert("gamma".to_string(), gamma);
+                                e.params.insert("black-output".to_string(), ob);
+                                e.params.insert("white-output".to_string(), ow);
+                                e.params.insert("show-histogram".to_string(), 0.0);
                             }
                         }
                         proj.dirty = true;
@@ -1237,13 +1724,7 @@ impl InspectorView {
     ) {
         use crate::model::clip::ClipKind;
 
-        let clip = clip_id.and_then(|id| {
-            project
-                .tracks
-                .iter()
-                .flat_map(|t| t.clips.iter())
-                .find(|c| c.id == id)
-        });
+        let clip = clip_id.and_then(|id| project.clip_ref(id));
 
         // Show content only when a clip is selected; otherwise show empty-state guidance.
         let has_clip = clip_id.is_some();
@@ -1284,13 +1765,19 @@ impl InspectorView {
                 self.chroma_key_section.set_visible(is_video || is_image);
                 self.bg_removal_section
                     .set_visible((is_video || is_image) && self.bg_removal_model_available.get());
-                self.subtitle_section.set_visible(is_video || is_audio);
+                self.subtitle_section
+                    .set_visible(is_video || is_audio || is_compound);
+                self.tracking_section.set_visible(is_visual);
                 let has_stt_model = self.stt_model_available.get();
                 let generating = self.stt_generating.get();
+                // For compound clips, hide the per-clip generate/clear controls;
+                // the aggregated segment list shows below via subtitle_segments_section.
                 self.subtitle_no_model_box
-                    .set_visible(!has_stt_model && !generating);
-                self.subtitle_controls_box
-                    .set_visible(has_stt_model || !c.subtitle_segments.is_empty() || generating);
+                    .set_visible(!is_compound && (!has_stt_model && !generating));
+                self.subtitle_controls_box.set_visible(
+                    !is_compound
+                        && (has_stt_model || !c.subtitle_segments.is_empty() || generating),
+                );
                 self.subtitle_generate_btn
                     .set_sensitive(has_stt_model && c.subtitle_segments.is_empty() && !generating);
                 self.subtitle_generate_spinner.set_visible(generating);
@@ -1303,20 +1790,90 @@ impl InspectorView {
                 self.subtitle_clear_btn
                     .set_sensitive(!c.subtitle_segments.is_empty() && !generating);
                 // Show segment list and style controls when subtitles exist.
-                // Filter to only show segments within the active source range (respects trim).
-                let visible_segments: Vec<crate::model::clip::SubtitleSegment> = c
-                    .subtitle_segments
-                    .iter()
-                    .filter(|s| s.start_ns < c.source_out && s.end_ns > c.source_in)
-                    .cloned()
-                    .collect();
+                // For compound clips, collect subtitle segments from all
+                // internal clips so the user can see them at root level.
+                let visible_segments: Vec<crate::model::clip::SubtitleSegment> = if is_compound {
+                    fn collect_compound_segments(
+                        tracks: &[crate::model::track::Track],
+                    ) -> Vec<crate::model::clip::SubtitleSegment> {
+                        let mut segs = Vec::new();
+                        for track in tracks {
+                            for clip in &track.clips {
+                                if let Some(ref inner) = clip.compound_tracks {
+                                    segs.extend(collect_compound_segments(inner));
+                                } else {
+                                    segs.extend(clip.subtitle_segments.iter().cloned());
+                                }
+                            }
+                        }
+                        segs
+                    }
+                    c.compound_tracks
+                        .as_deref()
+                        .map(collect_compound_segments)
+                        .unwrap_or_default()
+                } else {
+                    // Filter to only show segments within the visible duration.
+                    // Subtitle times are clip-local (0 = source_in), so compare
+                    // against source_duration rather than source-absolute bounds.
+                    let src_dur = c.source_duration();
+                    c.subtitle_segments
+                        .iter()
+                        .filter(|s| s.start_ns < src_dur && s.end_ns > 0)
+                        .cloned()
+                        .collect()
+                };
                 let has_subtitles = !visible_segments.is_empty();
-                self.subtitle_segments_section.set_visible(has_subtitles);
-                if has_subtitles {
-                    self.subtitle_segments_expander.set_label(Some(&format!(
-                        "Subtitle Segments ({})",
-                        visible_segments.len()
-                    )));
+                log::debug!(
+                    "inspector subtitle: clip={} kind={:?} own={} visible={} has_subtitles={}",
+                    c.id,
+                    c.kind,
+                    c.subtitle_segments.len(),
+                    visible_segments.len(),
+                    has_subtitles,
+                );
+                {
+                    use gtk4::prelude::TextBufferExt;
+                    use gtk4::prelude::TextViewExt;
+                    if is_compound {
+                        // Hide the expander and separate segments section; show
+                        // the aggregated info directly in the subtitle_section.
+                        self.subtitle_expander.set_visible(false);
+                        self.subtitle_segments_section.set_visible(false);
+                        let mut info =
+                            format!("Subtitles ({} segments)\n\n", visible_segments.len());
+                        for seg in &visible_segments {
+                            let s = seg.start_ns as f64 / 1e9;
+                            let e = seg.end_ns as f64 / 1e9;
+                            let txt = if seg.text.len() > 50 {
+                                format!("{}…", &seg.text[..50])
+                            } else {
+                                seg.text.clone()
+                            };
+                            info.push_str(&format!("{:.1}s – {:.1}s  {}\n", s, e, txt));
+                        }
+                        if visible_segments.is_empty() {
+                            info = "No subtitles.\nDouble-click compound to edit individual clips."
+                                .into();
+                        } else {
+                            info.push_str("\nDouble-click compound to edit segments.");
+                        }
+                        self.compound_subtitle_label
+                            .buffer()
+                            .set_text(info.trim_end());
+                        self.compound_subtitle_label.set_visible(true);
+                    } else {
+                        self.subtitle_expander.set_visible(true);
+                        self.compound_subtitle_label.set_visible(false);
+                        self.compound_subtitle_label.buffer().set_text("");
+                        self.subtitle_segments_section.set_visible(has_subtitles);
+                        if has_subtitles {
+                            self.subtitle_segments_expander.set_label(Some(&format!(
+                                "Subtitle Segments ({})",
+                                visible_segments.len()
+                            )));
+                        }
+                    }
                 }
 
                 // Only rebuild the segment list if the visible segment IDs changed.
@@ -1360,14 +1917,10 @@ impl InspectorView {
                                 let project_d = project.clone();
                                 let on_cmd_d = on_cmd.clone();
                                 del_btn.connect_clicked(move |_| {
-                                    let track_id = {
-                                        let proj = project_d.borrow();
-                                        proj.tracks
-                                            .iter()
-                                            .find(|t| t.clips.iter().any(|c| c.id == clip_id_d))
-                                            .map(|t| t.id.clone())
-                                            .unwrap_or_default()
-                                    };
+                                    let track_id = project_d
+                                        .borrow()
+                                        .find_track_id_for_clip(&clip_id_d)
+                                        .unwrap_or_default();
                                     on_cmd_d(Box::new(crate::undo::DeleteSubtitleSegmentCommand {
                                         clip_id: clip_id_d.clone(),
                                         track_id,
@@ -1387,39 +1940,71 @@ impl InspectorView {
                             entry.add_css_class("flat");
 
                             let seg_id = seg.id.clone();
-                            let old_text = Rc::new(RefCell::new(seg.text.clone()));
+                            // `last_committed_text` tracks the last value that was
+                            // pushed to the undo stack. `connect_changed` mutates
+                            // the model directly on every keystroke (so preview /
+                            // export reflect edits without waiting for a commit
+                            // boundary), and Enter / focus-out push a single
+                            // EditSubtitleTextCommand spanning from the last
+                            // committed text to the current text so undo works at
+                            // sentence-level granularity instead of per-keystroke.
+                            let last_committed_text = Rc::new(RefCell::new(seg.text.clone()));
                             let clip_id_c = clip_id.clone();
                             let project_c = project.clone();
                             let on_cmd_c = on_cmd.clone();
 
+                            // Live model update on every keystroke. Bypasses the
+                            // undo system on purpose: per-keystroke commands would
+                            // make undo unusable. The commit handlers below push
+                            // a consolidated command for undo.
+                            //
+                            // We re-sync per-word entries so karaoke / word
+                            // highlight rendering uses the edited text instead
+                            // of the original Whisper tokens.
+                            {
+                                let project_live = project_c.clone();
+                                let clip_id_live = clip_id_c.clone();
+                                let seg_id_live = seg_id.clone();
+                                entry.connect_changed(move |e| {
+                                    let new_text = e.text().to_string();
+                                    let mut proj = project_live.borrow_mut();
+                                    if let Some(clip) = proj.clip_mut(&clip_id_live) {
+                                        if let Some(seg) = clip
+                                            .subtitle_segments
+                                            .iter_mut()
+                                            .find(|s| s.id == seg_id_live)
+                                        {
+                                            if seg.text != new_text {
+                                                seg.set_text_and_resync_words(new_text);
+                                                proj.dirty = true;
+                                            }
+                                        }
+                                    }
+                                });
+                            }
+
                             // Shared commit logic for both Enter and focus-out.
+                            // Pushes a single EditSubtitleTextCommand from the
+                            // last committed value to the current value, so undo
+                            // collapses an entire typing session into one entry.
                             let commit_edit = {
                                 let seg_id = seg_id.clone();
-                                let old_text = old_text.clone();
+                                let last_committed_text = last_committed_text.clone();
                                 let clip_id_c = clip_id_c.clone();
-                                let project_c = project_c.clone();
                                 let on_cmd_c = on_cmd_c.clone();
                                 Rc::new(move |new_text: String| {
-                                    let prev = old_text.borrow().clone();
+                                    let prev = last_committed_text.borrow().clone();
                                     if new_text == prev {
                                         return;
                                     }
-                                    let track_id = {
-                                        let proj = project_c.borrow();
-                                        proj.tracks
-                                            .iter()
-                                            .find(|t| t.clips.iter().any(|c| c.id == clip_id_c))
-                                            .map(|t| t.id.clone())
-                                            .unwrap_or_default()
-                                    };
                                     on_cmd_c(Box::new(crate::undo::EditSubtitleTextCommand {
                                         clip_id: clip_id_c.clone(),
-                                        track_id,
+                                        track_id: String::new(),
                                         segment_id: seg_id.clone(),
                                         old_text: prev.clone(),
                                         new_text: new_text.clone(),
                                     }));
-                                    *old_text.borrow_mut() = new_text;
+                                    *last_committed_text.borrow_mut() = new_text;
                                 })
                             };
 
@@ -1452,57 +2037,64 @@ impl InspectorView {
                 // Style controls are always visible so users can configure before generating.
                 self.subtitle_style_box.set_visible(true);
                 sync_subtitle_font_button(&self.subtitle_font_btn, &c.subtitle_font);
-                let rgba = c.subtitle_color;
-                let r = ((rgba >> 24) & 0xFF) as f32 / 255.0;
-                let g = ((rgba >> 16) & 0xFF) as f32 / 255.0;
-                let b = ((rgba >> 8) & 0xFF) as f32 / 255.0;
-                let a = (rgba & 0xFF) as f32 / 255.0;
+                let (r, g, b, a) = crate::ui::colors::rgba_u32_to_f32(c.subtitle_color);
                 self.subtitle_color_btn
                     .set_rgba(&gdk4::RGBA::new(r, g, b, a));
-                let hl_idx = match c.subtitle_highlight_mode {
-                    crate::model::clip::SubtitleHighlightMode::None => 0,
-                    crate::model::clip::SubtitleHighlightMode::Bold => 1,
-                    crate::model::clip::SubtitleHighlightMode::Color => 2,
-                    crate::model::clip::SubtitleHighlightMode::Underline => 3,
-                    crate::model::clip::SubtitleHighlightMode::Stroke => 4,
-                };
-                self.subtitle_highlight_dropdown.set_selected(hl_idx);
+                // Sync base style toggles
+                self.sub_bold_btn.set_active(c.subtitle_bold);
+                self.sub_italic_btn.set_active(c.subtitle_italic);
+                self.sub_underline_btn.set_active(c.subtitle_underline);
+                self.sub_shadow_btn.set_active(c.subtitle_shadow);
+
+                // Sync highlight flags checkboxes
+                let flags = &c.subtitle_highlight_flags;
+                self.hl_bold_check.set_active(flags.bold);
+                self.hl_color_check.set_active(flags.color);
+                self.hl_underline_check.set_active(flags.underline);
+                self.hl_stroke_check.set_active(flags.stroke);
+                self.hl_italic_check.set_active(flags.italic);
+                self.hl_bg_check.set_active(flags.background);
+                self.hl_shadow_check.set_active(flags.shadow);
+
+                // Show highlight color row when color or stroke is checked
                 self.subtitle_highlight_color_row
-                    .set_visible(hl_idx == 2 || hl_idx == 4);
+                    .set_visible(flags.color || flags.stroke);
+                // Show bg highlight color row when background is checked
+                self.subtitle_bg_highlight_color_row
+                    .set_visible(flags.background);
+
                 self.subtitle_word_window_slider
                     .set_value(c.subtitle_word_window_secs);
-                // Show word window slider only when a highlight mode is active.
-                self.subtitle_word_window_slider.set_visible(hl_idx != 0);
+                // Show word window slider only when any highlight flag is set.
+                self.subtitle_word_window_slider
+                    .set_visible(!flags.is_none());
                 self.subtitle_position_slider
                     .set_value(c.subtitle_position_y);
-                let oc = c.subtitle_outline_color;
-                self.subtitle_outline_color_btn.set_rgba(&gdk4::RGBA::new(
-                    ((oc >> 24) & 0xFF) as f32 / 255.0,
-                    ((oc >> 16) & 0xFF) as f32 / 255.0,
-                    ((oc >> 8) & 0xFF) as f32 / 255.0,
-                    (oc & 0xFF) as f32 / 255.0,
-                ));
+                let (or_, og, ob, oa) =
+                    crate::ui::colors::rgba_u32_to_f32(c.subtitle_outline_color);
+                self.subtitle_outline_color_btn
+                    .set_rgba(&gdk4::RGBA::new(or_, og, ob, oa));
                 self.subtitle_bg_box_check.set_active(c.subtitle_bg_box);
-                let bgc = c.subtitle_bg_box_color;
-                self.subtitle_bg_color_btn.set_rgba(&gdk4::RGBA::new(
-                    ((bgc >> 24) & 0xFF) as f32 / 255.0,
-                    ((bgc >> 16) & 0xFF) as f32 / 255.0,
-                    ((bgc >> 8) & 0xFF) as f32 / 255.0,
-                    (bgc & 0xFF) as f32 / 255.0,
-                ));
+                let (bgr, bgg, bgb, bga) =
+                    crate::ui::colors::rgba_u32_to_f32(c.subtitle_bg_box_color);
+                self.subtitle_bg_color_btn
+                    .set_rgba(&gdk4::RGBA::new(bgr, bgg, bgb, bga));
                 self.subtitle_export_srt_btn
                     .set_sensitive(!c.subtitle_segments.is_empty());
-                if hl_idx == 2 || hl_idx == 4 {
-                    let hc = c.subtitle_highlight_color;
-                    let hr = ((hc >> 24) & 0xFF) as f32 / 255.0;
-                    let hg = ((hc >> 16) & 0xFF) as f32 / 255.0;
-                    let hb = ((hc >> 8) & 0xFF) as f32 / 255.0;
-                    let ha = (hc & 0xFF) as f32 / 255.0;
+                if flags.color || flags.stroke {
+                    let (hr, hg, hb, ha) =
+                        crate::ui::colors::rgba_u32_to_f32(c.subtitle_highlight_color);
                     self.subtitle_highlight_color_btn
                         .set_rgba(&gdk4::RGBA::new(hr, hg, hb, ha));
                 }
+                if flags.background {
+                    let (bhr, bhg, bhb, bha) =
+                        crate::ui::colors::rgba_u32_to_f32(c.subtitle_bg_highlight_color);
+                    self.subtitle_bg_highlight_color_btn
+                        .set_rgba(&gdk4::RGBA::new(bhr, bhg, bhb, bha));
+                }
                 self.mask_section
-                    .set_visible(is_video || is_image || is_title_clip);
+                    .set_visible(is_video || is_image || is_title_clip || is_adjustment);
                 self.frei0r_effects_section
                     .set_visible(is_visual && !is_compound && !is_multicam);
 
@@ -1539,6 +2131,9 @@ impl InspectorView {
                     self.mask_expansion_slider.set_value(0.0);
                     self.mask_invert_check.set_active(false);
                 }
+
+                self.sync_tracking_tracker_controls(c);
+                self.sync_tracking_reference_controls(project, c);
 
                 // Populate applied frei0r effects list.
                 self.rebuild_frei0r_effects_list(&c.frei0r_effects);
@@ -1596,6 +2191,115 @@ impl InspectorView {
                 self.out_value.set_text(&ns_to_timecode(c.source_out));
                 self.dur_value.set_text(&ns_to_timecode(c.duration()));
                 self.pos_value.set_text(&ns_to_timecode(c.timeline_start));
+                let current_transition = &c.outgoing_transition;
+                let current_kind_id =
+                    if is_supported_transition_kind(current_transition.kind_trimmed()) {
+                        current_transition.kind_trimmed()
+                    } else {
+                        ""
+                    };
+                self.transition_kind_dropdown
+                    .set_active_id(Some(current_kind_id));
+                self.transition_alignment_dropdown
+                    .set_active_id(Some(current_transition.alignment.as_str()));
+                self.transition_clear_btn
+                    .set_sensitive(current_transition.is_active());
+                if let Some((track, clip_index)) = project.tracks.iter().find_map(|track| {
+                    track
+                        .clips
+                        .iter()
+                        .position(|clip| clip.id == c.id)
+                        .map(|clip_index| (track, clip_index))
+                }) {
+                    if let Some(next_clip) = track.clips.get(clip_index + 1) {
+                        let max_duration_ns = max_transition_duration_ns(c, next_clip);
+                        let max_duration_ms =
+                            (max_duration_ns.max(MIN_TRANSITION_DURATION_NS) as f64) / 1_000_000.0;
+                        let display_duration_ns = if current_transition.is_active() {
+                            current_transition.duration_ns.clamp(
+                                MIN_TRANSITION_DURATION_NS,
+                                max_duration_ns.max(MIN_TRANSITION_DURATION_NS),
+                            )
+                        } else {
+                            DEFAULT_TRANSITION_DURATION_NS.clamp(
+                                MIN_TRANSITION_DURATION_NS,
+                                max_duration_ns.max(MIN_TRANSITION_DURATION_NS),
+                            )
+                        };
+                        let current_has_kind = !current_kind_id.is_empty();
+                        let boundary_supports_transition =
+                            max_duration_ns >= MIN_TRANSITION_DURATION_NS;
+                        self.transition_duration_ms.set_range(
+                            (MIN_TRANSITION_DURATION_NS as f64) / 1_000_000.0,
+                            max_duration_ms,
+                        );
+                        self.transition_duration_ms
+                            .set_value((display_duration_ns as f64) / 1_000_000.0);
+                        self.transition_kind_dropdown
+                            .set_sensitive(boundary_supports_transition);
+                        self.transition_duration_ms
+                            .set_sensitive(boundary_supports_transition && current_has_kind);
+                        self.transition_alignment_dropdown
+                            .set_sensitive(boundary_supports_transition && current_has_kind);
+                        let status = if !boundary_supports_transition {
+                            format!(
+                                "This cut is too short for a transition. Max overlap here is {:.0} ms.",
+                                max_duration_ns as f64 / 1_000_000.0
+                            )
+                        } else if current_transition.is_active()
+                            && current_transition.duration_ns > max_duration_ns
+                        {
+                            format!(
+                                "Max duration at this cut is {:.0} ms. The saved transition will clamp when you update it.",
+                                max_duration_ns as f64 / 1_000_000.0
+                            )
+                        } else if current_transition.is_active() {
+                            format!(
+                                "Max duration at this cut is {:.0} ms.",
+                                max_duration_ns as f64 / 1_000_000.0
+                            )
+                        } else {
+                            format!(
+                                "Choose a transition for the cut after this clip. Max duration here is {:.0} ms.",
+                                max_duration_ns as f64 / 1_000_000.0
+                            )
+                        };
+                        self.transition_status_label.set_text(&status);
+                    } else {
+                        let default_duration_ms =
+                            (DEFAULT_TRANSITION_DURATION_NS as f64) / 1_000_000.0;
+                        self.transition_duration_ms.set_range(
+                            (MIN_TRANSITION_DURATION_NS as f64) / 1_000_000.0,
+                            default_duration_ms
+                                .max((MIN_TRANSITION_DURATION_NS as f64) / 1_000_000.0),
+                        );
+                        let display_duration_ns = if current_transition.is_active() {
+                            current_transition
+                                .duration_ns
+                                .max(MIN_TRANSITION_DURATION_NS)
+                        } else {
+                            DEFAULT_TRANSITION_DURATION_NS
+                        };
+                        self.transition_duration_ms
+                            .set_value((display_duration_ns as f64) / 1_000_000.0);
+                        self.transition_kind_dropdown.set_sensitive(false);
+                        self.transition_duration_ms.set_sensitive(false);
+                        self.transition_alignment_dropdown.set_sensitive(false);
+                        let status = if current_transition.is_active() {
+                            "This clip has no following clip on the same track. Remove the saved transition or add another clip after it."
+                        } else {
+                            "Add another clip after this one on the same track to enable outgoing transitions."
+                        };
+                        self.transition_status_label.set_text(status);
+                    }
+                } else {
+                    self.transition_kind_dropdown.set_sensitive(false);
+                    self.transition_duration_ms.set_sensitive(false);
+                    self.transition_alignment_dropdown.set_sensitive(false);
+                    self.transition_clear_btn.set_sensitive(false);
+                    self.transition_status_label
+                        .set_text("Transition controls are unavailable for this clip.");
+                }
                 self.brightness_slider.set_value(c.brightness as f64);
                 self.contrast_slider.set_value(c.contrast as f64);
                 self.saturation_slider.set_value(c.saturation as f64);
@@ -1627,6 +2331,43 @@ impl InspectorView {
                     playhead_ns,
                 );
                 self.volume_slider.set_value(linear_to_db_volume(vol_val));
+                self.voice_isolation_slider
+                    .set_value((c.voice_isolation * 100.0) as f64);
+                self.voice_isolation_slider.set_sensitive(true);
+                self.vi_pad_slider
+                    .set_value(c.voice_isolation_pad_ms as f64);
+                self.vi_fade_slider
+                    .set_value(c.voice_isolation_fade_ms as f64);
+                self.vi_floor_slider
+                    .set_value((c.voice_isolation_floor * 100.0) as f64);
+                let vi_detail_visible = c.voice_isolation > 0.0;
+                self.vi_pad_slider.set_visible(vi_detail_visible);
+                self.vi_fade_slider.set_visible(vi_detail_visible);
+                self.vi_floor_slider.set_visible(vi_detail_visible);
+                self.vi_source_dropdown.set_visible(vi_detail_visible);
+                let is_silence_mode = matches!(
+                    c.voice_isolation_source,
+                    crate::model::clip::VoiceIsolationSource::Silence
+                );
+                self.vi_source_dropdown
+                    .set_selected(if is_silence_mode { 1 } else { 0 });
+                self.vi_silence_threshold_slider
+                    .set_value(c.voice_isolation_silence_threshold_db as f64);
+                self.vi_silence_min_ms_slider
+                    .set_value(c.voice_isolation_silence_min_ms as f64);
+                let silence_visible = vi_detail_visible && is_silence_mode;
+                self.vi_silence_threshold_slider
+                    .set_visible(silence_visible);
+                self.vi_silence_min_ms_slider.set_visible(silence_visible);
+                self.vi_silence_actions_row.set_visible(silence_visible);
+                if c.voice_isolation_speech_intervals.is_empty() {
+                    self.vi_intervals_label.set_text("Not analyzed");
+                } else {
+                    self.vi_intervals_label.set_text(&format!(
+                        "Speech intervals: {}",
+                        c.voice_isolation_speech_intervals.len()
+                    ));
+                }
                 self.pan_slider
                     .set_value(c.value_for_phase1_property_at_timeline_ns(
                         Phase1KeyframeProperty::Pan,
@@ -1639,6 +2380,16 @@ impl InspectorView {
                 } else {
                     self.measured_loudness_label.set_text("");
                 }
+                // Match EQ clear button + curve visibility/state
+                let show_match_eq = c.has_match_eq();
+                self.clear_match_eq_btn.set_visible(show_match_eq);
+                self.match_eq_curve.set_visible(show_match_eq);
+                {
+                    let mut state = self.match_eq_curve_state.borrow_mut();
+                    state.clear();
+                    state.extend_from_slice(&c.match_eq_bands);
+                }
+                self.match_eq_curve.queue_draw();
                 // LADSPA effects list — interactive controls
                 {
                     while let Some(child) = self.ladspa_effects_list.first_child() {
@@ -1695,21 +2446,16 @@ impl InspectorView {
                                 let on_changed = self.on_frei0r_changed.clone();
                                 enable_check.connect_toggled(move |btn| {
                                     let mut proj = project.borrow_mut();
-                                    for track in &mut proj.tracks {
-                                        if let Some(clip) =
-                                            track.clips.iter_mut().find(|c| c.id == clip_id)
+                                    if let Some(clip) = proj.clip_mut(&clip_id) {
+                                        if let Some(e) = clip
+                                            .ladspa_effects
+                                            .iter_mut()
+                                            .find(|e| e.id == effect_id)
                                         {
-                                            if let Some(e) = clip
-                                                .ladspa_effects
-                                                .iter_mut()
-                                                .find(|e| e.id == effect_id)
-                                            {
-                                                e.enabled = btn.is_active();
-                                                proj.dirty = true;
-                                            }
-                                            break;
+                                            e.enabled = btn.is_active();
                                         }
                                     }
+                                    proj.dirty = true;
                                     drop(proj);
                                     on_changed();
                                 });
@@ -1722,15 +2468,10 @@ impl InspectorView {
                                 let on_changed = self.on_frei0r_changed.clone();
                                 btn_remove.connect_clicked(move |_| {
                                     let mut proj = project.borrow_mut();
-                                    for track in &mut proj.tracks {
-                                        if let Some(clip) =
-                                            track.clips.iter_mut().find(|c| c.id == clip_id)
-                                        {
-                                            clip.ladspa_effects.retain(|e| e.id != effect_id);
-                                            proj.dirty = true;
-                                            break;
-                                        }
+                                    if let Some(clip) = proj.clip_mut(&clip_id) {
+                                        clip.ladspa_effects.retain(|e| e.id != effect_id);
                                     }
+                                    proj.dirty = true;
                                     drop(proj);
                                     on_changed();
                                 });
@@ -1743,23 +2484,18 @@ impl InspectorView {
                                 let on_changed = self.on_frei0r_changed.clone();
                                 btn_up.connect_clicked(move |_| {
                                     let mut proj = project.borrow_mut();
-                                    for track in &mut proj.tracks {
-                                        if let Some(clip) =
-                                            track.clips.iter_mut().find(|c| c.id == clip_id)
+                                    if let Some(clip) = proj.clip_mut(&clip_id) {
+                                        if let Some(pos) = clip
+                                            .ladspa_effects
+                                            .iter()
+                                            .position(|e| e.id == effect_id)
                                         {
-                                            if let Some(pos) = clip
-                                                .ladspa_effects
-                                                .iter()
-                                                .position(|e| e.id == effect_id)
-                                            {
-                                                if pos > 0 {
-                                                    clip.ladspa_effects.swap(pos, pos - 1);
-                                                    proj.dirty = true;
-                                                }
+                                            if pos > 0 {
+                                                clip.ladspa_effects.swap(pos, pos - 1);
                                             }
-                                            break;
                                         }
                                     }
+                                    proj.dirty = true;
                                     drop(proj);
                                     on_changed();
                                 });
@@ -1772,24 +2508,19 @@ impl InspectorView {
                                 let on_changed = self.on_frei0r_changed.clone();
                                 btn_down.connect_clicked(move |_| {
                                     let mut proj = project.borrow_mut();
-                                    for track in &mut proj.tracks {
-                                        if let Some(clip) =
-                                            track.clips.iter_mut().find(|c| c.id == clip_id)
+                                    if let Some(clip) = proj.clip_mut(&clip_id) {
+                                        let len = clip.ladspa_effects.len();
+                                        if let Some(pos) = clip
+                                            .ladspa_effects
+                                            .iter()
+                                            .position(|e| e.id == effect_id)
                                         {
-                                            let len = clip.ladspa_effects.len();
-                                            if let Some(pos) = clip
-                                                .ladspa_effects
-                                                .iter()
-                                                .position(|e| e.id == effect_id)
-                                            {
-                                                if pos + 1 < len {
-                                                    clip.ladspa_effects.swap(pos, pos + 1);
-                                                    proj.dirty = true;
-                                                }
+                                            if pos + 1 < len {
+                                                clip.ladspa_effects.swap(pos, pos + 1);
                                             }
-                                            break;
                                         }
                                     }
+                                    proj.dirty = true;
                                     drop(proj);
                                     on_changed();
                                 });
@@ -1836,21 +2567,16 @@ impl InspectorView {
                                     let on_changed = self.on_frei0r_changed.clone();
                                     slider.connect_value_changed(move |s| {
                                         let mut proj = project.borrow_mut();
-                                        for track in &mut proj.tracks {
-                                            if let Some(clip) =
-                                                track.clips.iter_mut().find(|c| c.id == clip_id)
+                                        if let Some(clip) = proj.clip_mut(&clip_id) {
+                                            if let Some(e) = clip
+                                                .ladspa_effects
+                                                .iter_mut()
+                                                .find(|e| e.id == effect_id)
                                             {
-                                                if let Some(e) = clip
-                                                    .ladspa_effects
-                                                    .iter_mut()
-                                                    .find(|e| e.id == effect_id)
-                                                {
-                                                    e.params.insert(param_name.clone(), s.value());
-                                                    proj.dirty = true;
-                                                }
-                                                break;
+                                                e.params.insert(param_name.clone(), s.value());
                                             }
                                         }
+                                        proj.dirty = true;
                                         drop(proj);
                                         on_changed();
                                     });
@@ -1948,11 +2674,7 @@ impl InspectorView {
                 self.title_entry.set_text(&c.title_text);
                 sync_title_font_button(&self.title_font_btn, &c.title_font);
                 {
-                    let rgba = c.title_color;
-                    let r = ((rgba >> 24) & 0xFF) as f32 / 255.0;
-                    let g = ((rgba >> 16) & 0xFF) as f32 / 255.0;
-                    let b = ((rgba >> 8) & 0xFF) as f32 / 255.0;
-                    let a = (rgba & 0xFF) as f32 / 255.0;
+                    let (r, g, b, a) = crate::ui::colors::rgba_u32_to_f32(c.title_color);
                     self.title_color_btn.set_rgba(&gdk4::RGBA::new(r, g, b, a));
                 }
                 self.title_x_slider.set_value(c.title_x);
@@ -1960,21 +2682,13 @@ impl InspectorView {
                 self.title_outline_width_slider
                     .set_value(c.title_outline_width);
                 {
-                    let rgba = c.title_outline_color;
-                    let r = ((rgba >> 24) & 0xFF) as f32 / 255.0;
-                    let g = ((rgba >> 16) & 0xFF) as f32 / 255.0;
-                    let b = ((rgba >> 8) & 0xFF) as f32 / 255.0;
-                    let a = (rgba & 0xFF) as f32 / 255.0;
+                    let (r, g, b, a) = crate::ui::colors::rgba_u32_to_f32(c.title_outline_color);
                     self.title_outline_color_btn
                         .set_rgba(&gdk4::RGBA::new(r, g, b, a));
                 }
                 self.title_shadow_check.set_active(c.title_shadow);
                 {
-                    let rgba = c.title_shadow_color;
-                    let r = ((rgba >> 24) & 0xFF) as f32 / 255.0;
-                    let g = ((rgba >> 16) & 0xFF) as f32 / 255.0;
-                    let b = ((rgba >> 8) & 0xFF) as f32 / 255.0;
-                    let a = (rgba & 0xFF) as f32 / 255.0;
+                    let (r, g, b, a) = crate::ui::colors::rgba_u32_to_f32(c.title_shadow_color);
                     self.title_shadow_color_btn
                         .set_rgba(&gdk4::RGBA::new(r, g, b, a));
                 }
@@ -1984,11 +2698,7 @@ impl InspectorView {
                     .set_value(c.title_shadow_offset_y);
                 self.title_bg_box_check.set_active(c.title_bg_box);
                 {
-                    let rgba = c.title_bg_box_color;
-                    let r = ((rgba >> 24) & 0xFF) as f32 / 255.0;
-                    let g = ((rgba >> 16) & 0xFF) as f32 / 255.0;
-                    let b = ((rgba >> 8) & 0xFF) as f32 / 255.0;
-                    let a = (rgba & 0xFF) as f32 / 255.0;
+                    let (r, g, b, a) = crate::ui::colors::rgba_u32_to_f32(c.title_bg_box_color);
                     self.title_bg_box_color_btn
                         .set_rgba(&gdk4::RGBA::new(r, g, b, a));
                 }
@@ -2008,6 +2718,19 @@ impl InspectorView {
                         crate::model::clip::SlowMotionInterp::Off => 0,
                         crate::model::clip::SlowMotionInterp::Blend => 1,
                         crate::model::clip::SlowMotionInterp::OpticalFlow => 2,
+                        // If a clip arrives with the AI variant but the
+                        // model is not installed, fall back to displaying
+                        // "Off" — the cache will refuse to generate
+                        // anything until the model appears, at which
+                        // point the dropdown will gain the AI entry and
+                        // a re-load will select it correctly.
+                        crate::model::clip::SlowMotionInterp::Ai => {
+                            if self.slow_motion_has_ai.get() {
+                                3
+                            } else {
+                                0
+                            }
+                        }
                     });
                 // LUT
                 // Rebuild LUT list display
@@ -2066,6 +2789,9 @@ impl InspectorView {
                     .set_value(c.bg_removal_threshold);
             }
             None => {
+                log::debug!(
+                    "inspector subtitle: update called with clip=None → hiding content_box"
+                );
                 self.name_entry.set_text("");
                 self.clip_color_label_combo
                     .set_selected(clip_color_label_index(ClipColorLabel::None));
@@ -2083,6 +2809,22 @@ impl InspectorView {
                 self.path_status_value.remove_css_class("offline-label");
                 self.path_status_value.add_css_class("dim-label");
                 self.relink_btn.set_visible(false);
+                self.transition_kind_dropdown.set_active_id(Some(""));
+                self.transition_duration_ms.set_range(
+                    (MIN_TRANSITION_DURATION_NS as f64) / 1_000_000.0,
+                    (DEFAULT_TRANSITION_DURATION_NS as f64) / 1_000_000.0,
+                );
+                self.transition_duration_ms
+                    .set_value((DEFAULT_TRANSITION_DURATION_NS as f64) / 1_000_000.0);
+                self.transition_alignment_dropdown
+                    .set_active_id(Some(TransitionAlignment::EndOnCut.as_str()));
+                self.transition_kind_dropdown.set_sensitive(false);
+                self.transition_duration_ms.set_sensitive(false);
+                self.transition_alignment_dropdown.set_sensitive(false);
+                self.transition_clear_btn.set_sensitive(false);
+                self.transition_status_label.set_text(
+                    "Select a clip with a following clip to edit its outgoing transition.",
+                );
                 self.brightness_slider.set_value(0.0);
                 self.contrast_slider.set_value(1.0);
                 self.saturation_slider.set_value(1.0);
@@ -2097,8 +2839,17 @@ impl InspectorView {
                 self.midtones_slider.set_value(0.0);
                 self.highlights_slider.set_value(0.0);
                 self.volume_slider.set_value(0.0);
+                self.voice_isolation_slider.set_value(0.0);
+                self.vi_source_dropdown.set_visible(false);
+                self.vi_silence_threshold_slider.set_visible(false);
+                self.vi_silence_min_ms_slider.set_visible(false);
+                self.vi_silence_actions_row.set_visible(false);
+                self.vi_intervals_label.set_text("Not analyzed");
                 self.pan_slider.set_value(0.0);
                 self.measured_loudness_label.set_text("");
+                self.clear_match_eq_btn.set_visible(false);
+                self.match_eq_curve.set_visible(false);
+                self.match_eq_curve_state.borrow_mut().clear();
                 let eq_defaults = crate::model::clip::default_eq_bands();
                 for (i, band) in eq_defaults.iter().enumerate() {
                     if i < self.eq_freq_sliders.len() {
@@ -2162,6 +2913,43 @@ impl InspectorView {
                 // Background Removal defaults
                 self.bg_removal_enable.set_active(false);
                 self.bg_removal_threshold_slider.set_value(0.5);
+                *self.selected_motion_tracker_id.borrow_mut() = None;
+                self.tracking_tracker_dropdown
+                    .set_model(Some(&gtk4::StringList::new(&["No trackers yet"])));
+                self.tracking_tracker_dropdown.set_selected(0);
+                *self.tracking_tracker_ids.borrow_mut() = vec![None];
+                self.tracking_add_btn.set_sensitive(false);
+                self.tracking_remove_btn.set_sensitive(false);
+                self.tracking_label_entry.set_text("");
+                self.tracking_label_entry.set_sensitive(false);
+                self.tracking_edit_region_btn.set_active(false);
+                self.tracking_edit_region_btn.set_sensitive(false);
+                self.tracking_center_x_slider.set_value(0.5);
+                self.tracking_center_y_slider.set_value(0.5);
+                self.tracking_width_slider.set_value(0.25);
+                self.tracking_height_slider.set_value(0.25);
+                self.tracking_rotation_spin.set_value(0.0);
+                self.tracking_center_x_slider.set_sensitive(false);
+                self.tracking_center_y_slider.set_sensitive(false);
+                self.tracking_width_slider.set_sensitive(false);
+                self.tracking_height_slider.set_sensitive(false);
+                self.tracking_rotation_spin.set_sensitive(false);
+                self.tracking_run_btn.set_label("Track Region");
+                self.tracking_run_btn.set_sensitive(false);
+                self.tracking_cancel_btn.set_sensitive(false);
+                self.tracking_status_label
+                    .set_text("Select a visual clip to create or attach motion tracking.");
+                self.tracking_target_dropdown
+                    .set_model(Some(&gtk4::StringList::new(&["Clip Transform"])));
+                self.tracking_target_dropdown.set_selected(0);
+                self.tracking_target_dropdown.set_sensitive(false);
+                self.tracking_reference_dropdown
+                    .set_model(Some(&gtk4::StringList::new(&["None"])));
+                self.tracking_reference_dropdown.set_selected(0);
+                *self.tracking_reference_choices.borrow_mut() = vec![None];
+                self.tracking_clear_binding_btn.set_sensitive(false);
+                self.tracking_binding_status_label
+                    .set_text("No motion trackers are available in the project yet.");
             }
         }
         *self.updating.borrow_mut() = false;
@@ -2169,14 +2957,11 @@ impl InspectorView {
 
     /// Update the keyframe indicator label based on the playhead position.
     pub fn update_keyframe_indicator(&self, project: &Project, playhead_ns: u64) {
-        let clip = self.selected_clip_id.borrow().clone().and_then(|id| {
-            project
-                .tracks
-                .iter()
-                .flat_map(|t| t.clips.iter())
-                .find(|c| c.id == id)
-                .cloned()
-        });
+        let clip = self
+            .selected_clip_id
+            .borrow()
+            .clone()
+            .and_then(|id| project.clip_ref(&id).cloned());
         match clip {
             Some(c) => {
                 let local = c.local_timeline_position_ns(playhead_ns);
@@ -2241,14 +3026,11 @@ impl InspectorView {
     /// indicators.  Called when the playhead moves (scrub, nav, playback) without
     /// a full clip re-selection.
     pub fn update_keyframed_sliders(&self, project: &Project, playhead_ns: u64) {
-        let clip = self.selected_clip_id.borrow().clone().and_then(|id| {
-            project
-                .tracks
-                .iter()
-                .flat_map(|t| t.clips.iter())
-                .find(|c| c.id == id)
-                .cloned()
-        });
+        let clip = self
+            .selected_clip_id
+            .borrow()
+            .clone()
+            .and_then(|id| project.clip_ref(&id).cloned());
         if let Some(c) = clip {
             *self.updating.borrow_mut() = true;
             self.volume_slider.set_value(linear_to_db_volume(
@@ -2257,6 +3039,8 @@ impl InspectorView {
                     playhead_ns,
                 ),
             ));
+            self.voice_isolation_slider
+                .set_value((c.voice_isolation * 100.0) as f64);
             self.pan_slider
                 .set_value(c.value_for_phase1_property_at_timeline_ns(
                     Phase1KeyframeProperty::Pan,
@@ -2345,7 +3129,7 @@ pub fn build_inspector(
             f32,
             f32,
         ) + 'static,
-    on_audio_changed: impl Fn(&str, f32, f32) + 'static,
+    on_audio_changed: impl Fn(&str, f32, f32, f32) + 'static,
     on_eq_changed: impl Fn(&str, [crate::model::clip::EqBand; 3]) + 'static,
     on_transform_changed: impl Fn(i32, i32, i32, i32, i32, bool, bool, f64, f64, f64) + 'static,
     on_anamorphic_changed: impl Fn(f64) + 'static,
@@ -2365,14 +3149,48 @@ pub fn build_inspector(
     current_playhead_ns: impl Fn() -> u64 + 'static,
     on_seek_to: impl Fn(u64) + 'static,
     on_normalize_audio: impl Fn(&str) + 'static,
+    on_analyze_voice_isolation_silence: impl Fn(&str) + 'static,
+    on_suggest_voice_isolation_threshold: impl Fn(&str) -> Option<f32> + 'static,
+    on_match_audio: impl Fn(
+            &str,
+            Option<crate::media::audio_match::AnalysisRegionNs>,
+            crate::media::audio_match::AudioMatchChannelMode,
+            &str,
+            Option<crate::media::audio_match::AnalysisRegionNs>,
+            crate::media::audio_match::AudioMatchChannelMode,
+        ) + 'static,
     on_duck_changed: impl Fn(&str, bool, f64) + 'static,
     on_role_changed: impl Fn(&str, &str) + 'static,
     on_execute_command: impl Fn(Box<dyn crate::undo::EditCommand>) + 'static,
+    on_clear_match_eq: impl Fn(&str) + 'static,
 ) -> (GBox, Rc<InspectorView>) {
+    // Bring transform-bound constants into scope so the slider/range/clamp
+    // sites below can use them by short name instead of literal magic
+    // numbers.  See `src/model/transform_bounds.rs` for the canonical
+    // values.
+    use crate::model::transform_bounds::{
+        CROP_MAX_PX, CROP_MIN_PX, POSITION_MAX, POSITION_MIN, ROTATE_MAX_DEG, ROTATE_MIN_DEG,
+        SCALE_MAX, SCALE_MIN,
+    };
     // Wrap frei0r callbacks in Rc so they can be cloned into multiple closures.
     let on_normalize_audio: Rc<dyn Fn(&str)> = Rc::new(on_normalize_audio);
+    let on_analyze_voice_isolation_silence: Rc<dyn Fn(&str)> =
+        Rc::new(on_analyze_voice_isolation_silence);
+    let on_suggest_voice_isolation_threshold: Rc<dyn Fn(&str) -> Option<f32>> =
+        Rc::new(on_suggest_voice_isolation_threshold);
+    let on_match_audio: Rc<
+        dyn Fn(
+            &str,
+            Option<crate::media::audio_match::AnalysisRegionNs>,
+            crate::media::audio_match::AudioMatchChannelMode,
+            &str,
+            Option<crate::media::audio_match::AnalysisRegionNs>,
+            crate::media::audio_match::AudioMatchChannelMode,
+        ),
+    > = Rc::new(on_match_audio);
     let on_duck_changed: Rc<dyn Fn(&str, bool, f64)> = Rc::new(on_duck_changed);
     let on_role_changed: Rc<dyn Fn(&str, &str)> = Rc::new(on_role_changed);
+    let on_clear_match_eq: Rc<dyn Fn(&str)> = Rc::new(on_clear_match_eq);
     let on_execute_command: Rc<dyn Fn(Box<dyn crate::undo::EditCommand>)> =
         Rc::new(on_execute_command);
     let on_vidstab_changed: Rc<dyn Fn()> = Rc::new(on_vidstab_changed);
@@ -2460,6 +3278,65 @@ pub fn build_inspector(
     let pos_value = value_label("—");
     content_box.append(&pos_value);
 
+    // ── Transition section ───────────────────────────────────────────────────
+    let transition_section = GBox::new(Orientation::Vertical, 8);
+
+    transition_section.append(&Separator::new(Orientation::Horizontal));
+    let transition_expander = Expander::new(Some("Transition"));
+    transition_expander.set_expanded(false);
+    transition_section.append(&transition_expander);
+    let transition_inner = GBox::new(Orientation::Vertical, 8);
+    transition_expander.set_child(Some(&transition_inner));
+
+    row_label(&transition_inner, "Type");
+    let transition_kind_dropdown = gtk4::ComboBoxText::new();
+    transition_kind_dropdown.append(Some(""), "None");
+    for transition in supported_transition_definitions() {
+        transition_kind_dropdown.append(Some(transition.kind), transition.label);
+    }
+    transition_kind_dropdown.set_active_id(Some(""));
+    transition_kind_dropdown.set_halign(gtk4::Align::Start);
+    transition_kind_dropdown.set_hexpand(true);
+    transition_inner.append(&transition_kind_dropdown);
+
+    row_label(&transition_inner, "Duration (ms)");
+    let transition_duration_ms = gtk4::SpinButton::with_range(
+        (MIN_TRANSITION_DURATION_NS as f64) / 1_000_000.0,
+        10_000.0,
+        10.0,
+    );
+    transition_duration_ms.set_value((DEFAULT_TRANSITION_DURATION_NS as f64) / 1_000_000.0);
+    transition_duration_ms.set_digits(0);
+    transition_duration_ms.set_halign(gtk::Align::Start);
+    transition_inner.append(&transition_duration_ms);
+
+    row_label(&transition_inner, "Alignment");
+    let transition_alignment_dropdown = gtk4::ComboBoxText::new();
+    for alignment in TransitionAlignment::ALL {
+        transition_alignment_dropdown.append(Some(alignment.as_str()), alignment.label());
+    }
+    transition_alignment_dropdown.set_active_id(Some(TransitionAlignment::EndOnCut.as_str()));
+    transition_alignment_dropdown.set_halign(gtk::Align::Start);
+    transition_alignment_dropdown.set_hexpand(true);
+    transition_alignment_dropdown.set_tooltip_text(Some(
+        "Controls where the overlap sits relative to the cut in preview, export, and background prerender.",
+    ));
+    transition_inner.append(&transition_alignment_dropdown);
+
+    let transition_clear_btn = Button::with_label("Remove Transition");
+    transition_clear_btn.set_halign(gtk::Align::Start);
+    transition_clear_btn.add_css_class("small-btn");
+    transition_inner.append(&transition_clear_btn);
+
+    let transition_status_label = Label::new(Some(
+        "Select a clip with a following clip to edit its outgoing transition.",
+    ));
+    transition_status_label.set_halign(gtk::Align::Start);
+    transition_status_label.set_xalign(0.0);
+    transition_status_label.set_wrap(true);
+    transition_status_label.add_css_class("dim-label");
+    transition_inner.append(&transition_status_label);
+
     // ── Color + Denoise/Sharpness section (Video + Image only) ───────────────
     let color_section = GBox::new(Orientation::Vertical, 8);
     content_box.append(&color_section);
@@ -2472,7 +3349,12 @@ pub fn build_inspector(
     color_expander.set_child(Some(&color_inner));
 
     row_label(&color_inner, "Exposure");
-    let exposure_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let exposure_slider = Scale::with_range(
+        Orientation::Horizontal,
+        COLOR_SLIDER_MIN,
+        COLOR_SLIDER_MAX,
+        COLOR_SLIDER_STEP,
+    );
     exposure_slider.set_value(0.0);
     exposure_slider.set_draw_value(true);
     exposure_slider.set_digits(2);
@@ -2480,7 +3362,12 @@ pub fn build_inspector(
     color_inner.append(&exposure_slider);
 
     row_label(&color_inner, "Brightness");
-    let brightness_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let brightness_slider = Scale::with_range(
+        Orientation::Horizontal,
+        COLOR_SLIDER_MIN,
+        COLOR_SLIDER_MAX,
+        COLOR_SLIDER_STEP,
+    );
     brightness_slider.set_value(0.0);
     brightness_slider.set_draw_value(true);
     brightness_slider.set_digits(2);
@@ -2488,7 +3375,12 @@ pub fn build_inspector(
     color_inner.append(&brightness_slider);
 
     row_label(&color_inner, "Contrast");
-    let contrast_slider = Scale::with_range(Orientation::Horizontal, 0.0, 2.0, 0.01);
+    let contrast_slider = Scale::with_range(
+        Orientation::Horizontal,
+        DOUBLE_SLIDER_MIN,
+        DOUBLE_SLIDER_MAX,
+        DOUBLE_SLIDER_STEP,
+    );
     contrast_slider.set_value(1.0);
     contrast_slider.set_draw_value(true);
     contrast_slider.set_digits(2);
@@ -2496,7 +3388,12 @@ pub fn build_inspector(
     color_inner.append(&contrast_slider);
 
     row_label(&color_inner, "Saturation");
-    let saturation_slider = Scale::with_range(Orientation::Horizontal, 0.0, 2.0, 0.01);
+    let saturation_slider = Scale::with_range(
+        Orientation::Horizontal,
+        DOUBLE_SLIDER_MIN,
+        DOUBLE_SLIDER_MAX,
+        DOUBLE_SLIDER_STEP,
+    );
     saturation_slider.set_value(1.0);
     saturation_slider.set_draw_value(true);
     saturation_slider.set_digits(2);
@@ -2504,7 +3401,12 @@ pub fn build_inspector(
     color_inner.append(&saturation_slider);
 
     row_label(&color_inner, "Temperature (K)");
-    let temperature_slider = Scale::with_range(Orientation::Horizontal, 2000.0, 10000.0, 100.0);
+    let temperature_slider = Scale::with_range(
+        Orientation::Horizontal,
+        COLOR_TEMPERATURE_MIN_K,
+        COLOR_TEMPERATURE_MAX_K,
+        COLOR_TEMPERATURE_STEP_K,
+    );
     temperature_slider.set_value(6500.0);
     temperature_slider.set_draw_value(true);
     temperature_slider.set_digits(0);
@@ -2512,7 +3414,12 @@ pub fn build_inspector(
     color_inner.append(&temperature_slider);
 
     row_label(&color_inner, "Tint");
-    let tint_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let tint_slider = Scale::with_range(
+        Orientation::Horizontal,
+        COLOR_SLIDER_MIN,
+        COLOR_SLIDER_MAX,
+        COLOR_SLIDER_STEP,
+    );
     tint_slider.set_value(0.0);
     tint_slider.set_draw_value(true);
     tint_slider.set_digits(2);
@@ -2520,7 +3427,12 @@ pub fn build_inspector(
     color_inner.append(&tint_slider);
 
     row_label(&color_inner, "Black Point");
-    let black_point_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let black_point_slider = Scale::with_range(
+        Orientation::Horizontal,
+        COLOR_SLIDER_MIN,
+        COLOR_SLIDER_MAX,
+        COLOR_SLIDER_STEP,
+    );
     black_point_slider.set_value(0.0);
     black_point_slider.set_draw_value(true);
     black_point_slider.set_digits(2);
@@ -2533,7 +3445,12 @@ pub fn build_inspector(
     color_inner.append(&ds_title);
 
     row_label(&color_inner, "Denoise");
-    let denoise_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    let denoise_slider = Scale::with_range(
+        Orientation::Horizontal,
+        UNIT_SLIDER_MIN,
+        UNIT_SLIDER_MAX,
+        UNIT_SLIDER_STEP,
+    );
     denoise_slider.set_value(0.0);
     denoise_slider.set_draw_value(true);
     denoise_slider.set_digits(2);
@@ -2541,7 +3458,12 @@ pub fn build_inspector(
     color_inner.append(&denoise_slider);
 
     row_label(&color_inner, "Sharpness");
-    let sharpness_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let sharpness_slider = Scale::with_range(
+        Orientation::Horizontal,
+        COLOR_SLIDER_MIN,
+        COLOR_SLIDER_MAX,
+        COLOR_SLIDER_STEP,
+    );
     sharpness_slider.set_value(0.0);
     sharpness_slider.set_draw_value(true);
     sharpness_slider.set_digits(2);
@@ -2549,7 +3471,12 @@ pub fn build_inspector(
     color_inner.append(&sharpness_slider);
 
     row_label(&color_inner, "Blur");
-    let blur_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    let blur_slider = Scale::with_range(
+        Orientation::Horizontal,
+        UNIT_SLIDER_MIN,
+        UNIT_SLIDER_MAX,
+        UNIT_SLIDER_STEP,
+    );
     blur_slider.set_value(0.0);
     blur_slider.set_draw_value(true);
     blur_slider.set_digits(2);
@@ -2571,7 +3498,12 @@ pub fn build_inspector(
     color_inner.append(&vidstab_row);
 
     row_label(&color_inner, "Smoothing");
-    let vidstab_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    let vidstab_slider = Scale::with_range(
+        Orientation::Horizontal,
+        UNIT_SLIDER_MIN,
+        UNIT_SLIDER_MAX,
+        UNIT_SLIDER_STEP,
+    );
     vidstab_slider.set_value(0.5);
     vidstab_slider.set_draw_value(true);
     vidstab_slider.set_digits(2);
@@ -2584,7 +3516,12 @@ pub fn build_inspector(
     color_inner.append(&grading_title);
 
     row_label(&color_inner, "Shadows");
-    let shadows_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let shadows_slider = Scale::with_range(
+        Orientation::Horizontal,
+        COLOR_SLIDER_MIN,
+        COLOR_SLIDER_MAX,
+        COLOR_SLIDER_STEP,
+    );
     shadows_slider.set_value(0.0);
     shadows_slider.set_draw_value(true);
     shadows_slider.set_digits(2);
@@ -2592,7 +3529,12 @@ pub fn build_inspector(
     color_inner.append(&shadows_slider);
 
     row_label(&color_inner, "Midtones");
-    let midtones_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let midtones_slider = Scale::with_range(
+        Orientation::Horizontal,
+        COLOR_SLIDER_MIN,
+        COLOR_SLIDER_MAX,
+        COLOR_SLIDER_STEP,
+    );
     midtones_slider.set_value(0.0);
     midtones_slider.set_draw_value(true);
     midtones_slider.set_digits(2);
@@ -2600,7 +3542,12 @@ pub fn build_inspector(
     color_inner.append(&midtones_slider);
 
     row_label(&color_inner, "Highlights");
-    let highlights_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let highlights_slider = Scale::with_range(
+        Orientation::Horizontal,
+        COLOR_SLIDER_MIN,
+        COLOR_SLIDER_MAX,
+        COLOR_SLIDER_STEP,
+    );
     highlights_slider.set_value(0.0);
     highlights_slider.set_draw_value(true);
     highlights_slider.set_digits(2);
@@ -2608,7 +3555,12 @@ pub fn build_inspector(
     color_inner.append(&highlights_slider);
 
     row_label(&color_inner, "Highlights Warmth");
-    let highlights_warmth_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let highlights_warmth_slider = Scale::with_range(
+        Orientation::Horizontal,
+        COLOR_SLIDER_MIN,
+        COLOR_SLIDER_MAX,
+        COLOR_SLIDER_STEP,
+    );
     highlights_warmth_slider.set_value(0.0);
     highlights_warmth_slider.set_draw_value(true);
     highlights_warmth_slider.set_digits(2);
@@ -2616,7 +3568,12 @@ pub fn build_inspector(
     color_inner.append(&highlights_warmth_slider);
 
     row_label(&color_inner, "Highlights Tint");
-    let highlights_tint_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let highlights_tint_slider = Scale::with_range(
+        Orientation::Horizontal,
+        COLOR_SLIDER_MIN,
+        COLOR_SLIDER_MAX,
+        COLOR_SLIDER_STEP,
+    );
     highlights_tint_slider.set_value(0.0);
     highlights_tint_slider.set_draw_value(true);
     highlights_tint_slider.set_digits(2);
@@ -2624,7 +3581,12 @@ pub fn build_inspector(
     color_inner.append(&highlights_tint_slider);
 
     row_label(&color_inner, "Midtones Warmth");
-    let midtones_warmth_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let midtones_warmth_slider = Scale::with_range(
+        Orientation::Horizontal,
+        COLOR_SLIDER_MIN,
+        COLOR_SLIDER_MAX,
+        COLOR_SLIDER_STEP,
+    );
     midtones_warmth_slider.set_value(0.0);
     midtones_warmth_slider.set_draw_value(true);
     midtones_warmth_slider.set_digits(2);
@@ -2632,7 +3594,12 @@ pub fn build_inspector(
     color_inner.append(&midtones_warmth_slider);
 
     row_label(&color_inner, "Midtones Tint");
-    let midtones_tint_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let midtones_tint_slider = Scale::with_range(
+        Orientation::Horizontal,
+        COLOR_SLIDER_MIN,
+        COLOR_SLIDER_MAX,
+        COLOR_SLIDER_STEP,
+    );
     midtones_tint_slider.set_value(0.0);
     midtones_tint_slider.set_draw_value(true);
     midtones_tint_slider.set_digits(2);
@@ -2640,7 +3607,12 @@ pub fn build_inspector(
     color_inner.append(&midtones_tint_slider);
 
     row_label(&color_inner, "Shadows Warmth");
-    let shadows_warmth_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let shadows_warmth_slider = Scale::with_range(
+        Orientation::Horizontal,
+        COLOR_SLIDER_MIN,
+        COLOR_SLIDER_MAX,
+        COLOR_SLIDER_STEP,
+    );
     shadows_warmth_slider.set_value(0.0);
     shadows_warmth_slider.set_draw_value(true);
     shadows_warmth_slider.set_digits(2);
@@ -2648,7 +3620,12 @@ pub fn build_inspector(
     color_inner.append(&shadows_warmth_slider);
 
     row_label(&color_inner, "Shadows Tint");
-    let shadows_tint_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let shadows_tint_slider = Scale::with_range(
+        Orientation::Horizontal,
+        COLOR_SLIDER_MIN,
+        COLOR_SLIDER_MAX,
+        COLOR_SLIDER_STEP,
+    );
     shadows_tint_slider.set_value(0.0);
     shadows_tint_slider.set_draw_value(true);
     shadows_tint_slider.set_digits(2);
@@ -2701,7 +3678,12 @@ pub fn build_inspector(
     chroma_custom_color_row.set_visible(false);
 
     row_label(&chroma_key_inner, "Tolerance");
-    let chroma_tolerance_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    let chroma_tolerance_slider = Scale::with_range(
+        Orientation::Horizontal,
+        UNIT_SLIDER_MIN,
+        UNIT_SLIDER_MAX,
+        UNIT_SLIDER_STEP,
+    );
     chroma_tolerance_slider.set_value(0.3);
     chroma_tolerance_slider.set_draw_value(true);
     chroma_tolerance_slider.set_digits(2);
@@ -2709,7 +3691,12 @@ pub fn build_inspector(
     chroma_key_inner.append(&chroma_tolerance_slider);
 
     row_label(&chroma_key_inner, "Edge Softness");
-    let chroma_softness_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    let chroma_softness_slider = Scale::with_range(
+        Orientation::Horizontal,
+        UNIT_SLIDER_MIN,
+        UNIT_SLIDER_MAX,
+        UNIT_SLIDER_STEP,
+    );
     chroma_softness_slider.set_value(0.1);
     chroma_softness_slider.set_draw_value(true);
     chroma_softness_slider.set_digits(2);
@@ -2731,7 +3718,12 @@ pub fn build_inspector(
     bg_removal_inner.append(&bg_removal_enable);
 
     row_label(&bg_removal_inner, "Threshold");
-    let bg_removal_threshold_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    let bg_removal_threshold_slider = Scale::with_range(
+        Orientation::Horizontal,
+        UNIT_SLIDER_MIN,
+        UNIT_SLIDER_MAX,
+        UNIT_SLIDER_STEP,
+    );
     bg_removal_threshold_slider.set_value(0.5);
     bg_removal_threshold_slider.set_draw_value(true);
     bg_removal_threshold_slider.set_digits(2);
@@ -2748,6 +3740,18 @@ pub fn build_inspector(
     subtitle_section.append(&subtitle_expander);
     let subtitle_inner = GBox::new(Orientation::Vertical, 8);
     subtitle_expander.set_child(Some(&subtitle_inner));
+
+    // TextView for compound clips showing aggregated subtitle info from
+    // internal clips.  Placed directly in subtitle_section (NOT inside the
+    // expander) so it renders without any expander-related layout issues.
+    let compound_subtitle_buf = gtk4::TextBuffer::new(None::<&gtk4::TextTagTable>);
+    let compound_subtitle_label = gtk4::TextView::with_buffer(&compound_subtitle_buf);
+    compound_subtitle_label.set_editable(false);
+    compound_subtitle_label.set_cursor_visible(false);
+    compound_subtitle_label.set_wrap_mode(gtk4::WrapMode::WordChar);
+    compound_subtitle_label.add_css_class("dim-label");
+    compound_subtitle_label.set_vexpand(false);
+    subtitle_section.append(&compound_subtitle_label);
 
     // "No model" warning box — shown when whisper model is not installed.
     let subtitle_no_model_box = GBox::new(Orientation::Vertical, 6);
@@ -2818,6 +3822,22 @@ pub fn build_inspector(
     sync_subtitle_font_button(&subtitle_font_btn, "Sans Bold 24");
     subtitle_style_box.append(&subtitle_font_btn);
 
+    // Base style toggle buttons
+    let subtitle_style_row = GBox::new(Orientation::Horizontal, 4);
+    let sub_bold_btn = gtk4::ToggleButton::with_label("B");
+    sub_bold_btn.set_tooltip_text(Some("Bold"));
+    let sub_italic_btn = gtk4::ToggleButton::with_label("I");
+    sub_italic_btn.set_tooltip_text(Some("Italic"));
+    let sub_underline_btn = gtk4::ToggleButton::with_label("U");
+    sub_underline_btn.set_tooltip_text(Some("Underline"));
+    let sub_shadow_btn = gtk4::ToggleButton::with_label("S");
+    sub_shadow_btn.set_tooltip_text(Some("Shadow"));
+    subtitle_style_row.append(&sub_bold_btn);
+    subtitle_style_row.append(&sub_italic_btn);
+    subtitle_style_row.append(&sub_underline_btn);
+    subtitle_style_row.append(&sub_shadow_btn);
+    subtitle_style_box.append(&subtitle_style_row);
+
     row_label(&subtitle_style_box, "Text Color");
     let sub_color_dialog = gtk4::ColorDialog::new();
     sub_color_dialog.set_with_alpha(true);
@@ -2826,11 +3846,33 @@ pub fn build_inspector(
     subtitle_style_box.append(&subtitle_color_btn);
 
     row_label(&subtitle_style_box, "Word Highlight");
+    // Keep the dropdown for legacy compat (hidden), but drive UI from checkboxes.
     let highlight_model = gtk4::StringList::new(&["None", "Bold", "Color", "Underline", "Stroke"]);
     let subtitle_highlight_dropdown =
         gtk4::DropDown::new(Some(highlight_model), Option::<gtk4::Expression>::None);
     subtitle_highlight_dropdown.set_selected(0);
-    subtitle_style_box.append(&subtitle_highlight_dropdown);
+    subtitle_highlight_dropdown.set_visible(false);
+
+    let hl_checks_box = GBox::new(Orientation::Horizontal, 4);
+    hl_checks_box.set_halign(gtk::Align::Start);
+    let hl_bold_check = CheckButton::with_label("Bold");
+    let hl_color_check = CheckButton::with_label("Color");
+    let hl_underline_check = CheckButton::with_label("Underline");
+    let hl_stroke_check = CheckButton::with_label("Stroke");
+    hl_checks_box.append(&hl_bold_check);
+    hl_checks_box.append(&hl_color_check);
+    hl_checks_box.append(&hl_underline_check);
+    hl_checks_box.append(&hl_stroke_check);
+    let hl_checks_box2 = GBox::new(Orientation::Horizontal, 4);
+    hl_checks_box2.set_halign(gtk::Align::Start);
+    let hl_italic_check = CheckButton::with_label("Italic");
+    let hl_bg_check = CheckButton::with_label("Background");
+    let hl_shadow_check = CheckButton::with_label("Shadow");
+    hl_checks_box2.append(&hl_italic_check);
+    hl_checks_box2.append(&hl_bg_check);
+    hl_checks_box2.append(&hl_shadow_check);
+    subtitle_style_box.append(&hl_checks_box);
+    subtitle_style_box.append(&hl_checks_box2);
 
     let subtitle_highlight_color_row = GBox::new(Orientation::Vertical, 4);
     row_label(&subtitle_highlight_color_row, "Highlight Color");
@@ -2840,6 +3882,17 @@ pub fn build_inspector(
     subtitle_highlight_color_btn.set_rgba(&gdk4::RGBA::new(1.0, 1.0, 0.0, 1.0));
     subtitle_highlight_color_row.append(&subtitle_highlight_color_btn);
     subtitle_style_box.append(&subtitle_highlight_color_row);
+
+    let subtitle_bg_highlight_color_row = GBox::new(Orientation::Vertical, 4);
+    row_label(&subtitle_bg_highlight_color_row, "BG Highlight Color");
+    let sub_bg_hl_color_dialog = gtk4::ColorDialog::new();
+    sub_bg_hl_color_dialog.set_with_alpha(true);
+    let subtitle_bg_highlight_color_btn =
+        gtk4::ColorDialogButton::new(Some(sub_bg_hl_color_dialog));
+    subtitle_bg_highlight_color_btn.set_rgba(&gdk4::RGBA::new(1.0, 1.0, 0.0, 0.5));
+    subtitle_bg_highlight_color_row.append(&subtitle_bg_highlight_color_btn);
+    subtitle_bg_highlight_color_row.set_visible(false);
+    subtitle_style_box.append(&subtitle_bg_highlight_color_row);
 
     let subtitle_word_window_slider = Scale::with_range(Orientation::Horizontal, 2.0, 10.0, 1.0);
     subtitle_word_window_slider.set_value(4.0);
@@ -2925,13 +3978,8 @@ pub fn build_inspector(
     segments_expander.set_expanded(false);
     subtitle_segments_section.append(&segments_expander);
 
-    let subtitle_scroll = gtk4::ScrolledWindow::new();
-    subtitle_scroll.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
-    subtitle_scroll.set_max_content_height(300);
-    subtitle_scroll.set_propagate_natural_height(true);
     let subtitle_list_box = GBox::new(Orientation::Vertical, 2);
-    subtitle_scroll.set_child(Some(&subtitle_list_box));
-    segments_expander.set_child(Some(&subtitle_scroll));
+    segments_expander.set_child(Some(&subtitle_list_box));
 
     // ── Shape Mask section (Video + Image + Title only) ──────────────
     let mask_section = GBox::new(Orientation::Vertical, 8);
@@ -2959,7 +4007,12 @@ pub fn build_inspector(
     mask_inner.append(&mask_rect_ellipse_controls);
 
     row_label(&mask_rect_ellipse_controls, "Center X");
-    let mask_center_x_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    let mask_center_x_slider = Scale::with_range(
+        Orientation::Horizontal,
+        UNIT_SLIDER_MIN,
+        UNIT_SLIDER_MAX,
+        UNIT_SLIDER_STEP,
+    );
     mask_center_x_slider.set_value(0.5);
     mask_center_x_slider.set_draw_value(true);
     mask_center_x_slider.set_digits(2);
@@ -2967,7 +4020,12 @@ pub fn build_inspector(
     mask_rect_ellipse_controls.append(&mask_center_x_slider);
 
     row_label(&mask_rect_ellipse_controls, "Center Y");
-    let mask_center_y_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    let mask_center_y_slider = Scale::with_range(
+        Orientation::Horizontal,
+        UNIT_SLIDER_MIN,
+        UNIT_SLIDER_MAX,
+        UNIT_SLIDER_STEP,
+    );
     mask_center_y_slider.set_value(0.5);
     mask_center_y_slider.set_draw_value(true);
     mask_center_y_slider.set_digits(2);
@@ -3027,6 +4085,144 @@ pub fn build_inspector(
 
     // Create shared state needed by effects and later sections.
     let selected_clip_id: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let selected_motion_tracker_id: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let tracking_tracker_ids: Rc<RefCell<Vec<Option<String>>>> = Rc::new(RefCell::new(vec![None]));
+    let tracking_reference_choices: Rc<RefCell<Vec<Option<MotionTrackerReference>>>> =
+        Rc::new(RefCell::new(vec![None]));
+
+    // ── Motion Tracking section ───────────────────────────────────────────────
+    let tracking_section = GBox::new(Orientation::Vertical, 8);
+    content_box.append(&tracking_section);
+    tracking_section.append(&Separator::new(Orientation::Horizontal));
+    let tracking_expander = Expander::new(Some("Motion Tracking"));
+    tracking_expander.set_expanded(false);
+    tracking_section.append(&tracking_expander);
+    let tracking_inner = GBox::new(Orientation::Vertical, 8);
+    tracking_expander.set_child(Some(&tracking_inner));
+
+    row_label(&tracking_inner, "Tracker");
+    let tracking_tracker_row = GBox::new(Orientation::Horizontal, 6);
+    let tracking_tracker_dropdown = gtk4::DropDown::new(
+        Some(gtk4::StringList::new(&["No trackers yet"])),
+        Option::<gtk4::Expression>::None,
+    );
+    tracking_tracker_dropdown.set_hexpand(true);
+    tracking_tracker_row.append(&tracking_tracker_dropdown);
+    let tracking_add_btn = Button::from_icon_name("list-add-symbolic");
+    tracking_add_btn.set_tooltip_text(Some("Add a motion tracker to this clip"));
+    tracking_add_btn.add_css_class("flat");
+    tracking_tracker_row.append(&tracking_add_btn);
+    let tracking_remove_btn = Button::from_icon_name("edit-delete-symbolic");
+    tracking_remove_btn.set_tooltip_text(Some("Remove the selected motion tracker"));
+    tracking_remove_btn.add_css_class("flat");
+    tracking_tracker_row.append(&tracking_remove_btn);
+    tracking_inner.append(&tracking_tracker_row);
+
+    row_label(&tracking_inner, "Label");
+    let tracking_label_entry = Entry::new();
+    tracking_label_entry.set_placeholder_text(Some("Tracker label"));
+    tracking_inner.append(&tracking_label_entry);
+
+    let tracking_edit_region_btn = gtk4::ToggleButton::with_label("Edit Region in Monitor");
+    tracking_edit_region_btn.set_tooltip_text(Some(
+        "Show the analysis rectangle in the Program Monitor and drag it to position the tracker",
+    ));
+    tracking_inner.append(&tracking_edit_region_btn);
+
+    row_label(&tracking_inner, "Region Center X");
+    let tracking_center_x_slider = Scale::with_range(
+        Orientation::Horizontal,
+        UNIT_SLIDER_MIN,
+        UNIT_SLIDER_MAX,
+        UNIT_SLIDER_STEP,
+    );
+    tracking_center_x_slider.set_value(0.5);
+    tracking_center_x_slider.set_draw_value(true);
+    tracking_center_x_slider.set_digits(2);
+    tracking_center_x_slider.add_mark(0.5, gtk4::PositionType::Bottom, None);
+    tracking_inner.append(&tracking_center_x_slider);
+
+    row_label(&tracking_inner, "Region Center Y");
+    let tracking_center_y_slider = Scale::with_range(
+        Orientation::Horizontal,
+        UNIT_SLIDER_MIN,
+        UNIT_SLIDER_MAX,
+        UNIT_SLIDER_STEP,
+    );
+    tracking_center_y_slider.set_value(0.5);
+    tracking_center_y_slider.set_draw_value(true);
+    tracking_center_y_slider.set_digits(2);
+    tracking_center_y_slider.add_mark(0.5, gtk4::PositionType::Bottom, None);
+    tracking_inner.append(&tracking_center_y_slider);
+
+    row_label(&tracking_inner, "Region Width");
+    let tracking_width_slider = Scale::with_range(Orientation::Horizontal, 0.05, 1.0, 0.01);
+    tracking_width_slider.set_value(0.25);
+    tracking_width_slider.set_draw_value(true);
+    tracking_width_slider.set_digits(2);
+    tracking_inner.append(&tracking_width_slider);
+
+    row_label(&tracking_inner, "Region Height");
+    let tracking_height_slider = Scale::with_range(Orientation::Horizontal, 0.05, 1.0, 0.01);
+    tracking_height_slider.set_value(0.25);
+    tracking_height_slider.set_draw_value(true);
+    tracking_height_slider.set_digits(2);
+    tracking_inner.append(&tracking_height_slider);
+
+    row_label(&tracking_inner, "Region Rotation");
+    let tracking_rotation_spin = gtk4::SpinButton::with_range(-180.0, 180.0, 1.0);
+    tracking_rotation_spin.set_value(0.0);
+    tracking_rotation_spin.set_digits(0);
+    tracking_inner.append(&tracking_rotation_spin);
+
+    let tracking_job_row = GBox::new(Orientation::Horizontal, 6);
+    let tracking_run_btn = Button::with_label("Track Region");
+    tracking_run_btn.set_tooltip_text(Some(
+        "Analyze the selected clip and generate motion samples for the current region",
+    ));
+    tracking_job_row.append(&tracking_run_btn);
+    let tracking_cancel_btn = Button::with_label("Cancel");
+    tracking_cancel_btn.set_sensitive(false);
+    tracking_job_row.append(&tracking_cancel_btn);
+    tracking_inner.append(&tracking_job_row);
+
+    let tracking_status_label = Label::new(Some(
+        "Select a visual clip to create or attach motion tracking.",
+    ));
+    tracking_status_label.set_wrap(true);
+    tracking_status_label.set_halign(gtk4::Align::Start);
+    tracking_status_label.add_css_class("dim-label");
+    tracking_inner.append(&tracking_status_label);
+
+    tracking_inner.append(&Separator::new(Orientation::Horizontal));
+
+    row_label(&tracking_inner, "Attach To");
+    let tracking_target_dropdown = gtk4::DropDown::new(
+        Some(gtk4::StringList::new(&["Clip Transform"])),
+        Option::<gtk4::Expression>::None,
+    );
+    tracking_target_dropdown.set_selected(0);
+    tracking_target_dropdown.set_sensitive(false);
+    tracking_inner.append(&tracking_target_dropdown);
+
+    row_label(&tracking_inner, "Follow Tracker");
+    let tracking_reference_dropdown = gtk4::DropDown::new(
+        Some(gtk4::StringList::new(&["None"])),
+        Option::<gtk4::Expression>::None,
+    );
+    tracking_reference_dropdown.set_selected(0);
+    tracking_inner.append(&tracking_reference_dropdown);
+
+    let tracking_clear_binding_btn = Button::with_label("Clear Attachment");
+    tracking_clear_binding_btn.set_sensitive(false);
+    tracking_inner.append(&tracking_clear_binding_btn);
+
+    let tracking_binding_status_label =
+        Label::new(Some("No motion trackers are available in the project yet."));
+    tracking_binding_status_label.set_wrap(true);
+    tracking_binding_status_label.set_halign(gtk4::Align::Start);
+    tracking_binding_status_label.add_css_class("dim-label");
+    tracking_inner.append(&tracking_binding_status_label);
 
     // ── Applied Frei0r Effects section (Video + Image only) ──────────────
     let frei0r_effects_section = GBox::new(Orientation::Vertical, 8);
@@ -3078,15 +4274,13 @@ pub fn build_inspector(
             let cid = selected_clip_id.borrow().clone();
             if let Some(cid) = cid {
                 let proj = project.borrow();
-                for track in &proj.tracks {
-                    if let Some(clip) = track.clips.iter().find(|c| c.id == cid) {
-                        let copied: Vec<crate::model::clip::Frei0rEffect> =
-                            clip.frei0r_effects.iter().cloned().collect();
-                        let has_effects = !copied.is_empty();
-                        *clipboard.borrow_mut() = Some(copied);
-                        paste_btn.set_sensitive(has_effects);
-                        return;
-                    }
+                if let Some(clip) = proj.clip_ref(&cid) {
+                    let copied: Vec<crate::model::clip::Frei0rEffect> =
+                        clip.frei0r_effects.iter().cloned().collect();
+                    let has_effects = !copied.is_empty();
+                    *clipboard.borrow_mut() = Some(copied);
+                    paste_btn.set_sensitive(has_effects);
+                    return;
                 }
             }
         });
@@ -3116,14 +4310,10 @@ pub fn build_inspector(
             };
             let cid = selected_clip_id.borrow().clone();
             if let Some(cid) = cid {
-                let track_id = {
-                    let proj = project.borrow();
-                    proj.tracks
-                        .iter()
-                        .find(|t| t.clips.iter().any(|c| c.id == cid))
-                        .map(|t| t.id.clone())
-                        .unwrap_or_default()
-                };
+                let track_id = project
+                    .borrow()
+                    .find_track_id_for_clip(&cid)
+                    .unwrap_or_default();
                 let insert_index = {
                     let proj = project.borrow();
                     proj.tracks
@@ -3175,18 +4365,220 @@ pub fn build_inspector(
     volume_keyframe_row.append(&volume_remove_keyframe_btn);
     audio_inner.append(&volume_keyframe_row);
 
+    row_label(&audio_inner, "Voice Isolation");
+    let voice_isolation_slider = Scale::with_range(Orientation::Horizontal, 0.0, 100.0, 1.0);
+    voice_isolation_slider.set_value(0.0);
+    voice_isolation_slider.set_draw_value(true);
+    voice_isolation_slider.set_digits(0);
+    voice_isolation_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("Off"));
+    voice_isolation_slider.add_mark(100.0, gtk4::PositionType::Bottom, Some("Max"));
+    voice_isolation_slider.set_tooltip_text(Some(
+        "Duck volume between spoken words (requires generated subtitles)",
+    ));
+    audio_inner.append(&voice_isolation_slider);
+
+    row_label(&audio_inner, "  Padding (ms)");
+    let vi_pad_slider = Scale::with_range(Orientation::Horizontal, 0.0, 500.0, 5.0);
+    vi_pad_slider.set_value(80.0);
+    vi_pad_slider.set_draw_value(true);
+    vi_pad_slider.set_digits(0);
+    vi_pad_slider.set_tooltip_text(Some(
+        "Extend word boundaries to merge close words into continuous speech",
+    ));
+    audio_inner.append(&vi_pad_slider);
+
+    row_label(&audio_inner, "  Fade (ms)");
+    let vi_fade_slider = Scale::with_range(Orientation::Horizontal, 0.0, 200.0, 1.0);
+    vi_fade_slider.set_value(25.0);
+    vi_fade_slider.set_draw_value(true);
+    vi_fade_slider.set_digits(0);
+    vi_fade_slider.set_tooltip_text(Some(
+        "Smooth transition time between speech and ducked regions",
+    ));
+    audio_inner.append(&vi_fade_slider);
+
+    row_label(&audio_inner, "  Floor");
+    let vi_floor_slider = Scale::with_range(Orientation::Horizontal, 0.0, 100.0, 1.0);
+    vi_floor_slider.set_value(0.0);
+    vi_floor_slider.set_draw_value(true);
+    vi_floor_slider.set_digits(0);
+    vi_floor_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("Silent"));
+    vi_floor_slider.add_mark(100.0, gtk4::PositionType::Bottom, Some("Full"));
+    vi_floor_slider.set_tooltip_text(Some(
+        "Minimum volume during ducked regions (preserves room tone)",
+    ));
+    audio_inner.append(&vi_floor_slider);
+
+    // ── Voice isolation source: Subtitles (default) or Silence-detect ──
+    row_label(&audio_inner, "  Source");
+    let vi_source_dropdown = gtk4::DropDown::from_strings(&["Subtitles", "Silence Detect"]);
+    vi_source_dropdown.set_tooltip_text(Some(
+        "Where to derive speech regions from. Subtitles uses generated word timings. \
+         Silence Detect uses ffmpeg silencedetect — works without subtitles.",
+    ));
+    audio_inner.append(&vi_source_dropdown);
+
+    // Silence-mode-only controls (visible only when source = Silence Detect)
+    row_label(&audio_inner, "  Silence threshold");
+    let vi_silence_threshold_slider = Scale::with_range(Orientation::Horizontal, -60.0, -10.0, 1.0);
+    vi_silence_threshold_slider.set_value(-30.0);
+    vi_silence_threshold_slider.set_draw_value(true);
+    vi_silence_threshold_slider.set_digits(0);
+    vi_silence_threshold_slider.add_mark(-60.0, gtk4::PositionType::Bottom, Some("-60 dB"));
+    vi_silence_threshold_slider.add_mark(-30.0, gtk4::PositionType::Bottom, Some("-30 dB"));
+    vi_silence_threshold_slider.add_mark(-10.0, gtk4::PositionType::Bottom, Some("-10 dB"));
+    vi_silence_threshold_slider.set_tooltip_text(Some(
+        "Audio below this dB level is treated as silence. Lower = stricter \
+         (only treat near-silence as gaps). Click Suggest to auto-pick.",
+    ));
+    audio_inner.append(&vi_silence_threshold_slider);
+
+    row_label(&audio_inner, "  Min gap (ms)");
+    let vi_silence_min_ms_slider = Scale::with_range(Orientation::Horizontal, 50.0, 2000.0, 10.0);
+    vi_silence_min_ms_slider.set_value(200.0);
+    vi_silence_min_ms_slider.set_draw_value(true);
+    vi_silence_min_ms_slider.set_digits(0);
+    vi_silence_min_ms_slider.set_tooltip_text(Some(
+        "Minimum silence duration to count as a gap. Higher = ignore \
+         brief pauses between words.",
+    ));
+    audio_inner.append(&vi_silence_min_ms_slider);
+
+    let vi_silence_actions_row = GBox::new(Orientation::Horizontal, 6);
+    let vi_suggest_btn = Button::with_label("Suggest");
+    vi_suggest_btn.set_tooltip_text(Some(
+        "Analyze the clip's noise floor with ffmpeg astats and pick a \
+         threshold automatically (5th percentile RMS + 6 dB headroom).",
+    ));
+    let vi_analyze_btn = Button::with_label("Analyze Audio");
+    vi_analyze_btn.set_tooltip_text(Some(
+        "Run silencedetect to find speech regions. Required before \
+         silence-mode voice isolation can take effect.",
+    ));
+    let vi_intervals_label = Label::new(Some("Not analyzed"));
+    vi_intervals_label.add_css_class("dim-label");
+    vi_intervals_label.set_halign(gtk4::Align::Start);
+    vi_intervals_label.set_hexpand(true);
+    vi_silence_actions_row.append(&vi_suggest_btn);
+    vi_silence_actions_row.append(&vi_analyze_btn);
+    vi_silence_actions_row.append(&vi_intervals_label);
+    audio_inner.append(&vi_silence_actions_row);
+
     let normalize_row = GBox::new(Orientation::Horizontal, 6);
     let normalize_btn = Button::with_label("Normalize\u{2026}");
     normalize_btn.set_tooltip_text(Some(
         "Analyze clip loudness and adjust volume to a target level",
     ));
+    let match_audio_btn = Button::with_label("Match Audio\u{2026}");
+    match_audio_btn.set_tooltip_text(Some(
+        "Analyze this clip against a reference clip and apply matched loudness plus a 7-band mic-match EQ (great for making a lav mic sound more like a shotgun mic)",
+    ));
+    let clear_match_eq_btn = Button::with_label("Clear Match EQ");
+    clear_match_eq_btn.set_tooltip_text(Some(
+        "Clear the 7-band match EQ from the previous Match Audio (leaves the user 3-band EQ untouched)",
+    ));
+    clear_match_eq_btn.set_visible(false);
     let measured_loudness_label = Label::new(None);
     measured_loudness_label.add_css_class("dim-label");
     measured_loudness_label.set_halign(gtk4::Align::Start);
     measured_loudness_label.set_hexpand(true);
     normalize_row.append(&normalize_btn);
+    normalize_row.append(&match_audio_btn);
+    normalize_row.append(&clear_match_eq_btn);
     normalize_row.append(&measured_loudness_label);
     audio_inner.append(&normalize_row);
+
+    // ── Match EQ frequency-response curve (7-band, read-only) ──
+    let match_eq_curve_state: Rc<RefCell<Vec<crate::model::clip::EqBand>>> =
+        Rc::new(RefCell::new(Vec::new()));
+    let match_eq_curve = gtk4::DrawingArea::new();
+    match_eq_curve.set_content_width(240);
+    match_eq_curve.set_content_height(60);
+    match_eq_curve.set_hexpand(true);
+    match_eq_curve.set_vexpand(false);
+    match_eq_curve.set_visible(false);
+    match_eq_curve.set_tooltip_text(Some(
+        "Match EQ — 7-band frequency response from the most recent Match Audio (mic match)",
+    ));
+    {
+        let curve_state = match_eq_curve_state.clone();
+        match_eq_curve.set_draw_func(move |_da, cr, ww, wh| {
+            let bands = curve_state.borrow();
+            if bands.is_empty() {
+                return;
+            }
+            let w = ww as f64;
+            let h = wh as f64;
+            // Background
+            cr.set_source_rgba(0.10, 0.10, 0.12, 0.95);
+            cr.rectangle(0.0, 0.0, w, h);
+            cr.fill().ok();
+            // Border
+            cr.set_source_rgba(0.30, 0.30, 0.34, 0.9);
+            cr.set_line_width(1.0);
+            cr.rectangle(0.5, 0.5, w - 1.0, h - 1.0);
+            cr.stroke().ok();
+            // 0 dB centerline
+            let mid_y = h * 0.5;
+            cr.set_source_rgba(0.45, 0.45, 0.48, 0.7);
+            cr.set_dash(&[2.0, 3.0], 0.0);
+            cr.move_to(0.0, mid_y);
+            cr.line_to(w, mid_y);
+            cr.stroke().ok();
+            cr.set_dash(&[], 0.0);
+
+            // Map frequency (log scale, 60 Hz to 12 kHz) to x.
+            let log_lo = 60f64.log10();
+            let log_hi = 12_000f64.log10();
+            let x_for_freq = |f: f64| -> f64 {
+                let lf = f.log10().clamp(log_lo, log_hi);
+                ((lf - log_lo) / (log_hi - log_lo)) * w
+            };
+            // Map gain (-12 to +12 dB) to y.
+            let max_gain_db = 12.0;
+            let y_for_gain = |g: f64| -> f64 {
+                let clamped = g.clamp(-max_gain_db, max_gain_db);
+                mid_y - (clamped / max_gain_db) * (h * 0.45)
+            };
+
+            // Build a smooth curve through the band peaks.
+            let mut points: Vec<(f64, f64)> = Vec::with_capacity(bands.len() + 2);
+            points.push((0.0, mid_y));
+            for band in bands.iter() {
+                points.push((x_for_freq(band.freq), y_for_gain(band.gain)));
+            }
+            points.push((w, mid_y));
+
+            // Filled curve (subtle teal)
+            cr.set_source_rgba(0.25, 0.78, 0.78, 0.20);
+            cr.move_to(0.0, mid_y);
+            for (x, y) in &points {
+                cr.line_to(*x, *y);
+            }
+            cr.line_to(w, mid_y);
+            cr.close_path();
+            cr.fill().ok();
+
+            // Stroke curve
+            cr.set_source_rgba(0.45, 0.95, 0.95, 0.95);
+            cr.set_line_width(1.6);
+            cr.move_to(points[0].0, points[0].1);
+            for (x, y) in points.iter().skip(1) {
+                cr.line_to(*x, *y);
+            }
+            cr.stroke().ok();
+
+            // Band markers (small circles)
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.85);
+            for band in bands.iter() {
+                let x = x_for_freq(band.freq);
+                let y = y_for_gain(band.gain);
+                cr.arc(x, y, 2.0, 0.0, std::f64::consts::TAU);
+                cr.fill().ok();
+            }
+        });
+    }
+    audio_inner.append(&match_eq_curve);
 
     // ── Audio keyframe navigation + animation mode ──
     let audio_keyframe_nav_row = GBox::new(Orientation::Horizontal, 4);
@@ -3211,7 +4603,12 @@ pub fn build_inspector(
     audio_inner.append(&audio_animation_mode_btn);
 
     row_label(&audio_inner, "Pan");
-    let pan_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let pan_slider = Scale::with_range(
+        Orientation::Horizontal,
+        COLOR_SLIDER_MIN,
+        COLOR_SLIDER_MAX,
+        COLOR_SLIDER_STEP,
+    );
     pan_slider.set_value(0.0);
     pan_slider.set_draw_value(true);
     pan_slider.set_digits(2);
@@ -3439,7 +4836,7 @@ pub fn build_inspector(
     transform_inner.append(&anamorphic_desqueeze_dropdown);
 
     row_label(&transform_inner, "Scale");
-    let scale_slider = Scale::with_range(Orientation::Horizontal, 0.1, 4.0, 0.05);
+    let scale_slider = Scale::with_range(Orientation::Horizontal, SCALE_MIN, SCALE_MAX, 0.05);
     scale_slider.set_value(1.0);
     scale_slider.set_draw_value(true);
     scale_slider.set_digits(2);
@@ -3457,7 +4854,12 @@ pub fn build_inspector(
     transform_inner.append(&scale_keyframe_row);
 
     row_label(&transform_inner, "Opacity");
-    let opacity_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    let opacity_slider = Scale::with_range(
+        Orientation::Horizontal,
+        UNIT_SLIDER_MIN,
+        UNIT_SLIDER_MAX,
+        UNIT_SLIDER_STEP,
+    );
     opacity_slider.set_value(1.0);
     opacity_slider.set_draw_value(true);
     opacity_slider.set_digits(2);
@@ -3474,16 +4876,19 @@ pub fn build_inspector(
     transform_inner.append(&opacity_keyframe_row);
 
     row_label(&transform_inner, "Position X");
-    let position_x_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let position_x_slider =
+        Scale::with_range(Orientation::Horizontal, POSITION_MIN, POSITION_MAX, 0.01);
     position_x_slider.set_value(0.0);
     position_x_slider.set_draw_value(true);
     position_x_slider.set_digits(2);
+    position_x_slider.add_mark(POSITION_MIN, gtk4::PositionType::Bottom, Some("⇤"));
     position_x_slider.add_mark(-1.0, gtk4::PositionType::Bottom, Some("←"));
     position_x_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("·"));
     position_x_slider.add_mark(1.0, gtk4::PositionType::Bottom, Some("→"));
+    position_x_slider.add_mark(POSITION_MAX, gtk4::PositionType::Bottom, Some("⇥"));
     position_x_slider.set_hexpand(true);
     position_x_slider.set_tooltip_text(Some(
-        "Horizontal position: −1 = left, 0 = center, +1 = right",
+        "Horizontal position: −1 = canvas left edge, 0 = center, +1 = canvas right edge. Values past ±1 push the clip off-canvas.",
     ));
     transform_inner.append(&position_x_slider);
     let position_x_keyframe_row = GBox::new(Orientation::Horizontal, 6);
@@ -3494,16 +4899,20 @@ pub fn build_inspector(
     transform_inner.append(&position_x_keyframe_row);
 
     row_label(&transform_inner, "Position Y");
-    let position_y_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let position_y_slider =
+        Scale::with_range(Orientation::Horizontal, POSITION_MIN, POSITION_MAX, 0.01);
     position_y_slider.set_value(0.0);
     position_y_slider.set_draw_value(true);
     position_y_slider.set_digits(2);
+    position_y_slider.add_mark(POSITION_MIN, gtk4::PositionType::Bottom, Some("⤒"));
     position_y_slider.add_mark(-1.0, gtk4::PositionType::Bottom, Some("↑"));
     position_y_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("·"));
     position_y_slider.add_mark(1.0, gtk4::PositionType::Bottom, Some("↓"));
+    position_y_slider.add_mark(POSITION_MAX, gtk4::PositionType::Bottom, Some("⤓"));
     position_y_slider.set_hexpand(true);
-    position_y_slider
-        .set_tooltip_text(Some("Vertical position: −1 = top, 0 = center, +1 = bottom"));
+    position_y_slider.set_tooltip_text(Some(
+        "Vertical position: −1 = canvas top edge, 0 = center, +1 = canvas bottom edge. Values past ±1 push the clip off-canvas.",
+    ));
     transform_inner.append(&position_y_slider);
     let position_y_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let position_y_set_keyframe_btn = Button::with_label("Set Position Y Keyframe");
@@ -3513,10 +4922,12 @@ pub fn build_inspector(
     transform_inner.append(&position_y_keyframe_row);
 
     row_label(&transform_inner, "Crop Left");
-    let crop_left_slider = Scale::with_range(Orientation::Horizontal, 0.0, 500.0, 2.0);
+    let crop_left_slider =
+        Scale::with_range(Orientation::Horizontal, CROP_MIN_PX, CROP_MAX_PX, 2.0);
     crop_left_slider.set_value(0.0);
     crop_left_slider.set_draw_value(true);
     crop_left_slider.set_digits(0);
+    crop_left_slider.set_tooltip_text(Some("Crop from the left edge, in project pixels (0–4000)."));
     transform_inner.append(&crop_left_slider);
     let crop_left_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let crop_left_set_keyframe_btn = Button::with_label("Set Crop Left Keyframe");
@@ -3526,10 +4937,14 @@ pub fn build_inspector(
     transform_inner.append(&crop_left_keyframe_row);
 
     row_label(&transform_inner, "Crop Right");
-    let crop_right_slider = Scale::with_range(Orientation::Horizontal, 0.0, 500.0, 2.0);
+    let crop_right_slider =
+        Scale::with_range(Orientation::Horizontal, CROP_MIN_PX, CROP_MAX_PX, 2.0);
     crop_right_slider.set_value(0.0);
     crop_right_slider.set_draw_value(true);
     crop_right_slider.set_digits(0);
+    crop_right_slider.set_tooltip_text(Some(
+        "Crop from the right edge, in project pixels (0–4000).",
+    ));
     transform_inner.append(&crop_right_slider);
     let crop_right_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let crop_right_set_keyframe_btn = Button::with_label("Set Crop Right Keyframe");
@@ -3539,10 +4954,11 @@ pub fn build_inspector(
     transform_inner.append(&crop_right_keyframe_row);
 
     row_label(&transform_inner, "Crop Top");
-    let crop_top_slider = Scale::with_range(Orientation::Horizontal, 0.0, 500.0, 2.0);
+    let crop_top_slider = Scale::with_range(Orientation::Horizontal, CROP_MIN_PX, CROP_MAX_PX, 2.0);
     crop_top_slider.set_value(0.0);
     crop_top_slider.set_draw_value(true);
     crop_top_slider.set_digits(0);
+    crop_top_slider.set_tooltip_text(Some("Crop from the top edge, in project pixels (0–4000)."));
     transform_inner.append(&crop_top_slider);
     let crop_top_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let crop_top_set_keyframe_btn = Button::with_label("Set Crop Top Keyframe");
@@ -3552,10 +4968,14 @@ pub fn build_inspector(
     transform_inner.append(&crop_top_keyframe_row);
 
     row_label(&transform_inner, "Crop Bottom");
-    let crop_bottom_slider = Scale::with_range(Orientation::Horizontal, 0.0, 500.0, 2.0);
+    let crop_bottom_slider =
+        Scale::with_range(Orientation::Horizontal, CROP_MIN_PX, CROP_MAX_PX, 2.0);
     crop_bottom_slider.set_value(0.0);
     crop_bottom_slider.set_draw_value(true);
     crop_bottom_slider.set_digits(0);
+    crop_bottom_slider.set_tooltip_text(Some(
+        "Crop from the bottom edge, in project pixels (0–4000).",
+    ));
     transform_inner.append(&crop_bottom_slider);
     let crop_bottom_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let crop_bottom_set_keyframe_btn = Button::with_label("Set Crop Bottom Keyframe");
@@ -3606,7 +5026,7 @@ pub fn build_inspector(
             cr.restore().ok();
         });
     }
-    let rotate_spin = gtk4::SpinButton::with_range(-180.0, 180.0, 1.0);
+    let rotate_spin = gtk4::SpinButton::with_range(ROTATE_MIN_DEG, ROTATE_MAX_DEG, 1.0);
     rotate_spin.set_digits(0);
     rotate_spin.set_value(0.0);
     rotate_spin.set_hexpand(true);
@@ -3628,6 +5048,8 @@ pub fn build_inspector(
     flip_row.append(&flip_h_btn);
     flip_row.append(&flip_v_btn);
     transform_inner.append(&flip_row);
+
+    content_box.append(&transition_section);
 
     // ── Title Overlay section (Video + Image only) ───────────────────────────
     let title_section_box = GBox::new(Orientation::Vertical, 8);
@@ -3657,13 +5079,23 @@ pub fn build_inspector(
     title_inner.append(&title_color_btn);
 
     row_label(&title_inner, "Position X");
-    let title_x_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    let title_x_slider = Scale::with_range(
+        Orientation::Horizontal,
+        UNIT_SLIDER_MIN,
+        UNIT_SLIDER_MAX,
+        UNIT_SLIDER_STEP,
+    );
     title_x_slider.set_value(0.5);
     title_x_slider.set_hexpand(true);
     title_inner.append(&title_x_slider);
 
     row_label(&title_inner, "Position Y");
-    let title_y_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    let title_y_slider = Scale::with_range(
+        Orientation::Horizontal,
+        UNIT_SLIDER_MIN,
+        UNIT_SLIDER_MAX,
+        UNIT_SLIDER_STEP,
+    );
     title_y_slider.set_value(0.9);
     title_y_slider.set_hexpand(true);
     title_inner.append(&title_y_slider);
@@ -3772,21 +5204,45 @@ pub fn build_inspector(
     ));
     speed_inner.append(&reverse_check);
 
-    // Slow-motion interpolation dropdown
+    // Slow-motion interpolation dropdown.  The "AI Interpolation (RIFE)"
+    // entry is only shown when the RIFE ONNX model is actually installed —
+    // the window glue toggles it dynamically as the model appears/disappears.
     row_label(&speed_inner, "Slow-Motion Interpolation:");
-    let smo_interp_model = StringList::new(&["Off", "Frame Blending", "Optical Flow"]);
+    let smo_initial_has_ai = crate::media::frame_interp_cache::find_model_path().is_some();
+    let smo_interp_items: &[&str] = if smo_initial_has_ai {
+        &[
+            "Off",
+            "Frame Blending",
+            "Optical Flow",
+            "AI Interpolation (RIFE)",
+        ]
+    } else {
+        &["Off", "Frame Blending", "Optical Flow"]
+    };
+    let smo_interp_model = StringList::new(smo_interp_items);
+    let slow_motion_model = smo_interp_model.clone();
+    let slow_motion_has_ai = Cell::new(smo_initial_has_ai);
     let slow_motion_dropdown = DropDown::new(Some(smo_interp_model), gtk4::Expression::NONE);
     slow_motion_dropdown.set_selected(0);
     slow_motion_dropdown.set_tooltip_text(Some(
-        "Synthesizes intermediate frames on export for smooth slow-motion (clips with speed < 1.0 only)",
+        "Synthesizes intermediate frames for smooth slow-motion (clips with speed < 1.0 only).\n\
+         • Frame Blending: fast, soft.\n\
+         • Optical Flow: ffmpeg motion compensation, sharper.\n\
+         • AI Interpolation (RIFE): learned model, best quality. Precomputes a sidecar in the background.",
     ));
     speed_inner.append(&slow_motion_dropdown);
     let smo_note = Label::new(Some(
-        "Synthesizes frames on export (slow-motion clips only)",
+        "Synthesizes frames for slow-motion clips (preview + export)",
     ));
     smo_note.set_halign(gtk4::Align::Start);
     smo_note.add_css_class("clip-path");
     speed_inner.append(&smo_note);
+    // Status row for AI interpolation sidecar generation.
+    let frame_interp_status = Label::new(None);
+    frame_interp_status.set_halign(gtk4::Align::Start);
+    frame_interp_status.add_css_class("clip-path");
+    frame_interp_status.set_visible(false);
+    speed_inner.append(&frame_interp_status);
 
     // ── LUT section (Video + Image only) ─────────────────────────────────────
     let lut_section_box = GBox::new(Orientation::Vertical, 8);
@@ -3849,7 +5305,7 @@ pub fn build_inspector(
             f32,
         ),
     > = Rc::new(on_color_changed);
-    let on_audio_changed: Rc<dyn Fn(&str, f32, f32)> = Rc::new(on_audio_changed);
+    let on_audio_changed: Rc<dyn Fn(&str, f32, f32, f32)> = Rc::new(on_audio_changed);
     let on_eq_changed: Rc<dyn Fn(&str, [crate::model::clip::EqBand; 3])> = Rc::new(on_eq_changed);
     let on_transform_changed: Rc<dyn Fn(i32, i32, i32, i32, i32, bool, bool, f64, f64, f64)> =
         Rc::new(on_transform_changed);
@@ -3897,13 +5353,10 @@ pub fn build_inspector(
                 };
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.label = new_name.clone();
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.label = new_name.clone();
                     }
+                    proj.dirty = true;
                 }
                 if old_label != new_name {
                     on_execute_command(Box::new(crate::undo::SetClipLabelCommand {
@@ -3978,13 +5431,10 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            apply(clip, val);
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        apply(clip, val);
                     }
+                    proj.dirty = true;
                 }
                 let b = brightness_slider.value() as f32;
                 let c = contrast_slider.value() as f32;
@@ -4067,13 +5517,10 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.vidstab_smoothing = v;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.vidstab_smoothing = v;
                     }
+                    proj.dirty = true;
                 }
                 on_vidstab_changed();
             }
@@ -4095,13 +5542,10 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.vidstab_enabled = enabled;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.vidstab_enabled = enabled;
                     }
+                    proj.dirty = true;
                 }
                 on_vidstab_changed();
             }
@@ -4254,13 +5698,10 @@ pub fn build_inspector(
                 let color_label = clip_color_label_from_index(combo.selected());
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.color_label = color_label;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.color_label = color_label;
                     }
+                    proj.dirty = true;
                 }
                 on_clip_changed();
             }
@@ -4284,13 +5725,10 @@ pub fn build_inspector(
                     .unwrap_or_default();
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.blend_mode = mode;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.blend_mode = mode;
                     }
+                    proj.dirty = true;
                 }
                 on_clip_changed();
             }
@@ -4324,6 +5762,7 @@ pub fn build_inspector(
         let updating = updating.clone();
         let on_audio_changed = on_audio_changed.clone();
         let pan_slider_cb = pan_slider.clone();
+        let voice_isolation_slider = voice_isolation_slider.clone();
         let animation_mode = animation_mode.clone();
         let current_playhead_ns = current_playhead_ns.clone();
         let interp_dropdown = interp_dropdown.clone();
@@ -4336,29 +5775,31 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            let has_kfs = !clip.volume_keyframes.is_empty();
-                            if animation_mode.get() || has_kfs {
-                                let interp = interp_idx_to_enum(interp_dropdown.selected());
-                                clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
-                                    Phase1KeyframeProperty::Volume,
-                                    current_playhead_ns(),
-                                    linear_vol as f64,
-                                    interp,
-                                );
-                            } else {
-                                clip.volume = linear_vol;
-                            }
-                            proj.dirty = true;
-                            break;
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        let has_kfs = !clip.volume_keyframes.is_empty();
+                        if animation_mode.get() || has_kfs {
+                            let interp = interp_idx_to_enum(interp_dropdown.selected());
+                            clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
+                                Phase1KeyframeProperty::Volume,
+                                current_playhead_ns(),
+                                linear_vol as f64,
+                                interp,
+                            );
+                        } else {
+                            clip.volume = linear_vol;
                         }
                     }
+                    proj.dirty = true;
                 }
                 // Use lightweight audio update (syncs keyframes to player without
                 // full pipeline reload). on_clip_changed would cause a heavy rebuild
                 // and visible playhead jump for every slider tick.
-                on_audio_changed(clip_id, linear_vol, pan_slider_cb.value() as f32);
+                on_audio_changed(
+                    clip_id,
+                    linear_vol,
+                    pan_slider_cb.value() as f32,
+                    voice_isolation_slider.value() as f32 / 100.0,
+                );
             }
         });
     }
@@ -4369,6 +5810,7 @@ pub fn build_inspector(
         let on_audio_changed = on_audio_changed.clone();
         let volume_slider_cb = volume_slider.clone();
         let pan_slider_cb = pan_slider.clone();
+        let voice_isolation_slider = voice_isolation_slider.clone();
         let animation_mode = animation_mode.clone();
         let current_playhead_ns = current_playhead_ns.clone();
         let interp_dropdown = interp_dropdown.clone();
@@ -4381,29 +5823,27 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            let has_kfs = !clip.pan_keyframes.is_empty();
-                            if animation_mode.get() || has_kfs {
-                                let interp = interp_idx_to_enum(interp_dropdown.selected());
-                                clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
-                                    Phase1KeyframeProperty::Pan,
-                                    current_playhead_ns(),
-                                    val as f64,
-                                    interp,
-                                );
-                            } else {
-                                clip.pan = val;
-                            }
-                            proj.dirty = true;
-                            break;
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        let has_kfs = !clip.pan_keyframes.is_empty();
+                        if animation_mode.get() || has_kfs {
+                            let interp = interp_idx_to_enum(interp_dropdown.selected());
+                            clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
+                                Phase1KeyframeProperty::Pan,
+                                current_playhead_ns(),
+                                val as f64,
+                                interp,
+                            );
+                        } else {
+                            clip.pan = val;
                         }
                     }
+                    proj.dirty = true;
                 }
                 on_audio_changed(
                     clip_id,
                     db_to_linear_volume(volume_slider_cb.value()) as f32,
                     pan_slider_cb.value() as f32,
+                    voice_isolation_slider.value() as f32 / 100.0,
                 );
             }
         });
@@ -4486,6 +5926,403 @@ pub fn build_inspector(
         }
     }
 
+    // Undo controller for voice isolation slider
+    {
+        type VoiceIsoSnapCell = Rc<RefCell<Option<(String, String, f32)>>>;
+        let voice_iso_snap: VoiceIsoSnapCell = Rc::new(RefCell::new(None));
+
+        let do_vi_snapshot = {
+            let project = project.clone();
+            let selected_clip_id = selected_clip_id.clone();
+            let voice_iso_snap = voice_iso_snap.clone();
+            move || {
+                let cid = selected_clip_id.borrow().clone();
+                if let Some(cid) = cid {
+                    let mut proj = project.borrow_mut();
+                    if let Some(clip) = proj.clip_mut(&cid) {
+                        *voice_iso_snap.borrow_mut() =
+                            Some((cid.clone(), String::new(), clip.voice_isolation));
+                    }
+                }
+            }
+        };
+
+        let do_vi_commit = {
+            let project = project.clone();
+            let voice_iso_snap = voice_iso_snap.clone();
+            let on_execute_command = on_execute_command.clone();
+            move || {
+                let entry = voice_iso_snap.borrow_mut().take();
+                if let Some((clip_id, track_id, old_amount)) = entry {
+                    let new_amount = {
+                        let mut proj = project.borrow_mut();
+                        proj.clip_mut(&clip_id)
+                            .map(|c| c.voice_isolation)
+                            .unwrap_or(old_amount)
+                    };
+                    on_execute_command(Box::new(crate::undo::SetClipVoiceIsolationCommand {
+                        clip_id,
+                        track_id,
+                        old_amount,
+                        new_amount,
+                    }));
+                }
+            }
+        };
+
+        let ges = gtk4::GestureClick::new();
+        let snap_c = do_vi_snapshot.clone();
+        let commit_c = do_vi_commit.clone();
+        ges.connect_pressed(move |_, _, _, _| {
+            snap_c();
+        });
+        ges.connect_released(move |_, _, _, _| {
+            commit_c();
+        });
+        voice_isolation_slider.add_controller(ges);
+
+        let focus_ctrl = gtk4::EventControllerFocus::new();
+        let snap_c = do_vi_snapshot.clone();
+        let commit_c = do_vi_commit.clone();
+        focus_ctrl.connect_enter(move |_| {
+            snap_c();
+        });
+        focus_ctrl.connect_leave(move |_| {
+            commit_c();
+        });
+        voice_isolation_slider.add_controller(focus_ctrl);
+
+        let project_c = project.clone();
+        let selected_clip_id_c = selected_clip_id.clone();
+        let updating_c = updating.clone();
+        let on_audio_changed_c = on_audio_changed.clone();
+        let volume_slider_c = volume_slider.clone();
+        let pan_slider_c = pan_slider.clone();
+        let vi_pad_vis = vi_pad_slider.clone();
+        let vi_fade_vis = vi_fade_slider.clone();
+        let vi_floor_vis = vi_floor_slider.clone();
+        voice_isolation_slider.connect_value_changed(move |s| {
+            if *updating_c.borrow() {
+                return;
+            }
+            let val = (s.value() / 100.0) as f32;
+            let show_detail = val > 0.0;
+            vi_pad_vis.set_visible(show_detail);
+            vi_fade_vis.set_visible(show_detail);
+            vi_floor_vis.set_visible(show_detail);
+            let id = selected_clip_id_c.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project_c.borrow_mut();
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.voice_isolation = val;
+                    }
+                    proj.dirty = true;
+                }
+                on_audio_changed_c(
+                    clip_id,
+                    db_to_linear_volume(volume_slider_c.value()) as f32,
+                    pan_slider_c.value() as f32,
+                    val,
+                );
+            }
+        });
+    }
+
+    // Wire voice isolation detail sliders (pad, fade, floor).
+    // These update the model and mark dirty; the next on_project_changed
+    // rebuilds ProgramClips with the new values.
+    for (slider, apply_fn) in [
+        (
+            &vi_pad_slider as &Scale,
+            (|clip: &mut crate::model::clip::Clip, v: f64| {
+                clip.voice_isolation_pad_ms = v as f32;
+            }) as fn(&mut crate::model::clip::Clip, f64),
+        ),
+        (
+            &vi_fade_slider as &Scale,
+            (|clip: &mut crate::model::clip::Clip, v: f64| {
+                clip.voice_isolation_fade_ms = v as f32;
+            }) as fn(&mut crate::model::clip::Clip, f64),
+        ),
+        (
+            &vi_floor_slider as &Scale,
+            (|clip: &mut crate::model::clip::Clip, v: f64| {
+                clip.voice_isolation_floor = (v / 100.0) as f32;
+            }) as fn(&mut crate::model::clip::Clip, f64),
+        ),
+    ] {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_clip_changed = on_clip_changed.clone();
+        let slider = slider.clone();
+        slider.connect_value_changed(move |s| {
+            if *updating.borrow() {
+                return;
+            }
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        apply_fn(clip, s.value());
+                    }
+                    proj.dirty = true;
+                }
+                on_clip_changed();
+            }
+        });
+    }
+
+    // Wire voice isolation source dropdown — toggles silence-mode controls,
+    // updates the model, and pushes an undo command.
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_clip_changed = on_clip_changed.clone();
+        let on_execute_command = on_execute_command.clone();
+        let vi_silence_threshold_vis = vi_silence_threshold_slider.clone();
+        let vi_silence_min_ms_vis = vi_silence_min_ms_slider.clone();
+        let vi_silence_actions_vis = vi_silence_actions_row.clone();
+        let vi_intervals_label_c = vi_intervals_label.clone();
+        vi_source_dropdown.connect_selected_notify(move |dd| {
+            if *updating.borrow() {
+                return;
+            }
+            let new_source = if dd.selected() == 1 {
+                crate::model::clip::VoiceIsolationSource::Silence
+            } else {
+                crate::model::clip::VoiceIsolationSource::Subtitles
+            };
+            let is_silence = matches!(
+                new_source,
+                crate::model::clip::VoiceIsolationSource::Silence
+            );
+            vi_silence_threshold_vis.set_visible(is_silence);
+            vi_silence_min_ms_vis.set_visible(is_silence);
+            vi_silence_actions_vis.set_visible(is_silence);
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                let old_source = {
+                    let proj = project.borrow();
+                    proj.clip_ref(clip_id)
+                        .map(|c| c.voice_isolation_source)
+                        .unwrap_or_default()
+                };
+                if old_source == new_source {
+                    return;
+                }
+                {
+                    let mut proj = project.borrow_mut();
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.voice_isolation_source = new_source;
+                    }
+                    proj.dirty = true;
+                }
+                // Refresh the intervals label for the new source.
+                {
+                    let proj = project.borrow();
+                    if let Some(c) = proj.clip_ref(clip_id) {
+                        if is_silence && c.voice_isolation_speech_intervals.is_empty() {
+                            vi_intervals_label_c.set_text("Not analyzed");
+                        } else if is_silence {
+                            vi_intervals_label_c.set_text(&format!(
+                                "Speech intervals: {}",
+                                c.voice_isolation_speech_intervals.len()
+                            ));
+                        } else {
+                            vi_intervals_label_c.set_text("Not analyzed");
+                        }
+                    }
+                }
+                on_execute_command(Box::new(crate::undo::SetClipVoiceIsolationSourceCommand {
+                    clip_id: clip_id.clone(),
+                    track_id: String::new(),
+                    old_source,
+                    new_source,
+                }));
+                on_clip_changed();
+            }
+        });
+    }
+
+    // Wire silence-mode threshold + min-gap sliders. Param changes invalidate
+    // the cached intervals so the user must re-Analyze.
+    {
+        type SilenceParamsSnap = Rc<RefCell<Option<(String, f32, u32, Vec<(u64, u64)>)>>>;
+        let snap: SilenceParamsSnap = Rc::new(RefCell::new(None));
+
+        let do_snap = {
+            let project = project.clone();
+            let selected_clip_id = selected_clip_id.clone();
+            let snap = snap.clone();
+            move || {
+                let cid = selected_clip_id.borrow().clone();
+                if let Some(cid) = cid {
+                    let proj = project.borrow();
+                    if let Some(clip) = proj.clip_ref(&cid) {
+                        *snap.borrow_mut() = Some((
+                            cid.clone(),
+                            clip.voice_isolation_silence_threshold_db,
+                            clip.voice_isolation_silence_min_ms,
+                            clip.voice_isolation_speech_intervals.clone(),
+                        ));
+                    }
+                }
+            }
+        };
+        let do_commit = {
+            let project = project.clone();
+            let snap = snap.clone();
+            let on_execute_command = on_execute_command.clone();
+            move || {
+                let entry = snap.borrow_mut().take();
+                if let Some((clip_id, old_threshold, old_min_ms, old_intervals)) = entry {
+                    let (new_threshold, new_min_ms) = {
+                        let proj = project.borrow();
+                        proj.clip_ref(&clip_id)
+                            .map(|c| {
+                                (
+                                    c.voice_isolation_silence_threshold_db,
+                                    c.voice_isolation_silence_min_ms,
+                                )
+                            })
+                            .unwrap_or((old_threshold, old_min_ms))
+                    };
+                    if (new_threshold - old_threshold).abs() < f32::EPSILON
+                        && new_min_ms == old_min_ms
+                    {
+                        return;
+                    }
+                    on_execute_command(Box::new(
+                        crate::undo::SetClipVoiceIsolationSilenceParamsCommand {
+                            clip_id,
+                            track_id: String::new(),
+                            old_threshold_db: old_threshold,
+                            new_threshold_db: new_threshold,
+                            old_min_ms,
+                            new_min_ms,
+                            old_intervals,
+                        },
+                    ));
+                }
+            }
+        };
+
+        // Live model write + cache invalidation on every value change so the
+        // playhead reflects the new params immediately. Undo capture happens
+        // at gesture end via the click controller below.
+        for (slider, apply_fn) in [
+            (
+                &vi_silence_threshold_slider as &Scale,
+                (|clip: &mut crate::model::clip::Clip, v: f64| {
+                    clip.voice_isolation_silence_threshold_db = v as f32;
+                    clip.voice_isolation_speech_intervals.clear();
+                }) as fn(&mut crate::model::clip::Clip, f64),
+            ),
+            (
+                &vi_silence_min_ms_slider as &Scale,
+                (|clip: &mut crate::model::clip::Clip, v: f64| {
+                    clip.voice_isolation_silence_min_ms = v as u32;
+                    clip.voice_isolation_speech_intervals.clear();
+                }) as fn(&mut crate::model::clip::Clip, f64),
+            ),
+        ] {
+            let project = project.clone();
+            let selected_clip_id = selected_clip_id.clone();
+            let updating = updating.clone();
+            let on_clip_changed = on_clip_changed.clone();
+            let slider = slider.clone();
+            let vi_intervals_label_c = vi_intervals_label.clone();
+            slider.connect_value_changed(move |s| {
+                if *updating.borrow() {
+                    return;
+                }
+                let id = selected_clip_id.borrow().clone();
+                if let Some(ref clip_id) = id {
+                    {
+                        let mut proj = project.borrow_mut();
+                        if let Some(clip) = proj.clip_mut(clip_id) {
+                            apply_fn(clip, s.value());
+                        }
+                        proj.dirty = true;
+                    }
+                    vi_intervals_label_c.set_text("Not analyzed");
+                    on_clip_changed();
+                }
+            });
+        }
+
+        for slider in [&vi_silence_threshold_slider, &vi_silence_min_ms_slider] {
+            let ges = gtk4::GestureClick::new();
+            let snap_c = do_snap.clone();
+            let commit_c = do_commit.clone();
+            ges.connect_pressed(move |_, _, _, _| {
+                snap_c();
+            });
+            ges.connect_released(move |_, _, _, _| {
+                commit_c();
+            });
+            slider.add_controller(ges);
+
+            let focus_ctrl = gtk4::EventControllerFocus::new();
+            let snap_c = do_snap.clone();
+            let commit_c = do_commit.clone();
+            focus_ctrl.connect_enter(move |_| {
+                snap_c();
+            });
+            focus_ctrl.connect_leave(move |_| {
+                commit_c();
+            });
+            slider.add_controller(focus_ctrl);
+        }
+    }
+
+    // Suggest button — analyze noise floor via astats and update the threshold
+    // slider. The slider's value-changed handler then propagates to the model
+    // and invalidates the intervals cache.
+    {
+        let selected_clip_id = selected_clip_id.clone();
+        let on_suggest_voice_isolation_threshold = on_suggest_voice_isolation_threshold.clone();
+        let vi_silence_threshold_slider_c = vi_silence_threshold_slider.clone();
+        vi_suggest_btn.connect_clicked(move |_| {
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                if let Some(suggested_db) = on_suggest_voice_isolation_threshold(clip_id) {
+                    vi_silence_threshold_slider_c.set_value(suggested_db as f64);
+                }
+            }
+        });
+    }
+
+    // Analyze Audio button — runs silencedetect, stores intervals, refreshes label.
+    // The callback handles ffmpeg shell-out, undo push, and on_project_changed.
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let on_analyze_voice_isolation_silence = on_analyze_voice_isolation_silence.clone();
+        let vi_intervals_label_c = vi_intervals_label.clone();
+        vi_analyze_btn.connect_clicked(move |_| {
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                on_analyze_voice_isolation_silence(clip_id);
+                let proj = project.borrow();
+                if let Some(c) = proj.clip_ref(clip_id) {
+                    if c.voice_isolation_speech_intervals.is_empty() {
+                        vi_intervals_label_c.set_text("Analysis returned no speech");
+                    } else {
+                        vi_intervals_label_c.set_text(&format!(
+                            "Speech intervals: {}",
+                            c.voice_isolation_speech_intervals.len()
+                        ));
+                    }
+                }
+            }
+        });
+    }
+
     // Wire Normalize button
     {
         let selected_clip_id = selected_clip_id.clone();
@@ -4495,6 +6332,396 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 on_normalize_audio(clip_id);
             }
+        });
+    }
+    {
+        let selected_clip_id = selected_clip_id.clone();
+        let on_clear_match_eq = on_clear_match_eq.clone();
+        clear_match_eq_btn.connect_clicked(move |_btn| {
+            let id = selected_clip_id.borrow().clone();
+            if let Some(clip_id) = id {
+                on_clear_match_eq(&clip_id);
+            }
+        });
+    }
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let on_match_audio = on_match_audio.clone();
+        match_audio_btn.connect_clicked(move |btn| {
+            let source_id = selected_clip_id.borrow().clone();
+            let Some(source_clip_id) = source_id else {
+                return;
+            };
+
+            let (frame_rate, source_duration_ns, candidates) = {
+                let proj = project.borrow();
+                // Use recursive lookup for source clip (may be inside a compound).
+                let source_duration_ns = proj.clip_ref(&source_clip_id).map(|c| {
+                    c.source_duration()
+                });
+                // Collect candidate clips from ALL tracks (including inside compounds).
+                let mut candidates = Vec::new();
+                fn collect_candidates(
+                    tracks: &[crate::model::track::Track],
+                    source_id: &str,
+                    candidates: &mut Vec<MatchAudioCandidate>,
+                    frame_rate: &crate::model::project::FrameRate,
+                ) {
+                    for track in tracks {
+                        for clip in &track.clips {
+                            if clip.id == source_id {
+                                continue;
+                            }
+                            if matches!(
+                                clip.kind,
+                                crate::model::clip::ClipKind::Video
+                                    | crate::model::clip::ClipKind::Audio
+                            ) {
+                                let duration_ns = clip.source_duration();
+                                let clip_label = audio_match_clip_label(&clip.label, &clip.id);
+                                candidates.push(MatchAudioCandidate {
+                                    clip_id: clip.id.clone(),
+                                    label: format!(
+                                        "{} ({})",
+                                        clip_label,
+                                        crate::ui::timecode::format_ns_as_timecode(
+                                            duration_ns,
+                                            frame_rate,
+                                        )
+                                    ),
+                                    duration_ns,
+                                });
+                            }
+                            // Recurse into compound clips
+                            if let Some(ref inner) = clip.compound_tracks {
+                                collect_candidates(inner, source_id, candidates, frame_rate);
+                            }
+                        }
+                    }
+                }
+                collect_candidates(&proj.tracks, &source_clip_id, &mut candidates, &proj.frame_rate);
+                (proj.frame_rate.clone(), source_duration_ns, candidates)
+            };
+            let Some(source_duration_ns) = source_duration_ns else {
+                return;
+            };
+
+            if candidates.is_empty() {
+                return;
+            }
+            let candidates = Rc::new(candidates);
+
+            let window = btn.root().and_then(|r| r.downcast::<gtk4::Window>().ok());
+            let dialog = gtk4::Window::builder()
+                .title("Match Audio")
+                .modal(true)
+                .default_width(460)
+                .build();
+            dialog.set_resizable(false);
+            if let Some(ref w) = window {
+                dialog.set_transient_for(Some(w));
+            }
+
+            let vbox = GBox::new(Orientation::Vertical, 12);
+            vbox.set_margin_start(16);
+            vbox.set_margin_end(16);
+            vbox.set_margin_top(16);
+            vbox.set_margin_bottom(16);
+            dialog.set_child(Some(&vbox));
+
+            let label = Label::new(Some(
+                "Choose a reference clip, then keep the simple voice match or switch to an exact region.",
+            ));
+            label.set_halign(gtk4::Align::Start);
+            label.set_wrap(true);
+            vbox.append(&label);
+
+            let labels: Vec<String> = candidates
+                .iter()
+                .map(|candidate| candidate.label.clone())
+                .collect();
+            let string_list =
+                gtk4::StringList::new(&labels.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+            let reference_dropdown = gtk4::DropDown::new(Some(string_list), gtk4::Expression::NONE);
+            reference_dropdown.set_selected(0);
+            reference_dropdown.set_hexpand(true);
+
+            let channel_labels = crate::media::audio_match::AudioMatchChannelMode::ALL
+                .iter()
+                .map(|mode| mode.label())
+                .collect::<Vec<_>>();
+            let channel_list = gtk4::StringList::new(&channel_labels);
+            let channel_dropdown = gtk4::DropDown::new(Some(channel_list), gtk4::Expression::NONE);
+            channel_dropdown.set_selected(0);
+            channel_dropdown.set_hexpand(true);
+
+            let mode_list =
+                gtk4::StringList::new(&["Match voice (Recommended)", "Choose region..."]);
+            let mode_dropdown = gtk4::DropDown::new(Some(mode_list), gtk4::Expression::NONE);
+            mode_dropdown.set_selected(0);
+            mode_dropdown.set_hexpand(true);
+
+            let form = gtk4::Grid::builder()
+                .column_spacing(12)
+                .row_spacing(8)
+                .build();
+            vbox.append(&form);
+
+            let mode_label = Label::new(Some("Match mode"));
+            mode_label.set_halign(gtk4::Align::Start);
+            form.attach(&mode_label, 0, 0, 1, 1);
+            form.attach(&mode_dropdown, 1, 0, 1, 1);
+
+            let reference_label = Label::new(Some("Reference clip"));
+            reference_label.set_halign(gtk4::Align::Start);
+            form.attach(&reference_label, 0, 1, 1, 1);
+            form.attach(&reference_dropdown, 1, 1, 1, 1);
+
+            let channel_label = Label::new(Some("Channel handling"));
+            channel_label.set_halign(gtk4::Align::Start);
+            form.attach(&channel_label, 0, 2, 1, 1);
+            form.attach(&channel_dropdown, 1, 2, 1, 1);
+
+            let mode_description = Label::new(None);
+            mode_description.set_halign(gtk4::Align::Start);
+            mode_description.set_wrap(true);
+            mode_description.add_css_class("dim-label");
+            vbox.append(&mode_description);
+
+            let channel_description = Label::new(None);
+            channel_description.set_halign(gtk4::Align::Start);
+            channel_description.set_wrap(true);
+            channel_description.add_css_class("dim-label");
+            vbox.append(&channel_description);
+
+            let region_box = GBox::new(Orientation::Vertical, 8);
+            vbox.append(&region_box);
+
+            let region_hint = Label::new(Some(
+                "Timecode uses HH:MM:SS:FF (or MM:SS:FF) at the project frame rate.",
+            ));
+            region_hint.set_halign(gtk4::Align::Start);
+            region_hint.add_css_class("dim-label");
+            region_hint.set_wrap(true);
+            region_box.append(&region_hint);
+
+            let region_form = gtk4::Grid::builder()
+                .column_spacing(12)
+                .row_spacing(8)
+                .build();
+            region_box.append(&region_form);
+
+            let source_in_label = Label::new(Some("Source in"));
+            source_in_label.set_halign(gtk4::Align::Start);
+            region_form.attach(&source_in_label, 0, 0, 1, 1);
+            let source_in_entry = Entry::new();
+            source_in_entry.set_hexpand(true);
+            region_form.attach(&source_in_entry, 1, 0, 1, 1);
+
+            let source_out_label = Label::new(Some("Source out"));
+            source_out_label.set_halign(gtk4::Align::Start);
+            region_form.attach(&source_out_label, 0, 1, 1, 1);
+            let source_out_entry = Entry::new();
+            source_out_entry.set_hexpand(true);
+            region_form.attach(&source_out_entry, 1, 1, 1, 1);
+
+            let source_hint = Label::new(Some(&format!(
+                "Source clip length: {}",
+                crate::ui::timecode::format_ns_as_timecode(source_duration_ns, &frame_rate)
+            )));
+            source_hint.set_halign(gtk4::Align::Start);
+            source_hint.add_css_class("dim-label");
+            region_form.attach(&source_hint, 1, 2, 1, 1);
+
+            let reference_in_label = Label::new(Some("Reference in"));
+            reference_in_label.set_halign(gtk4::Align::Start);
+            region_form.attach(&reference_in_label, 0, 3, 1, 1);
+            let reference_in_entry = Entry::new();
+            reference_in_entry.set_hexpand(true);
+            region_form.attach(&reference_in_entry, 1, 3, 1, 1);
+
+            let reference_out_label = Label::new(Some("Reference out"));
+            reference_out_label.set_halign(gtk4::Align::Start);
+            region_form.attach(&reference_out_label, 0, 4, 1, 1);
+            let reference_out_entry = Entry::new();
+            reference_out_entry.set_hexpand(true);
+            region_form.attach(&reference_out_entry, 1, 4, 1, 1);
+
+            let reference_hint = Label::new(None);
+            reference_hint.set_halign(gtk4::Align::Start);
+            reference_hint.add_css_class("dim-label");
+            region_form.attach(&reference_hint, 1, 5, 1, 1);
+
+            let error_label = Label::new(None);
+            error_label.set_halign(gtk4::Align::Start);
+            error_label.set_wrap(true);
+            error_label.add_css_class("error");
+            error_label.set_visible(false);
+            vbox.append(&error_label);
+
+            set_audio_match_region_entries(
+                &source_in_entry,
+                &source_out_entry,
+                crate::media::audio_match::AnalysisRegionNs {
+                    start_ns: 0,
+                    end_ns: source_duration_ns,
+                },
+                &frame_rate,
+            );
+
+            let candidates_for_update = candidates.clone();
+            let reference_hint_for_update = reference_hint.clone();
+            let reference_in_for_update = reference_in_entry.clone();
+            let reference_out_for_update = reference_out_entry.clone();
+            let frame_rate_for_update = frame_rate.clone();
+            let update_reference_range = Rc::new(move |selected: u32| {
+                if let Some(candidate) = candidates_for_update.get(selected as usize) {
+                    reference_hint_for_update.set_text(&format!(
+                        "Reference clip length: {}",
+                        crate::ui::timecode::format_ns_as_timecode(
+                            candidate.duration_ns,
+                            &frame_rate_for_update
+                        )
+                    ));
+                    set_audio_match_region_entries(
+                        &reference_in_for_update,
+                        &reference_out_for_update,
+                        crate::media::audio_match::AnalysisRegionNs {
+                            start_ns: 0,
+                            end_ns: candidate.duration_ns,
+                        },
+                        &frame_rate_for_update,
+                    );
+                }
+            });
+            update_reference_range(reference_dropdown.selected());
+            let update_reference_range_notify = update_reference_range.clone();
+            let error_label_for_reference_change = error_label.clone();
+            reference_dropdown.connect_selected_notify(move |dd| {
+                error_label_for_reference_change.set_visible(false);
+                update_reference_range_notify(dd.selected());
+            });
+
+            let dialog_for_mode = dialog.clone();
+            let mode_description_for_sync = mode_description.clone();
+            let region_box_for_sync = region_box.clone();
+            let sync_mode = Rc::new(move |selected: u32| {
+                sync_match_audio_mode_ui(
+                    &dialog_for_mode,
+                    &mode_description_for_sync,
+                    &region_box_for_sync,
+                    MatchAudioDialogMode::from_index(selected),
+                );
+            });
+            sync_mode(mode_dropdown.selected());
+            let sync_mode_notify = sync_mode.clone();
+            let error_label_for_mode_change = error_label.clone();
+            mode_dropdown.connect_selected_notify(move |dd| {
+                error_label_for_mode_change.set_visible(false);
+                sync_mode_notify(dd.selected());
+            });
+
+            let channel_description_for_sync = channel_description.clone();
+            let sync_channel_mode = Rc::new(move |selected: u32| {
+                let mode = crate::media::audio_match::AudioMatchChannelMode::ALL
+                    .get(selected as usize)
+                    .copied()
+                    .unwrap_or_default();
+                sync_match_audio_channel_mode_ui(&channel_description_for_sync, mode);
+            });
+            sync_channel_mode(channel_dropdown.selected());
+            let sync_channel_mode_notify = sync_channel_mode.clone();
+            let error_label_for_channel_change = error_label.clone();
+            channel_dropdown.connect_selected_notify(move |dd| {
+                error_label_for_channel_change.set_visible(false);
+                sync_channel_mode_notify(dd.selected());
+            });
+
+            let btn_row = GBox::new(Orientation::Horizontal, 8);
+            btn_row.set_halign(gtk4::Align::End);
+            let cancel_btn = Button::with_label("Cancel");
+            let ok_btn = Button::with_label("Match");
+            ok_btn.add_css_class("suggested-action");
+            btn_row.append(&cancel_btn);
+            btn_row.append(&ok_btn);
+            vbox.append(&btn_row);
+
+            let dialog_cancel = dialog.clone();
+            cancel_btn.connect_clicked(move |_| {
+                dialog_cancel.close();
+            });
+
+            let dialog_ok = dialog.clone();
+            let on_match_audio = on_match_audio.clone();
+            let candidates = candidates.clone();
+            let channel_dropdown = channel_dropdown.clone();
+            let mode_dropdown = mode_dropdown.clone();
+            let reference_dropdown = reference_dropdown.clone();
+            let source_in_entry = source_in_entry.clone();
+            let source_out_entry = source_out_entry.clone();
+            let reference_in_entry = reference_in_entry.clone();
+            let reference_out_entry = reference_out_entry.clone();
+            let error_label = error_label.clone();
+            let frame_rate = frame_rate.clone();
+            ok_btn.connect_clicked(move |_| {
+                let idx = reference_dropdown.selected() as usize;
+                if idx >= candidates.len() {
+                    error_label.set_text("Select a reference clip.");
+                    error_label.set_visible(true);
+                    return;
+                }
+                let mode = MatchAudioDialogMode::from_index(mode_dropdown.selected());
+                let channel_mode = crate::media::audio_match::AudioMatchChannelMode::ALL
+                    .get(channel_dropdown.selected() as usize)
+                    .copied()
+                    .unwrap_or_default();
+                let (source_region, reference_region) = if mode.shows_region_fields() {
+                    let source_region = match parse_audio_match_region_entries(
+                        &source_in_entry,
+                        &source_out_entry,
+                        source_duration_ns,
+                        &frame_rate,
+                        "Source",
+                    ) {
+                        Ok(region) => region,
+                        Err(error) => {
+                            error_label.set_text(&error);
+                            error_label.set_visible(true);
+                            return;
+                        }
+                    };
+                    let reference_region = match parse_audio_match_region_entries(
+                        &reference_in_entry,
+                        &reference_out_entry,
+                        candidates[idx].duration_ns,
+                        &frame_rate,
+                        "Reference",
+                    ) {
+                        Ok(region) => region,
+                        Err(error) => {
+                            error_label.set_text(&error);
+                            error_label.set_visible(true);
+                            return;
+                        }
+                    };
+                    (Some(source_region), Some(reference_region))
+                } else {
+                    (None, None)
+                };
+                error_label.set_visible(false);
+                on_match_audio(
+                    &source_clip_id,
+                    source_region,
+                    channel_mode,
+                    &candidates[idx].clip_id,
+                    reference_region,
+                    channel_mode,
+                );
+                dialog_ok.close();
+            });
+
+            dialog.present();
         });
     }
 
@@ -4514,14 +6741,11 @@ pub fn build_inspector(
             if let (Some(ref clip_id), Some(mode_id)) = (id, combo.active_id()) {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.audio_channel_mode =
-                                crate::model::clip::AudioChannelMode::from_str(&mode_id);
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.audio_channel_mode =
+                            crate::model::clip::AudioChannelMode::from_str(&mode_id);
                     }
+                    proj.dirty = true;
                 }
                 on_clip_changed();
             }
@@ -4543,14 +6767,11 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.pitch_shift_semitones = s.value();
-                            clip.pitch_preserve = pitch_preserve_check_cb.is_active();
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.pitch_shift_semitones = s.value();
+                        clip.pitch_preserve = pitch_preserve_check_cb.is_active();
                     }
+                    proj.dirty = true;
                 }
                 on_clip_changed();
             }
@@ -4569,13 +6790,10 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.pitch_preserve = btn.is_active();
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.pitch_preserve = btn.is_active();
                     }
+                    proj.dirty = true;
                 }
                 on_clip_changed();
             }
@@ -4668,13 +6886,10 @@ pub fn build_inspector(
                     ];
                     {
                         let mut proj = project.borrow_mut();
-                        for track in &mut proj.tracks {
-                            if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                                clip.eq_bands = bands;
-                                proj.dirty = true;
-                                break;
-                            }
+                        if let Some(clip) = proj.clip_mut(clip_id) {
+                            clip.eq_bands = bands;
                         }
+                        proj.dirty = true;
                     }
                     on_eq_changed(clip_id, bands);
                 }
@@ -4714,13 +6929,10 @@ pub fn build_inspector(
                     ];
                     {
                         let mut proj = project.borrow_mut();
-                        for track in &mut proj.tracks {
-                            if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                                clip.eq_bands = bands;
-                                proj.dirty = true;
-                                break;
-                            }
+                        if let Some(clip) = proj.clip_mut(clip_id) {
+                            clip.eq_bands = bands;
                         }
+                        proj.dirty = true;
                     }
                     on_eq_changed(clip_id, bands);
                 }
@@ -4760,13 +6972,10 @@ pub fn build_inspector(
                     ];
                     {
                         let mut proj = project.borrow_mut();
-                        for track in &mut proj.tracks {
-                            if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                                clip.eq_bands = bands;
-                                proj.dirty = true;
-                                break;
-                            }
+                        if let Some(clip) = proj.clip_mut(clip_id) {
+                            clip.eq_bands = bands;
                         }
+                        proj.dirty = true;
                     }
                     on_eq_changed(clip_id, bands);
                 }
@@ -4885,13 +7094,10 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            apply(clip, val);
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        apply(clip, val);
                     }
+                    proj.dirty = true;
                 }
                 let cl = crop_left_s.value() as i32;
                 let cr = crop_right_s.value() as i32;
@@ -4999,7 +7205,7 @@ pub fn build_inspector(
         let pos_x_s = position_x_slider.clone();
         let pos_y_s = position_y_slider.clone();
         rotate_spin.connect_value_changed(move |spin| {
-            let rot = spin.value().clamp(-180.0, 180.0).round() as i32;
+            let rot = spin.value().clamp(ROTATE_MIN_DEG, ROTATE_MAX_DEG).round() as i32;
             rotate_value.set(rot as f64);
             rotate_dial.queue_draw();
             if *updating.borrow() {
@@ -5009,13 +7215,10 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.rotate = rot;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.rotate = rot;
                     }
+                    proj.dirty = true;
                 }
                 let cl = crop_left_s.value() as i32;
                 let cr = crop_right_s.value() as i32;
@@ -5133,13 +7336,10 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.flip_h = fh;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.flip_h = fh;
                     }
+                    proj.dirty = true;
                 }
                 let cl = crop_left_s.value() as i32;
                 let cr = crop_right_s.value() as i32;
@@ -5185,13 +7385,10 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.flip_v = fv;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.flip_v = fv;
                     }
+                    proj.dirty = true;
                 }
                 let cl = crop_left_s.value() as i32;
                 let cr = crop_right_s.value() as i32;
@@ -5244,31 +7441,25 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            let has_kfs = !clip.scale_keyframes.is_empty();
-                            if animation_mode.get() || has_kfs {
-                                let interp = interp_idx_to_enum(interp_dropdown_s.selected());
-                                clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
-                                    Phase1KeyframeProperty::Scale,
-                                    current_playhead_ns(),
-                                    sc,
-                                    interp,
-                                );
-                            } else {
-                                clip.scale = sc;
-                            }
-                            proj.dirty = true;
-                            break;
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        let has_kfs = !clip.scale_keyframes.is_empty();
+                        if animation_mode.get() || has_kfs {
+                            let interp = interp_idx_to_enum(interp_dropdown_s.selected());
+                            clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
+                                Phase1KeyframeProperty::Scale,
+                                current_playhead_ns(),
+                                sc,
+                                interp,
+                            );
+                        } else {
+                            clip.scale = sc;
                         }
                     }
+                    proj.dirty = true;
                 }
                 if animation_mode.get() || {
                     let proj = project.borrow();
-                    proj.tracks
-                        .iter()
-                        .flat_map(|t| t.clips.iter())
-                        .find(|c| &c.id == clip_id)
+                    proj.clip_ref(clip_id)
                         .map_or(false, |c| !c.scale_keyframes.is_empty())
                 } {
                     on_clip_changed();
@@ -5315,31 +7506,25 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            let has_kfs = !clip.opacity_keyframes.is_empty();
-                            if animation_mode.get() || has_kfs {
-                                let interp = interp_idx_to_enum(interp_dropdown_o.selected());
-                                clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
-                                    Phase1KeyframeProperty::Opacity,
-                                    current_playhead_ns(),
-                                    opacity,
-                                    interp,
-                                );
-                            } else {
-                                clip.opacity = opacity;
-                            }
-                            proj.dirty = true;
-                            break;
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        let has_kfs = !clip.opacity_keyframes.is_empty();
+                        if animation_mode.get() || has_kfs {
+                            let interp = interp_idx_to_enum(interp_dropdown_o.selected());
+                            clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
+                                Phase1KeyframeProperty::Opacity,
+                                current_playhead_ns(),
+                                opacity,
+                                interp,
+                            );
+                        } else {
+                            clip.opacity = opacity;
                         }
                     }
+                    proj.dirty = true;
                 }
                 if animation_mode.get() || {
                     let proj = project.borrow();
-                    proj.tracks
-                        .iter()
-                        .flat_map(|t| t.clips.iter())
-                        .find(|c| &c.id == clip_id)
+                    proj.clip_ref(clip_id)
                         .map_or(false, |c| !c.opacity_keyframes.is_empty())
                 } {
                     on_clip_changed();
@@ -5377,31 +7562,25 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            let has_kfs = !clip.position_x_keyframes.is_empty();
-                            if animation_mode.get() || has_kfs {
-                                let interp = interp_idx_to_enum(interp_dropdown_px.selected());
-                                clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
-                                    Phase1KeyframeProperty::PositionX,
-                                    current_playhead_ns(),
-                                    px,
-                                    interp,
-                                );
-                            } else {
-                                clip.position_x = px;
-                            }
-                            proj.dirty = true;
-                            break;
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        let has_kfs = !clip.position_x_keyframes.is_empty();
+                        if animation_mode.get() || has_kfs {
+                            let interp = interp_idx_to_enum(interp_dropdown_px.selected());
+                            clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
+                                Phase1KeyframeProperty::PositionX,
+                                current_playhead_ns(),
+                                px,
+                                interp,
+                            );
+                        } else {
+                            clip.position_x = px;
                         }
                     }
+                    proj.dirty = true;
                 }
                 if animation_mode.get() || {
                     let proj = project.borrow();
-                    proj.tracks
-                        .iter()
-                        .flat_map(|t| t.clips.iter())
-                        .find(|c| &c.id == clip_id)
+                    proj.clip_ref(clip_id)
                         .map_or(false, |c| !c.position_x_keyframes.is_empty())
                 } {
                     on_clip_changed();
@@ -5458,31 +7637,25 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            let has_kfs = !clip.position_y_keyframes.is_empty();
-                            if animation_mode.get() || has_kfs {
-                                let interp = interp_idx_to_enum(interp_dropdown_py.selected());
-                                clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
-                                    Phase1KeyframeProperty::PositionY,
-                                    current_playhead_ns(),
-                                    py,
-                                    interp,
-                                );
-                            } else {
-                                clip.position_y = py;
-                            }
-                            proj.dirty = true;
-                            break;
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        let has_kfs = !clip.position_y_keyframes.is_empty();
+                        if animation_mode.get() || has_kfs {
+                            let interp = interp_idx_to_enum(interp_dropdown_py.selected());
+                            clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
+                                Phase1KeyframeProperty::PositionY,
+                                current_playhead_ns(),
+                                py,
+                                interp,
+                            );
+                        } else {
+                            clip.position_y = py;
                         }
                     }
+                    proj.dirty = true;
                 }
                 if animation_mode.get() || {
                     let proj = project.borrow();
-                    proj.tracks
-                        .iter()
-                        .flat_map(|t| t.clips.iter())
-                        .find(|c| &c.id == clip_id)
+                    proj.clip_ref(clip_id)
                         .map_or(false, |c| !c.position_y_keyframes.is_empty())
                 } {
                     on_clip_changed();
@@ -5545,18 +7718,17 @@ pub fn build_inspector(
                 let mut changed = false;
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                            clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
-                                property,
-                                timeline_pos_ns,
-                                value,
-                                interp,
-                            );
-                            proj.dirty = true;
-                            changed = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(&clip_id) {
+                        clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
+                            property,
+                            timeline_pos_ns,
+                            value,
+                            interp,
+                        );
+                        changed = true;
+                    }
+                    if changed {
+                        proj.dirty = true;
                     }
                 }
                 if changed {
@@ -5582,15 +7754,12 @@ pub fn build_inspector(
                 let mut removed = false;
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                            removed = clip
-                                .remove_phase1_keyframe_at_timeline_ns(property, timeline_pos_ns);
-                            if removed {
-                                proj.dirty = true;
-                            }
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(&clip_id) {
+                        removed =
+                            clip.remove_phase1_keyframe_at_timeline_ns(property, timeline_pos_ns);
+                    }
+                    if removed {
+                        proj.dirty = true;
                     }
                 }
                 if removed {
@@ -5711,7 +7880,12 @@ pub fn build_inspector(
         on_clip_changed.clone(),
         Rc::new({
             let crop_left_slider = crop_left_slider.clone();
-            move || crop_left_slider.value().clamp(0.0, 500.0).round()
+            move || {
+                crop_left_slider
+                    .value()
+                    .clamp(CROP_MIN_PX, CROP_MAX_PX)
+                    .round()
+            }
         }),
         interp_provider.clone(),
     );
@@ -5726,7 +7900,12 @@ pub fn build_inspector(
         on_clip_changed.clone(),
         Rc::new({
             let crop_right_slider = crop_right_slider.clone();
-            move || crop_right_slider.value().clamp(0.0, 500.0).round()
+            move || {
+                crop_right_slider
+                    .value()
+                    .clamp(CROP_MIN_PX, CROP_MAX_PX)
+                    .round()
+            }
         }),
         interp_provider.clone(),
     );
@@ -5741,7 +7920,12 @@ pub fn build_inspector(
         on_clip_changed.clone(),
         Rc::new({
             let crop_top_slider = crop_top_slider.clone();
-            move || crop_top_slider.value().clamp(0.0, 500.0).round()
+            move || {
+                crop_top_slider
+                    .value()
+                    .clamp(CROP_MIN_PX, CROP_MAX_PX)
+                    .round()
+            }
         }),
         interp_provider.clone(),
     );
@@ -5756,7 +7940,12 @@ pub fn build_inspector(
         on_clip_changed.clone(),
         Rc::new({
             let crop_bottom_slider = crop_bottom_slider.clone();
-            move || crop_bottom_slider.value().clamp(0.0, 500.0).round()
+            move || {
+                crop_bottom_slider
+                    .value()
+                    .clamp(CROP_MIN_PX, CROP_MAX_PX)
+                    .round()
+            }
         }),
         interp_provider.clone(),
     );
@@ -5771,7 +7960,12 @@ pub fn build_inspector(
         on_clip_changed.clone(),
         Rc::new({
             let rotate_spin = rotate_spin.clone();
-            move || rotate_spin.value().clamp(-180.0, 180.0).round()
+            move || {
+                rotate_spin
+                    .value()
+                    .clamp(ROTATE_MIN_DEG, ROTATE_MAX_DEG)
+                    .round()
+            }
         }),
         interp_provider.clone(),
     );
@@ -5799,17 +7993,14 @@ pub fn build_inspector(
             let result = {
                 let mut proj = project.borrow_mut();
                 let mut found = None;
-                for track in &mut proj.tracks {
-                    if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                        clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
-                            Phase1KeyframeProperty::Speed,
-                            timeline_pos_ns,
-                            value,
-                            interp,
-                        );
-                        found = Some((clip.speed, clip.speed_keyframes.clone()));
-                        break;
-                    }
+                if let Some(clip) = proj.clip_mut(&clip_id) {
+                    clip.upsert_phase1_keyframe_at_timeline_ns_with_interp(
+                        Phase1KeyframeProperty::Speed,
+                        timeline_pos_ns,
+                        value,
+                        interp,
+                    );
+                    found = Some((clip.speed, clip.speed_keyframes.clone()));
                 }
                 if found.is_some() {
                     proj.dirty = true;
@@ -5838,16 +8029,13 @@ pub fn build_inspector(
             let result = {
                 let mut proj = project.borrow_mut();
                 let mut found = None;
-                for track in &mut proj.tracks {
-                    if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                        let removed = clip.remove_phase1_keyframe_at_timeline_ns(
-                            Phase1KeyframeProperty::Speed,
-                            timeline_pos_ns,
-                        );
-                        if removed {
-                            found = Some((clip.speed, clip.speed_keyframes.clone()));
-                        }
-                        break;
+                if let Some(clip) = proj.clip_mut(&clip_id) {
+                    let removed = clip.remove_phase1_keyframe_at_timeline_ns(
+                        Phase1KeyframeProperty::Speed,
+                        timeline_pos_ns,
+                    );
+                    if removed {
+                        found = Some((clip.speed, clip.speed_keyframes.clone()));
                     }
                 }
                 if found.is_some() {
@@ -5873,14 +8061,11 @@ pub fn build_inspector(
             };
             let playhead = current_playhead_ns();
             let proj = project.borrow();
-            for track in &proj.tracks {
-                if let Some(clip) = track.clips.iter().find(|c| c.id == clip_id) {
-                    let local = clip.local_timeline_position_ns(playhead);
-                    if let Some(prev_local) = clip.prev_keyframe_local_ns(local) {
-                        let timeline_ns = clip.timeline_start.saturating_add(prev_local);
-                        on_seek_to(timeline_ns);
-                    }
-                    break;
+            if let Some(clip) = proj.clip_ref(&clip_id) {
+                let local = clip.local_timeline_position_ns(playhead);
+                if let Some(prev_local) = clip.prev_keyframe_local_ns(local) {
+                    let timeline_ns = clip.timeline_start.saturating_add(prev_local);
+                    on_seek_to(timeline_ns);
                 }
             }
         }
@@ -5896,14 +8081,11 @@ pub fn build_inspector(
             };
             let playhead = current_playhead_ns();
             let proj = project.borrow();
-            for track in &proj.tracks {
-                if let Some(clip) = track.clips.iter().find(|c| c.id == clip_id) {
-                    let local = clip.local_timeline_position_ns(playhead);
-                    if let Some(next_local) = clip.next_keyframe_local_ns(local) {
-                        let timeline_ns = clip.timeline_start.saturating_add(next_local);
-                        on_seek_to(timeline_ns);
-                    }
-                    break;
+            if let Some(clip) = proj.clip_ref(&clip_id) {
+                let local = clip.local_timeline_position_ns(playhead);
+                if let Some(next_local) = clip.next_keyframe_local_ns(local) {
+                    let timeline_ns = clip.timeline_start.saturating_add(next_local);
+                    on_seek_to(timeline_ns);
                 }
             }
         }
@@ -5925,21 +8107,18 @@ pub fn build_inspector(
             };
             let playhead = current_playhead_ns();
             let proj = project.borrow();
-            for track in &proj.tracks {
-                if let Some(clip) = track.clips.iter().find(|c| c.id == clip_id) {
-                    let local = clip.local_timeline_position_ns(playhead);
-                    if let Some(prev_local) = clip
-                        .prev_keyframe_local_ns_for_property(Phase1KeyframeProperty::Speed, local)
-                    {
-                        let timeline_ns = clip.timeline_start.saturating_add(prev_local);
-                        let speed_at_kf = clip.speed_at_local_timeline_ns(prev_local);
-                        drop(proj);
-                        *updating.borrow_mut() = true;
-                        speed_slider.set_value(speed_at_kf);
-                        *updating.borrow_mut() = false;
-                        on_seek_to(timeline_ns);
-                    }
-                    break;
+            if let Some(clip) = proj.clip_ref(&clip_id) {
+                let local = clip.local_timeline_position_ns(playhead);
+                if let Some(prev_local) =
+                    clip.prev_keyframe_local_ns_for_property(Phase1KeyframeProperty::Speed, local)
+                {
+                    let timeline_ns = clip.timeline_start.saturating_add(prev_local);
+                    let speed_at_kf = clip.speed_at_local_timeline_ns(prev_local);
+                    drop(proj);
+                    *updating.borrow_mut() = true;
+                    speed_slider.set_value(speed_at_kf);
+                    *updating.borrow_mut() = false;
+                    on_seek_to(timeline_ns);
                 }
             }
         }
@@ -5957,21 +8136,18 @@ pub fn build_inspector(
             };
             let playhead = current_playhead_ns();
             let proj = project.borrow();
-            for track in &proj.tracks {
-                if let Some(clip) = track.clips.iter().find(|c| c.id == clip_id) {
-                    let local = clip.local_timeline_position_ns(playhead);
-                    if let Some(next_local) = clip
-                        .next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Speed, local)
-                    {
-                        let timeline_ns = clip.timeline_start.saturating_add(next_local);
-                        let speed_at_kf = clip.speed_at_local_timeline_ns(next_local);
-                        drop(proj);
-                        *updating.borrow_mut() = true;
-                        speed_slider.set_value(speed_at_kf);
-                        *updating.borrow_mut() = false;
-                        on_seek_to(timeline_ns);
-                    }
-                    break;
+            if let Some(clip) = proj.clip_ref(&clip_id) {
+                let local = clip.local_timeline_position_ns(playhead);
+                if let Some(next_local) =
+                    clip.next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Speed, local)
+                {
+                    let timeline_ns = clip.timeline_start.saturating_add(next_local);
+                    let speed_at_kf = clip.speed_at_local_timeline_ns(next_local);
+                    drop(proj);
+                    *updating.borrow_mut() = true;
+                    speed_slider.set_value(speed_at_kf);
+                    *updating.borrow_mut() = false;
+                    on_seek_to(timeline_ns);
                 }
             }
         }
@@ -6011,24 +8187,21 @@ pub fn build_inspector(
             };
             let playhead = current_playhead_ns();
             let proj = project.borrow();
-            for track in &proj.tracks {
-                if let Some(clip) = track.clips.iter().find(|c| c.id == clip_id) {
-                    let local = clip.local_timeline_position_ns(playhead);
-                    let prev_volume = clip
-                        .prev_keyframe_local_ns_for_property(Phase1KeyframeProperty::Volume, local);
-                    let prev_pan = clip
-                        .prev_keyframe_local_ns_for_property(Phase1KeyframeProperty::Pan, local);
-                    let prev_local = match (prev_volume, prev_pan) {
-                        (Some(a), Some(b)) => Some(a.max(b)),
-                        (Some(a), None) => Some(a),
-                        (None, Some(b)) => Some(b),
-                        (None, None) => None,
-                    };
-                    if let Some(prev_local) = prev_local {
-                        let timeline_ns = clip.timeline_start.saturating_add(prev_local);
-                        on_seek_to(timeline_ns);
-                    }
-                    break;
+            if let Some(clip) = proj.clip_ref(&clip_id) {
+                let local = clip.local_timeline_position_ns(playhead);
+                let prev_volume =
+                    clip.prev_keyframe_local_ns_for_property(Phase1KeyframeProperty::Volume, local);
+                let prev_pan =
+                    clip.prev_keyframe_local_ns_for_property(Phase1KeyframeProperty::Pan, local);
+                let prev_local = match (prev_volume, prev_pan) {
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    (Some(a), None) => Some(a),
+                    (None, Some(b)) => Some(b),
+                    (None, None) => None,
+                };
+                if let Some(prev_local) = prev_local {
+                    let timeline_ns = clip.timeline_start.saturating_add(prev_local);
+                    on_seek_to(timeline_ns);
                 }
             }
         }
@@ -6044,24 +8217,21 @@ pub fn build_inspector(
             };
             let playhead = current_playhead_ns();
             let proj = project.borrow();
-            for track in &proj.tracks {
-                if let Some(clip) = track.clips.iter().find(|c| c.id == clip_id) {
-                    let local = clip.local_timeline_position_ns(playhead);
-                    let next_volume = clip
-                        .next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Volume, local);
-                    let next_pan = clip
-                        .next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Pan, local);
-                    let next_local = match (next_volume, next_pan) {
-                        (Some(a), Some(b)) => Some(a.min(b)),
-                        (Some(a), None) => Some(a),
-                        (None, Some(b)) => Some(b),
-                        (None, None) => None,
-                    };
-                    if let Some(next_local) = next_local {
-                        let timeline_ns = clip.timeline_start.saturating_add(next_local);
-                        on_seek_to(timeline_ns);
-                    }
-                    break;
+            if let Some(clip) = proj.clip_ref(&clip_id) {
+                let local = clip.local_timeline_position_ns(playhead);
+                let next_volume =
+                    clip.next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Volume, local);
+                let next_pan =
+                    clip.next_keyframe_local_ns_for_property(Phase1KeyframeProperty::Pan, local);
+                let next_local = match (next_volume, next_pan) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (Some(a), None) => Some(a),
+                    (None, Some(b)) => Some(b),
+                    (None, None) => None,
+                };
+                if let Some(next_local) = next_local {
+                    let timeline_ns = clip.timeline_start.saturating_add(next_local);
+                    on_seek_to(timeline_ns);
                 }
             }
         }
@@ -6084,13 +8254,10 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.title_text = text.clone();
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.title_text = text.clone();
                     }
+                    proj.dirty = true;
                 }
                 on_title_changed(text, title_x.value(), title_y.value());
             }
@@ -6112,13 +8279,10 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.title_x = x;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.title_x = x;
                     }
+                    proj.dirty = true;
                 }
                 on_title_changed(title_entry_x.text().to_string(), x, title_y.value());
             }
@@ -6140,13 +8304,10 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.title_y = y;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.title_y = y;
                     }
+                    proj.dirty = true;
                 }
                 on_title_changed(title_entry_y.text().to_string(), title_x.value(), y);
             }
@@ -6196,15 +8357,10 @@ pub fn build_inspector(
                         if let Some(ref clip_id) = id {
                             {
                                 let mut proj = project_c.borrow_mut();
-                                for track in &mut proj.tracks {
-                                    if let Some(clip) =
-                                        track.clips.iter_mut().find(|c| &c.id == clip_id)
-                                    {
-                                        clip.title_font = font_str.clone();
-                                        proj.dirty = true;
-                                        break;
-                                    }
+                                if let Some(clip) = proj.clip_mut(clip_id) {
+                                    clip.title_font = font_str.clone();
                                 }
+                                proj.dirty = true;
                             }
                             on_title(te.text().to_string(), tx.value(), ty.value());
                             on_style();
@@ -6238,13 +8394,10 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.title_color = color;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.title_color = color;
                     }
+                    proj.dirty = true;
                 }
                 on_title_changed(
                     title_entry_c.text().to_string(),
@@ -6270,13 +8423,10 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.title_outline_width = val;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.title_outline_width = val;
                     }
+                    proj.dirty = true;
                 }
                 on_title_style_changed();
             }
@@ -6303,13 +8453,10 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.title_outline_color = color;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.title_outline_color = color;
                     }
+                    proj.dirty = true;
                 }
                 on_title_style_changed();
             }
@@ -6331,13 +8478,10 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.title_shadow = active;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.title_shadow = active;
                     }
+                    proj.dirty = true;
                 }
                 on_title_style_changed();
             }
@@ -6364,13 +8508,10 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.title_shadow_color = color;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.title_shadow_color = color;
                     }
+                    proj.dirty = true;
                 }
                 on_title_style_changed();
             }
@@ -6392,13 +8533,10 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.title_shadow_offset_x = val;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.title_shadow_offset_x = val;
                     }
+                    proj.dirty = true;
                 }
                 on_title_style_changed();
             }
@@ -6420,13 +8558,10 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.title_shadow_offset_y = val;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.title_shadow_offset_y = val;
                     }
+                    proj.dirty = true;
                 }
                 on_title_style_changed();
             }
@@ -6448,13 +8583,10 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.title_bg_box = active;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.title_bg_box = active;
                     }
+                    proj.dirty = true;
                 }
                 on_title_style_changed();
             }
@@ -6481,13 +8613,10 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.title_bg_box_color = color;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.title_bg_box_color = color;
                     }
+                    proj.dirty = true;
                 }
                 on_title_style_changed();
             }
@@ -6509,16 +8638,136 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.title_bg_box_padding = val;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.title_bg_box_padding = val;
                     }
+                    proj.dirty = true;
                 }
                 on_title_style_changed();
             }
+        });
+    }
+
+    // Transition controls
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let transition_kind_dropdown = transition_kind_dropdown.clone();
+        let transition_duration_ms = transition_duration_ms.clone();
+        let transition_alignment_dropdown = transition_alignment_dropdown.clone();
+        let transition_status_label = transition_status_label.clone();
+        let on_execute_command = on_execute_command.clone();
+        let on_clip_changed = on_clip_changed.clone();
+        let transition_kind_dropdown_for_apply = transition_kind_dropdown.clone();
+        let transition_duration_ms_for_apply = transition_duration_ms.clone();
+        let transition_alignment_dropdown_for_apply = transition_alignment_dropdown.clone();
+        let apply_transition_edit: Rc<dyn Fn(Option<String>)> = Rc::new(
+            move |kind_override: Option<String>| {
+                if *updating.borrow() {
+                    return;
+                }
+                let Some(clip_id) = selected_clip_id.borrow().clone() else {
+                    return;
+                };
+                let kind = kind_override.unwrap_or_else(|| {
+                    transition_kind_dropdown_for_apply
+                        .active_id()
+                        .map(|id| id.to_string())
+                        .unwrap_or_default()
+                });
+                let alignment = transition_alignment_dropdown_for_apply
+                    .active_id()
+                    .as_deref()
+                    .and_then(TransitionAlignment::from_str)
+                    .unwrap_or(TransitionAlignment::EndOnCut);
+                let duration_ns = (transition_duration_ms_for_apply.value().round().max(0.0)
+                    as u64)
+                    .saturating_mul(1_000_000);
+                let transition_change =
+                    {
+                        let proj = project.borrow();
+                        proj.tracks.iter().find_map(|track| {
+                            track.clips.iter().position(|clip| clip.id == clip_id).map(
+                                |clip_index| {
+                                    (
+                                        track.id.clone(),
+                                        track.clips[clip_index].outgoing_transition.clone(),
+                                        validate_track_transition_request(
+                                            track,
+                                            clip_index,
+                                            &kind,
+                                            duration_ns,
+                                            alignment,
+                                        ),
+                                    )
+                                },
+                            )
+                        })
+                    };
+                let Some((track_id, old_transition, validated)) = transition_change else {
+                    return;
+                };
+                let new_transition = match validated {
+                    Ok(validated) => validated.transition,
+                    Err(err) => {
+                        let message = match err {
+                            crate::model::transition::TransitionValidationError::MissingFollowingClip => {
+                                "This clip needs a following clip on the same track to add a transition."
+                                    .to_string()
+                            }
+                            crate::model::transition::TransitionValidationError::UnsupportedKind {
+                                kind,
+                            } => {
+                                format!("Unsupported transition type: {kind}.")
+                            }
+                            crate::model::transition::TransitionValidationError::MissingDuration => {
+                                "Transition duration must be greater than 0 ms.".to_string()
+                            }
+                            crate::model::transition::TransitionValidationError::BoundaryTooShort {
+                                max_duration_ns,
+                            } => format!(
+                                "This cut is too short for a transition. Max overlap here is {:.0} ms.",
+                                max_duration_ns as f64 / 1_000_000.0
+                            ),
+                        };
+                        transition_status_label.set_text(&message);
+                        return;
+                    }
+                };
+                if new_transition == old_transition {
+                    return;
+                }
+                on_execute_command(Box::new(crate::undo::SetClipTransitionCommand {
+                    clip_id: clip_id.clone(),
+                    track_id,
+                    old_transition,
+                    new_transition,
+                }));
+                on_clip_changed();
+            },
+        );
+
+        {
+            let apply_transition_edit = apply_transition_edit.clone();
+            transition_kind_dropdown.connect_changed(move |_| {
+                apply_transition_edit(None);
+            });
+        }
+        {
+            let apply_transition_edit = apply_transition_edit.clone();
+            transition_duration_ms.connect_value_changed(move |_| {
+                apply_transition_edit(None);
+            });
+        }
+        {
+            let apply_transition_edit = apply_transition_edit.clone();
+            transition_alignment_dropdown.connect_changed(move |_| {
+                apply_transition_edit(None);
+            });
+        }
+        transition_clear_btn.connect_clicked(move |_| {
+            apply_transition_edit(Some(String::new()));
         });
     }
 
@@ -6546,10 +8795,7 @@ pub fn build_inspector(
                 // that come from live-updating keyframes during drags.
                 let has_keyframes = {
                     let proj = project.borrow();
-                    proj.tracks
-                        .iter()
-                        .flat_map(|t| t.clips.iter())
-                        .find(|c| c.id == *id)
+                    proj.clip_ref(id)
                         .map(|c| !c.speed_keyframes.is_empty())
                         .unwrap_or(false)
                 };
@@ -6563,13 +8809,12 @@ pub fn build_inspector(
                 let changed = {
                     let mut proj = project.borrow_mut();
                     let mut changed = false;
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == *id) {
-                            clip.speed = speed;
-                            proj.dirty = true;
-                            changed = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(id) {
+                        clip.speed = speed;
+                        changed = true;
+                    }
+                    if changed {
+                        proj.dirty = true;
                     }
                     changed
                 };
@@ -6688,13 +8933,9 @@ pub fn build_inspector(
             if let Some(ref id) = *selected_clip_id.borrow() {
                 let mut proj = project.borrow_mut();
                 let mut found = false;
-                for track in &mut proj.tracks {
-                    for clip in &mut track.clips {
-                        if clip.id == *id {
-                            clip.reverse = reversed;
-                            found = true;
-                        }
-                    }
+                if let Some(clip) = proj.clip_mut(id) {
+                    clip.reverse = reversed;
+                    found = true;
                 }
                 if found {
                     proj.dirty = true;
@@ -6717,18 +8958,15 @@ pub fn build_inspector(
             let interp = match dd.selected() {
                 1 => crate::model::clip::SlowMotionInterp::Blend,
                 2 => crate::model::clip::SlowMotionInterp::OpticalFlow,
+                3 => crate::model::clip::SlowMotionInterp::Ai,
                 _ => crate::model::clip::SlowMotionInterp::Off,
             };
             if let Some(ref id) = *selected_clip_id.borrow() {
                 let mut proj = project.borrow_mut();
                 let mut found = false;
-                for track in &mut proj.tracks {
-                    for clip in &mut track.clips {
-                        if clip.id == *id {
-                            clip.slow_motion_interp = interp;
-                            found = true;
-                        }
-                    }
+                if let Some(clip) = proj.clip_mut(id) {
+                    clip.slow_motion_interp = interp;
+                    found = true;
                 }
                 if found {
                     proj.dirty = true;
@@ -6770,16 +9008,11 @@ pub fn build_inspector(
                         let mut count = 0usize;
                         if let Some(ref clip_id) = id {
                             let mut proj = project.borrow_mut();
-                            for track in &mut proj.tracks {
-                                if let Some(clip) =
-                                    track.clips.iter_mut().find(|c| &c.id == clip_id)
-                                {
-                                    clip.lut_paths.push(path_str.clone());
-                                    count = clip.lut_paths.len();
-                                    proj.dirty = true;
-                                    break;
-                                }
+                            if let Some(clip) = proj.clip_mut(clip_id) {
+                                clip.lut_paths.push(path_str.clone());
+                                count = clip.lut_paths.len();
                             }
+                            proj.dirty = true;
                         }
                         // Rebuild display
                         while let Some(child) = lut_display_box.first_child() {
@@ -6790,10 +9023,7 @@ pub fn build_inspector(
                             let id = selected_clip_id.borrow();
                             let proj = project.borrow();
                             if let Some(ref clip_id) = *id {
-                                proj.tracks
-                                    .iter()
-                                    .flat_map(|t| t.clips.iter())
-                                    .find(|c| &c.id == clip_id)
+                                proj.clip_ref(clip_id)
                                     .map(|c| c.lut_paths.clone())
                                     .unwrap_or_default()
                             } else {
@@ -6832,13 +9062,10 @@ pub fn build_inspector(
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
                 let mut proj = project.borrow_mut();
-                for track in &mut proj.tracks {
-                    if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                        clip.lut_paths.clear();
-                        proj.dirty = true;
-                        break;
-                    }
+                if let Some(clip) = proj.clip_mut(clip_id) {
+                    clip.lut_paths.clear();
                 }
+                proj.dirty = true;
             }
             while let Some(child) = lut_display_box_clear.first_child() {
                 lut_display_box_clear.remove(&child);
@@ -6885,19 +9112,33 @@ pub fn build_inspector(
                 return;
             };
 
-            // Collect other video/image clips as reference candidates.
+            // Collect other video/image clips as reference candidates (recursively, including compounds).
             let proj = project.borrow();
             let mut candidates: Vec<(String, String, String)> = Vec::new(); // (clip_id, label, track_id)
-            for track in &proj.tracks {
-                for clip in &track.clips {
-                    if clip.id != source_clip_id
-                        && (clip.kind == crate::model::clip::ClipKind::Video
-                            || clip.kind == crate::model::clip::ClipKind::Image)
-                    {
-                        candidates.push((clip.id.clone(), clip.label.clone(), track.id.clone()));
+            fn collect_color_candidates(
+                tracks: &[crate::model::track::Track],
+                source_id: &str,
+                candidates: &mut Vec<(String, String, String)>,
+            ) {
+                for track in tracks {
+                    for clip in &track.clips {
+                        if clip.id != source_id
+                            && (clip.kind == crate::model::clip::ClipKind::Video
+                                || clip.kind == crate::model::clip::ClipKind::Image)
+                        {
+                            candidates.push((
+                                clip.id.clone(),
+                                clip.label.clone(),
+                                track.id.clone(),
+                            ));
+                        }
+                        if let Some(ref inner) = clip.compound_tracks {
+                            collect_color_candidates(inner, source_id, candidates);
+                        }
                     }
                 }
             }
+            collect_color_candidates(&proj.tracks, &source_clip_id, &mut candidates);
             drop(proj);
 
             if candidates.is_empty() {
@@ -6989,24 +9230,12 @@ pub fn build_inspector(
                 // Gather source and reference clip info.
                 let clip_info = {
                     let proj = project.borrow();
-                    let find = |id: &str| -> Option<(String, u64, u64, String)> {
-                        for track in &proj.tracks {
-                            if let Some(c) = track.clips.iter().find(|c| c.id == id) {
-                                return Some((
-                                    c.source_path.clone(),
-                                    c.source_in,
-                                    c.source_out,
-                                    track.id.clone(),
-                                ));
-                            }
-                        }
-                        None
+                    let find = |id: &str| -> Option<(String, u64, u64)> {
+                        proj.clip_ref(id)
+                            .map(|c| (c.source_path.clone(), c.source_in, c.source_out))
                     };
                     let ref_grading = proj
-                        .tracks
-                        .iter()
-                        .flat_map(|t| t.clips.iter())
-                        .find(|c| c.id == ref_clip_id)
+                        .clip_ref(&ref_clip_id)
                         .map(crate::media::color_match::ReferenceGrading::from_clip);
                     match (find(&source_clip_id), find(&ref_clip_id)) {
                         (Some(s), Some(r)) => Some((s, r, ref_grading)),
@@ -7019,13 +9248,15 @@ pub fn build_inspector(
                     return;
                 };
 
+                let (src_path, src_in, src_out) = src;
+                let (ref_path, ref_in, ref_out) = reff;
                 let params = crate::media::color_match::MatchColorParams {
-                    source_path: src.0,
-                    source_in_ns: src.1,
-                    source_out_ns: src.2,
-                    reference_path: reff.0,
-                    reference_in_ns: reff.1,
-                    reference_out_ns: reff.2,
+                    source_path: src_path,
+                    source_in_ns: src_in,
+                    source_out_ns: src_out,
+                    reference_path: ref_path,
+                    reference_in_ns: ref_in,
+                    reference_out_ns: ref_out,
                     sample_count: 8,
                     generate_lut: gen_lut,
                     lut_output_dir: None,
@@ -7037,33 +9268,28 @@ pub fn build_inspector(
                         let r = &outcome.slider_result;
                         {
                             let mut proj = project.borrow_mut();
-                            for track in &mut proj.tracks {
-                                if let Some(clip) =
-                                    track.clips.iter_mut().find(|c| c.id == source_clip_id)
-                                {
-                                    clip.brightness = r.brightness;
-                                    clip.contrast = r.contrast;
-                                    clip.saturation = r.saturation;
-                                    clip.temperature = r.temperature;
-                                    clip.tint = r.tint;
-                                    clip.exposure = r.exposure;
-                                    clip.black_point = r.black_point;
-                                    clip.shadows = r.shadows;
-                                    clip.midtones = r.midtones;
-                                    clip.highlights = r.highlights;
-                                    clip.highlights_warmth = r.highlights_warmth;
-                                    clip.highlights_tint = r.highlights_tint;
-                                    clip.midtones_warmth = r.midtones_warmth;
-                                    clip.midtones_tint = r.midtones_tint;
-                                    clip.shadows_warmth = r.shadows_warmth;
-                                    clip.shadows_tint = r.shadows_tint;
-                                    if let Some(ref lp) = outcome.lut_path {
-                                        clip.lut_paths.push(lp.clone());
-                                    }
-                                    proj.dirty = true;
-                                    break;
+                            if let Some(clip) = proj.clip_mut(&source_clip_id) {
+                                clip.brightness = r.brightness;
+                                clip.contrast = r.contrast;
+                                clip.saturation = r.saturation;
+                                clip.temperature = r.temperature;
+                                clip.tint = r.tint;
+                                clip.exposure = r.exposure;
+                                clip.black_point = r.black_point;
+                                clip.shadows = r.shadows;
+                                clip.midtones = r.midtones;
+                                clip.highlights = r.highlights;
+                                clip.highlights_warmth = r.highlights_warmth;
+                                clip.highlights_tint = r.highlights_tint;
+                                clip.midtones_warmth = r.midtones_warmth;
+                                clip.midtones_tint = r.midtones_tint;
+                                clip.shadows_warmth = r.shadows_warmth;
+                                clip.shadows_tint = r.shadows_tint;
+                                if let Some(ref lp) = outcome.lut_path {
+                                    clip.lut_paths.push(lp.clone());
                                 }
                             }
+                            proj.dirty = true;
                         }
 
                         // Update sliders to reflect new values.
@@ -7114,10 +9340,7 @@ pub fn build_inspector(
                             // Re-read and rebuild display from current clip state
                             let lut_paths: Vec<String> = {
                                 let proj = project.borrow();
-                                proj.tracks
-                                    .iter()
-                                    .flat_map(|t| t.clips.iter())
-                                    .find(|c| c.id == source_clip_id)
+                                proj.clip_ref(&source_clip_id)
                                     .map(|c| c.lut_paths.clone())
                                     .unwrap_or_default()
                             };
@@ -7168,13 +9391,10 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.chroma_key_enabled = enabled;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.chroma_key_enabled = enabled;
                     }
+                    proj.dirty = true;
                 }
                 on_chroma_key_changed();
             }
@@ -7197,13 +9417,10 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.chroma_key_color = 0x00FF00;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.chroma_key_color = 0x00FF00;
                     }
+                    proj.dirty = true;
                 }
                 on_chroma_key_changed();
             }
@@ -7224,13 +9441,10 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.chroma_key_color = 0x0000FF;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.chroma_key_color = 0x0000FF;
                     }
+                    proj.dirty = true;
                 }
                 on_chroma_key_changed();
             }
@@ -7266,13 +9480,10 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.chroma_key_color = color;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.chroma_key_color = color;
                     }
+                    proj.dirty = true;
                 }
                 on_chroma_key_changed();
             }
@@ -7295,13 +9506,10 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.chroma_key_tolerance = val;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.chroma_key_tolerance = val;
                     }
+                    proj.dirty = true;
                 }
                 on_chroma_key_slider_changed(val, softness_slider.value() as f32);
             }
@@ -7324,13 +9532,10 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.chroma_key_softness = val;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.chroma_key_softness = val;
                     }
+                    proj.dirty = true;
                 }
                 on_chroma_key_slider_changed(tolerance_slider.value() as f32, val);
             }
@@ -7352,13 +9557,10 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.bg_removal_enabled = enabled;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.bg_removal_enabled = enabled;
                     }
+                    proj.dirty = true;
                 }
                 on_bg_removal_changed();
             }
@@ -7378,13 +9580,10 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            clip.bg_removal_threshold = val;
-                            proj.dirty = true;
-                            break;
-                        }
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.bg_removal_threshold = val;
                     }
+                    proj.dirty = true;
                 }
                 on_bg_removal_changed();
             }
@@ -7409,21 +9608,18 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            if enabled && clip.masks.is_empty() {
-                                clip.masks.push(crate::model::clip::ClipMask::new(
-                                    crate::model::clip::MaskShape::Rectangle,
-                                ));
-                            } else if !enabled && !clip.masks.is_empty() {
-                                clip.masks[0].enabled = false;
-                            } else if enabled && !clip.masks.is_empty() {
-                                clip.masks[0].enabled = true;
-                            }
-                            proj.dirty = true;
-                            break;
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        if enabled && clip.masks.is_empty() {
+                            clip.masks.push(crate::model::clip::ClipMask::new(
+                                crate::model::clip::MaskShape::Rectangle,
+                            ));
+                        } else if !enabled && !clip.masks.is_empty() {
+                            clip.masks[0].enabled = false;
+                        } else if enabled && !clip.masks.is_empty() {
+                            clip.masks[0].enabled = true;
                         }
                     }
+                    proj.dirty = true;
                 }
                 on_mask_changed();
             }
@@ -7442,27 +9638,23 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            if let Some(m) = clip.masks.first_mut() {
-                                match dd.selected() {
-                                    1 => {
-                                        m.shape = crate::model::clip::MaskShape::Ellipse;
-                                    }
-                                    2 => {
-                                        m.shape = crate::model::clip::MaskShape::Path;
-                                        if m.path.is_none() {
-                                            m.path =
-                                                Some(crate::model::clip::default_diamond_path());
-                                        }
-                                    }
-                                    _ => {
-                                        m.shape = crate::model::clip::MaskShape::Rectangle;
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        if let Some(m) = clip.masks.first_mut() {
+                            match dd.selected() {
+                                1 => {
+                                    m.shape = crate::model::clip::MaskShape::Ellipse;
+                                }
+                                2 => {
+                                    m.shape = crate::model::clip::MaskShape::Path;
+                                    if m.path.is_none() {
+                                        m.path = Some(crate::model::clip::default_diamond_path());
                                     }
                                 }
-                                proj.dirty = true;
+                                _ => {
+                                    m.shape = crate::model::clip::MaskShape::Rectangle;
+                                }
                             }
-                            break;
+                            proj.dirty = true;
                         }
                     }
                 }
@@ -7487,15 +9679,12 @@ pub fn build_inspector(
                 if let Some(ref clip_id) = id {
                     {
                         let mut proj = project.borrow_mut();
-                        for track in &mut proj.tracks {
-                            if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                                if let Some(m) = clip.masks.first_mut() {
-                                    m.$field = val;
-                                    proj.dirty = true;
-                                }
-                                break;
+                        if let Some(clip) = proj.clip_mut(clip_id) {
+                            if let Some(m) = clip.masks.first_mut() {
+                                m.$field = val;
                             }
                         }
+                        proj.dirty = true;
                     }
                     on_mask_live();
                 }
@@ -7522,15 +9711,12 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            if let Some(m) = clip.masks.first_mut() {
-                                m.rotation = val;
-                                proj.dirty = true;
-                            }
-                            break;
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        if let Some(m) = clip.masks.first_mut() {
+                            m.rotation = val;
                         }
                     }
+                    proj.dirty = true;
                 }
                 on_mask_live();
             }
@@ -7550,15 +9736,12 @@ pub fn build_inspector(
             if let Some(ref clip_id) = id {
                 {
                     let mut proj = project.borrow_mut();
-                    for track in &mut proj.tracks {
-                        if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
-                            if let Some(m) = clip.masks.first_mut() {
-                                m.invert = invert;
-                                proj.dirty = true;
-                            }
-                            break;
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        if let Some(m) = clip.masks.first_mut() {
+                            m.invert = invert;
                         }
                     }
+                    proj.dirty = true;
                 }
                 on_mask_live();
             }
@@ -7598,8 +9781,23 @@ pub fn build_inspector(
         shadows_warmth_slider,
         shadows_tint_slider,
         volume_slider,
+        voice_isolation_slider,
+        vi_pad_slider,
+        vi_fade_slider,
+        vi_floor_slider,
+        vi_source_dropdown,
+        vi_silence_threshold_slider,
+        vi_silence_min_ms_slider,
+        vi_silence_actions_row,
+        vi_suggest_btn,
+        vi_analyze_btn,
+        vi_intervals_label,
         pan_slider,
         normalize_btn,
+        match_audio_btn,
+        clear_match_eq_btn,
+        match_eq_curve,
+        match_eq_curve_state,
         measured_loudness_label,
         ladspa_effects_list,
         channel_mode_dropdown,
@@ -7641,6 +9839,14 @@ pub fn build_inspector(
         speed_slider,
         reverse_check,
         slow_motion_dropdown,
+        slow_motion_model,
+        slow_motion_has_ai,
+        frame_interp_status,
+        transition_kind_dropdown,
+        transition_duration_ms,
+        transition_alignment_dropdown,
+        transition_clear_btn,
+        transition_status_label,
         lut_display_box,
         lut_clear_btn,
         match_color_btn,
@@ -7652,6 +9858,7 @@ pub fn build_inspector(
         transform_section,
         title_section_box,
         speed_section_box,
+        transition_section,
         lut_section_box,
         chroma_key_section,
         chroma_key_enable,
@@ -7673,16 +9880,30 @@ pub fn build_inspector(
         subtitle_generate_spinner,
         subtitle_generate_label,
         subtitle_language_dropdown,
+        subtitle_expander,
         subtitle_segments_section,
+        compound_subtitle_label,
         subtitle_segments_expander: segments_expander,
         subtitle_list_box,
-        subtitle_scroll,
         subtitle_segments_snapshot: Rc::new(RefCell::new(Vec::new())),
         subtitle_clear_btn,
         subtitle_error_label,
         subtitle_font_btn,
         subtitle_color_btn,
         subtitle_highlight_dropdown,
+        sub_bold_btn,
+        sub_italic_btn,
+        sub_underline_btn,
+        sub_shadow_btn,
+        hl_bold_check,
+        hl_color_check,
+        hl_underline_check,
+        hl_stroke_check,
+        hl_italic_check,
+        hl_bg_check,
+        hl_shadow_check,
+        subtitle_bg_highlight_color_btn,
+        subtitle_bg_highlight_color_row,
         subtitle_highlight_color_btn,
         subtitle_highlight_color_row,
         subtitle_word_window_slider,
@@ -7711,6 +9932,27 @@ pub fn build_inspector(
         mask_invert_check,
         mask_path_editor_box,
         mask_rect_ellipse_controls,
+        tracking_section,
+        tracking_tracker_dropdown,
+        tracking_add_btn,
+        tracking_remove_btn,
+        tracking_label_entry,
+        tracking_edit_region_btn,
+        tracking_center_x_slider,
+        tracking_center_y_slider,
+        tracking_width_slider,
+        tracking_height_slider,
+        tracking_rotation_spin,
+        tracking_run_btn,
+        tracking_cancel_btn,
+        tracking_status_label,
+        tracking_target_dropdown,
+        tracking_reference_dropdown,
+        tracking_clear_binding_btn,
+        tracking_binding_status_label,
+        selected_motion_tracker_id,
+        tracking_tracker_ids,
+        tracking_reference_choices,
         frei0r_effects_section,
         frei0r_effects_list,
         frei0r_effects_clipboard: frei0r_effects_clipboard.clone(),
@@ -7739,7 +9981,10 @@ fn dial_point_to_degrees(x: f64, y: f64, width: f64, height: f64) -> i32 {
     if deg > 180.0 {
         deg -= 360.0;
     }
-    -(deg.round().clamp(-180.0, 180.0) as i32)
+    -(deg.round().clamp(
+        crate::model::transform_bounds::ROTATE_MIN_DEG,
+        crate::model::transform_bounds::ROTATE_MAX_DEG,
+    ) as i32)
 }
 
 fn row_label(parent: &GBox, text: &str) {

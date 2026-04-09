@@ -14,6 +14,161 @@ use gtk4::{self as gtk, Button, HeaderBar, Label, Separator, ToggleButton};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+// -----------------------------------------------------------------------
+// Project-settings dropdown tables
+// -----------------------------------------------------------------------
+//
+// Both the project-settings dialog (frame rate + canvas resolution) and
+// the export dialog historically duplicated the same constant lists in
+// three or four places — once for the dropdown labels, once for the
+// init-from-current-state lookup, once inside the change handler, and
+// once inside the dialog response handler. The structs below collapse
+// each of those to a single source of truth so adding a new framerate
+// or resolution preset is a one-line edit.
+
+/// One option in the Project Settings frame-rate dropdown.
+struct FramerateOption {
+    label: &'static str,
+    num: u32,
+    den: u32,
+}
+
+/// Project-settings frame-rate options. The display label is what appears
+/// in the dropdown; `(num, den)` is what gets written into `Project::frame_rate`.
+const FRAMERATE_OPTIONS: &[FramerateOption] = &[
+    FramerateOption {
+        label: "23.976 fps",
+        num: 24000,
+        den: 1001,
+    },
+    FramerateOption {
+        label: "24 fps",
+        num: 24,
+        den: 1,
+    },
+    FramerateOption {
+        label: "25 fps",
+        num: 25,
+        den: 1,
+    },
+    FramerateOption {
+        label: "29.97 fps",
+        num: 30000,
+        den: 1001,
+    },
+    FramerateOption {
+        label: "30 fps",
+        num: 30,
+        den: 1,
+    },
+    FramerateOption {
+        label: "60 fps",
+        num: 60,
+        den: 1,
+    },
+];
+
+/// Default frame-rate index used when the current project's frame rate
+/// doesn't match any preset (24 fps).
+const DEFAULT_FRAMERATE_INDEX: usize = 1;
+
+/// One canvas-resolution preset within an aspect-ratio group.
+struct ResolutionPreset {
+    width: u32,
+    height: u32,
+    label: &'static str,
+}
+
+/// One aspect-ratio group in the Project Settings dialog.
+struct AspectRatioGroup {
+    label: &'static str,
+    presets: &'static [ResolutionPreset],
+}
+
+/// Project-settings aspect-ratio groups, each containing the discrete
+/// resolution presets that share that aspect.
+const ASPECT_RATIO_PRESETS: &[AspectRatioGroup] = &[
+    AspectRatioGroup {
+        label: "16:9 (Widescreen)",
+        presets: &[
+            ResolutionPreset {
+                width: 3840,
+                height: 2160,
+                label: "3840 × 2160  (4K UHD)",
+            },
+            ResolutionPreset {
+                width: 2560,
+                height: 1440,
+                label: "2560 × 1440  (1440p QHD)",
+            },
+            ResolutionPreset {
+                width: 1920,
+                height: 1080,
+                label: "1920 × 1080  (1080p HD)",
+            },
+            ResolutionPreset {
+                width: 1280,
+                height: 720,
+                label: "1280 × 720   (720p HD)",
+            },
+        ],
+    },
+    AspectRatioGroup {
+        label: "4:3 (Standard)",
+        presets: &[
+            ResolutionPreset {
+                width: 1440,
+                height: 1080,
+                label: "1440 × 1080  (HD 4:3)",
+            },
+            ResolutionPreset {
+                width: 1024,
+                height: 768,
+                label: "1024 × 768   (XGA)",
+            },
+            ResolutionPreset {
+                width: 720,
+                height: 480,
+                label: "720 × 480    (SD NTSC)",
+            },
+        ],
+    },
+    AspectRatioGroup {
+        label: "9:16 (Vertical)",
+        presets: &[
+            ResolutionPreset {
+                width: 1080,
+                height: 1920,
+                label: "1080 × 1920  (Full HD Vertical)",
+            },
+            ResolutionPreset {
+                width: 720,
+                height: 1280,
+                label: "720 × 1280   (HD Vertical)",
+            },
+        ],
+    },
+    AspectRatioGroup {
+        label: "1:1 (Square)",
+        presets: &[
+            ResolutionPreset {
+                width: 2160,
+                height: 2160,
+                label: "2160 × 2160  (4K Square)",
+            },
+            ResolutionPreset {
+                width: 1080,
+                height: 1080,
+                label: "1080 × 1080  (HD Square)",
+            },
+        ],
+    },
+];
+
+/// Label for the "Custom" entry appended after `ASPECT_RATIO_PRESETS` in the
+/// dropdown. Selecting this hides the preset dropdown and reveals W×H spinners.
+const CUSTOM_ASPECT_LABEL: &str = "Custom";
+
 fn save_project_to_path(
     project: &Rc<RefCell<Project>>,
     library: &Rc<RefCell<MediaLibrary>>,
@@ -36,6 +191,401 @@ fn save_project_to_path(
         proj.dirty = false;
     }
     Ok(())
+}
+
+fn create_named_snapshot(
+    project: &Rc<RefCell<Project>>,
+    library: &Rc<RefCell<MediaLibrary>>,
+    snapshot_name: &str,
+) -> Result<crate::project_versions::ProjectSnapshotEntry, String> {
+    crate::model::media_library::sync_bins_to_project(&library.borrow(), &mut project.borrow_mut());
+    let proj = project.borrow();
+    let xml = crate::project_versions::write_snapshot_project_xml(&proj)?;
+    crate::project_versions::create_project_snapshot(&proj, &xml, snapshot_name)
+}
+
+fn apply_restored_project_state(
+    project: &Rc<RefCell<Project>>,
+    timeline_state: &Rc<RefCell<TimelineState>>,
+    on_project_changed: &Rc<dyn Fn()>,
+    on_project_reloaded: &Rc<dyn Fn()>,
+    mut new_proj: Project,
+    preserved_file_path: Option<String>,
+) {
+    new_proj.file_path = preserved_file_path;
+    new_proj.dirty = true;
+    *project.borrow_mut() = new_proj;
+    timeline_state.borrow_mut().loading = false;
+    on_project_reloaded();
+    on_project_changed();
+}
+
+fn restore_project_version_async<F>(
+    project: Rc<RefCell<Project>>,
+    timeline_state: Rc<RefCell<TimelineState>>,
+    on_project_changed: Rc<dyn Fn()>,
+    on_project_reloaded: Rc<dyn Fn()>,
+    preserved_file_path: Option<String>,
+    loader: F,
+) where
+    F: FnOnce() -> Result<Project, String> + Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Project, String>>(1);
+    std::thread::spawn(move || {
+        let _ = tx.send(loader());
+    });
+    timeline_state.borrow_mut().loading = true;
+    glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+        match rx.try_recv() {
+            Ok(Ok(new_proj)) => {
+                apply_restored_project_state(
+                    &project,
+                    &timeline_state,
+                    &on_project_changed,
+                    &on_project_reloaded,
+                    new_proj,
+                    preserved_file_path.clone(),
+                );
+                glib::ControlFlow::Break
+            }
+            Ok(Err(e)) => {
+                log::error!("{e}");
+                timeline_state.borrow_mut().loading = false;
+                glib::ControlFlow::Break
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                timeline_state.borrow_mut().loading = false;
+                glib::ControlFlow::Break
+            }
+        }
+    });
+}
+
+#[allow(deprecated)]
+fn choose_snapshot_name(
+    window: Option<gtk::Window>,
+    on_selected: Rc<dyn Fn(String) -> Result<(), String>>,
+) {
+    let dialog = gtk::Dialog::builder()
+        .title("Create Snapshot")
+        .modal(true)
+        .default_width(420)
+        .build();
+    dialog.set_transient_for(window.as_ref());
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+    dialog.add_button("Create Snapshot", gtk::ResponseType::Accept);
+    dialog.set_default_response(gtk::ResponseType::Accept);
+
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    content.set_margin_start(16);
+    content.set_margin_end(16);
+    content.set_margin_top(16);
+    content.set_margin_bottom(16);
+
+    let description = gtk::Label::new(Some(
+        "Save the current project as a named milestone without changing its main save path.",
+    ));
+    description.set_wrap(true);
+    description.set_xalign(0.0);
+
+    let name_entry = gtk::Entry::new();
+    name_entry.set_placeholder_text(Some("Before color pass"));
+    name_entry.set_activates_default(true);
+
+    let error_label = gtk::Label::new(None);
+    error_label.set_wrap(true);
+    error_label.set_xalign(0.0);
+
+    content.append(&description);
+    content.append(&name_entry);
+    content.append(&error_label);
+    dialog.content_area().append(&content);
+
+    {
+        let error_label = error_label.clone();
+        name_entry.connect_changed(move |_| {
+            error_label.set_text("");
+        });
+    }
+
+    dialog.connect_response(move |d, resp| match resp {
+        gtk::ResponseType::Accept => {
+            let snapshot_name = name_entry.text().trim().to_string();
+            if snapshot_name.is_empty() {
+                error_label.set_text("Snapshot name cannot be empty.");
+                return;
+            }
+            match on_selected(snapshot_name) {
+                Ok(()) => d.close(),
+                Err(e) => error_label.set_text(&e),
+            }
+        }
+        _ => d.close(),
+    });
+    dialog.present();
+}
+
+#[allow(deprecated)]
+fn confirm_delete_snapshot(
+    window: Option<gtk::Window>,
+    snapshot_name: &str,
+    on_confirm: Rc<dyn Fn()>,
+) {
+    let dialog = gtk::Dialog::builder()
+        .title("Delete Snapshot")
+        .modal(true)
+        .default_width(420)
+        .build();
+    dialog.set_transient_for(window.as_ref());
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+    dialog.add_button("Delete", gtk::ResponseType::Accept);
+
+    let label = gtk::Label::new(Some(&format!(
+        "Delete snapshot \"{snapshot_name}\"? This cannot be undone."
+    )));
+    label.set_wrap(true);
+    label.set_margin_start(16);
+    label.set_margin_end(16);
+    label.set_margin_top(16);
+    label.set_margin_bottom(16);
+    label.set_xalign(0.0);
+    dialog.content_area().append(&label);
+
+    dialog.connect_response(move |d, resp| match resp {
+        gtk::ResponseType::Accept => {
+            d.close();
+            on_confirm();
+        }
+        _ => d.close(),
+    });
+    dialog.present();
+}
+
+#[allow(deprecated)]
+fn show_project_snapshots_dialog(
+    window: Option<gtk::Window>,
+    project: Rc<RefCell<Project>>,
+    library: Rc<RefCell<MediaLibrary>>,
+    timeline_state: Rc<RefCell<TimelineState>>,
+    on_project_changed: Rc<dyn Fn()>,
+    on_project_reloaded: Rc<dyn Fn()>,
+) {
+    let dialog = gtk::Dialog::builder()
+        .title("Project Snapshots")
+        .modal(true)
+        .default_width(520)
+        .build();
+    dialog.set_transient_for(window.as_ref());
+    dialog.add_button("Close", gtk::ResponseType::Close);
+
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    content.set_margin_start(16);
+    content.set_margin_end(16);
+    content.set_margin_top(16);
+    content.set_margin_bottom(16);
+
+    let description = gtk::Label::new(Some(
+        "Snapshots capture named milestone versions of the current project. Restoring one loads that version into the editor and keeps your main save target unchanged until you save again.",
+    ));
+    description.set_wrap(true);
+    description.set_xalign(0.0);
+
+    let snapshot_dropdown = gtk::DropDown::from_strings(&[]);
+    snapshot_dropdown.set_hexpand(true);
+
+    let details_label = gtk::Label::new(None);
+    details_label.set_wrap(true);
+    details_label.set_xalign(0.0);
+
+    let empty_label = gtk::Label::new(None);
+    empty_label.set_wrap(true);
+    empty_label.set_xalign(0.0);
+    empty_label.add_css_class("dim-label");
+
+    let action_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let btn_restore = gtk::Button::with_label("Restore Selected");
+    let btn_delete = gtk::Button::with_label("Delete Selected");
+    action_row.append(&btn_restore);
+    action_row.append(&btn_delete);
+
+    content.append(&description);
+    content.append(&snapshot_dropdown);
+    content.append(&details_label);
+    content.append(&empty_label);
+    content.append(&action_row);
+    dialog.content_area().append(&content);
+
+    let entries_state: Rc<RefCell<Vec<crate::project_versions::ProjectSnapshotEntry>>> =
+        Rc::new(RefCell::new(Vec::new()));
+
+    let sync_selection_state: Rc<dyn Fn()> = {
+        let snapshot_dropdown = snapshot_dropdown.clone();
+        let btn_restore = btn_restore.clone();
+        let btn_delete = btn_delete.clone();
+        let details_label = details_label.clone();
+        let empty_label = empty_label.clone();
+        let entries_state = entries_state.clone();
+        Rc::new(move || {
+            let selected = snapshot_dropdown.selected() as usize;
+            let entries = entries_state.borrow();
+            if let Some(entry) = entries.get(selected) {
+                btn_restore.set_sensitive(true);
+                btn_delete.set_sensitive(true);
+                let source = entry
+                    .metadata
+                    .project_file_path
+                    .as_deref()
+                    .unwrap_or("Unsaved project");
+                details_label.set_text(&format!(
+                    "Created {} • Source {}",
+                    crate::project_versions::format_snapshot_timestamp(
+                        entry.metadata.created_at_unix_secs
+                    ),
+                    source
+                ));
+                empty_label.set_visible(false);
+            } else {
+                btn_restore.set_sensitive(false);
+                btn_delete.set_sensitive(false);
+                details_label.set_text("No snapshot selected.");
+                empty_label.set_visible(true);
+            }
+        })
+    };
+
+    {
+        let sync_selection_state = sync_selection_state.clone();
+        snapshot_dropdown.connect_selected_notify(move |_| {
+            sync_selection_state();
+        });
+    }
+
+    let refresh_entries: Rc<dyn Fn()> = {
+        let project = project.clone();
+        let snapshot_dropdown = snapshot_dropdown.clone();
+        let details_label = details_label.clone();
+        let empty_label = empty_label.clone();
+        let entries_state = entries_state.clone();
+        let sync_selection_state = sync_selection_state.clone();
+        Rc::new(move || {
+            let entries = {
+                let proj = project.borrow();
+                crate::project_versions::list_project_snapshots_for_project(&proj)
+            };
+            let has_entries = !entries.is_empty();
+            let model = gtk::StringList::new(&[]);
+            for entry in &entries {
+                model.append(&format!(
+                    "{} — {}",
+                    entry.metadata.snapshot_name,
+                    crate::project_versions::format_snapshot_timestamp(
+                        entry.metadata.created_at_unix_secs
+                    )
+                ));
+            }
+            *entries_state.borrow_mut() = entries;
+            snapshot_dropdown.set_model(Some(&model));
+            snapshot_dropdown.set_sensitive(has_entries);
+            snapshot_dropdown.set_selected(0);
+            if has_entries {
+                empty_label.set_text("");
+            } else {
+                empty_label.set_text("No named snapshots exist for the current project yet.");
+                details_label
+                    .set_text("Create a snapshot from the Export menu to capture a milestone.");
+            }
+            sync_selection_state();
+        })
+    };
+
+    {
+        let window = window.clone();
+        let project = project.clone();
+        let library = library.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let on_project_reloaded = on_project_reloaded.clone();
+        let entries_state = entries_state.clone();
+        let snapshot_dropdown = snapshot_dropdown.clone();
+        let dialog_weak = dialog.downgrade();
+        btn_restore.connect_clicked(move |_| {
+            let Some(entry) = entries_state
+                .borrow()
+                .get(snapshot_dropdown.selected() as usize)
+                .cloned()
+            else {
+                return;
+            };
+            let on_project_changed_guard = on_project_changed.clone();
+            let action: Rc<dyn Fn()> = Rc::new({
+                let project = project.clone();
+                let timeline_state = timeline_state.clone();
+                let on_project_changed = on_project_changed.clone();
+                let on_project_reloaded = on_project_reloaded.clone();
+                let dialog_weak = dialog_weak.clone();
+                let snapshot_id = entry.metadata.id.clone();
+                move || {
+                    if let Some(dialog) = dialog_weak.upgrade() {
+                        dialog.close();
+                    }
+                    let preserved_file_path = project.borrow().file_path.clone();
+                    let snapshot_id_for_load = snapshot_id.clone();
+                    restore_project_version_async(
+                        project.clone(),
+                        timeline_state.clone(),
+                        on_project_changed.clone(),
+                        on_project_reloaded.clone(),
+                        preserved_file_path,
+                        move || {
+                            crate::project_versions::load_project_snapshot(&snapshot_id_for_load)
+                                .map(|(_, project)| project)
+                        },
+                    );
+                }
+            });
+            confirm_unsaved_then(
+                window.clone(),
+                project.clone(),
+                library.clone(),
+                on_project_changed_guard,
+                action,
+            );
+        });
+    }
+
+    {
+        let window = window.clone();
+        let refresh_entries = refresh_entries.clone();
+        let entries_state = entries_state.clone();
+        let snapshot_dropdown = snapshot_dropdown.clone();
+        btn_delete.connect_clicked(move |_| {
+            let Some(entry) = entries_state
+                .borrow()
+                .get(snapshot_dropdown.selected() as usize)
+                .cloned()
+            else {
+                return;
+            };
+            let on_confirm: Rc<dyn Fn()> = Rc::new({
+                let refresh_entries = refresh_entries.clone();
+                let snapshot_id = entry.metadata.id.clone();
+                move || {
+                    if let Err(e) = crate::project_versions::delete_project_snapshot(&snapshot_id) {
+                        log::error!("{e}");
+                    }
+                    refresh_entries();
+                }
+            });
+            confirm_delete_snapshot(window.clone(), &entry.metadata.snapshot_name, on_confirm);
+        });
+    }
+
+    dialog.connect_response(|d, _| {
+        d.close();
+    });
+    refresh_entries();
+    dialog.present();
 }
 
 enum ExportProjectWithMediaUiEvent {
@@ -260,7 +810,7 @@ pub fn confirm_unsaved_then(
                         on_project_changed_c();
                         on_continue_c();
                     }
-                    Err(e) => eprintln!("{e}"),
+                    Err(e) => log::error!("{e}"),
                 }
             } else {
                 let file_dialog = gtk::FileDialog::new();
@@ -285,7 +835,7 @@ pub fn confirm_unsaved_then(
                                     on_project_changed_s();
                                     on_continue_s();
                                 }
-                                Err(e) => eprintln!("{e}"),
+                                Err(e) => log::error!("{e}"),
                             }
                         }
                     }
@@ -396,6 +946,7 @@ pub fn build_toolbar(
     library: Rc<RefCell<MediaLibrary>>,
     timeline_state: Rc<RefCell<TimelineState>>,
     bg_removal_cache: Rc<RefCell<crate::media::bg_removal_cache::BgRemovalCache>>,
+    frame_interp_cache: Rc<RefCell<crate::media::frame_interp_cache::FrameInterpCache>>,
     on_project_changed: impl Fn() + 'static + Clone,
     on_project_reloaded: impl Fn() + 'static + Clone,
     on_show_editor: impl Fn() + 'static + Clone,
@@ -536,7 +1087,7 @@ pub fn build_toolbar(
                                             glib::ControlFlow::Break
                                         }
                                         Ok(Err(e)) => {
-                                            eprintln!("{e}");
+                                            log::error!("{e}");
                                             timeline_state_cb.borrow_mut().loading = false;
                                             glib::ControlFlow::Break
                                         }
@@ -684,7 +1235,7 @@ pub fn build_toolbar(
                                             glib::ControlFlow::Break
                                         }
                                         Ok(Err(e)) => {
-                                            eprintln!("{e}");
+                                            log::error!("{e}");
                                             timeline_state.borrow_mut().loading = false;
                                             glib::ControlFlow::Break
                                         }
@@ -749,7 +1300,7 @@ pub fn build_toolbar(
                                 on_project_changed();
                             }
                             Err(e) => {
-                                eprintln!("{e}");
+                                log::error!("{e}");
                             }
                         }
                     }
@@ -785,47 +1336,17 @@ pub fn build_toolbar(
             grid.set_column_spacing(12);
 
             // ── Aspect ratio / resolution presets ──
-            // Each aspect ratio group: (label, [(width, height, display_label)])
-            let ar_presets: Vec<(&str, Vec<(u32, u32, &str)>)> = vec![
-                (
-                    "16:9 (Widescreen)",
-                    vec![
-                        (3840, 2160, "3840 × 2160  (4K UHD)"),
-                        (2560, 1440, "2560 × 1440  (1440p QHD)"),
-                        (1920, 1080, "1920 × 1080  (1080p HD)"),
-                        (1280, 720, "1280 × 720   (720p HD)"),
-                    ],
-                ),
-                (
-                    "4:3 (Standard)",
-                    vec![
-                        (1440, 1080, "1440 × 1080  (HD 4:3)"),
-                        (1024, 768, "1024 × 768   (XGA)"),
-                        (720, 480, "720 × 480    (SD NTSC)"),
-                    ],
-                ),
-                (
-                    "9:16 (Vertical)",
-                    vec![
-                        (1080, 1920, "1080 × 1920  (Full HD Vertical)"),
-                        (720, 1280, "720 × 1280   (HD Vertical)"),
-                    ],
-                ),
-                (
-                    "1:1 (Square)",
-                    vec![
-                        (2160, 2160, "2160 × 2160  (4K Square)"),
-                        (1080, 1080, "1080 × 1080  (HD Square)"),
-                    ],
-                ),
-            ];
+            // Source of truth: ASPECT_RATIO_PRESETS at the top of this file.
 
-            // Detect current aspect ratio and resolution index
+            // Detect current aspect ratio and resolution index. Falls back to
+            // the "Custom" sentinel index (= ASPECT_RATIO_PRESETS.len()) when
+            // the project's W×H doesn't match any preset.
+            let custom_ar_idx = ASPECT_RATIO_PRESETS.len() as u32;
             let (init_ar_idx, init_res_idx) = {
-                let mut found = (4u32, 0u32); // default: Custom
-                'outer: for (ai, (_label, resolutions)) in ar_presets.iter().enumerate() {
-                    for (ri, &(w, h, _)) in resolutions.iter().enumerate() {
-                        if w == proj.width && h == proj.height {
+                let mut found = (custom_ar_idx, 0u32);
+                'outer: for (ai, group) in ASPECT_RATIO_PRESETS.iter().enumerate() {
+                    for (ri, preset) in group.presets.iter().enumerate() {
+                        if preset.width == proj.width && preset.height == proj.height {
                             found = (ai as u32, ri as u32);
                             break 'outer;
                         }
@@ -837,28 +1358,22 @@ pub fn build_toolbar(
             // Row 0: Aspect Ratio dropdown
             let ar_label = gtk::Label::new(Some("Aspect Ratio:"));
             ar_label.set_halign(gtk::Align::End);
-            let ar_combo = gtk::DropDown::from_strings(&[
-                "16:9 (Widescreen)",
-                "4:3 (Standard)",
-                "9:16 (Vertical)",
-                "1:1 (Square)",
-                "Custom",
-            ]);
+            let mut ar_dropdown_labels: Vec<&str> =
+                ASPECT_RATIO_PRESETS.iter().map(|g| g.label).collect();
+            ar_dropdown_labels.push(CUSTOM_ASPECT_LABEL);
+            let ar_combo = gtk::DropDown::from_strings(&ar_dropdown_labels);
             grid.attach(&ar_label, 0, 0, 1, 1);
             grid.attach(&ar_combo, 1, 0, 2, 1);
 
             // Row 1: Resolution dropdown (hidden when Custom)
             let res_label = gtk::Label::new(Some("Resolution:"));
             res_label.set_halign(gtk::Align::End);
-            let initial_res_strings: Vec<&str> = if (init_ar_idx as usize) < ar_presets.len() {
-                ar_presets[init_ar_idx as usize]
-                    .1
-                    .iter()
-                    .map(|r| r.2)
-                    .collect()
-            } else {
-                vec!["1920 × 1080  (1080p HD)"]
-            };
+            let initial_res_strings: Vec<&str> =
+                if let Some(group) = ASPECT_RATIO_PRESETS.get(init_ar_idx as usize) {
+                    group.presets.iter().map(|p| p.label).collect()
+                } else {
+                    vec!["1920 × 1080  (1080p HD)"]
+                };
             let res_string_list = gtk::StringList::new(
                 &initial_res_strings
                     .iter()
@@ -886,7 +1401,7 @@ pub fn build_toolbar(
             grid.attach(&custom_box, 0, 2, 3, 1);
 
             // Show/hide based on initial state
-            let is_custom = init_ar_idx == 4;
+            let is_custom = init_ar_idx == custom_ar_idx;
             res_label.set_visible(!is_custom);
             res_combo.set_visible(!is_custom);
             custom_box.set_visible(is_custom);
@@ -902,16 +1417,11 @@ pub fn build_toolbar(
                 let res_combo = res_combo.clone();
                 let res_label = res_label.clone();
                 let custom_box = custom_box.clone();
-                let ar_presets_labels: Vec<Vec<String>> = ar_presets
-                    .iter()
-                    .map(|(_, resolutions)| resolutions.iter().map(|r| r.2.to_string()).collect())
-                    .collect();
                 ar_combo.connect_selected_notify(move |combo| {
                     let idx = combo.selected() as usize;
-                    if idx < ar_presets_labels.len() {
+                    if let Some(group) = ASPECT_RATIO_PRESETS.get(idx) {
                         // Preset aspect ratio: show resolution dropdown, hide custom
-                        let labels: Vec<&str> =
-                            ar_presets_labels[idx].iter().map(|s| s.as_str()).collect();
+                        let labels: Vec<&str> = group.presets.iter().map(|p| p.label).collect();
                         let new_model = gtk::StringList::new(&labels);
                         res_combo.set_model(Some(&new_model));
                         res_combo.set_selected(0);
@@ -927,26 +1437,27 @@ pub fn build_toolbar(
                 });
             }
 
-            // Row 3: Frame rate preset (unchanged)
+            // Row 3: Frame rate preset
             let fps_label = gtk::Label::new(Some("Frame Rate:"));
             fps_label.set_halign(gtk::Align::End);
-            let fps_combo = gtk::DropDown::from_strings(&[
-                "23.976 fps",
-                "24 fps",
-                "25 fps",
-                "29.97 fps",
-                "30 fps",
-                "60 fps",
-            ]);
-            let fps_idx = match (proj.frame_rate.numerator, proj.frame_rate.denominator) {
-                (24000, 1001) | (2997, 125) => 0,
-                (24, 1) => 1,
-                (25, 1) => 2,
-                (30000, 1001) => 3,
-                (30, 1) => 4,
-                (60, 1) => 5,
-                _ => 1,
-            };
+            let fps_dropdown_labels: Vec<&str> =
+                FRAMERATE_OPTIONS.iter().map(|o| o.label).collect();
+            let fps_combo = gtk::DropDown::from_strings(&fps_dropdown_labels);
+            let fps_idx = FRAMERATE_OPTIONS
+                .iter()
+                .position(|o| {
+                    o.num == proj.frame_rate.numerator && o.den == proj.frame_rate.denominator
+                })
+                .or_else(|| {
+                    // Backwards compat: 2997/125 is the simplified form of
+                    // 24000/1001 (= 23.976). Old project files may store either.
+                    if proj.frame_rate.numerator == 2997 && proj.frame_rate.denominator == 125 {
+                        Some(0)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(DEFAULT_FRAMERATE_INDEX) as u32;
             fps_combo.set_selected(fps_idx);
             grid.attach(&fps_label, 0, 3, 1, 1);
             grid.attach(&fps_combo, 1, 3, 2, 1);
@@ -955,59 +1466,31 @@ pub fn build_toolbar(
             dialog.add_button("Cancel", gtk::ResponseType::Cancel);
             dialog.add_button("Apply", gtk::ResponseType::Accept);
 
-            // Clone presets data for the response handler
-            let ar_res_data: Vec<Vec<(u32, u32)>> = ar_presets
-                .iter()
-                .map(|(_, resolutions)| resolutions.iter().map(|r| (r.0, r.1)).collect())
-                .collect();
-
             drop(proj);
             let project = project.clone();
             let on_project_changed = on_project_changed.clone();
             dialog.connect_response(move |d, resp| {
                 if resp == gtk::ResponseType::Accept {
                     let ar_idx = ar_combo.selected() as usize;
-                    let (w, h) = if ar_idx < ar_res_data.len() {
+                    let (w, h) = if let Some(group) = ASPECT_RATIO_PRESETS.get(ar_idx) {
                         // Preset aspect ratio + resolution
                         let res_idx = res_combo.selected() as usize;
-                        if res_idx < ar_res_data[ar_idx].len() {
-                            ar_res_data[ar_idx][res_idx]
-                        } else {
-                            ar_res_data[ar_idx][0]
-                        }
+                        let preset = group
+                            .presets
+                            .get(res_idx)
+                            .or_else(|| group.presets.first())
+                            .expect("aspect ratio group should have at least one preset");
+                        (preset.width, preset.height)
                     } else {
                         // Custom
                         (w_spin.value() as u32, h_spin.value() as u32)
                     };
-                    let fr = match fps_combo.selected() {
-                        0 => FrameRate {
-                            numerator: 24000,
-                            denominator: 1001,
-                        },
-                        1 => FrameRate {
-                            numerator: 24,
-                            denominator: 1,
-                        },
-                        2 => FrameRate {
-                            numerator: 25,
-                            denominator: 1,
-                        },
-                        3 => FrameRate {
-                            numerator: 30000,
-                            denominator: 1001,
-                        },
-                        4 => FrameRate {
-                            numerator: 30,
-                            denominator: 1,
-                        },
-                        5 => FrameRate {
-                            numerator: 60,
-                            denominator: 1,
-                        },
-                        _ => FrameRate {
-                            numerator: 24,
-                            denominator: 1,
-                        },
+                    let opt = FRAMERATE_OPTIONS
+                        .get(fps_combo.selected() as usize)
+                        .unwrap_or(&FRAMERATE_OPTIONS[DEFAULT_FRAMERATE_INDEX]);
+                    let fr = FrameRate {
+                        numerator: opt.num,
+                        denominator: opt.den,
                     };
                     let mut proj = project.borrow_mut();
                     proj.width = w;
@@ -1031,6 +1514,7 @@ pub fn build_toolbar(
     {
         let project = project.clone();
         let bg_removal_cache = bg_removal_cache.clone();
+        let frame_interp_cache = frame_interp_cache.clone();
         btn_export.connect_clicked(move |btn| {
             let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
             let proj_w = project.borrow().width;
@@ -1422,6 +1906,7 @@ pub fn build_toolbar(
 
             let project = project.clone();
             let bg_removal_cache = bg_removal_cache.clone();
+            let frame_interp_cache = frame_interp_cache.clone();
             opt_dialog.connect_response(move |d, resp| {
                 if resp != gtk::ResponseType::Accept && resp != gtk::ResponseType::Other(1) {
                     d.close();
@@ -1511,6 +1996,7 @@ pub fn build_toolbar(
                 let window: Option<gtk::Window> = None; // no parent at this point
                 let project = project.clone();
                 let bg_removal_cache = bg_removal_cache.clone();
+                let frame_interp_cache = frame_interp_cache.clone();
                 file_dialog.save(window.as_ref(), gio::Cancellable::NONE, move |result| {
                     if let Ok(file) = result {
                         if let Some(path) = file.path() {
@@ -1519,6 +2005,8 @@ pub fn build_toolbar(
                             let proj = project.borrow().clone();
                             let opts = options.clone();
                             let bg_paths = bg_removal_cache.borrow().paths.clone();
+                            let interp_paths =
+                                frame_interp_cache.borrow().snapshot_paths_by_clip_id(&proj);
                             let (tx, rx) = std::sync::mpsc::channel::<ExportProgress>();
 
                             std::thread::spawn(move || {
@@ -1528,6 +2016,7 @@ pub fn build_toolbar(
                                     opts,
                                     None,
                                     &bg_paths,
+                                    &interp_paths,
                                     tx.clone(),
                                 ) {
                                     let _ = tx.send(ExportProgress::Error(e.to_string()));
@@ -1591,7 +2080,7 @@ pub fn build_toolbar(
                                             ExportProgress::Error(e) => {
                                                 status_label.set_text(&format!("Error: {e}"));
                                                 close_btn.set_label("Close");
-                                                eprintln!("Export error: {e}");
+                                                log::error!("Export error: {e}");
                                                 return glib::ControlFlow::Break;
                                             }
                                         }
@@ -1756,7 +2245,7 @@ pub fn build_toolbar(
                                     }
                                     ExportProjectWithMediaUiEvent::Error(e) => {
                                         status_label.set_text(&format!("Error: {e}"));
-                                        eprintln!("Export-with-media error: {e}");
+                                        log::error!("Export-with-media error: {e}");
                                         return glib::ControlFlow::Break;
                                     }
                                 }
@@ -1900,7 +2389,7 @@ pub fn build_toolbar(
                                     }
                                     CollectFilesUiEvent::Error(e) => {
                                         status_label.set_text(&format!("Error: {e}"));
-                                        eprintln!("Collect-files error: {e}");
+                                        log::error!("Collect-files error: {e}");
                                         return glib::ControlFlow::Break;
                                     }
                                 }
@@ -1924,10 +2413,56 @@ pub fn build_toolbar(
             on_export_frame();
         });
     }
+    let btn_create_snapshot = gtk::Button::with_label("Create Snapshot…");
+    btn_create_snapshot.add_css_class("flat");
+    {
+        let project = project.clone();
+        let library = library.clone();
+        let export_pop_weak = export_pop.downgrade();
+        btn_create_snapshot.connect_clicked(move |btn| {
+            if let Some(pop) = export_pop_weak.upgrade() {
+                pop.popdown();
+            }
+            let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+            let on_selected: Rc<dyn Fn(String) -> Result<(), String>> = Rc::new({
+                let project = project.clone();
+                let library = library.clone();
+                move |snapshot_name| {
+                    create_named_snapshot(&project, &library, &snapshot_name).map(|_| ())
+                }
+            });
+            choose_snapshot_name(window, on_selected);
+        });
+    }
+    let btn_manage_snapshots = gtk::Button::with_label("Manage Snapshots…");
+    btn_manage_snapshots.add_css_class("flat");
+    {
+        let project = project.clone();
+        let library = library.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed: Rc<dyn Fn()> = Rc::new(on_project_changed.clone());
+        let on_project_reloaded: Rc<dyn Fn()> = Rc::new(on_project_reloaded.clone());
+        let export_pop_weak = export_pop.downgrade();
+        btn_manage_snapshots.connect_clicked(move |btn| {
+            if let Some(pop) = export_pop_weak.upgrade() {
+                pop.popdown();
+            }
+            let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+            show_project_snapshots_dialog(
+                window,
+                project.clone(),
+                library.clone(),
+                timeline_state.clone(),
+                on_project_changed.clone(),
+                on_project_reloaded.clone(),
+            );
+        });
+    }
     let btn_restore_backup = gtk::Button::with_label("Restore from Backup…");
     btn_restore_backup.add_css_class("flat");
     {
         let project = project.clone();
+        let library = library.clone();
         let timeline_state = timeline_state.clone();
         let on_project_changed = on_project_changed.clone();
         let on_project_reloaded = on_project_reloaded.clone();
@@ -1937,73 +2472,56 @@ pub fn build_toolbar(
                 pop.popdown();
             }
             let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
-            let dialog = gtk::FileDialog::new();
-            dialog.set_title("Restore from Backup");
-            if let Some(dir) = crate::ui::window::backup_dir() {
-                let _ = std::fs::create_dir_all(&dir);
-                dialog.set_initial_folder(Some(&gio::File::for_path(&dir)));
-            }
-            let filter = gtk::FileFilter::new();
-            filter.add_pattern("*.uspxml");
-            filter.add_pattern("*.fcpxml");
-            filter.set_name(Some("Project Backups"));
-            let filters = gio::ListStore::new::<gtk::FileFilter>();
-            filters.append(&filter);
-            dialog.set_filters(Some(&filters));
-            let project = project.clone();
-            let timeline_state = timeline_state.clone();
-            let on_project_changed = on_project_changed.clone();
-            let on_project_reloaded = on_project_reloaded.clone();
-            dialog.open(window.as_ref(), gio::Cancellable::NONE, move |result| {
-                if let Ok(file) = result {
-                    if let Some(path) = file.path() {
-                        let path_str = path.to_string_lossy().to_string();
-                        let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Project, String>>(1);
-                        let path_bg = path_str.clone();
-                        std::thread::spawn(move || {
-                            let result = std::fs::read_to_string(&path_bg)
-                                .map_err(|e| format!("Failed to read backup: {e}"))
-                                .and_then(|xml| {
-                                    fcpxml::parser::parse_fcpxml_with_path(
-                                        &xml,
-                                        Some(std::path::Path::new(&path_bg)),
-                                    )
-                                    .map_err(|e| format!("Backup parse error: {e}"))
-                                });
-                            let _ = tx.send(result);
-                        });
-                        let project = project.clone();
-                        let on_project_changed = on_project_changed.clone();
-                        let on_project_reloaded = on_project_reloaded.clone();
-                        let timeline_state = timeline_state.clone();
-                        timeline_state.borrow_mut().loading = true;
-                        glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
-                            match rx.try_recv() {
-                                Ok(Ok(mut new_proj)) => {
-                                    new_proj.dirty = false;
-                                    *project.borrow_mut() = new_proj;
-                                    timeline_state.borrow_mut().loading = false;
-                                    on_project_reloaded();
-                                    on_project_changed();
-                                    glib::ControlFlow::Break
-                                }
-                                Ok(Err(e)) => {
-                                    log::error!("Failed to restore backup: {e}");
-                                    timeline_state.borrow_mut().loading = false;
-                                    glib::ControlFlow::Break
-                                }
-                                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                                    glib::ControlFlow::Continue
-                                }
-                                Err(_) => {
-                                    timeline_state.borrow_mut().loading = false;
-                                    glib::ControlFlow::Break
-                                }
-                            }
-                        });
+            let on_project_changed_guard: Rc<dyn Fn()> = Rc::new(on_project_changed.clone());
+            let action: Rc<dyn Fn()> = Rc::new({
+                let project = project.clone();
+                let timeline_state = timeline_state.clone();
+                let on_project_changed: Rc<dyn Fn()> = Rc::new(on_project_changed.clone());
+                let on_project_reloaded: Rc<dyn Fn()> = Rc::new(on_project_reloaded.clone());
+                let window = window.clone();
+                move || {
+                    let dialog = gtk::FileDialog::new();
+                    dialog.set_title("Restore from Backup");
+                    if let Some(dir) = crate::project_versions::backup_dir() {
+                        let _ = std::fs::create_dir_all(&dir);
+                        dialog.set_initial_folder(Some(&gio::File::for_path(&dir)));
                     }
+                    let filter = gtk::FileFilter::new();
+                    filter.add_pattern("*.uspxml");
+                    filter.add_pattern("*.fcpxml");
+                    filter.set_name(Some("Project Backups"));
+                    let filters = gio::ListStore::new::<gtk::FileFilter>();
+                    filters.append(&filter);
+                    dialog.set_filters(Some(&filters));
+
+                    let project = project.clone();
+                    let timeline_state = timeline_state.clone();
+                    let on_project_changed = on_project_changed.clone();
+                    let on_project_reloaded = on_project_reloaded.clone();
+                    dialog.open(window.as_ref(), gio::Cancellable::NONE, move |result| {
+                        if let Ok(file) = result {
+                            if let Some(path) = file.path() {
+                                let preserved_file_path = project.borrow().file_path.clone();
+                                restore_project_version_async(
+                                    project.clone(),
+                                    timeline_state.clone(),
+                                    on_project_changed.clone(),
+                                    on_project_reloaded.clone(),
+                                    preserved_file_path,
+                                    move || crate::project_versions::load_fcpxml_project(&path),
+                                );
+                            }
+                        }
+                    });
                 }
             });
+            confirm_unsaved_then(
+                window,
+                project.clone(),
+                library.clone(),
+                on_project_changed_guard,
+                action,
+            );
         });
     }
     let btn_export_edl = gtk::Button::with_label("Export EDL…");
@@ -2163,6 +2681,8 @@ pub fn build_toolbar(
     export_pop_box.append(&btn_export_project_with_media);
     export_pop_box.append(&btn_collect_files);
     export_pop_box.append(&btn_export_frame);
+    export_pop_box.append(&btn_create_snapshot);
+    export_pop_box.append(&btn_manage_snapshots);
     export_pop_box.append(&btn_export_edl);
     export_pop_box.append(&btn_export_otio);
     export_pop_box.append(&btn_restore_backup);
@@ -2175,6 +2695,7 @@ pub fn build_toolbar(
         let export_pop_weak = export_pop.downgrade();
         let project = project.clone();
         let bg_removal_cache = bg_removal_cache.clone();
+        let frame_interp_cache = frame_interp_cache.clone();
         btn_export_queue.connect_clicked(move |btn| {
             if let Some(pop) = export_pop_weak.upgrade() {
                 pop.popdown();
@@ -2183,6 +2704,7 @@ pub fn build_toolbar(
             let dialog = crate::ui::export_queue::build_export_queue_dialog(
                 project.clone(),
                 bg_removal_cache.clone(),
+                frame_interp_cache.clone(),
                 window.as_ref(),
             );
             dialog.present();

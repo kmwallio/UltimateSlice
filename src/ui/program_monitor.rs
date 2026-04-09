@@ -1,6 +1,10 @@
 use crate::media::program_player::{ProgramPlayer, ScopeFrame};
 use crate::model::project::FrameRate;
+use crate::ui::colors::{LUMA_B, LUMA_G, LUMA_R};
 use crate::ui::timecode;
+
+/// Discrete zoom levels for the program monitor zoom in/out buttons.
+const PROGRAM_MONITOR_ZOOM_LEVELS: &[f64] = &[0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
 use gtk4::prelude::*;
 use gtk4::{
     self as gtk, AspectFrame, Box as GBox, Button, CheckButton, DrawingArea, EventControllerScroll,
@@ -23,8 +27,8 @@ pub struct SubtitleLine {
     pub color: (f64, f64, f64, f64),
     /// Highlight color for the active word.
     pub highlight_color: (f64, f64, f64, f64),
-    /// Highlight mode.
-    pub highlight_mode: crate::model::clip::SubtitleHighlightMode,
+    /// Highlight flags (multi-effect).
+    pub highlight_flags: crate::model::clip::SubtitleHighlightFlags,
     /// Outline color.
     pub outline_color: (f64, f64, f64, f64),
     /// Outline width in pts.
@@ -38,6 +42,20 @@ pub struct SubtitleLine {
     /// Vertical position: 0.0 (top) to 1.0 (bottom), mapped to the subtitle line's
     /// top/center/bottom anchor the same way export does.
     pub position_y: f64,
+    /// Base style: bold applied to all text.
+    pub subtitle_bold: bool,
+    /// Base style: italic applied to all text.
+    pub subtitle_italic: bool,
+    /// Base style: underline applied to all text.
+    pub subtitle_underline: bool,
+    /// Base style: shadow applied to all text.
+    pub subtitle_shadow: bool,
+    /// Shadow color as (r, g, b, a) 0.0–1.0.
+    pub subtitle_shadow_color: (f64, f64, f64, f64),
+    /// Shadow offset (x, y).
+    pub subtitle_shadow_offset: (f64, f64),
+    /// Background highlight color for active word.
+    pub bg_highlight_color: (f64, f64, f64, f64),
 }
 
 /// A single word to display, with active (highlighted) flag.
@@ -54,13 +72,20 @@ impl Default for SubtitleLine {
             text: String::new(),
             color: (1.0, 1.0, 1.0, 1.0),
             highlight_color: (1.0, 1.0, 0.0, 1.0),
-            highlight_mode: crate::model::clip::SubtitleHighlightMode::None,
+            highlight_flags: crate::model::clip::SubtitleHighlightFlags::default(),
             outline_color: (0.0, 0.0, 0.0, 0.9),
             outline_width: 2.0,
             bg_box: true,
             bg_box_color: (0.0, 0.0, 0.0, 0.6),
             font_desc: crate::media::title_font::DEFAULT_SUBTITLE_FONT_DESC.to_string(),
             position_y: 0.85,
+            subtitle_bold: false,
+            subtitle_italic: false,
+            subtitle_underline: false,
+            subtitle_shadow: false,
+            subtitle_shadow_color: (0.0, 0.0, 0.0, 0.667),
+            subtitle_shadow_offset: (1.5, 1.5),
+            bg_highlight_color: (1.0, 1.0, 0.0, 0.5),
         }
     }
 }
@@ -135,7 +160,6 @@ fn subtitle_preview_baseline_y(
 /// Transform parameters for a clip (crop, rotation, flip).
 /// Kept here so other modules can reference it without a separate file.
 #[derive(Clone, Copy, Default)]
-#[allow(dead_code)]
 pub struct ClipTransform {
     pub crop_left: i32,
     pub crop_right: i32,
@@ -191,40 +215,49 @@ pub fn build_program_monitor(
     root.set_vexpand(true);
     root.add_css_class("preview-panel");
 
-    // Title bar
-    let title_bar = GBox::new(Orientation::Horizontal, 8);
+    // Header
+    let title_bar = GBox::new(Orientation::Vertical, 4);
     title_bar.add_css_class("preview-header");
     title_bar.set_margin_start(8);
     title_bar.set_margin_end(8);
     title_bar.set_margin_top(4);
     title_bar.set_margin_bottom(4);
 
+    let status_row = GBox::new(Orientation::Horizontal, 8);
+    status_row.set_hexpand(true);
+
     let label = Label::new(Some("Program Monitor"));
     label.add_css_class("dim-label");
-    title_bar.append(&label);
+    status_row.append(&label);
 
     let spacer = gtk::Separator::new(Orientation::Horizontal);
     spacer.set_hexpand(true);
-    title_bar.append(&spacer);
+    status_row.append(&spacer);
 
     // J/K/L shuttle rate indicator — shown/hidden by window.rs.
     let speed_label = Label::new(None);
     speed_label.add_css_class("timecode");
     speed_label.set_visible(false);
-    title_bar.append(&speed_label);
+    status_row.append(&speed_label);
 
     let pos_label = Label::new(Some("00:00:00:00"));
     pos_label.add_css_class("timecode");
-    title_bar.append(&pos_label);
+    pos_label.set_width_chars(11);
+    status_row.append(&pos_label);
+
+    title_bar.append(&status_row);
+
+    let controls_row = GBox::new(Orientation::Horizontal, 8);
+    controls_row.set_hexpand(true);
 
     let btn_go_to = Button::with_label("Go To");
     btn_go_to.set_tooltip_text(Some("Jump playhead to a timecode"));
     btn_go_to.connect_clicked(move |_| on_go_to_timecode());
-    title_bar.append(&btn_go_to);
+    controls_row.append(&btn_go_to);
 
     let btn_popout = Button::with_label("Pop Out / Dock");
     btn_popout.connect_clicked(move |_| on_toggle_popout());
-    title_bar.append(&btn_popout);
+    controls_row.append(&btn_popout);
 
     let on_safe_area_changed = Rc::new(on_safe_area_changed);
     let safe_area_btn = CheckButton::with_label("Safe Areas");
@@ -268,7 +301,11 @@ pub fn build_program_monitor(
     overlays_menu_btn.set_label("Overlays");
     overlays_menu_btn.set_popover(Some(&overlays_popover));
     overlays_menu_btn.set_tooltip_text(Some("Toggle Safe Areas, False Color, and Zebra overlays"));
-    title_bar.append(&overlays_menu_btn);
+    controls_row.append(&overlays_menu_btn);
+
+    let controls_spacer = gtk::Separator::new(Orientation::Horizontal);
+    controls_spacer.set_hexpand(true);
+    controls_row.append(&controls_spacer);
 
     // Zoom controls: − / zoom% label / + / Fit
     // These are appended to the title bar AFTER we build apply_zoom (below), so we
@@ -282,11 +319,12 @@ pub fn build_program_monitor(
     zoom_in_btn.set_tooltip_text(Some("Zoom in preview (Ctrl+Scroll)"));
     let zoom_fit_btn = Button::with_label("Fit");
     zoom_fit_btn.set_tooltip_text(Some("Reset zoom to fit"));
-    title_bar.append(&zoom_out_btn);
-    title_bar.append(&zoom_label);
-    title_bar.append(&zoom_in_btn);
-    title_bar.append(&zoom_fit_btn);
+    controls_row.append(&zoom_out_btn);
+    controls_row.append(&zoom_label);
+    controls_row.append(&zoom_in_btn);
+    controls_row.append(&zoom_fit_btn);
 
+    title_bar.append(&controls_row);
     root.append(&title_bar);
 
     // Video display: GtkOverlay composites picture_b as the bottom layer and
@@ -394,7 +432,7 @@ pub fn build_program_monitor(
                     let r = data[base] as f64 / 255.0;
                     let g = data[base + 1] as f64 / 255.0;
                     let b = data[base + 2] as f64 / 255.0;
-                    let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                    let luma = LUMA_R * r + LUMA_G * g + LUMA_B * b;
                     let (fr, fg, fb) = false_color_luma(luma);
                     cr.set_source_rgb(fr, fg, fb);
                     cr.rectangle(fx as f64 * sw, fy as f64 * sh, sw + 0.5, sh + 0.5);
@@ -440,7 +478,7 @@ pub fn build_program_monitor(
                     let r = data[base] as f64 / 255.0;
                     let g = data[base + 1] as f64 / 255.0;
                     let b = data[base + 2] as f64 / 255.0;
-                    let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                    let luma = LUMA_R * r + LUMA_G * g + LUMA_B * b;
                     if luma >= threshold && (fx + fy) % 8 < 4 {
                         cr.set_source_rgba(1.0, 0.85, 0.0, 0.85);
                         cr.rectangle(fx as f64 * sw, fy as f64 * sh, sw + 0.5, sh + 0.5);
@@ -580,8 +618,7 @@ pub fn build_program_monitor(
                 }
 
                 // Render words individually with highlighting, or as a single block.
-                use crate::model::clip::SubtitleHighlightMode;
-                if !line.words.is_empty() && line.highlight_mode != SubtitleHighlightMode::None {
+                if !line.words.is_empty() && !line.highlight_flags.is_none() {
                     let mut word_x = tx;
                     let space_w = cr
                         .text_extents(" ")
@@ -595,72 +632,143 @@ pub fn build_program_monitor(
                             .text_extents(&word.text)
                             .unwrap_or_else(|_| cr.text_extents("M").unwrap());
 
+                        // Base styles: shadow for all words
+                        if line.subtitle_shadow {
+                            let (sr, sg, sb, sa) = line.subtitle_shadow_color;
+                            let (sox, soy) = line.subtitle_shadow_offset;
+                            cr.set_source_rgba(sr, sg, sb, sa);
+                            let _ = cr.move_to(word_x + sox, ty + soy);
+                            let _ = cr.show_text(&word.text);
+                        }
+
                         if word.active {
-                            match line.highlight_mode {
-                                SubtitleHighlightMode::Color => {
-                                    let (hr, hg, hb, ha) = line.highlight_color;
-                                    cr.set_source_rgba(hr, hg, hb, ha);
-                                }
-                                SubtitleHighlightMode::Bold => {
-                                    // Draw twice for faux bold.
-                                    let (tr, tg, tb, ta) = line.color;
-                                    cr.set_source_rgba(tr, tg, tb, ta);
-                                    let _ = cr.move_to(word_x + 0.5, ty);
-                                    let _ = cr.show_text(&word.text);
-                                    cr.set_source_rgba(tr, tg, tb, ta);
-                                }
-                                SubtitleHighlightMode::Underline => {
-                                    let (underline_thickness, underline_offset) =
-                                        subtitle_preview_underline_metrics(font_size);
-                                    let (tr, tg, tb, ta) = line.color;
-                                    cr.set_source_rgba(tr, tg, tb, ta);
-                                    let _ = cr.move_to(word_x, ty);
-                                    let _ = cr.show_text(&word.text);
-                                    // Draw underline.
-                                    cr.set_line_width(underline_thickness);
-                                    let _ = cr.move_to(word_x, ty + underline_offset);
-                                    let _ =
-                                        cr.line_to(word_x + we.x_advance(), ty + underline_offset);
-                                    cr.stroke().ok();
-                                    word_x += we.x_advance();
-                                    continue;
-                                }
-                                SubtitleHighlightMode::Stroke => {
-                                    // Draw the word text first in normal color, then
-                                    // overlay a stroked outline in highlight_color.
-                                    let (tr, tg, tb, ta) = line.color;
-                                    cr.set_source_rgba(tr, tg, tb, ta);
-                                    let _ = cr.move_to(word_x, ty);
-                                    let _ = cr.show_text(&word.text);
-                                    // Stroke outline.
-                                    let (hr, hg, hb, ha) = line.highlight_color;
-                                    cr.set_source_rgba(hr, hg, hb, ha);
-                                    cr.set_line_width(subtitle_preview_stroke_width(h));
-                                    let _ = cr.move_to(word_x, ty);
-                                    cr.text_path(&word.text);
-                                    cr.stroke().ok();
-                                    word_x += we.x_advance();
-                                    continue;
-                                }
-                                SubtitleHighlightMode::None => {
-                                    let (tr, tg, tb, ta) = line.color;
-                                    cr.set_source_rgba(tr, tg, tb, ta);
-                                }
+                            // Multi-flag highlight rendering for active word
+                            let flags = &line.highlight_flags;
+
+                            // Shadow highlight
+                            if flags.shadow {
+                                let (sr, sg, sb, sa) = line.subtitle_shadow_color;
+                                cr.set_source_rgba(sr, sg, sb, sa);
+                                let _ = cr.move_to(word_x + 2.0, ty + 2.0);
+                                let _ = cr.show_text(&word.text);
+                            }
+
+                            // Background highlight
+                            if flags.background {
+                                let (bgr, bgg, bgb, bga) = line.bg_highlight_color;
+                                cr.set_source_rgba(bgr, bgg, bgb, bga);
+                                let pad = font_size * 0.1;
+                                let _ = cr.rectangle(
+                                    word_x - pad,
+                                    ty - font_size + pad,
+                                    we.x_advance() + pad * 2.0,
+                                    font_size + pad,
+                                );
+                                cr.fill().ok();
+                            }
+
+                            // Stroke highlight
+                            if flags.stroke {
+                                let (hr, hg, hb, ha) = line.highlight_color;
+                                cr.set_source_rgba(hr, hg, hb, ha);
+                                cr.set_line_width(subtitle_preview_stroke_width(h));
+                                let _ = cr.move_to(word_x, ty);
+                                cr.text_path(&word.text);
+                                cr.stroke().ok();
+                            }
+
+                            // Bold highlight (faux bold via offset draw)
+                            if flags.bold {
+                                let (tr, tg, tb, ta) = line.color;
+                                cr.set_source_rgba(tr, tg, tb, ta);
+                                let _ = cr.move_to(word_x + 0.5, ty);
+                                let _ = cr.show_text(&word.text);
+                            }
+
+                            // Color highlight
+                            if flags.color {
+                                let (hr, hg, hb, ha) = line.highlight_color;
+                                cr.set_source_rgba(hr, hg, hb, ha);
+                            } else {
+                                let (tr, tg, tb, ta) = line.color;
+                                cr.set_source_rgba(tr, tg, tb, ta);
+                            }
+
+                            // Draw main text
+                            let _ = cr.move_to(word_x, ty);
+                            let _ = cr.show_text(&word.text);
+
+                            // Underline highlight
+                            if flags.underline {
+                                let (underline_thickness, underline_offset) =
+                                    subtitle_preview_underline_metrics(font_size);
+                                cr.set_line_width(underline_thickness);
+                                let _ = cr.move_to(word_x, ty + underline_offset);
+                                let _ = cr.line_to(word_x + we.x_advance(), ty + underline_offset);
+                                cr.stroke().ok();
                             }
                         } else {
+                            // Non-active word: base styles only
                             let (tr, tg, tb, ta) = line.color;
                             cr.set_source_rgba(tr, tg, tb, ta);
+
+                            // Base bold
+                            if line.subtitle_bold {
+                                let _ = cr.move_to(word_x + 0.5, ty);
+                                let _ = cr.show_text(&word.text);
+                            }
+
+                            let _ = cr.move_to(word_x, ty);
+                            let _ = cr.show_text(&word.text);
+
+                            // Base underline
+                            if line.subtitle_underline {
+                                let (underline_thickness, underline_offset) =
+                                    subtitle_preview_underline_metrics(font_size);
+                                cr.set_line_width(underline_thickness);
+                                let _ = cr.move_to(word_x, ty + underline_offset);
+                                let _ = cr.line_to(word_x + we.x_advance(), ty + underline_offset);
+                                cr.stroke().ok();
+                            }
                         }
-                        let _ = cr.move_to(word_x, ty);
-                        let _ = cr.show_text(&word.text);
                         word_x += we.x_advance();
                     }
                 } else {
                     // Single-block rendering (no word-level highlight).
+
+                    // Base shadow
+                    if line.subtitle_shadow {
+                        let (sr, sg, sb, sa) = line.subtitle_shadow_color;
+                        let (sox, soy) = line.subtitle_shadow_offset;
+                        cr.set_source_rgba(sr, sg, sb, sa);
+                        let _ = cr.move_to(tx + sox, ty + soy);
+                        let _ = cr.show_text(&display_text);
+                    }
+
                     let (tr, tg, tb, ta) = line.color;
                     cr.set_source_rgba(tr, tg, tb, ta);
+
+                    // Base bold (faux)
+                    if line.subtitle_bold {
+                        let _ = cr.move_to(tx + 0.5, ty);
+                        let _ = cr.show_text(&display_text);
+                    }
+
                     let _ = cr.move_to(tx, ty);
                     let _ = cr.show_text(&display_text);
+
+                    // Base underline
+                    if line.subtitle_underline {
+                        let te = cr
+                            .text_extents(&display_text)
+                            .unwrap_or_else(|_| cr.text_extents("M").unwrap());
+                        let (underline_thickness, underline_offset) =
+                            subtitle_preview_underline_metrics(font_size);
+                        cr.set_line_width(underline_thickness);
+                        let _ = cr.move_to(tx, ty + underline_offset);
+                        let _ = cr.line_to(tx + te.x_advance(), ty + underline_offset);
+                        cr.stroke().ok();
+                    }
                 }
             }
         });
@@ -720,7 +828,7 @@ pub fn build_program_monitor(
 
     // apply_zoom: when leaving zoom=1.0, records the natural canvas_frame size as baseline.
     // At non-1.0 zoom, disables hexpand/vexpand so the frame can grow beyond viewport.
-    let zoom_levels: &[f64] = &[0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
+    let zoom_levels: &[f64] = PROGRAM_MONITOR_ZOOM_LEVELS;
     let apply_zoom = {
         let canvas_frame = canvas_frame.clone();
         let scroll = scroll.clone();
@@ -830,15 +938,14 @@ pub fn build_program_monitor(
         let az = apply_zoom.clone();
         let zl = zoom_level.clone();
         let lbl = zoom_label.clone();
-        let zoom_levels_v = vec![0.25_f64, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
         zoom_out_btn.connect_clicked(move |_| {
             let z = zl.get();
-            let idx = zoom_levels_v
+            let idx = PROGRAM_MONITOR_ZOOM_LEVELS
                 .iter()
                 .position(|&l| (l - z).abs() < 0.01)
                 .unwrap_or(3);
             let new_idx = idx.saturating_sub(1);
-            let new_z = zoom_levels_v[new_idx];
+            let new_z = PROGRAM_MONITOR_ZOOM_LEVELS[new_idx];
             az(new_z);
             lbl.set_label(&format!("{}%", (new_z * 100.0) as u32));
         });
@@ -847,15 +954,14 @@ pub fn build_program_monitor(
         let az = apply_zoom.clone();
         let zl = zoom_level.clone();
         let lbl = zoom_label.clone();
-        let zoom_levels_v = vec![0.25_f64, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
         zoom_in_btn.connect_clicked(move |_| {
             let z = zl.get();
-            let idx = zoom_levels_v
+            let idx = PROGRAM_MONITOR_ZOOM_LEVELS
                 .iter()
                 .position(|&l| (l - z).abs() < 0.01)
                 .unwrap_or(3);
-            let new_idx = (idx + 1).min(zoom_levels_v.len() - 1);
-            let new_z = zoom_levels_v[new_idx];
+            let new_idx = (idx + 1).min(PROGRAM_MONITOR_ZOOM_LEVELS.len() - 1);
+            let new_z = PROGRAM_MONITOR_ZOOM_LEVELS[new_idx];
             az(new_z);
             lbl.set_label(&format!("{}%", (new_z * 100.0) as u32));
         });
@@ -897,8 +1003,8 @@ pub fn build_program_monitor(
     vu_bar.set_margin_end(4);
     vu_bar.append(&vu_meter);
 
-    // Place VU meter at the end of the title bar (right-aligned).
-    title_bar.append(&vu_bar);
+    // Place VU meter at the end of the header controls.
+    controls_row.append(&vu_bar);
 
     let safe_area_setter: Rc<dyn Fn(bool)> = {
         let safe_area_visible = safe_area_visible.clone();
@@ -1111,7 +1217,8 @@ pub fn build_vu_meter() -> (DrawingArea, Rc<Cell<[f64; 2]>>) {
             let green_frac = db_to_frac(-18.0);
             let green_h = (green_frac * height as f64).min(bar_h);
             if green_h > 0.0 {
-                cr.set_source_rgb(0.2, 0.8, 0.2);
+                let (r, g, b) = crate::ui::colors::COLOR_LEVEL_GOOD;
+                cr.set_source_rgb(r, g, b);
                 cr.rectangle(x, height as f64 - green_h, bar_w, green_h);
                 let _ = cr.fill();
             }
@@ -1122,7 +1229,8 @@ pub fn build_vu_meter() -> (DrawingArea, Rc<Cell<[f64; 2]>>) {
             let yellow_h =
                 ((yellow_frac - green_frac) * height as f64).min((bar_h - green_h).max(0.0));
             if yellow_h > 0.0 {
-                cr.set_source_rgb(0.9, 0.85, 0.1);
+                let (r, g, b) = crate::ui::colors::COLOR_LEVEL_WARN;
+                cr.set_source_rgb(r, g, b);
                 cr.rectangle(x, height as f64 - yellow_top - yellow_h, bar_w, yellow_h);
                 let _ = cr.fill();
             }
@@ -1131,7 +1239,8 @@ pub fn build_vu_meter() -> (DrawingArea, Rc<Cell<[f64; 2]>>) {
             let red_top = yellow_frac * height as f64;
             let red_h = (bar_h - red_top).max(0.0);
             if red_h > 0.0 {
-                cr.set_source_rgb(0.9, 0.2, 0.1);
+                let (r, g, b) = crate::ui::colors::COLOR_LEVEL_CLIP;
+                cr.set_source_rgb(r, g, b);
                 cr.rectangle(x, y_top, bar_w, red_h);
                 let _ = cr.fill();
             }

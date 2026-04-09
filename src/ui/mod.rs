@@ -1,6 +1,7 @@
 pub mod audio_effects_browser;
 pub mod color_scopes;
 pub mod color_wheel;
+pub mod colors;
 pub mod curves_editor;
 pub mod effects_browser;
 pub mod export_queue;

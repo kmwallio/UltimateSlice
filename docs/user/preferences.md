@@ -235,6 +235,21 @@ Backups are stored in `~/.local/share/ultimateslice/backups/` (or `$XDG_DATA_HOM
   - `get_preferences` returns `gsk_renderer`.
   - `set_gsk_renderer` updates the mode (restart required to apply).
 
+## Models
+
+The **Models** category lists every AI model UltimateSlice can use, with an installed/not-installed status badge and a clickable link to the install directory. Models are user-installed (not bundled with the app) — install them once and they persist across projects.
+
+| Model | Used For | Install Path | Approx Size |
+|---|---|---|---|
+| **MODNet** | AI background removal (Inspector → Effects) | `~/.local/share/ultimateslice/models/modnet_photographic_portrait_matting.onnx` | 25 MB |
+| **Whisper (GGML)** | Speech-to-text subtitle generation | `~/.local/share/ultimateslice/models/ggml-*.bin` | 100–500 MB |
+| **MusicGen-small** | AI music generation | `~/.local/share/ultimateslice/models/musicgen-small/` (4 files) | 900 MB |
+| **RIFE** | AI slow-motion frame interpolation (Inspector → Speed → Slow-Motion Interpolation → AI Interpolation) | `~/.local/share/ultimateslice/models/rife.onnx` | 20 MB |
+
+The MODNet entry includes an in-app **Download Model** button. Whisper, MusicGen, and RIFE link out to download instructions on Hugging Face — paste the model file(s) into the listed directory and the status badge updates next time the Preferences pane is opened.
+
+For the RIFE model specifically: use any RIFE ONNX export with the standard 6-channel input + timestep convention. The upstream project ([`github.com/hzwer/Practical-RIFE`](https://github.com/hzwer/Practical-RIFE)) hosts the model and a PyTorch → ONNX export script; pre-built ONNX exports are also published periodically by the community on Hugging Face. Place the file at `~/.local/share/ultimateslice/models/rife.onnx` (the filename `model.onnx` is also accepted in the same directory, so community downloads under that upstream filename work without renaming). The dropdown entry in the Inspector appears automatically once the file is present — no restart required. See [inspector.md](inspector.md#slow-motion-interpolation) for the Inspector workflow.
+
 ## MCP Socket Server (Integration)
 
 - **Enable MCP socket server** allows AI agents to connect to this running instance via a Unix domain socket.

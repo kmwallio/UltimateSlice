@@ -3,3 +3,5 @@ pub mod media_library;
 pub mod project;
 pub mod through_edit;
 pub mod track;
+pub mod transform_bounds;
+pub mod transition;

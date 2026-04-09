@@ -62,7 +62,22 @@ When a visual timeline clip or adjustment layer is selected, the Program Monitor
 - **Edge midpoint handles**: drag top/bottom/left/right handles to adjust crop directly in preview.
 - Keyboard nudges work when the overlay has focus (click the monitor once).
 - Starting an overlay drag pauses playback and keeps the current frame locked while editing; playback remains paused after you release.
-- For **adjustment layers**, these controls edit the scoped effect region instead of moving source pixels. The overlay box is the exact region used for live scoped adjustment preview.
+- Still-image overlays use the selected clip's own preview framing for the transform box, so a PNG/JPEG/WebP/SVG overlay stays aligned with its handles even if the video clip underneath has a different aspect ratio. Selecting a still while paused immediately pushes that clip's framing to the transform overlay and refreshes the preview frame, instead of waiting for the next playhead poll to catch up.
+- Static still-image overlays update via a lightweight compositor flush during transform drags — the change is applied directly to the compositor without reseeking the upstream image decoder — so a PNG stays visible (and the UI stays responsive) while you move, scale, rotate, or crop it in the Program Monitor.
+- Titles and tracker-followed clips use direct canvas translation for **Position X/Y**, so movement still works at `Scale = 1.0` instead of collapsing when the visible content reaches a frame edge. Normal still-image clips keep the existing still-image preview path unless they are actually following a tracker.
+- For **adjustment layers**, these controls edit the scoped effect region instead of moving source pixels. The overlay box is the exact region used for live scoped adjustment preview, and any enabled shape mask further trims that region instead of replacing it.
+- Adjustment-layer **Position X/Y** offsets translate that scoped region directly, so tracked or keyframed adjustments still move visibly even when the layer stays at full-frame scale (`Scale = 1.0`).
+
+## Motion Tracking Region Overlay
+
+When **Motion Tracking → Edit Region in Monitor** is enabled for the selected clip:
+
+- Program Monitor draws a **green tracking rectangle** over the current clip.
+- Drag **inside** the rectangle to reposition the analysis region.
+- Drag the **corner handles** to resize the tracked region.
+- The Motion Tracking sliders in the Inspector stay in sync with those overlay edits.
+- If the selected clip or its first rectangle/ellipse mask is attached to a tracker, Program Monitor uses the resolved tracked motion at the current playhead position.
+- That tracked follow path also applies to title clips and still-image overlays, so follower motion keeps translating across the canvas even when the clip is full-frame or reaches an edge.
 
 ## Safe Area Guides
 
@@ -79,6 +94,7 @@ When a visual timeline clip or adjustment layer is selected, the Program Monitor
 - Audio from active video clips is mixed through an **audiomixer** element (except freeze-frame video holds, which are intentionally silent); audio-only tracks use a separate playbin.
 - Before clip audio reaches the preview mixer, UltimateSlice normalizes it to a fixed 48 kHz stereo raw-audio format. This keeps lower-rate camera AAC sources (such as 16 kHz mono Ring clips) from tripping GStreamer `not-negotiated` playback errors in the Program Monitor.
 - Animated SVG clips play through a cached silent rendered derivative so authored motion appears in preview, while timeline extensions beyond the authored duration hold on the last frame.
+- Still-image timeline clips loaded from `.uspxml` or imported FCPXML keep their held-image preview path after reopen, and live playback/transform reseeks pin them to their source-in frame, so PNG/JPEG/WebP/SVG overlays continue to display in Program Monitor instead of behaving like one-frame video decodes or disappearing once playback starts.
 - Program Monitor shows a **master stereo meter** (L/R), updated from GStreamer `level` elements.
 - During prerender playback, per-track timeline meters remain active by mapping prerender audio-level telemetry to the currently active prerender track set.
 - Timeline position is tracked via wall-clock timing for reliable playhead movement — no seek-anchor heuristics needed.
@@ -86,8 +102,12 @@ When a visual timeline clip or adjustment layer is selected, the Program Monitor
 - When clip boundaries are crossed during playback (a clip starts or ends), the pipeline is briefly rebuilt with the new set of active clips.
 - During those boundary rebuilds, audio-only preview playback is paused/re-synced to the current timeline position before resume so audio does not run ahead and end earlier than video.
 - All per-clip effects (color, denoise, sharpness, crop, rotate, flip, scale, position, title overlay, speed) are applied per-slot during playback.
-- Adjustment layers are applied post-compositor. Supported scoped preview effects (including LUTs, primary color, temperature/tint, and three-point grading) are limited to the selected adjustment clip's transformed bounding box, and overlapping adjustment layers stack by track order.
-- **Transitions** (cross-dissolve, fade-to-black, wipe-right, wipe-left) are previewed in real time during both playback and scrubbing, matching the FFmpeg `xfade` export output. Dissolve and fade transitions animate compositor pad alpha; wipe transitions use videocrop animation on the incoming clip to progressively reveal it.
+- Motion-tracked clip and first-mask attachments are resolved into the same transform/mask evaluation path used by normal preview playback, so tracked overlays in Program Monitor match export timing and placement.
+- Adjustment layers are applied post-compositor. Supported scoped preview effects (including LUTs, primary color, temperature/tint, and three-point grading) are limited to the selected adjustment clip's transformed bounding box, and any enabled adjustment-layer shape mask is intersected with that scope before the effect is blended in. Overlapping adjustment layers still stack by track order.
+- Motion-tracked adjustment layers use that same scoped-region transform path, so clip-level tracking can move a masked adjustment across the frame even when the adjustment starts as a full-frame layer.
+- **Transitions** are previewed natively in real time during both playback and scrubbing. `Cross-dissolve` fades compositor pad alpha between clips, `Fade to black` and `Fade to white` fade against the compositor background, `Wipe left/right/up/down` use videocrop animation on the incoming clip, `Circle open` / `Circle close` animate a live ellipse mask on the incoming clip even when the clip has no authored masks, and `Cover`, `Reveal`, and `Slide` left/right/up/down variants animate clip motion across the canvas. Export and prerender use the same supported transition set.
+- Transition **Alignment** (`End on cut`, `Center on cut`, `Start on cut`) shifts when the overlap begins and ends relative to the edit. For the post-cut portion of an overlap, Program Monitor keeps the outgoing clip visible by holding its last frame so preview matches export and prerender.
+- Changing a transition's type, duration, or alignment invalidates any matching cached boundary prerender so Program Monitor refreshes to the new transition instead of replaying an older overlap render.
 - Freeze-frame clips are rendered as true video holds: Program Monitor samples the configured freeze source frame and holds that frame for the clip's resolved freeze duration during playback and scrubbing.
 - Freeze-frame decoder seeks use accurate (non-key-unit) frame selection for the hold sample, preventing black-frame preview failures on long-GOP media.
 - Scale/Position edits from the Inspector and transform overlay are applied to the active preview clip immediately in both paused and playing states.
@@ -127,7 +147,7 @@ When a visual timeline clip or adjustment layer is selected, the Program Monitor
 - Background prerender encoding quality is configurable from Preferences via x264 preset + CRF. Lower CRF and slower presets improve fidelity, and those settings are part of the prerender cache identity so mismatched-quality cached segments are not reused.
 - Prerender cache lookups now track hit/miss telemetry (with hit-rate summaries), and `get_performance_snapshot` includes `prerender_cache_hits`, `prerender_cache_misses`, and `prerender_cache_hit_rate_percent`.
 - For proxy-backed prerender inputs, LUT is not re-applied in the prerender FFmpeg graph, preventing double LUT grading when the proxy media is already LUT-baked.
-- When a **scoped** adjustment layer is active, background prerender falls back to the live compositor-output path so the Program Monitor does not show stale full-frame adjustment renders.
+- When a **scoped or masked** adjustment layer is active, background prerender falls back to the live compositor-output path so the Program Monitor does not show stale full-frame adjustment renders.
 - Background prerender now preserves animated **brightness / contrast / saturation / temperature / tint** keyframes, so overlap playback stays closer to the final export when those color controls are keyframed.
 - Transparent title clips keep their alpha in background prerender, so prerendered title overlays show the lower video tracks behind the text instead of flattening to black.
 - Title fonts in background prerender now reuse the selected family plus structured weight/slant/width selectors, so bold and italic title faces stay closer to the live Program Monitor preview instead of falling back to a regular face.

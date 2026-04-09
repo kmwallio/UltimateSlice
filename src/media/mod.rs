@@ -1,13 +1,18 @@
 pub mod adjustment_scope;
 pub mod animated_svg;
+pub mod audio_features;
+pub mod audio_match;
 pub mod audio_sync;
 pub mod bg_removal_cache;
 pub mod color_match;
 pub mod cube_lut;
 pub mod export;
+pub mod frame_interp_cache;
 pub mod frei0r_registry;
 pub mod ladspa_registry;
+pub mod ltc;
 pub mod mask_alpha;
+pub mod music_gen;
 pub mod player;
 pub mod probe_cache;
 pub mod program_player;
@@ -16,6 +21,7 @@ pub mod stt_cache;
 pub mod thumb_cache;
 pub mod thumbnail;
 pub mod title_font;
+pub mod tracking;
 pub mod voiceover;
 pub mod waveform_cache;
 

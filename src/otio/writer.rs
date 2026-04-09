@@ -4,10 +4,6 @@ use anyhow::Result;
 use serde_json::json;
 use std::path::{Component, Path, PathBuf};
 
-use crate::model::clip::ClipKind;
-use crate::model::project::Project;
-use crate::model::track::TrackKind;
-
 use super::metadata::{
     wrap_clip_metadata, wrap_marker_metadata, wrap_project_metadata, wrap_track_metadata,
     wrap_transition_metadata, UltimateSliceClipOtioMetadata, UltimateSliceMarkerOtioMetadata,
@@ -15,6 +11,10 @@ use super::metadata::{
     UltimateSliceTransitionOtioMetadata,
 };
 use super::schema::*;
+use crate::model::clip::ClipKind;
+use crate::model::project::Project;
+use crate::model::track::TrackKind;
+use crate::model::transition::transition_label_for_kind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OtioMediaPathMode {
@@ -222,9 +222,171 @@ fn write_otio_with_mode(
                 reverse: Some(clip.reverse),
                 volume: Some(clip.volume as f64),
                 pan: Some(clip.pan as f64),
+                eq_bands: Some(clip.eq_bands),
+                match_eq_bands: if clip.match_eq_bands.is_empty() {
+                    None
+                } else {
+                    Some(clip.match_eq_bands.clone())
+                },
+                voice_isolation: Some(clip.voice_isolation as f64),
+                voice_isolation_pad_ms: Some(clip.voice_isolation_pad_ms as f64),
+                voice_isolation_fade_ms: Some(clip.voice_isolation_fade_ms as f64),
+                voice_isolation_floor: Some(clip.voice_isolation_floor as f64),
+                voice_isolation_source: Some(clip.voice_isolation_source),
+                voice_isolation_silence_threshold_db: Some(
+                    clip.voice_isolation_silence_threshold_db as f64,
+                ),
+                voice_isolation_silence_min_ms: Some(clip.voice_isolation_silence_min_ms),
+                measured_loudness_lufs: clip.measured_loudness_lufs,
+                chroma_key_enabled: Some(clip.chroma_key_enabled),
+                chroma_key_color: Some(clip.chroma_key_color),
+                chroma_key_tolerance: Some(clip.chroma_key_tolerance as f64),
+                chroma_key_softness: Some(clip.chroma_key_softness as f64),
+                bg_removal_enabled: Some(clip.bg_removal_enabled),
+                bg_removal_threshold: Some(clip.bg_removal_threshold),
+                freeze_frame: Some(clip.freeze_frame),
+                freeze_frame_source_ns: clip.freeze_frame_source_ns,
+                freeze_frame_hold_duration_ns: clip.freeze_frame_hold_duration_ns,
+                vidstab_enabled: Some(clip.vidstab_enabled),
+                vidstab_smoothing: Some(clip.vidstab_smoothing as f64),
+                color_label: Some(clip.color_label),
+                anamorphic_desqueeze: Some(clip.anamorphic_desqueeze),
+                group_id: clip.group_id.clone(),
+                link_group_id: clip.link_group_id.clone(),
+                source_timecode_base_ns: clip.source_timecode_base_ns,
+                animated_svg: Some(clip.animated_svg),
+                frei0r_effects: if clip.frei0r_effects.is_empty() {
+                    None
+                } else {
+                    Some(clip.frei0r_effects.clone())
+                },
+                ladspa_effects: if clip.ladspa_effects.is_empty() {
+                    None
+                } else {
+                    Some(clip.ladspa_effects.clone())
+                },
+                masks: if clip.masks.is_empty() {
+                    None
+                } else {
+                    Some(clip.masks.clone())
+                },
+                motion_trackers: if clip.motion_trackers.is_empty() {
+                    None
+                } else {
+                    Some(clip.motion_trackers.clone())
+                },
+                tracking_binding: clip.tracking_binding.clone(),
+                compound_tracks: clip.compound_tracks.clone(),
+                multicam_angles: clip.multicam_angles.clone(),
+                multicam_switches: clip.multicam_switches.clone(),
                 brightness: Some(clip.brightness as f64),
                 contrast: Some(clip.contrast as f64),
                 saturation: Some(clip.saturation as f64),
+                temperature: Some(clip.temperature as f64),
+                tint: Some(clip.tint as f64),
+                denoise: Some(clip.denoise as f64),
+                sharpness: Some(clip.sharpness as f64),
+                blur: Some(clip.blur as f64),
+                shadows: Some(clip.shadows as f64),
+                midtones: Some(clip.midtones as f64),
+                highlights: Some(clip.highlights as f64),
+                exposure: Some(clip.exposure as f64),
+                black_point: Some(clip.black_point as f64),
+                highlights_warmth: Some(clip.highlights_warmth as f64),
+                highlights_tint: Some(clip.highlights_tint as f64),
+                midtones_warmth: Some(clip.midtones_warmth as f64),
+                midtones_tint: Some(clip.midtones_tint as f64),
+                shadows_warmth: Some(clip.shadows_warmth as f64),
+                shadows_tint: Some(clip.shadows_tint as f64),
+                pitch_shift_semitones: Some(clip.pitch_shift_semitones),
+                pitch_preserve: Some(clip.pitch_preserve),
+                audio_channel_mode: Some(clip.audio_channel_mode),
+                speed_keyframes: if clip.speed_keyframes.is_empty() {
+                    None
+                } else {
+                    Some(clip.speed_keyframes.clone())
+                },
+                slow_motion_interp: Some(clip.slow_motion_interp),
+                lut_paths: if clip.lut_paths.is_empty() {
+                    None
+                } else {
+                    Some(clip.lut_paths.clone())
+                },
+                brightness_keyframes: if clip.brightness_keyframes.is_empty() {
+                    None
+                } else {
+                    Some(clip.brightness_keyframes.clone())
+                },
+                contrast_keyframes: if clip.contrast_keyframes.is_empty() {
+                    None
+                } else {
+                    Some(clip.contrast_keyframes.clone())
+                },
+                saturation_keyframes: if clip.saturation_keyframes.is_empty() {
+                    None
+                } else {
+                    Some(clip.saturation_keyframes.clone())
+                },
+                temperature_keyframes: if clip.temperature_keyframes.is_empty() {
+                    None
+                } else {
+                    Some(clip.temperature_keyframes.clone())
+                },
+                tint_keyframes: if clip.tint_keyframes.is_empty() {
+                    None
+                } else {
+                    Some(clip.tint_keyframes.clone())
+                },
+                blur_keyframes: if clip.blur_keyframes.is_empty() {
+                    None
+                } else {
+                    Some(clip.blur_keyframes.clone())
+                },
+                volume_keyframes: if clip.volume_keyframes.is_empty() {
+                    None
+                } else {
+                    Some(clip.volume_keyframes.clone())
+                },
+                pan_keyframes: if clip.pan_keyframes.is_empty() {
+                    None
+                } else {
+                    Some(clip.pan_keyframes.clone())
+                },
+                eq_low_gain_keyframes: if clip.eq_low_gain_keyframes.is_empty() {
+                    None
+                } else {
+                    Some(clip.eq_low_gain_keyframes.clone())
+                },
+                eq_mid_gain_keyframes: if clip.eq_mid_gain_keyframes.is_empty() {
+                    None
+                } else {
+                    Some(clip.eq_mid_gain_keyframes.clone())
+                },
+                eq_high_gain_keyframes: if clip.eq_high_gain_keyframes.is_empty() {
+                    None
+                } else {
+                    Some(clip.eq_high_gain_keyframes.clone())
+                },
+                crop_left_keyframes: if clip.crop_left_keyframes.is_empty() {
+                    None
+                } else {
+                    Some(clip.crop_left_keyframes.clone())
+                },
+                crop_right_keyframes: if clip.crop_right_keyframes.is_empty() {
+                    None
+                } else {
+                    Some(clip.crop_right_keyframes.clone())
+                },
+                crop_top_keyframes: if clip.crop_top_keyframes.is_empty() {
+                    None
+                } else {
+                    Some(clip.crop_top_keyframes.clone())
+                },
+                crop_bottom_keyframes: if clip.crop_bottom_keyframes.is_empty() {
+                    None
+                } else {
+                    Some(clip.crop_bottom_keyframes.clone())
+                },
                 opacity: Some(clip.opacity),
                 scale: Some(clip.scale),
                 position_x: Some(clip.position_x),
@@ -262,6 +424,19 @@ fn write_otio_with_mode(
                 subtitle_segments: Some(clip.subtitle_segments.clone()),
                 subtitles_language: Some(clip.subtitles_language.clone()),
                 subtitle_font: Some(clip.subtitle_font.clone()),
+                subtitle_bold: Some(clip.subtitle_bold),
+                subtitle_italic: Some(clip.subtitle_italic),
+                subtitle_underline: Some(clip.subtitle_underline),
+                subtitle_shadow: Some(clip.subtitle_shadow),
+                subtitle_shadow_color: Some(clip.subtitle_shadow_color),
+                subtitle_shadow_offset_x: Some(clip.subtitle_shadow_offset_x),
+                subtitle_shadow_offset_y: Some(clip.subtitle_shadow_offset_y),
+                subtitle_highlight_flags: if clip.subtitle_highlight_flags.is_none() {
+                    None
+                } else {
+                    Some(clip.subtitle_highlight_flags)
+                },
+                subtitle_bg_highlight_color: Some(clip.subtitle_bg_highlight_color),
                 subtitle_color: Some(clip.subtitle_color),
                 subtitle_outline_color: Some(clip.subtitle_outline_color),
                 subtitle_outline_width: Some(clip.subtitle_outline_width),
@@ -286,16 +461,21 @@ fn write_otio_with_mode(
             cursor_ns = clip.timeline_start + clip_duration_ns;
 
             // Transition after this clip?
-            if !clip.transition_after.is_empty() && clip.transition_after_ns > 0 {
-                let half_ns = clip.transition_after_ns / 2;
+            if clip.outgoing_transition.is_active() {
+                let split = clip.outgoing_transition.cut_split();
                 children.push(OtioTrackChild::Transition(OtioTransition {
                     schema: "Transition.1".into(),
-                    name: clip.transition_after.replace('_', " "),
-                    transition_type: otio_transition_type(&clip.transition_after).into(),
-                    in_offset: ns_to_rational_time(half_ns, rate),
-                    out_offset: ns_to_rational_time(clip.transition_after_ns - half_ns, rate),
+                    name: transition_label_for_kind(clip.outgoing_transition.kind_trimmed())
+                        .unwrap_or(clip.outgoing_transition.kind.as_str())
+                        .to_string(),
+                    transition_type: otio_transition_type(&clip.outgoing_transition.kind).into(),
+                    in_offset: ns_to_rational_time(split.before_cut_ns, rate),
+                    out_offset: ns_to_rational_time(split.after_cut_ns, rate),
                     metadata: wrap_transition_metadata(&UltimateSliceTransitionOtioMetadata {
-                        transition_kind: Some(clip.transition_after.clone()),
+                        transition_kind: Some(clip.outgoing_transition.kind.clone()),
+                        transition_alignment: Some(
+                            clip.outgoing_transition.alignment.as_str().to_string(),
+                        ),
                     }),
                 }));
             }
@@ -328,7 +508,7 @@ fn write_otio_with_mode(
         let target_idx = project
             .tracks
             .iter()
-            .position(|t| t.kind == TrackKind::Video)
+            .position(|t| t.is_video())
             .unwrap_or(0);
         if target_idx < otio_tracks.len() {
             for marker in &project.markers {
@@ -373,9 +553,7 @@ fn write_otio_with_mode(
 /// Map a packed RGBA colour to a human-readable OTIO marker colour name.
 fn marker_color_name(rgba: u32) -> String {
     // Extract rough hue from the RGB bytes.
-    let r = ((rgba >> 24) & 0xFF) as u8;
-    let g = ((rgba >> 16) & 0xFF) as u8;
-    let b = ((rgba >> 8) & 0xFF) as u8;
+    let (r, g, b, _a) = crate::ui::colors::rgba_u32_to_u8(rgba);
     let max = r.max(g).max(b);
     if max < 40 {
         return "BLACK".into();
@@ -522,8 +700,11 @@ mod tests {
         let mut p = make_project();
         let mut track = Track::new_video("V1");
         let mut c1 = Clip::new("/footage/a.mp4", 3_000_000_000, 0, ClipKind::Video);
-        c1.transition_after = "cross_dissolve".into();
-        c1.transition_after_ns = 1_000_000_000; // 1 second
+        c1.outgoing_transition = crate::model::transition::OutgoingTransition::new(
+            "cross_dissolve",
+            1_000_000_000,
+            crate::model::transition::TransitionAlignment::EndOnCut,
+        ); // 1 second
         track.add_clip(c1);
         track.add_clip(Clip::new(
             "/footage/b.mp4",

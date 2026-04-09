@@ -280,7 +280,7 @@ fn probe_wav_duration(path: &str) -> Option<u64> {
 /// Uses `$XDG_DATA_HOME/ultimateslice/voiceovers/` (typically `~/.local/share/...`)
 /// so recordings survive reboots. These files are source media referenced by
 /// the project — they must not be in `/tmp`.
-fn voiceover_cache_dir() -> PathBuf {
+pub fn voiceover_cache_dir() -> PathBuf {
     std::env::var("XDG_DATA_HOME")
         .ok()
         .filter(|v| !v.is_empty())

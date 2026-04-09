@@ -90,9 +90,10 @@ Bins are saved with your project and restored when you reopen it.
 
 1. Select a clip in the library.
 2. Set In/Out points in the Source Monitor if needed (see [source-monitor.md](source-monitor.md)).
-3. Click **Append to Timeline** — the marked region is placed at the end of the first Video track.
-   - For audio-only sources, append targets an audio track; for video sources, a video track.
+3. Click **Append to Timeline** — the marked region is placed at the end of a matching timeline track.
+   - For audio-only sources, append targets an audio track; for video or image sources, a video track.
    - If an active matching-kind track is selected in timeline, append uses that track; otherwise it uses the first matching-kind track.
+   - If no matching track exists yet, UltimateSlice creates one automatically before placing the clip.
 
 ### Drag and Drop
 

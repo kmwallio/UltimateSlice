@@ -7,6 +7,7 @@ use std::path::{Component, Path, PathBuf};
 use crate::model::clip::{Clip, ClipKind};
 use crate::model::project::{FrameRate, Marker, Project};
 use crate::model::track::{AudioRole, Track, TrackKind};
+use crate::model::transition::{OutgoingTransition, TransitionAlignment};
 
 use super::metadata::{
     clip_metadata_from_root, marker_metadata_from_root, project_metadata_from_root,
@@ -100,8 +101,8 @@ pub fn parse_otio_with_path(json: &str, otio_path: Option<&Path>) -> Result<Proj
                 OtioTrackChild::Transition(trans) => {
                     // Attach transition info to the preceding clip.
                     if let Some(prev) = track.clips.last_mut() {
-                        let kind_name = transition_metadata_from_root(&trans.metadata)
-                            .and_then(|us| us.transition_kind);
+                        let metadata = transition_metadata_from_root(&trans.metadata);
+                        let kind_name = metadata.as_ref().and_then(|us| us.transition_kind.clone());
                         let transition_name =
                             kind_name.unwrap_or_else(|| match trans.transition_type.as_str() {
                                 "SMPTE_Dissolve" => "cross_dissolve".into(),
@@ -109,8 +110,16 @@ pub fn parse_otio_with_path(json: &str, otio_path: Option<&Path>) -> Result<Proj
                             });
                         let in_ns = rational_time_to_ns(&trans.in_offset);
                         let out_ns = rational_time_to_ns(&trans.out_offset);
-                        prev.transition_after = transition_name;
-                        prev.transition_after_ns = in_ns + out_ns;
+                        let duration_ns = in_ns + out_ns;
+                        let alignment = metadata
+                            .as_ref()
+                            .and_then(|us| us.transition_alignment.as_deref())
+                            .and_then(TransitionAlignment::from_str)
+                            .unwrap_or_else(|| {
+                                TransitionAlignment::from_before_cut_duration(in_ns, duration_ns)
+                            });
+                        prev.outgoing_transition =
+                            OutgoingTransition::new(transition_name, duration_ns, alignment);
                     }
                 }
             }
@@ -202,6 +211,111 @@ fn otio_clip_to_clip(
         if let Some(v) = us.pan {
             clip.pan = v as f32;
         }
+        if let Some(v) = us.eq_bands {
+            clip.eq_bands = v;
+        }
+        if let Some(v) = us.match_eq_bands.clone() {
+            clip.match_eq_bands = v;
+        }
+        if let Some(v) = us.voice_isolation {
+            clip.voice_isolation = v as f32;
+        }
+        if let Some(v) = us.voice_isolation_pad_ms {
+            clip.voice_isolation_pad_ms = v as f32;
+        }
+        if let Some(v) = us.voice_isolation_fade_ms {
+            clip.voice_isolation_fade_ms = v as f32;
+        }
+        if let Some(v) = us.voice_isolation_floor {
+            clip.voice_isolation_floor = v as f32;
+        }
+        if let Some(v) = us.voice_isolation_source {
+            clip.voice_isolation_source = v;
+        }
+        if let Some(v) = us.voice_isolation_silence_threshold_db {
+            clip.voice_isolation_silence_threshold_db = v as f32;
+        }
+        if let Some(v) = us.voice_isolation_silence_min_ms {
+            clip.voice_isolation_silence_min_ms = v;
+        }
+        if let Some(v) = us.measured_loudness_lufs {
+            clip.measured_loudness_lufs = Some(v);
+        }
+        if let Some(v) = us.chroma_key_enabled {
+            clip.chroma_key_enabled = v;
+        }
+        if let Some(v) = us.chroma_key_color {
+            clip.chroma_key_color = v;
+        }
+        if let Some(v) = us.chroma_key_tolerance {
+            clip.chroma_key_tolerance = v as f32;
+        }
+        if let Some(v) = us.chroma_key_softness {
+            clip.chroma_key_softness = v as f32;
+        }
+        if let Some(v) = us.bg_removal_enabled {
+            clip.bg_removal_enabled = v;
+        }
+        if let Some(v) = us.bg_removal_threshold {
+            clip.bg_removal_threshold = v;
+        }
+        if let Some(v) = us.freeze_frame {
+            clip.freeze_frame = v;
+        }
+        if let Some(v) = us.freeze_frame_source_ns {
+            clip.freeze_frame_source_ns = Some(v);
+        }
+        if let Some(v) = us.freeze_frame_hold_duration_ns {
+            clip.freeze_frame_hold_duration_ns = Some(v);
+        }
+        if let Some(v) = us.vidstab_enabled {
+            clip.vidstab_enabled = v;
+        }
+        if let Some(v) = us.vidstab_smoothing {
+            clip.vidstab_smoothing = v as f32;
+        }
+        if let Some(v) = us.color_label {
+            clip.color_label = v;
+        }
+        if let Some(v) = us.anamorphic_desqueeze {
+            clip.anamorphic_desqueeze = v;
+        }
+        if let Some(v) = us.group_id.as_ref() {
+            clip.group_id = Some(v.clone());
+        }
+        if let Some(v) = us.link_group_id.as_ref() {
+            clip.link_group_id = Some(v.clone());
+        }
+        if let Some(v) = us.source_timecode_base_ns {
+            clip.source_timecode_base_ns = Some(v);
+        }
+        if let Some(v) = us.animated_svg {
+            clip.animated_svg = v;
+        }
+        if let Some(v) = us.frei0r_effects.as_ref() {
+            clip.frei0r_effects = v.clone();
+        }
+        if let Some(v) = us.ladspa_effects.as_ref() {
+            clip.ladspa_effects = v.clone();
+        }
+        if let Some(v) = us.masks.as_ref() {
+            clip.masks = v.clone();
+        }
+        if let Some(v) = us.motion_trackers.as_ref() {
+            clip.motion_trackers = v.clone();
+        }
+        if let Some(v) = us.tracking_binding.as_ref() {
+            clip.tracking_binding = Some(v.clone());
+        }
+        if let Some(v) = us.compound_tracks.as_ref() {
+            clip.compound_tracks = Some(v.clone());
+        }
+        if let Some(v) = us.multicam_angles.as_ref() {
+            clip.multicam_angles = Some(v.clone());
+        }
+        if let Some(v) = us.multicam_switches.as_ref() {
+            clip.multicam_switches = Some(v.clone());
+        }
         if let Some(v) = us.brightness {
             clip.brightness = v as f32;
         }
@@ -210,6 +324,117 @@ fn otio_clip_to_clip(
         }
         if let Some(v) = us.saturation {
             clip.saturation = v as f32;
+        }
+        if let Some(v) = us.temperature {
+            clip.temperature = v as f32;
+        }
+        if let Some(v) = us.tint {
+            clip.tint = v as f32;
+        }
+        if let Some(v) = us.denoise {
+            clip.denoise = v as f32;
+        }
+        if let Some(v) = us.sharpness {
+            clip.sharpness = v as f32;
+        }
+        if let Some(v) = us.blur {
+            clip.blur = v as f32;
+        }
+        if let Some(v) = us.shadows {
+            clip.shadows = v as f32;
+        }
+        if let Some(v) = us.midtones {
+            clip.midtones = v as f32;
+        }
+        if let Some(v) = us.highlights {
+            clip.highlights = v as f32;
+        }
+        if let Some(v) = us.exposure {
+            clip.exposure = v as f32;
+        }
+        if let Some(v) = us.black_point {
+            clip.black_point = v as f32;
+        }
+        if let Some(v) = us.highlights_warmth {
+            clip.highlights_warmth = v as f32;
+        }
+        if let Some(v) = us.highlights_tint {
+            clip.highlights_tint = v as f32;
+        }
+        if let Some(v) = us.midtones_warmth {
+            clip.midtones_warmth = v as f32;
+        }
+        if let Some(v) = us.midtones_tint {
+            clip.midtones_tint = v as f32;
+        }
+        if let Some(v) = us.shadows_warmth {
+            clip.shadows_warmth = v as f32;
+        }
+        if let Some(v) = us.shadows_tint {
+            clip.shadows_tint = v as f32;
+        }
+        if let Some(v) = us.pitch_shift_semitones {
+            clip.pitch_shift_semitones = v;
+        }
+        if let Some(v) = us.pitch_preserve {
+            clip.pitch_preserve = v;
+        }
+        if let Some(v) = us.audio_channel_mode {
+            clip.audio_channel_mode = v;
+        }
+        if let Some(v) = us.speed_keyframes.as_ref() {
+            clip.speed_keyframes = v.clone();
+        }
+        if let Some(v) = us.slow_motion_interp {
+            clip.slow_motion_interp = v;
+        }
+        if let Some(v) = us.lut_paths.as_ref() {
+            clip.lut_paths = v.clone();
+        }
+        if let Some(v) = us.brightness_keyframes.as_ref() {
+            clip.brightness_keyframes = v.clone();
+        }
+        if let Some(v) = us.contrast_keyframes.as_ref() {
+            clip.contrast_keyframes = v.clone();
+        }
+        if let Some(v) = us.saturation_keyframes.as_ref() {
+            clip.saturation_keyframes = v.clone();
+        }
+        if let Some(v) = us.temperature_keyframes.as_ref() {
+            clip.temperature_keyframes = v.clone();
+        }
+        if let Some(v) = us.tint_keyframes.as_ref() {
+            clip.tint_keyframes = v.clone();
+        }
+        if let Some(v) = us.blur_keyframes.as_ref() {
+            clip.blur_keyframes = v.clone();
+        }
+        if let Some(v) = us.volume_keyframes.as_ref() {
+            clip.volume_keyframes = v.clone();
+        }
+        if let Some(v) = us.pan_keyframes.as_ref() {
+            clip.pan_keyframes = v.clone();
+        }
+        if let Some(v) = us.eq_low_gain_keyframes.as_ref() {
+            clip.eq_low_gain_keyframes = v.clone();
+        }
+        if let Some(v) = us.eq_mid_gain_keyframes.as_ref() {
+            clip.eq_mid_gain_keyframes = v.clone();
+        }
+        if let Some(v) = us.eq_high_gain_keyframes.as_ref() {
+            clip.eq_high_gain_keyframes = v.clone();
+        }
+        if let Some(v) = us.crop_left_keyframes.as_ref() {
+            clip.crop_left_keyframes = v.clone();
+        }
+        if let Some(v) = us.crop_right_keyframes.as_ref() {
+            clip.crop_right_keyframes = v.clone();
+        }
+        if let Some(v) = us.crop_top_keyframes.as_ref() {
+            clip.crop_top_keyframes = v.clone();
+        }
+        if let Some(v) = us.crop_bottom_keyframes.as_ref() {
+            clip.crop_bottom_keyframes = v.clone();
         }
         if let Some(v) = us.opacity {
             clip.opacity = v;
@@ -321,6 +546,33 @@ fn otio_clip_to_clip(
         }
         if let Some(v) = us.subtitle_font.as_ref() {
             clip.subtitle_font = v.clone();
+        }
+        if let Some(v) = us.subtitle_bold {
+            clip.subtitle_bold = v;
+        }
+        if let Some(v) = us.subtitle_italic {
+            clip.subtitle_italic = v;
+        }
+        if let Some(v) = us.subtitle_underline {
+            clip.subtitle_underline = v;
+        }
+        if let Some(v) = us.subtitle_shadow {
+            clip.subtitle_shadow = v;
+        }
+        if let Some(v) = us.subtitle_shadow_color {
+            clip.subtitle_shadow_color = v;
+        }
+        if let Some(v) = us.subtitle_shadow_offset_x {
+            clip.subtitle_shadow_offset_x = v;
+        }
+        if let Some(v) = us.subtitle_shadow_offset_y {
+            clip.subtitle_shadow_offset_y = v;
+        }
+        if let Some(v) = us.subtitle_highlight_flags {
+            clip.subtitle_highlight_flags = v;
+        }
+        if let Some(v) = us.subtitle_bg_highlight_color {
+            clip.subtitle_bg_highlight_color = v;
         }
         if let Some(v) = us.subtitle_color {
             clip.subtitle_color = v;
@@ -693,8 +945,8 @@ mod tests {
         }"#;
         let p = parse_otio(json).unwrap();
         let a = &p.tracks[0].clips[0];
-        assert_eq!(a.transition_after, "cross_dissolve");
-        assert!(a.transition_after_ns > 0);
+        assert_eq!(a.outgoing_transition.kind, "cross_dissolve");
+        assert!(a.outgoing_transition.duration_ns > 0);
     }
 
     #[test]
@@ -965,6 +1217,617 @@ mod tests {
         assert_eq!(clip2.position_y_keyframes, clip.position_y_keyframes);
         assert_eq!(clip2.rotate_keyframes, clip.rotate_keyframes);
         assert_eq!(clip2.opacity_keyframes, clip.opacity_keyframes);
+    }
+
+    #[test]
+    fn test_roundtrip_batch_a_color_grading_and_keyframes() {
+        use crate::model::clip::{
+            AudioChannelMode, KeyframeInterpolation, NumericKeyframe, SlowMotionInterp,
+        };
+        use crate::model::track::Track;
+
+        let mut p = Project::new("Batch A Roundtrip");
+        p.frame_rate = FrameRate {
+            numerator: 30,
+            denominator: 1,
+        };
+        p.tracks.clear();
+
+        let mut track = Track::new_video("V1");
+        let mut clip = Clip::new(
+            "/footage/test.mov",
+            5_000_000_000,
+            0,
+            ClipKind::Video,
+        );
+
+        // Color correction
+        clip.temperature = 5200.0;
+        clip.tint = 0.15;
+        // Image filters
+        clip.denoise = 0.4;
+        clip.sharpness = 0.25;
+        clip.blur = 0.1;
+        // Color grading (10 sliders)
+        clip.shadows = -0.2;
+        clip.midtones = 0.1;
+        clip.highlights = 0.3;
+        clip.exposure = -0.15;
+        clip.black_point = 0.05;
+        clip.highlights_warmth = 0.2;
+        clip.highlights_tint = -0.1;
+        clip.midtones_warmth = -0.05;
+        clip.midtones_tint = 0.08;
+        clip.shadows_warmth = 0.12;
+        clip.shadows_tint = -0.18;
+        // Pitch
+        clip.pitch_shift_semitones = 2.5;
+        clip.pitch_preserve = true;
+        // Audio routing
+        clip.audio_channel_mode = AudioChannelMode::Left;
+        // Slow-motion interp
+        clip.slow_motion_interp = SlowMotionInterp::OpticalFlow;
+        // LUTs
+        clip.lut_paths = vec![
+            "/luts/film_warm.cube".to_string(),
+            "/luts/contrast_pop.cube".to_string(),
+        ];
+        // A small set of keyframes covering each lane
+        let kf = |t, v| NumericKeyframe {
+            time_ns: t,
+            value: v,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        };
+        clip.brightness_keyframes = vec![kf(0, 0.0), kf(2_000_000_000, 0.3)];
+        clip.contrast_keyframes = vec![kf(0, 1.0), kf(2_000_000_000, 1.4)];
+        clip.saturation_keyframes = vec![kf(1_000_000_000, 1.2)];
+        clip.temperature_keyframes = vec![kf(0, 5500.0), kf(3_000_000_000, 6500.0)];
+        clip.tint_keyframes = vec![kf(500_000_000, 0.05)];
+        clip.blur_keyframes = vec![kf(0, 0.0), kf(1_500_000_000, 0.5)];
+        clip.volume_keyframes = vec![kf(0, 1.0), kf(4_000_000_000, 0.6)];
+        clip.pan_keyframes = vec![kf(2_500_000_000, -0.4)];
+        clip.eq_low_gain_keyframes = vec![kf(0, -3.0), kf(2_000_000_000, 1.5)];
+        clip.eq_mid_gain_keyframes = vec![kf(1_000_000_000, 0.5)];
+        clip.eq_high_gain_keyframes = vec![kf(0, 2.0)];
+        clip.crop_left_keyframes = vec![kf(0, 0.0), kf(1_000_000_000, 20.0)];
+        clip.crop_right_keyframes = vec![kf(500_000_000, 5.0)];
+        clip.crop_top_keyframes = vec![kf(0, 10.0)];
+        clip.crop_bottom_keyframes = vec![kf(2_000_000_000, 15.0)];
+        clip.speed_keyframes = vec![kf(0, 1.0), kf(2_000_000_000, 0.5)];
+
+        track.add_clip(clip.clone());
+        p.tracks.push(track);
+
+        let json = crate::otio::writer::write_otio(&p).unwrap();
+        let p2 = parse_otio(&json).unwrap();
+        let clip2 = &p2.tracks[0].clips[0];
+
+        // Color correction
+        assert_eq!(clip2.temperature, clip.temperature);
+        assert_eq!(clip2.tint, clip.tint);
+        // Image filters
+        assert_eq!(clip2.denoise, clip.denoise);
+        assert_eq!(clip2.sharpness, clip.sharpness);
+        assert_eq!(clip2.blur, clip.blur);
+        // Color grading
+        assert_eq!(clip2.shadows, clip.shadows);
+        assert_eq!(clip2.midtones, clip.midtones);
+        assert_eq!(clip2.highlights, clip.highlights);
+        assert_eq!(clip2.exposure, clip.exposure);
+        assert_eq!(clip2.black_point, clip.black_point);
+        assert_eq!(clip2.highlights_warmth, clip.highlights_warmth);
+        assert_eq!(clip2.highlights_tint, clip.highlights_tint);
+        assert_eq!(clip2.midtones_warmth, clip.midtones_warmth);
+        assert_eq!(clip2.midtones_tint, clip.midtones_tint);
+        assert_eq!(clip2.shadows_warmth, clip.shadows_warmth);
+        assert_eq!(clip2.shadows_tint, clip.shadows_tint);
+        // Pitch + audio routing
+        assert_eq!(clip2.pitch_shift_semitones, clip.pitch_shift_semitones);
+        assert_eq!(clip2.pitch_preserve, clip.pitch_preserve);
+        assert_eq!(clip2.audio_channel_mode, clip.audio_channel_mode);
+        // Slow-motion interp
+        assert_eq!(clip2.slow_motion_interp, clip.slow_motion_interp);
+        // LUTs
+        assert_eq!(clip2.lut_paths, clip.lut_paths);
+        // Color/image keyframes
+        assert_eq!(clip2.brightness_keyframes, clip.brightness_keyframes);
+        assert_eq!(clip2.contrast_keyframes, clip.contrast_keyframes);
+        assert_eq!(clip2.saturation_keyframes, clip.saturation_keyframes);
+        assert_eq!(clip2.temperature_keyframes, clip.temperature_keyframes);
+        assert_eq!(clip2.tint_keyframes, clip.tint_keyframes);
+        assert_eq!(clip2.blur_keyframes, clip.blur_keyframes);
+        // Audio keyframes
+        assert_eq!(clip2.volume_keyframes, clip.volume_keyframes);
+        assert_eq!(clip2.pan_keyframes, clip.pan_keyframes);
+        assert_eq!(clip2.eq_low_gain_keyframes, clip.eq_low_gain_keyframes);
+        assert_eq!(clip2.eq_mid_gain_keyframes, clip.eq_mid_gain_keyframes);
+        assert_eq!(clip2.eq_high_gain_keyframes, clip.eq_high_gain_keyframes);
+        // Crop keyframes
+        assert_eq!(clip2.crop_left_keyframes, clip.crop_left_keyframes);
+        assert_eq!(clip2.crop_right_keyframes, clip.crop_right_keyframes);
+        assert_eq!(clip2.crop_top_keyframes, clip.crop_top_keyframes);
+        assert_eq!(clip2.crop_bottom_keyframes, clip.crop_bottom_keyframes);
+        // Speed keyframes
+        assert_eq!(clip2.speed_keyframes, clip.speed_keyframes);
+    }
+
+    #[test]
+    fn test_roundtrip_batch_b_voice_iso_chroma_freeze_misc() {
+        use crate::model::clip::{ClipColorLabel, VoiceIsolationSource};
+        use crate::model::track::Track;
+
+        let mut p = Project::new("Batch B Roundtrip");
+        p.frame_rate = FrameRate {
+            numerator: 30,
+            denominator: 1,
+        };
+        p.tracks.clear();
+
+        let mut track = Track::new_video("V1");
+        let mut clip = Clip::new(
+            "/footage/test.mov",
+            5_000_000_000,
+            0,
+            ClipKind::Video,
+        );
+
+        // Voice isolation (6 fields + base)
+        clip.voice_isolation = 0.6;
+        clip.voice_isolation_pad_ms = 120.0;
+        clip.voice_isolation_fade_ms = 35.0;
+        clip.voice_isolation_floor = 0.15;
+        clip.voice_isolation_source = VoiceIsolationSource::Silence;
+        clip.voice_isolation_silence_threshold_db = -28.0;
+        clip.voice_isolation_silence_min_ms = 250;
+        clip.measured_loudness_lufs = Some(-19.5);
+
+        // Chroma key
+        clip.chroma_key_enabled = true;
+        clip.chroma_key_color = 0x00FF80;
+        clip.chroma_key_tolerance = 0.42;
+        clip.chroma_key_softness = 0.18;
+
+        // BG removal
+        clip.bg_removal_enabled = true;
+        clip.bg_removal_threshold = 0.65;
+
+        // Freeze frame
+        clip.freeze_frame = true;
+        clip.freeze_frame_source_ns = Some(1_500_000_000);
+        clip.freeze_frame_hold_duration_ns = Some(3_000_000_000);
+
+        // Stabilization
+        clip.vidstab_enabled = true;
+        clip.vidstab_smoothing = 0.7;
+
+        // Misc
+        clip.color_label = ClipColorLabel::Teal;
+        clip.anamorphic_desqueeze = 1.33;
+        clip.group_id = Some("group-A".to_string());
+        clip.link_group_id = Some("link-42".to_string());
+        clip.source_timecode_base_ns = Some(86_400_000_000_000);
+        clip.animated_svg = true;
+
+        track.add_clip(clip.clone());
+        p.tracks.push(track);
+
+        let json = crate::otio::writer::write_otio(&p).unwrap();
+        let p2 = parse_otio(&json).unwrap();
+        let clip2 = &p2.tracks[0].clips[0];
+
+        // Voice isolation
+        assert_eq!(clip2.voice_isolation, clip.voice_isolation);
+        assert_eq!(clip2.voice_isolation_pad_ms, clip.voice_isolation_pad_ms);
+        assert_eq!(clip2.voice_isolation_fade_ms, clip.voice_isolation_fade_ms);
+        assert_eq!(clip2.voice_isolation_floor, clip.voice_isolation_floor);
+        assert_eq!(clip2.voice_isolation_source, clip.voice_isolation_source);
+        assert_eq!(
+            clip2.voice_isolation_silence_threshold_db,
+            clip.voice_isolation_silence_threshold_db
+        );
+        assert_eq!(
+            clip2.voice_isolation_silence_min_ms,
+            clip.voice_isolation_silence_min_ms
+        );
+        assert_eq!(clip2.measured_loudness_lufs, clip.measured_loudness_lufs);
+
+        // Chroma key
+        assert_eq!(clip2.chroma_key_enabled, clip.chroma_key_enabled);
+        assert_eq!(clip2.chroma_key_color, clip.chroma_key_color);
+        assert_eq!(clip2.chroma_key_tolerance, clip.chroma_key_tolerance);
+        assert_eq!(clip2.chroma_key_softness, clip.chroma_key_softness);
+
+        // BG removal
+        assert_eq!(clip2.bg_removal_enabled, clip.bg_removal_enabled);
+        assert_eq!(clip2.bg_removal_threshold, clip.bg_removal_threshold);
+
+        // Freeze frame
+        assert_eq!(clip2.freeze_frame, clip.freeze_frame);
+        assert_eq!(clip2.freeze_frame_source_ns, clip.freeze_frame_source_ns);
+        assert_eq!(
+            clip2.freeze_frame_hold_duration_ns,
+            clip.freeze_frame_hold_duration_ns
+        );
+
+        // Stabilization
+        assert_eq!(clip2.vidstab_enabled, clip.vidstab_enabled);
+        assert_eq!(clip2.vidstab_smoothing, clip.vidstab_smoothing);
+
+        // Misc
+        assert_eq!(clip2.color_label, clip.color_label);
+        assert_eq!(clip2.anamorphic_desqueeze, clip.anamorphic_desqueeze);
+        assert_eq!(clip2.group_id, clip.group_id);
+        assert_eq!(clip2.link_group_id, clip.link_group_id);
+        assert_eq!(
+            clip2.source_timecode_base_ns,
+            clip.source_timecode_base_ns
+        );
+        assert_eq!(clip2.animated_svg, clip.animated_svg);
+    }
+
+    #[test]
+    fn test_roundtrip_batch_c_subtitle_styling() {
+        use crate::model::clip::SubtitleHighlightFlags;
+        use crate::model::track::Track;
+
+        let mut p = Project::new("Batch C Roundtrip");
+        p.frame_rate = FrameRate {
+            numerator: 30,
+            denominator: 1,
+        };
+        p.tracks.clear();
+
+        let mut track = Track::new_video("V1");
+        let mut clip = Clip::new(
+            "/footage/test.mov",
+            5_000_000_000,
+            0,
+            ClipKind::Video,
+        );
+
+        clip.subtitle_bold = true;
+        clip.subtitle_italic = true;
+        clip.subtitle_underline = false;
+        clip.subtitle_shadow = true;
+        clip.subtitle_shadow_color = 0x000000CC;
+        clip.subtitle_shadow_offset_x = 2.5;
+        clip.subtitle_shadow_offset_y = 3.0;
+        clip.subtitle_highlight_flags = SubtitleHighlightFlags {
+            bold: true,
+            color: true,
+            underline: false,
+            stroke: true,
+            italic: false,
+            background: true,
+            shadow: false,
+        };
+        clip.subtitle_bg_highlight_color = 0xFFFF0080;
+
+        track.add_clip(clip.clone());
+        p.tracks.push(track);
+
+        let json = crate::otio::writer::write_otio(&p).unwrap();
+        let p2 = parse_otio(&json).unwrap();
+        let clip2 = &p2.tracks[0].clips[0];
+
+        assert_eq!(clip2.subtitle_bold, clip.subtitle_bold);
+        assert_eq!(clip2.subtitle_italic, clip.subtitle_italic);
+        assert_eq!(clip2.subtitle_underline, clip.subtitle_underline);
+        assert_eq!(clip2.subtitle_shadow, clip.subtitle_shadow);
+        assert_eq!(clip2.subtitle_shadow_color, clip.subtitle_shadow_color);
+        assert_eq!(
+            clip2.subtitle_shadow_offset_x,
+            clip.subtitle_shadow_offset_x
+        );
+        assert_eq!(
+            clip2.subtitle_shadow_offset_y,
+            clip.subtitle_shadow_offset_y
+        );
+        assert_eq!(
+            clip2.subtitle_highlight_flags,
+            clip.subtitle_highlight_flags
+        );
+        assert_eq!(
+            clip2.subtitle_bg_highlight_color,
+            clip.subtitle_bg_highlight_color
+        );
+    }
+
+    #[test]
+    fn test_roundtrip_batch_d_compound_clip_preserves_internal_tracks() {
+        use crate::model::track::Track;
+
+        let mut p = Project::new("Batch D Compound Roundtrip");
+        p.frame_rate = FrameRate {
+            numerator: 30,
+            denominator: 1,
+        };
+        p.tracks.clear();
+
+        // Build internal compound tracks: one video track with two clips
+        // (one of which has its own non-trivial transform/color settings).
+        let mut inner_v_track = Track::new_video("V1");
+        let mut inner_clip_a = Clip::new(
+            "/footage/inner_a.mov",
+            2_000_000_000,
+            0,
+            ClipKind::Video,
+        );
+        inner_clip_a.scale = 1.25;
+        inner_clip_a.brightness = 0.15;
+        inner_v_track.add_clip(inner_clip_a);
+        let mut inner_clip_b = Clip::new(
+            "/footage/inner_b.mov",
+            3_000_000_000,
+            2_000_000_000,
+            ClipKind::Video,
+        );
+        inner_clip_b.contrast = 1.4;
+        inner_v_track.add_clip(inner_clip_b);
+
+        let mut inner_a_track = Track::new_audio("A1");
+        let mut inner_audio = Clip::new(
+            "/footage/inner_audio.wav",
+            5_000_000_000,
+            0,
+            ClipKind::Audio,
+        );
+        inner_audio.volume = 0.8;
+        inner_a_track.add_clip(inner_audio);
+
+        // Outer compound clip placed on a video track at the project level.
+        let mut outer_track = Track::new_video("V_outer");
+        let mut compound = Clip::new("", 5_000_000_000, 0, ClipKind::Compound);
+        compound.label = "My Compound".to_string();
+        compound.compound_tracks = Some(vec![inner_v_track, inner_a_track]);
+        outer_track.add_clip(compound.clone());
+        p.tracks.push(outer_track);
+
+        let json = crate::otio::writer::write_otio(&p).unwrap();
+        let p2 = parse_otio(&json).unwrap();
+
+        let clip2 = &p2.tracks[0].clips[0];
+        assert_eq!(clip2.kind, ClipKind::Compound);
+        assert_eq!(clip2.label, "My Compound");
+        let inner_tracks = clip2
+            .compound_tracks
+            .as_ref()
+            .expect("compound_tracks should round-trip");
+        assert_eq!(inner_tracks.len(), 2);
+        // Inner video track + clips
+        let v = &inner_tracks[0];
+        assert_eq!(v.clips.len(), 2);
+        assert_eq!(v.clips[0].source_path, "/footage/inner_a.mov");
+        assert_eq!(v.clips[0].scale, 1.25);
+        assert_eq!(v.clips[0].brightness, 0.15);
+        assert_eq!(v.clips[1].source_path, "/footage/inner_b.mov");
+        assert_eq!(v.clips[1].contrast, 1.4);
+        // Inner audio track
+        let a = &inner_tracks[1];
+        assert_eq!(a.clips.len(), 1);
+        assert_eq!(a.clips[0].source_path, "/footage/inner_audio.wav");
+        assert_eq!(a.clips[0].volume, 0.8);
+    }
+
+    #[test]
+    fn test_roundtrip_batch_d_multicam_clip_preserves_angles_and_switches() {
+        use crate::model::clip::{AngleSwitch, MulticamAngle};
+        use crate::model::track::Track;
+
+        let mut p = Project::new("Batch D Multicam Roundtrip");
+        p.frame_rate = FrameRate {
+            numerator: 30,
+            denominator: 1,
+        };
+        p.tracks.clear();
+
+        let mut track = Track::new_video("V1");
+        let mut multicam = Clip::new("", 8_000_000_000, 0, ClipKind::Multicam);
+        multicam.label = "MC".to_string();
+        multicam.multicam_angles = Some(vec![
+            MulticamAngle {
+                id: "angle-0".to_string(),
+                label: "Cam A".to_string(),
+                source_path: "/footage/cam_a.mov".to_string(),
+                source_in: 0,
+                source_out: 8_000_000_000,
+                sync_offset_ns: 0,
+                source_timecode_base_ns: None,
+                media_duration_ns: Some(8_000_000_000),
+                volume: 1.0,
+                muted: false,
+            },
+            MulticamAngle {
+                id: "angle-1".to_string(),
+                label: "Cam B".to_string(),
+                source_path: "/footage/cam_b.mov".to_string(),
+                source_in: 250_000_000,
+                source_out: 8_250_000_000,
+                sync_offset_ns: -250_000_000,
+                source_timecode_base_ns: Some(86_400_000_000_000),
+                media_duration_ns: Some(8_500_000_000),
+                volume: 0.0,
+                muted: true,
+            },
+        ]);
+        multicam.multicam_switches = Some(vec![
+            AngleSwitch {
+                position_ns: 0,
+                angle_index: 0,
+            },
+            AngleSwitch {
+                position_ns: 3_000_000_000,
+                angle_index: 1,
+            },
+            AngleSwitch {
+                position_ns: 6_000_000_000,
+                angle_index: 0,
+            },
+        ]);
+        track.add_clip(multicam.clone());
+        p.tracks.push(track);
+
+        let json = crate::otio::writer::write_otio(&p).unwrap();
+        let p2 = parse_otio(&json).unwrap();
+
+        let clip2 = &p2.tracks[0].clips[0];
+        assert_eq!(clip2.kind, ClipKind::Multicam);
+        let angles = clip2
+            .multicam_angles
+            .as_ref()
+            .expect("multicam_angles should round-trip");
+        assert_eq!(angles.len(), 2);
+        assert_eq!(angles[0].label, "Cam A");
+        assert_eq!(angles[0].source_path, "/footage/cam_a.mov");
+        assert!(!angles[0].muted);
+        assert_eq!(angles[1].label, "Cam B");
+        assert_eq!(angles[1].sync_offset_ns, -250_000_000);
+        assert!(angles[1].muted);
+        assert_eq!(angles[1].volume, 0.0);
+        let switches = clip2
+            .multicam_switches
+            .as_ref()
+            .expect("multicam_switches should round-trip");
+        assert_eq!(switches.len(), 3);
+        assert_eq!(switches[0].angle_index, 0);
+        assert_eq!(switches[1].position_ns, 3_000_000_000);
+        assert_eq!(switches[1].angle_index, 1);
+        assert_eq!(switches[2].position_ns, 6_000_000_000);
+    }
+
+    #[test]
+    fn test_roundtrip_batch_e_effects_masks_motion_tracking() {
+        use crate::model::clip::{ClipMask, Frei0rEffect, LadspaEffect, MaskShape};
+        use crate::model::track::Track;
+        use std::collections::HashMap;
+
+        let mut p = Project::new("Batch E Roundtrip");
+        p.frame_rate = FrameRate {
+            numerator: 30,
+            denominator: 1,
+        };
+        p.tracks.clear();
+
+        let mut track = Track::new_video("V1");
+        let mut clip = Clip::new(
+            "/footage/test.mov",
+            5_000_000_000,
+            0,
+            ClipKind::Video,
+        );
+
+        // Two frei0r effects with mixed numeric + string params.
+        let mut frei0r_a_params = HashMap::new();
+        frei0r_a_params.insert("amount".to_string(), 0.75);
+        frei0r_a_params.insert("threshold".to_string(), 0.42);
+        let mut frei0r_a_strings = HashMap::new();
+        frei0r_a_strings.insert("blend-mode".to_string(), "normal".to_string());
+        clip.frei0r_effects = vec![
+            Frei0rEffect {
+                id: "fx-1".to_string(),
+                plugin_name: "cartoon".to_string(),
+                enabled: true,
+                params: frei0r_a_params,
+                string_params: frei0r_a_strings,
+            },
+            Frei0rEffect {
+                id: "fx-2".to_string(),
+                plugin_name: "vignette".to_string(),
+                enabled: false,
+                params: HashMap::new(),
+                string_params: HashMap::new(),
+            },
+        ];
+
+        // LADSPA audio effects.
+        let mut ladspa_params = HashMap::new();
+        ladspa_params.insert("gain".to_string(), 6.0);
+        ladspa_params.insert("ratio".to_string(), 4.0);
+        clip.ladspa_effects = vec![LadspaEffect {
+            id: "audio-fx-1".to_string(),
+            plugin_name: "compressor".to_string(),
+            gst_element_name: "ladspa-cmt-so-compress-stereo".to_string(),
+            enabled: true,
+            params: ladspa_params,
+        }];
+
+        // A non-default mask (ellipse, partly inverted, with feather).
+        clip.masks = vec![ClipMask {
+            id: "mask-1".to_string(),
+            shape: MaskShape::Ellipse,
+            enabled: true,
+            center_x: 0.6,
+            center_x_keyframes: Vec::new(),
+            center_y: 0.4,
+            center_y_keyframes: Vec::new(),
+            width: 0.3,
+            width_keyframes: Vec::new(),
+            height: 0.2,
+            height_keyframes: Vec::new(),
+            rotation: 15.0,
+            rotation_keyframes: Vec::new(),
+            feather: 0.05,
+            feather_keyframes: Vec::new(),
+            expansion: 0.02,
+            expansion_keyframes: Vec::new(),
+            invert: true,
+            path: None,
+            tracking_binding: None,
+        }];
+
+        track.add_clip(clip.clone());
+        p.tracks.push(track);
+
+        let json = crate::otio::writer::write_otio(&p).unwrap();
+        let p2 = parse_otio(&json).unwrap();
+        let clip2 = &p2.tracks[0].clips[0];
+
+        // Frei0r
+        assert_eq!(clip2.frei0r_effects.len(), 2);
+        assert_eq!(clip2.frei0r_effects[0].plugin_name, "cartoon");
+        assert!(clip2.frei0r_effects[0].enabled);
+        assert_eq!(
+            clip2.frei0r_effects[0].params.get("amount"),
+            Some(&0.75)
+        );
+        assert_eq!(
+            clip2.frei0r_effects[0].params.get("threshold"),
+            Some(&0.42)
+        );
+        assert_eq!(
+            clip2.frei0r_effects[0]
+                .string_params
+                .get("blend-mode")
+                .map(|s| s.as_str()),
+            Some("normal")
+        );
+        assert_eq!(clip2.frei0r_effects[1].plugin_name, "vignette");
+        assert!(!clip2.frei0r_effects[1].enabled);
+
+        // LADSPA
+        assert_eq!(clip2.ladspa_effects.len(), 1);
+        assert_eq!(clip2.ladspa_effects[0].plugin_name, "compressor");
+        assert_eq!(
+            clip2.ladspa_effects[0].gst_element_name,
+            "ladspa-cmt-so-compress-stereo"
+        );
+        assert_eq!(clip2.ladspa_effects[0].params.get("gain"), Some(&6.0));
+        assert_eq!(clip2.ladspa_effects[0].params.get("ratio"), Some(&4.0));
+
+        // Mask
+        assert_eq!(clip2.masks.len(), 1);
+        let m = &clip2.masks[0];
+        assert_eq!(m.shape, MaskShape::Ellipse);
+        assert!(m.enabled);
+        assert_eq!(m.center_x, 0.6);
+        assert_eq!(m.center_y, 0.4);
+        assert_eq!(m.width, 0.3);
+        assert_eq!(m.height, 0.2);
+        assert_eq!(m.rotation, 15.0);
+        assert_eq!(m.feather, 0.05);
+        assert_eq!(m.expansion, 0.02);
+        assert!(m.invert);
     }
 
     #[test]

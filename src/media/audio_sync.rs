@@ -53,7 +53,7 @@ pub fn sync_clips_by_audio(clips: &[(String, String, u64, u64)]) -> Vec<AudioSyn
     let anchor = &clips[0];
     let anchor_audio = match extract_and_prepare(&anchor.1, anchor.2, anchor.3) {
         Some(a) => {
-            eprintln!(
+            log::debug!(
                 "audio_sync: anchor '{}' extracted {} samples",
                 anchor.0,
                 a.len()
@@ -67,7 +67,7 @@ pub fn sync_clips_by_audio(clips: &[(String, String, u64, u64)]) -> Vec<AudioSyn
     for clip in &clips[1..] {
         let clip_audio = match extract_and_prepare(&clip.1, clip.2, clip.3) {
             Some(a) => {
-                eprintln!(
+                log::debug!(
                     "audio_sync: clip '{}' extracted {} samples",
                     clip.0,
                     a.len()
@@ -87,9 +87,12 @@ pub fn sync_clips_by_audio(clips: &[(String, String, u64, u64)]) -> Vec<AudioSyn
 
         let (sample_offset, confidence) = gcc_phat(&anchor_audio, &clip_audio);
         let offset_ns = (sample_offset as f64 * NS_PER_SAMPLE) as i64;
-        eprintln!(
+        log::debug!(
             "audio_sync: clip '{}' gcc_phat => sample_offset={}, offset_ns={}, confidence={:.2}",
-            clip.0, sample_offset, offset_ns, confidence
+            clip.0,
+            sample_offset,
+            offset_ns,
+            confidence
         );
 
         // Attempt two-point drift measurement if clips are long enough.
@@ -100,7 +103,7 @@ pub fn sync_clips_by_audio(clips: &[(String, String, u64, u64)]) -> Vec<AudioSyn
         };
 
         if let Some(drift) = drift_speed {
-            eprintln!(
+            log::debug!(
                 "audio_sync: clip '{}' drift_speed={:.8} ({:+.4} ppm)",
                 clip.0,
                 drift,
@@ -187,9 +190,13 @@ fn measure_drift(
     // Sanity check: reject implausible corrections (> 0.5% drift is almost
     // certainly a misdetection, not real clock drift).
     if (speed_ratio - 1.0).abs() > 0.005 {
-        eprintln!(
+        log::warn!(
             "audio_sync: drift {:.6} rejected (> 0.5%): start_off={} end_off={} conf={:.1}/{:.1}",
-            speed_ratio, start_offset, end_offset, start_conf, end_conf
+            speed_ratio,
+            start_offset,
+            end_offset,
+            start_conf,
+            end_conf
         );
         return None;
     }
@@ -281,6 +288,68 @@ fn bandpass_filter(samples: &mut [f32], sample_rate: f32, low_cut: f32, high_cut
 /// Caps extraction at MAX_EXTRACT_SECONDS to keep FFT sizes manageable
 /// when clips have very different durations.
 fn extract_raw_audio(path: &str, source_in_ns: u64, source_out_ns: u64) -> Option<Vec<f32>> {
+    extract_mono_audio_samples(
+        path,
+        source_in_ns,
+        source_out_ns,
+        SAMPLE_RATE,
+        MAX_EXTRACT_SECONDS,
+    )
+}
+
+pub(crate) fn mix_down_interleaved_audio_samples(
+    interleaved: &[f32],
+    channel_count: usize,
+) -> Vec<f32> {
+    if channel_count <= 1 {
+        return interleaved.to_vec();
+    }
+    interleaved
+        .chunks_exact(channel_count)
+        .map(|frame| frame.iter().copied().sum::<f32>() / channel_count as f32)
+        .collect()
+}
+
+pub(crate) fn extract_interleaved_audio_channel(
+    interleaved: &[f32],
+    channel_count: usize,
+    channel_index: usize,
+) -> Vec<f32> {
+    if interleaved.is_empty() || channel_count == 0 {
+        return Vec::new();
+    }
+    let channel_index = channel_index.min(channel_count.saturating_sub(1));
+    interleaved
+        .chunks_exact(channel_count)
+        .map(|frame| frame[channel_index])
+        .collect()
+}
+
+pub fn extract_mono_audio_samples(
+    path: &str,
+    source_in_ns: u64,
+    source_out_ns: u64,
+    sample_rate: i32,
+    max_extract_seconds: f64,
+) -> Option<Vec<f32>> {
+    let (interleaved, channel_count) = extract_interleaved_audio_samples(
+        path,
+        source_in_ns,
+        source_out_ns,
+        sample_rate,
+        max_extract_seconds,
+    )?;
+    let samples = mix_down_interleaved_audio_samples(&interleaved, channel_count);
+    (!samples.is_empty()).then_some(samples)
+}
+
+pub(crate) fn extract_interleaved_audio_samples(
+    path: &str,
+    source_in_ns: u64,
+    source_out_ns: u64,
+    sample_rate: i32,
+    max_extract_seconds: f64,
+) -> Option<(Vec<f32>, usize)> {
     let uri = if path.starts_with("file://") {
         path.to_string()
     } else {
@@ -301,8 +370,7 @@ fn extract_raw_audio(path: &str, source_in_ns: u64, source_out_ns: u64) -> Optio
 
     let caps = gst::Caps::builder("audio/x-raw")
         .field("format", "F32LE")
-        .field("channels", 1i32)
-        .field("rate", SAMPLE_RATE)
+        .field("rate", sample_rate)
         .build();
     capsf.set_property("caps", &caps);
 
@@ -354,7 +422,7 @@ fn extract_raw_audio(path: &str, source_in_ns: u64, source_out_ns: u64) -> Optio
             gst::ClockTime::from_nseconds(source_in_ns),
         );
         if seek_ok.is_err() {
-            eprintln!("audio_sync: seek to {}ns failed for {}", source_in_ns, path);
+            log::warn!("audio_sync: seek to {}ns failed for {}", source_in_ns, path);
             pipeline.set_state(gst::State::Null).ok();
             return None;
         }
@@ -366,14 +434,25 @@ fn extract_raw_audio(path: &str, source_in_ns: u64, source_out_ns: u64) -> Optio
 
     // Cap extraction length: use the shorter of clip duration and MAX_EXTRACT_SECONDS
     let clip_duration_s = source_out_ns.saturating_sub(source_in_ns) as f64 / 1_000_000_000.0;
-    let extract_s = clip_duration_s.min(MAX_EXTRACT_SECONDS);
-    let max_samples = (extract_s * SAMPLE_RATE as f64) as usize + SAMPLE_RATE as usize; // small buffer
+    let extract_s = clip_duration_s.min(max_extract_seconds);
+    let max_samples = (extract_s * sample_rate as f64) as usize + sample_rate as usize; // small buffer
 
     let mut samples: Vec<f32> = Vec::new();
+    let mut channel_count: Option<usize> = None;
     let bus = pipeline.bus()?;
 
     loop {
         if let Some(s) = appsink.try_pull_sample(gst::ClockTime::from_mseconds(100)) {
+            if channel_count.is_none() {
+                let caps = s.caps()?;
+                let structure = caps.structure(0)?;
+                let channels = structure.get::<i32>("channels").ok()?;
+                let channels = usize::try_from(channels).ok()?;
+                if channels == 0 {
+                    return None;
+                }
+                channel_count = Some(channels);
+            }
             let buffer = s.buffer()?;
             let map = buffer.map_readable().ok()?;
             let raw_bytes = map.as_slice();
@@ -382,7 +461,8 @@ fn extract_raw_audio(path: &str, source_in_ns: u64, source_out_ns: u64) -> Optio
             };
             samples.extend_from_slice(floats);
 
-            if samples.len() >= max_samples {
+            let max_interleaved_samples = max_samples * channel_count.unwrap_or(1);
+            if samples.len() >= max_interleaved_samples {
                 break;
             }
         }
@@ -400,16 +480,19 @@ fn extract_raw_audio(path: &str, source_in_ns: u64, source_out_ns: u64) -> Optio
         }
     }
 
-    // Trim to max_samples
-    if samples.len() > max_samples {
-        samples.truncate(max_samples);
+    let channel_count = channel_count?;
+    let max_interleaved_samples = max_samples * channel_count;
+    if samples.len() > max_interleaved_samples {
+        samples.truncate(max_interleaved_samples);
     }
+    let frames = samples.len() / channel_count;
+    samples.truncate(frames * channel_count);
 
     if samples.is_empty() {
         return None;
     }
 
-    Some(samples)
+    Some((samples, channel_count))
 }
 
 // ── GCC-PHAT cross-correlation ─────────────────────────────────────────────
@@ -610,6 +693,26 @@ mod tests {
             energy_after < energy_before * 0.3,
             "50Hz energy ratio = {:.2} (expected < 0.3)",
             energy_after / energy_before
+        );
+    }
+
+    #[test]
+    fn mix_down_interleaved_audio_samples_averages_channels() {
+        let interleaved = vec![1.0, 0.0, 0.5, -0.5, -1.0, 1.0];
+        let mono = mix_down_interleaved_audio_samples(&interleaved, 2);
+        assert_eq!(mono, vec![0.5, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn extract_interleaved_audio_channel_reads_requested_side() {
+        let interleaved = vec![1.0, 0.0, 0.5, -0.5, -1.0, 1.0];
+        assert_eq!(
+            extract_interleaved_audio_channel(&interleaved, 2, 0),
+            vec![1.0, 0.5, -1.0]
+        );
+        assert_eq!(
+            extract_interleaved_audio_channel(&interleaved, 2, 1),
+            vec![0.0, -0.5, 1.0]
         );
     }
 }

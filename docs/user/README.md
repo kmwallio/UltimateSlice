@@ -21,7 +21,7 @@ Welcome to UltimateSlice, a Final Cut Pro–inspired non-linear video editor bui
 | [python-mcp.md](python-mcp.md) | Python socket client commands for MCP |
 | [program-monitor.md](program-monitor.md) | Previewing the assembled timeline |
 | [export.md](export.md) | Advanced export and interchange: codecs, resolution, audio options, OTIO/EDL |
-| [project-settings.md](project-settings.md) | Canvas size, frame rate, FCPXML save/load |
+| [project-settings.md](project-settings.md) | Canvas size, frame rate, FCPXML save/load, snapshots, backups |
 | [shortcuts.md](shortcuts.md) | Complete keyboard shortcut reference |
 
 For playback tuning and render-cache behavior, start with [preferences.md](preferences.md) and [program-monitor.md](program-monitor.md); for saved panel arrangements, see [workspace-layouts.md](workspace-layouts.md); MCP automation examples for the same controls live in [python-mcp.md](python-mcp.md).
@@ -36,3 +36,7 @@ For playback tuning and render-cache behavior, start with [preferences.md](prefe
 4. **Arrange** — drag clips to reposition; drag their edges to trim; press **B** for the Razor tool to split.
 5. **Adjust** — select a clip and use the Inspector panel (right side) for color, audio, speed, and titles.
 6. **Export** — click **Export…** in the toolbar and choose your codec, resolution, and output file.
+
+For AI-generated music beds, right-click an audio track header and choose **Generate Music Region…**, then drag an empty 1-30 second range and enter a prompt.
+
+For dialogue tone matching, select a timeline clip and use **Inspector → Audio → Match Audio…** with a reference clip. The dialog now defaults to a simple **Match voice** mode, adds **Auto** channel-aware analysis for stereo/one-sided audio, and still lets power users switch to **Choose region...** for exact source/reference timecode ranges. The same workflow is available through MCP `match_clip_audio`.

@@ -1,5 +1,6 @@
-use crate::model::clip::Clip;
+use crate::model::clip::{Clip, VoiceIsolationSource};
 use crate::model::project::Project;
+use crate::model::transition::OutgoingTransition;
 
 /// A reversible edit operation on the project.
 pub trait EditCommand {
@@ -7,6 +8,83 @@ pub trait EditCommand {
     fn undo(&self, project: &mut Project);
     #[allow(dead_code)]
     fn description(&self) -> &str;
+}
+
+// -----------------------------------------------------------------------
+// Generic clip-property and track-property mutation wrappers (P1.4)
+// -----------------------------------------------------------------------
+//
+// Many EditCommand impls in this file share the same skeleton:
+//
+//   fn execute(&self, project: &mut Project) {
+//       if let Some(clip) = project.clip_mut(&self.clip_id) {
+//           clip.field = self.new_value.clone();
+//       }
+//       project.dirty = true;
+//   }
+//
+// The two helpers below collapse that pattern into a single generic struct.
+// New property setters can use `ClipMutateCommand` instead of adding a
+// 30-line per-property struct + impl. The `apply` function pointer is
+// called for both execute (with `new_state`) and undo (with `old_state`),
+// so the setter logic only has to be written once.
+//
+// For track-level properties (mute, solo, duck) use `TrackMutateCommand`.
+
+/// Generic "set one clip property" undo command. Replace individual
+/// per-property command structs with an instantiation of this. The `apply`
+/// function receives a `&mut Clip` and the state value to apply.
+pub struct ClipMutateCommand<T: Clone> {
+    pub clip_id: String,
+    pub old_state: T,
+    pub new_state: T,
+    pub apply: fn(&mut Clip, T),
+    pub label: &'static str,
+}
+
+impl<T: Clone + 'static> EditCommand for ClipMutateCommand<T> {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            (self.apply)(clip, self.new_state.clone());
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            (self.apply)(clip, self.old_state.clone());
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        self.label
+    }
+}
+
+/// Generic "set one track property" undo command.
+pub struct TrackMutateCommand<T: Clone> {
+    pub track_id: String,
+    pub old_state: T,
+    pub new_state: T,
+    pub apply: fn(&mut crate::model::track::Track, T),
+    pub label: &'static str,
+}
+
+impl<T: Clone + 'static> EditCommand for TrackMutateCommand<T> {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            (self.apply)(track, self.new_state.clone());
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            (self.apply)(track, self.old_state.clone());
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        self.label
+    }
 }
 
 /// Move a clip to a new track / timeline position
@@ -666,7 +744,6 @@ impl EditCommand for SetClipColorCommand {
 #[allow(dead_code)]
 pub struct NormalizeClipAudioCommand {
     pub clip_id: String,
-    pub track_id: String,
     pub old_volume: f32,
     pub new_volume: f32,
     pub old_measured_loudness: Option<f64>,
@@ -675,20 +752,16 @@ pub struct NormalizeClipAudioCommand {
 
 impl EditCommand for NormalizeClipAudioCommand {
     fn execute(&self, project: &mut Project) {
-        if let Some(track) = project.track_mut(&self.track_id) {
-            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
-                clip.volume = self.new_volume;
-                clip.measured_loudness_lufs = self.new_measured_loudness;
-            }
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            clip.volume = self.new_volume;
+            clip.measured_loudness_lufs = self.new_measured_loudness;
         }
         project.dirty = true;
     }
     fn undo(&self, project: &mut Project) {
-        if let Some(track) = project.track_mut(&self.track_id) {
-            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
-                clip.volume = self.old_volume;
-                clip.measured_loudness_lufs = self.old_measured_loudness;
-            }
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            clip.volume = self.old_volume;
+            clip.measured_loudness_lufs = self.old_measured_loudness;
         }
         project.dirty = true;
     }
@@ -728,6 +801,74 @@ impl EditCommand for SetClipEqCommand {
     }
 }
 
+/// Match clip audio tone using measured loudness plus 3-band EQ and 7-band match EQ.
+pub struct MatchClipAudioCommand {
+    pub clip_id: String,
+    pub old_volume: f32,
+    pub new_volume: f32,
+    pub old_measured_loudness: Option<f64>,
+    pub new_measured_loudness: Option<f64>,
+    pub old_eq_bands: [crate::model::clip::EqBand; 3],
+    pub new_eq_bands: [crate::model::clip::EqBand; 3],
+    pub old_match_eq_bands: Vec<crate::model::clip::EqBand>,
+    pub new_match_eq_bands: Vec<crate::model::clip::EqBand>,
+}
+
+impl MatchClipAudioCommand {
+    fn apply_values(&self, project: &mut Project, use_new: bool) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            if use_new {
+                clip.volume = self.new_volume;
+                clip.measured_loudness_lufs = self.new_measured_loudness;
+                clip.eq_bands = self.new_eq_bands;
+                clip.match_eq_bands = self.new_match_eq_bands.clone();
+            } else {
+                clip.volume = self.old_volume;
+                clip.measured_loudness_lufs = self.old_measured_loudness;
+                clip.eq_bands = self.old_eq_bands;
+                clip.match_eq_bands = self.old_match_eq_bands.clone();
+            }
+        }
+        project.dirty = true;
+    }
+}
+
+impl EditCommand for MatchClipAudioCommand {
+    fn execute(&self, project: &mut Project) {
+        self.apply_values(project, true);
+    }
+    fn undo(&self, project: &mut Project) {
+        self.apply_values(project, false);
+    }
+    fn description(&self) -> &str {
+        "Match clip audio"
+    }
+}
+
+/// Clear 7-band match EQ from a clip.
+pub struct ClearMatchEqCommand {
+    pub clip_id: String,
+    pub old_match_eq_bands: Vec<crate::model::clip::EqBand>,
+}
+
+impl EditCommand for ClearMatchEqCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            clip.match_eq_bands.clear();
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            clip.match_eq_bands = self.old_match_eq_bands.clone();
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Clear match EQ"
+    }
+}
+
 /// Set clip volume and/or pan.
 pub struct SetClipVolumeCommand {
     pub clip_id: String,
@@ -759,6 +900,122 @@ impl EditCommand for SetClipVolumeCommand {
     }
     fn description(&self) -> &str {
         "Set clip volume/pan"
+    }
+}
+
+/// Set clip voice isolation amount.
+pub struct SetClipVoiceIsolationCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_amount: f32,
+    pub new_amount: f32,
+}
+
+impl EditCommand for SetClipVoiceIsolationCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.voice_isolation = self.new_amount;
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.voice_isolation = self.old_amount;
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set clip voice isolation"
+    }
+}
+
+/// Switch the source of voice-isolation gate intervals between subtitles and
+/// silence-detect analysis.
+pub struct SetClipVoiceIsolationSourceCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_source: VoiceIsolationSource,
+    pub new_source: VoiceIsolationSource,
+}
+
+impl EditCommand for SetClipVoiceIsolationSourceCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.voice_isolation_source = self.new_source;
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.voice_isolation_source = self.old_source;
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set voice isolation source"
+    }
+}
+
+/// Update the silence-detect threshold and/or minimum gap parameters used to
+/// produce voice-isolation speech intervals. Also captures the cached intervals
+/// before/after so undo restores prior analysis without forcing a re-Analyze.
+pub struct SetClipVoiceIsolationSilenceParamsCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_threshold_db: f32,
+    pub new_threshold_db: f32,
+    pub old_min_ms: u32,
+    pub new_min_ms: u32,
+    pub old_intervals: Vec<(u64, u64)>,
+}
+
+impl EditCommand for SetClipVoiceIsolationSilenceParamsCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.voice_isolation_silence_threshold_db = self.new_threshold_db;
+            clip.voice_isolation_silence_min_ms = self.new_min_ms;
+            // Parameter change invalidates the cached analysis.
+            clip.voice_isolation_speech_intervals.clear();
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.voice_isolation_silence_threshold_db = self.old_threshold_db;
+            clip.voice_isolation_silence_min_ms = self.old_min_ms;
+            clip.voice_isolation_speech_intervals = self.old_intervals.clone();
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set voice isolation silence params"
+    }
+}
+
+/// Capture the result of running silencedetect analysis on a clip so the
+/// resulting cached intervals can be undone.
+pub struct AnalyzeVoiceIsolationSilenceCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_intervals: Vec<(u64, u64)>,
+    pub new_intervals: Vec<(u64, u64)>,
+}
+
+impl EditCommand for AnalyzeVoiceIsolationSilenceCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.voice_isolation_speech_intervals = self.new_intervals.clone();
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.voice_isolation_speech_intervals = self.old_intervals.clone();
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Analyze voice isolation"
     }
 }
 
@@ -822,78 +1079,54 @@ impl EditCommand for SetClipLabelCommand {
     }
 }
 
-/// Toggle a track's mute state.
-pub struct SetTrackMuteCommand {
-    pub track_id: String,
-    pub old_muted: bool,
-    pub new_muted: bool,
-}
-
-impl EditCommand for SetTrackMuteCommand {
-    fn execute(&self, project: &mut Project) {
-        if let Some(track) = project.track_mut(&self.track_id) {
-            track.muted = self.new_muted;
-        }
-        project.dirty = true;
-    }
-    fn undo(&self, project: &mut Project) {
-        if let Some(track) = project.track_mut(&self.track_id) {
-            track.muted = self.old_muted;
-        }
-        project.dirty = true;
-    }
-    fn description(&self) -> &str {
-        "Toggle track mute"
+/// Toggle a track's mute state. Construct via `set_track_mute_cmd()`.
+pub fn set_track_mute_cmd(
+    track_id: String,
+    old_muted: bool,
+    new_muted: bool,
+) -> TrackMutateCommand<bool> {
+    TrackMutateCommand {
+        track_id,
+        old_state: old_muted,
+        new_state: new_muted,
+        apply: |track, v| {
+            track.muted = v;
+        },
+        label: "Toggle track mute",
     }
 }
 
-/// Toggle a track's solo state.
-pub struct SetTrackSoloCommand {
-    pub track_id: String,
-    pub old_solo: bool,
-    pub new_solo: bool,
-}
-
-impl EditCommand for SetTrackSoloCommand {
-    fn execute(&self, project: &mut Project) {
-        if let Some(track) = project.track_mut(&self.track_id) {
-            track.soloed = self.new_solo;
-        }
-        project.dirty = true;
-    }
-    fn undo(&self, project: &mut Project) {
-        if let Some(track) = project.track_mut(&self.track_id) {
-            track.soloed = self.old_solo;
-        }
-        project.dirty = true;
-    }
-    fn description(&self) -> &str {
-        "Toggle track solo"
+/// Toggle a track's solo state. Construct via `set_track_solo_cmd()`.
+pub fn set_track_solo_cmd(
+    track_id: String,
+    old_solo: bool,
+    new_solo: bool,
+) -> TrackMutateCommand<bool> {
+    TrackMutateCommand {
+        track_id,
+        old_state: old_solo,
+        new_state: new_solo,
+        apply: |track, v| {
+            track.soloed = v;
+        },
+        label: "Toggle track solo",
     }
 }
 
-/// Toggle a track's duck (sidechain) state.
-pub struct SetTrackDuckCommand {
-    pub track_id: String,
-    pub old_duck: bool,
-    pub new_duck: bool,
-}
-
-impl EditCommand for SetTrackDuckCommand {
-    fn execute(&self, project: &mut Project) {
-        if let Some(track) = project.track_mut(&self.track_id) {
-            track.duck = self.new_duck;
-        }
-        project.dirty = true;
-    }
-    fn undo(&self, project: &mut Project) {
-        if let Some(track) = project.track_mut(&self.track_id) {
-            track.duck = self.old_duck;
-        }
-        project.dirty = true;
-    }
-    fn description(&self) -> &str {
-        "Toggle track duck"
+/// Toggle a track's duck (sidechain) state. Construct via `set_track_duck_cmd()`.
+pub fn set_track_duck_cmd(
+    track_id: String,
+    old_duck: bool,
+    new_duck: bool,
+) -> TrackMutateCommand<bool> {
+    TrackMutateCommand {
+        track_id,
+        old_state: old_duck,
+        new_state: new_duck,
+        apply: |track, v| {
+            track.duck = v;
+        },
+        label: "Toggle track duck",
     }
 }
 
@@ -1000,18 +1233,15 @@ impl EditCommand for MatchColorCommand {
 pub struct SetClipTransitionCommand {
     pub clip_id: String,
     pub track_id: String,
-    pub old_transition: String,
-    pub old_transition_ns: u64,
-    pub new_transition: String,
-    pub new_transition_ns: u64,
+    pub old_transition: OutgoingTransition,
+    pub new_transition: OutgoingTransition,
 }
 
 impl EditCommand for SetClipTransitionCommand {
     fn execute(&self, project: &mut Project) {
         if let Some(track) = project.track_mut(&self.track_id) {
             if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
-                clip.transition_after = self.new_transition.clone();
-                clip.transition_after_ns = self.new_transition_ns;
+                clip.outgoing_transition = self.new_transition.clone();
             }
         }
         project.dirty = true;
@@ -1019,8 +1249,7 @@ impl EditCommand for SetClipTransitionCommand {
     fn undo(&self, project: &mut Project) {
         if let Some(track) = project.track_mut(&self.track_id) {
             if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
-                clip.transition_after = self.old_transition.clone();
-                clip.transition_after_ns = self.old_transition_ns;
+                clip.outgoing_transition = self.old_transition.clone();
             }
         }
         project.dirty = true;
@@ -1567,7 +1796,10 @@ impl EditCommand for EditSubtitleTextCommand {
                 .iter_mut()
                 .find(|s| s.id == self.segment_id)
             {
-                seg.text = self.new_text.clone();
+                // Re-sync per-word entries so karaoke / word highlight
+                // rendering uses the edited text instead of the original
+                // Whisper tokens.
+                seg.set_text_and_resync_words(self.new_text.clone());
             }
         }
         project.dirty = true;
@@ -1579,7 +1811,7 @@ impl EditCommand for EditSubtitleTextCommand {
                 .iter_mut()
                 .find(|s| s.id == self.segment_id)
             {
-                seg.text = self.old_text.clone();
+                seg.set_text_and_resync_words(self.old_text.clone());
             }
         }
         project.dirty = true;
@@ -1740,17 +1972,15 @@ impl EditCommand for SetSubtitleStyleCommand {
     }
 }
 
-/// Helper: find a mutable clip reference by clip_id and track_id.
+//// Helper: find a mutable clip reference by clip_id and track_id.
+/// Uses recursive `clip_mut` so clips inside compound tracks are found
+/// regardless of whether `track_id` is valid.
 fn find_clip_mut<'a>(
     project: &'a mut Project,
     clip_id: &str,
-    track_id: &str,
+    _track_id: &str,
 ) -> Option<&'a mut Clip> {
-    project
-        .track_mut(track_id)?
-        .clips
-        .iter_mut()
-        .find(|c| c.id == clip_id)
+    project.clip_mut(clip_id)
 }
 
 #[cfg(test)]
@@ -1911,6 +2141,91 @@ mod tests {
     }
 
     #[test]
+    fn match_clip_audio_command_updates_and_restores_volume_loudness_and_eq() {
+        let mut project = Project::new("Test");
+        let mut track = Track::new_audio("A1");
+        let track_id = track.id.clone();
+        let mut clip = Clip::new("voice.wav", 10, 0, ClipKind::Audio);
+        clip.id = "A".to_string();
+        clip.volume = 0.8;
+        clip.measured_loudness_lufs = Some(-19.5);
+        clip.eq_bands = crate::model::clip::default_eq_bands();
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let mut matched_eq = crate::model::clip::default_eq_bands();
+        matched_eq[0].gain = -2.5;
+        matched_eq[1].gain = 1.0;
+        matched_eq[2].gain = 3.5;
+        let cmd = MatchClipAudioCommand {
+            clip_id: "A".to_string(),
+            old_volume: 0.8,
+            new_volume: 1.1,
+            old_measured_loudness: Some(-19.5),
+            new_measured_loudness: Some(-19.5),
+            old_eq_bands: crate::model::clip::default_eq_bands(),
+            new_eq_bands: matched_eq,
+            old_match_eq_bands: Vec::new(),
+            new_match_eq_bands: vec![
+                crate::model::clip::EqBand {
+                    freq: 100.0,
+                    gain: -3.0,
+                    q: 1.5,
+                },
+                crate::model::clip::EqBand {
+                    freq: 200.0,
+                    gain: -2.0,
+                    q: 1.0,
+                },
+                crate::model::clip::EqBand {
+                    freq: 400.0,
+                    gain: 0.0,
+                    q: 1.5,
+                },
+                crate::model::clip::EqBand {
+                    freq: 800.0,
+                    gain: 1.0,
+                    q: 1.0,
+                },
+                crate::model::clip::EqBand {
+                    freq: 2000.0,
+                    gain: 3.0,
+                    q: 1.0,
+                },
+                crate::model::clip::EqBand {
+                    freq: 5000.0,
+                    gain: 2.5,
+                    q: 1.0,
+                },
+                crate::model::clip::EqBand {
+                    freq: 9000.0,
+                    gain: 0.0,
+                    q: 1.5,
+                },
+            ],
+        };
+
+        cmd.execute(&mut project);
+        let track = project.tracks.iter().find(|t| t.id == track_id).unwrap();
+        let clip = track.clips.iter().find(|c| c.id == "A").unwrap();
+        assert_eq!(clip.volume, 1.1);
+        assert_eq!(clip.measured_loudness_lufs, Some(-19.5));
+        assert_eq!(clip.eq_bands[0].gain, -2.5);
+        assert_eq!(clip.eq_bands[1].gain, 1.0);
+        assert_eq!(clip.eq_bands[2].gain, 3.5);
+        assert_eq!(clip.match_eq_bands.len(), 7);
+        assert_eq!(clip.match_eq_bands[4].gain, 3.0);
+
+        cmd.undo(&mut project);
+        let track = project.tracks.iter().find(|t| t.id == track_id).unwrap();
+        let clip = track.clips.iter().find(|c| c.id == "A").unwrap();
+        assert_eq!(clip.volume, 0.8);
+        assert_eq!(clip.measured_loudness_lufs, Some(-19.5));
+        assert_eq!(clip.eq_bands, crate::model::clip::default_eq_bands());
+        assert!(clip.match_eq_bands.is_empty());
+    }
+
+    #[test]
     fn test_trim_clip_command() {
         let (mut project, track_id, clip_id) = make_project_with_clip("C", 10, 5);
 
@@ -2059,8 +2374,11 @@ mod tests {
         right.source_in = 10;
         right.source_out = 20;
         right.timeline_start = 10;
-        right.transition_after = "cross_dissolve".to_string();
-        right.transition_after_ns = 500;
+        right.outgoing_transition = OutgoingTransition::new(
+            "cross_dissolve",
+            500,
+            crate::model::transition::TransitionAlignment::EndOnCut,
+        );
         track.add_clip(left.clone());
         track.add_clip(right.clone());
         project.tracks.push(track);
@@ -2068,8 +2386,7 @@ mod tests {
         let old_clips = vec![left.clone(), right.clone()];
         let mut merged = left.clone();
         merged.source_out = right.source_out;
-        merged.transition_after = right.transition_after.clone();
-        merged.transition_after_ns = right.transition_after_ns;
+        merged.outgoing_transition = right.outgoing_transition.clone();
         let new_clips = vec![merged.clone()];
 
         let cmd = JoinThroughEditCommand {
@@ -2353,6 +2670,93 @@ mod tests {
         assert!(project.clip_ref("A").is_some());
         let inner = project.track_ref(&inner_track_id).unwrap();
         assert_eq!(inner.clips.len(), 1);
+    }
+
+    #[test]
+    fn clip_mutate_command_sets_and_reverts_property() {
+        let mut project = Project::new("Test");
+        let track = &project.tracks[0];
+        let track_id = track.id.clone();
+        let mut clip = Clip::new("test.mp4", 5_000_000_000, 0, ClipKind::Video);
+        clip.id = "c1".into();
+        clip.volume = 1.0;
+        project.track_mut(&track_id).unwrap().add_clip(clip);
+
+        let cmd = ClipMutateCommand {
+            clip_id: "c1".into(),
+            old_state: 1.0_f32,
+            new_state: 0.5_f32,
+            apply: |clip, v| {
+                clip.volume = v;
+            },
+            label: "Set volume",
+        };
+
+        cmd.execute(&mut project);
+        assert!((project.clip_ref("c1").unwrap().volume - 0.5).abs() < 1e-6);
+        assert!(project.dirty);
+
+        project.dirty = false;
+        cmd.undo(&mut project);
+        assert!((project.clip_ref("c1").unwrap().volume - 1.0).abs() < 1e-6);
+        assert!(project.dirty);
+    }
+
+    #[test]
+    fn clip_mutate_command_finds_compound_internal_clips() {
+        let mut project = Project::new("Test");
+        project.tracks.clear();
+
+        let mut inner_track = Track::new_video("Inner");
+        let mut inner_clip = Clip::new("inner.mp4", 5_000, 0, ClipKind::Video);
+        inner_clip.id = "inner-c1".into();
+        inner_clip.volume = 1.0;
+        inner_track.add_clip(inner_clip);
+
+        let mut compound = Clip::new_compound(0, vec![inner_track]);
+        compound.id = "compound".into();
+        let mut root = Track::new_video("Root");
+        root.add_clip(compound);
+        project.tracks.push(root);
+
+        let cmd = ClipMutateCommand {
+            clip_id: "inner-c1".into(),
+            old_state: 1.0_f32,
+            new_state: 0.3_f32,
+            apply: |clip, v| {
+                clip.volume = v;
+            },
+            label: "Set inner volume",
+        };
+
+        cmd.execute(&mut project);
+        assert!((project.clip_ref("inner-c1").unwrap().volume - 0.3).abs() < 1e-6);
+
+        cmd.undo(&mut project);
+        assert!((project.clip_ref("inner-c1").unwrap().volume - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn track_mutate_command_sets_and_reverts_property() {
+        let mut project = Project::new("Test");
+        let track_id = project.tracks[0].id.clone();
+        assert!(!project.tracks[0].muted);
+
+        let cmd = TrackMutateCommand {
+            track_id: track_id.clone(),
+            old_state: false,
+            new_state: true,
+            apply: |track, v| {
+                track.muted = v;
+            },
+            label: "Toggle mute",
+        };
+
+        cmd.execute(&mut project);
+        assert!(project.track_ref(&track_id).unwrap().muted);
+
+        cmd.undo(&mut project);
+        assert!(!project.track_ref(&track_id).unwrap().muted);
     }
 
     #[test]

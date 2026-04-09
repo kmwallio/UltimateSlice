@@ -55,7 +55,12 @@ pub struct AnimatedSvgCache {
 impl AnimatedSvgCache {
     pub fn new() -> Self {
         let local_cache_root = animated_svg_cache_root();
-        let _ = std::fs::create_dir_all(&local_cache_root);
+        if let Err(e) = std::fs::create_dir_all(&local_cache_root) {
+            log::warn!(
+                "animated SVG: failed to create cache dir {}: {e}",
+                local_cache_root.display()
+            );
+        }
         let (result_tx, result_rx) = mpsc::sync_channel::<AnimatedSvgRenderResult>(32);
         let (work_tx, work_rx) = mpsc::channel::<AnimatedSvgWorkItem>();
         let work_rx = std::sync::Arc::new(std::sync::Mutex::new(work_rx));
@@ -159,14 +164,18 @@ impl AnimatedSvgCache {
         }
         self.pending.insert(key);
         if let Some(ref tx) = self.work_tx {
-            let _ = tx.send((
+            if let Err(e) = tx.send((
                 source_path.to_string(),
                 source_in_ns,
                 source_out_ns,
                 media_duration_ns,
                 fps_num,
                 fps_den,
-            ));
+            )) {
+                log::warn!(
+                    "animated SVG: failed to enqueue {source_path}: worker channel disconnected ({e})"
+                );
+            }
         }
     }
 
@@ -331,6 +340,8 @@ fn render_animated_svg_clip(
             parent.display()
         )
     })?;
+    // Stale partial may exist from a previous failed run; ENOENT is the
+    // expected case here so we don't surface failures.
     let _ = std::fs::remove_file(&temp_path);
     let mut encoder = Command::new(&ffmpeg)
         .args([
@@ -396,7 +407,11 @@ fn render_animated_svg_clip(
         .wait()
         .context("waiting for animated SVG encoder failed")?;
     if !status.success() {
-        let _ = std::fs::remove_file(&temp_path);
+        // Best-effort cleanup of the partial file before propagating the
+        // encoder failure to the caller.
+        if let Err(e) = std::fs::remove_file(&temp_path) {
+            log::warn!("animated SVG: failed to remove partial {temp_path}: {e}");
+        }
         return Err(anyhow!(
             "animated SVG encoder exited with status {}",
             status

@@ -1,9 +1,18 @@
-use crate::media::{adjustment_scope::AdjustmentScopeShape, program_player::ProgramPlayer};
-use crate::model::clip::{Clip, ClipKind, NumericKeyframe, SlowMotionInterp};
+use crate::media::{
+    adjustment_scope::AdjustmentScopeShape, mask_alpha::prepare_adjustment_canvas_masks,
+    program_player::ProgramPlayer,
+};
+use crate::model::clip::{Clip, ClipKind, MaskShape, NumericKeyframe, SlowMotionInterp};
 use crate::model::project::Project;
+use crate::model::track::Track;
+use crate::model::transform_bounds::{
+    CROP_MAX_PX, CROP_MIN_PX, OPACITY_MAX, OPACITY_MIN, POSITION_MAX, POSITION_MIN, ROTATE_MAX_DEG,
+    ROTATE_MIN_DEG, SCALE_MAX, SCALE_MIN,
+};
+use crate::model::transition::{max_transition_duration_ns, transition_xfade_name_for_kind};
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 
@@ -88,14 +97,71 @@ impl Default for ExportOptions {
     }
 }
 
+struct ActiveVideoTrackExportLayout<'a> {
+    primary_clips: Vec<&'a Clip>,
+    secondary_track_clips: Vec<Vec<&'a Clip>>,
+    adjustment_clips: Vec<&'a Clip>,
+}
+
+fn sorted_non_adjustment_track_clips<'a>(track: &'a Track) -> Vec<&'a Clip> {
+    let mut clips: Vec<&Clip> = track
+        .clips
+        .iter()
+        .filter(|clip| clip.kind != ClipKind::Adjustment)
+        .collect();
+    clips.sort_by_key(|clip| clip.timeline_start);
+    clips
+}
+
+fn split_active_video_tracks_for_export<'a>(
+    project: &Project,
+    flattened_project_tracks: &'a [Track],
+) -> Option<ActiveVideoTrackExportLayout<'a>> {
+    let active_video_tracks: Vec<&Track> = flattened_project_tracks
+        .iter()
+        .filter(|track| track.is_video())
+        .filter(|track| project.track_is_active_for_output(track))
+        .collect();
+    let primary_track_idx = active_video_tracks.iter().position(|track| {
+        track
+            .clips
+            .iter()
+            .any(|clip| clip.kind != ClipKind::Adjustment)
+    })?;
+
+    Some(ActiveVideoTrackExportLayout {
+        primary_clips: sorted_non_adjustment_track_clips(active_video_tracks[primary_track_idx]),
+        secondary_track_clips: active_video_tracks
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| *idx != primary_track_idx)
+            .filter_map(|(_, track)| {
+                let clips = sorted_non_adjustment_track_clips(track);
+                (!clips.is_empty()).then_some(clips)
+            })
+            .collect(),
+        adjustment_clips: active_video_tracks
+            .iter()
+            .flat_map(|track| track.clips.iter())
+            .filter(|clip| clip.kind == ClipKind::Adjustment)
+            .collect(),
+    })
+}
+
 /// Export the project to a file at `output_path` using `options`.
 /// Sends progress to `tx`. Call this from a background thread.
+///
+/// `frame_interp_paths` maps a flattened clip's id to a precomputed AI
+/// frame-interpolation sidecar (RIFE) when one is ready. When a sidecar is
+/// present for a clip, the export reads the sidecar instead of the original
+/// source so the higher-fps interpolated frames are encoded into the output.
 pub fn export_project(
     project: &Project,
     output_path: &str,
     options: ExportOptions,
     estimated_size_bytes: Option<u64>,
     bg_removal_paths: &std::collections::HashMap<String, String>,
+    frame_interp_paths: &std::collections::HashMap<String, String>,
     tx: mpsc::Sender<ExportProgress>,
 ) -> Result<()> {
     let out_w = if options.output_width == 0 {
@@ -120,57 +186,26 @@ pub fn export_project(
     // recursively expanded into its constituent leaf clips with rebased
     // timeline positions. The rest of the export pipeline operates on this
     // flat representation unchanged.
-    let flattened_tracks = flatten_compound_tracks(&project.tracks);
+    let mut flattened_tracks = flatten_compound_tracks(&project.tracks);
+    crate::media::tracking::apply_tracking_bindings_to_tracks(&mut flattened_tracks);
     let flattened_project_tracks = &flattened_tracks;
 
-    // Primary video track (first active video track) — forms the base concat sequence.
-    // Secondary active video tracks are composited on top with overlay.
-    let active_video_tracks: Vec<_> = flattened_project_tracks
-        .iter()
-        .filter(|t| t.kind == crate::model::track::TrackKind::Video)
-        .filter(|t| project.track_is_active_for_output(t))
-        .collect();
-    let mut primary_clips: Vec<&crate::model::clip::Clip> = active_video_tracks
-        .first()
-        .map(|t| {
-            t.clips
-                .iter()
-                .filter(|c| c.kind != ClipKind::Adjustment)
-                .collect()
-        })
-        .unwrap_or_default();
-    primary_clips.sort_by_key(|c| c.timeline_start);
-
-    // Remaining video tracks: each is a list of (overlay) clips
-    // Collect adjustment clips from ALL tracks before filtering them out.
-    let all_adjustment_clips: Vec<&Clip> = active_video_tracks
-        .iter()
-        .flat_map(|t| t.clips.iter())
-        .filter(|c| c.kind == ClipKind::Adjustment)
-        .collect();
-
-    let secondary_track_clips: Vec<Vec<&crate::model::clip::Clip>> = active_video_tracks
-        .into_iter()
-        .skip(1)
-        .map(|t| {
-            let mut clips: Vec<&Clip> = t
-                .clips
-                .iter()
-                .filter(|c| c.kind != ClipKind::Adjustment)
-                .collect();
-            clips.sort_by_key(|c| c.timeline_start);
-            clips
-        })
-        .collect();
-
-    if primary_clips.is_empty() {
+    // Primary video track: the first active video track that actually contains
+    // non-adjustment clips. This keeps upper-track image/title overlays
+    // exportable even when lower video tracks are empty.
+    let Some(video_layout) =
+        split_active_video_tracks_for_export(project, flattened_project_tracks)
+    else {
         return Err(anyhow!("No video clips to export"));
-    }
+    };
+    let primary_clips = video_layout.primary_clips;
+    let all_adjustment_clips = video_layout.adjustment_clips;
+    let secondary_track_clips = video_layout.secondary_track_clips;
 
     // Collect audio-only clips from active audio tracks.
     let audio_track_clips: Vec<Vec<&crate::model::clip::Clip>> = flattened_project_tracks
         .iter()
-        .filter(|t| t.kind == crate::model::track::TrackKind::Audio)
+        .filter(|t| t.is_audio())
         .filter(|t| project.track_is_active_for_output(t))
         .map(|t| {
             let mut clips: Vec<&Clip> = t.clips.iter().collect();
@@ -229,6 +264,17 @@ pub fn export_project(
                 project.frame_rate.numerator,
                 project.frame_rate.denominator,
             );
+        }
+        // AI frame-interpolation sidecar takes priority over the original
+        // source so the export gets the smoother interpolated frames. The
+        // sidecar has the same wall-clock duration so existing setpts /
+        // source_in math stays unchanged.
+        if clip.slow_motion_interp == SlowMotionInterp::Ai {
+            if let Some(interp_path) = frame_interp_paths.get(&clip.id) {
+                if std::path::Path::new(interp_path).exists() {
+                    return Ok(interp_path.clone());
+                }
+            }
         }
         if clip.bg_removal_enabled {
             if let Some(bg_path) = bg_removal_paths.get(&clip.source_path) {
@@ -322,6 +368,9 @@ pub fn export_project(
         cmd.arg("-map_metadata")
             .arg(format!("{metadata_input_idx}"));
     }
+    let mut adjustment_matte_temp_files: Vec<tempfile::NamedTempFile> = Vec::new();
+    let mut next_extra_input_idx =
+        audio_base + audio_clips.len() + usize::from(_chapter_metadata.is_some());
 
     let mut filter = String::new();
     let color_caps = detect_color_filter_capabilities(&ffmpeg);
@@ -333,6 +382,18 @@ pub fn export_project(
             vidstab_trf.insert(clip.id.clone(), trf);
         }
     }
+
+    let primary_transition_timings: Vec<Option<PrimaryTransitionTiming>> = primary_clips
+        .windows(2)
+        .map(|clips| clamped_primary_transition_timing(clips[0], clips[1]))
+        .collect();
+    let has_primary_transitions = primary_clips
+        .iter()
+        .take(primary_clips.len().saturating_sub(1))
+        .any(|c| c.outgoing_transition.is_active());
+    let has_xfade = check_filter_support(&ffmpeg, "xfade");
+    let has_tpad = check_filter_support(&ffmpeg, "tpad");
+    let can_render_primary_transitions = has_primary_transitions && has_xfade && has_tpad;
 
     // === Primary video track: scale/correct each clip then concatenate ===
     // Adjustment clips are already filtered out of primary_clips.
@@ -356,8 +417,14 @@ pub fn export_project(
             project.frame_rate.denominator,
         );
         let lut_prefix = build_lut_filter_prefix(clip);
-        let crop_filter = build_crop_filter(clip, out_w, out_h, false);
+        let crop_filter =
+            build_crop_filter(clip, out_w, out_h, project.width, project.height, false);
         let rotate_filter = build_rotation_filter(clip, false);
+        let transition_stop_pad_filter = if can_render_primary_transitions {
+            build_primary_clip_transition_stop_pad_filter(&primary_transition_timings, i)
+        } else {
+            String::new()
+        };
         let has_transform_keyframes = has_transform_keyframes(clip);
         let has_opacity_keyframes = !clip.opacity_keyframes.is_empty();
         let clip_has_mask = clip.has_mask();
@@ -365,29 +432,29 @@ pub fn export_project(
             let scale_expr = build_keyframed_property_expression(
                 &clip.scale_keyframes,
                 clip.scale,
-                0.1,
-                4.0,
+                SCALE_MIN,
+                SCALE_MAX,
                 "t",
             );
             let pos_x_expr = build_keyframed_property_expression(
                 &clip.position_x_keyframes,
                 clip.position_x,
-                -1.0,
-                1.0,
+                POSITION_MIN,
+                POSITION_MAX,
                 "t",
             );
             let pos_y_expr = build_keyframed_property_expression(
                 &clip.position_y_keyframes,
                 clip.position_y,
-                -1.0,
-                1.0,
+                POSITION_MIN,
+                POSITION_MAX,
                 "t",
             );
             let opacity_expr = build_keyframed_property_expression(
                 &clip.opacity_keyframes,
                 clip.opacity,
-                0.0,
-                1.0,
+                OPACITY_MIN,
+                OPACITY_MAX,
                 "T",
             );
             let mask_result = build_combined_mask_alpha(clip, out_w, out_h);
@@ -398,13 +465,29 @@ pub fn export_project(
                 Some(MaskAlphaResult::GeqExpression(expr)) => expr.clone(),
                 Some(MaskAlphaResult::RasterFile(_)) | None => "1".to_string(),
             };
+            // Direct canvas translation for tracker-bound, title, and
+            // adjustment clips uses a different overlay position formula
+            // than normal clips, matching the preview's
+            // `direct_canvas_origin` math. See secondary chain for the
+            // longer comment.
+            let (overlay_x_expr, overlay_y_expr) = if clip_uses_direct_canvas_translation(clip) {
+                (
+                    format!("(W*(1+({pos_x_expr}))-w)/2"),
+                    format!("(H*(1+({pos_y_expr}))-h)/2"),
+                )
+            } else {
+                (
+                    format!("(W-w)*(1+({pos_x_expr}))/2"),
+                    format!("(H-h)*(1+({pos_y_expr}))/2"),
+                )
+            };
             filter.push_str(&format!(
                 "[{i}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{speed_filter}\
                  ,scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[pv{i}fg];\
                  color=c=black:size={out_w}x{out_h}:r={}/{}:d={clip_duration_s:.6}[pv{i}bg];\
-                 [pv{i}bg][pv{i}fg]overlay=x='(W-w)*(1+({pos_x_expr}))/2':y='(H-h)*(1+({pos_y_expr}))/2':eval=frame\
-                 ,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({opacity_expr})*({mask_alpha_expr})'[pv{i}raw];\
-                 [pv{i}raw]format=yuv420p[pv{i}];",
+                 [pv{i}bg][pv{i}fg]overlay=x='{overlay_x_expr}':y='{overlay_y_expr}':eval=frame\
+                  ,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({opacity_expr})*({mask_alpha_expr})'[pv{i}raw];\
+                 [pv{i}raw]format=yuv420p{transition_stop_pad_filter}[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
                 , project.frame_rate.numerator, project.frame_rate.denominator
             ));
@@ -412,10 +495,13 @@ pub fn export_project(
             if let Some(MaskAlphaResult::RasterFile(mask_file)) = mask_result {
                 let mask_path_str = mask_file.path().display().to_string();
                 _mask_temp_files.push(mask_file);
-                let old_tail = format!("[pv{i}raw];[pv{i}raw]format=yuv420p[pv{i}];", i = i);
+                let old_tail = format!(
+                    "[pv{i}raw];[pv{i}raw]format=yuv420p{transition_stop_pad_filter}[pv{i}];",
+                    i = i
+                );
                 let new_tail = format!(
                     "[pv{i}raw];movie='{mask_path_str}',format=gray,scale={out_w}:{out_h}[pv{i}mask];\
-                     [pv{i}raw][pv{i}mask]alphamerge,format=yuv420p[pv{i}];",
+                     [pv{i}raw][pv{i}mask]alphamerge,format=yuv420p{transition_stop_pad_filter}[pv{i}];",
                     i = i, out_w = out_w, out_h = out_h,
                 );
                 let current = filter.clone();
@@ -428,76 +514,49 @@ pub fn export_project(
             let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
             let anamorphic_filter = build_anamorphic_filter(clip);
             filter.push_str(&format!(
-                "[{i}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{speed_filter}[pv{i}raw];[pv{i}raw]format=yuv420p[pv{i}];",
+                "[{i}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{speed_filter}[pv{i}raw];[pv{i}raw]format=yuv420p{transition_stop_pad_filter}[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
             ));
         } else {
             let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
             let anamorphic_filter = build_anamorphic_filter(clip);
             filter.push_str(&format!(
-                "[{i}:v]{lut_prefix}{anamorphic_filter}scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{},format=yuv420p{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{title_filter}{subtitle_filter}{speed_filter}[pv{i}];",
+                "[{i}:v]{lut_prefix}{anamorphic_filter}scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{},format=yuv420p{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{title_filter}{subtitle_filter}{speed_filter}{transition_stop_pad_filter}[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
             ));
         }
     }
-    // Check for xfade and tpad support
-    let has_xfade = check_filter_support(&ffmpeg, "xfade");
-    let has_tpad = check_filter_support(&ffmpeg, "tpad");
-
-    // Map transition kind string to the ffmpeg xfade transition name.
-    let transition_xfade_name = |kind: &str| -> &'static str {
-        match kind {
-            "cross_dissolve" => "fade",
-            "fade_to_black" => "fadeblack",
-            "wipe_right" => "wiperight",
-            "wipe_left" => "wipeleft",
-            _ => "fade", // safe fallback
-        }
-    };
-
     // Build primary-track sequence:
     // - If transitions exist AND filters are supported, chain xfade filters
     // - Otherwise use concat (original behavior).
-    let has_primary_transitions = primary_clips
-        .iter()
-        .take(primary_clips.len().saturating_sub(1))
-        .any(|c| !c.transition_after.is_empty() && c.transition_after_ns > 0);
-
     if primary_clips.len() == 1 {
         filter.push_str("[pv0]copy[vbase]");
-    } else if has_primary_transitions && has_xfade && has_tpad {
+    } else if can_render_primary_transitions {
         let mut prev_label = "pv0".to_string();
-        let mut running_s = primary_clips[0].duration() as f64 / 1_000_000_000.0;
-        let mut total_overlap_s = 0.0_f64;
+        let mut running_cut_s = primary_clips[0].duration() as f64 / 1_000_000_000.0;
         for i in 0..(primary_clips.len() - 1) {
             let next_label = format!("pv{}", i + 1);
             let out_label = format!("vseq{}", i + 1);
             let clip = &primary_clips[i];
             let next_clip = &primary_clips[i + 1];
             let sep = if i == 0 { "" } else { ";" };
-            if let Some(d_s) = clamped_primary_xfade_duration_s(clip, next_clip) {
-                let offset_s = (running_s - d_s).max(0.0);
-                let xfade = transition_xfade_name(&clip.transition_after);
+            if let Some(timing) = primary_transition_timings[i] {
+                let offset_s = (running_cut_s - timing.before_cut_s()).max(0.0);
+                let xfade = transition_xfade_name_for_kind(clip.outgoing_transition.kind_trimmed())
+                    .unwrap_or("fade");
                 filter.push_str(&format!(
-                    "{sep}[{prev_label}][{next_label}]xfade=transition={xfade}:duration={d_s:.6}:offset={offset_s:.6}[{out_label}]"
+                    "{sep}[{prev_label}][{next_label}]xfade=transition={xfade}:duration={:.6}:offset={offset_s:.6}[{out_label}]",
+                    timing.duration_s(),
                 ));
-                running_s += next_clip.duration() as f64 / 1_000_000_000.0 - d_s;
-                total_overlap_s += d_s;
             } else {
                 filter.push_str(&format!(
                     "{sep}[{prev_label}][{next_label}]concat=n=2:v=1:a=0[{out_label}]"
                 ));
-                running_s += next_clip.duration() as f64 / 1_000_000_000.0;
             }
+            running_cut_s += next_clip.duration() as f64 / 1_000_000_000.0;
             prev_label = out_label;
         }
-        if total_overlap_s > 0.0 {
-            filter.push_str(&format!(
-                ";[{prev_label}]tpad=stop_mode=clone:stop_duration={total_overlap_s:.6}[vbase]"
-            ));
-        } else {
-            filter.push_str(&format!(";[{prev_label}]copy[vbase]"));
-        }
+        filter.push_str(&format!(";[{prev_label}]copy[vbase]"));
     } else {
         for i in 0..primary_clips.len() {
             filter.push_str(&format!("[pv{i}]"));
@@ -534,7 +593,8 @@ pub fn export_project(
             project.frame_rate.denominator,
         );
         let lut_prefix = build_lut_filter_prefix(clip);
-        let crop_filter = build_crop_filter(clip, out_w, out_h, true);
+        let crop_filter =
+            build_crop_filter(clip, out_w, out_h, project.width, project.height, true);
         let rotate_filter = build_rotation_filter(clip, true);
         let has_transform_keyframes = has_transform_keyframes(clip);
         let has_opacity_keyframes = !clip.opacity_keyframes.is_empty();
@@ -549,29 +609,29 @@ pub fn export_project(
             let scale_expr = build_keyframed_property_expression(
                 &clip.scale_keyframes,
                 clip.scale,
-                0.1,
-                4.0,
+                SCALE_MIN,
+                SCALE_MAX,
                 "t",
             );
             let pos_x_expr = build_keyframed_property_expression(
                 &clip.position_x_keyframes,
                 clip.position_x,
-                -1.0,
-                1.0,
+                POSITION_MIN,
+                POSITION_MAX,
                 "t",
             );
             let pos_y_expr = build_keyframed_property_expression(
                 &clip.position_y_keyframes,
                 clip.position_y,
-                -1.0,
-                1.0,
+                POSITION_MIN,
+                POSITION_MAX,
                 "t",
             );
             let opacity_expr = build_keyframed_property_expression(
                 &clip.opacity_keyframes,
                 clip.opacity,
-                0.0,
-                1.0,
+                OPACITY_MIN,
+                OPACITY_MAX,
                 "T",
             );
             let ov_mask_result = build_combined_mask_alpha(clip, out_w, out_h);
@@ -581,11 +641,32 @@ pub fn export_project(
             };
             let clip_duration_s = clip.duration() as f64 / 1_000_000_000.0;
             let anamorphic_filter = build_anamorphic_filter(clip);
+            // Direct canvas translation for tracker-bound, title, and
+            // adjustment clips uses a different overlay position formula
+            // than normal clips, matching the preview's
+            // `direct_canvas_origin` math:
+            //   normal: x = (W-w)*(1+pos_x)/2
+            //   direct: x = (W-w)/2 + pos_x*W/2 = (W*(1+pos_x) - w)/2
+            // Without this branch, tracker-bound clips end up at a
+            // different horizontal position in the export than in the
+            // preview (the tracker baking encodes positions in
+            // direct-canvas-relative space).
+            let (overlay_x_expr, overlay_y_expr) = if clip_uses_direct_canvas_translation(clip) {
+                (
+                    format!("(W*(1+({pos_x_expr}))-w)/2"),
+                    format!("(H*(1+({pos_y_expr}))-h)/2"),
+                )
+            } else {
+                (
+                    format!("(W-w)*(1+({pos_x_expr}))/2"),
+                    format!("(H-h)*(1+({pos_y_expr}))/2"),
+                )
+            };
             filter.push_str(&format!(
                 ";[{in_idx}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{crop_filter}{rotate_filter}{speed_filter}\
                  ,scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[ov{k}fg];\
                  color=c=black@0:size={out_w}x{out_h}:r={}/{}:d={clip_duration_s:.6}[ov{k}bg];\
-                 [ov{k}bg][ov{k}fg]overlay=x='(W-w)*(1+({pos_x_expr}))/2':y='(H-h)*(1+({pos_y_expr}))/2':eval=frame\
+                 [ov{k}bg][ov{k}fg]overlay=x='{overlay_x_expr}':y='{overlay_y_expr}':eval=frame\
                  ,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({opacity_expr})*({mask_alpha_expr})'[{ov_label}raw]"
                 , project.frame_rate.numerator, project.frame_rate.denominator
                 , project.frame_rate.numerator, project.frame_rate.denominator
@@ -639,15 +720,38 @@ pub fn export_project(
     // Each adjustment layer applies its effects (color, LUT, blur, frei0r) to the
     // composite output, time-gated to the adjustment clip's duration.
     for (adj_idx, adj_clip) in adjustment_clips.iter().enumerate() {
+        if build_adjustment_effects_chain_filter(adj_clip, &color_caps).is_empty()
+            || adj_clip.opacity.clamp(0.0, 1.0) <= f64::EPSILON
+        {
+            continue;
+        }
         let next_label = format!("vadj{adj_idx}");
+        let matte_input = prepare_adjustment_export_matte_input(
+            &ffmpeg,
+            &mut cmd,
+            adj_clip,
+            out_w,
+            out_h,
+            project.frame_rate.frame_duration_ns(),
+            project.frame_rate.numerator.max(1),
+            project.frame_rate.denominator.max(1),
+            next_extra_input_idx,
+            &mut adjustment_matte_temp_files,
+        )?;
+        if matte_input.is_some() {
+            next_extra_input_idx += 1;
+        }
         if let Some(graph) = build_adjustment_layer_filter_graph(
             &prev_label,
             &next_label,
             adj_clip,
+            matte_input,
             adj_idx,
             out_w,
             out_h,
+            project.frame_rate.frame_duration_ns(),
             &color_caps,
+            &mut _mask_temp_files,
         ) {
             filter.push_str(&graph);
             prev_label = next_label;
@@ -665,17 +769,24 @@ pub fn export_project(
                 if clip.subtitle_segments.is_empty() {
                     continue;
                 }
+                log::debug!(
+                    "export: found {} subtitle segments on clip {} (kind={:?}, tl_start={}, source_in={})",
+                    clip.subtitle_segments.len(),
+                    clip.label,
+                    clip.kind,
+                    clip.timeline_start,
+                    clip.source_in,
+                );
                 // Collect this clip's segments as timeline-absolute.
+                // Subtitle start_ns/end_ns are relative to clip start (0 = source_in),
+                // so we just scale by speed and add timeline_start.
                 let clip_segs: Vec<(u64, u64, String, &crate::model::clip::Clip)> = clip
                     .subtitle_segments
                     .iter()
                     .map(|seg| {
-                        let abs_start = clip.timeline_start
-                            + ((seg.start_ns.saturating_sub(clip.source_in)) as f64 / clip.speed)
-                                as u64;
-                        let abs_end = clip.timeline_start
-                            + ((seg.end_ns.saturating_sub(clip.source_in)) as f64 / clip.speed)
-                                as u64;
+                        let abs_start =
+                            clip.timeline_start + (seg.start_ns as f64 / clip.speed) as u64;
+                        let abs_end = clip.timeline_start + (seg.end_ns as f64 / clip.speed) as u64;
                         (abs_start, abs_end, seg.text.clone(), clip)
                     })
                     .collect();
@@ -780,6 +891,12 @@ pub fn export_project(
                 } else {
                     format!(",{ladspa_filter}")
                 };
+                let match_eq_filter = build_match_eq_filter(clip);
+                let match_eq_part = if match_eq_filter.is_empty() {
+                    String::new()
+                } else {
+                    format!(",{match_eq_filter}")
+                };
                 let eq_filter = build_eq_filter(clip);
                 let eq_part = if eq_filter.is_empty() {
                     String::new()
@@ -791,7 +908,7 @@ pub fn export_project(
                 let pre_pan = format!("{label}_prepan");
                 let post_pan = format!("{label}_panned");
                 filter.push_str(&format!(
-                ";[{i}:a]{areverse}{atempo}{ch_part}{volume_filter}{pitch_part}{ladspa_part}{eq_part},{fade_filters}anull[{pre_pan}]"
+                ";[{i}:a]{areverse}{atempo}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{match_eq_part}{eq_part},{fade_filters}anull[{pre_pan}]"
             ));
                 append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
                 filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
@@ -838,6 +955,12 @@ pub fn export_project(
                 } else {
                     format!(",{ladspa_filter}")
                 };
+                let match_eq_filter = build_match_eq_filter(clip);
+                let match_eq_part = if match_eq_filter.is_empty() {
+                    String::new()
+                } else {
+                    format!(",{match_eq_filter}")
+                };
                 let eq_filter = build_eq_filter(clip);
                 let eq_part = if eq_filter.is_empty() {
                     String::new()
@@ -849,7 +972,7 @@ pub fn export_project(
                 let pre_pan = format!("{label}_prepan");
                 let post_pan = format!("{label}_panned");
                 filter.push_str(&format!(
-                ";[{in_idx}:a]{areverse}{atempo}{ch_part}{volume_filter}{pitch_part}{ladspa_part}{eq_part},{fade_filters}anull[{pre_pan}]"
+                ";[{in_idx}:a]{areverse}{atempo}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{match_eq_part}{eq_part},{fade_filters}anull[{pre_pan}]"
             ));
                 append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
                 filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
@@ -889,6 +1012,12 @@ pub fn export_project(
             } else {
                 format!(",{ladspa_filter}")
             };
+            let match_eq_filter = build_match_eq_filter(clip);
+            let match_eq_part = if match_eq_filter.is_empty() {
+                String::new()
+            } else {
+                format!(",{match_eq_filter}")
+            };
             let eq_filter = build_eq_filter(clip);
             let eq_part = if eq_filter.is_empty() {
                 String::new()
@@ -912,7 +1041,7 @@ pub fn export_project(
             let pre_pan = format!("{label}_prepan");
             let post_pan = format!("{label}_panned");
             filter.push_str(&format!(
-            ";[{}:a]{areverse}{atempo}{ch_part}{volume_filter}{pitch_part}{ladspa_part}{duck_part}{eq_part},{fade_filters}anull[{pre_pan}]",
+            ";[{}:a]{areverse}{atempo}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{duck_part}{match_eq_part}{eq_part},{fade_filters}anull[{pre_pan}]",
             audio_base + j
         ));
             append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
@@ -1018,8 +1147,11 @@ pub fn export_project(
         (filter, vout_label)
     };
 
-    cmd.arg("-filter_complex")
-        .arg(&filter)
+    let mut filter_script_file = tempfile::NamedTempFile::new()?;
+    filter_script_file.write_all(filter.as_bytes())?;
+
+    cmd.arg("-filter_complex_script")
+        .arg(filter_script_file.path())
         .arg("-map")
         .arg(format!("[{map_label}]"));
 
@@ -1103,10 +1235,7 @@ pub fn export_project(
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
 
-    eprintln!(
-        "[export] ffmpeg args: {:?}",
-        cmd.get_args().collect::<Vec<_>>()
-    );
+    log::debug!("ffmpeg args: {:?}", cmd.get_args().collect::<Vec<_>>());
 
     let mut child = cmd
         .spawn()
@@ -1133,7 +1262,7 @@ pub fn export_project(
             && !line.starts_with("drop_")
             && !line.starts_with("stream_")
         {
-            eprintln!("[export] ffmpeg: {line}");
+            log::warn!("ffmpeg: {line}");
             error_lines.push(line);
         }
     }
@@ -1328,6 +1457,73 @@ fn build_custom_eased_t_expr(
     expr
 }
 
+fn build_keyframed_segment_expression(
+    left_ns: u64,
+    left_value: f64,
+    interp: crate::model::clip::KeyframeInterpolation,
+    controls: Option<(f64, f64, f64, f64)>,
+    right_ns: u64,
+    right_value: f64,
+    time_var: &str,
+) -> String {
+    let left_s = left_ns as f64 / 1_000_000_000.0;
+    let right_s = right_ns as f64 / 1_000_000_000.0;
+    let span_s = (right_s - left_s).max(1e-9);
+    let t_expr = format!("(({time_var})-{left_s:.9})/{span_s:.9}");
+    let eased_t = if let Some(controls) = controls {
+        build_custom_eased_t_expr(&t_expr, controls, 8)
+    } else {
+        match interp {
+            crate::model::clip::KeyframeInterpolation::Linear => t_expr.clone(),
+            crate::model::clip::KeyframeInterpolation::EaseIn => format!("pow({t_expr},2)"),
+            crate::model::clip::KeyframeInterpolation::EaseOut => {
+                format!("(1-pow(1-({t_expr}),2))")
+            }
+            crate::model::clip::KeyframeInterpolation::EaseInOut => {
+                format!("if(lt({t_expr},0.5),2*pow({t_expr},2),1-pow(-2*({t_expr})+2,2)/2)")
+            }
+        }
+    };
+    format!("{left_value:.10}+({right_value:.10}-{left_value:.10})*{eased_t}")
+}
+
+fn build_flat_keyframed_property_expression(
+    deduped: &[(
+        u64,
+        f64,
+        crate::model::clip::KeyframeInterpolation,
+        Option<(f64, f64, f64, f64)>,
+    )],
+    time_var: &str,
+) -> String {
+    let (first_ns, first_value, _, _) = deduped[0];
+    let (last_ns, last_value, _, _) = deduped[deduped.len() - 1];
+    let first_s = first_ns as f64 / 1_000_000_000.0;
+    let last_s = last_ns as f64 / 1_000_000_000.0;
+    let mut terms = Vec::with_capacity(deduped.len() + 1);
+    terms.push(format!("lt({time_var},{first_s:.9})*{first_value:.10}"));
+    for i in 1..deduped.len() {
+        let (left_ns, left_value, interp, controls) = deduped[i - 1];
+        let (right_ns, right_value, _, _) = deduped[i];
+        let left_s = left_ns as f64 / 1_000_000_000.0;
+        let right_s = right_ns as f64 / 1_000_000_000.0;
+        let segment_expr = build_keyframed_segment_expression(
+            left_ns,
+            left_value,
+            interp,
+            controls,
+            right_ns,
+            right_value,
+            time_var,
+        );
+        terms.push(format!(
+            "(gte({time_var},{left_s:.9})*lt({time_var},{right_s:.9}))*({segment_expr})"
+        ));
+    }
+    terms.push(format!("gte({time_var},{last_s:.9})*{last_value:.10}"));
+    terms.join("+")
+}
+
 pub(crate) fn build_keyframed_property_expression(
     keyframes: &[NumericKeyframe],
     default_value: f64,
@@ -1371,6 +1567,14 @@ pub(crate) fn build_keyframed_property_expression(
         return format!("{:.10}", deduped[0].1);
     }
 
+    const MAX_NESTED_KEYFRAME_SEGMENTS: usize = 48;
+    if deduped.len() > MAX_NESTED_KEYFRAME_SEGMENTS {
+        // FFmpeg starts rejecting very deep nested `if()` expressions from dense
+        // tracking/keyframe data. Flatten large keyframe sets into a gated
+        // piecewise sum so export remains compatible with high-sample trackers.
+        return build_flat_keyframed_property_expression(&deduped, time_var);
+    }
+
     let mut expr = format!(
         "{:.10}",
         deduped
@@ -1381,26 +1585,16 @@ pub(crate) fn build_keyframed_property_expression(
     for i in (1..deduped.len()).rev() {
         let (left_ns, left_value, interp, controls) = deduped[i - 1];
         let (right_ns, right_value, _, _) = deduped[i];
-        let left_s = left_ns as f64 / 1_000_000_000.0;
         let right_s = right_ns as f64 / 1_000_000_000.0;
-        let span_s = (right_s - left_s).max(1e-9);
-        // Compute normalized t for this segment
-        let t_expr = format!("(({time_var})-{left_s:.9})/{span_s:.9}");
-        // Apply easing to t
-        let eased_t = if let Some(controls) = controls {
-            build_custom_eased_t_expr(&t_expr, controls, 8)
-        } else {
-            match interp {
-                KeyframeInterpolation::Linear => t_expr.clone(),
-                KeyframeInterpolation::EaseIn => format!("pow({t_expr},2)"),
-                KeyframeInterpolation::EaseOut => format!("(1-pow(1-({t_expr}),2))"),
-                KeyframeInterpolation::EaseInOut => {
-                    format!("if(lt({t_expr},0.5),2*pow({t_expr},2),1-pow(-2*({t_expr})+2,2)/2)")
-                }
-            }
-        };
-        let segment_expr =
-            format!("{left_value:.10}+({right_value:.10}-{left_value:.10})*{eased_t}");
+        let segment_expr = build_keyframed_segment_expression(
+            left_ns,
+            left_value,
+            interp,
+            controls,
+            right_ns,
+            right_value,
+            time_var,
+        );
         expr = format!(
             "if(lt({time_var},{right_s:.9}),{segment_expr},{expr})",
             right_s = right_s
@@ -1411,11 +1605,467 @@ pub(crate) fn build_keyframed_property_expression(
     format!("if(lt({time_var},{first_s:.9}),{first_value:.10},{expr})")
 }
 
+#[derive(Debug, Clone, Copy)]
+struct AdjustmentExportRoi {
+    left: usize,
+    top: usize,
+    right: usize,
+    bottom: usize,
+}
+
+impl AdjustmentExportRoi {
+    fn width(self) -> usize {
+        self.right.saturating_sub(self.left)
+    }
+
+    fn height(self) -> usize {
+        self.bottom.saturating_sub(self.top)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AdjustmentMatteInput {
+    input_index: usize,
+    roi: AdjustmentExportRoi,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResolvedAdjustmentTransform {
+    scale: f64,
+    position_x: f64,
+    position_y: f64,
+    rotate_deg: f64,
+    crop_left: i32,
+    crop_right: i32,
+    crop_top: i32,
+    crop_bottom: i32,
+}
+
+impl ResolvedAdjustmentTransform {
+    fn scope(self, out_w: u32, out_h: u32) -> AdjustmentScopeShape {
+        AdjustmentScopeShape::from_transform(
+            out_w,
+            out_h,
+            self.scale,
+            self.position_x,
+            self.position_y,
+            self.rotate_deg,
+            self.crop_left,
+            self.crop_right,
+            self.crop_top,
+            self.crop_bottom,
+        )
+    }
+}
+
+fn intersect_bounds(
+    a: (usize, usize, usize, usize),
+    b: (usize, usize, usize, usize),
+) -> Option<(usize, usize, usize, usize)> {
+    let left = a.0.max(b.0);
+    let top = a.1.max(b.1);
+    let right = a.2.min(b.2);
+    let bottom = a.3.min(b.3);
+    if left >= right || top >= bottom {
+        None
+    } else {
+        Some((left, top, right, bottom))
+    }
+}
+
+fn union_bounds(
+    a: (usize, usize, usize, usize),
+    b: (usize, usize, usize, usize),
+) -> (usize, usize, usize, usize) {
+    (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3))
+}
+
+fn expand_bounds(
+    bounds: (usize, usize, usize, usize),
+    padding: usize,
+    frame_width: usize,
+    frame_height: usize,
+) -> Option<AdjustmentExportRoi> {
+    let left = bounds.0.saturating_sub(padding);
+    let top = bounds.1.saturating_sub(padding);
+    let right = bounds.2.saturating_add(padding).min(frame_width);
+    let bottom = bounds.3.saturating_add(padding).min(frame_height);
+    if left >= right || top >= bottom {
+        None
+    } else {
+        Some(AdjustmentExportRoi {
+            left,
+            top,
+            right,
+            bottom,
+        })
+    }
+}
+
+fn adjustment_supports_roi_fast_path(clip: &Clip) -> bool {
+    clip.denoise <= f32::EPSILON
+        && !clip.has_frei0r_effects()
+        && !clip
+            .masks
+            .iter()
+            .any(|mask| mask.enabled && mask.shape == MaskShape::Path)
+}
+
+fn mask_has_dynamic_geometry(mask: &crate::model::clip::ClipMask) -> bool {
+    !mask.center_x_keyframes.is_empty()
+        || !mask.center_y_keyframes.is_empty()
+        || !mask.width_keyframes.is_empty()
+        || !mask.height_keyframes.is_empty()
+        || !mask.rotation_keyframes.is_empty()
+        || !mask.feather_keyframes.is_empty()
+        || !mask.expansion_keyframes.is_empty()
+}
+
+fn adjustment_needs_resolved_matte(clip: &Clip) -> bool {
+    has_transform_keyframes(clip) || clip.masks.iter().any(mask_has_dynamic_geometry)
+}
+
+fn adjustment_roi_padding_px(clip: &Clip) -> usize {
+    let blur_padding = if clip.blur > 0.0 {
+        (clip.blur.clamp(0.0, 1.0) * 10.0).round().max(0.0) as usize
+    } else {
+        0
+    };
+    let sharpen_padding = if clip.sharpness != 0.0 { 3 } else { 0 };
+    blur_padding.max(sharpen_padding)
+}
+
+fn resolve_adjustment_transform_at_local_time(
+    clip: &Clip,
+    local_time_ns: u64,
+) -> ResolvedAdjustmentTransform {
+    use crate::model::transform_bounds::*;
+    ResolvedAdjustmentTransform {
+        scale: Clip::evaluate_keyframed_value(&clip.scale_keyframes, local_time_ns, clip.scale)
+            .clamp(SCALE_MIN, SCALE_MAX),
+        // Adjustment scope positions stay clamped to ±1.0 — moving the
+        // adjustment region off-canvas has no useful semantic.
+        position_x: Clip::evaluate_keyframed_value(
+            &clip.position_x_keyframes,
+            local_time_ns,
+            clip.position_x,
+        )
+        .clamp(ADJUSTMENT_POSITION_MIN, ADJUSTMENT_POSITION_MAX),
+        position_y: Clip::evaluate_keyframed_value(
+            &clip.position_y_keyframes,
+            local_time_ns,
+            clip.position_y,
+        )
+        .clamp(ADJUSTMENT_POSITION_MIN, ADJUSTMENT_POSITION_MAX),
+        rotate_deg: Clip::evaluate_keyframed_value(
+            &clip.rotate_keyframes,
+            local_time_ns,
+            clip.rotate as f64,
+        )
+        .clamp(ROTATE_MIN_DEG, ROTATE_MAX_DEG),
+        crop_left: Clip::evaluate_keyframed_value(
+            &clip.crop_left_keyframes,
+            local_time_ns,
+            clip.crop_left as f64,
+        )
+        .round()
+        .clamp(CROP_MIN_PX, CROP_MAX_PX) as i32,
+        crop_right: Clip::evaluate_keyframed_value(
+            &clip.crop_right_keyframes,
+            local_time_ns,
+            clip.crop_right as f64,
+        )
+        .round()
+        .clamp(CROP_MIN_PX, CROP_MAX_PX) as i32,
+        crop_top: Clip::evaluate_keyframed_value(
+            &clip.crop_top_keyframes,
+            local_time_ns,
+            clip.crop_top as f64,
+        )
+        .round()
+        .clamp(CROP_MIN_PX, CROP_MAX_PX) as i32,
+        crop_bottom: Clip::evaluate_keyframed_value(
+            &clip.crop_bottom_keyframes,
+            local_time_ns,
+            clip.crop_bottom as f64,
+        )
+        .round()
+        .clamp(CROP_MIN_PX, CROP_MAX_PX) as i32,
+    }
+}
+
+fn build_adjustment_export_roi(
+    clip: &Clip,
+    out_w: u32,
+    out_h: u32,
+    frame_duration_ns: u64,
+) -> Option<AdjustmentExportRoi> {
+    if !adjustment_supports_roi_fast_path(clip) {
+        return None;
+    }
+
+    let frame_width = out_w.max(1) as usize;
+    let frame_height = out_h.max(1) as usize;
+    let duration_ns = clip.duration();
+    let last_sample_ns = duration_ns.saturating_sub(1);
+    let sample_step_ns = frame_duration_ns.max(1);
+    let roi_masks: Vec<_> = clip
+        .masks
+        .iter()
+        .filter(|mask| mask.enabled && !mask.invert)
+        .cloned()
+        .collect();
+    let mut union: Option<(usize, usize, usize, usize)> = None;
+    let mut local_time_ns = 0u64;
+
+    loop {
+        let resolved = resolve_adjustment_transform_at_local_time(clip, local_time_ns);
+        let scope_bounds = resolved
+            .scope(out_w, out_h)
+            .pixel_bounds(frame_width, frame_height);
+        let sample_bounds = if roi_masks.is_empty() {
+            scope_bounds
+        } else {
+            scope_bounds.and_then(|scope_bounds| {
+                prepare_adjustment_canvas_masks(
+                    &roi_masks,
+                    local_time_ns,
+                    resolved.scale,
+                    resolved.position_x,
+                    resolved.position_y,
+                    resolved.rotate_deg,
+                )
+                .and_then(|prepared| prepared.pixel_bounds(frame_width, frame_height))
+                .and_then(|mask_bounds| intersect_bounds(scope_bounds, mask_bounds))
+            })
+        };
+        if let Some(bounds) = sample_bounds {
+            union = Some(match union {
+                Some(existing) => union_bounds(existing, bounds),
+                None => bounds,
+            });
+        }
+        if local_time_ns >= last_sample_ns {
+            break;
+        }
+        let next_time_ns = local_time_ns
+            .saturating_add(sample_step_ns)
+            .min(last_sample_ns);
+        if next_time_ns == local_time_ns {
+            break;
+        }
+        local_time_ns = next_time_ns;
+    }
+
+    let union = union?;
+    let padded = expand_bounds(
+        union,
+        adjustment_roi_padding_px(clip),
+        frame_width,
+        frame_height,
+    )?;
+    if padded.left == 0
+        && padded.top == 0
+        && padded.right == frame_width
+        && padded.bottom == frame_height
+    {
+        None
+    } else {
+        Some(padded)
+    }
+}
+
+fn render_adjustment_export_matte_file(
+    ffmpeg: &str,
+    clip: &Clip,
+    out_w: u32,
+    out_h: u32,
+    frame_duration_ns: u64,
+    fps_num: u32,
+    fps_den: u32,
+    roi: AdjustmentExportRoi,
+) -> Result<tempfile::NamedTempFile> {
+    let roi_w = roi.width();
+    let roi_h = roi.height();
+    if roi_w == 0 || roi_h == 0 {
+        return Err(anyhow!("Adjustment matte ROI is empty"));
+    }
+
+    let duration_ns = clip.duration().max(1);
+    let sample_step_ns = frame_duration_ns.max(1);
+    let last_sample_ns = duration_ns.saturating_sub(1);
+    let frame_count = last_sample_ns / sample_step_ns + 1;
+    let full_w = out_w.max(1) as usize;
+    let full_h = out_h.max(1) as usize;
+    let roi_rect = (roi.left, roi.top, roi.right, roi.bottom);
+    let matte_alpha_scale = clip.opacity.clamp(0.0, 1.0);
+    let roi_masks: Vec<_> = clip
+        .masks
+        .iter()
+        .filter(|mask| mask.enabled && !mask.invert)
+        .cloned()
+        .collect();
+
+    let output_file = tempfile::Builder::new().suffix(".mkv").tempfile()?;
+    let mut child = Command::new(ffmpeg)
+        .arg("-y")
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-f")
+        .arg("rawvideo")
+        .arg("-pix_fmt")
+        .arg("gray")
+        .arg("-video_size")
+        .arg(format!("{roi_w}x{roi_h}"))
+        .arg("-framerate")
+        .arg(format!("{fps_num}/{fps_den}"))
+        .arg("-i")
+        .arg("-")
+        .arg("-an")
+        .arg("-c:v")
+        .arg("ffv1")
+        .arg("-pix_fmt")
+        .arg("gray")
+        .arg(output_file.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| anyhow!("Failed to start adjustment matte ffmpeg: {e}"))?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("Failed to open adjustment matte stdin"))?;
+    let mut frame = vec![0u8; roi_w.saturating_mul(roi_h)];
+
+    for frame_idx in 0..frame_count {
+        frame.fill(0);
+        let local_time_ns = frame_idx.saturating_mul(sample_step_ns).min(last_sample_ns);
+        let resolved = resolve_adjustment_transform_at_local_time(clip, local_time_ns);
+        let resolved_scope = resolved.scope(out_w, out_h).resolve(full_w, full_h);
+        let scope_bounds = resolved_scope.pixel_bounds(full_w, full_h);
+        let prepared_masks = if roi_masks.is_empty() {
+            None
+        } else {
+            prepare_adjustment_canvas_masks(
+                &roi_masks,
+                local_time_ns,
+                resolved.scale,
+                resolved.position_x,
+                resolved.position_y,
+                resolved.rotate_deg,
+            )
+        };
+        let sample_bounds = if roi_masks.is_empty() {
+            scope_bounds
+        } else {
+            scope_bounds.and_then(|scope_bounds| {
+                prepared_masks
+                    .as_ref()
+                    .and_then(|prepared| prepared.pixel_bounds(full_w, full_h))
+                    .and_then(|mask_bounds| intersect_bounds(scope_bounds, mask_bounds))
+            })
+        }
+        .and_then(|bounds| intersect_bounds(bounds, roi_rect));
+
+        if let Some((x0, y0, x1, y1)) = sample_bounds {
+            for y in y0..y1 {
+                let roi_y = y - roi.top;
+                let row_start = roi_y * roi_w;
+                for x in x0..x1 {
+                    if !resolved_scope.contains_pixel(x, y) {
+                        continue;
+                    }
+                    let mask_alpha = prepared_masks
+                        .as_ref()
+                        .map(|mask| mask.alpha_at_canvas_pixel(x, y, full_w, full_h))
+                        .unwrap_or(1.0);
+                    if mask_alpha <= f64::EPSILON {
+                        continue;
+                    }
+                    frame[row_start + (x - roi.left)] = (mask_alpha * matte_alpha_scale * 255.0)
+                        .round()
+                        .clamp(0.0, 255.0)
+                        as u8;
+                }
+            }
+        }
+
+        stdin
+            .write_all(&frame)
+            .map_err(|e| anyhow!("Failed writing adjustment matte frame: {e}"))?;
+    }
+    drop(stdin);
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| anyhow!("Failed finalizing adjustment matte: {e}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(anyhow!(
+            "Failed to render adjustment matte: {}",
+            if detail.is_empty() {
+                "unknown ffmpeg error"
+            } else {
+                detail.as_str()
+            }
+        ));
+    }
+
+    Ok(output_file)
+}
+
+fn prepare_adjustment_export_matte_input(
+    ffmpeg: &str,
+    cmd: &mut Command,
+    clip: &Clip,
+    out_w: u32,
+    out_h: u32,
+    frame_duration_ns: u64,
+    fps_num: u32,
+    fps_den: u32,
+    input_index: usize,
+    matte_temp_files: &mut Vec<tempfile::NamedTempFile>,
+) -> Result<Option<AdjustmentMatteInput>> {
+    if !adjustment_needs_resolved_matte(clip) {
+        return Ok(None);
+    }
+    let Some(roi) = build_adjustment_export_roi(clip, out_w, out_h, frame_duration_ns) else {
+        return Ok(None);
+    };
+    let matte_file = render_adjustment_export_matte_file(
+        ffmpeg,
+        clip,
+        out_w,
+        out_h,
+        frame_duration_ns,
+        fps_num,
+        fps_den,
+        roi,
+    )?;
+    cmd.arg("-i").arg(matte_file.path());
+    matte_temp_files.push(matte_file);
+    Ok(Some(AdjustmentMatteInput { input_index, roi }))
+}
+
 fn build_adjustment_scope_alpha_expression(
     clip: &Clip,
     out_w: u32,
     out_h: u32,
     time_var: &str,
+) -> String {
+    build_adjustment_scope_alpha_expression_for_coords(clip, out_w, out_h, time_var, "X", "Y")
+}
+
+fn build_adjustment_scope_alpha_expression_for_coords(
+    clip: &Clip,
+    out_w: u32,
+    out_h: u32,
+    time_var: &str,
+    x_var: &str,
+    y_var: &str,
 ) -> String {
     if !has_transform_keyframes(clip) {
         let scope = AdjustmentScopeShape::from_transform(
@@ -1437,60 +2087,65 @@ fn build_adjustment_scope_alpha_expression(
 
     let pw = out_w.max(1) as f64;
     let ph = out_h.max(1) as f64;
-    let scale_expr =
-        build_keyframed_property_expression(&clip.scale_keyframes, clip.scale, 0.1, 4.0, time_var);
+    let scale_expr = build_keyframed_property_expression(
+        &clip.scale_keyframes,
+        clip.scale,
+        SCALE_MIN,
+        SCALE_MAX,
+        time_var,
+    );
     let pos_x_expr = build_keyframed_property_expression(
         &clip.position_x_keyframes,
         clip.position_x,
-        -1.0,
-        1.0,
+        POSITION_MIN,
+        POSITION_MAX,
         time_var,
     );
     let pos_y_expr = build_keyframed_property_expression(
         &clip.position_y_keyframes,
         clip.position_y,
-        -1.0,
-        1.0,
+        POSITION_MIN,
+        POSITION_MAX,
         time_var,
     );
     let rotate_expr = build_keyframed_property_expression(
         &clip.rotate_keyframes,
         clip.rotate as f64,
-        -180.0,
-        180.0,
+        ROTATE_MIN_DEG,
+        ROTATE_MAX_DEG,
         time_var,
     );
     let crop_left_expr = build_keyframed_property_expression(
         &clip.crop_left_keyframes,
         clip.crop_left as f64,
-        0.0,
-        500.0,
+        CROP_MIN_PX,
+        CROP_MAX_PX,
         time_var,
     );
     let crop_right_expr = build_keyframed_property_expression(
         &clip.crop_right_keyframes,
         clip.crop_right as f64,
-        0.0,
-        500.0,
+        CROP_MIN_PX,
+        CROP_MAX_PX,
         time_var,
     );
     let crop_top_expr = build_keyframed_property_expression(
         &clip.crop_top_keyframes,
         clip.crop_top as f64,
-        0.0,
-        500.0,
+        CROP_MIN_PX,
+        CROP_MAX_PX,
         time_var,
     );
     let crop_bottom_expr = build_keyframed_property_expression(
         &clip.crop_bottom_keyframes,
         clip.crop_bottom as f64,
-        0.0,
-        500.0,
+        CROP_MIN_PX,
+        CROP_MAX_PX,
         time_var,
     );
 
-    let cx_expr = format!("{pw:.10}/2+({pos_x_expr})*{pw:.10}*(1-({scale_expr}))/2");
-    let cy_expr = format!("{ph:.10}/2+({pos_y_expr})*{ph:.10}*(1-({scale_expr}))/2");
+    let cx_expr = format!("{pw:.10}/2+({pos_x_expr})*{pw:.10}/2");
+    let cy_expr = format!("{ph:.10}/2+({pos_y_expr})*{ph:.10}/2");
     let half_w_expr = format!("{pw:.10}*({scale_expr})/2");
     let half_h_expr = format!("{ph:.10}*({scale_expr})/2");
     let left_raw_expr = format!("({cx_expr})-({half_w_expr})+({crop_left_expr})*({scale_expr})");
@@ -1501,13 +2156,276 @@ fn build_adjustment_scope_alpha_expression(
     let right_expr = format!("max({right_raw_expr},{left_raw_expr})");
     let bottom_expr = format!("max({bottom_raw_expr},{top_raw_expr})");
     let rad_expr = format!("({rotate_expr})*PI/180");
-    let ux_expr =
-        format!("({cx_expr})+(X-({cx_expr}))*cos({rad_expr})-(Y-({cy_expr}))*sin({rad_expr})");
-    let uy_expr =
-        format!("({cy_expr})+(X-({cx_expr}))*sin({rad_expr})+(Y-({cy_expr}))*cos({rad_expr})");
+    let ux_expr = format!(
+        "({cx_expr})+(({x_var})-({cx_expr}))*cos({rad_expr})-(({y_var})-({cy_expr}))*sin({rad_expr})"
+    );
+    let uy_expr = format!(
+        "({cy_expr})+(({x_var})-({cx_expr}))*sin({rad_expr})+(({y_var})-({cy_expr}))*cos({rad_expr})"
+    );
 
     format!(
         "between({ux_expr},{left_raw_expr},({right_expr})-0.000001)*between({uy_expr},{top_raw_expr},({bottom_expr})-0.000001)"
+    )
+}
+
+struct AdjustmentTransformExpressions {
+    scale_expr: String,
+    rotate_expr: String,
+    center_x_expr: String,
+    center_y_expr: String,
+    clip_width_expr: String,
+    clip_height_expr: String,
+    clip_left_expr: String,
+    clip_top_expr: String,
+}
+
+fn build_adjustment_transform_expressions(
+    clip: &Clip,
+    out_w: u32,
+    out_h: u32,
+    time_var: &str,
+) -> AdjustmentTransformExpressions {
+    use crate::model::transform_bounds::{ADJUSTMENT_POSITION_MAX, ADJUSTMENT_POSITION_MIN};
+    let pw = out_w.max(1) as f64;
+    let ph = out_h.max(1) as f64;
+    let scale_expr = build_keyframed_property_expression(
+        &clip.scale_keyframes,
+        clip.scale,
+        SCALE_MIN,
+        SCALE_MAX,
+        time_var,
+    );
+    let pos_x_expr = build_keyframed_property_expression(
+        &clip.position_x_keyframes,
+        clip.position_x,
+        ADJUSTMENT_POSITION_MIN,
+        ADJUSTMENT_POSITION_MAX,
+        time_var,
+    );
+    let pos_y_expr = build_keyframed_property_expression(
+        &clip.position_y_keyframes,
+        clip.position_y,
+        ADJUSTMENT_POSITION_MIN,
+        ADJUSTMENT_POSITION_MAX,
+        time_var,
+    );
+    let rotate_expr = build_keyframed_property_expression(
+        &clip.rotate_keyframes,
+        clip.rotate as f64,
+        ROTATE_MIN_DEG,
+        ROTATE_MAX_DEG,
+        time_var,
+    );
+    let center_x_expr = format!("{pw:.10}/2+({pos_x_expr})*{pw:.10}/2");
+    let center_y_expr = format!("{ph:.10}/2+({pos_y_expr})*{ph:.10}/2");
+    let clip_width_expr = format!("{pw:.10}*({scale_expr})");
+    let clip_height_expr = format!("{ph:.10}*({scale_expr})");
+    let clip_left_expr = format!("({center_x_expr})-({clip_width_expr})/2");
+    let clip_top_expr = format!("({center_y_expr})-({clip_height_expr})/2");
+
+    AdjustmentTransformExpressions {
+        scale_expr,
+        rotate_expr,
+        center_x_expr,
+        center_y_expr,
+        clip_width_expr,
+        clip_height_expr,
+        clip_left_expr,
+        clip_top_expr,
+    }
+}
+
+fn build_adjustment_mask_coordinate_expressions(
+    clip: &Clip,
+    out_w: u32,
+    out_h: u32,
+    time_var: &str,
+) -> (String, String, AdjustmentTransformExpressions) {
+    build_adjustment_mask_coordinate_expressions_for_coords(clip, out_w, out_h, time_var, "X", "Y")
+}
+
+fn build_adjustment_mask_coordinate_expressions_for_coords(
+    clip: &Clip,
+    out_w: u32,
+    out_h: u32,
+    time_var: &str,
+    x_var: &str,
+    y_var: &str,
+) -> (String, String, AdjustmentTransformExpressions) {
+    let transform = build_adjustment_transform_expressions(clip, out_w, out_h, time_var);
+    let rad_expr = format!("({})*PI/180", transform.rotate_expr);
+    let ux_expr = format!(
+        "({cx})+(({x_var})-({cx}))*cos({rad})-(({y_var})-({cy}))*sin({rad})",
+        cx = transform.center_x_expr,
+        cy = transform.center_y_expr,
+        rad = rad_expr
+    );
+    let uy_expr = format!(
+        "({cy})+(({x_var})-({cx}))*sin({rad})+(({y_var})-({cy}))*cos({rad})",
+        cx = transform.center_x_expr,
+        cy = transform.center_y_expr,
+        rad = rad_expr
+    );
+    let npx_expr = format!(
+        "(({ux_expr})-({clip_left}))/({clip_width})",
+        clip_left = transform.clip_left_expr,
+        clip_width = transform.clip_width_expr
+    );
+    let npy_expr = format!(
+        "(({uy_expr})-({clip_top}))/({clip_height})",
+        clip_top = transform.clip_top_expr,
+        clip_height = transform.clip_height_expr
+    );
+    (npx_expr, npy_expr, transform)
+}
+
+fn build_adjustment_rect_mask_alpha_expression(
+    npx_expr: &str,
+    npy_expr: &str,
+    mask: &crate::model::clip::ClipMask,
+) -> String {
+    let hw = (mask.width + mask.expansion).max(0.0);
+    let hh = (mask.height + mask.expansion).max(0.0);
+    let feather = mask.feather.max(0.0);
+    let rot_rad = mask.rotation.to_radians();
+    let cos_r = rot_rad.cos();
+    let sin_r = rot_rad.sin();
+    let ux = format!(
+        "((({npx_expr})-{cx:.10})*{cos_r:.10})+((({npy_expr})-{cy:.10})*{sin_r:.10})",
+        cx = mask.center_x,
+        cy = mask.center_y,
+    );
+    let uy = format!(
+        "(-((({npx_expr})-{cx:.10})*{sin_r:.10}))+((({npy_expr})-{cy:.10})*{cos_r:.10})",
+        cx = mask.center_x,
+        cy = mask.center_y,
+    );
+    let expr = if feather < 0.5 {
+        format!("between(abs({ux}),0,{hw:.10})*between(abs({uy}),0,{hh:.10})")
+    } else {
+        let f2 = feather * 2.0;
+        let ax = format!("clip(({hw:.10}+{feather:.10}-abs({ux}))/{f2:.10},0,1)");
+        let ay = format!("clip(({hh:.10}+{feather:.10}-abs({uy}))/{f2:.10},0,1)");
+        let sax = format!("({ax}*{ax}*(3-2*{ax}))");
+        let say = format!("({ay}*{ay}*(3-2*{ay}))");
+        format!("{sax}*{say}")
+    };
+    if mask.invert {
+        format!("(1-{})", expr)
+    } else {
+        expr
+    }
+}
+
+fn build_adjustment_ellipse_mask_alpha_expression(
+    npx_expr: &str,
+    npy_expr: &str,
+    mask: &crate::model::clip::ClipMask,
+) -> String {
+    let hw = (mask.width + mask.expansion).max(0.1);
+    let hh = (mask.height + mask.expansion).max(0.1);
+    let feather = mask.feather.max(0.0);
+    let rot_rad = mask.rotation.to_radians();
+    let cos_r = rot_rad.cos();
+    let sin_r = rot_rad.sin();
+    let ux = format!(
+        "((({npx_expr})-{cx:.10})*{cos_r:.10})+((({npy_expr})-{cy:.10})*{sin_r:.10})",
+        cx = mask.center_x,
+        cy = mask.center_y,
+    );
+    let uy = format!(
+        "(-((({npx_expr})-{cx:.10})*{sin_r:.10}))+((({npy_expr})-{cy:.10})*{cos_r:.10})",
+        cx = mask.center_x,
+        cy = mask.center_y,
+    );
+    let r_expr = format!("sqrt({ux}*{ux}/({hw:.10}*{hw:.10})+{uy}*{uy}/({hh:.10}*{hh:.10}))");
+    let expr = if feather < 0.5 {
+        format!("lte({r_expr},1)")
+    } else {
+        let min_axis = hw.min(hh);
+        let f_norm = feather / min_axis;
+        let inner = 1.0 - f_norm;
+        let t_expr = format!("clip(({inner:.10}-{r_expr}+{f_norm:.10})/{f_norm:.10},0,1)");
+        format!("({t_expr}*{t_expr}*(3-2*{t_expr}))")
+    };
+    if mask.invert {
+        format!("(1-{})", expr)
+    } else {
+        expr
+    }
+}
+
+fn build_adjustment_mask_alpha_expression(
+    clip: &Clip,
+    out_w: u32,
+    out_h: u32,
+    time_var: &str,
+) -> Option<String> {
+    build_adjustment_mask_alpha_expression_for_coords(clip, out_w, out_h, time_var, "X", "Y")
+}
+
+fn build_adjustment_mask_alpha_expression_for_coords(
+    clip: &Clip,
+    out_w: u32,
+    out_h: u32,
+    time_var: &str,
+    x_var: &str,
+    y_var: &str,
+) -> Option<String> {
+    let active_masks: Vec<&crate::model::clip::ClipMask> =
+        clip.masks.iter().filter(|mask| mask.enabled).collect();
+    if active_masks.is_empty()
+        || active_masks
+            .iter()
+            .any(|mask| mask.shape == crate::model::clip::MaskShape::Path)
+    {
+        return None;
+    }
+
+    let (npx_expr, npy_expr, _) = build_adjustment_mask_coordinate_expressions_for_coords(
+        clip, out_w, out_h, time_var, x_var, y_var,
+    );
+    let exprs: Vec<String> = active_masks
+        .iter()
+        .map(|mask| match mask.shape {
+            crate::model::clip::MaskShape::Rectangle => {
+                build_adjustment_rect_mask_alpha_expression(&npx_expr, &npy_expr, mask)
+            }
+            crate::model::clip::MaskShape::Ellipse => {
+                build_adjustment_ellipse_mask_alpha_expression(&npx_expr, &npy_expr, mask)
+            }
+            crate::model::clip::MaskShape::Path => unreachable!(),
+        })
+        .collect();
+
+    Some(if exprs.len() == 1 {
+        exprs.into_iter().next().unwrap_or_else(|| "1".to_string())
+    } else {
+        exprs.join("*")
+    })
+}
+
+fn build_adjustment_path_mask_alpha(
+    clip: &Clip,
+    out_w: u32,
+    out_h: u32,
+) -> Option<crate::media::mask_alpha::FfmpegMaskAlphaResult> {
+    if !clip
+        .masks
+        .iter()
+        .any(|mask| mask.enabled && mask.shape == crate::model::clip::MaskShape::Path)
+    {
+        return None;
+    }
+
+    crate::media::mask_alpha::build_combined_mask_ffmpeg_alpha(
+        &clip.masks,
+        out_w,
+        out_h,
+        0,
+        1.0,
+        0.0,
+        0.0,
     )
 }
 
@@ -1585,22 +2503,72 @@ fn build_duck_filter(
 }
 
 fn build_volume_filter(clip: &Clip) -> String {
-    if clip.volume_keyframes.is_empty() {
-        return format!("volume={:.4}", clip.volume.clamp(0.0, 4.0));
+    let base_expr = if clip.volume_keyframes.is_empty() {
+        format!("{:.4}", clip.volume.clamp(0.0, 4.0))
+    } else {
+        build_keyframed_property_expression(
+            &clip.volume_keyframes,
+            clip.volume as f64,
+            0.0,
+            4.0,
+            "t",
+        )
+    };
+
+    if clip.has_voice_isolation_data() {
+        let pad_ns = (clip.voice_isolation_pad_ms as f64 * 1_000_000.0) as u64;
+        let merged_ns = clip.voice_isolation_speech_intervals_ns(pad_ns);
+        // Duck towards floor instead of silence.
+        let duck_ratio = (1.0 - clip.voice_isolation) * (1.0 - clip.voice_isolation_floor)
+            + clip.voice_isolation_floor;
+        if !merged_ns.is_empty() {
+            let condition: String = merged_ns
+                .iter()
+                .map(|(s_ns, e_ns)| {
+                    let s = *s_ns as f64 / 1_000_000_000.0;
+                    let e = *e_ns as f64 / 1_000_000_000.0;
+                    format!("between(t,{:.3},{:.3})", s, e)
+                })
+                .collect::<Vec<_>>()
+                .join("+");
+            let expr = format!(
+                "({}) * if({}, 1.0, {:.4})",
+                base_expr, condition, duck_ratio
+            );
+            return format!("volume='{}':eval=frame", expr);
+        }
     }
-    let expr = build_keyframed_property_expression(
-        &clip.volume_keyframes,
-        clip.volume as f64,
-        0.0,
-        4.0,
-        "t",
-    );
-    // Keyframed volume expressions depend on `t`, so force per-frame evaluation.
-    format!("volume='{expr}':eval=frame")
+
+    if clip.volume_keyframes.is_empty() {
+        format!("volume={base_expr}")
+    } else {
+        format!("volume='{base_expr}':eval=frame")
+    }
 }
 
 /// Build FFmpeg `equalizer` filter chain for the clip's 3-band parametric EQ.
 /// Returns an empty string when EQ is flat (all gains 0 and no keyframes).
+/// Build the FFmpeg `equalizer` filter chain for the clip's match EQ
+/// (7-band, populated by audio match). Static gains only — no keyframes.
+fn build_match_eq_filter(clip: &Clip) -> String {
+    if !clip.has_match_eq() {
+        return String::new();
+    }
+    let parts: Vec<String> = clip
+        .match_eq_bands
+        .iter()
+        .filter(|band| band.gain.abs() >= 0.001)
+        .map(|band| {
+            let bw = band.freq / band.q.max(0.1);
+            format!(
+                "equalizer=f={:.1}:t=h:w={:.1}:g={:.2}",
+                band.freq, bw, band.gain
+            )
+        })
+        .collect();
+    parts.join(",")
+}
+
 fn build_eq_filter(clip: &Clip) -> String {
     if !clip.has_eq() {
         return String::new();
@@ -2094,10 +3062,13 @@ fn build_adjustment_layer_filter_graph(
     input_label: &str,
     output_label: &str,
     adj_clip: &Clip,
+    matte_input: Option<AdjustmentMatteInput>,
     adj_idx: usize,
     out_w: u32,
     out_h: u32,
+    frame_duration_ns: u64,
     color_caps: &ColorFilterCapabilities,
+    mask_temp_files: &mut Vec<tempfile::NamedTempFile>,
 ) -> Option<String> {
     let effects_chain = build_adjustment_effects_chain_filter(adj_clip, color_caps);
     if effects_chain.is_empty() {
@@ -2111,23 +3082,121 @@ fn build_adjustment_layer_filter_graph(
 
     let start_s = adj_clip.timeline_start as f64 / 1_000_000_000.0;
     let end_s = (adj_clip.timeline_start + adj_clip.duration()) as f64 / 1_000_000_000.0;
+    let clip_duration_s = adj_clip.duration() as f64 / 1_000_000_000.0;
     let orig_label = format!("vadj{adj_idx}orig");
     let work_label = format!("vadj{adj_idx}work");
+    let work_raw_label = format!("vadj{adj_idx}raw");
     let fx_label = format!("vadj{adj_idx}fx");
-    let scope_alpha = build_adjustment_scope_alpha_expression(adj_clip, out_w, out_h, "T");
+    let roi = matte_input
+        .map(|matte| matte.roi)
+        .or_else(|| build_adjustment_export_roi(adj_clip, out_w, out_h, frame_duration_ns));
+
+    if let Some(matte_input) = matte_input {
+        let roi = matte_input.roi;
+        let matte_label = format!("vadj{adj_idx}matte");
+        return Some(format!(
+            ";[{input_label}]split[{orig_label}][{work_label}];\
+             [{work_label}]trim=start={start_s:.6}:end={end_s:.6},setpts=PTS-STARTPTS,crop={roi_w}:{roi_h}:{roi_x}:{roi_y},{effects_chain},format=yuva420p[{work_raw_label}];\
+             [{matte_idx}:v]trim=duration={clip_duration_s:.6},setpts=PTS-STARTPTS,format=gray[{matte_label}];\
+             [{work_raw_label}][{matte_label}]alphamerge,setpts=PTS+{start_s:.6}/TB[{fx_label}];\
+             [{orig_label}][{fx_label}]overlay=x={roi_x}:y={roi_y}:eof_action=pass[{output_label}]",
+            roi_w = roi.width(),
+            roi_h = roi.height(),
+            roi_x = roi.left,
+            roi_y = roi.top,
+            matte_idx = matte_input.input_index,
+        ));
+    }
+
+    let roi_x_expr = roi
+        .map(|roi| format!("X+{}", roi.left))
+        .unwrap_or_else(|| "X".to_string());
+    let roi_y_expr = roi
+        .map(|roi| format!("Y+{}", roi.top))
+        .unwrap_or_else(|| "Y".to_string());
+    let scope_alpha = build_adjustment_scope_alpha_expression_for_coords(
+        adj_clip,
+        out_w,
+        out_h,
+        "T",
+        &roi_x_expr,
+        &roi_y_expr,
+    );
     let scope_alpha = if opacity < 1.0 - f64::EPSILON {
         format!("({scope_alpha})*{opacity:.10}")
     } else {
         scope_alpha
     };
+    let path_mask_alpha = build_adjustment_path_mask_alpha(adj_clip, out_w, out_h);
+    let adjustment_mask_alpha = if path_mask_alpha.is_none() {
+        build_adjustment_mask_alpha_expression_for_coords(
+            adj_clip,
+            out_w,
+            out_h,
+            "T",
+            &roi_x_expr,
+            &roi_y_expr,
+        )
+    } else {
+        None
+    };
+    let alpha_expr = if let Some(mask_alpha) = adjustment_mask_alpha {
+        format!("({scope_alpha})*({mask_alpha})")
+    } else {
+        scope_alpha.clone()
+    };
 
-    Some(format!(
-        ";[{input_label}]split[{orig_label}][{work_label}];\
-         [{work_label}]trim=start={start_s:.6}:end={end_s:.6},setpts=PTS-STARTPTS,{effects_chain},format=yuva420p,\
-         geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({scope_alpha})',\
-         setpts=PTS+{start_s:.6}/TB[{fx_label}];\
-         [{orig_label}][{fx_label}]overlay=x=0:y=0:eof_action=pass[{output_label}]"
-    ))
+    if let Some(crate::media::mask_alpha::FfmpegMaskAlphaResult::RasterFile(mask_file)) =
+        path_mask_alpha
+    {
+        let mask_path_str = mask_file.path().display().to_string();
+        mask_temp_files.push(mask_file);
+        let transform = build_adjustment_transform_expressions(adj_clip, out_w, out_h, "T");
+        let mask_source_label = format!("vadj{adj_idx}masksrc");
+        let mask_fg_label = format!("vadj{adj_idx}maskfg");
+        let mask_bg_label = format!("vadj{adj_idx}maskbg");
+        let mask_label = format!("vadj{adj_idx}mask");
+
+        return Some(format!(
+            ";[{input_label}]split[{orig_label}][{work_label}];\
+             [{work_label}]trim=start={start_s:.6}:end={end_s:.6},setpts=PTS-STARTPTS,{effects_chain},format=yuva420p[{work_raw_label}];\
+             movie='{mask_path_str}',format=gray,scale={out_w}:{out_h}[{mask_source_label}];\
+             [{mask_source_label}]rotate='-({rotate_expr})*PI/180':fillcolor=black,scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[{mask_fg_label}];\
+             color=c=black:size={out_w}x{out_h}:r=1:d={clip_duration_s:.6}[{mask_bg_label}];\
+             [{mask_bg_label}][{mask_fg_label}]overlay=x='{clip_left_expr}':y='{clip_top_expr}':eval=frame,format=gray[{mask_label}];\
+             [{work_raw_label}][{mask_label}]alphamerge,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({scope_alpha})',\
+             setpts=PTS+{start_s:.6}/TB[{fx_label}];\
+             [{orig_label}][{fx_label}]overlay=x=0:y=0:eof_action=pass[{output_label}]",
+            rotate_expr = transform.rotate_expr,
+            scale_expr = transform.scale_expr,
+            clip_left_expr = transform.clip_left_expr,
+            clip_top_expr = transform.clip_top_expr,
+            scope_alpha = scope_alpha,
+        ));
+    }
+
+    let graph = if let Some(roi) = roi {
+        format!(
+            ";[{input_label}]split[{orig_label}][{work_label}];\
+             [{work_label}]trim=start={start_s:.6}:end={end_s:.6},setpts=PTS-STARTPTS,crop={roi_w}:{roi_h}:{roi_x}:{roi_y},{effects_chain},format=yuva420p,\
+             geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({alpha_expr})',\
+             setpts=PTS+{start_s:.6}/TB[{fx_label}];\
+             [{orig_label}][{fx_label}]overlay=x={roi_x}:y={roi_y}:eof_action=pass[{output_label}]",
+            roi_w = roi.width(),
+            roi_h = roi.height(),
+            roi_x = roi.left,
+            roi_y = roi.top,
+        )
+    } else {
+        format!(
+            ";[{input_label}]split[{orig_label}][{work_label}];\
+             [{work_label}]trim=start={start_s:.6}:end={end_s:.6},setpts=PTS-STARTPTS,{effects_chain},format=yuva420p,\
+             geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({alpha_expr})',\
+             setpts=PTS+{start_s:.6}/TB[{fx_label}];\
+             [{orig_label}][{fx_label}]overlay=x=0:y=0:eof_action=pass[{output_label}]"
+        )
+    };
+    Some(graph)
 }
 
 const TITLE_REFERENCE_HEIGHT: f64 = 1080.0;
@@ -2148,11 +3217,7 @@ fn build_title_filter(clip: &crate::model::clip::Clip, out_h: u32) -> String {
     // Scale Pango points → pixels (×4/3) then proportionally to output height
     let scaled_size = font_size * (4.0 / 3.0) * scale_factor;
 
-    let rgba = clip.title_color;
-    let r = ((rgba >> 24) & 0xFF) as u8;
-    let g = ((rgba >> 16) & 0xFF) as u8;
-    let b = ((rgba >> 8) & 0xFF) as u8;
-    let a = (rgba & 0xFF) as u8;
+    let (r, g, b, a) = crate::ui::colors::rgba_u32_to_u8(clip.title_color);
     let alpha = (a as f64 / 255.0).clamp(0.0, 1.0);
 
     // Base drawtext filter
@@ -2163,11 +3228,7 @@ fn build_title_filter(clip: &crate::model::clip::Clip, out_h: u32) -> String {
     // Outline (border)
     if clip.title_outline_width > 0.0 {
         let bw = (clip.title_outline_width * scale_factor).max(0.5);
-        let oc = clip.title_outline_color;
-        let or = ((oc >> 24) & 0xFF) as u8;
-        let og = ((oc >> 16) & 0xFF) as u8;
-        let ob = ((oc >> 8) & 0xFF) as u8;
-        let oa = (oc & 0xFF) as u8;
+        let (or, og, ob, oa) = crate::ui::colors::rgba_u32_to_u8(clip.title_outline_color);
         let o_alpha = (oa as f64 / 255.0).clamp(0.0, 1.0);
         filter.push_str(&format!(
             ":borderw={bw:.1}:bordercolor={or:02x}{og:02x}{ob:02x}@{o_alpha:.4}"
@@ -2178,11 +3239,7 @@ fn build_title_filter(clip: &crate::model::clip::Clip, out_h: u32) -> String {
     if clip.title_shadow {
         let sx = (clip.title_shadow_offset_x * scale_factor).round() as i32;
         let sy = (clip.title_shadow_offset_y * scale_factor).round() as i32;
-        let sc = clip.title_shadow_color;
-        let sr = ((sc >> 24) & 0xFF) as u8;
-        let sg = ((sc >> 16) & 0xFF) as u8;
-        let sb = ((sc >> 8) & 0xFF) as u8;
-        let sa = (sc & 0xFF) as u8;
+        let (sr, sg, sb, sa) = crate::ui::colors::rgba_u32_to_u8(clip.title_shadow_color);
         let s_alpha = (sa as f64 / 255.0).clamp(0.0, 1.0);
         filter.push_str(&format!(
             ":shadowx={sx}:shadowy={sy}:shadowcolor={sr:02x}{sg:02x}{sb:02x}@{s_alpha:.4}"
@@ -2192,11 +3249,7 @@ fn build_title_filter(clip: &crate::model::clip::Clip, out_h: u32) -> String {
     // Background box
     if clip.title_bg_box {
         let pad = (clip.title_bg_box_padding * scale_factor).round() as i32;
-        let bc = clip.title_bg_box_color;
-        let br = ((bc >> 24) & 0xFF) as u8;
-        let bg = ((bc >> 16) & 0xFF) as u8;
-        let bb = ((bc >> 8) & 0xFF) as u8;
-        let ba = (bc & 0xFF) as u8;
+        let (br, bg, bb, ba) = crate::ui::colors::rgba_u32_to_u8(clip.title_bg_box_color);
         let b_alpha = (ba as f64 / 255.0).clamp(0.0, 1.0);
         filter.push_str(&format!(
             ":box=1:boxcolor={br:02x}{bg:02x}{bb:02x}@{b_alpha:.4}:boxborderw={pad}"
@@ -2276,8 +3329,6 @@ fn build_subtitle_filter_composited(
     style_clip: &crate::model::clip::Clip,
     out_h: u32,
 ) -> (String, Option<tempfile::NamedTempFile>) {
-    use crate::model::clip::SubtitleHighlightMode;
-
     if segments.is_empty() {
         return (String::new(), None);
     }
@@ -2285,13 +3336,10 @@ fn build_subtitle_filter_composited(
     let scale_factor = out_h as f64 / TITLE_REFERENCE_HEIGHT;
     let font_style = resolve_subtitle_font_style(&style_clip.subtitle_font);
     let scaled_size = (font_style.size_points * (4.0 / 3.0) * scale_factor).round() as u32;
-    let ass_bold = ass_bool(font_style.bold);
-    let ass_italic = ass_bool(font_style.italic);
+    let ass_bold = ass_bool(font_style.bold || style_clip.subtitle_bold);
+    let ass_italic = ass_bool(font_style.italic || style_clip.subtitle_italic);
 
-    let rgba = style_clip.subtitle_color;
-    let r = ((rgba >> 24) & 0xFF) as u8;
-    let g = ((rgba >> 16) & 0xFF) as u8;
-    let b = ((rgba >> 8) & 0xFF) as u8;
+    let (r, g, b, _a) = crate::ui::colors::rgba_u32_to_u8(style_clip.subtitle_color);
     let ass_primary = format!("&H00{b:02X}{g:02X}{r:02X}");
 
     // Map position_y to ASS alignment + MarginV.
@@ -2311,50 +3359,46 @@ fn build_subtitle_filter_composited(
 
     if style_clip.subtitle_outline_width > 0.0 {
         let bw = (style_clip.subtitle_outline_width * scale_factor).round() as u32;
-        let oc = style_clip.subtitle_outline_color;
-        let obr = ((oc >> 24) & 0xFF) as u8;
-        let obg = ((oc >> 16) & 0xFF) as u8;
-        let obb = ((oc >> 8) & 0xFF) as u8;
+        let (obr, obg, obb, _) =
+            crate::ui::colors::rgba_u32_to_u8(style_clip.subtitle_outline_color);
         style_parts.push_str(&format!(
             ",OutlineColour=&H00{obb:02X}{obg:02X}{obr:02X},Outline={bw}"
         ));
     }
 
     if style_clip.subtitle_bg_box {
-        let bc = style_clip.subtitle_bg_box_color;
-        let bbr = ((bc >> 24) & 0xFF) as u8;
-        let bbg = ((bc >> 16) & 0xFF) as u8;
-        let bbb = ((bc >> 8) & 0xFF) as u8;
-        let bba = (bc & 0xFF) as u8;
+        let (bbr, bbg, bbb, bba) =
+            crate::ui::colors::rgba_u32_to_u8(style_clip.subtitle_bg_box_color);
         let ass_alpha = format!("{:02X}", 255 - bba);
         style_parts.push_str(&format!(
             ",BorderStyle=3,BackColour=&H{ass_alpha}{bbb:02X}{bbg:02X}{bbr:02X}"
         ));
     }
 
-    let highlight_mode = style_clip.subtitle_highlight_mode;
+    let flags = &style_clip.subtitle_highlight_flags;
     let has_words = style_clip
         .subtitle_segments
         .iter()
         .any(|s| !s.words.is_empty());
-    let use_karaoke = highlight_mode != SubtitleHighlightMode::None && has_words;
+    let use_karaoke = !flags.is_none() && has_words;
 
-    if use_karaoke {
-        // Write a proper ASS file so override tags (\c, \b, \u) work.
+    // Always use the ASS path for subtitle burn-in.  The SRT+force_style path
+    // is unreliable: libass silently drops subtitles when certain force_style
+    // parameters (e.g. MarginV at high values) interact with BorderStyle=3.
+    // ASS embeds all styling inline, avoiding the issue entirely.
+    {
+        let _ = use_karaoke;
+        // Write a proper ASS file with embedded styles.
         let mut sub_file = match tempfile::Builder::new().suffix(".ass").tempfile() {
             Ok(f) => f,
             Err(_) => return (String::new(), None),
         };
 
-        let hc = style_clip.subtitle_highlight_color;
-        let hr = ((hc >> 24) & 0xFF) as u8;
-        let hg = ((hc >> 16) & 0xFF) as u8;
-        let hb = ((hc >> 8) & 0xFF) as u8;
+        let (hr, hg, hb, _) =
+            crate::ui::colors::rgba_u32_to_u8(style_clip.subtitle_highlight_color);
         let group_size = (style_clip.subtitle_word_window_secs as usize).max(2);
 
         {
-            use std::io::Write;
-
             // ASS header with default style matching our settings.
             let _ = writeln!(sub_file, "[Script Info]");
             let _ = writeln!(sub_file, "ScriptType: v4.00+");
@@ -2372,34 +3416,38 @@ fn build_subtitle_filter_composited(
             let mut border_style = 1u32;
             let mut back_color = "&H00000000".to_string();
             if style_clip.subtitle_outline_width > 0.0 {
-                let oc = style_clip.subtitle_outline_color;
-                let obr = ((oc >> 24) & 0xFF) as u8;
-                let obg = ((oc >> 16) & 0xFF) as u8;
-                let obb = ((oc >> 8) & 0xFF) as u8;
+                let (obr, obg, obb, _) =
+                    crate::ui::colors::rgba_u32_to_u8(style_clip.subtitle_outline_color);
                 outline_color = format!("&H00{obb:02X}{obg:02X}{obr:02X}");
                 outline_w = (style_clip.subtitle_outline_width * scale_factor).round() as u32;
             }
-            let mut shadow_depth = 0u32;
+            let mut shadow_depth = if style_clip.subtitle_shadow {
+                2u32
+            } else {
+                0u32
+            };
+            let ass_underline = if style_clip.subtitle_underline {
+                -1i32
+            } else {
+                0i32
+            };
             if style_clip.subtitle_bg_box {
-                let bc = style_clip.subtitle_bg_box_color;
-                let bbr = ((bc >> 24) & 0xFF) as u8;
-                let bbg = ((bc >> 16) & 0xFF) as u8;
-                let bbb = ((bc >> 8) & 0xFF) as u8;
-                let bba = (bc & 0xFF) as u8;
+                let (bbr, bbg, bbb, bba) =
+                    crate::ui::colors::rgba_u32_to_u8(style_clip.subtitle_bg_box_color);
                 let ass_alpha = 255 - bba;
                 back_color = format!("&H{ass_alpha:02X}{bbb:02X}{bbg:02X}{bbr:02X}");
-                if highlight_mode == SubtitleHighlightMode::Stroke {
+                if flags.stroke {
                     // Stroke mode needs BorderStyle=1 for outline overrides to work.
                     // Simulate bg box via shadow (BackColour + Shadow depth).
                     border_style = 1;
-                    shadow_depth = 4;
+                    shadow_depth = shadow_depth.max(4);
                 } else {
                     border_style = 3;
                 }
             }
             let _ = writeln!(
                 sub_file,
-                "Style: Default,{font_name},{scaled_size},{ass_primary},&H000000FF,{outline_color},{back_color},{ass_bold},{ass_italic},0,0,100,100,0,0,{border_style},{outline_w},{shadow_depth},{ass_align},10,10,{margin_v},1",
+                "Style: Default,{font_name},{scaled_size},{ass_primary},&H000000FF,{outline_color},{back_color},{ass_bold},{ass_italic},{ass_underline},0,100,100,0,0,{border_style},{outline_w},{shadow_depth},{ass_align},10,10,{margin_v},1",
                 font_name = font_style.family,
                 ass_bold = ass_bold,
                 ass_italic = ass_italic
@@ -2413,12 +3461,10 @@ fn build_subtitle_filter_composited(
 
             for seg in &style_clip.subtitle_segments {
                 if seg.words.is_empty() {
-                    let abs_start = style_clip.timeline_start
-                        + ((seg.start_ns.saturating_sub(style_clip.source_in)) as f64
-                            / style_clip.speed) as u64;
-                    let abs_end = style_clip.timeline_start
-                        + ((seg.end_ns.saturating_sub(style_clip.source_in)) as f64
-                            / style_clip.speed) as u64;
+                    let abs_start =
+                        style_clip.timeline_start + (seg.start_ns as f64 / style_clip.speed) as u64;
+                    let abs_end =
+                        style_clip.timeline_start + (seg.end_ns as f64 / style_clip.speed) as u64;
                     let _ = writeln!(
                         sub_file,
                         "Dialogue: 0,{},{},Default,,0,0,0,,{}",
@@ -2434,11 +3480,9 @@ fn build_subtitle_filter_composited(
                 // but the visible text is the same fixed set of words.
                 for (wi, word) in seg.words.iter().enumerate() {
                     let w_abs_start = style_clip.timeline_start
-                        + ((word.start_ns.saturating_sub(style_clip.source_in)) as f64
-                            / style_clip.speed) as u64;
-                    let w_abs_end = style_clip.timeline_start
-                        + ((word.end_ns.saturating_sub(style_clip.source_in)) as f64
-                            / style_clip.speed) as u64;
+                        + (word.start_ns as f64 / style_clip.speed) as u64;
+                    let w_abs_end =
+                        style_clip.timeline_start + (word.end_ns as f64 / style_clip.speed) as u64;
 
                     // Determine which fixed group this word belongs to.
                     let group_start = (wi / group_size) * group_size;
@@ -2450,34 +3494,42 @@ fn build_subtitle_filter_composited(
                             text.push(' ');
                         }
                         if group_start + owi == wi {
-                            match highlight_mode {
-                                SubtitleHighlightMode::Color => {
-                                    text.push_str(&format!("{{\\c&H{hb:02X}{hg:02X}{hr:02X}&}}"));
-                                    text.push_str(&ow.text);
-                                    text.push_str(&format!("{{\\c{ass_primary}&}}"));
-                                }
-                                SubtitleHighlightMode::Bold => {
-                                    text.push_str("{\\b1}");
-                                    text.push_str(&ow.text);
-                                    text.push_str("{\\b0}");
-                                }
-                                SubtitleHighlightMode::Underline => {
-                                    text.push_str("{\\u1}");
-                                    text.push_str(&ow.text);
-                                    text.push_str("{\\u0}");
-                                }
-                                SubtitleHighlightMode::Stroke => {
-                                    // Switch to outline border style, set outline color
-                                    // to highlight color with thick border, then restore.
-                                    text.push_str(&format!(
-                                        "{{\\bord4\\3c&H{hb:02X}{hg:02X}{hr:02X}&}}"
-                                    ));
-                                    text.push_str(&ow.text);
-                                    text.push_str(&format!(
-                                        "{{\\bord{outline_w}\\3c{outline_color}&}}"
-                                    ));
-                                }
-                                SubtitleHighlightMode::None => text.push_str(&ow.text),
+                            // Build combined ASS override tags from highlight flags.
+                            let mut overrides = String::new();
+                            if flags.bold {
+                                overrides.push_str("\\b1");
+                            }
+                            if flags.italic {
+                                overrides.push_str("\\i1");
+                            }
+                            if flags.underline {
+                                overrides.push_str("\\u1");
+                            }
+                            if flags.color {
+                                overrides.push_str(&format!("\\c&H{hb:02X}{hg:02X}{hr:02X}&"));
+                            }
+                            if flags.stroke {
+                                overrides
+                                    .push_str(&format!("\\bord4\\3c&H{hb:02X}{hg:02X}{hr:02X}&"));
+                            }
+                            if flags.background {
+                                let (bhr, bhg, bhb, _) = crate::ui::colors::rgba_u32_to_u8(
+                                    style_clip.subtitle_bg_highlight_color,
+                                );
+                                overrides.push_str(&format!(
+                                    "\\4c&H{bhb:02X}{bhg:02X}{bhr:02X}&\\shad2"
+                                ));
+                            }
+                            if flags.shadow {
+                                overrides.push_str("\\shad2");
+                            }
+
+                            if overrides.is_empty() {
+                                text.push_str(&ow.text);
+                            } else {
+                                text.push_str(&format!("{{{overrides}}}"));
+                                text.push_str(&ow.text);
+                                text.push_str("{\\r}");
                             }
                         } else {
                             text.push_str(&ow.text);
@@ -2502,47 +3554,14 @@ fn build_subtitle_filter_composited(
             .replace('\'', "'\\''");
 
         // ASS file has styles embedded, no force_style needed.
-        let filter = format!("subtitles='{escaped_path}'");
-        (filter, Some(sub_file))
-    } else {
-        // Simple mode: SRT with force_style.
-        let mut sub_file = match tempfile::Builder::new().suffix(".srt").tempfile() {
-            Ok(f) => f,
-            Err(_) => return (String::new(), None),
-        };
-
-        {
-            use std::io::Write;
-            let mut sorted: Vec<_> = segments.iter().collect();
-            sorted.sort_by_key(|(start, _, _, _)| *start);
-            for (i, (start_ns, end_ns, text, _)) in sorted.iter().enumerate() {
-                let _ = writeln!(sub_file, "{}", i + 1);
-                let _ = writeln!(
-                    sub_file,
-                    "{} --> {}",
-                    srt_timecode(*start_ns),
-                    srt_timecode(*end_ns)
-                );
-                let _ = writeln!(sub_file, "{text}");
-                let _ = writeln!(sub_file);
-            }
-            let _ = sub_file.flush();
-        }
-
-        let sub_path = sub_file.path().to_string_lossy().to_string();
-        let escaped_path = sub_path
-            .replace('\\', "\\\\")
-            .replace(':', "\\:")
-            .replace('\'', "'\\''");
-
-        let filter = format!("subtitles='{escaped_path}':force_style='{style_parts}'");
+        // No single quotes around path — argv is not shell-interpreted.
+        let filter = format!("subtitles={escaped_path}");
         (filter, Some(sub_file))
     }
 }
 
 /// Export subtitles from all clips in the project as an SRT file.
 pub fn export_srt(project: &Project, output_path: &str) -> Result<()> {
-    use std::io::Write;
     let mut segments: Vec<(u64, u64, String)> = Vec::new();
 
     for track in &project.tracks {
@@ -2551,11 +3570,11 @@ pub fn export_srt(project: &Project, output_path: &str) -> Result<()> {
                 continue;
             }
             for seg in &clip.subtitle_segments {
-                // Convert source-relative to timeline-absolute timestamps.
-                let timeline_start = clip.timeline_start
-                    + ((seg.start_ns.saturating_sub(clip.source_in)) as f64 / clip.speed) as u64;
-                let timeline_end = clip.timeline_start
-                    + ((seg.end_ns.saturating_sub(clip.source_in)) as f64 / clip.speed) as u64;
+                // Convert clip-local to timeline-absolute timestamps.
+                // Subtitle start_ns/end_ns are relative to clip start (0 = source_in).
+                let timeline_start =
+                    clip.timeline_start + (seg.start_ns as f64 / clip.speed) as u64;
+                let timeline_end = clip.timeline_start + (seg.end_ns as f64 / clip.speed) as u64;
                 segments.push((timeline_start, timeline_end, seg.text.clone()));
             }
         }
@@ -2624,8 +3643,8 @@ pub fn import_srt(
             if !text.is_empty() {
                 segments.push(crate::model::clip::SubtitleSegment {
                     id: uuid::Uuid::new_v4().to_string(),
-                    start_ns: source_in_ns + start_ns,
-                    end_ns: source_in_ns + end_ns,
+                    start_ns,
+                    end_ns,
                     text,
                     words: Vec::new(),
                 });
@@ -2864,12 +3883,9 @@ fn title_clip_lavfi_color(
     dur_s: f64,
 ) -> String {
     let bg = clip.title_clip_bg_color;
-    let a = bg & 0xFF;
+    let (r, g, b, a) = crate::ui::colors::rgba_u32_to_u8(bg);
     if a > 0 {
         // Opaque or semi-transparent background — use opaque yuv420p.
-        let r = (bg >> 24) & 0xFF;
-        let g = (bg >> 16) & 0xFF;
-        let b = (bg >> 8) & 0xFF;
         let color_str = format!("#{r:02x}{g:02x}{b:02x}");
         format!(
             "color=c={color_str}:size={out_w}x{out_h}:r={fr_n}/{fr_d}:d={dur_s:.6},format=yuv420p,trim=duration={dur_s:.6},setpts=PTS-STARTPTS"
@@ -3014,6 +4030,10 @@ fn build_minterpolate_suffix(clip: &Clip, fps_num: u32, fps_den: u32) -> String 
     let mi_mode = match clip.slow_motion_interp {
         SlowMotionInterp::Blend => "blend",
         SlowMotionInterp::OpticalFlow => "mci",
+        // AI mode is realized via a precomputed sidecar (see frame_interp_cache);
+        // do NOT also apply ffmpeg minterpolate here or frames would be doubly
+        // interpolated.
+        SlowMotionInterp::Ai => return String::new(),
         SlowMotionInterp::Off => unreachable!(),
     };
     let fps = if fps_den > 0 {
@@ -3031,39 +4051,62 @@ fn build_crop_filter(
     clip: &crate::model::clip::Clip,
     out_w: u32,
     out_h: u32,
+    project_w: u32,
+    project_h: u32,
     transparent_pad: bool,
 ) -> String {
+    // Crop values are stored in PROJECT pixels, but the export filter chain
+    // operates on a canvas at `out_w × out_h` (which can differ from
+    // `project_w × project_h` when an export preset upscales/downscales the
+    // project). Scale every crop value by the (out / project) ratio so the
+    // exported visible region matches the proportional crop the user sees in
+    // the preview (which scales crop the same way against the preview
+    // buffer's processing dimensions).
+    let scale_x = if project_w > 0 {
+        out_w as f64 / project_w as f64
+    } else {
+        1.0
+    };
+    let scale_y = if project_h > 0 {
+        out_h as f64 / project_h as f64
+    } else {
+        1.0
+    };
     let has_crop_keyframes = !clip.crop_left_keyframes.is_empty()
         || !clip.crop_right_keyframes.is_empty()
         || !clip.crop_top_keyframes.is_empty()
         || !clip.crop_bottom_keyframes.is_empty();
     if has_crop_keyframes {
-        let cl_expr = build_keyframed_property_expression(
+        let cl_expr = build_keyframed_property_expression_scaled(
             &clip.crop_left_keyframes,
             clip.crop_left as f64,
-            0.0,
-            500.0,
+            CROP_MIN_PX,
+            CROP_MAX_PX,
+            scale_x,
             "T",
         );
-        let cr_expr = build_keyframed_property_expression(
+        let cr_expr = build_keyframed_property_expression_scaled(
             &clip.crop_right_keyframes,
             clip.crop_right as f64,
-            0.0,
-            500.0,
+            CROP_MIN_PX,
+            CROP_MAX_PX,
+            scale_x,
             "T",
         );
-        let ct_expr = build_keyframed_property_expression(
+        let ct_expr = build_keyframed_property_expression_scaled(
             &clip.crop_top_keyframes,
             clip.crop_top as f64,
-            0.0,
-            500.0,
+            CROP_MIN_PX,
+            CROP_MAX_PX,
+            scale_y,
             "T",
         );
-        let cb_expr = build_keyframed_property_expression(
+        let cb_expr = build_keyframed_property_expression_scaled(
             &clip.crop_bottom_keyframes,
             clip.crop_bottom as f64,
-            0.0,
-            500.0,
+            CROP_MIN_PX,
+            CROP_MAX_PX,
+            scale_y,
             "T",
         );
         // Dynamic crop via alpha masking (per-frame expressions). This avoids relying on
@@ -3072,10 +4115,10 @@ fn build_crop_filter(
             ",geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='if(between(X,({cl_expr}),{out_w}-({cr_expr})-1)*between(Y,({ct_expr}),{out_h}-({cb_expr})-1),alpha(X,Y),0)'"
         );
     }
-    let cl = clip.crop_left.max(0) as u32;
-    let cr = clip.crop_right.max(0) as u32;
-    let ct = clip.crop_top.max(0) as u32;
-    let cb = clip.crop_bottom.max(0) as u32;
+    let cl = ((clip.crop_left.max(0) as f64 * scale_x).round() as u32).min(out_w);
+    let cr = ((clip.crop_right.max(0) as f64 * scale_x).round() as u32).min(out_w);
+    let ct = ((clip.crop_top.max(0) as f64 * scale_y).round() as u32).min(out_h);
+    let cb = ((clip.crop_bottom.max(0) as f64 * scale_y).round() as u32).min(out_h);
     if cl == 0 && cr == 0 && ct == 0 && cb == 0 {
         return String::new();
     }
@@ -3087,6 +4130,34 @@ fn build_crop_filter(
         "black"
     };
     format!(",crop={cw}:{ch}:{cl}:{ct},pad={out_w}:{out_h}:{cl}:{ct}:{pad_color}")
+}
+
+/// Like `build_keyframed_property_expression` but multiplies the clamped
+/// per-keyframe value by `output_scale` before serializing into the ffmpeg
+/// expression. Used for crop expressions where the stored values are in
+/// project pixels but the filter graph operates at the export resolution.
+pub(crate) fn build_keyframed_property_expression_scaled(
+    keyframes: &[NumericKeyframe],
+    default_value: f64,
+    min_value: f64,
+    max_value: f64,
+    output_scale: f64,
+    time_var: &str,
+) -> String {
+    // Build the unscaled expression and wrap it in a multiplication. Cheap
+    // and avoids duplicating the (large) keyframe-walk code paths.
+    let inner = build_keyframed_property_expression(
+        keyframes,
+        default_value,
+        min_value,
+        max_value,
+        time_var,
+    );
+    if (output_scale - 1.0).abs() < 1e-9 {
+        inner
+    } else {
+        format!("({inner})*{output_scale:.10}")
+    }
 }
 
 /// Build a rotation filter for arbitrary-angle clip rotation.
@@ -3131,7 +4202,10 @@ fn build_scale_position_filter(
     out_h: u32,
     transparent_pad: bool,
 ) -> String {
-    let scale = clip.scale.clamp(0.1, 4.0);
+    let scale = clip.scale.clamp(
+        crate::model::transform_bounds::SCALE_MIN,
+        crate::model::transform_bounds::SCALE_MAX,
+    );
     if (scale - 1.0).abs() < 0.001 && clip.position_x.abs() < 0.001 && clip.position_y.abs() < 0.001
     {
         return String::new(); // passthrough when scale=1 and position=0
@@ -3140,11 +4214,17 @@ fn build_scale_position_filter(
     let ph = out_h as f64;
     let pos_x = clip.position_x;
     let pos_y = clip.position_y;
+    let sw = (pw * scale).round() as u32;
+    let sh = (ph * scale).round() as u32;
+
+    if clip_uses_direct_canvas_translation(clip) {
+        let raw_x = direct_canvas_origin(pw, sw as f64, pos_x) as i64;
+        let raw_y = direct_canvas_origin(ph, sh as f64, pos_y) as i64;
+        return build_scale_translate_filter(sw, sh, raw_x, raw_y, out_w, out_h, transparent_pad);
+    }
 
     if scale >= 1.0 {
         // Zoom in: scale UP then crop to output size.
-        let sw = (pw * scale).round() as u32;
-        let sh = (ph * scale).round() as u32;
         let total_x = pw * (scale - 1.0);
         let total_y = ph * (scale - 1.0);
         let cx = (total_x * (1.0 + pos_x) / 2.0).round() as i64;
@@ -3156,60 +4236,148 @@ fn build_scale_position_filter(
         // When the PIP extends beyond the frame edge (position > 1.0 or < -1.0),
         // crop the overflow before padding — matching the preview's videobox
         // behavior which clips content past the frame boundary.
-        let sw = (pw * scale).round() as u32;
-        let sh = (ph * scale).round() as u32;
         let total_x = pw * (1.0 - scale);
         let total_y = ph * (1.0 - scale);
         let raw_pad_x = (total_x * (1.0 + pos_x) / 2.0).round() as i64;
         let raw_pad_y = (total_y * (1.0 + pos_y) / 2.0).round() as i64;
+        build_scale_translate_filter(sw, sh, raw_pad_x, raw_pad_y, out_w, out_h, transparent_pad)
+    }
+}
 
-        // Compute overflow on each edge
-        let crop_left = if raw_pad_x < 0 {
-            (-raw_pad_x) as u32
-        } else {
-            0
-        };
-        let crop_top = if raw_pad_y < 0 {
-            (-raw_pad_y) as u32
-        } else {
-            0
-        };
-        let crop_right = if raw_pad_x as i64 + sw as i64 > out_w as i64 {
-            (raw_pad_x as i64 + sw as i64 - out_w as i64) as u32
-        } else {
-            0
-        };
-        let crop_bottom = if raw_pad_y as i64 + sh as i64 > out_h as i64 {
-            (raw_pad_y as i64 + sh as i64 - out_h as i64) as u32
-        } else {
-            0
-        };
+fn clip_uses_direct_canvas_translation(clip: &crate::model::clip::Clip) -> bool {
+    matches!(
+        clip.kind,
+        crate::model::clip::ClipKind::Adjustment | crate::model::clip::ClipKind::Title
+    ) || clip.tracking_binding.is_some()
+}
 
-        let pad_x = raw_pad_x.max(0) as u32;
-        let pad_y = raw_pad_y.max(0) as u32;
-        let pad_color = if transparent_pad { "black@0" } else { "black" };
+fn direct_canvas_origin(axis_size: f64, scaled_axis_size: f64, position: f64) -> i32 {
+    // Mirror `program_player::direct_canvas_origin`'s relaxed clamp so titles,
+    // adjustment scopes, and tracker-followed clips can be moved off-canvas
+    // in export the same way they appear in preview.
+    let clamped = position.clamp(
+        crate::model::transform_bounds::POSITION_MIN,
+        crate::model::transform_bounds::POSITION_MAX,
+    );
+    (((axis_size - scaled_axis_size) / 2.0) + clamped * axis_size / 2.0).round() as i32
+}
 
-        let needs_crop = crop_left > 0 || crop_top > 0 || crop_right > 0 || crop_bottom > 0;
-        if needs_crop {
-            let vis_w = sw.saturating_sub(crop_left + crop_right).max(1);
-            let vis_h = sh.saturating_sub(crop_top + crop_bottom).max(1);
-            format!(
-                ",scale={sw}:{sh},crop={vis_w}:{vis_h}:{crop_left}:{crop_top},pad={out_w}:{out_h}:{pad_x}:{pad_y}:{pad_color}"
-            )
-        } else {
-            format!(",scale={sw}:{sh},pad={out_w}:{out_h}:{pad_x}:{pad_y}:{pad_color}")
-        }
+fn build_scale_translate_filter(
+    sw: u32,
+    sh: u32,
+    raw_x: i64,
+    raw_y: i64,
+    out_w: u32,
+    out_h: u32,
+    transparent_pad: bool,
+) -> String {
+    let crop_left = if raw_x < 0 { (-raw_x) as u32 } else { 0 };
+    let crop_top = if raw_y < 0 { (-raw_y) as u32 } else { 0 };
+    let crop_right = if raw_x + sw as i64 > out_w as i64 {
+        (raw_x + sw as i64 - out_w as i64) as u32
+    } else {
+        0
+    };
+    let crop_bottom = if raw_y + sh as i64 > out_h as i64 {
+        (raw_y + sh as i64 - out_h as i64) as u32
+    } else {
+        0
+    };
+
+    let pad_x = raw_x.max(0) as u32;
+    let pad_y = raw_y.max(0) as u32;
+    let pad_color = if transparent_pad { "black@0" } else { "black" };
+    let needs_crop = crop_left > 0 || crop_top > 0 || crop_right > 0 || crop_bottom > 0;
+    if needs_crop {
+        let vis_w = sw.saturating_sub(crop_left + crop_right).max(1);
+        let vis_h = sh.saturating_sub(crop_top + crop_bottom).max(1);
+        format!(
+            ",scale={sw}:{sh},crop={vis_w}:{vis_h}:{crop_left}:{crop_top},pad={out_w}:{out_h}:{pad_x}:{pad_y}:{pad_color}"
+        )
+    } else {
+        format!(",scale={sw}:{sh},pad={out_w}:{out_h}:{pad_x}:{pad_y}:{pad_color}")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PrimaryTransitionTiming {
+    duration_ns: u64,
+    before_cut_ns: u64,
+    after_cut_ns: u64,
+}
+
+impl PrimaryTransitionTiming {
+    fn duration_s(self) -> f64 {
+        self.duration_ns as f64 / 1_000_000_000.0
+    }
+
+    fn before_cut_s(self) -> f64 {
+        self.before_cut_ns as f64 / 1_000_000_000.0
+    }
+}
+
+fn clamped_primary_transition_timing(
+    current: &Clip,
+    next: &Clip,
+) -> Option<PrimaryTransitionTiming> {
+    if !current.outgoing_transition.is_active() {
+        return None;
+    }
+    let max_duration_ns = max_transition_duration_ns(current, next);
+    if max_duration_ns < 1_000_000 {
+        return None;
+    }
+    let duration_ns = current
+        .outgoing_transition
+        .duration_ns
+        .min(max_duration_ns)
+        .max(1_000_000);
+    let split = current
+        .outgoing_transition
+        .alignment
+        .split_duration(duration_ns);
+    Some(PrimaryTransitionTiming {
+        duration_ns,
+        before_cut_ns: split.before_cut_ns,
+        after_cut_ns: split.after_cut_ns,
+    })
+}
+
+fn primary_clip_transition_stop_pad_ns(
+    transition_timings: &[Option<PrimaryTransitionTiming>],
+    clip_idx: usize,
+) -> u64 {
+    let incoming_before_ns = clip_idx
+        .checked_sub(1)
+        .and_then(|prev_idx| transition_timings.get(prev_idx))
+        .and_then(|timing| *timing)
+        .map(|timing| timing.before_cut_ns)
+        .unwrap_or(0);
+    let outgoing_after_ns = transition_timings
+        .get(clip_idx)
+        .and_then(|timing| *timing)
+        .map(|timing| timing.after_cut_ns)
+        .unwrap_or(0);
+    incoming_before_ns.saturating_add(outgoing_after_ns)
+}
+
+fn build_primary_clip_transition_stop_pad_filter(
+    transition_timings: &[Option<PrimaryTransitionTiming>],
+    clip_idx: usize,
+) -> String {
+    let stop_pad_ns = primary_clip_transition_stop_pad_ns(transition_timings, clip_idx);
+    if stop_pad_ns == 0 {
+        String::new()
+    } else {
+        format!(
+            ",tpad=stop_mode=clone:stop_duration={:.6}",
+            stop_pad_ns as f64 / 1_000_000_000.0
+        )
     }
 }
 
 fn clamped_primary_xfade_duration_s(current: &Clip, next: &Clip) -> Option<f64> {
-    if current.transition_after.is_empty() || current.transition_after_ns == 0 {
-        return None;
-    }
-    let mut d_s = current.transition_after_ns as f64 / 1_000_000_000.0;
-    let max_d = (current.duration().min(next.duration()) as f64 / 1_000_000_000.0) - 0.001;
-    d_s = d_s.clamp(0.001, max_d.max(0.001));
-    Some(d_s)
+    clamped_primary_transition_timing(current, next).map(PrimaryTransitionTiming::duration_s)
 }
 
 /// Build atempo filter chain for audio speed change.
@@ -3504,7 +4672,6 @@ fn parse_progress_line(
                 return Some((bytes as f64 / estimate as f64).clamp(0.0, 0.99));
             }
         }
-        return None;
     }
 
     if let Some(v) = line.strip_prefix("out_time_us=") {
@@ -3768,12 +4935,196 @@ pub(crate) fn detect_silence(
     Ok(intervals)
 }
 
+/// Convert silent intervals (returned by `detect_silence`) into the inverse:
+/// **speech intervals** in clip-local nanoseconds, suitable for storing in
+/// `Clip::voice_isolation_speech_intervals`.
+///
+/// `silences` is a sorted list of `(start_sec, end_sec)` pairs relative to
+/// `source_in`. `clip_duration_ns` is `source_out_ns - source_in_ns`. Speech
+/// regions are everything between/around the silences.
+pub(crate) fn invert_silences_to_speech(
+    silences: &[(f64, f64)],
+    clip_duration_ns: u64,
+) -> Vec<(u64, u64)> {
+    let mut speech: Vec<(u64, u64)> = Vec::new();
+    let mut cursor_ns: u64 = 0;
+    for (s, e) in silences {
+        let s_ns = (s.max(0.0) * 1_000_000_000.0) as u64;
+        let e_ns = (e.max(0.0) * 1_000_000_000.0) as u64;
+        if s_ns > cursor_ns {
+            speech.push((cursor_ns, s_ns.min(clip_duration_ns)));
+        }
+        cursor_ns = e_ns;
+    }
+    if cursor_ns < clip_duration_ns {
+        speech.push((cursor_ns, clip_duration_ns));
+    }
+    // Drop zero-length intervals that can occur at clip boundaries.
+    speech.retain(|(s, e)| e > s);
+    speech
+}
+
+/// Analyze a clip's audio and suggest a silence-detection threshold (in dB)
+/// based on the noise floor.
+///
+/// Uses FFmpeg's `astats` filter with windowed RMS measurements (0.5 s windows)
+/// and computes the **5th percentile** of the windowed RMS levels — a robust
+/// noise-floor estimate that ignores both intro/outro silences (which would
+/// pull a naive mean toward `-inf`) and loud transients during speech.
+///
+/// Returns the suggested threshold = noise_floor + 6 dB headroom, clamped to
+/// the inspector's slider range `[-60.0, -10.0]`.
+///
+/// Returns an error if ffmpeg is missing, the source has no audio, or no RMS
+/// samples were measurable.
+pub(crate) fn suggest_silence_threshold_db(
+    source_path: &str,
+    source_in_ns: u64,
+    source_out_ns: u64,
+) -> Result<f32> {
+    let ffmpeg = find_ffmpeg()?;
+    if !probe_has_audio(&ffmpeg, source_path) {
+        return Err(anyhow!("source has no audio stream"));
+    }
+    let src_in_sec = source_in_ns as f64 / 1_000_000_000.0;
+    let duration_sec = source_out_ns.saturating_sub(source_in_ns) as f64 / 1_000_000_000.0;
+    if duration_sec <= 0.0 {
+        return Err(anyhow!("clip duration is zero"));
+    }
+    // astats with reset=0.5 gives one measurement per 0.5 s window. ametadata=print
+    // emits the RMS_level metadata to stderr (alongside other lavfi.astats keys).
+    // We're only interested in lavfi.astats.Overall.RMS_level lines.
+    let af = "astats=metadata=1:reset=0.5,ametadata=print:key=lavfi.astats.Overall.RMS_level"
+        .to_string();
+    let output = Command::new(&ffmpeg)
+        .args([
+            "-nostats",
+            "-hide_banner",
+            "-ss",
+            &format!("{src_in_sec}"),
+            "-t",
+            &format!("{duration_sec}"),
+            "-i",
+            source_path,
+            "-vn",
+            "-af",
+            &af,
+            "-f",
+            "null",
+            "-",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| anyhow!("Failed to run ffmpeg astats: {e}"))?;
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut rms_levels: Vec<f64> = Vec::new();
+    for line in stderr.lines() {
+        // ametadata=print emits lines like:
+        //   [Parsed_ametadata_1 @ 0x...] lavfi.astats.Overall.RMS_level=-42.123456
+        if let Some(pos) = line.find("lavfi.astats.Overall.RMS_level=") {
+            let val_str = &line[pos + "lavfi.astats.Overall.RMS_level=".len()..];
+            if let Some(val) = val_str
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse::<f64>().ok())
+            {
+                // -inf shows up as a very large negative — skip these (silent windows).
+                if val.is_finite() && val > -200.0 {
+                    rms_levels.push(val);
+                }
+            }
+        }
+    }
+
+    if rms_levels.is_empty() {
+        return Err(anyhow!("no RMS samples produced by astats"));
+    }
+
+    // 5th percentile of windowed RMS = robust noise-floor estimate.
+    rms_levels.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let idx = ((rms_levels.len() as f64) * 0.05) as usize;
+    let noise_floor = rms_levels[idx.min(rms_levels.len() - 1)];
+
+    // Suggested threshold sits 6 dB above the noise floor.
+    let suggested = (noise_floor + 6.0) as f32;
+    Ok(suggested.clamp(-60.0, -10.0))
+}
+
+/// Detect scene/shot changes in a video clip using ffmpeg's `scdet` filter.
+///
+/// Returns cut-point timestamps in seconds, relative to `source_in_ns`.
+/// Returns an empty vec if the source has no video stream or no cuts are found.
+pub(crate) fn detect_scene_cuts(
+    source_path: &str,
+    source_in_ns: u64,
+    source_out_ns: u64,
+    threshold: f64,
+) -> Result<Vec<f64>> {
+    let ffmpeg = find_ffmpeg()?;
+    let src_in_sec = source_in_ns as f64 / 1_000_000_000.0;
+    let duration_sec = source_out_ns.saturating_sub(source_in_ns) as f64 / 1_000_000_000.0;
+    if duration_sec <= 0.0 {
+        return Ok(Vec::new());
+    }
+    let vf = format!("scdet=threshold={threshold}:sc_pass=1");
+    let output = Command::new(&ffmpeg)
+        .args([
+            "-ss",
+            &format!("{src_in_sec}"),
+            "-t",
+            &format!("{duration_sec}"),
+            "-i",
+            source_path,
+            "-vf",
+            &vf,
+            "-an",
+            "-f",
+            "null",
+            "-",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| anyhow!("Failed to run ffmpeg scdet: {e}"))?;
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut cuts = Vec::new();
+    for line in stderr.lines() {
+        if let Some(pos) = line.find("lavfi.scd.time:") {
+            let val_str = &line[pos + "lavfi.scd.time:".len()..];
+            if let Some(t) = val_str
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse::<f64>().ok())
+            {
+                // Skip cuts at the very start or end of the clip
+                if t > 0.01 && t < duration_sec - 0.01 {
+                    cuts.push(t);
+                }
+            }
+        }
+    }
+    cuts.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+    Ok(cuts)
+}
+
 /// Measure integrated loudness (LUFS) of a clip's audio via FFmpeg `ebur128` filter.
 /// Returns the integrated loudness value in LUFS (e.g. -18.3).
 pub(crate) fn analyze_loudness_lufs(
     source_path: &str,
     source_in_ns: u64,
     source_out_ns: u64,
+) -> Result<f64> {
+    analyze_loudness_lufs_with_prefilter(source_path, source_in_ns, source_out_ns, None)
+}
+
+pub(crate) fn analyze_loudness_lufs_with_prefilter(
+    source_path: &str,
+    source_in_ns: u64,
+    source_out_ns: u64,
+    prefilter: Option<String>,
 ) -> Result<f64> {
     let ffmpeg = find_ffmpeg()?;
     if !probe_has_audio(&ffmpeg, source_path) {
@@ -3784,6 +5135,9 @@ pub(crate) fn analyze_loudness_lufs(
     if duration_sec <= 0.0 {
         return Err(anyhow!("Clip has zero duration"));
     }
+    let audio_filter = prefilter
+        .map(|filter| format!("{filter},ebur128"))
+        .unwrap_or_else(|| "ebur128".to_string());
     let output = Command::new(&ffmpeg)
         .args([
             "-ss",
@@ -3794,7 +5148,7 @@ pub(crate) fn analyze_loudness_lufs(
             source_path,
             "-vn", // skip video decode — audio-only analysis
             "-af",
-            "ebur128",
+            &audio_filter,
             "-f",
             "null",
             "-",
@@ -3940,7 +5294,6 @@ fn write_chapter_metadata(
     if markers.is_empty() {
         return Ok(None);
     }
-    use std::io::Write;
     let mut file = tempfile::NamedTempFile::new()?;
     writeln!(file, ";FFMETADATA1")?;
     writeln!(file)?;
@@ -3981,7 +5334,7 @@ fn write_chapter_metadata(
 /// Each compound clip is replaced by its internal clips with timeline positions
 /// rebased to the compound clip's position on the parent timeline.
 /// Returns a new `Vec<Track>` containing only leaf (non-compound) clips.
-fn flatten_compound_tracks(
+pub(crate) fn flatten_compound_tracks(
     tracks: &[crate::model::track::Track],
 ) -> Vec<crate::model::track::Track> {
     let mut result: Vec<crate::model::track::Track> = Vec::new();
@@ -3992,7 +5345,7 @@ fn flatten_compound_tracks(
     for track in tracks {
         let flat = flatten_clips(&track.clips, 0, 0);
         // Separate audio clips that landed on a video track (from compound/multicam expansion)
-        if track.kind == crate::model::track::TrackKind::Video {
+        if track.is_video() {
             let mut video_clips = Vec::new();
             for clip in flat {
                 if clip.kind == ClipKind::Audio {
@@ -4014,9 +5367,7 @@ fn flatten_compound_tracks(
     // Place extracted audio clips onto an audio track
     if !extracted_audio_clips.is_empty() {
         // Find an existing audio track or create one
-        let audio_track = result
-            .iter_mut()
-            .find(|t| t.kind == crate::model::track::TrackKind::Audio);
+        let audio_track = result.iter_mut().find(|t| t.is_audio());
         if let Some(track) = audio_track {
             track.clips.extend(extracted_audio_clips);
             track.clips.sort_by_key(|c| c.timeline_start);
@@ -4039,12 +5390,27 @@ fn flatten_clips(clips: &[Clip], timeline_offset: u64, depth: usize) -> Vec<Clip
     for clip in clips {
         if clip.kind == ClipKind::Compound {
             if let Some(ref internal_tracks) = clip.compound_tracks {
+                // Map internal clip positions into the parent timeline.
+                // After windowing, each clip's timeline_start >= source_in,
+                // so subtracting source_in gives the offset from the visible
+                // start. Adding the compound's parent position avoids u64
+                // underflow that saturating_sub would cause.
                 let compound_offset = timeline_offset.saturating_add(clip.timeline_start);
+                let window_start = clip.source_in;
+                let window_end = clip.source_out;
                 for inner_track in internal_tracks {
                     for inner_clip in &inner_track.clips {
-                        let mut rebased = inner_clip.clone();
-                        rebased.timeline_start =
-                            compound_offset.saturating_add(rebased.timeline_start);
+                        // Window the clip to the compound's [source_in, source_out)
+                        // range. Skip / trim / rebase keyframes & subtitles all
+                        // happen inside the helper.
+                        let Some(mut rebased) =
+                            inner_clip.rebase_to_window(window_start, window_end)
+                        else {
+                            continue;
+                        };
+                        // Rebase: offset from window start + compound parent pos
+                        rebased.timeline_start = compound_offset
+                            .saturating_add(rebased.timeline_start.saturating_sub(window_start));
                         if rebased.kind == ClipKind::Compound || rebased.kind == ClipKind::Multicam
                         {
                             result.extend(flatten_clips(&[rebased], 0, depth + 1));
@@ -4058,6 +5424,9 @@ fn flatten_clips(clips: &[Clip], timeline_offset: u64, depth: usize) -> Vec<Clip
             let clip_start = timeline_offset.saturating_add(clip.timeline_start);
             let clip_dur = clip.duration();
             let segments = clip.multicam_segments();
+            // Segments are window-relative (0 = visible start); add source_in
+            // to map back to the angle's internal timeline.
+            let mc_offset = clip.source_in;
             // Video segments from angle switches
             for (seg_start, seg_end, angle_idx) in &segments {
                 if let Some(angle) = clip
@@ -4069,14 +5438,19 @@ fn flatten_clips(clips: &[Clip], timeline_offset: u64, depth: usize) -> Vec<Clip
                         &angle.source_path,
                         angle
                             .source_in
+                            .saturating_add(mc_offset)
                             .saturating_add(*seg_end)
                             .min(angle.source_out),
                         clip_start.saturating_add(*seg_start),
                         ClipKind::Video,
                     );
-                    seg.source_in = angle.source_in.saturating_add(*seg_start);
+                    seg.source_in = angle
+                        .source_in
+                        .saturating_add(mc_offset)
+                        .saturating_add(*seg_start);
                     seg.source_out = angle
                         .source_in
+                        .saturating_add(mc_offset)
                         .saturating_add(*seg_end)
                         .min(angle.source_out);
                     seg.id = uuid::Uuid::new_v4().to_string();
@@ -4093,14 +5467,16 @@ fn flatten_clips(clips: &[Clip], timeline_offset: u64, depth: usize) -> Vec<Clip
                         &angle.source_path,
                         angle
                             .source_in
+                            .saturating_add(mc_offset)
                             .saturating_add(clip_dur)
                             .min(angle.source_out),
                         clip_start,
                         ClipKind::Audio,
                     );
-                    audio_clip.source_in = angle.source_in;
+                    audio_clip.source_in = angle.source_in.saturating_add(mc_offset);
                     audio_clip.source_out = angle
                         .source_in
+                        .saturating_add(mc_offset)
                         .saturating_add(clip_dur)
                         .min(angle.source_out);
                     audio_clip.volume = angle.volume;
@@ -4121,16 +5497,20 @@ fn flatten_clips(clips: &[Clip], timeline_offset: u64, depth: usize) -> Vec<Clip
 #[cfg(test)]
 mod tests {
     use super::{
-        append_pan_filter_chain, audio_crossfade_curve_name, build_adjustment_layer_filter_graph,
+        adjustment_roi_padding_px, append_pan_filter_chain, audio_crossfade_curve_name,
+        build_adjustment_export_roi, build_adjustment_layer_filter_graph,
         build_adjustment_scope_alpha_expression, build_audio_crossfade_filters, build_color_filter,
         build_crop_filter, build_grading_filter, build_keyframed_property_expression,
-        build_pan_expression, build_rotation_filter, build_subtitle_filter_composited,
-        build_temperature_tint_filter, build_timing_filter, build_title_filter,
-        build_volume_filter, clamped_primary_xfade_duration_s, compute_clip_audio_fades,
-        compute_export_coloradj_params, estimate_export_size_bytes, flatten_compound_tracks,
-        has_linked_audio_peer, has_transform_keyframes, parse_progress_line,
-        resolve_subtitle_font_style, video_input_seek_and_duration, write_chapter_metadata,
-        AudioCodec, ClipAudioFade, ColorFilterCapabilities, ExportOptions, VideoCodec,
+        build_pan_expression, build_rotation_filter, build_scale_position_filter,
+        build_subtitle_filter_composited, build_temperature_tint_filter, build_timing_filter,
+        build_title_filter, build_volume_filter, clamped_primary_transition_timing,
+        clamped_primary_xfade_duration_s, compute_clip_audio_fades, compute_export_coloradj_params,
+        estimate_export_size_bytes, find_ffmpeg, flatten_compound_tracks, has_linked_audio_peer,
+        has_transform_keyframes, parse_progress_line, primary_clip_transition_stop_pad_ns,
+        resolve_subtitle_font_style, split_active_video_tracks_for_export,
+        video_input_seek_and_duration, write_chapter_metadata, AdjustmentExportRoi,
+        AdjustmentMatteInput, AudioCodec, ClipAudioFade, ColorFilterCapabilities, ExportOptions,
+        VideoCodec,
     };
     use crate::media::program_player::ProgramPlayer;
     use crate::model::clip::{
@@ -4139,6 +5519,7 @@ mod tests {
     use crate::model::project::Project;
     use crate::ui_state::CrossfadeCurve;
     use gstreamer as gst;
+    use std::process::Command;
 
     fn extract_colorbalance_component(filter: &str, key: &str) -> f32 {
         let needle = format!("{key}=");
@@ -4176,7 +5557,8 @@ mod tests {
 
     #[test]
     fn total_size_mode_ignores_out_time_lines() {
-        assert!(parse_progress_line("out_time_us=500000", 1_000_000, Some(1_000)).is_none());
+        let p = parse_progress_line("out_time_us=500000", 1_000_000, Some(1_000)).unwrap();
+        assert!((p - 0.5).abs() < 1e-6);
     }
 
     #[test]
@@ -4201,6 +5583,59 @@ mod tests {
         };
         let est = estimate_export_size_bytes(&project, &options, project.width, project.height);
         assert!(est.unwrap_or(0) > 0);
+    }
+
+    #[test]
+    fn export_video_layout_skips_empty_lower_video_tracks() {
+        use crate::model::track::Track;
+
+        let mut project = Project::new("Test");
+        project.tracks.clear();
+
+        let empty_lower = Track::new_video("V1");
+        let mut base_track = Track::new_video("V2");
+        base_track.add_clip(Clip::new(
+            "/tmp/base.png",
+            4_000_000_000,
+            1_000_000_000,
+            ClipKind::Image,
+        ));
+        let mut overlay_track = Track::new_video("V3");
+        overlay_track.add_clip(Clip::new(
+            "/tmp/overlay.png",
+            2_000_000_000,
+            1_500_000_000,
+            ClipKind::Image,
+        ));
+
+        project.tracks.push(empty_lower);
+        project.tracks.push(base_track);
+        project.tracks.push(overlay_track);
+
+        let layout =
+            split_active_video_tracks_for_export(&project, &project.tracks).expect("video layout");
+        assert_eq!(layout.primary_clips.len(), 1);
+        assert_eq!(layout.primary_clips[0].source_path, "/tmp/base.png");
+        assert_eq!(layout.secondary_track_clips.len(), 1);
+        assert_eq!(layout.secondary_track_clips[0].len(), 1);
+        assert_eq!(
+            layout.secondary_track_clips[0][0].source_path,
+            "/tmp/overlay.png"
+        );
+    }
+
+    #[test]
+    fn export_video_layout_rejects_adjustment_only_video_tracks() {
+        use crate::model::track::Track;
+
+        let mut project = Project::new("Test");
+        project.tracks.clear();
+
+        let mut adjustment_track = Track::new_video("V1");
+        adjustment_track.add_clip(Clip::new_adjustment(0, 2_000_000_000));
+        project.tracks.push(adjustment_track);
+
+        assert!(split_active_video_tracks_for_export(&project, &project.tracks).is_none());
     }
 
     #[test]
@@ -4319,16 +5754,18 @@ mod tests {
     }
 
     #[test]
-    fn subtitle_force_style_splits_family_and_style_flags() {
+    fn subtitle_ass_style_splits_family_and_style_flags() {
         let clip = make_subtitle_video_clip("DejaVu Sans Mono Bold Oblique 24");
         let segs = vec![(0_u64, 1_000_000_000_u64, "Hello world".to_string(), &clip)];
 
-        let (filter, _temp) = build_subtitle_filter_composited(&segs, &clip, 1080);
-
-        assert!(filter.contains("FontName=DejaVu Sans Mono"));
-        assert!(filter.contains("Bold=-1"));
-        assert!(filter.contains("Italic=-1"));
-        assert!(!filter.contains("FontName=DejaVu Sans Mono Bold Oblique"));
+        let (_filter, temp) = build_subtitle_filter_composited(&segs, &clip, 1080);
+        // Now always uses ASS path — check the ASS file content for correct font splitting
+        let content = std::fs::read_to_string(temp.unwrap().path()).unwrap();
+        assert!(
+            content.contains("DejaVu Sans Mono"),
+            "ASS should contain font family"
+        );
+        assert!(content.contains(",-1,"), "ASS should contain Bold=-1");
     }
 
     #[test]
@@ -4461,6 +5898,66 @@ mod tests {
     }
 
     #[test]
+    fn keyframed_expression_flattens_large_keyframe_sets() {
+        let keyframes = (0..240)
+            .map(|i| NumericKeyframe {
+                time_ns: i * 41_666_667,
+                value: -0.8 + (i as f64 / 239.0) * 1.6,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            })
+            .collect::<Vec<_>>();
+        let expr = build_keyframed_property_expression(&keyframes, 0.0, -1.0, 1.0, "t");
+        assert!(expr.contains("gte(t,"));
+        assert!(!expr.contains("if(lt(t,"));
+    }
+
+    #[test]
+    fn large_keyframed_overlay_expression_is_ffmpeg_compatible() {
+        let Ok(ffmpeg) = find_ffmpeg() else {
+            return;
+        };
+        let keyframes = (0..240)
+            .map(|i| NumericKeyframe {
+                time_ns: i * 41_666_667,
+                value: -0.8 + (i as f64 / 239.0) * 1.6,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            })
+            .collect::<Vec<_>>();
+        let expr = build_keyframed_property_expression(&keyframes, 0.0, -1.0, 1.0, "t");
+        let filter = format!(
+            "[0:v][1:v]overlay=x='(W-w)*(1+({expr}))/2':y='(H-h)*0.25':eval=frame,format=yuv420p[vout]"
+        );
+        let status = Command::new(ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=320x240:r=24:d=10",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=white:s=64x64:r=24:d=10",
+                "-filter_complex",
+                &filter,
+                "-map",
+                "[vout]",
+                "-frames:v",
+                "12",
+                "-f",
+                "null",
+                "-",
+            ])
+            .status()
+            .expect("ffmpeg should start");
+        assert!(status.success(), "ffmpeg rejected filter: {filter}");
+    }
+
+    #[test]
     fn volume_filter_uses_expression_when_keyframed() {
         let mut clip = Clip::new("/tmp/test.wav", 2_000_000_000, 0, ClipKind::Audio);
         clip.volume = 0.8;
@@ -4557,10 +6054,54 @@ mod tests {
     fn clamped_primary_xfade_duration_clamps_to_boundary_limits() {
         let mut a = make_video_clip("a", 0, 4_000_000_000);
         let b = make_video_clip("b", 4_000_000_000, 8_000_000_000);
-        a.transition_after = "cross_dissolve".to_string();
-        a.transition_after_ns = 10_000_000_000;
+        a.outgoing_transition = crate::model::transition::OutgoingTransition::new(
+            "cross_dissolve",
+            10_000_000_000,
+            crate::model::transition::TransitionAlignment::EndOnCut,
+        );
         let d = clamped_primary_xfade_duration_s(&a, &b).expect("transition should be enabled");
         assert!((d - 3.999).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn clamped_primary_transition_timing_respects_alignment_split() {
+        let mut a = make_video_clip("a", 0, 4_000_000_000);
+        let b = make_video_clip("b", 4_000_000_000, 8_000_000_000);
+        a.outgoing_transition = crate::model::transition::OutgoingTransition::new(
+            "cross_dissolve",
+            1_000_000_000,
+            crate::model::transition::TransitionAlignment::CenterOnCut,
+        );
+        let timing =
+            clamped_primary_transition_timing(&a, &b).expect("transition timing should exist");
+        assert_eq!(timing.duration_ns, 1_000_000_000);
+        assert_eq!(timing.before_cut_ns, 500_000_000);
+        assert_eq!(timing.after_cut_ns, 500_000_000);
+    }
+
+    #[test]
+    fn primary_clip_transition_stop_pad_combines_incoming_and_outgoing_hold() {
+        let timings = vec![
+            Some(super::PrimaryTransitionTiming {
+                duration_ns: 1_000_000_000,
+                before_cut_ns: 400_000_000,
+                after_cut_ns: 600_000_000,
+            }),
+            Some(super::PrimaryTransitionTiming {
+                duration_ns: 800_000_000,
+                before_cut_ns: 0,
+                after_cut_ns: 800_000_000,
+            }),
+        ];
+        assert_eq!(
+            primary_clip_transition_stop_pad_ns(&timings, 0),
+            600_000_000
+        );
+        assert_eq!(
+            primary_clip_transition_stop_pad_ns(&timings, 1),
+            1_200_000_000
+        );
+        assert_eq!(primary_clip_transition_stop_pad_ns(&timings, 2), 0);
     }
 
     #[test]
@@ -4625,10 +6166,81 @@ mod tests {
                 bezier_controls: None,
             },
         ];
-        let f = build_crop_filter(&clip, 1920, 1080, false);
+        let f = build_crop_filter(&clip, 1920, 1080, 1920, 1080, false);
         assert!(f.contains(",geq=lum='lum(X,Y)'"));
         assert!(f.contains("alpha(X,Y)"));
         assert!(f.contains("between(X,("));
+    }
+
+    #[test]
+    fn build_crop_filter_still_image_static_crop_emits_filter() {
+        let mut clip = Clip::new("/tmp/test.png", 2_000_000_000, 0, ClipKind::Image);
+        clip.crop_left = 400;
+        clip.crop_right = 400;
+        clip.crop_top = 200;
+        clip.crop_bottom = 200;
+        let f = build_crop_filter(&clip, 1920, 1080, 1920, 1080, true);
+        // Expect a static crop+pad filter, NOT empty.
+        assert!(
+            !f.is_empty(),
+            "crop filter was empty for crop=(400,400,200,200): {f}"
+        );
+        assert!(
+            f.contains("crop=1120:680:400:200"),
+            "unexpected crop filter: {f}"
+        );
+        assert!(
+            f.contains("pad=1920:1080:400:200:black@0.0"),
+            "unexpected pad in filter: {f}"
+        );
+    }
+
+    #[test]
+    fn keyframed_overlay_uses_direct_canvas_formula_for_tracker_bound_clips() {
+        // A clip with a tracking_binding (or kind=Title/Adjustment) uses
+        // direct_canvas_origin in the preview, not the normal
+        // (W-w)*(1+pos_x)/2 formula. The export's keyframed branch must
+        // emit the matching direct formula `(W*(1+pos_x)-w)/2` when the
+        // clip has direct canvas translation, otherwise the export ends up
+        // at a different horizontal position than the preview for any
+        // pos_x ≠ 0.
+        let mut clip = Clip::new("/tmp/test.png", 5_000_000_000, 0, ClipKind::Image);
+        clip.tracking_binding = Some(crate::model::clip::TrackingBinding::new(
+            "source-clip-1",
+            "tracker-1",
+        ));
+        // Force the keyframed branch by giving the clip a position keyframe.
+        clip.position_x_keyframes = vec![NumericKeyframe {
+            time_ns: 0,
+            value: 0.25,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        }];
+        assert!(super::clip_uses_direct_canvas_translation(&clip));
+    }
+
+    #[test]
+    fn build_crop_filter_scales_when_export_resolution_differs_from_project() {
+        // Project is 1920x1080. Export is 3840x2160 (2x in each dimension).
+        // The user's stored crop is 153 px (from the left, in PROJECT pixels)
+        // = 8% of the project canvas. The export must apply 306 px = 8% of
+        // the export canvas, NOT the literal 153.
+        let mut clip = Clip::new("/tmp/test.png", 2_000_000_000, 0, ClipKind::Image);
+        clip.crop_left = 153;
+        clip.crop_right = 1340;
+        clip.crop_top = 78;
+        clip.crop_bottom = 598;
+        let f = build_crop_filter(&clip, 3840, 2160, 1920, 1080, true);
+        // Expected scaled values: 153*2=306, 1340*2=2680, 78*2=156, 598*2=1196
+        // Visible region: 3840-306-2680=854 wide, 2160-156-1196=808 tall
+        assert!(
+            f.contains("crop=854:808:306:156"),
+            "unexpected scaled crop filter: {f}"
+        );
+        assert!(
+            f.contains("pad=3840:2160:306:156:black@0.0"),
+            "unexpected scaled pad in filter: {f}"
+        );
     }
 
     #[test]
@@ -4638,6 +6250,15 @@ mod tests {
             build_adjustment_scope_alpha_expression(&clip, 1920, 1080, "T"),
             "1"
         );
+    }
+
+    #[test]
+    fn adjustment_scope_alpha_expression_moves_full_frame_scope_when_translated() {
+        let mut clip = Clip::new_adjustment(0, 2_000_000_000);
+        clip.position_x = 0.5;
+        let expr = build_adjustment_scope_alpha_expression(&clip, 1920, 1080, "T");
+        assert_ne!(expr, "1");
+        assert!(expr.contains("between("));
     }
 
     #[test]
@@ -4680,10 +6301,13 @@ mod tests {
             "vin",
             "vout",
             &clip,
+            None,
             0,
             1920,
             1080,
+            41_666_667,
             &ColorFilterCapabilities::default(),
+            &mut Vec::new(),
         )
         .expect("adjustment graph");
 
@@ -4691,7 +6315,153 @@ mod tests {
         assert!(graph.contains("eq=brightness='if(lt(t,"));
         assert!(graph.contains("a='alpha(X,Y)*("));
         assert!(graph.contains("if(lt(T,"));
-        assert!(graph.contains("overlay=x=0:y=0:eof_action=pass[vout]"));
+        assert!(graph.contains("crop="));
+        assert!(graph.contains("eof_action=pass[vout]"));
+    }
+
+    #[test]
+    fn adjustment_layer_filter_graph_combines_rect_mask_alpha() {
+        let mut clip = Clip::new_adjustment(0, 2_000_000_000);
+        clip.brightness = 0.2;
+        let mut mask = crate::model::clip::ClipMask::new(crate::model::clip::MaskShape::Rectangle);
+        mask.enabled = true;
+        mask.width = 0.2;
+        mask.height = 0.2;
+        clip.masks.push(mask);
+
+        let mut mask_files = Vec::new();
+        let graph = build_adjustment_layer_filter_graph(
+            "vin",
+            "vout",
+            &clip,
+            None,
+            0,
+            1920,
+            1080,
+            41_666_667,
+            &ColorFilterCapabilities::default(),
+            &mut mask_files,
+        )
+        .expect("adjustment graph");
+
+        assert!(
+            mask_files.is_empty(),
+            "rect masks should stay inline in the graph"
+        );
+        assert!(
+            graph.contains("between(abs("),
+            "expected inline rect mask alpha in `{graph}`"
+        );
+        assert!(!graph.contains("alphamerge"));
+        assert!(graph.contains("crop="));
+    }
+
+    #[test]
+    fn adjustment_layer_filter_graph_rasterizes_path_masks() {
+        let mut clip = Clip::new_adjustment(0, 2_000_000_000);
+        clip.brightness = 0.2;
+        let mut mask = crate::model::clip::ClipMask::new(crate::model::clip::MaskShape::Path);
+        mask.enabled = true;
+        mask.path = Some(crate::model::clip::default_diamond_path());
+        clip.masks.push(mask);
+
+        let mut mask_files = Vec::new();
+        let graph = build_adjustment_layer_filter_graph(
+            "vin",
+            "vout",
+            &clip,
+            None,
+            0,
+            1920,
+            1080,
+            41_666_667,
+            &ColorFilterCapabilities::default(),
+            &mut mask_files,
+        )
+        .expect("adjustment graph");
+
+        assert!(
+            !mask_files.is_empty(),
+            "path masks should create a temporary raster mask"
+        );
+        assert!(graph.contains("alphamerge"));
+        assert!(graph.contains("movie='"));
+    }
+
+    #[test]
+    fn adjustment_layer_filter_graph_uses_precomputed_matte_input_when_available() {
+        let mut clip = Clip::new_adjustment(0, 2_000_000_000);
+        clip.brightness = 0.2;
+        clip.position_x_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: 0.0,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+            NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 0.5,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+        ];
+        let mut mask = crate::model::clip::ClipMask::new(crate::model::clip::MaskShape::Ellipse);
+        mask.enabled = true;
+        mask.width = 0.2;
+        mask.height = 0.2;
+        clip.masks.push(mask);
+
+        let graph = build_adjustment_layer_filter_graph(
+            "vin",
+            "vout",
+            &clip,
+            Some(AdjustmentMatteInput {
+                input_index: 7,
+                roi: AdjustmentExportRoi {
+                    left: 120,
+                    top: 80,
+                    right: 520,
+                    bottom: 460,
+                },
+            }),
+            0,
+            1920,
+            1080,
+            41_666_667,
+            &ColorFilterCapabilities::default(),
+            &mut Vec::new(),
+        )
+        .expect("adjustment graph");
+
+        assert!(graph.contains("[7:v]trim=duration=2.000000,setpts=PTS-STARTPTS,format=gray"));
+        assert!(graph.contains("crop=400:380:120:80"));
+        assert!(graph.contains("alphamerge"));
+        assert!(!graph.contains("geq=lum='lum(X,Y)'"));
+    }
+
+    #[test]
+    fn build_adjustment_export_roi_tracks_masked_region() {
+        let mut clip = Clip::new_adjustment(0, 2_000_000_000);
+        clip.brightness = 0.2;
+        clip.position_x = 0.5;
+        let mut mask = crate::model::clip::ClipMask::new(crate::model::clip::MaskShape::Ellipse);
+        mask.enabled = true;
+        mask.center_x = 0.5;
+        mask.center_y = 0.5;
+        mask.width = 0.1;
+        mask.height = 0.1;
+        clip.masks.push(mask);
+
+        let roi = build_adjustment_export_roi(&clip, 1920, 1080, 41_666_667).expect("roi");
+
+        assert_eq!(adjustment_roi_padding_px(&clip), 0);
+        assert!(
+            roi.left > 1000,
+            "expected translated ROI to move right: {roi:?}"
+        );
+        assert!(roi.width() < 500, "expected a tight masked ROI: {roi:?}");
+        assert!(roi.height() < 500, "expected a tight masked ROI: {roi:?}");
     }
 
     #[test]
@@ -5001,6 +6771,47 @@ mod tests {
     }
 
     #[test]
+    fn scale_position_filter_moves_title_at_unit_scale() {
+        let mut clip = Clip::new("", 2_000_000_000, 0, ClipKind::Title);
+        clip.position_x = 0.5;
+
+        let filter = build_scale_position_filter(&clip, 1920, 1080, true);
+
+        assert!(filter.contains("scale=1920:1080"));
+        assert!(filter.contains("crop=1440:1080:0:0"));
+        assert!(filter.contains("pad=1920:1080:480:0:black@0"));
+    }
+
+    #[test]
+    fn direct_canvas_translation_skips_untracked_images() {
+        let clip = Clip::new("/tmp/test.png", 2_000_000_000, 0, ClipKind::Image);
+        assert!(!super::clip_uses_direct_canvas_translation(&clip));
+
+        let mut tracked_clip = clip.clone();
+        tracked_clip.tracking_binding = Some(crate::model::clip::TrackingBinding::new(
+            "source-clip",
+            "tracker-1",
+        ));
+        assert!(super::clip_uses_direct_canvas_translation(&tracked_clip));
+    }
+
+    #[test]
+    fn scale_position_filter_moves_tracked_clip_at_unit_scale() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.position_x = 0.5;
+        clip.tracking_binding = Some(crate::model::clip::TrackingBinding::new(
+            "source-clip",
+            "tracker-1",
+        ));
+
+        let filter = build_scale_position_filter(&clip, 1920, 1080, false);
+
+        assert!(filter.contains("scale=1920:1080"));
+        assert!(filter.contains("crop=1440:1080:0:0"));
+        assert!(filter.contains("pad=1920:1080:480:0:black"));
+    }
+
+    #[test]
     fn drawtext_font_selector_uses_structured_fontconfig_fields() {
         assert_eq!(
             crate::media::title_font::build_drawtext_font_selector("Sans Bold 48"),
@@ -5293,14 +7104,8 @@ mod tests {
         let flattened = flatten_compound_tracks(&[video_track]);
 
         // Should have at least 2 tracks: original video track + audio track for extracted audio
-        let video_tracks: Vec<_> = flattened
-            .iter()
-            .filter(|t| t.kind == crate::model::track::TrackKind::Video)
-            .collect();
-        let audio_tracks: Vec<_> = flattened
-            .iter()
-            .filter(|t| t.kind == crate::model::track::TrackKind::Audio)
-            .collect();
+        let video_tracks: Vec<_> = flattened.iter().filter(|t| t.is_video()).collect();
+        let audio_tracks: Vec<_> = flattened.iter().filter(|t| t.is_audio()).collect();
 
         // Video track should have the video clip, no audio clips
         assert!(!video_tracks.is_empty());
@@ -5329,6 +7134,239 @@ mod tests {
         let first_audio = &audio_tracks[0].clips[0];
         assert_eq!(first_audio.source_path, "audio.wav");
         assert_eq!(first_audio.timeline_start, 1_000); // compound offset applied
+    }
+
+    #[test]
+    fn test_flatten_compound_preserves_subtitles_on_audio_clip() {
+        use crate::model::track::Track;
+
+        // Audio clip inside compound with subtitles
+        let mut inner_a = Track::new_audio("Inner A");
+        let mut ac = Clip::new("audio.wav", 20_000, 0, ClipKind::Audio);
+        ac.id = "ac".into();
+        ac.subtitle_segments = vec![
+            crate::model::clip::SubtitleSegment {
+                id: "s1".into(),
+                start_ns: 1_000,
+                end_ns: 5_000,
+                text: "hello world".into(),
+                words: vec![],
+            },
+            crate::model::clip::SubtitleSegment {
+                id: "s2".into(),
+                start_ns: 8_000,
+                end_ns: 12_000,
+                text: "second segment".into(),
+                words: vec![],
+            },
+        ];
+        inner_a.add_clip(ac);
+
+        let mut inner_v = Track::new_video("Inner V");
+        let mut vc = Clip::new("video.mp4", 20_000, 0, ClipKind::Video);
+        vc.id = "vc".into();
+        inner_v.add_clip(vc);
+
+        let mut compound = Clip::new_compound(5_000, vec![inner_v, inner_a]);
+        compound.id = "compound".into();
+
+        let mut root = Track::new_video("V1");
+        root.add_clip(compound);
+
+        let flattened = flatten_compound_tracks(&[root]);
+
+        // Find the audio clip in flattened tracks
+        let audio_clips: Vec<&Clip> = flattened
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .filter(|c| c.kind == ClipKind::Audio)
+            .collect();
+        assert_eq!(audio_clips.len(), 1, "should have one flattened audio clip");
+
+        let audio = audio_clips[0];
+        assert_eq!(audio.source_path, "audio.wav");
+        assert!(
+            !audio.subtitle_segments.is_empty(),
+            "subtitles should survive flattening"
+        );
+        assert_eq!(audio.subtitle_segments.len(), 2);
+        assert_eq!(audio.subtitle_segments[0].text, "hello world");
+        assert_eq!(audio.subtitle_segments[1].text, "second segment");
+    }
+
+    #[test]
+    fn test_clip_mut_writes_subtitles_into_compound_then_flattened() {
+        use crate::model::project::Project;
+        use crate::model::track::Track;
+
+        // Simulate the STT handler flow: create a project with a compound clip,
+        // use clip_mut to write subtitles to an internal clip, then flatten
+        // and verify subtitles survive.
+        let mut project = Project::new("Test");
+
+        let mut inner_v = Track::new_video("Inner V");
+        let mut vc = Clip::new("video.mp4", 20_000, 0, ClipKind::Video);
+        vc.id = "vc".into();
+        inner_v.add_clip(vc);
+
+        let mut inner_a = Track::new_audio("Inner A");
+        let mut ac = Clip::new("audio.wav", 20_000, 0, ClipKind::Audio);
+        ac.id = "ac".into();
+        inner_a.add_clip(ac);
+
+        let mut compound = Clip::new_compound(5_000, vec![inner_v, inner_a]);
+        compound.id = "compound".into();
+
+        let mut root = Track::new_video("V1");
+        root.add_clip(compound);
+        project.tracks.push(root);
+
+        // Verify clip_mut finds the audio clip inside the compound
+        assert!(
+            project.clip_mut("ac").is_some(),
+            "clip_mut should find audio clip inside compound"
+        );
+
+        // Write subtitles via clip_mut (same path as STT result handler)
+        if let Some(clip) = project.clip_mut("ac") {
+            clip.subtitle_segments = vec![crate::model::clip::SubtitleSegment {
+                id: "s1".into(),
+                start_ns: 1_000,
+                end_ns: 5_000,
+                text: "hello from clip_mut".into(),
+                words: vec![],
+            }];
+        }
+
+        // Verify the subtitle was written
+        let subs = project
+            .clip_ref("ac")
+            .map(|c| c.subtitle_segments.len())
+            .unwrap_or(0);
+        assert_eq!(
+            subs, 1,
+            "subtitle should be written to clip inside compound"
+        );
+
+        // Flatten and verify subtitles survive
+        let flattened = flatten_compound_tracks(&project.tracks);
+        let audio_clips: Vec<&Clip> = flattened
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .filter(|c| c.kind == ClipKind::Audio)
+            .collect();
+        assert_eq!(audio_clips.len(), 1);
+        assert_eq!(
+            audio_clips[0].subtitle_segments.len(),
+            1,
+            "subtitle should survive flattening"
+        );
+        assert_eq!(
+            audio_clips[0].subtitle_segments[0].text,
+            "hello from clip_mut"
+        );
+    }
+
+    #[test]
+    fn test_flatten_compound_with_source_in_offset() {
+        use crate::model::track::Track;
+
+        // Simulate a razor-cut compound clip (right half) where source_in > 0.
+        // Internal clips: A at 0..3000, B at 3000..6000
+        // Compound source_in=3000 (cut at 3000), source_out=6000
+        // Compound timeline_start=10000 (placed at 10s on parent)
+        let mut inner_track = Track::new_video("Inner V");
+        let mut clip_a = Clip::new("a.mp4", 3_000, 0, ClipKind::Video);
+        clip_a.id = "A".into();
+        inner_track.add_clip(clip_a);
+        let mut clip_b = Clip::new("b.mp4", 6_000, 3_000, ClipKind::Video);
+        clip_b.id = "B".into();
+        inner_track.add_clip(clip_b);
+
+        let mut compound = Clip::new_compound(10_000, vec![inner_track]);
+        compound.id = "compound".into();
+        // Simulate razor cut: right half starts at source_in=3000
+        compound.source_in = 3_000;
+        // source_out stays at 6000 (the internal timeline duration)
+
+        let mut root_track = Track::new_video("Root V");
+        root_track.add_clip(compound);
+
+        let flattened = flatten_compound_tracks(&[root_track]);
+        // Clip A (0..3000) is entirely before source_in=3000, should be excluded
+        // Clip B (3000..6000) is within the window, should appear at 10000
+        assert_eq!(flattened[0].clips.len(), 1);
+        assert_eq!(flattened[0].clips[0].source_path, "b.mp4");
+        assert_eq!(flattened[0].clips[0].timeline_start, 10_000);
+    }
+
+    #[test]
+    fn test_flatten_compound_moved_after_cut_no_gap() {
+        use crate::model::track::Track;
+
+        // Scenario: compound cut at 10s, left half deleted, right half moved
+        // to position 0.  The compound's visible window is [10000, 25000] but
+        // timeline_start is 0 — content must start immediately, no gap.
+        let mut inner_track = Track::new_video("Inner V");
+        let mut clip_a = Clip::new("a.mp4", 10_000, 0, ClipKind::Video);
+        clip_a.id = "A".into();
+        inner_track.add_clip(clip_a);
+        let mut clip_b = Clip::new("b.mp4", 25_000, 10_000, ClipKind::Video);
+        clip_b.id = "B".into();
+        inner_track.add_clip(clip_b);
+
+        let mut compound = Clip::new_compound(0, vec![inner_track]);
+        compound.id = "compound".into();
+        compound.source_in = 10_000;
+        // source_out = 25_000 (from new_compound)
+
+        let mut root = Track::new_video("Root V");
+        root.add_clip(compound);
+
+        let flattened = flatten_compound_tracks(&[root]);
+        // Clip A (0..10000) is outside window, excluded
+        // Clip B (10000..25000) should start at position 0 (no gap)
+        assert_eq!(flattened[0].clips.len(), 1);
+        assert_eq!(flattened[0].clips[0].source_path, "b.mp4");
+        assert_eq!(
+            flattened[0].clips[0].timeline_start, 0,
+            "clip should start at 0 with no gap"
+        );
+    }
+
+    #[test]
+    fn test_flatten_compound_trims_partial_overlap() {
+        use crate::model::track::Track;
+
+        // Internal clip spans 1000..5000, compound window is 2000..4000
+        let mut inner_track = Track::new_video("Inner V");
+        let mut clip = Clip::new("wide.mp4", 5_000, 1_000, ClipKind::Video);
+        clip.source_in = 0;
+        clip.source_out = 4_000; // 4000ns of source material
+        clip.timeline_start = 1_000;
+        clip.id = "W".into();
+        inner_track.add_clip(clip);
+
+        let mut compound = Clip::new_compound(20_000, vec![inner_track]);
+        compound.id = "compound".into();
+        compound.source_in = 2_000;
+        compound.source_out = 4_000;
+
+        let mut root = Track::new_video("Root V");
+        root.add_clip(compound);
+
+        let flattened = flatten_compound_tracks(&[root]);
+        assert_eq!(flattened[0].clips.len(), 1);
+        let fc = &flattened[0].clips[0];
+        // compound_offset = 20000 - 2000 = 18000
+        // Clip starts at 1000, trimmed to window_start=2000, so trim=1000
+        // Rebased: 18000 + 2000 = 20000
+        assert_eq!(fc.timeline_start, 20_000);
+        // source_in trimmed by 1000 (from 0 to 1000)
+        assert_eq!(fc.source_in, 1_000);
+        // source_out trimmed: clip would end at 5000, window_end=4000, excess=1000
+        // source_out was 4000, minus 1000 = 3000
+        assert_eq!(fc.source_out, 3_000);
     }
 
     #[test]
@@ -5375,10 +7413,7 @@ mod tests {
         let flattened = flatten_compound_tracks(&[root]);
 
         // Video track: should have 2 video segments (angle 0: 5000-15000, angle 1: 15000-25000)
-        let video_tracks: Vec<_> = flattened
-            .iter()
-            .filter(|t| t.kind == crate::model::track::TrackKind::Video)
-            .collect();
+        let video_tracks: Vec<_> = flattened.iter().filter(|t| t.is_video()).collect();
         assert!(!video_tracks.is_empty());
         let video_clips: Vec<_> = video_tracks.iter().flat_map(|t| &t.clips).collect();
         assert_eq!(
@@ -5390,10 +7425,7 @@ mod tests {
         assert_eq!(video_clips[1].source_path, "cam2.mp4");
 
         // Audio tracks: should have 2 audio clips (one per unmuted angle, continuous)
-        let audio_tracks: Vec<_> = flattened
-            .iter()
-            .filter(|t| t.kind == crate::model::track::TrackKind::Audio)
-            .collect();
+        let audio_tracks: Vec<_> = flattened.iter().filter(|t| t.is_audio()).collect();
         let audio_clips: Vec<_> = audio_tracks.iter().flat_map(|t| &t.clips).collect();
         assert_eq!(
             audio_clips.len(),
@@ -5448,7 +7480,7 @@ mod tests {
         let flattened = flatten_compound_tracks(&[root]);
         let audio_clips: Vec<_> = flattened
             .iter()
-            .filter(|t| t.kind == crate::model::track::TrackKind::Audio)
+            .filter(|t| t.is_audio())
             .flat_map(|t| &t.clips)
             .collect();
         assert_eq!(
@@ -5508,7 +7540,7 @@ mod tests {
         // Video clip should be at compound offset
         let video_clips: Vec<_> = flattened
             .iter()
-            .filter(|t| t.kind == crate::model::track::TrackKind::Video)
+            .filter(|t| t.is_video())
             .flat_map(|t| &t.clips)
             .collect();
         assert!(!video_clips.is_empty());

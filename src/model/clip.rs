@@ -1,4 +1,5 @@
 use super::track::Track;
+use super::transition::OutgoingTransition;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -7,6 +8,12 @@ use uuid::Uuid;
 const IMAGE_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "bmp", "tiff", "tif", "webp", "svg", "heic", "heif",
 ];
+
+/// Tolerance (in nanoseconds, ~half a frame at 24 fps) used when looking up an
+/// existing keyframe near a given timeline position. Keyframes within this
+/// distance are treated as the same keyframe so close-but-not-exact playhead
+/// positions update the existing entry instead of creating a near-duplicate.
+pub const KEYFRAME_SNAP_TOLERANCE_NS: u64 = 20_000_000;
 
 /// Returns `true` when `path` has a file extension matching a known still-image
 /// format.  Used across import, placement, playback, and export to distinguish
@@ -43,6 +50,52 @@ impl Default for SubtitleHighlightMode {
     }
 }
 
+/// Bitflags for which highlight effects apply to the active word.
+/// Multiple effects can be combined (e.g., bold + color + underline).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SubtitleHighlightFlags {
+    #[serde(default)]
+    pub bold: bool,
+    #[serde(default)]
+    pub color: bool,
+    #[serde(default)]
+    pub underline: bool,
+    #[serde(default)]
+    pub stroke: bool,
+    #[serde(default)]
+    pub italic: bool,
+    #[serde(default)]
+    pub background: bool,
+    #[serde(default)]
+    pub shadow: bool,
+}
+
+impl SubtitleHighlightFlags {
+    /// Returns `true` when no highlight effects are enabled.
+    pub fn is_none(&self) -> bool {
+        !self.bold
+            && !self.color
+            && !self.underline
+            && !self.stroke
+            && !self.italic
+            && !self.background
+            && !self.shadow
+    }
+
+    /// Convert a legacy `SubtitleHighlightMode` enum value into flags.
+    pub fn from_legacy(mode: SubtitleHighlightMode) -> Self {
+        let mut flags = Self::default();
+        match mode {
+            SubtitleHighlightMode::None => {}
+            SubtitleHighlightMode::Bold => flags.bold = true,
+            SubtitleHighlightMode::Color => flags.color = true,
+            SubtitleHighlightMode::Underline => flags.underline = true,
+            SubtitleHighlightMode::Stroke => flags.stroke = true,
+        }
+        flags
+    }
+}
+
 /// A single word with timing from speech-to-text token-level timestamps.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SubtitleWord {
@@ -68,6 +121,60 @@ pub struct SubtitleSegment {
     /// Per-word timing for highlight/karaoke rendering.
     #[serde(default)]
     pub words: Vec<SubtitleWord>,
+}
+
+impl SubtitleSegment {
+    /// Apply a new full-text value to this segment and re-sync the
+    /// per-word entries used by karaoke / word-highlight rendering so
+    /// the highlighted text matches what the user typed instead of the
+    /// original Whisper tokenization.
+    ///
+    /// Word timings are preserved 1:1 when the whitespace-split word
+    /// count matches the existing entries; otherwise the segment's
+    /// total time range is redistributed evenly across the new words so
+    /// the karaoke timeline still spans the segment.
+    pub fn set_text_and_resync_words(&mut self, new_text: String) {
+        let new_words: Vec<String> = new_text.split_whitespace().map(|s| s.to_string()).collect();
+        self.text = new_text;
+
+        if self.words.is_empty() {
+            // No karaoke data to maintain — nothing else to do.
+            return;
+        }
+        if new_words.is_empty() {
+            // Edited text is empty — clear stale word tokens so karaoke
+            // doesn't keep showing the previous Whisper output.
+            self.words.clear();
+            return;
+        }
+
+        if new_words.len() == self.words.len() {
+            // Word counts match — replace texts in place so the existing
+            // per-word timings (originally from Whisper token timestamps)
+            // keep working untouched.
+            for (slot, word) in self.words.iter_mut().zip(new_words.into_iter()) {
+                slot.text = word;
+            }
+        } else {
+            // Word count changed — redistribute the segment's time range
+            // evenly across the new word list. Granularity drops a bit
+            // but karaoke highlighting still tracks the segment.
+            let total = self.end_ns.saturating_sub(self.start_ns).max(1);
+            let n = new_words.len() as u64;
+            let mut rebuilt: Vec<SubtitleWord> = Vec::with_capacity(new_words.len());
+            for (i, w) in new_words.into_iter().enumerate() {
+                let i = i as u64;
+                let w_start = self.start_ns + (total * i) / n;
+                let w_end = self.start_ns + (total * (i + 1)) / n;
+                rebuilt.push(SubtitleWord {
+                    start_ns: w_start,
+                    end_ns: w_end,
+                    text: w,
+                });
+            }
+            self.words = rebuilt;
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -97,6 +204,15 @@ fn default_subtitle_word_window_secs() -> f64 {
 }
 fn default_subtitle_position_y() -> f64 {
     0.85
+}
+fn default_subtitle_shadow_color() -> u32 {
+    0x000000AA
+}
+fn default_subtitle_shadow_offset() -> f64 {
+    1.5
+}
+fn default_subtitle_bg_highlight_color() -> u32 {
+    0xFFFF0080
 }
 
 /// Type of media a clip contains
@@ -166,7 +282,12 @@ impl Default for ClipColorLabel {
     }
 }
 
-/// Slow-motion frame interpolation mode (export-only).
+/// Slow-motion frame interpolation mode.
+///
+/// `Off`/`Blend`/`OpticalFlow` are realized at export time via FFmpeg
+/// `minterpolate`. `Ai` is realized via an ONNX-based learned interpolator
+/// (RIFE) that precomputes a higher-fps sidecar consumed identically by both
+/// preview and export — see [`crate::media::frame_interp_cache`].
 #[derive(Default, Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SlowMotionInterp {
@@ -176,6 +297,31 @@ pub enum SlowMotionInterp {
     Blend,
     /// Motion-compensated interpolation (minterpolate mi_mode=mci). Slow but smooth.
     OpticalFlow,
+    /// Learned frame interpolation (RIFE ONNX). Precomputed to a sidecar
+    /// video; preview and export both consume the same sidecar.
+    Ai,
+}
+
+impl SlowMotionInterp {
+    /// FCPXML / serialization string for this variant.
+    pub fn as_xml_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Blend => "blend",
+            Self::OpticalFlow => "optical-flow",
+            Self::Ai => "ai",
+        }
+    }
+
+    /// Parse from FCPXML / serialization string. Unknown values yield `Off`.
+    pub fn from_xml_str(s: &str) -> Self {
+        match s {
+            "blend" => Self::Blend,
+            "optical-flow" => Self::OpticalFlow,
+            "ai" => Self::Ai,
+            _ => Self::Off,
+        }
+    }
 }
 
 /// Audio channel routing mode for a clip.
@@ -222,6 +368,46 @@ impl AudioChannelMode {
     }
 
     pub const ALL: [AudioChannelMode; 4] = [Self::Stereo, Self::Left, Self::Right, Self::MonoMix];
+}
+
+/// Source of speech-region intervals used by the voice-isolation gate.
+///
+/// `Subtitles` walks the clip's `subtitle_segments` (current behavior, requires
+/// running speech-to-text first). `Silence` reads the cached
+/// `voice_isolation_speech_intervals` populated by an ffmpeg `silencedetect`
+/// analysis pass — used for clips that don't transcribe well or where running
+/// Whisper is undesirable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceIsolationSource {
+    #[default]
+    Subtitles,
+    Silence,
+}
+
+impl VoiceIsolationSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Subtitles => "Subtitles",
+            Self::Silence => "Silence Detect",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Subtitles => "subtitles",
+            Self::Silence => "silence",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "silence" => Self::Silence,
+            _ => Self::Subtitles,
+        }
+    }
+
+    pub const ALL: [VoiceIsolationSource; 2] = [Self::Subtitles, Self::Silence];
 }
 
 /// Compositing blend mode for a clip.
@@ -529,6 +715,18 @@ fn default_saturation() -> f32 {
 fn default_volume() -> f32 {
     1.0
 }
+fn default_voice_iso_pad_ms() -> f32 {
+    80.0
+}
+fn default_voice_iso_fade_ms() -> f32 {
+    25.0
+}
+fn default_vi_silence_threshold_db() -> f32 {
+    -30.0
+}
+fn default_vi_silence_min_ms() -> u32 {
+    200
+}
 fn default_vidstab_smoothing() -> f32 {
     0.5
 }
@@ -666,6 +864,236 @@ fn default_mask_center() -> f64 {
 fn default_mask_half_size() -> f64 {
     0.25
 }
+fn default_tracking_confidence() -> f64 {
+    1.0
+}
+fn default_tracking_strength() -> f64 {
+    1.0
+}
+fn default_motion_tracker_label() -> String {
+    "Tracker".to_string()
+}
+
+/// Normalized tracking analysis region in clip-local space.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TrackingRegion {
+    /// Region center X in normalized clip coordinates (0 = left, 1 = right).
+    #[serde(default = "default_mask_center")]
+    pub center_x: f64,
+    /// Region center Y in normalized clip coordinates (0 = top, 1 = bottom).
+    #[serde(default = "default_mask_center")]
+    pub center_y: f64,
+    /// Half-width in normalized clip coordinates.
+    #[serde(default = "default_mask_half_size")]
+    pub width: f64,
+    /// Half-height in normalized clip coordinates.
+    #[serde(default = "default_mask_half_size")]
+    pub height: f64,
+    /// Clockwise rotation in degrees.
+    #[serde(default)]
+    pub rotation_deg: f64,
+}
+
+impl Default for TrackingRegion {
+    fn default() -> Self {
+        Self {
+            center_x: default_mask_center(),
+            center_y: default_mask_center(),
+            width: default_mask_half_size(),
+            height: default_mask_half_size(),
+            rotation_deg: 0.0,
+        }
+    }
+}
+
+/// One sampled motion value from a tracker, relative to the tracked region's
+/// starting pose in clip-local space.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TrackingSample {
+    /// Clip-local sample time in nanoseconds.
+    pub time_ns: u64,
+    /// Horizontal normalized motion delta from the initial tracked region.
+    #[serde(default)]
+    pub offset_x: f64,
+    /// Vertical normalized motion delta from the initial tracked region.
+    #[serde(default)]
+    pub offset_y: f64,
+    /// Relative scale multiplier. `1.0` preserves the original size.
+    #[serde(default = "default_scale")]
+    pub scale_multiplier: f64,
+    /// Relative rotation delta in degrees.
+    #[serde(default)]
+    pub rotation_deg: f64,
+    /// Tracker confidence for this sample, normalized to 0..1.
+    #[serde(default = "default_tracking_confidence")]
+    pub confidence: f64,
+}
+
+impl TrackingSample {
+    pub fn identity(time_ns: u64) -> Self {
+        Self {
+            time_ns,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            scale_multiplier: 1.0,
+            rotation_deg: 0.0,
+            confidence: 1.0,
+        }
+    }
+
+    fn interpolate(self, next: Self, local_timeline_ns: u64) -> Self {
+        if next.time_ns <= self.time_ns {
+            let mut sample = next;
+            sample.time_ns = local_timeline_ns;
+            return sample;
+        }
+        let span = next.time_ns.saturating_sub(self.time_ns);
+        let t = local_timeline_ns.saturating_sub(self.time_ns) as f64 / span as f64;
+        Self {
+            time_ns: local_timeline_ns,
+            offset_x: self.offset_x + (next.offset_x - self.offset_x) * t,
+            offset_y: self.offset_y + (next.offset_y - self.offset_y) * t,
+            scale_multiplier: self.scale_multiplier
+                + (next.scale_multiplier - self.scale_multiplier) * t,
+            rotation_deg: self.rotation_deg + (next.rotation_deg - self.rotation_deg) * t,
+            confidence: self.confidence + (next.confidence - self.confidence) * t,
+        }
+    }
+}
+
+/// Stored motion-tracking data for a source clip.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MotionTracker {
+    /// Unique tracker identifier (UUID v4).
+    pub id: String,
+    /// User-visible tracker label.
+    #[serde(default = "default_motion_tracker_label")]
+    pub label: String,
+    /// Whether this tracker is enabled for downstream attachments.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Source analysis region in clip-local normalized coordinates.
+    #[serde(default)]
+    pub analysis_region: TrackingRegion,
+    /// Optional clip-local analysis window start.
+    #[serde(default)]
+    pub analysis_start_ns: u64,
+    /// Optional clip-local analysis window end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analysis_end_ns: Option<u64>,
+    /// Sampled motion values in clip-local time.
+    #[serde(default)]
+    pub samples: Vec<TrackingSample>,
+}
+
+impl MotionTracker {
+    pub fn new(label: impl Into<String>) -> Self {
+        let label = label.into();
+        Self {
+            id: Uuid::new_v4().to_string(),
+            label: if label.trim().is_empty() {
+                default_motion_tracker_label()
+            } else {
+                label
+            },
+            enabled: true,
+            analysis_region: TrackingRegion::default(),
+            analysis_start_ns: 0,
+            analysis_end_ns: None,
+            samples: Vec::new(),
+        }
+    }
+
+    pub fn retain_samples_in_local_range(&mut self, start_ns: u64, end_ns: u64) {
+        self.samples
+            .retain(|sample| sample.time_ns >= start_ns && sample.time_ns < end_ns);
+        for sample in &mut self.samples {
+            sample.time_ns = sample.time_ns.saturating_sub(start_ns);
+        }
+
+        let clamped_start = self.analysis_start_ns.clamp(start_ns, end_ns);
+        self.analysis_start_ns = clamped_start.saturating_sub(start_ns);
+        if let Some(analysis_end_ns) = self.analysis_end_ns {
+            let clamped_end = analysis_end_ns.clamp(clamped_start, end_ns);
+            self.analysis_end_ns = Some(clamped_end.saturating_sub(start_ns));
+        }
+    }
+
+    pub fn sample_at_local_ns(&self, local_timeline_ns: u64) -> Option<TrackingSample> {
+        if self.samples.is_empty() {
+            return None;
+        }
+        let mut sorted = self.samples.clone();
+        sorted.sort_by_key(|sample| sample.time_ns);
+        let first = sorted[0];
+        if local_timeline_ns <= first.time_ns {
+            return Some(first);
+        }
+
+        let mut prev = first;
+        for next in sorted.iter().skip(1) {
+            if local_timeline_ns < next.time_ns {
+                return Some(prev.interpolate(*next, local_timeline_ns));
+            }
+            prev = *next;
+        }
+        Some(prev)
+    }
+}
+
+/// Attachment from a clip transform or mask to a tracker stored on another clip.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrackingBinding {
+    /// The clip that owns the referenced tracker.
+    pub source_clip_id: String,
+    /// The specific tracker on the source clip.
+    pub tracker_id: String,
+    /// When true, apply tracked translation deltas.
+    #[serde(default = "default_true")]
+    pub apply_translation: bool,
+    /// When true, apply tracked scale changes.
+    #[serde(default)]
+    pub apply_scale: bool,
+    /// When true, apply tracked rotation changes.
+    #[serde(default)]
+    pub apply_rotation: bool,
+    /// Additional X offset in normalized coordinates after tracked translation.
+    #[serde(default)]
+    pub offset_x: f64,
+    /// Additional Y offset in normalized coordinates after tracked translation.
+    #[serde(default)]
+    pub offset_y: f64,
+    /// Multiplier applied after tracked scale changes.
+    #[serde(default = "default_scale")]
+    pub scale_multiplier: f64,
+    /// Additional rotation offset in degrees after tracked rotation.
+    #[serde(default)]
+    pub rotation_offset_deg: f64,
+    /// Global blend amount for the tracking result, 0 = ignore, 1 = full effect.
+    #[serde(default = "default_tracking_strength")]
+    pub strength: f64,
+    /// Optional smoothing amount for downstream consumers.
+    #[serde(default)]
+    pub smoothing: f64,
+}
+
+impl TrackingBinding {
+    pub fn new(source_clip_id: impl Into<String>, tracker_id: impl Into<String>) -> Self {
+        Self {
+            source_clip_id: source_clip_id.into(),
+            tracker_id: tracker_id.into(),
+            apply_translation: true,
+            apply_scale: false,
+            apply_rotation: false,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            scale_multiplier: 1.0,
+            rotation_offset_deg: 0.0,
+            strength: 1.0,
+            smoothing: 0.0,
+        }
+    }
+}
 
 /// A shape mask applied to a clip to restrict visible area via alpha.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -719,6 +1147,9 @@ pub struct ClipMask {
     /// Bezier path data (only used when `shape == MaskShape::Path`).
     #[serde(default)]
     pub path: Option<MaskPath>,
+    /// Optional motion-tracking attachment for this specific mask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracking_binding: Option<TrackingBinding>,
 }
 
 impl ClipMask {
@@ -744,6 +1175,7 @@ impl ClipMask {
             expansion_keyframes: Vec::new(),
             invert: false,
             path: None,
+            tracking_binding: None,
         }
     }
 
@@ -764,6 +1196,10 @@ impl ClipMask {
         Clip::retain_and_rebase_keyframes(&mut self.rotation_keyframes, start_ns, end_ns);
         Clip::retain_and_rebase_keyframes(&mut self.feather_keyframes, start_ns, end_ns);
         Clip::retain_and_rebase_keyframes(&mut self.expansion_keyframes, start_ns, end_ns);
+    }
+
+    pub fn has_tracking_binding(&self) -> bool {
+        self.tracking_binding.is_some()
     }
 }
 fn default_bg_removal_threshold() -> f64 {
@@ -977,6 +1413,37 @@ pub struct Clip {
     /// Audio volume multiplier: 0.0 (silent) to 2.0 (double), default 1.0
     #[serde(default = "default_volume")]
     pub volume: f32,
+    /// Voice Isolation (Smart Noise Gating via Whisper timings): 0.0 (off) to 1.0 (full ducking)
+    #[serde(default)]
+    pub voice_isolation: f32,
+    /// Voice isolation padding in milliseconds added around each word boundary.
+    /// Prevents ducking in short natural pauses between words. Default 80 ms.
+    #[serde(default = "default_voice_iso_pad_ms")]
+    pub voice_isolation_pad_ms: f32,
+    /// Voice isolation fade ramp in milliseconds for smooth transitions. Default 25 ms.
+    #[serde(default = "default_voice_iso_fade_ms")]
+    pub voice_isolation_fade_ms: f32,
+    /// Voice isolation floor: minimum volume during ducked regions.
+    /// 0.0 = full silence, 1.0 = no ducking. Default 0.0.
+    #[serde(default)]
+    pub voice_isolation_floor: f32,
+    /// Source for voice-isolation gate intervals: subtitles (default, requires
+    /// generated subtitles) or silence-detect (requires Analyze Audio).
+    #[serde(default)]
+    pub voice_isolation_source: VoiceIsolationSource,
+    /// Silence-detection threshold in dB (more negative = stricter). Default -30.
+    /// Used only when `voice_isolation_source` is `Silence`.
+    #[serde(default = "default_vi_silence_threshold_db")]
+    pub voice_isolation_silence_threshold_db: f32,
+    /// Minimum silence duration to count as a gap, in milliseconds. Default 200.
+    /// Used only when `voice_isolation_source` is `Silence`.
+    #[serde(default = "default_vi_silence_min_ms")]
+    pub voice_isolation_silence_min_ms: u32,
+    /// Cached speech intervals (clip-local source-time nanoseconds, [start, end] pairs)
+    /// computed from `silencedetect` analysis. NOT serialized — re-analyzed on demand
+    /// via the inspector "Analyze Audio" button after project reload or trim edits.
+    #[serde(skip)]
+    pub voice_isolation_speech_intervals: Vec<(u64, u64)>,
     /// Last measured integrated loudness in LUFS (informational, from normalization analysis).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measured_loudness_lufs: Option<f64>,
@@ -1001,6 +1468,11 @@ pub struct Clip {
     /// Optional EQ high-band gain keyframes over clip-local timeline.
     #[serde(default)]
     pub eq_high_gain_keyframes: Vec<NumericKeyframe>,
+    /// Matched EQ bands from audio matching (7-band, independent of user EQ).
+    /// Populated by the audio match engine; applied in series before the user's
+    /// 3-band EQ during preview and export.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub match_eq_bands: Vec<EqBand>,
     /// Pitch shift in semitones: −12.0 (one octave down) to +12.0 (one octave up).
     /// Applied via Rubberband (LADSPA in preview, FFmpeg rubberband filter in export).
     /// 0.0 = no shift.
@@ -1098,12 +1570,9 @@ pub struct Clip {
     /// Secondary line of text (used by some templates).
     #[serde(default)]
     pub title_secondary_text: String,
-    /// Transition to the next clip on the same track (e.g. "cross_dissolve").
-    #[serde(default)]
-    pub transition_after: String,
-    /// Transition duration in nanoseconds for `transition_after` (0 = none).
-    #[serde(default)]
-    pub transition_after_ns: u64,
+    /// Transition to the next clip on the same track.
+    #[serde(default, flatten)]
+    pub outgoing_transition: OutgoingTransition,
     /// Ordered list of .cube LUT file paths for color grading (applied sequentially on export via ffmpeg lut3d).
     /// Empty means no LUTs are assigned.
     #[serde(default)]
@@ -1240,6 +1709,12 @@ pub struct Clip {
     /// Shape masks applied to this clip (empty = no mask).
     #[serde(default)]
     pub masks: Vec<ClipMask>,
+    /// Motion trackers authored on this source clip.
+    #[serde(default)]
+    pub motion_trackers: Vec<MotionTracker>,
+    /// Optional transform-level motion-tracking attachment for this clip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracking_binding: Option<TrackingBinding>,
     // ── Subtitles (speech-to-text) ───────────────────────────────────────
     /// Timed subtitle segments generated by STT.
     #[serde(default)]
@@ -1250,6 +1725,27 @@ pub struct Clip {
     /// Subtitle display font descriptor.
     #[serde(default = "default_subtitle_font")]
     pub subtitle_font: String,
+    /// Base style: always-on bold for all subtitle text.
+    #[serde(default)]
+    pub subtitle_bold: bool,
+    /// Base style: always-on italic for all subtitle text.
+    #[serde(default)]
+    pub subtitle_italic: bool,
+    /// Base style: always-on underline for all subtitle text.
+    #[serde(default)]
+    pub subtitle_underline: bool,
+    /// Base style: draw a shadow behind all subtitle text.
+    #[serde(default)]
+    pub subtitle_shadow: bool,
+    /// Shadow color (0xRRGGBBAA). Default: 0x000000AA (black, ~67% opaque).
+    #[serde(default = "default_subtitle_shadow_color")]
+    pub subtitle_shadow_color: u32,
+    /// Shadow X offset in pts.
+    #[serde(default = "default_subtitle_shadow_offset")]
+    pub subtitle_shadow_offset_x: f64,
+    /// Shadow Y offset in pts.
+    #[serde(default = "default_subtitle_shadow_offset")]
+    pub subtitle_shadow_offset_y: f64,
     /// Subtitle text color (0xRRGGBBAA).
     #[serde(default = "default_subtitle_color")]
     pub subtitle_color: u32,
@@ -1271,6 +1767,12 @@ pub struct Clip {
     /// Highlight color for the active word (0xRRGGBBAA).
     #[serde(default = "default_subtitle_highlight_color")]
     pub subtitle_highlight_color: u32,
+    /// Multi-effect highlight flags (replaces single-mode enum for new projects).
+    #[serde(default)]
+    pub subtitle_highlight_flags: SubtitleHighlightFlags,
+    /// Background highlight color behind the active word (0xRRGGBBAA).
+    #[serde(default = "default_subtitle_bg_highlight_color")]
+    pub subtitle_bg_highlight_color: u32,
     /// Time window (seconds) around the active word to display in karaoke mode.
     /// Words within ±this duration of the current word are shown. Default 2.0s.
     #[serde(default = "default_subtitle_word_window_secs")]
@@ -1323,6 +1825,11 @@ impl Clip {
             || !self.eq_low_gain_keyframes.is_empty()
             || !self.eq_mid_gain_keyframes.is_empty()
             || !self.eq_high_gain_keyframes.is_empty()
+    }
+
+    /// Returns `true` when any match EQ band has non-zero gain.
+    pub fn has_match_eq(&self) -> bool {
+        self.match_eq_bands.iter().any(|b| b.gain.abs() > 0.001)
     }
 
     pub fn lut_key(&self) -> Option<String> {
@@ -1438,11 +1945,112 @@ impl Clip {
         for mask in &mut self.masks {
             mask.retain_keyframes_in_local_range(start_ns, end_ns);
         }
+        for tracker in &mut self.motion_trackers {
+            tracker.retain_samples_in_local_range(start_ns, end_ns);
+        }
+    }
+
+    /// Returns `true` when voice isolation has a usable data source (subtitles
+    /// when `voice_isolation_source` is `Subtitles`, or analyzed speech intervals
+    /// when `Silence`) AND the gate amount is non-zero.
+    pub fn has_voice_isolation_data(&self) -> bool {
+        if self.voice_isolation <= 0.0 {
+            return false;
+        }
+        match self.voice_isolation_source {
+            VoiceIsolationSource::Subtitles => !self.subtitle_segments.is_empty(),
+            VoiceIsolationSource::Silence => !self.voice_isolation_speech_intervals.is_empty(),
+        }
+    }
+
+    /// Returns merged speech intervals in clip-local source-time nanoseconds,
+    /// padded by `pad_ns` on each side, for the active `voice_isolation_source`.
+    /// This is the single source of truth used by both real-time preview
+    /// (`program_player`) and export (`build_volume_filter`).
+    /// Returns an empty Vec when isolation is off or there is no source data.
+    pub fn voice_isolation_speech_intervals_ns(&self, pad_ns: u64) -> Vec<(u64, u64)> {
+        if !self.has_voice_isolation_data() {
+            return Vec::new();
+        }
+        let mut intervals: Vec<(u64, u64)> = Vec::new();
+        match self.voice_isolation_source {
+            VoiceIsolationSource::Subtitles => {
+                for seg in &self.subtitle_segments {
+                    if seg.words.is_empty() {
+                        intervals.push((seg.start_ns.saturating_sub(pad_ns), seg.end_ns + pad_ns));
+                    } else {
+                        for w in &seg.words {
+                            intervals.push((w.start_ns.saturating_sub(pad_ns), w.end_ns + pad_ns));
+                        }
+                    }
+                }
+            }
+            VoiceIsolationSource::Silence => {
+                for &(s, e) in &self.voice_isolation_speech_intervals {
+                    intervals.push((s.saturating_sub(pad_ns), e + pad_ns));
+                }
+            }
+        }
+        // Sort by start, then merge any overlaps so consumers see clean,
+        // non-overlapping ranges.
+        intervals.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut merged: Vec<(u64, u64)> = Vec::new();
+        for iv in intervals {
+            if let Some(last) = merged.last_mut() {
+                if iv.0 <= last.1 {
+                    last.1 = last.1.max(iv.1);
+                    continue;
+                }
+            }
+            merged.push(iv);
+        }
+        merged
+    }
+
+    /// Clear the cached silence-detected speech intervals. Call this whenever
+    /// the underlying source window changes (`source_in`/`source_out` edits)
+    /// or the threshold/min-gap parameters change, so the user must re-Analyze.
+    pub fn invalidate_voice_isolation_silence_cache(&mut self) {
+        self.voice_isolation_speech_intervals.clear();
+    }
+
+    /// Filter subtitle segments to the clip-local time range `[start_ns, end_ns)`,
+    /// rebasing retained segments so `start_ns` maps to time 0.
+    /// Segments entirely outside the range are removed; partially overlapping
+    /// segments have their start/end clamped and rebased. Word-level timings
+    /// within each segment are adjusted the same way.
+    pub fn retain_subtitles_in_local_range(&mut self, start_ns: u64, end_ns: u64) {
+        self.subtitle_segments
+            .retain(|s| s.end_ns > start_ns && s.start_ns < end_ns);
+        for seg in &mut self.subtitle_segments {
+            seg.start_ns = seg.start_ns.max(start_ns).saturating_sub(start_ns);
+            seg.end_ns = seg.end_ns.min(end_ns).saturating_sub(start_ns);
+            seg.words
+                .retain(|w| w.end_ns > start_ns && w.start_ns < end_ns);
+            for word in &mut seg.words {
+                word.start_ns = word.start_ns.max(start_ns).saturating_sub(start_ns);
+                word.end_ns = word.end_ns.min(end_ns).saturating_sub(start_ns);
+            }
+        }
     }
 
     /// Returns `true` when any mask is present and enabled.
     pub fn has_mask(&self) -> bool {
         self.masks.iter().any(|m| m.enabled)
+    }
+
+    pub fn has_tracking_data(&self) -> bool {
+        !self.motion_trackers.is_empty()
+            || self.tracking_binding.is_some()
+            || self.masks.iter().any(ClipMask::has_tracking_binding)
+    }
+
+    pub fn has_outgoing_transition(&self) -> bool {
+        self.outgoing_transition.is_active()
+    }
+
+    pub fn clear_outgoing_transition(&mut self) {
+        self.outgoing_transition.clear();
     }
 
     pub fn new(
@@ -1483,6 +2091,14 @@ impl Clip {
             vidstab_enabled: false,
             vidstab_smoothing: default_vidstab_smoothing(),
             volume: 1.0,
+            voice_isolation: 0.0,
+            voice_isolation_pad_ms: default_voice_iso_pad_ms(),
+            voice_isolation_fade_ms: default_voice_iso_fade_ms(),
+            voice_isolation_floor: 0.0,
+            voice_isolation_source: VoiceIsolationSource::default(),
+            voice_isolation_silence_threshold_db: default_vi_silence_threshold_db(),
+            voice_isolation_silence_min_ms: default_vi_silence_min_ms(),
+            voice_isolation_speech_intervals: Vec::new(),
             measured_loudness_lufs: None,
             volume_keyframes: Vec::new(),
             pan: 0.0,
@@ -1491,6 +2107,7 @@ impl Clip {
             eq_low_gain_keyframes: Vec::new(),
             eq_mid_gain_keyframes: Vec::new(),
             eq_high_gain_keyframes: Vec::new(),
+            match_eq_bands: Vec::new(),
             pitch_shift_semitones: 0.0,
             pitch_preserve: false,
             audio_channel_mode: AudioChannelMode::default(),
@@ -1526,8 +2143,7 @@ impl Clip {
             title_bg_box_padding: default_title_bg_box_padding(),
             title_clip_bg_color: 0,
             title_secondary_text: String::new(),
-            transition_after: String::new(),
-            transition_after_ns: 0,
+            outgoing_transition: OutgoingTransition::default(),
             lut_paths: Vec::new(),
             scale: 1.0,
             scale_keyframes: Vec::new(),
@@ -1567,9 +2183,18 @@ impl Clip {
             frei0r_effects: Vec::new(),
             ladspa_effects: Vec::new(),
             masks: Vec::new(),
+            motion_trackers: Vec::new(),
+            tracking_binding: None,
             subtitle_segments: Vec::new(),
             subtitles_language: String::new(),
             subtitle_font: default_subtitle_font(),
+            subtitle_bold: false,
+            subtitle_italic: false,
+            subtitle_underline: false,
+            subtitle_shadow: false,
+            subtitle_shadow_color: default_subtitle_shadow_color(),
+            subtitle_shadow_offset_x: default_subtitle_shadow_offset(),
+            subtitle_shadow_offset_y: default_subtitle_shadow_offset(),
             subtitle_color: default_subtitle_color(),
             subtitle_outline_color: default_subtitle_outline_color(),
             subtitle_outline_width: default_subtitle_outline_width(),
@@ -1577,6 +2202,8 @@ impl Clip {
             subtitle_bg_box_color: default_subtitle_bg_box_color(),
             subtitle_highlight_mode: SubtitleHighlightMode::None,
             subtitle_highlight_color: default_subtitle_highlight_color(),
+            subtitle_highlight_flags: SubtitleHighlightFlags::default(),
+            subtitle_bg_highlight_color: default_subtitle_bg_highlight_color(),
             subtitle_word_window_secs: default_subtitle_word_window_secs(),
             subtitle_position_y: default_subtitle_position_y(),
             fcpxml_unknown_attrs: Vec::new(),
@@ -1673,6 +2300,18 @@ impl Clip {
             .unwrap_or(0)
     }
 
+    pub fn motion_tracker_ref(&self, tracker_id: &str) -> Option<&MotionTracker> {
+        self.motion_trackers
+            .iter()
+            .find(|tracker| tracker.id == tracker_id)
+    }
+
+    pub fn motion_tracker_mut(&mut self, tracker_id: &str) -> Option<&mut MotionTracker> {
+        self.motion_trackers
+            .iter_mut()
+            .find(|tracker| tracker.id == tracker_id)
+    }
+
     /// Return the MulticamAngle for the active angle at a given local position.
     pub fn active_angle_ref_at(&self, local_pos_ns: u64) -> Option<&MulticamAngle> {
         let idx = self.active_angle_at(local_pos_ns);
@@ -1706,21 +2345,50 @@ impl Clip {
     }
 
     /// Return the multicam segments — contiguous ranges between angle switches.
-    /// Each segment is (start_ns, end_ns, angle_index) relative to clip start.
+    /// Each segment is (start_ns, end_ns, angle_index) relative to the visible
+    /// clip start (accounting for `source_in` after a razor cut).
     pub fn multicam_segments(&self) -> Vec<(u64, u64, usize)> {
         let switches = match self.multicam_switches.as_ref() {
             Some(s) if !s.is_empty() => s,
             _ => return vec![(0, self.duration(), 0)],
         };
         let clip_dur = self.duration();
+        let offset = self.source_in;
+
+        // Find the angle active at the start of the visible window by
+        // looking at the last switch at or before source_in.
+        let active_at_start = switches
+            .iter()
+            .filter(|s| s.position_ns <= offset)
+            .last()
+            .map(|s| s.angle_index)
+            .unwrap_or(switches[0].angle_index);
+
+        // Build window-relative switch list starting with the implicit
+        // start, then all switches that fall within the visible window.
+        let mut visible: Vec<(u64, usize)> = vec![(0, active_at_start)];
+        for sw in switches {
+            if sw.position_ns <= offset {
+                continue;
+            }
+            let vis_pos = sw.position_ns - offset;
+            if vis_pos >= clip_dur {
+                break;
+            }
+            // Avoid duplicate at position 0 if the first visible switch
+            // happens to land exactly on the window start.
+            if vis_pos == 0 {
+                visible[0].1 = sw.angle_index;
+            } else {
+                visible.push((vis_pos, sw.angle_index));
+            }
+        }
+
         let mut segments = Vec::new();
-        for (i, sw) in switches.iter().enumerate() {
-            let end = switches
-                .get(i + 1)
-                .map(|next| next.position_ns)
-                .unwrap_or(clip_dur);
-            if sw.position_ns < end {
-                segments.push((sw.position_ns, end, sw.angle_index));
+        for (i, (pos, angle_idx)) in visible.iter().enumerate() {
+            let end = visible.get(i + 1).map(|s| s.0).unwrap_or(clip_dur);
+            if *pos < end {
+                segments.push((*pos, end, *angle_idx));
             }
         }
         segments
@@ -2011,12 +2679,13 @@ impl Clip {
     }
 
     pub fn clamp_phase1_property_value(property: Phase1KeyframeProperty, value: f64) -> f64 {
+        use crate::model::transform_bounds::*;
         match property {
             Phase1KeyframeProperty::PositionX | Phase1KeyframeProperty::PositionY => {
-                value.clamp(-1.0, 1.0)
+                value.clamp(POSITION_MIN, POSITION_MAX)
             }
-            Phase1KeyframeProperty::Scale => value.clamp(0.1, 4.0),
-            Phase1KeyframeProperty::Opacity => value.clamp(0.0, 1.0),
+            Phase1KeyframeProperty::Scale => value.clamp(SCALE_MIN, SCALE_MAX),
+            Phase1KeyframeProperty::Opacity => value.clamp(OPACITY_MIN, OPACITY_MAX),
             Phase1KeyframeProperty::Brightness => value.clamp(-1.0, 1.0),
             Phase1KeyframeProperty::Contrast => value.clamp(0.0, 2.0),
             Phase1KeyframeProperty::Saturation => value.clamp(0.0, 2.0),
@@ -2025,11 +2694,11 @@ impl Clip {
             Phase1KeyframeProperty::Volume => value.clamp(0.0, 4.0),
             Phase1KeyframeProperty::Pan => value.clamp(-1.0, 1.0),
             Phase1KeyframeProperty::Speed => value.clamp(0.05, 16.0),
-            Phase1KeyframeProperty::Rotate => value.clamp(-180.0, 180.0),
+            Phase1KeyframeProperty::Rotate => value.clamp(ROTATE_MIN_DEG, ROTATE_MAX_DEG),
             Phase1KeyframeProperty::CropLeft
             | Phase1KeyframeProperty::CropRight
             | Phase1KeyframeProperty::CropTop
-            | Phase1KeyframeProperty::CropBottom => value.clamp(0.0, 500.0),
+            | Phase1KeyframeProperty::CropBottom => value.clamp(CROP_MIN_PX, CROP_MAX_PX),
             Phase1KeyframeProperty::Blur => value.clamp(0.0, 1.0),
             Phase1KeyframeProperty::EqLowGain
             | Phase1KeyframeProperty::EqMidGain
@@ -2040,7 +2709,7 @@ impl Clip {
             Phase1KeyframeProperty::MaskWidth | Phase1KeyframeProperty::MaskHeight => {
                 value.clamp(0.01, 0.5)
             }
-            Phase1KeyframeProperty::MaskRotation => value.clamp(-180.0, 180.0),
+            Phase1KeyframeProperty::MaskRotation => value.clamp(ROTATE_MIN_DEG, ROTATE_MAX_DEG),
             Phase1KeyframeProperty::MaskFeather => value.clamp(0.0, 0.5),
             Phase1KeyframeProperty::MaskExpansion => value.clamp(-0.5, 0.5),
         }
@@ -2097,13 +2766,10 @@ impl Clip {
                 None
             };
         let keyframes = self.keyframes_for_phase1_property_mut(property);
-        // Snap to an existing keyframe within half a frame (~20ms) to avoid
-        // creating near-duplicates when the playhead is close but not exact.
-        const SNAP_TOLERANCE_NS: u64 = 20_000_000;
         let mut changed_time_ns: Option<u64> = None;
         if let Some(existing) = keyframes
             .iter_mut()
-            .find(|kf| kf.time_ns.abs_diff(local_time_ns) <= SNAP_TOLERANCE_NS)
+            .find(|kf| kf.time_ns.abs_diff(local_time_ns) <= KEYFRAME_SNAP_TOLERANCE_NS)
         {
             changed_time_ns = Some(existing.time_ns);
             existing.value = clamped_value;
@@ -2148,8 +2814,7 @@ impl Clip {
         };
         let keyframes = self.keyframes_for_phase1_property_mut(property);
         let before = keyframes.len();
-        const SNAP_TOLERANCE_NS: u64 = 20_000_000;
-        keyframes.retain(|kf| kf.time_ns.abs_diff(local_time_ns) > SNAP_TOLERANCE_NS);
+        keyframes.retain(|kf| kf.time_ns.abs_diff(local_time_ns) > KEYFRAME_SNAP_TOLERANCE_NS);
         keyframes.len() != before
     }
 
@@ -2545,11 +3210,24 @@ impl Clip {
     }
 
     fn min_effective_speed_hint(&self) -> f64 {
+        self.min_effective_speed()
+    }
+
+    /// Minimum playback speed across the clip's constant speed and any
+    /// variable-speed keyframes (clamped to a sane range). Used for retime
+    /// math and for sizing AI frame-interpolation sidecars.
+    pub fn min_effective_speed(&self) -> f64 {
         let mut min_speed = self.speed.clamp(0.05, 16.0);
         for kf in &self.speed_keyframes {
             min_speed = min_speed.min(kf.value.clamp(0.05, 16.0));
         }
         min_speed
+    }
+
+    /// Returns `true` when the clip's constant speed or any variable-speed
+    /// keyframe drops below `1.0` (i.e. there is at least one slowed segment).
+    pub fn has_slow_motion(&self) -> bool {
+        self.min_effective_speed() < 0.999
     }
 
     fn playback_duration_from_speed(&self) -> u64 {
@@ -2587,6 +3265,44 @@ impl Clip {
     pub fn timeline_end(&self) -> u64 {
         self.timeline_start + self.duration()
     }
+
+    /// Trim a clone of this clip to the visible window `[window_start, window_end)`.
+    ///
+    /// Returns `None` if the clip is entirely outside the window. Keyframes and
+    /// subtitles are rebased to clip-local time so they stay aligned with the
+    /// trimmed content.
+    ///
+    /// **Coordinate space note:** The returned clip's `timeline_start` is still
+    /// in the same space as `self.timeline_start` (clamped up to `window_start`
+    /// if the left edge was trimmed). Callers that need to map the clip into a
+    /// parent timeline must do their own offset arithmetic afterward — see
+    /// `docs/ARCHITECTURE.md` "Compound Clips, Timelines & Coordinate Spaces"
+    /// for the no-underflow rebasing pattern. Folding parent rebasing into this
+    /// helper would re-introduce the 2026-04 compound-clip windowing bugs.
+    pub fn rebase_to_window(&self, window_start: u64, window_end: u64) -> Option<Clip> {
+        if self.timeline_end() <= window_start || self.timeline_start >= window_end {
+            return None;
+        }
+        let mut windowed = self.clone();
+        let orig_duration = windowed.duration();
+
+        let left_trim = window_start.saturating_sub(windowed.timeline_start);
+        if left_trim > 0 {
+            windowed.source_in = windowed.source_in.saturating_add(left_trim);
+            windowed.timeline_start = window_start;
+        }
+        let mut right_trim = 0u64;
+        if windowed.timeline_end() > window_end {
+            right_trim = windowed.timeline_end() - window_end;
+            windowed.source_out = windowed.source_out.saturating_sub(right_trim);
+        }
+        if left_trim > 0 || right_trim > 0 {
+            let range_end = orig_duration.saturating_sub(right_trim);
+            windowed.retain_keyframes_in_local_range(left_trim, range_end);
+            windowed.retain_subtitles_in_local_range(left_trim, range_end);
+        }
+        Some(windowed)
+    }
 }
 
 #[cfg(test)]
@@ -2600,6 +3316,65 @@ mod tests {
             timeline_start,
             ClipKind::Video,
         )
+    }
+
+    #[test]
+    fn slow_motion_interp_xml_roundtrip() {
+        for variant in [
+            SlowMotionInterp::Off,
+            SlowMotionInterp::Blend,
+            SlowMotionInterp::OpticalFlow,
+            SlowMotionInterp::Ai,
+        ] {
+            let s = variant.as_xml_str();
+            let parsed = SlowMotionInterp::from_xml_str(s);
+            assert_eq!(parsed, variant, "round-trip failed for {variant:?}");
+        }
+        // Unknown values fall back to Off (so older project files with new
+        // unknown variants don't break round-trip).
+        assert_eq!(
+            SlowMotionInterp::from_xml_str("not-a-real-mode"),
+            SlowMotionInterp::Off
+        );
+    }
+
+    #[test]
+    fn has_slow_motion_constant() {
+        let mut clip = Clip::new("/tmp/x.mp4", 5_000_000_000, 0, ClipKind::Video);
+        clip.speed = 1.0;
+        assert!(!clip.has_slow_motion());
+        clip.speed = 0.5;
+        assert!(clip.has_slow_motion());
+        clip.speed = 2.0;
+        assert!(!clip.has_slow_motion());
+    }
+
+    #[test]
+    fn has_slow_motion_keyframed() {
+        let mut clip = Clip::new("/tmp/x.mp4", 5_000_000_000, 0, ClipKind::Video);
+        clip.speed = 1.0;
+        clip.speed_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: 1.0,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+            NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 0.25,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+            NumericKeyframe {
+                time_ns: 2_000_000_000,
+                value: 1.0,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+        ];
+        assert!(clip.has_slow_motion());
+        assert!((clip.min_effective_speed() - 0.25).abs() < 1e-9);
     }
 
     #[test]
@@ -2647,11 +3422,81 @@ mod tests {
         assert!(clip.lut_paths.is_empty());
         assert!(clip.group_id.is_none());
         assert!(clip.link_group_id.is_none());
+        assert!(clip.motion_trackers.is_empty());
+        assert!(clip.tracking_binding.is_none());
         assert!(clip.source_timecode_base_ns.is_none());
-        assert!(clip.transition_after.is_empty());
+        assert!(!clip.outgoing_transition.is_active());
         assert!(clip.fcpxml_unknown_attrs.is_empty());
         assert!(clip.fcpxml_unknown_children.is_empty());
         assert!(clip.fcpxml_original_source_path.is_none());
+    }
+
+    #[test]
+    fn test_motion_tracker_interpolates_samples() {
+        let mut tracker = MotionTracker::new("Face");
+        tracker.samples = vec![
+            TrackingSample::identity(0),
+            TrackingSample {
+                time_ns: 1_000_000_000,
+                offset_x: 0.4,
+                offset_y: -0.2,
+                scale_multiplier: 1.5,
+                rotation_deg: 45.0,
+                confidence: 0.5,
+            },
+        ];
+
+        let sample = tracker
+            .sample_at_local_ns(500_000_000)
+            .expect("interpolated sample should exist");
+        assert!((sample.offset_x - 0.2).abs() < 1e-9);
+        assert!((sample.offset_y + 0.1).abs() < 1e-9);
+        assert!((sample.scale_multiplier - 1.25).abs() < 1e-9);
+        assert!((sample.rotation_deg - 22.5).abs() < 1e-9);
+        assert!((sample.confidence - 0.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_clip_retain_keyframes_rebases_motion_tracker_samples() {
+        let mut clip = make_test_clip(5_000_000_000, 0);
+        let mut tracker = MotionTracker::new("Subject");
+        tracker.analysis_start_ns = 1_000_000_000;
+        tracker.analysis_end_ns = Some(4_000_000_000);
+        tracker.samples = vec![
+            TrackingSample::identity(500_000_000),
+            TrackingSample::identity(1_500_000_000),
+            TrackingSample::identity(2_500_000_000),
+        ];
+        clip.motion_trackers.push(tracker);
+
+        clip.retain_keyframes_in_local_range(1_000_000_000, 3_000_000_000);
+
+        let tracker = &clip.motion_trackers[0];
+        assert_eq!(tracker.analysis_start_ns, 0);
+        assert_eq!(tracker.analysis_end_ns, Some(2_000_000_000));
+        assert_eq!(
+            tracker
+                .samples
+                .iter()
+                .map(|sample| sample.time_ns)
+                .collect::<Vec<_>>(),
+            vec![500_000_000, 1_500_000_000]
+        );
+    }
+
+    #[test]
+    fn test_tracking_binding_defaults_and_clip_mask_attachment() {
+        let binding = TrackingBinding::new("source-clip", "tracker-1");
+        assert!(binding.apply_translation);
+        assert!(!binding.apply_scale);
+        assert!(!binding.apply_rotation);
+        assert!((binding.scale_multiplier - 1.0).abs() < 1e-9);
+        assert!((binding.strength - 1.0).abs() < 1e-9);
+
+        let mut mask = ClipMask::new(MaskShape::Rectangle);
+        assert!(!mask.has_tracking_binding());
+        mask.tracking_binding = Some(binding);
+        assert!(mask.has_tracking_binding());
     }
 
     #[test]
@@ -2950,6 +3795,9 @@ mod tests {
         assert!(clip.crop_right_keyframes.is_empty());
         assert!(clip.crop_top_keyframes.is_empty());
         assert!(clip.crop_bottom_keyframes.is_empty());
+        assert!(clip.motion_trackers.is_empty());
+        assert!(clip.tracking_binding.is_none());
+        assert!(!clip.has_tracking_data());
     }
 
     #[test]
@@ -3190,21 +4038,41 @@ mod tests {
             Clip::clamp_phase1_property_value(Phase1KeyframeProperty::Tint, -4.0),
             -1.0
         );
+        use crate::model::transform_bounds::*;
         assert_eq!(
             Clip::clamp_phase1_property_value(Phase1KeyframeProperty::Rotate, 500.0),
-            180.0
+            ROTATE_MAX_DEG
         );
         assert_eq!(
             Clip::clamp_phase1_property_value(Phase1KeyframeProperty::Rotate, -500.0),
-            -180.0
+            ROTATE_MIN_DEG
         );
         assert_eq!(
             Clip::clamp_phase1_property_value(Phase1KeyframeProperty::CropLeft, -10.0),
-            0.0
+            CROP_MIN_PX
         );
         assert_eq!(
             Clip::clamp_phase1_property_value(Phase1KeyframeProperty::CropBottom, 999.0),
-            500.0
+            999.0
+        );
+        assert_eq!(
+            Clip::clamp_phase1_property_value(
+                Phase1KeyframeProperty::CropTop,
+                CROP_MAX_PX + 1000.0
+            ),
+            CROP_MAX_PX
+        );
+        // Position can now be pushed past ±1 so clips can swing off-canvas.
+        assert_eq!(
+            Clip::clamp_phase1_property_value(Phase1KeyframeProperty::PositionX, 2.5),
+            2.5
+        );
+        assert_eq!(
+            Clip::clamp_phase1_property_value(
+                Phase1KeyframeProperty::PositionY,
+                POSITION_MIN - 10.0
+            ),
+            POSITION_MIN
         );
     }
 
@@ -3898,6 +4766,58 @@ mod tests {
     }
 
     #[test]
+    fn test_multicam_segments_with_source_in_offset() {
+        // Simulate a razor-cut multicam (right half).
+        // Switches at 0→angle0, 5s→angle1, 10s→angle0.
+        // After cut at 7s: source_in=7s, visible window covers 7-20s.
+        // Expected segments (window-relative):
+        //   0-3s (=internal 7-10): angle1 (active at 7s)
+        //   3-13s (=internal 10-20): angle0
+        let mut mc = Clip::new_multicam(
+            0,
+            vec![
+                MulticamAngle {
+                    id: "a1".into(),
+                    label: "Cam1".into(),
+                    source_path: "a.mp4".into(),
+                    source_in: 0,
+                    source_out: 20_000_000_000,
+                    sync_offset_ns: 0,
+                    source_timecode_base_ns: None,
+                    media_duration_ns: None,
+                    volume: 1.0,
+                    muted: false,
+                },
+                MulticamAngle {
+                    id: "a2".into(),
+                    label: "Cam2".into(),
+                    source_path: "b.mp4".into(),
+                    source_in: 0,
+                    source_out: 20_000_000_000,
+                    sync_offset_ns: 0,
+                    source_timecode_base_ns: None,
+                    media_duration_ns: None,
+                    volume: 1.0,
+                    muted: false,
+                },
+            ],
+        );
+        mc.insert_angle_switch(5_000_000_000, 1);
+        mc.insert_angle_switch(10_000_000_000, 0);
+        // Simulate razor cut: right half
+        mc.source_in = 7_000_000_000;
+
+        let segments = mc.multicam_segments();
+        // duration = 20s - 7s = 13s
+        assert_eq!(mc.duration(), 13_000_000_000);
+        assert_eq!(segments.len(), 2);
+        // First segment: 0 to 3s, angle 1 (active at internal 7s)
+        assert_eq!(segments[0], (0, 3_000_000_000, 1));
+        // Second segment: 3s to 13s, angle 0
+        assert_eq!(segments[1], (3_000_000_000, 13_000_000_000, 0));
+    }
+
+    #[test]
     fn test_insert_angle_switch_updates_existing() {
         let mut mc = Clip::new_multicam(
             0,
@@ -4027,5 +4947,173 @@ mod tests {
             "default volume should be 1.0"
         );
         assert!(!angle.muted, "default muted should be false");
+    }
+
+    // -------------------------------------------------------------------
+    // rebase_to_window — covers the windowing edge cases that the 2026-04
+    // compound-clip session uncovered. Three call sites in window.rs,
+    // export.rs, and timeline/widget.rs all delegate to this helper.
+    // -------------------------------------------------------------------
+
+    fn linear_kf(time_ns: u64, value: f64) -> NumericKeyframe {
+        NumericKeyframe {
+            time_ns,
+            value,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        }
+    }
+
+    fn make_subtitle(start_ns: u64, end_ns: u64, text: &str) -> SubtitleSegment {
+        SubtitleSegment {
+            id: "seg-1".to_string(),
+            start_ns,
+            end_ns,
+            text: text.to_string(),
+            words: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn rebase_to_window_clip_entirely_before_returns_none() {
+        // Clip occupies [0, 5s); window starts at 6s.
+        let clip = make_test_clip(5_000_000_000, 0);
+        assert!(clip
+            .rebase_to_window(6_000_000_000, 10_000_000_000)
+            .is_none());
+    }
+
+    #[test]
+    fn rebase_to_window_clip_entirely_after_returns_none() {
+        // Clip occupies [10s, 15s); window ends at 8s.
+        let clip = make_test_clip(5_000_000_000, 10_000_000_000);
+        assert!(clip.rebase_to_window(0, 8_000_000_000).is_none());
+    }
+
+    #[test]
+    fn rebase_to_window_clip_touching_left_edge_excluded() {
+        // Clip [0, 5s); window [5s, 10s). The skip check uses
+        // `timeline_end() <= window_start`, so a clip whose end exactly meets
+        // window_start contributes nothing.
+        let clip = make_test_clip(5_000_000_000, 0);
+        assert!(clip
+            .rebase_to_window(5_000_000_000, 10_000_000_000)
+            .is_none());
+    }
+
+    #[test]
+    fn rebase_to_window_clip_fully_inside_unchanged() {
+        // Clip [3s, 8s) sits entirely inside window [0, 10s) — no edge trims.
+        let clip = make_test_clip(5_000_000_000, 3_000_000_000);
+        let out = clip
+            .rebase_to_window(0, 10_000_000_000)
+            .expect("clip is inside the window");
+        assert_eq!(out.timeline_start, 3_000_000_000);
+        assert_eq!(out.source_in, 0);
+        assert_eq!(out.source_out, 5_000_000_000);
+    }
+
+    #[test]
+    fn rebase_to_window_trims_left_edge() {
+        // Clip [0, 5s); window [2s, 10s). Left edge is trimmed by 2s.
+        let clip = make_test_clip(5_000_000_000, 0);
+        let out = clip
+            .rebase_to_window(2_000_000_000, 10_000_000_000)
+            .expect("clip overlaps the window");
+        assert_eq!(out.timeline_start, 2_000_000_000);
+        assert_eq!(out.source_in, 2_000_000_000);
+        assert_eq!(out.source_out, 5_000_000_000);
+    }
+
+    #[test]
+    fn rebase_to_window_trims_right_edge() {
+        // Clip [0, 5s); window [0, 3s). Right edge is trimmed by 2s.
+        let clip = make_test_clip(5_000_000_000, 0);
+        let out = clip
+            .rebase_to_window(0, 3_000_000_000)
+            .expect("clip overlaps the window");
+        assert_eq!(out.timeline_start, 0);
+        assert_eq!(out.source_in, 0);
+        assert_eq!(out.source_out, 3_000_000_000);
+    }
+
+    #[test]
+    fn rebase_to_window_trims_both_edges() {
+        // Clip [0, 10s); window [2s, 7s). Both edges are trimmed.
+        let clip = make_test_clip(10_000_000_000, 0);
+        let out = clip
+            .rebase_to_window(2_000_000_000, 7_000_000_000)
+            .expect("clip overlaps the window");
+        assert_eq!(out.timeline_start, 2_000_000_000);
+        assert_eq!(out.source_in, 2_000_000_000);
+        assert_eq!(out.source_out, 7_000_000_000);
+    }
+
+    #[test]
+    fn rebase_to_window_rebases_keyframes_after_left_trim() {
+        // Clip [0, 10s) with scale keyframes at 1s, 4s, 8s. Trim 3s off the
+        // left — the 1s keyframe falls out, the 4s and 8s keyframes shift to
+        // 1s and 5s in clip-local time.
+        let mut clip = make_test_clip(10_000_000_000, 0);
+        clip.scale_keyframes = vec![
+            linear_kf(1_000_000_000, 1.0),
+            linear_kf(4_000_000_000, 1.5),
+            linear_kf(8_000_000_000, 2.0),
+        ];
+        let out = clip
+            .rebase_to_window(3_000_000_000, 20_000_000_000)
+            .expect("clip overlaps the window");
+        let times: Vec<u64> = out.scale_keyframes.iter().map(|k| k.time_ns).collect();
+        assert_eq!(times, vec![1_000_000_000, 5_000_000_000]);
+        // Values are preserved 1:1.
+        let values: Vec<f64> = out.scale_keyframes.iter().map(|k| k.value).collect();
+        assert_eq!(values, vec![1.5, 2.0]);
+    }
+
+    #[test]
+    fn rebase_to_window_rebases_keyframes_after_right_trim() {
+        // Clip [0, 10s) with opacity keyframes at 2s, 6s, 9s. Trim back to
+        // [0, 7s) — the 9s keyframe falls out, others stay in place
+        // (no left trim, so no rebase needed).
+        let mut clip = make_test_clip(10_000_000_000, 0);
+        clip.opacity_keyframes = vec![
+            linear_kf(2_000_000_000, 1.0),
+            linear_kf(6_000_000_000, 0.5),
+            linear_kf(9_000_000_000, 0.0),
+        ];
+        let out = clip
+            .rebase_to_window(0, 7_000_000_000)
+            .expect("clip overlaps the window");
+        let times: Vec<u64> = out.opacity_keyframes.iter().map(|k| k.time_ns).collect();
+        assert_eq!(times, vec![2_000_000_000, 6_000_000_000]);
+    }
+
+    #[test]
+    fn rebase_to_window_rebases_subtitles_after_left_trim() {
+        // Clip [0, 10s) with one subtitle [4s, 6s). Trim 3s off the left;
+        // the subtitle shifts to [1s, 3s) in clip-local time.
+        let mut clip = make_test_clip(10_000_000_000, 0);
+        clip.subtitle_segments
+            .push(make_subtitle(4_000_000_000, 6_000_000_000, "hello"));
+        let out = clip
+            .rebase_to_window(3_000_000_000, 20_000_000_000)
+            .expect("clip overlaps the window");
+        assert_eq!(out.subtitle_segments.len(), 1);
+        assert_eq!(out.subtitle_segments[0].start_ns, 1_000_000_000);
+        assert_eq!(out.subtitle_segments[0].end_ns, 3_000_000_000);
+    }
+
+    #[test]
+    fn rebase_to_window_does_not_mutate_self() {
+        // Sanity check: the helper takes &self and clones, so the original
+        // clip's state must be unchanged after the call.
+        let mut clip = make_test_clip(10_000_000_000, 0);
+        clip.scale_keyframes = vec![linear_kf(5_000_000_000, 1.0)];
+        let _ = clip.rebase_to_window(2_000_000_000, 7_000_000_000);
+        assert_eq!(clip.timeline_start, 0);
+        assert_eq!(clip.source_in, 0);
+        assert_eq!(clip.source_out, 10_000_000_000);
+        assert_eq!(clip.scale_keyframes.len(), 1);
+        assert_eq!(clip.scale_keyframes[0].time_ns, 5_000_000_000);
     }
 }

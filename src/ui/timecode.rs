@@ -1,6 +1,6 @@
 use crate::model::project::FrameRate;
 
-const NS_PER_SECOND: u128 = 1_000_000_000;
+const NS_PER_SECOND: u128 = crate::units::NS_PER_SECOND as u128;
 
 pub fn nominal_fps(frame_rate: &FrameRate) -> u64 {
     frame_rate.as_f64().round().max(1.0) as u64

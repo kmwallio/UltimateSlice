@@ -151,6 +151,16 @@ impl Track {
         }
     }
 
+    /// True if this is a video track.
+    pub fn is_video(&self) -> bool {
+        self.kind == TrackKind::Video
+    }
+
+    /// True if this is an audio track.
+    pub fn is_audio(&self) -> bool {
+        self.kind == TrackKind::Audio
+    }
+
     /// Add a clip and keep clips sorted by timeline position
     pub fn add_clip(&mut self, clip: Clip) {
         self.clips.push(clip);

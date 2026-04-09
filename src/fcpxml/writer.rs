@@ -1,3 +1,4 @@
+use crate::model::transition::transition_label_for_kind;
 use crate::model::{
     media_library::MediaItem,
     project::{FrameRate, Project},
@@ -68,7 +69,7 @@ fn fcpxml_transition_name_for_kind(kind: &str) -> Option<&'static str> {
         "fade_to_black" => Some("Fade To Black"),
         "wipe_right" => Some("Wipe Right"),
         "wipe_left" => Some("Wipe Left"),
-        _ => None,
+        _ => transition_label_for_kind(kind),
     }
 }
 
@@ -492,19 +493,23 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                 writer.write_event(Event::End(BytesEnd::new("asset-clip")))?;
 
                 // Transition between adjacent primary clips
-                if clip_idx + 1 < primary_track.clips.len()
-                    && !clip.transition_after.trim().is_empty()
-                    && clip.transition_after_ns > 0
+                if clip_idx + 1 < primary_track.clips.len() && clip.outgoing_transition.is_active()
                 {
                     let next_clip = &primary_track.clips[clip_idx + 1];
                     let clamped_duration_ns = clip
-                        .transition_after_ns
+                        .outgoing_transition
+                        .duration_ns
                         .min(clip.duration())
                         .min(next_clip.duration());
                     if clamped_duration_ns > 0 {
+                        let before_cut_ns = clip
+                            .outgoing_transition
+                            .alignment
+                            .split_duration(clamped_duration_ns)
+                            .before_cut_ns;
                         let mut transition = BytesStart::new("transition");
                         if let Some(name) =
-                            fcpxml_transition_name_for_kind(clip.transition_after.trim())
+                            fcpxml_transition_name_for_kind(clip.outgoing_transition.kind_trimmed())
                         {
                             transition.push_attribute(("name", name));
                         }
@@ -513,7 +518,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                             ns_to_fcpxml_time(
                                 clip.timeline_start
                                     .saturating_add(clip.duration())
-                                    .saturating_sub(clamped_duration_ns),
+                                    .saturating_sub(before_cut_ns),
                                 &project.frame_rate,
                             )
                             .as_str(),
@@ -633,6 +638,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                             crate::model::clip::ClipColorLabel::Magenta => "magenta",
                         },
                     ));
+                    asset_clip.push_attribute(("us:clip-id", clip.id.as_str()));
                     if clip.blend_mode != crate::model::clip::BlendMode::Normal {
                         asset_clip.push_attribute((
                             "us:blend-mode",
@@ -716,6 +722,16 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     if !clip.frei0r_effects.is_empty() {
                         if let Ok(json) = serde_json::to_string(&clip.frei0r_effects) {
                             asset_clip.push_attribute(("us:frei0r-effects", json.as_str()));
+                        }
+                    }
+                    if !clip.motion_trackers.is_empty() {
+                        if let Ok(json) = serde_json::to_string(&clip.motion_trackers) {
+                            asset_clip.push_attribute(("us:motion-trackers", json.as_str()));
+                        }
+                    }
+                    if let Some(binding) = &clip.tracking_binding {
+                        if let Ok(json) = serde_json::to_string(binding) {
+                            asset_clip.push_attribute(("us:tracking-binding", json.as_str()));
                         }
                     }
                     if !clip.masks.is_empty() {
@@ -802,6 +818,34 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                         }
                     }
                     asset_clip.push_attribute(("us:volume", clip.volume.to_string().as_str()));
+                    if clip.voice_isolation > 0.0 {
+                        asset_clip.push_attribute((
+                            "us:voice-isolation",
+                            clip.voice_isolation.to_string().as_str(),
+                        ));
+                    }
+                    if clip.voice_isolation_source
+                        != crate::model::clip::VoiceIsolationSource::default()
+                    {
+                        asset_clip.push_attribute((
+                            "us:voice-isolation-source",
+                            clip.voice_isolation_source.as_str(),
+                        ));
+                    }
+                    if (clip.voice_isolation_silence_threshold_db - (-30.0)).abs() > 0.01 {
+                        asset_clip.push_attribute((
+                            "us:voice-isolation-silence-threshold-db",
+                            clip.voice_isolation_silence_threshold_db
+                                .to_string()
+                                .as_str(),
+                        ));
+                    }
+                    if clip.voice_isolation_silence_min_ms != 200 {
+                        asset_clip.push_attribute((
+                            "us:voice-isolation-silence-min-ms",
+                            clip.voice_isolation_silence_min_ms.to_string().as_str(),
+                        ));
+                    }
                     let volume_keyframes_json = if clip.volume_keyframes.is_empty() {
                         None
                     } else {
@@ -845,6 +889,11 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     if !clip.eq_high_gain_keyframes.is_empty() {
                         if let Ok(json) = serde_json::to_string(&clip.eq_high_gain_keyframes) {
                             asset_clip.push_attribute(("us:eq-high-gain-keyframes", json.as_str()));
+                        }
+                    }
+                    if !clip.match_eq_bands.is_empty() {
+                        if let Ok(json) = serde_json::to_string(&clip.match_eq_bands) {
+                            asset_clip.push_attribute(("us:match-eq-bands", json.as_str()));
                         }
                     }
                     if clip.pitch_shift_semitones.abs() > 0.001 {
@@ -1022,7 +1071,9 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                             clip.title_secondary_text.as_str(),
                         ));
                     }
-                    if clip.kind == crate::model::clip::ClipKind::Title {
+                    if clip.kind == crate::model::clip::ClipKind::Image {
+                        asset_clip.push_attribute(("us:clip-kind", "image"));
+                    } else if clip.kind == crate::model::clip::ClipKind::Title {
                         asset_clip.push_attribute(("us:clip-kind", "title"));
                     } else if clip.kind == crate::model::clip::ClipKind::Adjustment {
                         asset_clip.push_attribute(("us:clip-kind", "adjustment"));
@@ -1061,12 +1112,10 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     }
                     asset_clip.push_attribute(("us:reverse", clip.reverse.to_string().as_str()));
                     if clip.slow_motion_interp != crate::model::clip::SlowMotionInterp::Off {
-                        let val = match clip.slow_motion_interp {
-                            crate::model::clip::SlowMotionInterp::Blend => "blend",
-                            crate::model::clip::SlowMotionInterp::OpticalFlow => "optical-flow",
-                            crate::model::clip::SlowMotionInterp::Off => unreachable!(),
-                        };
-                        asset_clip.push_attribute(("us:slow-motion-interp", val));
+                        asset_clip.push_attribute((
+                            "us:slow-motion-interp",
+                            clip.slow_motion_interp.as_xml_str(),
+                        ));
                     }
                     if clip.freeze_frame {
                         asset_clip.push_attribute(("us:freeze-frame", "true"));
@@ -1158,14 +1207,18 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                         // Also write first LUT as us:lut-path for backward compat
                         asset_clip.push_attribute(("us:lut-path", clip.lut_paths[0].as_str()));
                     }
-                    if !clip.transition_after.is_empty() {
+                    if clip.outgoing_transition.is_active() {
                         asset_clip.push_attribute((
                             "us:transition-after",
-                            clip.transition_after.as_str(),
+                            clip.outgoing_transition.kind.as_str(),
                         ));
                         asset_clip.push_attribute((
                             "us:transition-after-ns",
-                            clip.transition_after_ns.to_string().as_str(),
+                            clip.outgoing_transition.duration_ns.to_string().as_str(),
+                        ));
+                        asset_clip.push_attribute((
+                            "us:transition-after-alignment",
+                            clip.outgoing_transition.alignment.as_str(),
                         ));
                     }
                 }
@@ -1262,6 +1315,43 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                         writer.write_event(Event::Empty(adjust_volume))?;
                     }
 
+                    // Emit `<adjust-voiceIsolation>` when the gate is active OR when
+                    // any of our silence-mode settings differ from defaults, so the
+                    // source/threshold/min_ms vendor attrs round-trip even if the user
+                    // configured silence mode without setting an isolation amount yet.
+                    let vi_silence_active = clip.voice_isolation_source
+                        != crate::model::clip::VoiceIsolationSource::default()
+                        || (clip.voice_isolation_silence_threshold_db - (-30.0)).abs() > 0.01
+                        || clip.voice_isolation_silence_min_ms != 200;
+                    if clip.voice_isolation > 0.0 || vi_silence_active {
+                        let mut adjust_vi = BytesStart::new("adjust-voiceIsolation");
+                        let vi_amount = format!("{:.0}", clip.voice_isolation * 100.0);
+                        adjust_vi.push_attribute(("amount", vi_amount.as_str()));
+                        if clip.voice_isolation_source
+                            != crate::model::clip::VoiceIsolationSource::default()
+                        {
+                            adjust_vi.push_attribute((
+                                "us:source",
+                                clip.voice_isolation_source.as_str(),
+                            ));
+                        }
+                        if (clip.voice_isolation_silence_threshold_db - (-30.0)).abs() > 0.01 {
+                            adjust_vi.push_attribute((
+                                "us:silence-threshold-db",
+                                clip.voice_isolation_silence_threshold_db
+                                    .to_string()
+                                    .as_str(),
+                            ));
+                        }
+                        if clip.voice_isolation_silence_min_ms != 200 {
+                            adjust_vi.push_attribute((
+                                "us:silence-min-ms",
+                                clip.voice_isolation_silence_min_ms.to_string().as_str(),
+                            ));
+                        }
+                        writer.write_event(Event::Empty(adjust_vi))?;
+                    }
+
                     let mut adjust_panner = BytesStart::new("adjust-panner");
                     adjust_panner.push_attribute((
                         "amount",
@@ -1299,19 +1389,22 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
 
                 writer.write_event(Event::End(BytesEnd::new("asset-clip")))?;
 
-                if clip_idx + 1 < track.clips.len()
-                    && !clip.transition_after.trim().is_empty()
-                    && clip.transition_after_ns > 0
-                {
+                if clip_idx + 1 < track.clips.len() && clip.outgoing_transition.is_active() {
                     let next_clip = &track.clips[clip_idx + 1];
                     let clamped_duration_ns = clip
-                        .transition_after_ns
+                        .outgoing_transition
+                        .duration_ns
                         .min(clip.duration())
                         .min(next_clip.duration());
                     if clamped_duration_ns > 0 {
+                        let before_cut_ns = clip
+                            .outgoing_transition
+                            .alignment
+                            .split_duration(clamped_duration_ns)
+                            .before_cut_ns;
                         let mut transition = BytesStart::new("transition");
                         if let Some(name) =
-                            fcpxml_transition_name_for_kind(clip.transition_after.trim())
+                            fcpxml_transition_name_for_kind(clip.outgoing_transition.kind_trimmed())
                         {
                             transition.push_attribute(("name", name));
                         }
@@ -1320,7 +1413,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                             ns_to_fcpxml_time(
                                 clip.timeline_start
                                     .saturating_add(clip.duration())
-                                    .saturating_sub(clamped_duration_ns),
+                                    .saturating_sub(before_cut_ns),
                                 &project.frame_rate,
                             )
                             .as_str(),
@@ -2262,8 +2355,16 @@ fn write_strict_audio_channel_sources(
 ) -> Result<()> {
     let has_vol_kf = !clip.volume_keyframes.is_empty();
     let has_pan_kf = !clip.pan_keyframes.is_empty();
+    let has_voice_isolation = clip.voice_isolation > 0.0;
+    // Also include the audio-channel-source block when silence-mode settings
+    // differ from defaults so the vendor attrs round-trip even without an
+    // active gate amount.
+    let vi_silence_active = clip.voice_isolation_source
+        != crate::model::clip::VoiceIsolationSource::default()
+        || (clip.voice_isolation_silence_threshold_db - (-30.0)).abs() > 0.01
+        || clip.voice_isolation_silence_min_ms != 200;
 
-    if !has_vol_kf && !has_pan_kf {
+    if !has_vol_kf && !has_pan_kf && !has_voice_isolation && !vi_silence_active {
         return Ok(());
     }
 
@@ -2281,6 +2382,30 @@ fn write_strict_audio_channel_sources(
         writer.write_event(Event::Start(adjust_volume))?;
         write_volume_keyframe_params(writer, clip, fps, source_start_ns, true)?;
         writer.write_event(Event::End(BytesEnd::new("adjust-volume")))?;
+    }
+
+    if has_voice_isolation || vi_silence_active {
+        let mut adjust_vi = BytesStart::new("adjust-voiceIsolation");
+        let vi_amount = format!("{:.0}", clip.voice_isolation * 100.0);
+        adjust_vi.push_attribute(("amount", vi_amount.as_str()));
+        if clip.voice_isolation_source != crate::model::clip::VoiceIsolationSource::default() {
+            adjust_vi.push_attribute(("us:source", clip.voice_isolation_source.as_str()));
+        }
+        if (clip.voice_isolation_silence_threshold_db - (-30.0)).abs() > 0.01 {
+            adjust_vi.push_attribute((
+                "us:silence-threshold-db",
+                clip.voice_isolation_silence_threshold_db
+                    .to_string()
+                    .as_str(),
+            ));
+        }
+        if clip.voice_isolation_silence_min_ms != 200 {
+            adjust_vi.push_attribute((
+                "us:silence-min-ms",
+                clip.voice_isolation_silence_min_ms.to_string().as_str(),
+            ));
+        }
+        writer.write_event(Event::Empty(adjust_vi))?;
     }
 
     if has_pan_kf {
@@ -2801,6 +2926,7 @@ fn patch_asset_clip_block_transform(
         (
             "us:clip-kind",
             match clip.kind {
+                crate::model::clip::ClipKind::Image => Some("image".to_string()),
                 crate::model::clip::ClipKind::Title => Some("title".to_string()),
                 crate::model::clip::ClipKind::Adjustment => Some("adjustment".to_string()),
                 crate::model::clip::ClipKind::Compound => Some("compound".to_string()),
@@ -2866,6 +2992,44 @@ fn patch_asset_clip_block_transform(
             replace_or_insert_attr(&updated_start, "us:frei0r-effects", &v)?
         } else {
             remove_attr(&updated_start, "us:frei0r-effects")
+        };
+        if next != updated_start {
+            changed = true;
+        }
+        updated_start = next;
+    }
+
+    // Patch motion trackers JSON attribute.
+    {
+        let motion_trackers_value = if clip.motion_trackers.is_empty() {
+            None
+        } else {
+            serde_json::to_string(&clip.motion_trackers)
+                .ok()
+                .map(|s| s.replace('"', "&quot;"))
+        };
+        let next = if let Some(v) = motion_trackers_value {
+            replace_or_insert_attr(&updated_start, "us:motion-trackers", &v)?
+        } else {
+            remove_attr(&updated_start, "us:motion-trackers")
+        };
+        if next != updated_start {
+            changed = true;
+        }
+        updated_start = next;
+    }
+
+    // Patch clip tracking binding JSON attribute.
+    {
+        let tracking_binding_value = clip
+            .tracking_binding
+            .as_ref()
+            .and_then(|binding| serde_json::to_string(binding).ok())
+            .map(|s| s.replace('"', "&quot;"));
+        let next = if let Some(v) = tracking_binding_value {
+            replace_or_insert_attr(&updated_start, "us:tracking-binding", &v)?
+        } else {
+            remove_attr(&updated_start, "us:tracking-binding")
         };
         if next != updated_start {
             changed = true;
@@ -3751,6 +3915,72 @@ fn keyframe_curve_attr(kf: &crate::model::clip::NumericKeyframe) -> Option<&'sta
     }
 }
 
+/// Emit a single `<param><keyframeAnimation><keyframe …/>…</keyframeAnimation></param>`
+/// block. Used by every per-property keyframe writer (scale, rotation,
+/// opacity, volume, pan) so they share one source of truth for keyframe
+/// time formatting and attribute layout. Does nothing when `keyframes` is
+/// empty so callers can pass an empty slice unconditionally.
+///
+/// - `param_base_value` is the optional `value="…"` attribute on the outer
+///   `<param>` element. Some callers (opacity / volume / pan) include the
+///   non-keyframed base value here; others (scale / rotation) omit it.
+/// - `format_value` builds the per-keyframe `value` attribute from a
+///   `NumericKeyframe`. This is where the per-property formatting lives:
+///   `format!("{} {}", v, v)` for scale, `linear_volume_to_fcpxml_db` for
+///   volume, etc.
+/// - `omit_interp` skips both the `interp` and `curve` attributes. FCP
+///   ignores `interp` on volume and pan keyframes, so the strict-mode
+///   writers pass `true` here for byte-perfect FCP-style output.
+fn emit_keyframe_animation_param(
+    writer: &mut Writer<Cursor<Vec<u8>>>,
+    param_name: &str,
+    param_base_value: Option<&str>,
+    keyframes: &[crate::model::clip::NumericKeyframe],
+    source_start_ns: u64,
+    fps: &crate::model::project::FrameRate,
+    format_value: impl Fn(&crate::model::clip::NumericKeyframe) -> String,
+    omit_interp: bool,
+) -> Result<()> {
+    if keyframes.is_empty() {
+        return Ok(());
+    }
+    let mut param = BytesStart::new("param");
+    param.push_attribute(("name", param_name));
+    if let Some(v) = param_base_value {
+        param.push_attribute(("value", v));
+    }
+    writer.write_event(Event::Start(param))?;
+
+    let kfa = BytesStart::new("keyframeAnimation");
+    writer.write_event(Event::Start(kfa))?;
+
+    let mut sorted: Vec<&crate::model::clip::NumericKeyframe> = keyframes.iter().collect();
+    sorted.sort_by_key(|kf| kf.time_ns);
+
+    for kf in &sorted {
+        let mut kf_elem = BytesStart::new("keyframe");
+        // Offset clip-local time back to absolute source time for FCP.
+        kf_elem.push_attribute((
+            "time",
+            ns_to_fcpxml_time(kf.time_ns + source_start_ns, fps).as_str(),
+        ));
+        let value_str = format_value(kf);
+        kf_elem.push_attribute(("value", value_str.as_str()));
+        if !omit_interp {
+            kf_elem.push_attribute(("interp", kf.interpolation.to_fcpxml()));
+            if let Some(curve) = keyframe_curve_attr(kf) {
+                kf_elem.push_attribute(("curve", curve));
+            }
+        }
+        writer.write_event(Event::Empty(kf_elem))?;
+    }
+
+    writer.write_event(Event::End(BytesEnd::new("keyframeAnimation")))?;
+    writer.write_event(Event::End(BytesEnd::new("param")))?;
+
+    Ok(())
+}
+
 /// Write native `<param>/<keyframeAnimation>/<keyframe>` children for transform properties.
 /// `source_start_ns` is the FCPXML `start` attribute value in nanoseconds — keyframe times
 /// are offset by this amount so they appear in absolute source time as FCP expects.
@@ -3827,69 +4057,29 @@ fn write_transform_keyframe_params(
         writer.write_event(Event::End(BytesEnd::new("param")))?;
     }
 
-    // Scale keyframes — FCP uses lowercase "scale"
-    if !clip.scale_keyframes.is_empty() {
-        let mut param = BytesStart::new("param");
-        param.push_attribute(("name", "scale"));
-        writer.write_event(Event::Start(param))?;
-
-        let kfa = BytesStart::new("keyframeAnimation");
-        writer.write_event(Event::Start(kfa))?;
-
-        let mut sorted: Vec<&crate::model::clip::NumericKeyframe> =
-            clip.scale_keyframes.iter().collect();
-        sorted.sort_by_key(|kf| kf.time_ns);
-
-        for kf in &sorted {
-            let mut kf_elem = BytesStart::new("keyframe");
-            // Offset clip-local time back to absolute source time for FCP
-            kf_elem.push_attribute((
-                "time",
-                ns_to_fcpxml_time(kf.time_ns + source_start_ns, fps).as_str(),
-            ));
-            kf_elem.push_attribute(("value", format!("{} {}", kf.value, kf.value).as_str()));
-            kf_elem.push_attribute(("interp", kf.interpolation.to_fcpxml()));
-            if let Some(curve) = keyframe_curve_attr(kf) {
-                kf_elem.push_attribute(("curve", curve));
-            }
-            writer.write_event(Event::Empty(kf_elem))?;
-        }
-
-        writer.write_event(Event::End(BytesEnd::new("keyframeAnimation")))?;
-        writer.write_event(Event::End(BytesEnd::new("param")))?;
-    }
+    // Scale keyframes — FCP uses lowercase "scale" with `"v v"` value pairs.
+    emit_keyframe_animation_param(
+        writer,
+        "scale",
+        None,
+        &clip.scale_keyframes,
+        source_start_ns,
+        fps,
+        |kf| format!("{} {}", kf.value, kf.value),
+        false,
+    )?;
 
     // Rotation keyframes
-    if !clip.rotate_keyframes.is_empty() {
-        let mut param = BytesStart::new("param");
-        param.push_attribute(("name", "rotation"));
-        writer.write_event(Event::Start(param))?;
-
-        let kfa = BytesStart::new("keyframeAnimation");
-        writer.write_event(Event::Start(kfa))?;
-
-        let mut sorted: Vec<&crate::model::clip::NumericKeyframe> =
-            clip.rotate_keyframes.iter().collect();
-        sorted.sort_by_key(|kf| kf.time_ns);
-
-        for kf in &sorted {
-            let mut kf_elem = BytesStart::new("keyframe");
-            // Offset clip-local time back to absolute source time for FCP
-            kf_elem.push_attribute((
-                "time",
-                ns_to_fcpxml_time(kf.time_ns + source_start_ns, fps).as_str(),
-            ));
-            kf_elem.push_attribute(("value", kf.value.to_string().as_str()));
-            kf_elem.push_attribute(("interp", kf.interpolation.to_fcpxml()));
-            if let Some(curve) = keyframe_curve_attr(kf) {
-                kf_elem.push_attribute(("curve", curve));
-            }
-            writer.write_event(Event::Empty(kf_elem))?;
-        }
-
-        writer.write_event(Event::End(BytesEnd::new("keyframeAnimation")))?;
-        writer.write_event(Event::End(BytesEnd::new("param")))?;
-    }
+    emit_keyframe_animation_param(
+        writer,
+        "rotation",
+        None,
+        &clip.rotate_keyframes,
+        source_start_ns,
+        fps,
+        |kf| kf.value.to_string(),
+        false,
+    )?;
 
     Ok(())
 }
@@ -3901,41 +4091,17 @@ fn write_opacity_keyframe_params(
     fps: &crate::model::project::FrameRate,
     source_start_ns: u64,
 ) -> Result<()> {
-    if clip.opacity_keyframes.is_empty() {
-        return Ok(());
-    }
-
-    let mut param = BytesStart::new("param");
-    param.push_attribute(("name", "amount"));
-    param.push_attribute(("value", clip.opacity.to_string().as_str()));
-    writer.write_event(Event::Start(param))?;
-
-    let kfa = BytesStart::new("keyframeAnimation");
-    writer.write_event(Event::Start(kfa))?;
-
-    let mut sorted: Vec<&crate::model::clip::NumericKeyframe> =
-        clip.opacity_keyframes.iter().collect();
-    sorted.sort_by_key(|kf| kf.time_ns);
-
-    for kf in &sorted {
-        let mut kf_elem = BytesStart::new("keyframe");
-        // Offset clip-local time back to absolute source time for FCP
-        kf_elem.push_attribute((
-            "time",
-            ns_to_fcpxml_time(kf.time_ns + source_start_ns, fps).as_str(),
-        ));
-        kf_elem.push_attribute(("value", kf.value.to_string().as_str()));
-        kf_elem.push_attribute(("interp", kf.interpolation.to_fcpxml()));
-        if let Some(curve) = keyframe_curve_attr(kf) {
-            kf_elem.push_attribute(("curve", curve));
-        }
-        writer.write_event(Event::Empty(kf_elem))?;
-    }
-
-    writer.write_event(Event::End(BytesEnd::new("keyframeAnimation")))?;
-    writer.write_event(Event::End(BytesEnd::new("param")))?;
-
-    Ok(())
+    let base = clip.opacity.to_string();
+    emit_keyframe_animation_param(
+        writer,
+        "amount",
+        Some(&base),
+        &clip.opacity_keyframes,
+        source_start_ns,
+        fps,
+        |kf| kf.value.to_string(),
+        false,
+    )
 }
 
 /// Write native `<param>/<keyframeAnimation>/<keyframe>` children for volume (dB).
@@ -3946,47 +4112,18 @@ fn write_volume_keyframe_params(
     source_start_ns: u64,
     strict: bool,
 ) -> Result<()> {
-    if clip.volume_keyframes.is_empty() {
-        return Ok(());
-    }
-
-    let mut param = BytesStart::new("param");
-    param.push_attribute(("name", "amount"));
-    param.push_attribute((
-        "value",
-        linear_volume_to_fcpxml_db(clip.volume as f64).as_str(),
-    ));
-    writer.write_event(Event::Start(param))?;
-
-    let kfa = BytesStart::new("keyframeAnimation");
-    writer.write_event(Event::Start(kfa))?;
-
-    let mut sorted: Vec<&crate::model::clip::NumericKeyframe> =
-        clip.volume_keyframes.iter().collect();
-    sorted.sort_by_key(|kf| kf.time_ns);
-
-    for kf in &sorted {
-        let mut kf_elem = BytesStart::new("keyframe");
-        // Offset clip-local time back to source time for FCP
-        kf_elem.push_attribute((
-            "time",
-            ns_to_fcpxml_time(kf.time_ns + source_start_ns, fps).as_str(),
-        ));
-        kf_elem.push_attribute(("value", linear_volume_to_fcpxml_db(kf.value).as_str()));
+    let base = linear_volume_to_fcpxml_db(clip.volume as f64);
+    emit_keyframe_animation_param(
+        writer,
+        "amount",
+        Some(&base),
+        &clip.volume_keyframes,
+        source_start_ns,
+        fps,
+        |kf| linear_volume_to_fcpxml_db(kf.value),
         // FCP ignores interp on volume param keyframes — omit in strict mode.
-        if !strict {
-            kf_elem.push_attribute(("interp", kf.interpolation.to_fcpxml()));
-            if let Some(curve) = keyframe_curve_attr(kf) {
-                kf_elem.push_attribute(("curve", curve));
-            }
-        }
-        writer.write_event(Event::Empty(kf_elem))?;
-    }
-
-    writer.write_event(Event::End(BytesEnd::new("keyframeAnimation")))?;
-    writer.write_event(Event::End(BytesEnd::new("param")))?;
-
-    Ok(())
+        strict,
+    )
 }
 
 /// Write native `<param>/<keyframeAnimation>/<keyframe>` children for pan.
@@ -3997,48 +4134,18 @@ fn write_pan_keyframe_params(
     source_start_ns: u64,
     strict: bool,
 ) -> Result<()> {
-    if clip.pan_keyframes.is_empty() {
-        return Ok(());
-    }
-
-    let mut param = BytesStart::new("param");
-    param.push_attribute(("name", "amount"));
-    param.push_attribute((
-        "value",
-        format!("{:.6}", clip.pan.clamp(-1.0, 1.0)).as_str(),
-    ));
-    writer.write_event(Event::Start(param))?;
-
-    let kfa = BytesStart::new("keyframeAnimation");
-    writer.write_event(Event::Start(kfa))?;
-
-    let mut sorted: Vec<&crate::model::clip::NumericKeyframe> = clip.pan_keyframes.iter().collect();
-    sorted.sort_by_key(|kf| kf.time_ns);
-
-    for kf in &sorted {
-        let mut kf_elem = BytesStart::new("keyframe");
-        // Offset clip-local time back to source time for FCP
-        kf_elem.push_attribute((
-            "time",
-            ns_to_fcpxml_time(kf.time_ns + source_start_ns, fps).as_str(),
-        ));
-        kf_elem.push_attribute((
-            "value",
-            format!("{:.6}", kf.value.clamp(-1.0, 1.0)).as_str(),
-        ));
+    let base = format!("{:.6}", clip.pan.clamp(-1.0, 1.0));
+    emit_keyframe_animation_param(
+        writer,
+        "amount",
+        Some(&base),
+        &clip.pan_keyframes,
+        source_start_ns,
+        fps,
+        |kf| format!("{:.6}", kf.value.clamp(-1.0, 1.0)),
         // FCP ignores interp on pan param keyframes — omit in strict mode.
-        if !strict {
-            kf_elem.push_attribute(("interp", kf.interpolation.to_fcpxml()));
-            if let Some(curve) = keyframe_curve_attr(kf) {
-                kf_elem.push_attribute(("curve", curve));
-            }
-        }
-        writer.write_event(Event::Empty(kf_elem))?;
-    }
-
-    writer.write_event(Event::End(BytesEnd::new("keyframeAnimation")))?;
-    writer.write_event(Event::End(BytesEnd::new("param")))?;
-    Ok(())
+        strict,
+    )
 }
 
 /// Convert nanoseconds to FCPXML rational time string (e.g. "48048/24000s").
@@ -4153,6 +4260,10 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:blur-keyframes"
             | "us:frei0r-effects"
             | "us:volume"
+            | "us:voice-isolation"
+            | "us:voice-isolation-source"
+            | "us:voice-isolation-silence-threshold-db"
+            | "us:voice-isolation-silence-min-ms"
             | "us:volume-keyframes"
             | "us:pan"
             | "us:pan-keyframes"
@@ -4214,6 +4325,7 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:shadows-tint"
             | "us:bg-removal-enabled"
             | "us:bg-removal-threshold"
+            | "us:clip-id"
             | "us:title-template"
             | "us:title-outline-color"
             | "us:title-outline-width"
@@ -4231,10 +4343,13 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:eq-low-gain-keyframes"
             | "us:eq-mid-gain-keyframes"
             | "us:eq-high-gain-keyframes"
+            | "us:match-eq-bands"
             | "us:pitch-shift-semitones"
             | "us:pitch-preserve"
             | "us:audio-channel-mode"
             | "us:ladspa-effects"
+            | "us:motion-trackers"
+            | "us:tracking-binding"
             | "us:masks"
             | "us:measured-loudness-lufs"
             | "us:subtitle-segments"
@@ -4397,8 +4512,11 @@ mod tests {
         project.tracks.clear();
         let mut track = Track::new_video("Video 1");
         let mut a = Clip::new("/tmp/a.mov", 2_000_000_000, 0, ClipKind::Video);
-        a.transition_after = "cross_dissolve".to_string();
-        a.transition_after_ns = 1_000_000_000;
+        a.outgoing_transition = crate::model::transition::OutgoingTransition::new(
+            "cross_dissolve",
+            1_000_000_000,
+            crate::model::transition::TransitionAlignment::EndOnCut,
+        );
         track.add_clip(a);
         track.add_clip(Clip::new(
             "/tmp/b.mov",
@@ -4414,8 +4532,14 @@ mod tests {
 
         let parsed = parse_fcpxml(&xml).expect("parse written xml");
         let first = &parsed.video_tracks().next().expect("video track").clips[0];
-        assert_eq!(first.transition_after, "cross_dissolve");
-        assert_eq!(first.transition_after_ns, 1_000_000_000);
+        assert_eq!(
+            first.outgoing_transition,
+            crate::model::transition::OutgoingTransition::new(
+                "cross_dissolve",
+                1_000_000_000,
+                crate::model::transition::TransitionAlignment::EndOnCut,
+            )
+        );
     }
 
     #[test]
@@ -5991,6 +6115,103 @@ mod tests {
     }
 
     #[test]
+    fn test_write_read_motion_tracking_round_trip() {
+        let mut project = Project::new("Tracking RT");
+        project.tracks.clear();
+
+        let mut track = Track::new_video("Video 1");
+
+        let mut source = Clip::new("/tmp/source.mp4", 2_000_000_000, 0, ClipKind::Video);
+        source.id = "source-clip".to_string();
+        let mut tracker = crate::model::clip::MotionTracker::new("Subject");
+        tracker.id = "tracker-1".to_string();
+        tracker.analysis_region = crate::model::clip::TrackingRegion {
+            center_x: 0.4,
+            center_y: 0.6,
+            width: 0.2,
+            height: 0.3,
+            rotation_deg: 12.0,
+        };
+        tracker.analysis_end_ns = Some(1_800_000_000);
+        tracker.samples = vec![
+            crate::model::clip::TrackingSample::identity(0),
+            crate::model::clip::TrackingSample {
+                time_ns: 1_000_000_000,
+                offset_x: 0.15,
+                offset_y: -0.08,
+                scale_multiplier: 1.1,
+                rotation_deg: 6.0,
+                confidence: 0.9,
+            },
+        ];
+        source.motion_trackers.push(tracker);
+
+        let mut target = Clip::new(
+            "/tmp/overlay.png",
+            2_500_000_000,
+            500_000_000,
+            ClipKind::Image,
+        );
+        target.id = "target-clip".to_string();
+        let mut binding = crate::model::clip::TrackingBinding::new("source-clip", "tracker-1");
+        binding.apply_scale = true;
+        binding.apply_rotation = true;
+        binding.offset_x = 0.05;
+        binding.offset_y = -0.03;
+        binding.scale_multiplier = 1.2;
+        binding.rotation_offset_deg = 8.0;
+        binding.strength = 0.75;
+        binding.smoothing = 0.25;
+        target.tracking_binding = Some(binding.clone());
+        let mut mask = crate::model::clip::ClipMask::new(crate::model::clip::MaskShape::Rectangle);
+        mask.tracking_binding = Some(binding);
+        target.masks.push(mask);
+
+        track.add_clip(source);
+        track.add_clip(target);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(xml.contains("us:clip-id=\"source-clip\""));
+        assert!(xml.contains("us:motion-trackers=\""));
+        assert!(xml.contains("us:tracking-binding=\""));
+        assert!(xml.contains("us:clip-kind=\"image\""));
+
+        let loaded = parse_fcpxml(&xml).expect("parse written xml");
+        let loaded_source = loaded
+            .clip_ref("source-clip")
+            .expect("source clip id should persist");
+        assert_eq!(loaded_source.motion_trackers.len(), 1);
+        assert_eq!(loaded_source.motion_trackers[0].id, "tracker-1");
+        assert_eq!(
+            loaded_source.motion_trackers[0].analysis_end_ns,
+            Some(1_800_000_000)
+        );
+        assert_eq!(loaded_source.motion_trackers[0].samples.len(), 2);
+
+        let loaded_target = loaded
+            .clip_ref("target-clip")
+            .expect("target clip id should persist");
+        assert_eq!(loaded_target.kind, ClipKind::Image);
+        let loaded_binding = loaded_target
+            .tracking_binding
+            .as_ref()
+            .expect("clip tracking binding should round-trip");
+        assert_eq!(loaded_binding.source_clip_id, "source-clip");
+        assert_eq!(loaded_binding.tracker_id, "tracker-1");
+        assert!(loaded_binding.apply_scale);
+        assert!(loaded_binding.apply_rotation);
+        assert!((loaded_binding.strength - 0.75).abs() < 1e-6);
+        assert_eq!(loaded_target.masks.len(), 1);
+        let loaded_mask_binding = loaded_target.masks[0]
+            .tracking_binding
+            .as_ref()
+            .expect("mask tracking binding should round-trip");
+        assert_eq!(loaded_mask_binding.source_clip_id, "source-clip");
+        assert_eq!(loaded_mask_binding.tracker_id, "tracker-1");
+    }
+
+    #[test]
     fn test_export_project_with_media_copies_and_rewrites_paths() {
         let root = unique_test_dir("package-export");
         let source_a_dir = root.join("source-a");
@@ -6646,12 +6867,12 @@ mod tests {
         let video_tracks_with_clips = parsed
             .tracks
             .iter()
-            .filter(|t| t.kind == crate::model::track::TrackKind::Video && !t.clips.is_empty())
+            .filter(|t| t.is_video() && !t.clips.is_empty())
             .count();
         let audio_tracks_with_clips = parsed
             .tracks
             .iter()
-            .filter(|t| t.kind == crate::model::track::TrackKind::Audio && !t.clips.is_empty())
+            .filter(|t| t.is_audio() && !t.clips.is_empty())
             .count();
         assert!(
             video_tracks_with_clips >= 2,

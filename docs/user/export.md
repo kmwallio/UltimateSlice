@@ -13,6 +13,8 @@ Use the toolbar linked split control **Export | ▼** (styled as one control):
 
 Animated SVG clips are rendered to cached silent video during export. Static image clips still use single-frame hold behavior, while animated SVG clips preserve authored motion and hold on the last frame if the clip was extended on the timeline.
 
+Tracked clip transforms and first-mask attachments use the same motion data during export as they do in Program Monitor preview, including trackers with dense sample counts.
+
 ## Export Dialog Options
 
 ### Video Codec
@@ -93,6 +95,16 @@ When enabled, export applies automatic fades at adjacent same-track audio edit p
 
 Fade lengths are clamped safely for very short clips and overlap boundaries so exports remain stable.
 
+## Video Transitions
+
+Export applies the supported primary-track transition set using the same duration and alignment timing shown in the Timeline and Program Monitor.
+
+- The Inspector and **Transitions** pane expose the preview-supported transition set: `Cross-dissolve`, `Fade to black`, `Fade to white`, `Wipe left/right/up/down`, `Circle open/close`, `Cover left/right/up/down`, `Reveal left/right/up/down`, and `Slide left/right/up/down`.
+- **End on cut**: the overlap finishes at the cut.
+- **Center on cut**: the overlap is split across the cut.
+- **Start on cut**: the overlap begins at the cut.
+- For any post-cut overlap portion, export mirrors preview/background-prerender by holding the outgoing clip's last frame after the cut instead of reading source past the trimmed out-point.
+
 ### Frei0r effect export compatibility
 
 When UltimateSlice cannot discover native frei0r plugin metadata on the local system, export falls back to built-in native parameter schemas for supported plugins instead of guessing from unordered numeric parameters.
@@ -126,7 +138,7 @@ For automation workflows, MCP also exposes preset operations:
 ## Export Progress
 
 After choosing the output file, an export progress dialog shows:
-- A progress bar driven by ffmpeg progress output. It estimates final file size from bitrate × duration and then tracks ffmpeg `total_size` against that estimate.
+- A progress bar driven by ffmpeg progress output. It estimates final file size from bitrate × duration and tracks ffmpeg `total_size` against that estimate when possible, then automatically falls back to ffmpeg `out_time_*` progress while the muxed file size is still too small to be a useful signal.
 - Progress is capped at **99%** while encoding/muxing is still running, then switches to **100%** only after export completes successfully.
 - A status label showing the output path.
 - A **Close** button (available once export completes or errors).
@@ -184,12 +196,13 @@ The exported clip duration matches the timeline duration computed from the speed
 
 ### Slow-motion interpolation
 
-When **Slow-Motion Interpolation** is enabled in the Inspector (Frame Blending or Optical Flow), export appends `minterpolate` after the speed filter for clips with effective speed < 1.0:
+When **Slow-Motion Interpolation** is enabled in the Inspector for a clip with effective speed < 1.0, export inserts a smoothing pass appropriate to the chosen mode:
 
-- **Frame Blending** (`mi_mode=blend`): fast temporal averaging between frames.
-- **Optical Flow** (`mi_mode=mci`): motion-compensated interpolation for the smoothest result (significantly slower to encode).
+- **Frame Blending** (`mi_mode=blend`): fast temporal averaging between frames. Uses ffmpeg `minterpolate` appended after the speed filter at the project frame rate.
+- **Optical Flow** (`mi_mode=mci`): classical motion-compensated interpolation. Uses ffmpeg `minterpolate` appended after the speed filter at the project frame rate (significantly slower to encode than Frame Blending).
+- **AI Interpolation (RIFE)**: a higher-fps **sidecar** is precomputed by the background `FrameInterpCache` (see [inspector.md](inspector.md#slow-motion-interpolation)). Export then reads the sidecar instead of the original source for that clip — `minterpolate` is **not** applied because the sidecar already contains the interpolated frames. Both Program Monitor preview and export consume the same sidecar so the visible frames match exactly.
 
-The filter is set to the project frame rate (`fps=NUM/DEN`) so synthesized frames match the output timeline. Normal-speed and fast clips are unaffected. Background prerender also applies minterpolate when enabled.
+If a clip is set to AI Interpolation but the sidecar is not yet ready (still generating, model missing, or generation failed), export falls back to the original source and skips frame synthesis for that clip. Normal-speed and fast clips are unaffected by all three modes. Background prerender also applies the minterpolate path when enabled.
 
 ## Keyframed Properties
 
@@ -204,6 +217,10 @@ Keyframes are evaluated in clip-local timeline time and rendered directly into f
 
 - Adjustment layers export as post-compositor effect passes over the assembled timeline image.
 - The exported effect region uses the same **scale / position / crop / rotate / opacity** scope model as the Program Monitor overlay for adjustment clips.
+- If an adjustment layer has an enabled shape mask, export intersects that mask alpha with the adjustment scope so the rendered effect region matches Program Monitor preview. Rectangle/ellipse masks stay inline in the FFmpeg graph; path masks rasterize to a temporary grayscale mask and are transformed with the adjustment clip before blending.
+- For safe tracked/scoped adjustment cases, export now crops the work area down to a conservative bounded ROI before running the adjustment effect chain, which keeps exact output quality while avoiding needless full-frame processing for small moving masks.
+- When that safe ROI path still has moving tracked geometry, UltimateSlice now pre-renders the resolved adjustment alpha as a temporary grayscale matte stream and `alphamerge`s it back into the cropped effect pass. This preserves preview/export parity while avoiding very large per-pixel tracked `geq` expressions in FFmpeg.
+- Adjustment passes that still rely on the full-frame path (for example path masks or higher-risk effect combinations) fall back automatically.
 - Each adjustment layer is trimmed to its own clip-local time before FFmpeg evaluates keyframed effect expressions, so adjustment-layer keyframes animate relative to the adjustment clip instead of the global timeline.
 - Overlapping adjustment layers stack in track order, matching Program Monitor preview.
 
@@ -255,7 +272,7 @@ Features:
 - Track metadata (muted, locked, soloed, audio role, ducking)
 - UltimateSlice OTIO metadata currently preserves the supported clip metadata set, including core clip settings (`speed`, `reverse`, `opacity`, `volume`, `pan`, `brightness`, `contrast`, `saturation`), transform/compositing settings (`scale`, `position_x`, `position_y`, `rotate`, `flip_h`, `flip_v`, `crop_left`, `crop_right`, `crop_top`, `crop_bottom`, `blend_mode`), and core animated lanes (`opacity_keyframes`, `scale_keyframes`, `position_x_keyframes`, `position_y_keyframes`, `rotate_keyframes`)
 - Title clips exported with `MissingReference`, plus title styling metadata (text, font, colors, outline, shadow, box, template, secondary text, and clip background color)
-- Subtitle-bearing clips preserve subtitle segments/word timing plus subtitle styling metadata (language, font/colors, outline, background box, highlight mode/color, word window, and vertical position)
+- Subtitle-bearing clips preserve subtitle segments/word timing plus subtitle styling metadata (language, font/colors, outline, background box, highlight flags, highlight color, BG highlight color, base styles, word window, and vertical position)
 - Adjustment clips also export as `MissingReference`
 
 **Import:** Open `.otio` files via the main **Open…** action in the header bar or Welcome screen (or MCP `open_otio` tool). OTIO files from other tools are imported with default clip properties; UltimateSlice metadata is restored when present. Relative OTIO media references are resolved against the opened `.otio` file location. UltimateSlice also accepts older flat OTIO metadata from previous app builds and upgrades it to the current versioned OTIO metadata contract on save.
@@ -269,6 +286,8 @@ Also available via MCP: `save_otio` and `open_otio` tools. `save_otio` accepts `
 - Export requires **ffmpeg** to be installed and on `$PATH`.
 - All video tracks are processed in timeline order, with letterbox/pillarbox padding applied to each clip.
 - Secondary-track overlays keep transparent padding when zoomed out and honor per-clip opacity, so layered composites export closer to Program Monitor preview.
+- Title clips and other tracker-followed clips now use direct canvas translation for `Position X/Y`, so export keeps them moving at `Scale = 1.0` and stays aligned with the Program Monitor near frame edges. Normal still-image clips keep the existing non-tracked image path unless they are actually following a tracker.
+- If lower video tracks are empty, export automatically promotes the first non-empty active video track to the base layer so upper-track PNG/title overlays still render instead of failing with “No video clips to export”.
 - Overlay clips positioned near frame edges (where the PIP extends beyond the output boundary) are correctly clipped to match the preview — the export pre-crops overflow before padding so the visible portion and position match exactly.
 - Primary static color controls (`brightness`, `contrast`, `saturation`, plus static `exposure`) are mapped through the same calibrated primary-color model used by Program Monitor preview, including contrast-dependent brightness compensation, to improve low/high-contrast parity.
 - Extended grading sliders (`shadows`, `midtones`, `highlights`, `exposure`, `black point`, and per-tone warmth/tint) now prioritize preview/export parity. When FFmpeg frei0r modules are available, export uses a bridge path aligned with Program Monitor’s calibrated grading mapping; otherwise it falls back to native FFmpeg grading filters. Tonal warmth/tint controls use stronger non-linear endpoint response (with gentler center response) for more creative looks while staying parity-aligned.

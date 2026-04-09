@@ -28,7 +28,11 @@ Tracking docs:
 - [x] `Project` — title, frame rate, resolution, tracks, dirty flag
 - [x] `MediaItem` — library entry (path, duration, label); separate from timeline clips
 - [x] `SourceMarks` — shared in/out selection state for the source monitor
+- [x] Phase-2 motion-tracking schema groundwork: source clips can now own sampled `motion_trackers`, overlay clips or individual masks can store `tracking_binding` attachments, and clip ids now persist through UltimateSlice vendor attrs so saved tracking references reconnect after reload
 - [x] Unit tests for model, undo, and FCPXML parser (62 tests)
+
+### Tracking Backend
+- [x] Phase-2 motion-tracking backend groundwork: background `TrackingCache` with cancellable jobs, progress/error polling, disk-backed JSON results, and low-resolution translation analysis that produces `MotionTracker` sample data for future tracked clip/mask attachments
 
 ### Media Library Browser
 - [x] Import media via file chooser (video/audio/image MIME filter)
@@ -76,6 +80,10 @@ Tracking docs:
 - [x] **Play/Pause** — Space bar toggles player
 - [x] Tool indicator overlay (Razor mode)
 - [x] **Image clips** — still images (PNG, JPEG, etc.) placed as `ClipKind::Image` with 4 s default, unlimited trim-out, `imagefreeze` playback, and `tpad`-based export
+- [x] **Convert LTC audio to source timecode** — right-click a source-backed audio/video clip and choose **Convert LTC Audio to Timecode…** to decode Linear Timecode from the selected audio side, store it in `source_timecode_base_ns`, and reuse the existing grouped timecode alignment path
+- [x] **Automatic LTC audio cleanup** — when LTC lives on one stereo side, the opposite program-audio side is routed to both speakers via clip `AudioChannelMode`; mono LTC-only clips are muted after conversion, and new placements from the same source inherit the preferred program-audio routing in the current project
+- [x] **Still-image transform overlay alignment** — Program Monitor now uses the selected still-image clip's own preview inset for transform handles, so PNG/JPEG/WebP/SVG overlays stay aligned even when the base video under them has a different aspect ratio
+- [x] **Tracked overlay movement parity** — Program Monitor, transform-overlay sync, background prerender, and export now use direct canvas translation for titles, adjustment layers, and tracker-followed clips so `Position X/Y` keeps moving at `Scale = 1.0` and near frame edges, while normal still-image clips stay on the existing safe preview path, pin to their source-in frame during playback/transform reseeks, and refresh via a non-blocking compositor flush during transform drags (no per-decoder reseek, so the imagefreeze-parked PNG buffer stays visible while editing). Selecting a still while paused also pushes its own preview inset to the transform overlay and triggers a paused-frame refresh so the Program Monitor immediately shows the selected PNG with correctly aligned handles.
 
 ### Undo / Redo System
 - [x] `EditCommand` trait with `execute` / `undo` / `description`
@@ -86,6 +94,8 @@ Tracking docs:
 ### Inspector Panel
 - [x] Right-side inspector showing selected clip properties
 - [x] Fields: clip name, source path, source in/out, duration, timeline start
+- [x] Outgoing transition editor in the Inspector with editable type/duration/alignment, remove action, shared duration clamping across Inspector/timeline/MCP, alignment-aware preview/export/prerender timing, collapsed-below-Transform placement, preview-supported transition catalog (including fade-to-white, circle-open/close, and directional cover/reveal/slide live preview), plus a scrollable, resizable transitions pane whose split is saved with workspace layouts
+- [x] Motion Tracking inspector workflow: create/remove multiple trackers per clip, label them, edit the analysis region numerically or in Program Monitor, run/cancel tracking jobs, and attach a project tracker to the selected clip transform or first mask
 
 ### Toolbar / Header
 - [x] New / Open / Save / Export MP4 buttons
@@ -97,12 +107,12 @@ Tracking docs:
 ### Append to Timeline
 - [x] "Append to Timeline" button in media browser
 - [x] Appends marked region (in → out) of selected source clip
-- [x] Placed at end of first Video track
+- [x] Targets the selected matching track or first matching track, auto-creating one when needed
 
 ### Export
 - [x] MP4/H.264 + AAC export via ffmpeg (`-filter_complex` concat + adelay/amix for audio)
 - [x] Background thread with `mpsc::channel` progress reporting
-- [x] Progress estimate based on ffmpeg `total_size` versus largest imported library file, capped to 99% until completion (100% only on successful finish)
+- [x] Progress estimate based on ffmpeg `total_size` with automatic `out_time_*` fallback when size-based progress has not advanced yet, capped to 99% until completion (100% only on successful finish)
 - [x] Audio from embedded video-clip streams and standalone audio-track clips included in export
 - [x] Clips without audio streams safely skipped via `ffprobe` probe
 - [x] Extended grading parity bridge: export prefers FFmpeg frei0r (`coloradj_RGB`, `three_point_balance`) using the same calibrated mapping as Program Monitor preview, with automatic native-filter fallback when frei0r modules are unavailable
@@ -112,6 +122,10 @@ Tracking docs:
 - [x] Warmth slider direction consistency: midtones/highlights warmth now follow standard grading direction (left cooler, right warmer) in both preview and export
 - [x] Shadows warmth deep-shadow direction consistency: 3-point mapping now inverts shadows warmth in curve-space so slider direction remains conventional (left cooler, right warmer) in preview/export bridge
 - [x] Stronger shadows endpoint range: shadows warmth/tint endpoint gain increased to allow more pronounced blue/gold shadow looks near slider extremes while preserving directional semantics
+- [x] Empty lower video tracks no longer block layered exports: export now promotes the first non-empty active video track to the base layer so upper-track PNG/title overlays still render correctly
+- [x] Motion-tracked preview/export parity groundwork: Program Monitor and FFmpeg export now resolve clip and first-mask tracking bindings through the normal transform/mask evaluation path so tracked overlays stay aligned between preview and export
+- [x] Bounded tracked-adjustment export fast path: safe rect/ellipse adjustment passes now crop to a conservative tracked ROI before running the expensive post-compositor effect chain, reducing export cost for small moving adjustment regions while preserving the existing full-frame fallback for path masks and higher-risk effect stacks
+- [x] Precomputed tracked-adjustment export mattes: safe moving rect/ellipse adjustment passes now render a temporary grayscale matte stream from the same Rust-side scope/mask geometry used by preview, then `alphamerge` it back into the ROI-scoped effect pass so export avoids giant per-pixel tracked `geq` expressions without reducing quality
 
 ### FCPXML
 - [x] FCPXML 1.10-1.14 import (`quick-xml`) — parses assets, spine, asset-clip elements
@@ -146,6 +160,8 @@ Tracking docs:
 - [x] Import fallback for spine `ref-clip` and `sync-clip`: parse `ref-clip@ref` via asset mapping and traverse `sync-clip`/nested `spine` containers to import nested clip items
 - [x] Import source-time normalization: rebase `asset-clip@start` by `asset@start` for absolute timecode-domain assets so layered video/audio lane clips seek correctly in Program Monitor
 - [x] Export transform overflow clipping: overlay clips with positions exceeding the frame boundary now crop overflow edges before padding, so exported PIP positions match the Program Monitor preview exactly
+- [x] Motion-tracking vendor-attr persistence groundwork: `.uspxml` save/load now preserves clip ids, source `motion_trackers`, clip transform `tracking_binding`, and mask bindings through UltimateSlice `us:*` attributes so tracked overlays survive project reopen
+- [x] Still-image round-trip parity for timeline overlays: FCPXML/`.uspxml` import now infers `ClipKind::Image` from PNG/JPEG/WebP/SVG source paths, and save persists that kind explicitly so reopened projects keep imagefreeze-based Program Monitor playback for still overlays
 - [x] Background-threaded project open (file I/O + XML parsing off main thread)
 
 ### MCP Server (`--mcp` flag)
@@ -251,6 +267,8 @@ Tracking docs:
 - [x] Right-click clip context menu now shows only currently actionable clip operations (hides unavailable actions)
 - [x] Select clips forward/backward from playhead for bulk operations
 - [x] Clip display options / adjustable per-track height, clip color labels
+- [ ] Source-Record Track Patching (UI to control source channel to timeline track mapping)
+- [ ] Dynamic Trim Mode / Precision Editor (Interface for side-by-side fine-tuning of cuts)
 
 ### Speed Ramps (per clip)
 - [x] Constant speed change per clip (e.g. 0.5× slow-mo, 2× fast-forward) via GStreamer rate seek + ffmpeg `setpts`/`atempo` on export
@@ -287,7 +305,7 @@ Tracking docs:
   - Project replacement resets cached monitor output so empty projects do not show stale prior frames
 - [x] Program-monitor playback priority mode in Preferences (`Smooth` / `Balanced` / `Accurate`)
 - [x] Docked Program Monitor and scopes are resizable via draggable splitter (position persisted; pane collapses fully when scopes are hidden)
-- [ ] Detachable Program Monitor window (pop-out preview)
+- [x] Detachable Program Monitor window (pop-out preview)
   - [x] Pop out Program Monitor into a separate top-level window for dual-display workflows
   - [x] Keep transport controls/timecode/playhead fully synchronized between docked + popped-out monitor
   - [x] Persist monitor window geometry and last docked/popped state across sessions
@@ -397,6 +415,8 @@ Tracking docs:
   - [x] ~~Fix preview halting with 3+ video tracks — ensure preroll before seek during mid-playback clip switches, plus timeline-position safety check~~ *(superseded by compositor rewrite — wall-clock position tracking)*
 
 ### Audio
+- [x] Voice Isolation (Smart Noise Gating) based on Whisper STT subtitle timestamps
+  - [x] No-subtitle silence-detect mode (ffmpeg `silencedetect`) with auto-suggested threshold from astats noise-floor analysis
 - [x] Audio track clip display with waveform (see Timeline Improvements above)
 - [x] Volume / pan controls per clip in the inspector (volume slider now dB-based: `-100 dB` to `+12 dB`, mapped to linear gain for playback/export, persisted in FCPXML)
 - [x] Basic audio mixing (level meters)
@@ -424,6 +444,8 @@ Tracking docs:
   - [ ] Preview/export comparison overlay — a split-screen or A/B toggle in the Program Monitor that shows the prerender frame beside a single-frame export render, allowing direct visual parity inspection without a full export cycle
 - [x] Advanced color grading
   - [x] Match Clip Colors — automatic Reinhard-style color transfer: analyzes source and reference clip frames in CIE L\*a\*b\* space to compute slider adjustments (brightness, contrast, saturation, temperature, tint) and optional 17³ 3D LUT for fine-grained matching. Inspector "Match Color…" button, `Ctrl+Alt+M` shortcut, and `match_clip_colors` MCP tool with full undo support.
+  - [ ] HSL Qualifiers (Secondary color correction for specific hue/saturation/luminance ranges)
+  - [ ] Video Limiter / Legalizer (Ensure brightness/color levels stay within broadcast-safe limits)
 - [ ] Color management pipeline via OpenColorIO (OCIO)
   - [ ] Rust FFI bindings for OpenColorIO C++ library (bindgen wrapper against OCIO C API; build.rs pkg-config detection + static/dynamic linking)
   - [ ] OCIO config loading (ACES 2.0, Rec.709, sRGB built-in configs; user-supplied config file path in Preferences)
@@ -479,6 +501,7 @@ Tracking docs:
   - [x] Phase 1: Full-frame adjustment layers with `ClipKind::Adjustment`. Color grading (brightness, contrast, saturation) applied to composited output via permanent GStreamer videobalance element (real-time preview). Frei0r user effects, LUTs, temperature/tint, blur applied on export via time-gated FFmpeg filter chain. Purple hatched timeline rendering, inspector visibility, FCPXML round-trip, MCP tool, undo support, right-click context menu.
   - [x] Phase 1b: Background prerender support for adjustment layer frei0r effects — when Background Render is enabled, prerender the adjustment frei0r/LUT/blur effects into temporary clips so the Program Monitor shows the full effect chain without real-time GStreamer topology changes
   - [x] Phase 2: Bounding box scoping (position, scale, crop, and rotate constrain the adjustment effect region in both preview and export; overlapping scoped adjustments stack by track order)
+  - [x] Phase 3: Shape-mask support on adjustment layers — adjustment clips now reuse the normal rectangle / ellipse / path mask workflow, and preview/export intersect that mask alpha with the existing transform/crop scope instead of replacing it
 - [x] Shape / freeform masking — rectangle, ellipse, bezier path masks with feathering for selective effects
   - [x] Phase 1: Rectangle & ellipse masks with feathering — per-clip mask model (`Vec<ClipMask>`), SDF-based alpha computation, GStreamer preview pad probe, FFmpeg `geq` export, Inspector UI with all controls, transform overlay mask outline, keyframe property support, FCPXML round-trip, MCP `set_clip_mask` tool, full undo/redo
   - [x] Phase 2: Bezier/freeform path masks — `MaskShape::Path` with `Vec<BezierPoint>` (anchor + in/out bezier handles), closed-path SDF via polyline subdivision + winding number, feathered edges via distance-to-polyline, AABB early-out optimization, export via rasterized grayscale PGM + FFmpeg `movie`/`alphamerge`, Cairo bezier curve overlay drawing with control point visualization, Inspector point list editor, MCP `set_clip_mask` path support, serde backward-compatible persistence
@@ -521,12 +544,14 @@ Tracking docs:
 - [x] Keyboard nudge in transform overlay — arrow keys adjust position by 0.01 per press (0.1 with Shift); `+`/`-` adjust scale; activated when a clip is selected
 - [x] Transform overlay drag now pauses playback at interaction start, so the Program Monitor frame stays fixed while editing (no background timeline advancement)
 - [x] Support anamorphic desqueeze (1.33x, 1.5x, 1.8x, 2.0x desqueeze via Inspector and MCP; persists in FCPXML)
+- [ ] Motion Blur for Transforms (Shutter angle support for keyframed transforms)
 
 ### Monitoring
 - [x] Safe area overlays (title safe 80%, action safe 90%) — Program Monitor "Safe Areas" toggle with persisted state
 - [x] False color overlay — map luminance to color spectrum for exposure evaluation
 - [x] Zebra stripes — diagonal lines on areas exceeding configurable IRE threshold
 - [x] Focus peaking — highlight in-focus edges with colored overlay
+- [ ] Timecode Burn-In Effect (Display timeline or source timecode on screen)
 
 ### Project Management
 - [x] Project save / load as FCPXML (wired to New/Open/Save buttons in toolbar)
@@ -544,7 +569,9 @@ Tracking docs:
   - [x] FCPXML persistence via `us:bins`/`us:media-bins` vendor attributes on `<event>`
   - [x] MCP tools: `create_bin`, `delete_bin`, `rename_bin`, `list_bins`, `move_to_bin`; `list_library` includes `bin_id`
 - [x] Offline / missing media indicators — visual badge on clips when source_path doesn't exist
+- [ ] Subclips (Create virtual library items from specific In/Out ranges)
 - [x] Consolidate / collect files — copy project media into a chosen folder for archival or transfer, with **Timeline-used only** and **Entire library** modes in the UI plus MCP `collect_project_files` automation
+- [ ] Consolidated Archiving with Handles (Trim source media to used regions plus configurable handles during collection)
 - [x] Metadata display & filtering — media browser cards now surface resolution, codec, frame rate, duration, and file size with search/type/resolution filters and expanded `list_library` metadata
 
 ### Canvas / Sequence Settings
@@ -579,12 +606,12 @@ Tracking docs:
 - [ ] Accessibility: keyboard navigation in all panels
 - [x] Welcome window for choosing recent project or new one (Stack-based overlay with New/Open/Recent, crossfade transition to editor)
 - [ ] Help documentation and tutorials
-- [ ] Application icon and desktop integration (`.desktop` file)
+- [x] Application icon and desktop integration (`.desktop` file, MIME type, AppStream metadata, installer wiring)
 - [ ] Customizable keyboard shortcuts (shortcut config file + preferences UI)
 - [x] Timecode entry / go-to timecode (HH:MM:SS:FF to jump playhead)
 - [x] Drag-and-drop from file manager (import by dragging files into media browser or timeline)
 - [x] Customizable workspace layouts (save/restore panel arrangements for different tasks)
-- [ ] Named project snapshots (create named versions at milestones without separate files)
+- [x] Named project snapshots (create named versions at milestones without separate files)
 
 ### Professional Workflow (The "Pro" Edge)
 - [x] Multicam editing (sync by audio or timecode)
@@ -603,6 +630,7 @@ Tracking docs:
 - [x] 3-Point and 4-Point editing (Insert/Overwrite from Source)
 - [x] J/K/L scrubbing (shuttle control in program monitor; pitch-corrected audio via Rubberband is a planned enhancement)
 - [x] Match Frame (`F` shortcut to find timeline clip in media library, load in source monitor, seek to matching frame; MCP `match_frame` tool)
+- [ ] Reverse Match Frame (Find all timeline instances of a library clip)
 - [x] Proxy Workflow: One-click toggle between original and proxy media
 - [x] Keyword ranges + favorite/reject ratings in browser
 - [ ] Auditions / clip versions (swap alternate takes nondestructively)
@@ -616,10 +644,14 @@ Tracking docs:
   - [x] Pitch-shift effect per clip (±12 semitones via inspector slider)
   - [x] Pitch-preserved J/K/L shuttle (scaletempo in main pipeline + rate-based decoder seeks for hot rate changes)
 - [x] Audio Roles (Dialogue, Effects, Music) with submixing — per-track `AudioRole` enum, inspector dropdown, timeline color-coded labels, MCP `set_track_role` tool, FCPXML persistence, export per-role submix routing
+- [ ] Audio Track Mixer (Panel for track-level volume, panning, effects, and bus routing)
+- [ ] Surround sound support (5.1 / 7.1 channel layouts, panner UI, multi-channel export)
+- [ ] Loudness Radar / Normalization to Standards (Tools for broadcast-standard compliance like EBU R128)
 - [x] LADSPA audio plugin support — Audio FX browser tab, inspector effect display, discovery via GStreamer registry, per-clip effect chain, parameter control, GStreamer preview + FFmpeg export via native `ladspa` filter, FCPXML persistence, MCP tools (list/add/remove/set params)
 - [x] Voiceover recording tool with countdown and punch-in (toolbar Record button, 3s countdown, GStreamer `autoaudiosrc` capture to WAV, clip placed at playhead on first audio track, undo support, MCP `record_voiceover` tool)
 - [x] Automatic Ducking (per-track `duck` toggle, volume reduced when dialogue/non-ducked audio is active; configurable amount in Preferences; real-time preview; MCP `set_track_duck` tool; FCPXML persistence)
 - [x] Audio normalization and peak-matching (LUFS + peak modes via FFmpeg `ebur128`/`volumedetect`; Inspector button, MCP `normalize_clip_audio` tool, undo, measured loudness display + FCPXML persistence)
+- [x] Reference-based audio matching (Inspector **Match Audio…** action analyzes a source clip against a reference clip and applies conservative loudness + adaptive built-in 3-band EQ matching, including derived band freq/gain/Q targets plus subtitle/STT-aware speech-region weighting; dialog defaults to simple **Match voice** mode, exposes explicit source/reference In/Out ranges through **Choose region...**, and now includes channel-aware **Auto / Mono Mix / Left / Right** analysis; bottom status bar shows matching activity while the analysis runs; undo support; MCP `match_clip_audio` with optional range/channel args). **NEW**: now also produces a separate **7-band match EQ** (`clip.match_eq_bands`) at ~100 Hz / 200 Hz / 400 Hz / 800 Hz / 2 kHz / 5 kHz / 9 kHz for fine mic-matching (e.g., lav → shotgun); applied in series with the user 3-band EQ during export; MCP `clear_match_eq` tool resets just the match EQ.
 - [x] Built-in parametric EQ (3-band: Low/Mid/High with freq/gain/Q per band; GStreamer `equalizer-nbands` preview, FFmpeg `equalizer` export, gain keyframes, Inspector UI, FCPXML persistence, MCP `set_clip_eq` tool, undo)
 - [x] Waveform sync (align external audio to camera reference audio by waveform analysis; "Sync & Replace Audio" context menu action links clips and mutes camera embedded audio; MCP `sync_clips_by_audio` with `replace_audio` flag)
 
@@ -630,6 +662,9 @@ Tracking docs:
   - [x] Per-clip subtitle segments with word-level timestamps
   - [x] Subtitle styling: font, color, outline, background box, vertical position
   - [x] Word highlight modes: None, Bold, Color, Underline, Stroke (karaoke-style)
+  - [x] Multi-effect word highlight flags (bold, color, underline, stroke, italic, background, shadow combinable) with Inspector checkboxes, preview rendering, ASS export, and MCP support
+  - [x] Base subtitle styles: bold, italic, underline, shadow (with color/offset) applied to all text, with Inspector toggle buttons, preview rendering, ASS export, and MCP support
+  - [x] Background highlight color picker for active word background effect
   - [x] Time-based word window (configurable seconds around active word)
   - [x] Multi-track subtitle support with independent per-clip positioning/styling
 - [x] Program Monitor overlay with real-time word highlighting
@@ -638,13 +673,17 @@ Tracking docs:
 - [x] Subtitle renderer-detail parity cleanup: Program Monitor subtitle outline, box, underline, and stroke metrics now scale from the same 1080-based sizing model used by export, and subtitle vertical positioning now uses the same normalized top/center/bottom anchoring model as export, reducing visible preview-vs-export styling drift without changing the separate GTK-overlay vs libass renderer architecture
   - [x] SRT file export, 7 MCP tools, FCPXML round-trip, timeline CC badge
   - [x] Whisper output cleanup (contraction merging, punctuation spacing)
-- [ ] AI Scene Cut Detection for long source files
+- [x] AI Scene Cut Detection for long source files
 - [x] Smart Collections based on metadata — save project-wide media-browser queries by search text, kind, resolution, and frame rate; manage them from the browser; persist via FCPXML vendor metadata; automate with MCP `list_collections` / `create_collection` / `update_collection` / `delete_collection`
-- [ ] Optical Flow slow-motion (AI frame interpolation)
-- [ ] AI Music Generation (MusicGen / MusicGPT)
-  - [ ] Phase 1 — Draw-region UX: draw a time-range box on an audio track to define a generated-audio region (reusable for silence/tone generation too)
-  - [ ] Phase 2 — Local model backend: Preferences entry for local model path; candidate runtimes include the `musicgpt` Rust crate (native, no Python dependency), MusicGen-small ONNX via `ort`, or Python `audiocraft` subprocess; background generation with status-bar progress (same pattern as proxy transcoding)
-  - [ ] Phase 3 — Prompt UI: popover on drawn region with text prompt input, optional reference audio, duration auto-calculated from region length; generated audio written as a WAV clip and placed in the region
+- [ ] Transcript-Based Editing (Edit timeline by deleting text in STT transcripts)
+- [ ] AI Audio Remix (Automatically adjust music duration while preserving structure)
+- [ ] AI Voice Enhancement (One-click studio-quality enhancement for low-quality recordings)
+- [x] Optical Flow slow-motion (AI frame interpolation): Inspector dropdown gains an **AI Interpolation (RIFE)** mode that precomputes a 2–8× sidecar via ONNX RIFE in a background `FrameInterpCache` worker (mirrors the `BgRemovalCache` pattern); both Program Monitor preview and FFmpeg export consume the same sidecar so frames match exactly. New MCP `set_clip_speed` tool, Preferences → Models RIFE entry, FCPXML `us:slow-motion-interp="ai"` round-trip. RIFE model is user-installed at `~/.local/share/ultimateslice/models/rife.onnx`.
+- [x] AI Music Generation (MusicGen / MusicGPT)
+  - [x] Phase 1 — Draw-region UX: draw a time-range box on an audio track to define a generated-audio region (reusable for silence/tone generation too)
+  - [x] Phase 2 — Local model backend: MusicGen-small ONNX via `ort` with background generation worker thread and status-bar progress; MCP `generate_music` tool for automation; generated WAV clips placed on audio tracks with undo support
+  - [x] Phase 3 — Region-aware prompt UI and inline timeline lifecycle: the existing Generate Music dialog now accepts track/playhead targets or drawn audio regions, auto-fills requested duration from the selected range, shows pending/failed overlays inline on the timeline, and inserts generated WAV clips back into the requested region with undo support
+  - [x] Follow-up — Reference-audio style guidance for MusicGen prompts: optional **Choose Reference Audio…** picker in the Generate Music dialog (and `reference_audio_path` argument on the `generate_music` MCP tool) analyzes BPM, key/mode, brightness, and dynamics from the reference clip via the new `audio_features` module and appends the derived natural-language descriptors to the text prompt. The musicgen-small model itself is unchanged — this is prompt augmentation, since musicgen-melody (the only variant with native audio conditioning) currently has no off-the-shelf ONNX export.
 
 ### Script-to-Timeline (Create Project from Script & Clips)
 - [ ] **Script import**: parse Final Draft (FDX) and Fountain screenplay files to extract scene headings, dialogue lines, and scene order
@@ -662,6 +701,8 @@ Tracking docs:
 ### Performance & Integration
 - [ ] Hardware-accelerated decoding/encoding (VA-API, NVENC)
 - [ ] Background rendering for complex effect stacks
+- [ ] Render-and-Replace (Bake complex effect stacks into temporary high-quality clips)
+- [ ] Project & Bin Locking (Collaborative project/media locking)
 - [x] OpenTimelineIO (OTIO) import/export (native Rust JSON serializer via serde_json; clips/tracks/gaps/transitions/markers/speed plus current OTIO metadata round-trip; versioned `metadata.ultimateslice` contract; title/subtitle metadata, track audio-role metadata, transform/crop/blend metadata, and core transform/opacity keyframe round-trip; absolute/relative OTIO media-reference export with base-path-aware reimport; MCP `save_otio`/`open_otio` tools; Export dropdown + File Open dialog)
 - [ ] Full OTIO metadata parity for UltimateSlice-specific features not yet covered by OTIO round-trip (remaining advanced effects, mask payloads/animation, secondary keyframe lanes such as crop animation, and nested clip internals)
 - [ ] Shared Project/Library support for collaborative editing

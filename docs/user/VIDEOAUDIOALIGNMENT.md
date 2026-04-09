@@ -1,6 +1,6 @@
 # Video & Audio Alignment
 
-UltimateSlice provides two methods for synchronizing clips from multi-camera shoots or separate audio recorders: **timecode-based alignment** and **audio cross-correlation sync**. Both are available from the timeline right-click context menu and via MCP tools.
+UltimateSlice provides two methods for synchronizing clips from multi-camera shoots or separate audio recorders: **timecode-based alignment** and **audio cross-correlation sync**. Both are available from the timeline right-click context menu and via MCP tools. Source timecode can come from imported metadata **or** from a one-time LTC audio conversion pass.
 
 ---
 
@@ -9,7 +9,7 @@ UltimateSlice provides two methods for synchronizing clips from multi-camera sho
 1. Place your clips on separate tracks in the timeline.
 2. Select all the clips you want to align (Ctrl+click or Shift+click).
 3. Right-click the selection and choose:
-   - **Align Grouped Clips by Timecode** — if clips have embedded creation timestamps.
+   - **Align Grouped Clips by Timecode** — if clips already have source timecode metadata.
    - **Sync Selected Clips by Audio** — if clips share audible ambient sound.
 4. The first selected clip is the **anchor** (it stays in place); other clips are repositioned to match.
 
@@ -20,6 +20,8 @@ UltimateSlice provides two methods for synchronizing clips from multi-camera sho
 ### How it works
 
 When media is imported, UltimateSlice automatically extracts the creation date/time from each file using GStreamer's Discoverer (`GST_TAG_DATE_TIME`). This timestamp is stored as `source_timecode_base_ns` — time-of-day in nanoseconds — on the library item and on every clip placed from that source.
+
+If the source instead carries **Linear Timecode (LTC)** on an audio channel, you can right-click a single timeline clip and choose **Convert LTC Audio to Timecode…**. UltimateSlice decodes the LTC start value into the same `source_timecode_base_ns` field, so the converted media behaves exactly like imported timecode metadata everywhere else in the app.
 
 When you align by timecode, UltimateSlice computes the time-of-day offset between each clip's source start and the anchor clip's source start, then repositions the clips so those offsets are reflected in their timeline positions.
 
@@ -33,7 +35,29 @@ When you align by timecode, UltimateSlice computes the time-of-day offset betwee
 
 - Clips must be **grouped** (`Ctrl+G`) before aligning by timecode.
 - At least two clips in the group must have source timecode metadata.
-- The metadata is automatically extracted on import for most camera files (MP4, MOV, MKV with creation-time tags). It's also preserved through FCPXML import/export.
+- The metadata is automatically extracted on import for most camera files (MP4, MOV, MKV with creation-time tags), or can be generated from LTC audio with **Convert LTC Audio to Timecode…**. It's also preserved through FCPXML import/export.
+
+### Converting LTC audio into source timecode
+
+Use this when one audio side contains SMPTE LTC instead of a normal embedded timecode track.
+
+1. Place the clip on the timeline and select it.
+2. Right-click → **Convert LTC Audio to Timecode…**
+3. Pick the LTC source channel:
+   - **Auto Detect** — tries left, right, then mono mix.
+   - **Left Channel** / **Right Channel** — use when you know which stereo side carries LTC.
+   - **Mono Mix** — use for mono LTC or already mixed-down recordings.
+4. Leave the frame rate on **Project / Source Default** unless the LTC was recorded at a different frame rate than the project.
+5. Click **Convert**.
+
+Result:
+
+- UltimateSlice writes the decoded base to the library item, the selected source monitor entry, and all same-source clips already in the project.
+- If LTC lives on the **left** side, the **right** side is routed to both speakers.
+- If LTC lives on the **right** side, the **left** side is routed to both speakers.
+- If the clip is effectively **mono LTC only**, clip audio is muted after conversion.
+
+After conversion, group the clips and use **Align Grouped Clips by Timecode** as usual.
 
 ### Accuracy
 
@@ -42,6 +66,8 @@ Timecode alignment is as accurate as the cameras' internal clocks. Professional 
 ### Source file
 
 `src/media/probe_cache.rs` — `extract_timecode_ns()` reads `GST_TAG_DATE_TIME` from the GStreamer Discoverer result and converts hour/minute/second/microsecond to time-of-day nanoseconds.
+
+`src/media/ltc.rs` — decodes LTC from audio samples when you run **Convert LTC Audio to Timecode…**.
 
 ---
 
@@ -170,11 +196,14 @@ When more than two clips are selected, the first clip is the **anchor**. Each su
 2. Right-click → choose **Sync Selected Clips by Audio** or **Align Grouped Clips by Timecode**.
 3. The sync button is only sensitive when 2+ clips are selected.
 4. The timecode button is only sensitive when selected clips are grouped and have timecode metadata.
+5. For LTC-backed sources, right-click a **single** clip first and run **Convert LTC Audio to Timecode…**, then group and align.
 
 ### Status feedback
 
 - During audio sync, the title bar shows "Syncing audio..." (sync runs on a background thread).
+- During LTC conversion, the title bar shows "Converting LTC to timecode..." while decoding runs in the background.
 - On completion: "Audio sync complete" or "Audio sync failed — no reliable audio match found".
+- On LTC completion: "Converted LTC to HH:MM:SS:FF..." with the applied audio-routing outcome.
 - Status messages auto-clear after 3 seconds.
 
 ### Undo
@@ -193,6 +222,34 @@ Both operations are fully undoable with `Ctrl+Z`. Audio sync uses `SetTrackClips
   "arguments": {
     "clip_ids": ["clip-uuid-1", "clip-uuid-2", "clip-uuid-3"]
   }
+}
+```
+
+### `convert_ltc_audio_to_timecode`
+
+```json
+{
+  "name": "convert_ltc_audio_to_timecode",
+  "arguments": {
+    "clip_id": "clip-uuid-1",
+    "ltc_channel": "auto",
+    "frame_rate": "29.97"
+  }
+}
+```
+
+Returns:
+
+```json
+{
+  "success": true,
+  "clip_id": "clip-uuid-1",
+  "source_timecode_base_ns": 3600000000000,
+  "timecode": "01:00:00:00",
+  "resolved_ltc_channel": "left",
+  "applied_audio_channel_mode": "right",
+  "muted": false,
+  "updated_clip_count": 3
 }
 ```
 
