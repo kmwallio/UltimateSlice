@@ -1218,7 +1218,8 @@ pub fn build_vu_meter() -> (DrawingArea, Rc<Cell<[f64; 2]>>) {
             let green_frac = db_to_frac(-18.0);
             let green_h = (green_frac * height as f64).min(bar_h);
             if green_h > 0.0 {
-                cr.set_source_rgb(0.2, 0.8, 0.2);
+                let (r, g, b) = crate::ui::colors::COLOR_LEVEL_GOOD;
+                cr.set_source_rgb(r, g, b);
                 cr.rectangle(x, height as f64 - green_h, bar_w, green_h);
                 let _ = cr.fill();
             }
@@ -1229,7 +1230,8 @@ pub fn build_vu_meter() -> (DrawingArea, Rc<Cell<[f64; 2]>>) {
             let yellow_h =
                 ((yellow_frac - green_frac) * height as f64).min((bar_h - green_h).max(0.0));
             if yellow_h > 0.0 {
-                cr.set_source_rgb(0.9, 0.85, 0.1);
+                let (r, g, b) = crate::ui::colors::COLOR_LEVEL_WARN;
+                cr.set_source_rgb(r, g, b);
                 cr.rectangle(x, height as f64 - yellow_top - yellow_h, bar_w, yellow_h);
                 let _ = cr.fill();
             }
@@ -1238,7 +1240,8 @@ pub fn build_vu_meter() -> (DrawingArea, Rc<Cell<[f64; 2]>>) {
             let red_top = yellow_frac * height as f64;
             let red_h = (bar_h - red_top).max(0.0);
             if red_h > 0.0 {
-                cr.set_source_rgb(0.9, 0.2, 0.1);
+                let (r, g, b) = crate::ui::colors::COLOR_LEVEL_CLIP;
+                cr.set_source_rgb(r, g, b);
                 cr.rectangle(x, y_top, bar_w, red_h);
                 let _ = cr.fill();
             }

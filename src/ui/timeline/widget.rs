@@ -7034,7 +7034,8 @@ fn draw_timeline(
     let h = height as f64;
 
     // Background
-    cr.set_source_rgb(0.13, 0.13, 0.15);
+    let (bg_r, bg_g, bg_b) = crate::ui::colors::COLOR_TIMELINE_BG;
+    cr.set_source_rgb(bg_r, bg_g, bg_b);
     cr.paint().ok();
 
     // Ruler
@@ -7155,7 +7156,8 @@ fn draw_timeline(
             let top = track_row_y(track_idx) + 2.0;
             let height = track_row_height(track) - 4.0;
             if height > 0.0 {
-                cr.set_source_rgba(0.30, 0.55, 0.95, 0.08);
+                let (sr, sg, sb, sa) = crate::ui::colors::COLOR_SELECTION_FILL;
+                cr.set_source_rgba(sr, sg, sb, sa);
                 cr.rectangle(
                     TRACK_LABEL_WIDTH + 1.0,
                     top,
@@ -7163,7 +7165,8 @@ fn draw_timeline(
                     height,
                 );
                 cr.fill().ok();
-                cr.set_source_rgba(0.45, 0.75, 1.0, 0.85);
+                let (br, bg, bb, ba) = crate::ui::colors::COLOR_SELECTION_BORDER;
+                cr.set_source_rgba(br, bg, bb, ba);
                 cr.set_line_width(1.2);
                 cr.rectangle(
                     TRACK_LABEL_WIDTH + 1.0,
@@ -7449,7 +7452,8 @@ fn draw_ruler(cr: &gtk::cairo::Context, width: f64, st: &TimelineState) {
         }
     }
 
-    cr.set_source_rgb(0.25, 0.25, 0.28);
+    let (lbl_r, lbl_g, lbl_b) = crate::ui::colors::COLOR_TRACK_LABEL_BG;
+    cr.set_source_rgb(lbl_r, lbl_g, lbl_b);
     cr.rectangle(0.0, 0.0, TRACK_LABEL_WIDTH, RULER_HEIGHT);
     cr.fill().ok();
 }
@@ -7539,10 +7543,10 @@ fn draw_track_row(
     if track.is_audio() && track.audio_role != crate::model::track::AudioRole::None {
         let role_label = track.audio_role.short_label();
         let (role_r, role_g, role_b) = match track.audio_role {
-            crate::model::track::AudioRole::Dialogue => (0.9, 0.7, 0.3),
-            crate::model::track::AudioRole::Effects => (0.3, 0.8, 0.9),
-            crate::model::track::AudioRole::Music => (0.4, 0.9, 0.5),
-            _ => (0.5, 0.5, 0.5),
+            crate::model::track::AudioRole::Dialogue => crate::ui::colors::COLOR_AUDIO_DIALOGUE,
+            crate::model::track::AudioRole::Effects => crate::ui::colors::COLOR_AUDIO_EFFECTS,
+            crate::model::track::AudioRole::Music => crate::ui::colors::COLOR_AUDIO_MUSIC,
+            _ => crate::ui::colors::COLOR_AUDIO_ROLE_NONE,
         };
         cr.set_source_rgb(role_r, role_g, role_b);
         cr.set_font_size(9.0);
@@ -7713,7 +7717,8 @@ fn draw_track_label_meter(
         let green_frac = db_to_frac(-18.0);
         let green_h = (green_frac * height).min(bar_h);
         if green_h > 0.0 {
-            cr.set_source_rgb(0.2, 0.8, 0.2);
+            let (r, g, b) = crate::ui::colors::COLOR_LEVEL_GOOD;
+            cr.set_source_rgb(r, g, b);
             cr.rectangle(bx, y + height - green_h, bar_w, green_h);
             cr.fill().ok();
         }
@@ -7721,7 +7726,8 @@ fn draw_track_label_meter(
         let yellow_frac = db_to_frac(-6.0);
         let yellow_h = ((yellow_frac - green_frac) * height).min((bar_h - green_h).max(0.0));
         if yellow_h > 0.0 {
-            cr.set_source_rgb(0.9, 0.85, 0.1);
+            let (r, g, b) = crate::ui::colors::COLOR_LEVEL_WARN;
+            cr.set_source_rgb(r, g, b);
             cr.rectangle(
                 bx,
                 y + height - green_frac * height - yellow_h,
@@ -7733,7 +7739,8 @@ fn draw_track_label_meter(
 
         let red_h = (bar_h - yellow_frac * height).max(0.0);
         if red_h > 0.0 {
-            cr.set_source_rgb(0.9, 0.2, 0.1);
+            let (r, g, b) = crate::ui::colors::COLOR_LEVEL_CLIP;
+            cr.set_source_rgb(r, g, b);
             cr.rectangle(bx, top, bar_w, red_h);
             cr.fill().ok();
         }

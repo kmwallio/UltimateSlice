@@ -1,13 +1,60 @@
 //! Color constants and unpacking helpers used by UI rendering and analysis code.
 //!
-//! Designed to grow over time. Future home for the P2.5 named theme palette
-//! (timeline backgrounds, playhead, selection, etc.).
+//! The theme palette section below is the single source of truth for the
+//! named UI colors that previously lived as inline `set_source_rgb*` tuples
+//! in the timeline and program-monitor draw functions. Adding a light theme
+//! later (or letting users theme these) becomes a one-place edit.
 
-// ITU-R BT.709 luma coefficients. Used for false-color and zebra-pattern
-// displays in the program monitor; applied to gamma-corrected RGB.
+// ─── ITU-R BT.709 luma coefficients ───────────────────────────────────────
+//
+// Used for false-color and zebra-pattern displays in the program monitor;
+// applied to gamma-corrected RGB.
 pub const LUMA_R: f64 = 0.2126;
 pub const LUMA_G: f64 = 0.7152;
 pub const LUMA_B: f64 = 0.0722;
+
+// ─── Theme palette (P2.5) ─────────────────────────────────────────────────
+//
+// Each constant is the exact tuple that was previously inline at the
+// listed call site(s). When in doubt about a value: it shipped this way.
+// Tuples are `(r, g, b)` for opaque colors, `(r, g, b, a)` for translucent.
+
+/// Selection-highlight fill (used by both selected-track highlight and
+/// razor-tool track highlight in the timeline). Very low alpha so the
+/// underlying clips remain readable.
+pub const COLOR_SELECTION_FILL: (f64, f64, f64, f64) = (0.30, 0.55, 0.95, 0.08);
+
+/// Selection-highlight border (drawn around the same rectangle as
+/// `COLOR_SELECTION_FILL`).
+pub const COLOR_SELECTION_BORDER: (f64, f64, f64, f64) = (0.45, 0.75, 1.00, 0.85);
+
+/// Audio level meter — "safe" zone (below −18 dBFS). Used by both the
+/// timeline track meters and the program-monitor master meters.
+pub const COLOR_LEVEL_GOOD: (f64, f64, f64) = (0.20, 0.80, 0.20);
+
+/// Audio level meter — "warning" zone (−18 to −6 dBFS).
+pub const COLOR_LEVEL_WARN: (f64, f64, f64) = (0.90, 0.85, 0.10);
+
+/// Audio level meter — "clipping" zone (above −6 dBFS).
+pub const COLOR_LEVEL_CLIP: (f64, f64, f64) = (0.90, 0.20, 0.10);
+
+/// Audio role label color — Dialogue.
+pub const COLOR_AUDIO_DIALOGUE: (f64, f64, f64) = (0.90, 0.70, 0.30);
+
+/// Audio role label color — Effects.
+pub const COLOR_AUDIO_EFFECTS: (f64, f64, f64) = (0.30, 0.80, 0.90);
+
+/// Audio role label color — Music.
+pub const COLOR_AUDIO_MUSIC: (f64, f64, f64) = (0.40, 0.90, 0.50);
+
+/// Audio role label color — fallback for unknown / unset roles.
+pub const COLOR_AUDIO_ROLE_NONE: (f64, f64, f64) = (0.50, 0.50, 0.50);
+
+/// Timeline canvas background (the dark area behind tracks).
+pub const COLOR_TIMELINE_BG: (f64, f64, f64) = (0.13, 0.13, 0.15);
+
+/// Track-label / left-gutter background panel.
+pub const COLOR_TRACK_LABEL_BG: (f64, f64, f64) = (0.25, 0.25, 0.28);
 
 /// Unpack a packed RGBA `u32` (`0xRRGGBBAA`) into `(r, g, b, a)` byte channels.
 ///

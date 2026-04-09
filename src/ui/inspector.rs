@@ -8,6 +8,49 @@ use crate::model::transition::{
     MIN_TRANSITION_DURATION_NS,
 };
 
+// -----------------------------------------------------------------------
+// Inspector slider range constants (P2.7)
+// -----------------------------------------------------------------------
+//
+// Promotes the most-duplicated `Scale::with_range(…)` literal arguments
+// to named constants. The "rule of three" applies — only ranges used 3+
+// times or with clear semantic meaning are promoted. Single-use values
+// (mask feather, vi pad, eq Q, etc.) are intentionally left inline so
+// the magic-number list doesn't bloat.
+//
+// Existing transform-bounds constants from `model::transform_bounds`
+// (`SCALE_MIN/MAX`, `POSITION_MIN/MAX`, `CROP_MIN_PX/MAX_PX`, `OPACITY_*`,
+// `ROTATE_MIN_DEG/MAX_DEG`) cover the transform sliders and are not
+// duplicated here.
+
+/// Range for "color slider" inspector controls — symmetric ±1.0 with 0.01
+/// step. Used by brightness, exposure, tint, sharpness, and the eight
+/// grading sliders (shadows/midtones/highlights × value/warmth/tint).
+const COLOR_SLIDER_MIN: f64 = -1.0;
+const COLOR_SLIDER_MAX: f64 = 1.0;
+const COLOR_SLIDER_STEP: f64 = 0.01;
+
+/// Range for "unit slider" inspector controls — `[0.0, 1.0]` with 0.01 step.
+/// Used by denoise, blur, vidstab smoothing, chroma key tolerance/softness,
+/// background-removal threshold, mask center x/y, opacity, and title x/y.
+const UNIT_SLIDER_MIN: f64 = 0.0;
+const UNIT_SLIDER_MAX: f64 = 1.0;
+const UNIT_SLIDER_STEP: f64 = 0.01;
+
+/// Range for "double slider" inspector controls — `[0.0, 2.0]` with 0.01
+/// step. Used by contrast and saturation (where `1.0` is the neutral
+/// midpoint and `2.0` is doubled).
+const DOUBLE_SLIDER_MIN: f64 = 0.0;
+const DOUBLE_SLIDER_MAX: f64 = 2.0;
+const DOUBLE_SLIDER_STEP: f64 = 0.01;
+
+/// Range for the colour-temperature slider, in Kelvin. Spans tungsten to
+/// daylight (2000 K to 10000 K) with 100 K steps; the neutral default is
+/// 6500 K (D65).
+const COLOR_TEMPERATURE_MIN_K: f64 = 2000.0;
+const COLOR_TEMPERATURE_MAX_K: f64 = 10000.0;
+const COLOR_TEMPERATURE_STEP_K: f64 = 100.0;
+
 /// Clipboard for copy/paste subtitle style between clips.
 #[derive(Clone)]
 pub struct SubtitleStyleClipboard {
@@ -3300,7 +3343,7 @@ pub fn build_inspector(
     color_expander.set_child(Some(&color_inner));
 
     row_label(&color_inner, "Exposure");
-    let exposure_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let exposure_slider = Scale::with_range(Orientation::Horizontal, COLOR_SLIDER_MIN, COLOR_SLIDER_MAX, COLOR_SLIDER_STEP);
     exposure_slider.set_value(0.0);
     exposure_slider.set_draw_value(true);
     exposure_slider.set_digits(2);
@@ -3308,7 +3351,7 @@ pub fn build_inspector(
     color_inner.append(&exposure_slider);
 
     row_label(&color_inner, "Brightness");
-    let brightness_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let brightness_slider = Scale::with_range(Orientation::Horizontal, COLOR_SLIDER_MIN, COLOR_SLIDER_MAX, COLOR_SLIDER_STEP);
     brightness_slider.set_value(0.0);
     brightness_slider.set_draw_value(true);
     brightness_slider.set_digits(2);
@@ -3316,7 +3359,7 @@ pub fn build_inspector(
     color_inner.append(&brightness_slider);
 
     row_label(&color_inner, "Contrast");
-    let contrast_slider = Scale::with_range(Orientation::Horizontal, 0.0, 2.0, 0.01);
+    let contrast_slider = Scale::with_range(Orientation::Horizontal, DOUBLE_SLIDER_MIN, DOUBLE_SLIDER_MAX, DOUBLE_SLIDER_STEP);
     contrast_slider.set_value(1.0);
     contrast_slider.set_draw_value(true);
     contrast_slider.set_digits(2);
@@ -3324,7 +3367,7 @@ pub fn build_inspector(
     color_inner.append(&contrast_slider);
 
     row_label(&color_inner, "Saturation");
-    let saturation_slider = Scale::with_range(Orientation::Horizontal, 0.0, 2.0, 0.01);
+    let saturation_slider = Scale::with_range(Orientation::Horizontal, DOUBLE_SLIDER_MIN, DOUBLE_SLIDER_MAX, DOUBLE_SLIDER_STEP);
     saturation_slider.set_value(1.0);
     saturation_slider.set_draw_value(true);
     saturation_slider.set_digits(2);
@@ -3332,7 +3375,7 @@ pub fn build_inspector(
     color_inner.append(&saturation_slider);
 
     row_label(&color_inner, "Temperature (K)");
-    let temperature_slider = Scale::with_range(Orientation::Horizontal, 2000.0, 10000.0, 100.0);
+    let temperature_slider = Scale::with_range(Orientation::Horizontal, COLOR_TEMPERATURE_MIN_K, COLOR_TEMPERATURE_MAX_K, COLOR_TEMPERATURE_STEP_K);
     temperature_slider.set_value(6500.0);
     temperature_slider.set_draw_value(true);
     temperature_slider.set_digits(0);
@@ -3340,7 +3383,7 @@ pub fn build_inspector(
     color_inner.append(&temperature_slider);
 
     row_label(&color_inner, "Tint");
-    let tint_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let tint_slider = Scale::with_range(Orientation::Horizontal, COLOR_SLIDER_MIN, COLOR_SLIDER_MAX, COLOR_SLIDER_STEP);
     tint_slider.set_value(0.0);
     tint_slider.set_draw_value(true);
     tint_slider.set_digits(2);
@@ -3348,7 +3391,7 @@ pub fn build_inspector(
     color_inner.append(&tint_slider);
 
     row_label(&color_inner, "Black Point");
-    let black_point_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let black_point_slider = Scale::with_range(Orientation::Horizontal, COLOR_SLIDER_MIN, COLOR_SLIDER_MAX, COLOR_SLIDER_STEP);
     black_point_slider.set_value(0.0);
     black_point_slider.set_draw_value(true);
     black_point_slider.set_digits(2);
@@ -3361,7 +3404,7 @@ pub fn build_inspector(
     color_inner.append(&ds_title);
 
     row_label(&color_inner, "Denoise");
-    let denoise_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    let denoise_slider = Scale::with_range(Orientation::Horizontal, UNIT_SLIDER_MIN, UNIT_SLIDER_MAX, UNIT_SLIDER_STEP);
     denoise_slider.set_value(0.0);
     denoise_slider.set_draw_value(true);
     denoise_slider.set_digits(2);
@@ -3369,7 +3412,7 @@ pub fn build_inspector(
     color_inner.append(&denoise_slider);
 
     row_label(&color_inner, "Sharpness");
-    let sharpness_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let sharpness_slider = Scale::with_range(Orientation::Horizontal, COLOR_SLIDER_MIN, COLOR_SLIDER_MAX, COLOR_SLIDER_STEP);
     sharpness_slider.set_value(0.0);
     sharpness_slider.set_draw_value(true);
     sharpness_slider.set_digits(2);
@@ -3377,7 +3420,7 @@ pub fn build_inspector(
     color_inner.append(&sharpness_slider);
 
     row_label(&color_inner, "Blur");
-    let blur_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    let blur_slider = Scale::with_range(Orientation::Horizontal, UNIT_SLIDER_MIN, UNIT_SLIDER_MAX, UNIT_SLIDER_STEP);
     blur_slider.set_value(0.0);
     blur_slider.set_draw_value(true);
     blur_slider.set_digits(2);
@@ -3399,7 +3442,7 @@ pub fn build_inspector(
     color_inner.append(&vidstab_row);
 
     row_label(&color_inner, "Smoothing");
-    let vidstab_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    let vidstab_slider = Scale::with_range(Orientation::Horizontal, UNIT_SLIDER_MIN, UNIT_SLIDER_MAX, UNIT_SLIDER_STEP);
     vidstab_slider.set_value(0.5);
     vidstab_slider.set_draw_value(true);
     vidstab_slider.set_digits(2);
@@ -3412,7 +3455,7 @@ pub fn build_inspector(
     color_inner.append(&grading_title);
 
     row_label(&color_inner, "Shadows");
-    let shadows_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let shadows_slider = Scale::with_range(Orientation::Horizontal, COLOR_SLIDER_MIN, COLOR_SLIDER_MAX, COLOR_SLIDER_STEP);
     shadows_slider.set_value(0.0);
     shadows_slider.set_draw_value(true);
     shadows_slider.set_digits(2);
@@ -3420,7 +3463,7 @@ pub fn build_inspector(
     color_inner.append(&shadows_slider);
 
     row_label(&color_inner, "Midtones");
-    let midtones_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let midtones_slider = Scale::with_range(Orientation::Horizontal, COLOR_SLIDER_MIN, COLOR_SLIDER_MAX, COLOR_SLIDER_STEP);
     midtones_slider.set_value(0.0);
     midtones_slider.set_draw_value(true);
     midtones_slider.set_digits(2);
@@ -3428,7 +3471,7 @@ pub fn build_inspector(
     color_inner.append(&midtones_slider);
 
     row_label(&color_inner, "Highlights");
-    let highlights_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let highlights_slider = Scale::with_range(Orientation::Horizontal, COLOR_SLIDER_MIN, COLOR_SLIDER_MAX, COLOR_SLIDER_STEP);
     highlights_slider.set_value(0.0);
     highlights_slider.set_draw_value(true);
     highlights_slider.set_digits(2);
@@ -3436,7 +3479,7 @@ pub fn build_inspector(
     color_inner.append(&highlights_slider);
 
     row_label(&color_inner, "Highlights Warmth");
-    let highlights_warmth_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let highlights_warmth_slider = Scale::with_range(Orientation::Horizontal, COLOR_SLIDER_MIN, COLOR_SLIDER_MAX, COLOR_SLIDER_STEP);
     highlights_warmth_slider.set_value(0.0);
     highlights_warmth_slider.set_draw_value(true);
     highlights_warmth_slider.set_digits(2);
@@ -3444,7 +3487,7 @@ pub fn build_inspector(
     color_inner.append(&highlights_warmth_slider);
 
     row_label(&color_inner, "Highlights Tint");
-    let highlights_tint_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let highlights_tint_slider = Scale::with_range(Orientation::Horizontal, COLOR_SLIDER_MIN, COLOR_SLIDER_MAX, COLOR_SLIDER_STEP);
     highlights_tint_slider.set_value(0.0);
     highlights_tint_slider.set_draw_value(true);
     highlights_tint_slider.set_digits(2);
@@ -3452,7 +3495,7 @@ pub fn build_inspector(
     color_inner.append(&highlights_tint_slider);
 
     row_label(&color_inner, "Midtones Warmth");
-    let midtones_warmth_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let midtones_warmth_slider = Scale::with_range(Orientation::Horizontal, COLOR_SLIDER_MIN, COLOR_SLIDER_MAX, COLOR_SLIDER_STEP);
     midtones_warmth_slider.set_value(0.0);
     midtones_warmth_slider.set_draw_value(true);
     midtones_warmth_slider.set_digits(2);
@@ -3460,7 +3503,7 @@ pub fn build_inspector(
     color_inner.append(&midtones_warmth_slider);
 
     row_label(&color_inner, "Midtones Tint");
-    let midtones_tint_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let midtones_tint_slider = Scale::with_range(Orientation::Horizontal, COLOR_SLIDER_MIN, COLOR_SLIDER_MAX, COLOR_SLIDER_STEP);
     midtones_tint_slider.set_value(0.0);
     midtones_tint_slider.set_draw_value(true);
     midtones_tint_slider.set_digits(2);
@@ -3468,7 +3511,7 @@ pub fn build_inspector(
     color_inner.append(&midtones_tint_slider);
 
     row_label(&color_inner, "Shadows Warmth");
-    let shadows_warmth_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let shadows_warmth_slider = Scale::with_range(Orientation::Horizontal, COLOR_SLIDER_MIN, COLOR_SLIDER_MAX, COLOR_SLIDER_STEP);
     shadows_warmth_slider.set_value(0.0);
     shadows_warmth_slider.set_draw_value(true);
     shadows_warmth_slider.set_digits(2);
@@ -3476,7 +3519,7 @@ pub fn build_inspector(
     color_inner.append(&shadows_warmth_slider);
 
     row_label(&color_inner, "Shadows Tint");
-    let shadows_tint_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let shadows_tint_slider = Scale::with_range(Orientation::Horizontal, COLOR_SLIDER_MIN, COLOR_SLIDER_MAX, COLOR_SLIDER_STEP);
     shadows_tint_slider.set_value(0.0);
     shadows_tint_slider.set_draw_value(true);
     shadows_tint_slider.set_digits(2);
@@ -3529,7 +3572,7 @@ pub fn build_inspector(
     chroma_custom_color_row.set_visible(false);
 
     row_label(&chroma_key_inner, "Tolerance");
-    let chroma_tolerance_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    let chroma_tolerance_slider = Scale::with_range(Orientation::Horizontal, UNIT_SLIDER_MIN, UNIT_SLIDER_MAX, UNIT_SLIDER_STEP);
     chroma_tolerance_slider.set_value(0.3);
     chroma_tolerance_slider.set_draw_value(true);
     chroma_tolerance_slider.set_digits(2);
@@ -3537,7 +3580,7 @@ pub fn build_inspector(
     chroma_key_inner.append(&chroma_tolerance_slider);
 
     row_label(&chroma_key_inner, "Edge Softness");
-    let chroma_softness_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    let chroma_softness_slider = Scale::with_range(Orientation::Horizontal, UNIT_SLIDER_MIN, UNIT_SLIDER_MAX, UNIT_SLIDER_STEP);
     chroma_softness_slider.set_value(0.1);
     chroma_softness_slider.set_draw_value(true);
     chroma_softness_slider.set_digits(2);
@@ -3559,7 +3602,7 @@ pub fn build_inspector(
     bg_removal_inner.append(&bg_removal_enable);
 
     row_label(&bg_removal_inner, "Threshold");
-    let bg_removal_threshold_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    let bg_removal_threshold_slider = Scale::with_range(Orientation::Horizontal, UNIT_SLIDER_MIN, UNIT_SLIDER_MAX, UNIT_SLIDER_STEP);
     bg_removal_threshold_slider.set_value(0.5);
     bg_removal_threshold_slider.set_draw_value(true);
     bg_removal_threshold_slider.set_digits(2);
@@ -3843,7 +3886,7 @@ pub fn build_inspector(
     mask_inner.append(&mask_rect_ellipse_controls);
 
     row_label(&mask_rect_ellipse_controls, "Center X");
-    let mask_center_x_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    let mask_center_x_slider = Scale::with_range(Orientation::Horizontal, UNIT_SLIDER_MIN, UNIT_SLIDER_MAX, UNIT_SLIDER_STEP);
     mask_center_x_slider.set_value(0.5);
     mask_center_x_slider.set_draw_value(true);
     mask_center_x_slider.set_digits(2);
@@ -3851,7 +3894,7 @@ pub fn build_inspector(
     mask_rect_ellipse_controls.append(&mask_center_x_slider);
 
     row_label(&mask_rect_ellipse_controls, "Center Y");
-    let mask_center_y_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    let mask_center_y_slider = Scale::with_range(Orientation::Horizontal, UNIT_SLIDER_MIN, UNIT_SLIDER_MAX, UNIT_SLIDER_STEP);
     mask_center_y_slider.set_value(0.5);
     mask_center_y_slider.set_draw_value(true);
     mask_center_y_slider.set_digits(2);
@@ -3956,7 +3999,7 @@ pub fn build_inspector(
     tracking_inner.append(&tracking_edit_region_btn);
 
     row_label(&tracking_inner, "Region Center X");
-    let tracking_center_x_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    let tracking_center_x_slider = Scale::with_range(Orientation::Horizontal, UNIT_SLIDER_MIN, UNIT_SLIDER_MAX, UNIT_SLIDER_STEP);
     tracking_center_x_slider.set_value(0.5);
     tracking_center_x_slider.set_draw_value(true);
     tracking_center_x_slider.set_digits(2);
@@ -3964,7 +4007,7 @@ pub fn build_inspector(
     tracking_inner.append(&tracking_center_x_slider);
 
     row_label(&tracking_inner, "Region Center Y");
-    let tracking_center_y_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    let tracking_center_y_slider = Scale::with_range(Orientation::Horizontal, UNIT_SLIDER_MIN, UNIT_SLIDER_MAX, UNIT_SLIDER_STEP);
     tracking_center_y_slider.set_value(0.5);
     tracking_center_y_slider.set_draw_value(true);
     tracking_center_y_slider.set_digits(2);
@@ -4331,7 +4374,7 @@ pub fn build_inspector(
     audio_inner.append(&audio_animation_mode_btn);
 
     row_label(&audio_inner, "Pan");
-    let pan_slider = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    let pan_slider = Scale::with_range(Orientation::Horizontal, COLOR_SLIDER_MIN, COLOR_SLIDER_MAX, COLOR_SLIDER_STEP);
     pan_slider.set_value(0.0);
     pan_slider.set_draw_value(true);
     pan_slider.set_digits(2);
@@ -4577,7 +4620,7 @@ pub fn build_inspector(
     transform_inner.append(&scale_keyframe_row);
 
     row_label(&transform_inner, "Opacity");
-    let opacity_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    let opacity_slider = Scale::with_range(Orientation::Horizontal, UNIT_SLIDER_MIN, UNIT_SLIDER_MAX, UNIT_SLIDER_STEP);
     opacity_slider.set_value(1.0);
     opacity_slider.set_draw_value(true);
     opacity_slider.set_digits(2);
@@ -4796,13 +4839,13 @@ pub fn build_inspector(
     title_inner.append(&title_color_btn);
 
     row_label(&title_inner, "Position X");
-    let title_x_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    let title_x_slider = Scale::with_range(Orientation::Horizontal, UNIT_SLIDER_MIN, UNIT_SLIDER_MAX, UNIT_SLIDER_STEP);
     title_x_slider.set_value(0.5);
     title_x_slider.set_hexpand(true);
     title_inner.append(&title_x_slider);
 
     row_label(&title_inner, "Position Y");
-    let title_y_slider = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    let title_y_slider = Scale::with_range(Orientation::Horizontal, UNIT_SLIDER_MIN, UNIT_SLIDER_MAX, UNIT_SLIDER_STEP);
     title_y_slider.set_value(0.9);
     title_y_slider.set_hexpand(true);
     title_inner.append(&title_y_slider);

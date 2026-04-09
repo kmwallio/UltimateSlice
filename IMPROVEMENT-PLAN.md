@@ -358,29 +358,20 @@ the closed PR's version of this file.
 > the Project Settings dialog, so it deserves its own table; defer to a
 > follow-up.
 
-### P2.5 — Color palette / theme
-~30 RGBA tuples in `src/ui/timeline/widget.rs` draw functions
-(7049, 7170, 7178, 7279, 7382, 7466, 7485-7486, 7556-7558, 7685, ...).
-Audio level colors at `src/ui/program_monitor.rs:1219, 1230, 1239`.
+### ~~P2.5 — Color palette / theme~~ ✅ DONE (one-off colors still inline)
 
-Create `src/ui/theme.rs` with named constants:
-
-```rust
-pub const COLOR_BG_DARK: (f64, f64, f64) = (0.13, 0.13, 0.15);
-pub const COLOR_BG_PANEL: (f64, f64, f64) = (0.25, 0.25, 0.28);
-pub const COLOR_PLAYHEAD: (f64, f64, f64, f64) = (0.20, 0.70, 1.00, 0.90);
-pub const COLOR_SELECTION_FILL: (f64, f64, f64, f64) = (0.30, 0.55, 0.95, 0.08);
-pub const COLOR_SELECTION_BORDER: (f64, f64, f64, f64) = (0.45, 0.75, 1.00, 0.85);
-pub const COLOR_AUDIO_DIALOGUE: (f64, f64, f64) = (0.90, 0.70, 0.30);
-pub const COLOR_AUDIO_EFFECTS:  (f64, f64, f64) = (0.30, 0.80, 0.90);
-pub const COLOR_AUDIO_MUSIC:    (f64, f64, f64) = (0.40, 0.90, 0.50);
-pub const COLOR_LEVEL_GOOD: (f64, f64, f64) = (0.20, 0.80, 0.20);
-pub const COLOR_LEVEL_WARN: (f64, f64, f64) = (0.90, 0.85, 0.10);
-pub const COLOR_LEVEL_CLIP: (f64, f64, f64) = (0.90, 0.20, 0.10);
-// ... etc.
-```
-
-This also gives a single place to add a "light theme" later if desired.
+> **Landed:** the named theme palette lives in the existing `src/ui/colors.rs`
+> module (no new `theme.rs` — `colors.rs` already exists from batch 1 and is
+> the natural home). Constants added: `COLOR_SELECTION_FILL`,
+> `COLOR_SELECTION_BORDER`, `COLOR_LEVEL_GOOD/WARN/CLIP`,
+> `COLOR_AUDIO_DIALOGUE/EFFECTS/MUSIC/ROLE_NONE`, `COLOR_TIMELINE_BG`,
+> `COLOR_TRACK_LABEL_BG`. Both timeline meters (widget.rs) and program-monitor
+> meters (program_monitor.rs) share the same level constants.
+>
+> **Still pending:** the ~50 one-off colors in widget.rs that are unique to
+> a single drawing site (compound badge `(0.18, 0.50, 0.48)`, error tints,
+> through-edit indicator, etc.). The rule of three didn't fire for those —
+> promote later only if they start to duplicate.
 
 ### ~~P2.6 — ITU-R BT.709 luma coefficients (duplicated)~~ ✅ DONE
 
@@ -390,23 +381,24 @@ This also gives a single place to add a "light theme" later if desired.
 > designed as the future home for the deferred P1.6 RGBA-from-u32 helper
 > and the P2.5 named theme palette.
 
-### P2.7 — Inspector slider ranges
-25+ slider min/max/step tuples in `src/ui/inspector.rs:3335-4253`:
+### ~~P2.7 — Inspector slider ranges~~ ✅ DONE (single-use ranges still inline)
 
-| Range | Step | Use | Lines |
-|---|---|---|---|
-| -1.0 .. 1.0 | 0.01 | Color sliders (brightness, exposure, etc.) | 3335-3511 |
-| 0.0 .. 2.0 | 0.01 | Contrast, saturation | 3351, 3359 |
-| 2000 .. 10000 | 100 | Color temperature (Kelvin) | 3367 |
-| 0.0 .. 1.0 | 0.01 | Denoise, blur, chroma intensity | 3396-3594 |
-| -100.0 .. 12.0 | 0.1 | Volume (dB) | 4205 |
-| 0.0 .. 100.0 | 1.0 | Voice isolation intensity/floor | 4221, 4253 |
-| 0.05 .. 0.95 | 0.05 | Subtitle position | 3775 |
-| 2.0 .. 10.0 | 1.0 | Subtitle word window | 3765 |
-
-Group into named constants per inspector section (`COLOR_SLIDER_MIN`,
-`COLOR_SLIDER_MAX`, `COLOR_SLIDER_STEP`, `VOLUME_DB_MIN`, etc.). Reduces
-magic numbers and makes UI consistent if a range needs retuning.
+> **Landed:** four slider-range groups added at the top of `src/ui/inspector.rs`:
+> `COLOR_SLIDER_*` (17 sites — brightness/exposure/tint/sharpness/grading),
+> `UNIT_SLIDER_*` (12 sites — denoise/blur/vidstab/chroma/bg-removal/masks/
+> opacity/title), `DOUBLE_SLIDER_*` (contrast, saturation), and
+> `COLOR_TEMPERATURE_*_K` (the temperature slider). The transform sliders
+> already used `model::transform_bounds` constants from an earlier release
+> and were not touched.
+>
+> **Intentionally inline:** single-use ranges like vi pad `(0.0, 500.0, 5.0)`,
+> vi fade `(0.0, 200.0, 1.0)`, vi silence threshold `(-60.0, -10.0, 1.0)`,
+> eq gain `(-24.0, 12.0, 0.1)`, eq Q `(0.1, 10.0, 0.1)`, pitch shift
+> `(-12.0, 12.0, 0.5)`, duck amount `(-24.0, 0.0, 0.5)`, mask feather
+> `(0.0, 0.5, 0.01)`, mask expansion `(-0.5, 0.5, 0.01)`, subtitle position
+> `(0.05, 0.95, 0.05)`, and subtitle word window `(2.0, 10.0, 1.0)`. The rule
+> of three didn't fire — promoting them would add line noise without
+> reducing duplication.
 
 ### ~~P2.8 — Font sizes~~ ✅ DONE
 
