@@ -400,6 +400,19 @@ fn write_otio_with_mode(
                 subtitle_segments: Some(clip.subtitle_segments.clone()),
                 subtitles_language: Some(clip.subtitles_language.clone()),
                 subtitle_font: Some(clip.subtitle_font.clone()),
+                subtitle_bold: Some(clip.subtitle_bold),
+                subtitle_italic: Some(clip.subtitle_italic),
+                subtitle_underline: Some(clip.subtitle_underline),
+                subtitle_shadow: Some(clip.subtitle_shadow),
+                subtitle_shadow_color: Some(clip.subtitle_shadow_color),
+                subtitle_shadow_offset_x: Some(clip.subtitle_shadow_offset_x),
+                subtitle_shadow_offset_y: Some(clip.subtitle_shadow_offset_y),
+                subtitle_highlight_flags: if clip.subtitle_highlight_flags.is_none() {
+                    None
+                } else {
+                    Some(clip.subtitle_highlight_flags)
+                },
+                subtitle_bg_highlight_color: Some(clip.subtitle_bg_highlight_color),
                 subtitle_color: Some(clip.subtitle_color),
                 subtitle_outline_color: Some(clip.subtitle_outline_color),
                 subtitle_outline_width: Some(clip.subtitle_outline_width),

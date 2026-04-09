@@ -3,7 +3,7 @@ use serde_json::Value;
 
 use crate::model::clip::{
     AudioChannelMode, BlendMode, ClipColorLabel, EqBand, NumericKeyframe, SlowMotionInterp,
-    SubtitleHighlightMode, SubtitleSegment, VoiceIsolationSource,
+    SubtitleHighlightFlags, SubtitleHighlightMode, SubtitleSegment, VoiceIsolationSource,
 };
 
 pub(crate) const ULTIMATESLICE_OTIO_METADATA_VERSION: u32 = 1;
@@ -252,6 +252,27 @@ pub(crate) struct UltimateSliceClipOtioMetadata {
     pub(crate) subtitles_language: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) subtitle_font: Option<String>,
+    /// Base subtitle text styling (always-on, applies to every subtitle line).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) subtitle_bold: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) subtitle_italic: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) subtitle_underline: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) subtitle_shadow: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) subtitle_shadow_color: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) subtitle_shadow_offset_x: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) subtitle_shadow_offset_y: Option<f64>,
+    /// Multi-effect karaoke highlight flags (replaces single-mode enum).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) subtitle_highlight_flags: Option<SubtitleHighlightFlags>,
+    /// Background highlight color behind the active word.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) subtitle_bg_highlight_color: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) subtitle_color: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -5,6 +5,11 @@ All notable project changes and progress should be recorded here.
 ## [Unreleased]
 
 ### Added
+- **OTIO clip metadata coverage — Batch C** (subtitle styling completion): adds **9 more fields** that complete the subtitle metadata story:
+  - Base text styles: `subtitle_bold`, `subtitle_italic`, `subtitle_underline`, `subtitle_shadow` + `subtitle_shadow_color`, `subtitle_shadow_offset_x`, `subtitle_shadow_offset_y`
+  - Multi-effect karaoke highlight: `subtitle_highlight_flags` (full `SubtitleHighlightFlags` struct: bold, color, underline, stroke, italic, background, shadow combinable)
+  - Active-word background highlight: `subtitle_bg_highlight_color`
+  - All existing subtitle base color/outline/box/highlight-mode fields were already covered in earlier batches; Batch C closes the remaining gaps so a styled subtitle clip exported to OTIO and re-imported preserves every visual setting. Roundtrip test (`test_roundtrip_batch_c_subtitle_styling`) verifies the new fields. All 915 tests pass.
 - **OTIO clip metadata coverage — Batch B** (voice isolation, chroma key, background removal, freeze frame, stabilization, misc): adds **24 more fields** to `UltimateSliceClipOtioMetadata` so the second tier of per-clip features now round-trips:
   - **Voice isolation (6 + measured loudness)**: `voice_isolation_pad_ms`, `voice_isolation_fade_ms`, `voice_isolation_floor`, `voice_isolation_source` (`Subtitles`/`Silence`), `voice_isolation_silence_threshold_db`, `voice_isolation_silence_min_ms`, `measured_loudness_lufs`
   - **Chroma key (4)**: `chroma_key_enabled`, `chroma_key_color`, `chroma_key_tolerance`, `chroma_key_softness`

@@ -523,6 +523,33 @@ fn otio_clip_to_clip(
         if let Some(v) = us.subtitle_font.as_ref() {
             clip.subtitle_font = v.clone();
         }
+        if let Some(v) = us.subtitle_bold {
+            clip.subtitle_bold = v;
+        }
+        if let Some(v) = us.subtitle_italic {
+            clip.subtitle_italic = v;
+        }
+        if let Some(v) = us.subtitle_underline {
+            clip.subtitle_underline = v;
+        }
+        if let Some(v) = us.subtitle_shadow {
+            clip.subtitle_shadow = v;
+        }
+        if let Some(v) = us.subtitle_shadow_color {
+            clip.subtitle_shadow_color = v;
+        }
+        if let Some(v) = us.subtitle_shadow_offset_x {
+            clip.subtitle_shadow_offset_x = v;
+        }
+        if let Some(v) = us.subtitle_shadow_offset_y {
+            clip.subtitle_shadow_offset_y = v;
+        }
+        if let Some(v) = us.subtitle_highlight_flags {
+            clip.subtitle_highlight_flags = v;
+        }
+        if let Some(v) = us.subtitle_bg_highlight_color {
+            clip.subtitle_bg_highlight_color = v;
+        }
         if let Some(v) = us.subtitle_color {
             clip.subtitle_color = v;
         }
@@ -1413,6 +1440,74 @@ mod tests {
             clip.source_timecode_base_ns
         );
         assert_eq!(clip2.animated_svg, clip.animated_svg);
+    }
+
+    #[test]
+    fn test_roundtrip_batch_c_subtitle_styling() {
+        use crate::model::clip::SubtitleHighlightFlags;
+        use crate::model::track::Track;
+
+        let mut p = Project::new("Batch C Roundtrip");
+        p.frame_rate = FrameRate {
+            numerator: 30,
+            denominator: 1,
+        };
+        p.tracks.clear();
+
+        let mut track = Track::new_video("V1");
+        let mut clip = Clip::new(
+            "/footage/test.mov",
+            5_000_000_000,
+            0,
+            ClipKind::Video,
+        );
+
+        clip.subtitle_bold = true;
+        clip.subtitle_italic = true;
+        clip.subtitle_underline = false;
+        clip.subtitle_shadow = true;
+        clip.subtitle_shadow_color = 0x000000CC;
+        clip.subtitle_shadow_offset_x = 2.5;
+        clip.subtitle_shadow_offset_y = 3.0;
+        clip.subtitle_highlight_flags = SubtitleHighlightFlags {
+            bold: true,
+            color: true,
+            underline: false,
+            stroke: true,
+            italic: false,
+            background: true,
+            shadow: false,
+        };
+        clip.subtitle_bg_highlight_color = 0xFFFF0080;
+
+        track.add_clip(clip.clone());
+        p.tracks.push(track);
+
+        let json = crate::otio::writer::write_otio(&p).unwrap();
+        let p2 = parse_otio(&json).unwrap();
+        let clip2 = &p2.tracks[0].clips[0];
+
+        assert_eq!(clip2.subtitle_bold, clip.subtitle_bold);
+        assert_eq!(clip2.subtitle_italic, clip.subtitle_italic);
+        assert_eq!(clip2.subtitle_underline, clip.subtitle_underline);
+        assert_eq!(clip2.subtitle_shadow, clip.subtitle_shadow);
+        assert_eq!(clip2.subtitle_shadow_color, clip.subtitle_shadow_color);
+        assert_eq!(
+            clip2.subtitle_shadow_offset_x,
+            clip.subtitle_shadow_offset_x
+        );
+        assert_eq!(
+            clip2.subtitle_shadow_offset_y,
+            clip.subtitle_shadow_offset_y
+        );
+        assert_eq!(
+            clip2.subtitle_highlight_flags,
+            clip.subtitle_highlight_flags
+        );
+        assert_eq!(
+            clip2.subtitle_bg_highlight_color,
+            clip.subtitle_bg_highlight_color
+        );
     }
 
     #[test]
