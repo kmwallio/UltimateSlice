@@ -52,6 +52,7 @@ impl FrameRate {
             denominator: 1,
         }
     }
+    // Used in tests; available as a public constructor if needed.
     #[allow(dead_code)]
     pub fn fps_30() -> Self {
         Self {
@@ -59,6 +60,7 @@ impl FrameRate {
             denominator: 1001,
         }
     }
+    // Used in tests; available as a public constructor if needed.
     #[allow(dead_code)]
     pub fn fps_60() -> Self {
         Self {
@@ -206,14 +208,12 @@ impl Project {
         self.tracks.iter().map(|t| t.duration()).max().unwrap_or(0)
     }
 
-    #[allow(dead_code)]
     pub fn add_video_track(&mut self) {
         let n = self.video_tracks().count() + 1;
         self.tracks.push(Track::new_video(format!("Video {n}")));
         self.dirty = true;
     }
 
-    #[allow(dead_code)]
     pub fn add_audio_track(&mut self) {
         let n = self.audio_tracks().count() + 1;
         self.tracks.push(Track::new_audio(format!("Audio {n}")));

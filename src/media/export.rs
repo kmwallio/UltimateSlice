@@ -1217,8 +1217,8 @@ pub fn export_project(
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
 
-    eprintln!(
-        "[export] ffmpeg args: {:?}",
+    log::debug!(
+        "ffmpeg args: {:?}",
         cmd.get_args().collect::<Vec<_>>()
     );
 
@@ -1247,7 +1247,7 @@ pub fn export_project(
             && !line.starts_with("drop_")
             && !line.starts_with("stream_")
         {
-            eprintln!("[export] ffmpeg: {line}");
+            log::warn!("ffmpeg: {line}");
             error_lines.push(line);
         }
     }

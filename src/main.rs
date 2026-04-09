@@ -130,7 +130,7 @@ fn ensure_single_mcp_instance() {
     if let Ok(content) = std::fs::read_to_string(MCP_PID_FILE) {
         if let Ok(pid) = content.trim().parse::<u32>() {
             if process_exists(pid) {
-                eprintln!("[MCP] Terminating existing instance (PID {pid})…");
+                log::info!("Terminating existing MCP instance (PID {pid})…");
                 let killed = std::process::Command::new("kill")
                     .args(["-15", &pid.to_string()])
                     .status()
@@ -147,7 +147,7 @@ fn ensure_single_mcp_instance() {
                     }
                     // Force-kill if still alive
                     if process_exists(pid) {
-                        eprintln!("[MCP] Sending SIGKILL to PID {pid}");
+                        log::warn!("Sending SIGKILL to MCP PID {pid}");
                         let _ = std::process::Command::new("kill")
                             .args(["-9", &pid.to_string()])
                             .status();

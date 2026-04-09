@@ -53,7 +53,7 @@ pub fn sync_clips_by_audio(clips: &[(String, String, u64, u64)]) -> Vec<AudioSyn
     let anchor = &clips[0];
     let anchor_audio = match extract_and_prepare(&anchor.1, anchor.2, anchor.3) {
         Some(a) => {
-            eprintln!(
+            log::debug!(
                 "audio_sync: anchor '{}' extracted {} samples",
                 anchor.0,
                 a.len()
@@ -67,7 +67,7 @@ pub fn sync_clips_by_audio(clips: &[(String, String, u64, u64)]) -> Vec<AudioSyn
     for clip in &clips[1..] {
         let clip_audio = match extract_and_prepare(&clip.1, clip.2, clip.3) {
             Some(a) => {
-                eprintln!(
+                log::debug!(
                     "audio_sync: clip '{}' extracted {} samples",
                     clip.0,
                     a.len()
@@ -87,7 +87,7 @@ pub fn sync_clips_by_audio(clips: &[(String, String, u64, u64)]) -> Vec<AudioSyn
 
         let (sample_offset, confidence) = gcc_phat(&anchor_audio, &clip_audio);
         let offset_ns = (sample_offset as f64 * NS_PER_SAMPLE) as i64;
-        eprintln!(
+        log::debug!(
             "audio_sync: clip '{}' gcc_phat => sample_offset={}, offset_ns={}, confidence={:.2}",
             clip.0, sample_offset, offset_ns, confidence
         );
@@ -100,7 +100,7 @@ pub fn sync_clips_by_audio(clips: &[(String, String, u64, u64)]) -> Vec<AudioSyn
         };
 
         if let Some(drift) = drift_speed {
-            eprintln!(
+            log::debug!(
                 "audio_sync: clip '{}' drift_speed={:.8} ({:+.4} ppm)",
                 clip.0,
                 drift,
@@ -187,7 +187,7 @@ fn measure_drift(
     // Sanity check: reject implausible corrections (> 0.5% drift is almost
     // certainly a misdetection, not real clock drift).
     if (speed_ratio - 1.0).abs() > 0.005 {
-        eprintln!(
+        log::warn!(
             "audio_sync: drift {:.6} rejected (> 0.5%): start_off={} end_off={} conf={:.1}/{:.1}",
             speed_ratio, start_offset, end_offset, start_conf, end_conf
         );
@@ -415,7 +415,7 @@ pub(crate) fn extract_interleaved_audio_samples(
             gst::ClockTime::from_nseconds(source_in_ns),
         );
         if seek_ok.is_err() {
-            eprintln!("audio_sync: seek to {}ns failed for {}", source_in_ns, path);
+            log::warn!("audio_sync: seek to {}ns failed for {}", source_in_ns, path);
             pipeline.set_state(gst::State::Null).ok();
             return None;
         }

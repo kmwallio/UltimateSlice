@@ -87,12 +87,12 @@ pub fn run_socket_server(sender: std::sync::mpsc::Sender<McpCommand>, stop: Arc<
     let listener = match UnixListener::bind(&path) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("[MCP-socket] Failed to bind {}: {e}", path.display());
+            log::error!("Failed to bind MCP socket {}: {e}", path.display());
             return;
         }
     };
     listener.set_nonblocking(true).ok();
-    eprintln!("[MCP-socket] Listening on {}", path.display());
+    log::info!("MCP socket listening on {}", path.display());
 
     let client_active = Arc::new(AtomicBool::new(false));
 
@@ -112,7 +112,7 @@ pub fn run_socket_server(sender: std::sync::mpsc::Sender<McpCommand>, stop: Arc<
                     );
                     continue;
                 }
-                eprintln!("[MCP-socket] Client connected");
+                log::info!("MCP socket client connected");
                 let sender = sender.clone();
                 let active = client_active.clone();
                 std::thread::spawn(move || {
@@ -127,21 +127,21 @@ pub fn run_socket_server(sender: std::sync::mpsc::Sender<McpCommand>, stop: Arc<
                     let mut writer = stream;
                     run_server(reader, &mut writer, &sender);
                     active.store(false, Ordering::Relaxed);
-                    eprintln!("[MCP-socket] Client disconnected");
+                    log::info!("MCP socket client disconnected");
                 });
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
             Err(e) => {
-                eprintln!("[MCP-socket] Accept error: {e}");
+                log::error!("MCP socket accept error: {e}");
                 break;
             }
         }
     }
 
     let _ = std::fs::remove_file(&path);
-    eprintln!("[MCP-socket] Server stopped");
+    log::info!("MCP socket server stopped");
 }
 
 // ── JSON-RPC helpers ─────────────────────────────────────────────────────────

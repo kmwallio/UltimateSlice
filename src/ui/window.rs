@@ -4309,7 +4309,7 @@ pub fn build_window(
                 .borrow()
                 .set_hardware_acceleration(new_state.hardware_acceleration_enabled)
             {
-                eprintln!("Failed to apply hardware acceleration setting: {e}");
+                log::warn!("Failed to apply hardware acceleration setting: {e}");
             }
             player
                 .borrow()
@@ -7232,7 +7232,7 @@ pub fn build_window(
                                 &format!("Frame exported ({fmt})"),
                             ),
                             Err(e) => {
-                                eprintln!("[frame-export] {e}");
+                                log::error!("{e}");
                                 flash_window_status_title(
                                     &win_for_save,
                                     &project,
@@ -13787,7 +13787,7 @@ pub fn build_window(
             std::thread::spawn(move || {
                 crate::mcp::server::run_stdio_server(stdio_sender);
             });
-            eprintln!("[MCP] Server listening on stdio (JSON-RPC 2.0 / MCP 2024-11-05)");
+            log::info!("Server listening on stdio (JSON-RPC 2.0 / MCP 2024-11-05)");
         }
 
         // Socket transport (Preferences toggle) — can start/stop at runtime.
@@ -14384,13 +14384,13 @@ pub fn build_window(
                 }
                 Ok(Err(e)) => {
                     timeline_state.borrow_mut().loading = false;
-                    eprintln!("{e}");
+                    log::error!("{e}");
                     glib::ControlFlow::Break
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     timeline_state.borrow_mut().loading = false;
-                    eprintln!("Startup project open worker disconnected");
+                    log::error!("Startup project open worker disconnected");
                     glib::ControlFlow::Break
                 }
             }

@@ -810,7 +810,7 @@ pub fn confirm_unsaved_then(
                         on_project_changed_c();
                         on_continue_c();
                     }
-                    Err(e) => eprintln!("{e}"),
+                    Err(e) => log::error!("{e}"),
                 }
             } else {
                 let file_dialog = gtk::FileDialog::new();
@@ -835,7 +835,7 @@ pub fn confirm_unsaved_then(
                                     on_project_changed_s();
                                     on_continue_s();
                                 }
-                                Err(e) => eprintln!("{e}"),
+                                Err(e) => log::error!("{e}"),
                             }
                         }
                     }
@@ -1087,7 +1087,7 @@ pub fn build_toolbar(
                                             glib::ControlFlow::Break
                                         }
                                         Ok(Err(e)) => {
-                                            eprintln!("{e}");
+                                            log::error!("{e}");
                                             timeline_state_cb.borrow_mut().loading = false;
                                             glib::ControlFlow::Break
                                         }
@@ -1235,7 +1235,7 @@ pub fn build_toolbar(
                                             glib::ControlFlow::Break
                                         }
                                         Ok(Err(e)) => {
-                                            eprintln!("{e}");
+                                            log::error!("{e}");
                                             timeline_state.borrow_mut().loading = false;
                                             glib::ControlFlow::Break
                                         }
@@ -1300,7 +1300,7 @@ pub fn build_toolbar(
                                 on_project_changed();
                             }
                             Err(e) => {
-                                eprintln!("{e}");
+                                log::error!("{e}");
                             }
                         }
                     }
@@ -2080,7 +2080,7 @@ pub fn build_toolbar(
                                             ExportProgress::Error(e) => {
                                                 status_label.set_text(&format!("Error: {e}"));
                                                 close_btn.set_label("Close");
-                                                eprintln!("Export error: {e}");
+                                                log::error!("Export error: {e}");
                                                 return glib::ControlFlow::Break;
                                             }
                                         }
@@ -2245,7 +2245,7 @@ pub fn build_toolbar(
                                     }
                                     ExportProjectWithMediaUiEvent::Error(e) => {
                                         status_label.set_text(&format!("Error: {e}"));
-                                        eprintln!("Export-with-media error: {e}");
+                                        log::error!("Export-with-media error: {e}");
                                         return glib::ControlFlow::Break;
                                     }
                                 }
@@ -2389,7 +2389,7 @@ pub fn build_toolbar(
                                     }
                                     CollectFilesUiEvent::Error(e) => {
                                         status_label.set_text(&format!("Error: {e}"));
-                                        eprintln!("Collect-files error: {e}");
+                                        log::error!("Collect-files error: {e}");
                                         return glib::ControlFlow::Break;
                                     }
                                 }

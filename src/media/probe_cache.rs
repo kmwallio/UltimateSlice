@@ -24,7 +24,6 @@ pub struct ProbeResult {
     pub path: String,
     pub duration_ns: u64,
     pub is_audio_only: bool,
-    #[allow(dead_code)]
     pub has_audio: bool,
     pub source_timecode_base_ns: Option<u64>,
     /// True when the file is a still image (PNG, JPEG, etc.).

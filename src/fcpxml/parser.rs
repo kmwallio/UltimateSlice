@@ -22,7 +22,7 @@ const MAX_IMPORTED_LINEAR_VOLUME: f64 = 3.981_071_705_5; // +12 dB
 
 /// Represents a parsed FCPXML asset
 struct Asset {
-    #[allow(dead_code)]
+    #[allow(dead_code)] // read in finalize_asset to key the assets HashMap
     id: String,
     src: String,
     name: String,
@@ -82,7 +82,7 @@ struct ActiveClipContext {
 }
 
 /// Parse an FCPXML string into a `Project`.
-#[allow(dead_code)]
+#[allow(dead_code)] // used by tests in parser.rs and writer.rs
 pub fn parse_fcpxml(xml: &str) -> Result<Project> {
     parse_fcpxml_with_path(xml, None)
 }

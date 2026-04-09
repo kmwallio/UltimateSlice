@@ -220,7 +220,6 @@ impl MediaCollection {
 /// multicam clips) using their clip id as the stable library key.
 #[derive(Debug, Clone)]
 pub struct MediaItem {
-    #[allow(dead_code)]
     pub id: String,
     pub source_path: String,
     pub duration_ns: u64,

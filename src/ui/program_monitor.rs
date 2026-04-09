@@ -160,7 +160,6 @@ fn subtitle_preview_baseline_y(
 /// Transform parameters for a clip (crop, rotation, flip).
 /// Kept here so other modules can reference it without a separate file.
 #[derive(Clone, Copy, Default)]
-#[allow(dead_code)]
 pub struct ClipTransform {
     pub crop_left: i32,
     pub crop_right: i32,

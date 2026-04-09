@@ -151,27 +151,27 @@ impl ThumbnailCache {
                             0
                         };
                         extract_animated_svg_rgba(&path, clamped_time_ns).unwrap_or_else(|e| {
-                            eprintln!("[thumb] animated svg render failed: {e}");
+                            log::warn!("animated svg render failed: {e}");
                             Vec::new()
                         })
                     } else if is_image {
                         extract_rgba(path.clone(), time_ns)
                             .or_else(|gst_err| {
-                                eprintln!("[thumb] gstreamer extraction failed: {gst_err}");
+                                log::warn!("gstreamer extraction failed: {gst_err}");
                                 extract_rgba_ffmpeg(&path, time_ns)
                             })
                             .unwrap_or_else(|e| {
-                                eprintln!("[thumb] ffmpeg fallback failed: {e}");
+                                log::warn!("ffmpeg fallback failed: {e}");
                                 Vec::new()
                             })
                     } else {
                         extract_rgba_ffmpeg(&path, time_ns)
                             .or_else(|ffmpeg_err| {
-                                eprintln!("[thumb] ffmpeg extraction failed: {ffmpeg_err}");
+                                log::warn!("ffmpeg extraction failed: {ffmpeg_err}");
                                 extract_rgba(path.clone(), time_ns)
                             })
                             .unwrap_or_else(|e| {
-                                eprintln!("[thumb] gstreamer fallback failed: {e}");
+                                log::warn!("gstreamer fallback failed: {e}");
                                 Vec::new()
                             })
                     };

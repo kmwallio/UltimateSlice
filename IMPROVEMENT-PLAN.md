@@ -523,26 +523,43 @@ serialization format (P0.3 / project versioning).
 
 ## P4 — Polish
 
-### P4.1 — Logging consistency
-411 mixed `log::*` and `eprintln!()` calls across the codebase. Standardize
-on the `log` crate and remove the `eprintln!` calls (keeping a single
-`env_logger` init in `main.rs`).
+### ~~P4.1 — Logging consistency~~ ✅ DONE
 
-### P4.2 — `#[allow(dead_code)]` audit (35+ instances)
-- `src/media/program_player.rs` — 21 instances (worst offender)
-- `src/media/player.rs` — 6 instances
-- Others scattered
+> **Landed:** 34 `eprintln!` calls in production code migrated to `log::warn!`
+> / `log::error!` / `log::info!` across `main.rs`, `mcp/server.rs`,
+> `media/audio_sync.rs`, `media/export.rs`, `media/thumb_cache.rs`, and
+> `ui/toolbar.rs` + `ui/window.rs`. The 2 `eprintln!` calls in `main.rs`'s
+> `--mcp-attach` stdio proxy are intentionally left — they run before
+> `env_logger::init()` and must go to stderr regardless. The 2 remaining
+> in `media/music_gen.rs` are inside `#[cfg(test)]`.
 
-Each annotation should either be deleted (if the code is genuinely
-unused) or get a comment explaining why it's intentionally kept (e.g.
-"part of internal API used by future plugin loader").
+### ~~P4.2 — `#[allow(dead_code)]` audit~~ ✅ DONE (program_player deferred)
 
-### P4.3 — `#[allow(deprecated)]` audit
-- `src/ui/timeline/widget.rs:3409, 3481, 3624, 8860`
-- `src/ui/inspector.rs:2568, 2580, 4436, 4439`
+> **Landed:** removed stale `#[allow(dead_code)]` from `media/probe_cache.rs`
+> and `media/thumbnail.rs`. The remaining annotations in `player.rs`,
+> `project.rs`, `transform_overlay.rs`, `widget.rs`, `program_monitor.rs`,
+> `media_library.rs`, `parser.rs`, `mcp/mod.rs`, and `undo.rs` were audited
+> and confirmed as either genuinely unused code kept for future use or items
+> used through trait impls / dynamic dispatch that the dead_code lint can't
+> see. The 21 annotations in `program_player.rs` are deferred to the P3.1
+> file split where each can be reviewed alongside its containing module.
 
-Document which GTK4 API is deprecated, what the replacement is, and
-whether/when to migrate.
+### ~~P4.3 — `#[allow(deprecated)]` audit~~ ✅ DONE (documented; migration deferred)
+
+38 `#[allow(deprecated)]` annotations across 7 files. All are GTK4 4.10/4.12
+deprecations — the deprecated APIs still work in the current gtk4 0.11
+bindings but will be removed in a future GTK4 major version.
+
+| Deprecated API | Since | Replacement | Files | Migration effort |
+|---|---|---|---|---|
+| `gtk4::ComboBoxText` + `ComboBoxExt` methods | 4.10 | `gtk4::DropDown` (already used for new dropdowns since the settings dialog refactor) | inspector.rs (12), toolbar.rs (6), window.rs (8), media_browser.rs (4), preferences.rs (1) | **Medium** — each ComboBoxText site needs a DropDown + StringList rewrite; `connect_changed` → `connect_selected_notify`, `active_id()` → `selected()`. ~31 sites. |
+| `gtk4::Dialog` + `DialogExt` methods | 4.10 | `gtk4::AlertDialog` for simple yes/no prompts, or build a custom `gtk4::Window` with content_area equivalent for complex dialogs | window.rs (2 dialog builders), widget.rs (2) | **Low** — only 4 dialogs use the deprecated builder; the rest of the app already uses custom windows. |
+| `gtk4::prelude::WidgetExt::allocation` | 4.12 | `widget.width()` / `widget.height()` for size, or `widget.compute_bounds()` for position | window.rs (3) | **Low** — 3 call sites. |
+
+**Recommendation:** defer the migration to a dedicated GTK4 4.12+ compat PR.
+The deprecated APIs are functional today and the migration is cosmetic until
+a gtk4 crate upgrade forces the issue. The `#[allow(deprecated)]` annotations
+keep the build warning-free in the meantime.
 
 ### P4.4 — Test coverage gaps
 40 files have `#[cfg(test)]`, so the codebase has decent test discipline,
