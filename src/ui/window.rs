@@ -4253,6 +4253,9 @@ pub fn build_window(
     let bg_removal_cache = Rc::new(RefCell::new(
         crate::media::bg_removal_cache::BgRemovalCache::new(),
     ));
+    let frame_interp_cache = Rc::new(RefCell::new(
+        crate::media::frame_interp_cache::FrameInterpCache::new(),
+    ));
     let stt_cache = Rc::new(RefCell::new(crate::media::stt_cache::SttCache::new()));
     let tracking_cache = Rc::new(RefCell::new(crate::media::tracking::TrackingCache::new()));
     let music_gen_cache = Rc::new(RefCell::new(crate::media::music_gen::MusicGenCache::new()));
@@ -7307,6 +7310,7 @@ pub fn build_window(
         library.clone(),
         timeline_state.clone(),
         bg_removal_cache.clone(),
+        frame_interp_cache.clone(),
         {
             let cb = on_project_changed.clone();
             move || cb()
@@ -11641,6 +11645,7 @@ pub fn build_window(
         let prog_player = prog_player.clone();
         let proxy_cache = proxy_cache.clone();
         let bg_removal_cache = bg_removal_cache.clone();
+        let frame_interp_cache = frame_interp_cache.clone();
         let preferences_state = preferences_state.clone();
         let panel_weak = timeline_area.downgrade();
         let transform_overlay_cell = transform_overlay_cell.clone();
@@ -11866,6 +11871,7 @@ pub fn build_window(
             let project_reload = project.clone();
             let proxy_cache_reload = proxy_cache.clone();
             let bg_removal_cache_reload = bg_removal_cache.clone();
+            let frame_interp_cache_reload = frame_interp_cache.clone();
             let reload_ticket = pending_reload_ticket.get().wrapping_add(1);
             pending_reload_ticket.set(reload_ticket);
             let pending_reload_ticket_phase1 = pending_reload_ticket.clone();
@@ -11931,6 +11937,33 @@ pub fn build_window(
                         prog_player_reload
                             .borrow_mut()
                             .update_bg_removal_paths(paths);
+                    }
+
+                    // Request AI frame interpolation for slow-motion clips
+                    // that opt in via SlowMotionInterp::Ai. The cache is a
+                    // no-op for clips with no slow-motion segment or with
+                    // any other interpolation mode.
+                    {
+                        let proj = project_reload.borrow();
+                        let mut cache = frame_interp_cache_reload.borrow_mut();
+                        fn walk_request(
+                            cache: &mut crate::media::frame_interp_cache::FrameInterpCache,
+                            tracks: &[crate::model::track::Track],
+                        ) {
+                            for track in tracks {
+                                for clip in &track.clips {
+                                    cache.request_for_clip(clip);
+                                    if let Some(ref ctracks) = clip.compound_tracks {
+                                        walk_request(cache, ctracks);
+                                    }
+                                }
+                            }
+                        }
+                        walk_request(&mut cache, &proj.tracks);
+                        let interp_paths = cache.snapshot_paths_by_clip_id(&proj);
+                        prog_player_reload
+                            .borrow_mut()
+                            .update_frame_interp_paths(interp_paths);
                     }
                 }
 
@@ -13302,6 +13335,7 @@ pub fn build_window(
     {
         let proxy_cache = proxy_cache.clone();
         let bg_removal_cache = bg_removal_cache.clone();
+        let frame_interp_cache = frame_interp_cache.clone();
         let stt_cache = stt_cache.clone();
         let tracking_cache = tracking_cache.clone();
         let project_for_stt = project.clone();
@@ -13373,6 +13407,73 @@ pub fn build_window(
                 inspector_view
                     .stt_model_available
                     .set(stt_cache.borrow().is_available());
+            }
+            // Poll AI frame-interpolation cache. New sidecars are pushed to
+            // the Program Monitor as a clip-id-keyed snapshot so the next
+            // decoder rebuild will swap them in.
+            {
+                let interp_resolved = frame_interp_cache.borrow_mut().poll();
+                if !interp_resolved.is_empty() {
+                    let proj = project_for_stt.borrow();
+                    let snapshot = frame_interp_cache
+                        .borrow()
+                        .snapshot_paths_by_clip_id(&proj);
+                    prog_player
+                        .borrow_mut()
+                        .update_frame_interp_paths(snapshot);
+                }
+                // Toggle the "AI Interpolation (RIFE)" dropdown entry in
+                // sync with the on-disk model. So users can drop the model
+                // file in and have the option appear without restarting.
+                // Re-stat the model path each tick (cheap) so the cache's
+                // `is_available()` reflects current filesystem state, not
+                // what was true at startup.
+                {
+                    use gtk::prelude::ListModelExt;
+                    frame_interp_cache.borrow_mut().refresh_model_path();
+                    let model_ready = frame_interp_cache.borrow().is_available();
+                    let dropdown_has_ai = inspector_view.slow_motion_has_ai.get();
+                    if model_ready && !dropdown_has_ai {
+                        inspector_view
+                            .slow_motion_model
+                            .append("AI Interpolation (RIFE)");
+                        inspector_view.slow_motion_has_ai.set(true);
+                    } else if !model_ready && dropdown_has_ai {
+                        let n = inspector_view.slow_motion_model.n_items();
+                        if n > 0 {
+                            // Drop the most recently appended entry (the AI
+                            // option). If the user had it selected, GTK
+                            // automatically falls back to the previous
+                            // valid index.
+                            inspector_view.slow_motion_model.remove(n - 1);
+                        }
+                        inspector_view.slow_motion_has_ai.set(false);
+                    }
+                }
+                // Refresh the Inspector status row from the currently
+                // selected clip's cache state. Cheap — the cache lookup is
+                // a HashMap probe; the Label is only updated if the text
+                // actually changes (GTK no-op when identical).
+                use crate::media::frame_interp_cache::FrameInterpStatus;
+                let status_text = {
+                    let proj = project_for_stt.borrow();
+                    let selected = inspector_view.selected_clip_id.borrow().clone();
+                    selected.and_then(|id| proj.clip_ref(&id).cloned()).map(|clip| {
+                        match frame_interp_cache.borrow().status_for_clip(&clip) {
+                            FrameInterpStatus::NotApplicable => "",
+                            FrameInterpStatus::ModelMissing => "AI model not installed (Preferences → Models)",
+                            FrameInterpStatus::Generating => "AI sidecar: Generating…",
+                            FrameInterpStatus::Ready => "AI sidecar: Ready",
+                            FrameInterpStatus::Failed => "AI sidecar: generation failed",
+                        }
+                        .to_string()
+                    })
+                };
+                let text = status_text.unwrap_or_default();
+                if inspector_view.frame_interp_status.text() != text.as_str() {
+                    inspector_view.frame_interp_status.set_text(&text);
+                    inspector_view.frame_interp_status.set_visible(!text.is_empty());
+                }
             }
             // Poll STT cache — apply generated subtitles via undo system.
             {
@@ -13755,6 +13856,7 @@ pub fn build_window(
         let workspace_layouts_state = workspace_layouts_state.clone();
         let proxy_cache = proxy_cache.clone();
         let bg_removal_cache = bg_removal_cache.clone();
+        let frame_interp_cache = frame_interp_cache.clone();
         let on_close_preview = on_close_preview.clone();
         let source_marks = source_marks.clone();
         let on_source_selected = on_source_selected.clone();
@@ -13817,6 +13919,7 @@ pub fn build_window(
                         &workspace_layouts_state,
                         &proxy_cache,
                         &bg_removal_cache,
+                        &frame_interp_cache,
                         &stt_cache,
                         &music_gen_cache,
                         &on_close_preview,
@@ -14363,6 +14466,7 @@ fn handle_mcp_command(
     workspace_layouts_state: &Rc<RefCell<crate::ui_state::WorkspaceLayoutsState>>,
     proxy_cache: &Rc<RefCell<crate::media::proxy_cache::ProxyCache>>,
     bg_removal_cache: &Rc<RefCell<crate::media::bg_removal_cache::BgRemovalCache>>,
+    frame_interp_cache: &Rc<RefCell<crate::media::frame_interp_cache::FrameInterpCache>>,
     stt_cache: &Rc<RefCell<crate::media::stt_cache::SttCache>>,
     music_gen_cache: &Rc<RefCell<crate::media::music_gen::MusicGenCache>>,
     on_close_preview: &Rc<dyn Fn()>,
@@ -15847,6 +15951,49 @@ fn handle_mcp_command(
             }
             drop(proj);
             reply.send(json!({"success": found})).ok();
+            if found {
+                on_project_changed();
+            }
+        }
+
+        McpCommand::SetClipSpeed {
+            clip_id,
+            speed,
+            slow_motion_interp,
+            reply,
+        } => {
+            let speed = speed.clamp(0.05, 16.0);
+            let mut found = false;
+            let mut requested_ai = false;
+            {
+                let mut proj = project.borrow_mut();
+                if let Some(clip) = proj.clip_mut(&clip_id) {
+                    clip.speed = speed;
+                    if let Some(ref mode) = slow_motion_interp {
+                        clip.slow_motion_interp =
+                            crate::model::clip::SlowMotionInterp::from_xml_str(mode);
+                    }
+                    requested_ai = clip.slow_motion_interp
+                        == crate::model::clip::SlowMotionInterp::Ai
+                        && clip.has_slow_motion();
+                    proj.dirty = true;
+                    found = true;
+                }
+            }
+            if found && requested_ai {
+                let proj = project.borrow();
+                let clip = proj.clip_ref(&clip_id).cloned();
+                drop(proj);
+                if let Some(clip) = clip {
+                    frame_interp_cache.borrow_mut().request_for_clip(&clip);
+                }
+            }
+            reply
+                .send(json!({
+                    "success": found,
+                    "ai_queued": requested_ai,
+                }))
+                .ok();
             if found {
                 on_project_changed();
             }
@@ -17417,6 +17564,7 @@ fn handle_mcp_command(
         McpCommand::ExportMp4 { path, reply } => {
             let proj = project.borrow().clone();
             let bg_paths = bg_removal_cache.borrow().paths.clone();
+            let interp_paths = frame_interp_cache.borrow().snapshot_paths_by_clip_id(&proj);
             std::thread::spawn(move || {
                 let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
                 let proj_worker = proj.clone();
@@ -17429,6 +17577,7 @@ fn handle_mcp_command(
                         crate::media::export::ExportOptions::default(),
                         None,
                         &bg_paths,
+                        &interp_paths,
                         tx,
                     )
                     .map_err(|e| e.to_string())
@@ -17702,6 +17851,7 @@ fn handle_mcp_command(
             let options = preset.to_export_options();
             let proj = project.borrow().clone();
             let bg_paths = bg_removal_cache.borrow().paths.clone();
+            let interp_paths = frame_interp_cache.borrow().snapshot_paths_by_clip_id(&proj);
             std::thread::spawn(move || {
                 let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
                 let proj_worker = proj.clone();
@@ -17714,6 +17864,7 @@ fn handle_mcp_command(
                         options,
                         None,
                         &bg_paths,
+                        &interp_paths,
                         tx,
                     )
                     .map_err(|e| e.to_string())
@@ -19681,6 +19832,9 @@ fn handle_mcp_command(
             }
             let proj_snapshot = project.borrow().clone();
             let bg_paths = bg_removal_cache.borrow().paths.clone();
+            let interp_paths = frame_interp_cache
+                .borrow()
+                .snapshot_paths_by_clip_id(&proj_snapshot);
             std::thread::spawn(move || {
                 let mut results = vec![];
                 for job in &pending {
@@ -19700,6 +19854,7 @@ fn handle_mcp_command(
                         opts,
                         None,
                         &bg_paths,
+                        &interp_paths,
                         ptx,
                     );
                     let (new_status, err_msg) = match export_result {

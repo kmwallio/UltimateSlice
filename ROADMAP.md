@@ -265,6 +265,8 @@ Tracking docs:
 - [x] Right-click clip context menu now shows only currently actionable clip operations (hides unavailable actions)
 - [x] Select clips forward/backward from playhead for bulk operations
 - [x] Clip display options / adjustable per-track height, clip color labels
+- [ ] Source-Record Track Patching (UI to control source channel to timeline track mapping)
+- [ ] Dynamic Trim Mode / Precision Editor (Interface for side-by-side fine-tuning of cuts)
 
 ### Speed Ramps (per clip)
 - [x] Constant speed change per clip (e.g. 0.5× slow-mo, 2× fast-forward) via GStreamer rate seek + ffmpeg `setpts`/`atempo` on export
@@ -440,6 +442,8 @@ Tracking docs:
   - [ ] Preview/export comparison overlay — a split-screen or A/B toggle in the Program Monitor that shows the prerender frame beside a single-frame export render, allowing direct visual parity inspection without a full export cycle
 - [x] Advanced color grading
   - [x] Match Clip Colors — automatic Reinhard-style color transfer: analyzes source and reference clip frames in CIE L\*a\*b\* space to compute slider adjustments (brightness, contrast, saturation, temperature, tint) and optional 17³ 3D LUT for fine-grained matching. Inspector "Match Color…" button, `Ctrl+Alt+M` shortcut, and `match_clip_colors` MCP tool with full undo support.
+  - [ ] HSL Qualifiers (Secondary color correction for specific hue/saturation/luminance ranges)
+  - [ ] Video Limiter / Legalizer (Ensure brightness/color levels stay within broadcast-safe limits)
 - [ ] Color management pipeline via OpenColorIO (OCIO)
   - [ ] Rust FFI bindings for OpenColorIO C++ library (bindgen wrapper against OCIO C API; build.rs pkg-config detection + static/dynamic linking)
   - [ ] OCIO config loading (ACES 2.0, Rec.709, sRGB built-in configs; user-supplied config file path in Preferences)
@@ -538,12 +542,14 @@ Tracking docs:
 - [x] Keyboard nudge in transform overlay — arrow keys adjust position by 0.01 per press (0.1 with Shift); `+`/`-` adjust scale; activated when a clip is selected
 - [x] Transform overlay drag now pauses playback at interaction start, so the Program Monitor frame stays fixed while editing (no background timeline advancement)
 - [x] Support anamorphic desqueeze (1.33x, 1.5x, 1.8x, 2.0x desqueeze via Inspector and MCP; persists in FCPXML)
+- [ ] Motion Blur for Transforms (Shutter angle support for keyframed transforms)
 
 ### Monitoring
 - [x] Safe area overlays (title safe 80%, action safe 90%) — Program Monitor "Safe Areas" toggle with persisted state
 - [x] False color overlay — map luminance to color spectrum for exposure evaluation
 - [x] Zebra stripes — diagonal lines on areas exceeding configurable IRE threshold
 - [x] Focus peaking — highlight in-focus edges with colored overlay
+- [ ] Timecode Burn-In Effect (Display timeline or source timecode on screen)
 
 ### Project Management
 - [x] Project save / load as FCPXML (wired to New/Open/Save buttons in toolbar)
@@ -561,7 +567,9 @@ Tracking docs:
   - [x] FCPXML persistence via `us:bins`/`us:media-bins` vendor attributes on `<event>`
   - [x] MCP tools: `create_bin`, `delete_bin`, `rename_bin`, `list_bins`, `move_to_bin`; `list_library` includes `bin_id`
 - [x] Offline / missing media indicators — visual badge on clips when source_path doesn't exist
+- [ ] Subclips (Create virtual library items from specific In/Out ranges)
 - [x] Consolidate / collect files — copy project media into a chosen folder for archival or transfer, with **Timeline-used only** and **Entire library** modes in the UI plus MCP `collect_project_files` automation
+- [ ] Consolidated Archiving with Handles (Trim source media to used regions plus configurable handles during collection)
 - [x] Metadata display & filtering — media browser cards now surface resolution, codec, frame rate, duration, and file size with search/type/resolution filters and expanded `list_library` metadata
 
 ### Canvas / Sequence Settings
@@ -620,6 +628,7 @@ Tracking docs:
 - [x] 3-Point and 4-Point editing (Insert/Overwrite from Source)
 - [x] J/K/L scrubbing (shuttle control in program monitor; pitch-corrected audio via Rubberband is a planned enhancement)
 - [x] Match Frame (`F` shortcut to find timeline clip in media library, load in source monitor, seek to matching frame; MCP `match_frame` tool)
+- [ ] Reverse Match Frame (Find all timeline instances of a library clip)
 - [x] Proxy Workflow: One-click toggle between original and proxy media
 - [x] Keyword ranges + favorite/reject ratings in browser
 - [ ] Auditions / clip versions (swap alternate takes nondestructively)
@@ -633,6 +642,8 @@ Tracking docs:
   - [x] Pitch-shift effect per clip (±12 semitones via inspector slider)
   - [x] Pitch-preserved J/K/L shuttle (scaletempo in main pipeline + rate-based decoder seeks for hot rate changes)
 - [x] Audio Roles (Dialogue, Effects, Music) with submixing — per-track `AudioRole` enum, inspector dropdown, timeline color-coded labels, MCP `set_track_role` tool, FCPXML persistence, export per-role submix routing
+- [ ] Audio Track Mixer (Panel for track-level volume, panning, effects, and bus routing)
+- [ ] Loudness Radar / Normalization to Standards (Tools for broadcast-standard compliance like EBU R128)
 - [x] LADSPA audio plugin support — Audio FX browser tab, inspector effect display, discovery via GStreamer registry, per-clip effect chain, parameter control, GStreamer preview + FFmpeg export via native `ladspa` filter, FCPXML persistence, MCP tools (list/add/remove/set params)
 - [x] Voiceover recording tool with countdown and punch-in (toolbar Record button, 3s countdown, GStreamer `autoaudiosrc` capture to WAV, clip placed at playhead on first audio track, undo support, MCP `record_voiceover` tool)
 - [x] Automatic Ducking (per-track `duck` toggle, volume reduced when dialogue/non-ducked audio is active; configurable amount in Preferences; real-time preview; MCP `set_track_duck` tool; FCPXML persistence)
@@ -661,7 +672,10 @@ Tracking docs:
   - [x] Whisper output cleanup (contraction merging, punctuation spacing)
 - [x] AI Scene Cut Detection for long source files
 - [x] Smart Collections based on metadata — save project-wide media-browser queries by search text, kind, resolution, and frame rate; manage them from the browser; persist via FCPXML vendor metadata; automate with MCP `list_collections` / `create_collection` / `update_collection` / `delete_collection`
-- [ ] Optical Flow slow-motion (AI frame interpolation)
+- [ ] Transcript-Based Editing (Edit timeline by deleting text in STT transcripts)
+- [ ] AI Audio Remix (Automatically adjust music duration while preserving structure)
+- [ ] AI Voice Enhancement (One-click studio-quality enhancement for low-quality recordings)
+- [x] Optical Flow slow-motion (AI frame interpolation): Inspector dropdown gains an **AI Interpolation (RIFE)** mode that precomputes a 2–8× sidecar via ONNX RIFE in a background `FrameInterpCache` worker (mirrors the `BgRemovalCache` pattern); both Program Monitor preview and FFmpeg export consume the same sidecar so frames match exactly. New MCP `set_clip_speed` tool, Preferences → Models RIFE entry, FCPXML `us:slow-motion-interp="ai"` round-trip. RIFE model is user-installed at `~/.local/share/ultimateslice/models/rife.onnx`.
 - [x] AI Music Generation (MusicGen / MusicGPT)
   - [x] Phase 1 — Draw-region UX: draw a time-range box on an audio track to define a generated-audio region (reusable for silence/tone generation too)
   - [x] Phase 2 — Local model backend: MusicGen-small ONNX via `ort` with background generation worker thread and status-bar progress; MCP `generate_music` tool for automation; generated WAV clips placed on audio tracks with undo support
@@ -684,6 +698,8 @@ Tracking docs:
 ### Performance & Integration
 - [ ] Hardware-accelerated decoding/encoding (VA-API, NVENC)
 - [ ] Background rendering for complex effect stacks
+- [ ] Render-and-Replace (Bake complex effect stacks into temporary high-quality clips)
+- [ ] Project & Bin Locking (Collaborative project/media locking)
 - [x] OpenTimelineIO (OTIO) import/export (native Rust JSON serializer via serde_json; clips/tracks/gaps/transitions/markers/speed plus current OTIO metadata round-trip; versioned `metadata.ultimateslice` contract; title/subtitle metadata, track audio-role metadata, transform/crop/blend metadata, and core transform/opacity keyframe round-trip; absolute/relative OTIO media-reference export with base-path-aware reimport; MCP `save_otio`/`open_otio` tools; Export dropdown + File Open dialog)
 - [ ] Full OTIO metadata parity for UltimateSlice-specific features not yet covered by OTIO round-trip (remaining advanced effects, mask payloads/animation, secondary keyframe lanes such as crop animation, and nested clip internals)
 - [ ] Shared Project/Library support for collaborative editing

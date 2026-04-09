@@ -355,18 +355,25 @@ Controls the playback speed and direction of the clip. Changing speed adjusts th
 |---|---|---|---|
 | **Speed Multiplier** | 0.25× → 4.0× | 1.0× | 0.5× = slow-motion, 2.0× = fast-forward |
 | **Reverse** | Checkbox | Off | Play the clip backwards (reversed frame order) |
-| **Slow-Motion Interpolation** | Off / Frame Blending / Optical Flow | Off | Synthesizes intermediate frames on export for smooth slow-motion (speed < 1.0 only) |
+| **Slow-Motion Interpolation** | Off / Frame Blending / Optical Flow / AI Interpolation (RIFE) | Off | Synthesizes intermediate frames for smooth slow-motion (speed < 1.0 only) |
 
 Marks at **½×**, **1×**, **2×** for quick snapping.
 
 ### Slow-motion interpolation
 
-When a clip's speed is below 1.0, the default behavior repeats frames to fill the longer duration, which can look stuttery. The **Slow-Motion Interpolation** dropdown offers two alternatives:
+When a clip's speed is below 1.0, the default behavior repeats frames to fill the longer duration, which can look stuttery. The **Slow-Motion Interpolation** dropdown offers three alternatives:
 
-- **Frame Blending** — fast temporal averaging (`minterpolate mi_mode=blend`). Produces a slight motion-blur effect between frames.
-- **Optical Flow** — motion-compensated interpolation (`minterpolate mi_mode=mci`). Slower to encode but produces the smoothest result by synthesizing true intermediate frames.
+- **Frame Blending** — fast temporal averaging (`minterpolate mi_mode=blend`). Produces a slight motion-blur effect between frames. Export-only.
+- **Optical Flow** — classical motion-compensated interpolation (`minterpolate mi_mode=mci`). Slower to encode but produces a smoother result than Frame Blending. Export-only.
+- **AI Interpolation (RIFE)** — learned frame interpolation via a RIFE ONNX model. Best quality on rapid motion / occlusion / non-rigid subjects, where classical motion compensation tends to warp or ghost. Unlike the other two modes, the AI sidecar is **shared between Program Monitor preview and export**, so what you scrub through in the monitor is exactly what you get in the rendered MP4.
 
-This is an **export-only** feature — `minterpolate` is too CPU-intensive for real-time preview. Background prerender includes it when enabled. The setting has no effect when speed is 1.0 or higher. Persists via FCPXML.
+#### How AI Interpolation works
+
+When you switch a slowed clip to **AI Interpolation**, a background worker decodes the source, runs RIFE pairwise to produce intermediate frames (multiplier `M = ceil(1 / min_speed)`, clamped to 2× / 4× / 8×), and writes a higher-fps H.264 sidecar to `~/.cache/ultimateslice/frame_interp/`. A status row beneath the dropdown shows **Generating…**, **Ready**, **Error**, or **Model not installed**. While generation is in progress the clip plays through the original source (so you keep working); once the sidecar is ready, the next preview rebuild and any export pick it up automatically.
+
+The AI mode requires a **RIFE ONNX model** in `~/.local/share/ultimateslice/models/rife.onnx` — see [Preferences → Models](preferences.md#models) for the install location and a download link. If the model is missing, the dropdown still accepts the AI option but the status row will say **Model not installed** and preview/export fall back to the original source. AI mode is also a no-op for clips with no slow-motion segment — it only does work when the speed curve dips below 1.0.
+
+The other two modes (Frame Blending / Optical Flow) remain export-only — they use ffmpeg `minterpolate`, which is too CPU-intensive for real-time preview, and are also picked up by background prerender when enabled. All four modes persist via the FCPXML `us:slow-motion-interp` vendor attribute.
 
 ### Variable speed ramps
 

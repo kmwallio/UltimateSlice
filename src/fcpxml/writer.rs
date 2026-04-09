@@ -1107,12 +1107,10 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                     }
                     asset_clip.push_attribute(("us:reverse", clip.reverse.to_string().as_str()));
                     if clip.slow_motion_interp != crate::model::clip::SlowMotionInterp::Off {
-                        let val = match clip.slow_motion_interp {
-                            crate::model::clip::SlowMotionInterp::Blend => "blend",
-                            crate::model::clip::SlowMotionInterp::OpticalFlow => "optical-flow",
-                            crate::model::clip::SlowMotionInterp::Off => unreachable!(),
-                        };
-                        asset_clip.push_attribute(("us:slow-motion-interp", val));
+                        asset_clip.push_attribute((
+                            "us:slow-motion-interp",
+                            clip.slow_motion_interp.as_xml_str(),
+                        ));
                     }
                     if clip.freeze_frame {
                         asset_clip.push_attribute(("us:freeze-frame", "true"));

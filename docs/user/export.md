@@ -196,12 +196,13 @@ The exported clip duration matches the timeline duration computed from the speed
 
 ### Slow-motion interpolation
 
-When **Slow-Motion Interpolation** is enabled in the Inspector (Frame Blending or Optical Flow), export appends `minterpolate` after the speed filter for clips with effective speed < 1.0:
+When **Slow-Motion Interpolation** is enabled in the Inspector for a clip with effective speed < 1.0, export inserts a smoothing pass appropriate to the chosen mode:
 
-- **Frame Blending** (`mi_mode=blend`): fast temporal averaging between frames.
-- **Optical Flow** (`mi_mode=mci`): motion-compensated interpolation for the smoothest result (significantly slower to encode).
+- **Frame Blending** (`mi_mode=blend`): fast temporal averaging between frames. Uses ffmpeg `minterpolate` appended after the speed filter at the project frame rate.
+- **Optical Flow** (`mi_mode=mci`): classical motion-compensated interpolation. Uses ffmpeg `minterpolate` appended after the speed filter at the project frame rate (significantly slower to encode than Frame Blending).
+- **AI Interpolation (RIFE)**: a higher-fps **sidecar** is precomputed by the background `FrameInterpCache` (see [inspector.md](inspector.md#slow-motion-interpolation)). Export then reads the sidecar instead of the original source for that clip — `minterpolate` is **not** applied because the sidecar already contains the interpolated frames. Both Program Monitor preview and export consume the same sidecar so the visible frames match exactly.
 
-The filter is set to the project frame rate (`fps=NUM/DEN`) so synthesized frames match the output timeline. Normal-speed and fast clips are unaffected. Background prerender also applies minterpolate when enabled.
+If a clip is set to AI Interpolation but the sidecar is not yet ready (still generating, model missing, or generation failed), export falls back to the original source and skips frame synthesis for that clip. Normal-speed and fast clips are unaffected by all three modes. Background prerender also applies the minterpolate path when enabled.
 
 ## Keyframed Properties
 

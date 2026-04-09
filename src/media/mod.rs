@@ -7,6 +7,7 @@ pub mod bg_removal_cache;
 pub mod color_match;
 pub mod cube_lut;
 pub mod export;
+pub mod frame_interp_cache;
 pub mod frei0r_registry;
 pub mod ladspa_registry;
 pub mod mask_alpha;

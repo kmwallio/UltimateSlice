@@ -43,6 +43,14 @@ UltimateSlice uses open-source crates and runtime libraries, including:
 - FFmpeg (tooling/runtime) — LGPL-2.1-or-later (Flatpak build enables GPL options)
 - x264 (Flatpak build dependency) — GPL-2.0-or-later
 
+UltimateSlice can also use the following AI models, **installed by the user** at runtime
+(not bundled with the binary):
+
+- **MODNet** — photographic portrait matting (background removal). Apache-2.0.
+- **Whisper (GGML)** — speech-to-text for subtitle generation. MIT.
+- **MusicGen-small** — text-to-music generation (Meta AI). CC-BY-NC-4.0 (research/non-commercial use; check the model card before commercial use).
+- **RIFE** — Real-time Intermediate Flow Estimation for AI slow-motion frame interpolation. MIT (model weights from third-party ONNX exports of the upstream RIFE project).
+
 For exact versions and full dependency tree, see `Cargo.toml`, `Cargo.lock`,
 `io.github.kmwallio.ultimateslice.yml`, `cargo-sources.json`, and
 `onnxruntime-sources.json`.

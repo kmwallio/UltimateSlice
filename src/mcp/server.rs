@@ -469,6 +469,23 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_clip_speed",
+            "description": "Set per-clip playback speed and (optionally) the slow-motion frame interpolation mode. When slow_motion_interp is 'ai' the AI frame-interpolation cache (RIFE) precomputes a higher-fps sidecar in the background; preview and export consume the same sidecar once it is ready, guaranteeing they match.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id." },
+                    "speed":   { "type": "number", "description": "Playback multiplier. <1 = slow-motion, >1 = fast-forward, 1.0 = normal. Range 0.05–16.0." },
+                    "slow_motion_interp": {
+                        "type": "string",
+                        "enum": ["off", "blend", "optical-flow", "ai"],
+                        "description": "Interpolation mode for slow-motion clips. 'off' disables interpolation; 'blend' uses ffmpeg minterpolate blend; 'optical-flow' uses ffmpeg motion-compensation; 'ai' precomputes a learned RIFE sidecar."
+                    }
+                },
+                "required": ["clip_id", "speed"]
+            }
+        },
+        {
             "name": "slip_clip",
             "description": "Slip a clip: shift its source window (source_in and source_out) by a delta without changing timeline position or duration.",
             "inputSchema": {
@@ -2189,6 +2206,15 @@ fn dispatch_tool_payload(
             clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
             source_in_ns: args["source_in_ns"].as_u64().unwrap_or(0),
             source_out_ns: args["source_out_ns"].as_u64().unwrap_or(0),
+            reply: tx,
+        },
+
+        "set_clip_speed" => McpCommand::SetClipSpeed {
+            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            speed: args["speed"].as_f64().unwrap_or(1.0),
+            slow_motion_interp: args["slow_motion_interp"]
+                .as_str()
+                .map(|s| s.to_string()),
             reply: tx,
         },
 

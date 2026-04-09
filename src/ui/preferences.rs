@@ -28,6 +28,12 @@ Third-party crates and libraries:\n\
 • FFmpeg (export/runtime tooling) — LGPL-2.1-or-later (built with GPL options in Flatpak)\n\
 • x264 (Flatpak build) — GPL-2.0-or-later\n\
 \n\
+User-installed AI models (not bundled — see Models pane):\n\
+• MODNet — photographic portrait matting (background removal). Apache-2.0\n\
+• Whisper (GGML) — speech-to-text. MIT\n\
+• MusicGen-small — text-to-music generation. CC-BY-NC-4.0 (research/non-commercial)\n\
+• RIFE — Real-time Intermediate Flow Estimation, used for AI slow-motion frame interpolation. MIT\n\
+\n\
 See Cargo.toml/Cargo.lock and io.github.kmwallio.ultimateslice.yml for full dependency details.";
 
 const LICENSE_NOTICE: &str = "\
@@ -746,6 +752,66 @@ pub fn show_preferences_dialog(
         musicgen_files_hint.set_wrap(true);
         musicgen_files_hint.set_max_width_chars(60);
         models_box.append(&musicgen_files_hint);
+
+        // ── RIFE frame interpolation model status ──────────────────────
+        models_box.append(&Separator::new(Orientation::Horizontal));
+
+        let rife_row = GBox::new(Orientation::Horizontal, 8);
+        let rife_name = Label::new(Some("RIFE (AI Slow-Motion Frame Interpolation)"));
+        rife_name.set_halign(gtk::Align::Start);
+        rife_name.set_hexpand(true);
+        let rife_status = Label::new(None);
+        rife_status.set_halign(gtk::Align::End);
+
+        let has_rife = crate::media::frame_interp_cache::find_model_path().is_some();
+        if has_rife {
+            rife_status.set_text("\u{2713} Installed");
+            rife_status.add_css_class("success");
+        } else {
+            rife_status.set_text("Not installed");
+            rife_status.add_css_class("dim-label");
+        }
+        rife_row.append(&rife_name);
+        rife_row.append(&rife_status);
+        models_box.append(&rife_row);
+
+        let rife_hint = Label::new(None);
+        rife_hint.set_markup(
+            "RIFE synthesizes intermediate frames for high-quality slow-motion. \
+             Enable on a clip via Inspector → Speed → Slow-Motion Interpolation → \
+             AI Interpolation. Use a RIFE ONNX export with the standard \
+             6-channel input + timestep convention (see the upstream project at \
+             <a href=\"https://github.com/hzwer/Practical-RIFE\">github.com/hzwer/Practical-RIFE</a> \
+             for the model and export tooling) and place the file in:",
+        );
+        rife_hint.set_halign(gtk::Align::Start);
+        rife_hint.add_css_class("dim-label");
+        rife_hint.set_wrap(true);
+        rife_hint.set_max_width_chars(60);
+        models_box.append(&rife_hint);
+
+        let rife_dir = crate::media::frame_interp_cache::model_install_dir();
+        let rife_dir_str = rife_dir.to_string_lossy();
+        let rife_path_label = Label::new(None);
+        rife_path_label.set_markup(&format!(
+            "<a href=\"file://{}\">{}</a>",
+            glib::markup_escape_text(&rife_dir_str),
+            glib::markup_escape_text(&rife_dir_str),
+        ));
+        rife_path_label.set_halign(gtk::Align::Start);
+        rife_path_label.add_css_class("monospace");
+        models_box.append(&rife_path_label);
+
+        let rife_files_hint = Label::new(Some(
+            "Accepted filenames: rife.onnx (preferred) or model.onnx. \
+             The dropdown entry appears automatically once the file is \
+             present — no restart required.",
+        ));
+        rife_files_hint.set_halign(gtk::Align::Start);
+        rife_files_hint.add_css_class("dim-label");
+        rife_files_hint.set_wrap(true);
+        rife_files_hint.set_max_width_chars(60);
+        models_box.append(&rife_files_hint);
 
         append_generated_files_section(&models_box);
 

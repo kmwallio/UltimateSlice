@@ -791,6 +791,7 @@ pub fn build_toolbar(
     library: Rc<RefCell<MediaLibrary>>,
     timeline_state: Rc<RefCell<TimelineState>>,
     bg_removal_cache: Rc<RefCell<crate::media::bg_removal_cache::BgRemovalCache>>,
+    frame_interp_cache: Rc<RefCell<crate::media::frame_interp_cache::FrameInterpCache>>,
     on_project_changed: impl Fn() + 'static + Clone,
     on_project_reloaded: impl Fn() + 'static + Clone,
     on_show_editor: impl Fn() + 'static + Clone,
@@ -1426,6 +1427,7 @@ pub fn build_toolbar(
     {
         let project = project.clone();
         let bg_removal_cache = bg_removal_cache.clone();
+        let frame_interp_cache = frame_interp_cache.clone();
         btn_export.connect_clicked(move |btn| {
             let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
             let proj_w = project.borrow().width;
@@ -1817,6 +1819,7 @@ pub fn build_toolbar(
 
             let project = project.clone();
             let bg_removal_cache = bg_removal_cache.clone();
+            let frame_interp_cache = frame_interp_cache.clone();
             opt_dialog.connect_response(move |d, resp| {
                 if resp != gtk::ResponseType::Accept && resp != gtk::ResponseType::Other(1) {
                     d.close();
@@ -1906,6 +1909,7 @@ pub fn build_toolbar(
                 let window: Option<gtk::Window> = None; // no parent at this point
                 let project = project.clone();
                 let bg_removal_cache = bg_removal_cache.clone();
+                let frame_interp_cache = frame_interp_cache.clone();
                 file_dialog.save(window.as_ref(), gio::Cancellable::NONE, move |result| {
                     if let Ok(file) = result {
                         if let Some(path) = file.path() {
@@ -1914,6 +1918,8 @@ pub fn build_toolbar(
                             let proj = project.borrow().clone();
                             let opts = options.clone();
                             let bg_paths = bg_removal_cache.borrow().paths.clone();
+                            let interp_paths =
+                                frame_interp_cache.borrow().snapshot_paths_by_clip_id(&proj);
                             let (tx, rx) = std::sync::mpsc::channel::<ExportProgress>();
 
                             std::thread::spawn(move || {
@@ -1923,6 +1929,7 @@ pub fn build_toolbar(
                                     opts,
                                     None,
                                     &bg_paths,
+                                    &interp_paths,
                                     tx.clone(),
                                 ) {
                                     let _ = tx.send(ExportProgress::Error(e.to_string()));
@@ -2601,6 +2608,7 @@ pub fn build_toolbar(
         let export_pop_weak = export_pop.downgrade();
         let project = project.clone();
         let bg_removal_cache = bg_removal_cache.clone();
+        let frame_interp_cache = frame_interp_cache.clone();
         btn_export_queue.connect_clicked(move |btn| {
             if let Some(pop) = export_pop_weak.upgrade() {
                 pop.popdown();
@@ -2609,6 +2617,7 @@ pub fn build_toolbar(
             let dialog = crate::ui::export_queue::build_export_queue_dialog(
                 project.clone(),
                 bg_removal_cache.clone(),
+                frame_interp_cache.clone(),
                 window.as_ref(),
             );
             dialog.present();

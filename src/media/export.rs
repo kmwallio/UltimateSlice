@@ -150,12 +150,18 @@ fn split_active_video_tracks_for_export<'a>(
 
 /// Export the project to a file at `output_path` using `options`.
 /// Sends progress to `tx`. Call this from a background thread.
+///
+/// `frame_interp_paths` maps a flattened clip's id to a precomputed AI
+/// frame-interpolation sidecar (RIFE) when one is ready. When a sidecar is
+/// present for a clip, the export reads the sidecar instead of the original
+/// source so the higher-fps interpolated frames are encoded into the output.
 pub fn export_project(
     project: &Project,
     output_path: &str,
     options: ExportOptions,
     estimated_size_bytes: Option<u64>,
     bg_removal_paths: &std::collections::HashMap<String, String>,
+    frame_interp_paths: &std::collections::HashMap<String, String>,
     tx: mpsc::Sender<ExportProgress>,
 ) -> Result<()> {
     let out_w = if options.output_width == 0 {
@@ -258,6 +264,17 @@ pub fn export_project(
                 project.frame_rate.numerator,
                 project.frame_rate.denominator,
             );
+        }
+        // AI frame-interpolation sidecar takes priority over the original
+        // source so the export gets the smoother interpolated frames. The
+        // sidecar has the same wall-clock duration so existing setpts /
+        // source_in math stays unchanged.
+        if clip.slow_motion_interp == SlowMotionInterp::Ai {
+            if let Some(interp_path) = frame_interp_paths.get(&clip.id) {
+                if std::path::Path::new(interp_path).exists() {
+                    return Ok(interp_path.clone());
+                }
+            }
         }
         if clip.bg_removal_enabled {
             if let Some(bg_path) = bg_removal_paths.get(&clip.source_path) {
@@ -4012,6 +4029,10 @@ fn build_minterpolate_suffix(clip: &Clip, fps_num: u32, fps_den: u32) -> String 
     let mi_mode = match clip.slow_motion_interp {
         SlowMotionInterp::Blend => "blend",
         SlowMotionInterp::OpticalFlow => "mci",
+        // AI mode is realized via a precomputed sidecar (see frame_interp_cache);
+        // do NOT also apply ffmpeg minterpolate here or frames would be doubly
+        // interpolated.
+        SlowMotionInterp::Ai => return String::new(),
         SlowMotionInterp::Off => unreachable!(),
     };
     let fps = if fps_den > 0 {

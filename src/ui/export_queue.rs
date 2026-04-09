@@ -1,5 +1,6 @@
 use crate::media::bg_removal_cache::BgRemovalCache;
 use crate::media::export::{export_project, ExportProgress};
+use crate::media::frame_interp_cache::FrameInterpCache;
 use crate::model::project::Project;
 use crate::ui_state::{self, ExportQueueJob, ExportQueueJobStatus, ExportQueueState};
 use glib;
@@ -13,6 +14,7 @@ use std::sync::mpsc;
 pub fn build_export_queue_dialog(
     project: Rc<RefCell<Project>>,
     bg_removal_cache: Rc<RefCell<BgRemovalCache>>,
+    frame_interp_cache: Rc<RefCell<FrameInterpCache>>,
     transient_for: Option<&gtk::Window>,
 ) -> gtk::Window {
     let win = gtk::Window::builder()
@@ -355,6 +357,9 @@ pub fn build_export_queue_dialog(
 
             let proj_snapshot = project.borrow().clone();
             let bg_paths = bg_removal_cache.borrow().paths.clone();
+            let interp_paths = frame_interp_cache
+                .borrow()
+                .snapshot_paths_by_clip_id(&proj_snapshot);
 
             std::thread::spawn(move || {
                 for job in &jobs_snapshot {
@@ -365,12 +370,19 @@ pub fn build_export_queue_dialog(
                     let output_bg = output.clone();
                     let proj2 = proj_snapshot.clone();
                     let bg_paths2 = bg_paths.clone();
+                    let interp_paths2 = interp_paths.clone();
                     let job_id = job.id.clone();
                     let tx2 = tx.clone();
                     let handle = std::thread::spawn(move || {
-                        if let Err(e) =
-                            export_project(&proj2, &output_bg, opts, None, &bg_paths2, ptx.clone())
-                        {
+                        if let Err(e) = export_project(
+                            &proj2,
+                            &output_bg,
+                            opts,
+                            None,
+                            &bg_paths2,
+                            &interp_paths2,
+                            ptx.clone(),
+                        ) {
                             let _ = ptx.send(ExportProgress::Error(e.to_string()));
                         }
                     });

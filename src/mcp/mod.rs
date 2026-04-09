@@ -144,6 +144,18 @@ pub enum McpCommand {
         source_out_ns: u64,
         reply: SyncSender<Value>,
     },
+    /// Set per-clip playback speed and (optionally) the slow-motion frame
+    /// interpolation mode.  When `slow_motion_interp` is `"ai"`, the
+    /// FrameInterpCache is asked to precompute a higher-fps sidecar in the
+    /// background; preview/export consume the sidecar once it is ready.
+    SetClipSpeed {
+        clip_id: String,
+        speed: f64,
+        /// `"off"`, `"blend"`, `"optical-flow"`, or `"ai"`. Omit to leave
+        /// the existing interpolation mode unchanged.
+        slow_motion_interp: Option<String>,
+        reply: SyncSender<Value>,
+    },
     SetClipColor {
         clip_id: String,
         brightness: f64,

@@ -1795,6 +1795,10 @@ pub struct ProgramPlayer {
     animated_svg_paths: HashMap<String, String>,
     /// Bg-removed file paths: source_path → bg_removed file path.
     bg_removal_paths: HashMap<String, String>,
+    /// AI frame-interpolation sidecar paths: clip_id → sidecar file path.
+    /// Populated by [`Self::update_frame_interp_paths`] from
+    /// `FrameInterpCache::snapshot_paths_by_clip_id`.
+    frame_interp_paths: HashMap<String, String>,
     /// Cache for per-path audio-stream probe results.
     audio_stream_probe_cache: HashMap<String, bool>,
     /// GStreamer `level` element on audiomixer output for metering.
@@ -2584,6 +2588,7 @@ impl ProgramPlayer {
                 proxy_fallback_warned_keys: HashSet::new(),
                 animated_svg_paths: HashMap::new(),
                 bg_removal_paths: HashMap::new(),
+                frame_interp_paths: HashMap::new(),
                 audio_stream_probe_cache: HashMap::new(),
                 level_element,
                 level_element_audio,
@@ -2941,6 +2946,17 @@ impl ProgramPlayer {
             self.bg_removal_paths = paths;
             self.prewarmed_boundary_ns = None;
             self.invalidate_short_frame_cache("bg-removal-paths-updated");
+        }
+    }
+
+    /// Hand off a freshly snapshotted clip-id → AI frame-interpolation
+    /// sidecar map. The Program Monitor will swap in the sidecar at decoder
+    /// build time for any clip in the map whose source path actually exists.
+    pub fn update_frame_interp_paths(&mut self, paths: HashMap<String, String>) {
+        if self.frame_interp_paths != paths {
+            self.frame_interp_paths = paths;
+            self.prewarmed_boundary_ns = None;
+            self.invalidate_short_frame_cache("frame-interp-paths-updated");
         }
     }
 
@@ -6520,6 +6536,22 @@ impl ProgramPlayer {
                 return (path, false, key, true);
             }
             return (clip.source_path.clone(), false, key, false);
+        }
+
+        // AI frame-interpolation sidecar takes priority over the original
+        // source so playback shows the same interpolated frames as export.
+        // The sidecar has the same wall-clock duration as the source so
+        // existing rate-seek and source_in math are unchanged.
+        if clip.slow_motion_interp == crate::model::clip::SlowMotionInterp::Ai {
+            if let Some(interp_path) = self.frame_interp_paths.get(&clip.id) {
+                if std::fs::metadata(interp_path)
+                    .ok()
+                    .filter(|m| m.len() > 0)
+                    .is_some()
+                {
+                    return (interp_path.clone(), false, String::new(), false);
+                }
+            }
         }
 
         // Check for bg-removed version first (takes priority — includes alpha channel).
@@ -12379,6 +12411,9 @@ impl ProgramPlayer {
         let mi_mode = match clip.slow_motion_interp {
             SlowMotionInterp::Blend => "blend",
             SlowMotionInterp::OpticalFlow => "mci",
+            // AI mode is realized via a precomputed sidecar consumed at the
+            // input level — do not also apply ffmpeg minterpolate here.
+            SlowMotionInterp::Ai => return String::new(),
             SlowMotionInterp::Off => unreachable!(),
         };
         format!(",minterpolate=fps={fps}:mi_mode={mi_mode}")

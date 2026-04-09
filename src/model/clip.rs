@@ -279,7 +279,12 @@ impl Default for ClipColorLabel {
     }
 }
 
-/// Slow-motion frame interpolation mode (export-only).
+/// Slow-motion frame interpolation mode.
+///
+/// `Off`/`Blend`/`OpticalFlow` are realized at export time via FFmpeg
+/// `minterpolate`. `Ai` is realized via an ONNX-based learned interpolator
+/// (RIFE) that precomputes a higher-fps sidecar consumed identically by both
+/// preview and export — see [`crate::media::frame_interp_cache`].
 #[derive(Default, Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SlowMotionInterp {
@@ -289,6 +294,31 @@ pub enum SlowMotionInterp {
     Blend,
     /// Motion-compensated interpolation (minterpolate mi_mode=mci). Slow but smooth.
     OpticalFlow,
+    /// Learned frame interpolation (RIFE ONNX). Precomputed to a sidecar
+    /// video; preview and export both consume the same sidecar.
+    Ai,
+}
+
+impl SlowMotionInterp {
+    /// FCPXML / serialization string for this variant.
+    pub fn as_xml_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Blend => "blend",
+            Self::OpticalFlow => "optical-flow",
+            Self::Ai => "ai",
+        }
+    }
+
+    /// Parse from FCPXML / serialization string. Unknown values yield `Off`.
+    pub fn from_xml_str(s: &str) -> Self {
+        match s {
+            "blend" => Self::Blend,
+            "optical-flow" => Self::OpticalFlow,
+            "ai" => Self::Ai,
+            _ => Self::Off,
+        }
+    }
 }
 
 /// Audio channel routing mode for a clip.
@@ -3171,11 +3201,24 @@ impl Clip {
     }
 
     fn min_effective_speed_hint(&self) -> f64 {
+        self.min_effective_speed()
+    }
+
+    /// Minimum playback speed across the clip's constant speed and any
+    /// variable-speed keyframes (clamped to a sane range). Used for retime
+    /// math and for sizing AI frame-interpolation sidecars.
+    pub fn min_effective_speed(&self) -> f64 {
         let mut min_speed = self.speed.clamp(0.05, 16.0);
         for kf in &self.speed_keyframes {
             min_speed = min_speed.min(kf.value.clamp(0.05, 16.0));
         }
         min_speed
+    }
+
+    /// Returns `true` when the clip's constant speed or any variable-speed
+    /// keyframe drops below `1.0` (i.e. there is at least one slowed segment).
+    pub fn has_slow_motion(&self) -> bool {
+        self.min_effective_speed() < 0.999
     }
 
     fn playback_duration_from_speed(&self) -> u64 {
@@ -3226,6 +3269,65 @@ mod tests {
             timeline_start,
             ClipKind::Video,
         )
+    }
+
+    #[test]
+    fn slow_motion_interp_xml_roundtrip() {
+        for variant in [
+            SlowMotionInterp::Off,
+            SlowMotionInterp::Blend,
+            SlowMotionInterp::OpticalFlow,
+            SlowMotionInterp::Ai,
+        ] {
+            let s = variant.as_xml_str();
+            let parsed = SlowMotionInterp::from_xml_str(s);
+            assert_eq!(parsed, variant, "round-trip failed for {variant:?}");
+        }
+        // Unknown values fall back to Off (so older project files with new
+        // unknown variants don't break round-trip).
+        assert_eq!(
+            SlowMotionInterp::from_xml_str("not-a-real-mode"),
+            SlowMotionInterp::Off
+        );
+    }
+
+    #[test]
+    fn has_slow_motion_constant() {
+        let mut clip = Clip::new("/tmp/x.mp4", 5_000_000_000, 0, ClipKind::Video);
+        clip.speed = 1.0;
+        assert!(!clip.has_slow_motion());
+        clip.speed = 0.5;
+        assert!(clip.has_slow_motion());
+        clip.speed = 2.0;
+        assert!(!clip.has_slow_motion());
+    }
+
+    #[test]
+    fn has_slow_motion_keyframed() {
+        let mut clip = Clip::new("/tmp/x.mp4", 5_000_000_000, 0, ClipKind::Video);
+        clip.speed = 1.0;
+        clip.speed_keyframes = vec![
+            NumericKeyframe {
+                time_ns: 0,
+                value: 1.0,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+            NumericKeyframe {
+                time_ns: 1_000_000_000,
+                value: 0.25,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+            NumericKeyframe {
+                time_ns: 2_000_000_000,
+                value: 1.0,
+                interpolation: KeyframeInterpolation::Linear,
+                bezier_controls: None,
+            },
+        ];
+        assert!(clip.has_slow_motion());
+        assert!((clip.min_effective_speed() - 0.25).abs() < 1e-9);
     }
 
     #[test]

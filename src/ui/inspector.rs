@@ -335,6 +335,16 @@ pub struct InspectorView {
     pub speed_slider: Scale,
     pub reverse_check: CheckButton,
     pub slow_motion_dropdown: DropDown,
+    /// Backing model for `slow_motion_dropdown`. Held so the window glue
+    /// can append/remove the "AI Interpolation (RIFE)" entry when the RIFE
+    /// model is installed/removed at runtime.
+    pub slow_motion_model: StringList,
+    /// `true` while the dropdown contains the AI Interpolation entry. The
+    /// window glue toggles this in sync with the on-disk RIFE model.
+    pub slow_motion_has_ai: Cell<bool>,
+    /// Status row showing AI frame-interpolation sidecar progress
+    /// (`Generating…` / `Ready` / `Error` / `Model not installed`).
+    pub frame_interp_status: Label,
     // Transitions
     pub transition_kind_dropdown: gtk4::ComboBoxText,
     pub transition_duration_ms: gtk4::SpinButton,
@@ -2696,6 +2706,19 @@ impl InspectorView {
                         crate::model::clip::SlowMotionInterp::Off => 0,
                         crate::model::clip::SlowMotionInterp::Blend => 1,
                         crate::model::clip::SlowMotionInterp::OpticalFlow => 2,
+                        // If a clip arrives with the AI variant but the
+                        // model is not installed, fall back to displaying
+                        // "Off" — the cache will refuse to generate
+                        // anything until the model appears, at which
+                        // point the dropdown will gain the AI entry and
+                        // a re-load will select it correctly.
+                        crate::model::clip::SlowMotionInterp::Ai => {
+                            if self.slow_motion_has_ai.get() {
+                                3
+                            } else {
+                                0
+                            }
+                        }
                     });
                 // LUT
                 // Rebuild LUT list display
@@ -4920,21 +4943,41 @@ pub fn build_inspector(
     ));
     speed_inner.append(&reverse_check);
 
-    // Slow-motion interpolation dropdown
+    // Slow-motion interpolation dropdown.  The "AI Interpolation (RIFE)"
+    // entry is only shown when the RIFE ONNX model is actually installed —
+    // the window glue toggles it dynamically as the model appears/disappears.
     row_label(&speed_inner, "Slow-Motion Interpolation:");
-    let smo_interp_model = StringList::new(&["Off", "Frame Blending", "Optical Flow"]);
+    let smo_initial_has_ai =
+        crate::media::frame_interp_cache::find_model_path().is_some();
+    let smo_interp_items: &[&str] = if smo_initial_has_ai {
+        &["Off", "Frame Blending", "Optical Flow", "AI Interpolation (RIFE)"]
+    } else {
+        &["Off", "Frame Blending", "Optical Flow"]
+    };
+    let smo_interp_model = StringList::new(smo_interp_items);
+    let slow_motion_model = smo_interp_model.clone();
+    let slow_motion_has_ai = Cell::new(smo_initial_has_ai);
     let slow_motion_dropdown = DropDown::new(Some(smo_interp_model), gtk4::Expression::NONE);
     slow_motion_dropdown.set_selected(0);
     slow_motion_dropdown.set_tooltip_text(Some(
-        "Synthesizes intermediate frames on export for smooth slow-motion (clips with speed < 1.0 only)",
+        "Synthesizes intermediate frames for smooth slow-motion (clips with speed < 1.0 only).\n\
+         • Frame Blending: fast, soft.\n\
+         • Optical Flow: ffmpeg motion compensation, sharper.\n\
+         • AI Interpolation (RIFE): learned model, best quality. Precomputes a sidecar in the background.",
     ));
     speed_inner.append(&slow_motion_dropdown);
     let smo_note = Label::new(Some(
-        "Synthesizes frames on export (slow-motion clips only)",
+        "Synthesizes frames for slow-motion clips (preview + export)",
     ));
     smo_note.set_halign(gtk4::Align::Start);
     smo_note.add_css_class("clip-path");
     speed_inner.append(&smo_note);
+    // Status row for AI interpolation sidecar generation.
+    let frame_interp_status = Label::new(None);
+    frame_interp_status.set_halign(gtk4::Align::Start);
+    frame_interp_status.add_css_class("clip-path");
+    frame_interp_status.set_visible(false);
+    speed_inner.append(&frame_interp_status);
 
     // ── LUT section (Video + Image only) ─────────────────────────────────────
     let lut_section_box = GBox::new(Orientation::Vertical, 8);
@@ -8628,6 +8671,7 @@ pub fn build_inspector(
             let interp = match dd.selected() {
                 1 => crate::model::clip::SlowMotionInterp::Blend,
                 2 => crate::model::clip::SlowMotionInterp::OpticalFlow,
+                3 => crate::model::clip::SlowMotionInterp::Ai,
                 _ => crate::model::clip::SlowMotionInterp::Off,
             };
             if let Some(ref id) = *selected_clip_id.borrow() {
@@ -9505,6 +9549,9 @@ pub fn build_inspector(
         speed_slider,
         reverse_check,
         slow_motion_dropdown,
+        slow_motion_model,
+        slow_motion_has_ai,
+        frame_interp_status,
         transition_kind_dropdown,
         transition_duration_ms,
         transition_alignment_dropdown,

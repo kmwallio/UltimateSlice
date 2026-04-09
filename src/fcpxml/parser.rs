@@ -1370,11 +1370,7 @@ fn parse_asset_clip(
             clip.reverse = v.parse().unwrap_or(false);
         }
         if let Some(v) = attrs.get("us:slow-motion-interp") {
-            clip.slow_motion_interp = match v.as_str() {
-                "blend" => SlowMotionInterp::Blend,
-                "optical-flow" => SlowMotionInterp::OpticalFlow,
-                _ => SlowMotionInterp::Off,
-            };
+            clip.slow_motion_interp = SlowMotionInterp::from_xml_str(v);
         }
         if let Some(v) = attrs.get("us:freeze-frame") {
             clip.freeze_frame = v == "true" || v == "1";
