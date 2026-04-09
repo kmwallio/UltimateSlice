@@ -1,4 +1,5 @@
 use crate::mcp::McpCommand;
+use crate::model::project::FrameRate;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -453,6 +454,29 @@ fn tools_list() -> Value {
                     }
                 },
                 "required": ["clip_ids"]
+            }
+        },
+        {
+            "name": "convert_ltc_audio_to_timecode",
+            "description": "Decode LTC from a clip's audio and store the result as source timecode metadata. When LTC lives on one stereo side, the opposite side is routed to both speakers; mono LTC clips are muted.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": {
+                        "type": "string",
+                        "description": "Clip id whose source audio should be decoded for LTC."
+                    },
+                    "ltc_channel": {
+                        "type": "string",
+                        "description": "Which audio channel carries LTC: auto, left, right, or mono_mix.",
+                        "enum": ["auto", "left", "right", "mono_mix"]
+                    },
+                    "frame_rate": {
+                        "type": "string",
+                        "description": "Optional LTC frame rate override: 23.976, 24, 25, 29.97, 30, or a fraction like 24000/1001."
+                    }
+                },
+                "required": ["clip_id"]
             }
         },
         {
@@ -2265,6 +2289,22 @@ fn dispatch_tool_payload(
                 .unwrap_or_default(),
             reply: tx,
         },
+        "convert_ltc_audio_to_timecode" => {
+            let ltc_channel = match parse_ltc_channel_arg(args.get("ltc_channel")) {
+                Ok(channel) => channel,
+                Err(message) => return Err(tool_error_payload(-32602, message)),
+            };
+            let frame_rate = match parse_ltc_frame_rate_arg(args.get("frame_rate")) {
+                Ok(frame_rate) => frame_rate,
+                Err(message) => return Err(tool_error_payload(-32602, message)),
+            };
+            McpCommand::ConvertLtcAudioToTimecode {
+                clip_id: arg_str!(args, "clip_id"),
+                ltc_channel,
+                frame_rate,
+                reply: tx,
+            }
+        }
 
         "trim_clip" => McpCommand::TrimClip {
             clip_id: arg_str!(args, "clip_id"),
@@ -2276,9 +2316,7 @@ fn dispatch_tool_payload(
         "set_clip_speed" => McpCommand::SetClipSpeed {
             clip_id: arg_str!(args, "clip_id"),
             speed: arg_f64!(args, "speed", 1.0),
-            slow_motion_interp: args["slow_motion_interp"]
-                .as_str()
-                .map(|s| s.to_string()),
+            slow_motion_interp: args["slow_motion_interp"].as_str().map(|s| s.to_string()),
             reply: tx,
         },
 
@@ -3562,6 +3600,74 @@ fn call_tool(
             err(id.clone(), code, message)
         }
     }
+}
+
+fn parse_ltc_channel_arg(
+    value: Option<&Value>,
+) -> Result<crate::media::ltc::LtcChannelSelection, &'static str> {
+    let Some(value) = value else {
+        return Ok(crate::media::ltc::LtcChannelSelection::Auto);
+    };
+    let Some(value) = value.as_str() else {
+        return Err("ltc_channel must be a string");
+    };
+    crate::media::ltc::LtcChannelSelection::from_str(value)
+        .ok_or("ltc_channel must be auto, left, right, or mono_mix")
+}
+
+fn parse_ltc_frame_rate_arg(value: Option<&Value>) -> Result<Option<FrameRate>, &'static str> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let Some(value) = value.as_str() else {
+        return Err("frame_rate must be a string");
+    };
+    let trimmed = value.trim().to_ascii_lowercase();
+    if trimmed.is_empty() || matches!(trimmed.as_str(), "auto" | "default" | "project") {
+        return Ok(None);
+    }
+
+    let parsed = match trimmed.as_str() {
+        "23.976" | "23.98" | "24000/1001" => Some(FrameRate {
+            numerator: 24_000,
+            denominator: 1_001,
+        }),
+        "24" | "24/1" => Some(FrameRate {
+            numerator: 24,
+            denominator: 1,
+        }),
+        "25" | "25/1" => Some(FrameRate {
+            numerator: 25,
+            denominator: 1,
+        }),
+        "29.97" | "30000/1001" => Some(FrameRate {
+            numerator: 30_000,
+            denominator: 1_001,
+        }),
+        "30" | "30/1" => Some(FrameRate {
+            numerator: 30,
+            denominator: 1,
+        }),
+        _ => {
+            if let Some((numerator, denominator)) = trimmed.split_once('/') {
+                let numerator = numerator.parse::<u32>().ok();
+                let denominator = denominator.parse::<u32>().ok();
+                numerator
+                    .zip(denominator)
+                    .filter(|(numerator, denominator)| *numerator > 0 && *denominator > 0)
+                    .map(|(numerator, denominator)| FrameRate {
+                        numerator,
+                        denominator,
+                    })
+            } else {
+                None
+            }
+        }
+    };
+
+    parsed
+        .ok_or("frame_rate must be one of 23.976, 24, 25, 29.97, 30, or a fraction like 24000/1001")
+        .map(Some)
 }
 
 fn parse_crossfade_settings_args(args: &Value) -> Result<(bool, &'static str, u64), &'static str> {

@@ -10,6 +10,7 @@ pub mod export;
 pub mod frame_interp_cache;
 pub mod frei0r_registry;
 pub mod ladspa_registry;
+pub mod ltc;
 pub mod mask_alpha;
 pub mod music_gen;
 pub mod player;

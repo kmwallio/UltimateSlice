@@ -1,4 +1,4 @@
-use crate::model::clip::ClipKind;
+use crate::model::clip::{AudioChannelMode, ClipKind};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -740,6 +740,8 @@ pub struct SourceMarks {
     pub is_animated_svg: bool,
     /// Optional absolute source time reference for the start of the loaded media.
     pub source_timecode_base_ns: Option<u64>,
+    /// Preferred program-audio routing when this source is placed on the timeline.
+    pub audio_channel_mode: AudioChannelMode,
 }
 
 impl Default for SourceMarks {
@@ -756,6 +758,7 @@ impl Default for SourceMarks {
             is_image: false,
             is_animated_svg: false,
             source_timecode_base_ns: None,
+            audio_channel_mode: AudioChannelMode::Stereo,
         }
     }
 }

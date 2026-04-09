@@ -1,12 +1,12 @@
 use crate::media::player::Player;
 use crate::media::program_player::{ProgramClip, ProgramPlayer};
-use crate::model::clip::{Clip, ClipKind, Phase1KeyframeProperty};
+use crate::model::clip::{AudioChannelMode, Clip, ClipKind, Phase1KeyframeProperty};
 use crate::model::media_library::{
     media_keyword_summary, FrameRateFilter, MediaCollection, MediaFilterCriteria, MediaItem,
     MediaKeywordRange, MediaKindFilter, MediaLibrary, MediaRating, MediaRatingFilter,
-    ResolutionFilter,
+    ResolutionFilter, SourceMarks,
 };
-use crate::model::project::Project;
+use crate::model::project::{FrameRate, Project};
 use crate::model::track::TrackKind;
 use crate::model::transition::{
     supported_transition_definitions, supported_transition_kinds,
@@ -1048,6 +1048,29 @@ fn present_text_entry_dialog(
     entry.select_region(0, -1);
 }
 
+fn lookup_source_timecode_base_ns_in_tracks(
+    tracks: &[crate::model::track::Track],
+    source_path: &str,
+) -> Option<u64> {
+    for track in tracks {
+        for clip in &track.clips {
+            if clip.source_path == source_path {
+                if let Some(base) = clip.source_timecode_base_ns {
+                    return Some(base);
+                }
+            }
+            if let Some(ref compound_tracks) = clip.compound_tracks {
+                if let Some(base) =
+                    lookup_source_timecode_base_ns_in_tracks(compound_tracks, source_path)
+                {
+                    return Some(base);
+                }
+            }
+        }
+    }
+    None
+}
+
 fn lookup_source_timecode_base_ns(
     library: &[MediaItem],
     project: &Project,
@@ -1057,14 +1080,43 @@ fn lookup_source_timecode_base_ns(
         .iter()
         .find(|item| item.source_path == source_path)
         .and_then(|item| item.source_timecode_base_ns)
-        .or_else(|| {
-            project
-                .tracks
-                .iter()
-                .flat_map(|track| track.clips.iter())
-                .find(|clip| clip.source_path == source_path)
-                .and_then(|clip| clip.source_timecode_base_ns)
-        })
+        .or_else(|| lookup_source_timecode_base_ns_in_tracks(&project.tracks, source_path))
+}
+
+fn lookup_source_audio_channel_mode_in_tracks(
+    tracks: &[crate::model::track::Track],
+    source_path: &str,
+    fallback: &mut Option<AudioChannelMode>,
+) -> Option<AudioChannelMode> {
+    for track in tracks {
+        for clip in &track.clips {
+            if clip.source_path == source_path {
+                if fallback.is_none() {
+                    *fallback = Some(clip.audio_channel_mode);
+                }
+                if clip.audio_channel_mode != AudioChannelMode::Stereo {
+                    return Some(clip.audio_channel_mode);
+                }
+            }
+            if let Some(ref compound_tracks) = clip.compound_tracks {
+                if let Some(mode) = lookup_source_audio_channel_mode_in_tracks(
+                    compound_tracks,
+                    source_path,
+                    fallback,
+                ) {
+                    return Some(mode);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn lookup_source_audio_channel_mode(project: &Project, source_path: &str) -> AudioChannelMode {
+    let mut fallback = None;
+    lookup_source_audio_channel_mode_in_tracks(&project.tracks, source_path, &mut fallback)
+        .or(fallback)
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1455,6 +1507,7 @@ struct SourcePlacementInfo {
     is_image: bool,
     is_animated_svg: bool,
     source_timecode_base_ns: Option<u64>,
+    audio_channel_mode: AudioChannelMode,
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1495,6 +1548,7 @@ fn lookup_source_placement_info(
         is_image,
         is_animated_svg,
         source_timecode_base_ns: lookup_source_timecode_base_ns(library, project, source_path),
+        audio_channel_mode: lookup_source_audio_channel_mode(project, source_path),
     }
 }
 
@@ -1694,6 +1748,7 @@ fn build_source_clips_for_plan(
     source_out_ns: u64,
     timeline_start_ns: u64,
     source_timecode_base_ns: Option<u64>,
+    audio_channel_mode: AudioChannelMode,
     media_duration_ns: Option<u64>,
     animated_svg: bool,
 ) -> Vec<(usize, Clip)> {
@@ -1707,6 +1762,7 @@ fn build_source_clips_for_plan(
                 timeline_start_ns,
                 target.clip_kind.clone(),
                 source_timecode_base_ns,
+                audio_channel_mode,
                 plan.link_group_id.as_deref(),
                 media_duration_ns,
             );
@@ -1726,6 +1782,7 @@ fn build_source_clip(
     timeline_start_ns: u64,
     kind: ClipKind,
     source_timecode_base_ns: Option<u64>,
+    audio_channel_mode: AudioChannelMode,
     link_group_id: Option<&str>,
     media_duration_ns: Option<u64>,
 ) -> Clip {
@@ -1738,9 +1795,199 @@ fn build_source_clip(
     clip.source_in = source_in_ns;
     clip.source_out = source_out_ns;
     clip.source_timecode_base_ns = source_timecode_base_ns;
+    clip.audio_channel_mode = audio_channel_mode;
     clip.link_group_id = link_group_id.map(str::to_string);
     clip.media_duration_ns = media_duration_ns;
     clip
+}
+
+fn media_item_frame_rate(item: &MediaItem) -> Option<FrameRate> {
+    let (numerator, denominator) = item.frame_rate_num.zip(item.frame_rate_den)?;
+    if numerator == 0 || denominator == 0 {
+        return None;
+    }
+    Some(FrameRate {
+        numerator,
+        denominator,
+    })
+}
+
+fn resolve_ltc_frame_rate_for_source(
+    library: &MediaLibrary,
+    project: &Project,
+    source_path: &str,
+    frame_rate_override: Option<FrameRate>,
+) -> FrameRate {
+    frame_rate_override
+        .or_else(|| {
+            library
+                .items
+                .iter()
+                .find(|item| item.source_path == source_path)
+                .and_then(media_item_frame_rate)
+        })
+        .unwrap_or_else(|| project.frame_rate.clone())
+}
+
+#[derive(Debug, Clone)]
+struct LtcConversionContext {
+    source_path: String,
+    source_in: u64,
+    source_out: u64,
+    frame_rate: FrameRate,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedLtcConversion {
+    context: LtcConversionContext,
+    decode: crate::media::ltc::LtcDecodeResult,
+}
+
+#[derive(Debug, Clone)]
+struct AppliedLtcConversion {
+    source_path: String,
+    source_timecode_base_ns: u64,
+    updated_clip_count: usize,
+    muted_clip_count: usize,
+    applied_audio_channel_mode: Option<AudioChannelMode>,
+    resolved_channel: crate::media::ltc::ResolvedLtcChannel,
+    frame_rate: FrameRate,
+}
+
+fn resolve_ltc_conversion_context(
+    project: &Project,
+    library: &MediaLibrary,
+    clip_id: &str,
+    frame_rate_override: Option<FrameRate>,
+) -> Result<LtcConversionContext, String> {
+    let clip = project
+        .clip_ref(clip_id)
+        .ok_or_else(|| "Clip not found.".to_string())?;
+    if clip.source_path.is_empty() {
+        return Err("Selected clip does not reference source media.".to_string());
+    }
+    if !matches!(clip.kind, ClipKind::Video | ClipKind::Audio) {
+        return Err(
+            "LTC conversion currently supports audio and video source clips only.".to_string(),
+        );
+    }
+    if clip.source_out <= clip.source_in {
+        return Err("Selected clip has an empty source range.".to_string());
+    }
+
+    Ok(LtcConversionContext {
+        source_path: clip.source_path.clone(),
+        source_in: clip.source_in,
+        source_out: clip.source_out,
+        frame_rate: resolve_ltc_frame_rate_for_source(
+            library,
+            project,
+            &clip.source_path,
+            frame_rate_override,
+        ),
+    })
+}
+
+fn apply_ltc_conversion_to_tracks(
+    tracks: &mut [crate::model::track::Track],
+    source_path: &str,
+    source_timecode_base_ns: u64,
+    audio_repair: crate::media::ltc::LtcAudioRepair,
+) -> (usize, usize) {
+    let mut updated_clip_count = 0usize;
+    let mut muted_clip_count = 0usize;
+
+    for track in tracks {
+        for clip in &mut track.clips {
+            if clip.source_path == source_path {
+                clip.source_timecode_base_ns = Some(source_timecode_base_ns);
+                if audio_repair.mute {
+                    clip.volume = 0.0;
+                    muted_clip_count += 1;
+                } else if let Some(channel_mode) = audio_repair.channel_mode {
+                    clip.audio_channel_mode = channel_mode;
+                }
+                updated_clip_count += 1;
+            }
+            if let Some(ref mut compound_tracks) = clip.compound_tracks {
+                let (nested_updated, nested_muted) = apply_ltc_conversion_to_tracks(
+                    compound_tracks,
+                    source_path,
+                    source_timecode_base_ns,
+                    audio_repair,
+                );
+                updated_clip_count += nested_updated;
+                muted_clip_count += nested_muted;
+            }
+        }
+    }
+
+    (updated_clip_count, muted_clip_count)
+}
+
+fn apply_prepared_ltc_conversion(
+    project: &mut Project,
+    library: &mut MediaLibrary,
+    source_marks: Option<&mut SourceMarks>,
+    prepared: PreparedLtcConversion,
+) -> AppliedLtcConversion {
+    let audio_repair = crate::media::ltc::audio_repair_for_ltc_channel(
+        prepared.decode.channel_count,
+        prepared.decode.resolved_channel,
+    );
+    let (updated_clip_count, muted_clip_count) = apply_ltc_conversion_to_tracks(
+        &mut project.tracks,
+        &prepared.context.source_path,
+        prepared.decode.source_timecode_base_ns,
+        audio_repair,
+    );
+    for item in library
+        .items
+        .iter_mut()
+        .filter(|item| item.source_path == prepared.context.source_path)
+    {
+        item.source_timecode_base_ns = Some(prepared.decode.source_timecode_base_ns);
+    }
+    if let Some(source_marks) = source_marks {
+        if source_marks.path == prepared.context.source_path {
+            source_marks.source_timecode_base_ns = Some(prepared.decode.source_timecode_base_ns);
+            if let Some(channel_mode) = audio_repair.channel_mode {
+                source_marks.audio_channel_mode = channel_mode;
+            }
+        }
+    }
+    if updated_clip_count > 0 {
+        project.dirty = true;
+    }
+
+    AppliedLtcConversion {
+        source_path: prepared.context.source_path,
+        source_timecode_base_ns: prepared.decode.source_timecode_base_ns,
+        updated_clip_count,
+        muted_clip_count,
+        applied_audio_channel_mode: audio_repair.channel_mode,
+        resolved_channel: prepared.decode.resolved_channel,
+        frame_rate: prepared.context.frame_rate,
+    }
+}
+
+fn format_ltc_conversion_status(applied: &AppliedLtcConversion) -> String {
+    let timecode_label =
+        timecode::format_ns_as_timecode(applied.source_timecode_base_ns, &applied.frame_rate);
+    let clip_count = applied.updated_clip_count;
+    if applied.muted_clip_count > 0 {
+        format!("Converted LTC to {timecode_label} on {clip_count} clip(s) — muted clip audio")
+    } else if let Some(channel_mode) = applied.applied_audio_channel_mode {
+        let routed = match channel_mode {
+            AudioChannelMode::Left => "left-channel program audio",
+            AudioChannelMode::Right => "right-channel program audio",
+            AudioChannelMode::MonoMix => "mono-mix program audio",
+            AudioChannelMode::Stereo => "stereo program audio",
+        };
+        format!("Converted LTC to {timecode_label} on {clip_count} clip(s) — using {routed}")
+    } else {
+        format!("Converted LTC to {timecode_label} on {clip_count} clip(s)")
+    }
 }
 
 fn add_clip_to_track(
@@ -1969,6 +2216,7 @@ mod tests {
             is_image: false,
             is_animated_svg: false,
             source_timecode_base_ns: Some(42),
+            audio_channel_mode: AudioChannelMode::Stereo,
         };
 
         let plan = build_source_placement_plan_by_track_id(
@@ -1996,6 +2244,7 @@ mod tests {
             300,
             1_000,
             source_info.source_timecode_base_ns,
+            source_info.audio_channel_mode,
             None,
             false,
         );
@@ -2020,6 +2269,156 @@ mod tests {
     }
 
     #[test]
+    fn source_monitor_created_clips_inherit_audio_channel_mode() {
+        let project = Project::new("Test");
+        let source_info = SourcePlacementInfo {
+            is_audio_only: false,
+            has_audio: true,
+            is_image: false,
+            is_animated_svg: false,
+            source_timecode_base_ns: None,
+            audio_channel_mode: AudioChannelMode::Right,
+        };
+
+        let plan = build_source_placement_plan_by_track_id(&project, None, source_info, false);
+        let created = build_source_clips_for_plan(
+            &plan,
+            "/tmp/program-with-ltc.wav",
+            0,
+            500_000_000,
+            0,
+            None,
+            source_info.audio_channel_mode,
+            None,
+            false,
+        );
+
+        assert!(!created.is_empty());
+        assert!(created
+            .iter()
+            .all(|(_, clip)| clip.audio_channel_mode == AudioChannelMode::Right));
+    }
+
+    #[test]
+    fn apply_prepared_ltc_conversion_updates_matching_clips_and_source_marks() {
+        let mut project = Project::new("Test");
+        let audio_track_idx = project
+            .tracks
+            .iter()
+            .position(|track| track.is_audio())
+            .expect("audio track should exist");
+
+        let mut root_clip = build_source_clip(
+            "/tmp/program-with-ltc.wav",
+            0,
+            1_000_000_000,
+            0,
+            ClipKind::Audio,
+            None,
+            AudioChannelMode::Stereo,
+            None,
+            None,
+        );
+        root_clip.id = "root-clip".to_string();
+        project.tracks[audio_track_idx].add_clip(root_clip);
+
+        let mut nested_clip = build_source_clip(
+            "/tmp/program-with-ltc.wav",
+            0,
+            1_000_000_000,
+            0,
+            ClipKind::Audio,
+            None,
+            AudioChannelMode::Stereo,
+            None,
+            None,
+        );
+        nested_clip.id = "nested-clip".to_string();
+        let mut nested_track = crate::model::track::Track::new_audio("Nested");
+        nested_track.add_clip(nested_clip);
+        let mut compound = Clip::new("", 1_000_000_000, 0, ClipKind::Compound);
+        compound.id = "compound-clip".to_string();
+        compound.compound_tracks = Some(vec![nested_track]);
+        project.tracks[audio_track_idx].add_clip(compound);
+
+        let mut library = MediaLibrary::default();
+        library
+            .items
+            .push(MediaItem::new("/tmp/program-with-ltc.wav", 1_000_000_000));
+
+        let mut source_marks = SourceMarks {
+            path: "/tmp/program-with-ltc.wav".to_string(),
+            duration_ns: 1_000_000_000,
+            out_ns: 1_000_000_000,
+            has_audio: true,
+            is_audio_only: true,
+            ..SourceMarks::default()
+        };
+
+        let prepared = PreparedLtcConversion {
+            context: LtcConversionContext {
+                source_path: "/tmp/program-with-ltc.wav".to_string(),
+                source_in: 0,
+                source_out: 1_000_000_000,
+                frame_rate: FrameRate::fps_24(),
+            },
+            decode: crate::media::ltc::LtcDecodeResult {
+                source_timecode_base_ns: 3_600_000_000_000,
+                resolved_channel: crate::media::ltc::ResolvedLtcChannel::Left,
+                channel_count: 2,
+                frame_start_sample: 0,
+                decoded_frame_count: 2,
+            },
+        };
+
+        let applied = apply_prepared_ltc_conversion(
+            &mut project,
+            &mut library,
+            Some(&mut source_marks),
+            prepared,
+        );
+
+        assert_eq!(applied.updated_clip_count, 2);
+        assert_eq!(applied.muted_clip_count, 0);
+        assert_eq!(
+            applied.applied_audio_channel_mode,
+            Some(AudioChannelMode::Right)
+        );
+        assert_eq!(
+            project
+                .clip_ref("root-clip")
+                .unwrap()
+                .source_timecode_base_ns,
+            Some(3_600_000_000_000)
+        );
+        assert_eq!(
+            project
+                .clip_ref("nested-clip")
+                .unwrap()
+                .source_timecode_base_ns,
+            Some(3_600_000_000_000)
+        );
+        assert_eq!(
+            project.clip_ref("root-clip").unwrap().audio_channel_mode,
+            AudioChannelMode::Right
+        );
+        assert_eq!(
+            project.clip_ref("nested-clip").unwrap().audio_channel_mode,
+            AudioChannelMode::Right
+        );
+        assert_eq!(
+            library.items[0].source_timecode_base_ns,
+            Some(3_600_000_000_000)
+        );
+        assert_eq!(
+            source_marks.source_timecode_base_ns,
+            Some(3_600_000_000_000)
+        );
+        assert_eq!(source_marks.audio_channel_mode, AudioChannelMode::Right);
+        assert!(project.dirty);
+    }
+
+    #[test]
     fn source_monitor_plan_with_auto_link_disabled_uses_single_video_clip_for_av_sources() {
         let project = Project::new("Test");
         let source_info = SourcePlacementInfo {
@@ -2028,6 +2427,7 @@ mod tests {
             is_image: false,
             is_animated_svg: false,
             source_timecode_base_ns: None,
+            audio_channel_mode: AudioChannelMode::Stereo,
         };
 
         let plan = build_source_placement_plan_by_track_id(&project, None, source_info, false);
@@ -2040,19 +2440,16 @@ mod tests {
     #[test]
     fn source_monitor_plan_falls_back_to_single_kind_when_pair_not_possible() {
         let mut project_video_only = Project::new("Test");
-        project_video_only
-            .tracks
-            .retain(|track| track.is_video());
+        project_video_only.tracks.retain(|track| track.is_video());
         let mut project_audio_only = Project::new("Test");
-        project_audio_only
-            .tracks
-            .retain(|track| track.is_audio());
+        project_audio_only.tracks.retain(|track| track.is_audio());
         let source_info = SourcePlacementInfo {
             is_audio_only: false,
             has_audio: true,
             is_image: false,
             is_animated_svg: false,
             source_timecode_base_ns: None,
+            audio_channel_mode: AudioChannelMode::Stereo,
         };
 
         let video_only_plan =
@@ -2077,6 +2474,7 @@ mod tests {
             is_image: false,
             is_animated_svg: false,
             source_timecode_base_ns: None,
+            audio_channel_mode: AudioChannelMode::Stereo,
         };
         let silent_video = SourcePlacementInfo {
             is_audio_only: false,
@@ -2084,6 +2482,7 @@ mod tests {
             is_image: false,
             is_animated_svg: false,
             source_timecode_base_ns: None,
+            audio_channel_mode: AudioChannelMode::Stereo,
         };
 
         let audio_plan = build_source_placement_plan_by_track_id(&project, None, audio_only, true);
@@ -2108,6 +2507,7 @@ mod tests {
             is_image: false,
             is_animated_svg: false,
             source_timecode_base_ns: None,
+            audio_channel_mode: AudioChannelMode::Stereo,
         };
 
         let plan = build_source_placement_plan_by_track_id(&project, None, source_info, true);
@@ -2118,25 +2518,21 @@ mod tests {
     #[test]
     fn ensure_matching_source_track_exists_adds_video_track_for_image_sources() {
         let mut project = Project::new("Test");
-        project
-            .tracks
-            .retain(|track| track.is_audio());
+        project.tracks.retain(|track| track.is_audio());
         let source_info = SourcePlacementInfo {
             is_audio_only: false,
             has_audio: false,
             is_image: true,
             is_animated_svg: false,
             source_timecode_base_ns: None,
+            audio_channel_mode: AudioChannelMode::Stereo,
         };
 
         assert!(ensure_matching_source_track_exists(
             &mut project,
             source_info
         ));
-        assert!(project
-            .tracks
-            .iter()
-            .any(|track| track.is_video()));
+        assert!(project.tracks.iter().any(|track| track.is_video()));
 
         let plan = build_source_placement_plan_by_track_id(&project, None, source_info, true);
         assert_eq!(plan.targets.len(), 1);
@@ -2146,25 +2542,21 @@ mod tests {
     #[test]
     fn ensure_matching_source_track_exists_adds_audio_track_for_audio_only_sources() {
         let mut project = Project::new("Test");
-        project
-            .tracks
-            .retain(|track| track.is_video());
+        project.tracks.retain(|track| track.is_video());
         let source_info = SourcePlacementInfo {
             is_audio_only: true,
             has_audio: true,
             is_image: false,
             is_animated_svg: false,
             source_timecode_base_ns: None,
+            audio_channel_mode: AudioChannelMode::Stereo,
         };
 
         assert!(ensure_matching_source_track_exists(
             &mut project,
             source_info
         ));
-        assert!(project
-            .tracks
-            .iter()
-            .any(|track| track.is_audio()));
+        assert!(project.tracks.iter().any(|track| track.is_audio()));
 
         let plan = build_source_placement_plan_by_track_id(&project, None, source_info, true);
         assert_eq!(plan.targets.len(), 1);
@@ -2186,6 +2578,7 @@ mod tests {
             is_image: false,
             is_animated_svg: false,
             source_timecode_base_ns: None,
+            audio_channel_mode: AudioChannelMode::Stereo,
         };
 
         let by_track_id = build_source_placement_plan_by_track_id(
@@ -2233,6 +2626,7 @@ mod tests {
             is_image: false,
             is_animated_svg: false,
             source_timecode_base_ns: None,
+            audio_channel_mode: AudioChannelMode::Stereo,
         };
 
         let plan = build_source_placement_plan_by_track_index(
@@ -2263,6 +2657,7 @@ mod tests {
             is_image: false,
             is_animated_svg: false,
             source_timecode_base_ns: None,
+            audio_channel_mode: AudioChannelMode::Stereo,
         };
 
         let plan = build_source_placement_plan_by_track_index(
@@ -2278,6 +2673,7 @@ mod tests {
             1_000,
             2_000,
             source_info.source_timecode_base_ns,
+            source_info.audio_channel_mode,
             Some(10_000),
             false,
         );
@@ -2295,15 +2691,14 @@ mod tests {
     #[test]
     fn mcp_track_index_plan_returns_empty_without_matching_tracks() {
         let mut project = Project::new("Test");
-        project
-            .tracks
-            .retain(|track| track.is_video());
+        project.tracks.retain(|track| track.is_video());
         let source_info = SourcePlacementInfo {
             is_audio_only: true,
             has_audio: true,
             is_image: false,
             is_animated_svg: false,
             source_timecode_base_ns: None,
+            audio_channel_mode: AudioChannelMode::Stereo,
         };
 
         let plan = build_source_placement_plan_by_track_index(&project, Some(0), source_info, true);
@@ -2323,6 +2718,7 @@ mod tests {
             is_image: false,
             is_animated_svg: false,
             source_timecode_base_ns: None,
+            audio_channel_mode: AudioChannelMode::Stereo,
         };
 
         project.tracks[0].add_clip(build_source_clip(
@@ -2332,6 +2728,7 @@ mod tests {
             1_500_000_000,
             ClipKind::Video,
             None,
+            AudioChannelMode::Stereo,
             None,
             None,
         ));
@@ -2342,6 +2739,7 @@ mod tests {
             1_500_000_000,
             ClipKind::Audio,
             None,
+            AudioChannelMode::Stereo,
             None,
             None,
         ));
@@ -2359,6 +2757,7 @@ mod tests {
             source_out,
             playhead,
             None,
+            source_info.audio_channel_mode,
             None,
             false,
         ) {
@@ -2406,6 +2805,7 @@ mod tests {
             0,
             ClipKind::Video,
             None,
+            AudioChannelMode::Stereo,
             None,
             None,
         ));
@@ -2416,6 +2816,7 @@ mod tests {
             0,
             ClipKind::Audio,
             None,
+            AudioChannelMode::Stereo,
             None,
             None,
         ));
@@ -2433,6 +2834,7 @@ mod tests {
             source_out,
             range_start,
             None,
+            source_info.audio_channel_mode,
             None,
             false,
         ) {
@@ -2512,6 +2914,7 @@ mod tests {
             0,
             ClipKind::Video,
             None,
+            AudioChannelMode::Stereo,
             None,
             None,
         ));
@@ -2581,6 +2984,7 @@ mod tests {
             0,
             ClipKind::Video,
             None,
+            AudioChannelMode::Stereo,
             None,
             None,
         ));
@@ -5242,14 +5646,8 @@ pub fn build_window(
                         )
                     })
                 };
-                let Some((
-                    source_path,
-                    source_in,
-                    source_out,
-                    threshold_db,
-                    min_ms,
-                    old_intervals,
-                )) = clip_info
+                let Some((source_path, source_in, source_out, threshold_db, min_ms, old_intervals)) =
+                    clip_info
                 else {
                     return;
                 };
@@ -5546,8 +5944,7 @@ pub fn build_window(
             move |clip_id: &str| {
                 let old_match_eq_bands = {
                     let proj = project.borrow();
-                    proj.clip_ref(clip_id)
-                        .map(|c| c.match_eq_bands.clone())
+                    proj.clip_ref(clip_id).map(|c| c.match_eq_bands.clone())
                 };
                 let Some(old_bands) = old_match_eq_bands else {
                     return;
@@ -7514,11 +7911,7 @@ pub fn build_window(
                     let proj = project.borrow();
                     let selected_tid = ts.selected_track_id.clone();
                     let target = selected_tid
-                        .and_then(|tid| {
-                            proj.tracks
-                                .iter()
-                                .find(|t| t.id == tid && t.is_audio())
-                        })
+                        .and_then(|tid| proj.tracks.iter().find(|t| t.id == tid && t.is_audio()))
                         .or_else(|| proj.tracks.iter().find(|t| t.is_audio()));
                     if let Some(t) = target {
                         format!("Target track: {}", t.label)
@@ -8011,6 +8404,7 @@ pub fn build_window(
                             is_image: marks.is_image,
                             is_animated_svg: marks.is_animated_svg,
                             source_timecode_base_ns: marks.source_timecode_base_ns,
+                            audio_channel_mode: marks.audio_channel_mode,
                         }
                     } else {
                         let lib = library.borrow();
@@ -8054,6 +8448,7 @@ pub fn build_window(
                     src_out,
                     timeline_start_ns,
                     source_info.source_timecode_base_ns,
+                    source_info.audio_channel_mode,
                     media_dur_opt,
                     source_info.is_animated_svg,
                 ) {
@@ -8212,6 +8607,7 @@ pub fn build_window(
                         src_out,
                         cursor_ns,
                         source_info.source_timecode_base_ns,
+                        source_info.audio_channel_mode,
                         media_dur_opt,
                         source_info.is_animated_svg,
                     ) {
@@ -8689,6 +9085,113 @@ pub fn build_window(
         ));
     }
 
+    // Wire on_convert_ltc_to_timecode — decode LTC in the background and apply
+    // source timecode + channel routing on the main thread.
+    {
+        type LtcConversionThreadResult = Result<PreparedLtcConversion, String>;
+        let project = project.clone();
+        let library = library.clone();
+        let source_marks = source_marks.clone();
+        let on_project_changed = on_project_changed.clone();
+        let window_weak = window.downgrade();
+        let ltc_rx: Rc<RefCell<Option<std::sync::mpsc::Receiver<LtcConversionThreadResult>>>> =
+            Rc::new(RefCell::new(None));
+        let ltc_rx_for_timer = ltc_rx.clone();
+        {
+            let project = project.clone();
+            let library = library.clone();
+            let source_marks = source_marks.clone();
+            let on_project_changed = on_project_changed.clone();
+            let window_weak = window_weak.clone();
+            glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+                let rx_opt = ltc_rx_for_timer.borrow();
+                if let Some(ref rx) = *rx_opt {
+                    if let Ok(result) = rx.try_recv() {
+                        drop(rx_opt);
+                        ltc_rx_for_timer.borrow_mut().take();
+                        match result {
+                            Ok(prepared) => {
+                                let status = {
+                                    let mut proj = project.borrow_mut();
+                                    let mut lib = library.borrow_mut();
+                                    let mut marks = source_marks.borrow_mut();
+                                    let applied = apply_prepared_ltc_conversion(
+                                        &mut proj,
+                                        &mut lib,
+                                        Some(&mut *marks),
+                                        prepared,
+                                    );
+                                    format_ltc_conversion_status(&applied)
+                                };
+                                on_project_changed();
+                                if let Some(win) = window_weak.upgrade() {
+                                    flash_window_status_title(&win, &project, &status);
+                                }
+                            }
+                            Err(error) => {
+                                log::warn!("ltc conversion failed: {error}");
+                                if let Some(win) = window_weak.upgrade() {
+                                    flash_window_status_title(
+                                        &win,
+                                        &project,
+                                        &format!("LTC conversion failed: {error}"),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                glib::ControlFlow::Continue
+            });
+        }
+        timeline_state.borrow_mut().on_convert_ltc_to_timecode = Some(Rc::new(
+            move |clip_id: String,
+                  selection: crate::media::ltc::LtcChannelSelection,
+                  frame_rate_override: Option<FrameRate>| {
+                if ltc_rx.borrow().is_some() {
+                    return;
+                }
+                let context = {
+                    let proj = project.borrow();
+                    let lib = library.borrow();
+                    resolve_ltc_conversion_context(&proj, &lib, &clip_id, frame_rate_override)
+                };
+                let context = match context {
+                    Ok(context) => context,
+                    Err(message) => {
+                        if let Some(win) = window_weak.upgrade() {
+                            flash_window_status_title(
+                                &win,
+                                &project,
+                                &format!("LTC conversion failed: {message}"),
+                            );
+                        }
+                        return;
+                    }
+                };
+                if let Some(win) = window_weak.upgrade() {
+                    let title = project.borrow().title.clone();
+                    win.set_title(Some(&format!(
+                        "UltimateSlice — {title} (Converting LTC to timecode...)"
+                    )));
+                }
+                let (tx, rx) = std::sync::mpsc::channel();
+                *ltc_rx.borrow_mut() = Some(rx);
+                std::thread::spawn(move || {
+                    let result = crate::media::ltc::decode_ltc_from_clip(
+                        &context.source_path,
+                        context.source_in,
+                        context.source_out,
+                        selection,
+                        &context.frame_rate,
+                    )
+                    .map(|decode| PreparedLtcConversion { context, decode });
+                    let _ = tx.send(result);
+                });
+            },
+        ));
+    }
+
     {
         let project = project.clone();
         let timeline_panel_cell = timeline_panel_cell.clone();
@@ -8711,8 +9214,8 @@ pub fn build_window(
         let timeline_state_for_music = timeline_state.clone();
         let timeline_panel_cell = timeline_panel_cell.clone();
         let window_weak = window.downgrade();
-        timeline_state.borrow_mut().on_generate_music =
-            Some(Rc::new(move |target: MusicGenerationTarget| {
+        timeline_state.borrow_mut().on_generate_music = Some(Rc::new(
+            move |target: MusicGenerationTarget| {
                 let win = match window_weak.upgrade() {
                     Some(w) => w,
                     None => return,
@@ -9001,8 +9504,7 @@ pub fn build_window(
                         ref_status_label_inner.set_text("");
                         hints_entry_inner.set_text("");
                         clear_ref_btn_inner.set_visible(false);
-                        analysis_generation
-                            .set(analysis_generation.get().wrapping_add(1));
+                        analysis_generation.set(analysis_generation.get().wrapping_add(1));
                     });
                 }
 
@@ -9030,8 +9532,7 @@ pub fn build_window(
                         } else {
                             format!("{}, {}", prompt.trim(), hints.trim())
                         };
-                        let reference_audio_path =
-                            chosen_ref_path_for_response.borrow().clone();
+                        let reference_audio_path = chosen_ref_path_for_response.borrow().clone();
                         let duration_secs = fixed_duration_secs.unwrap_or_else(|| dur_spin.value());
                         let requested_end_ns = target.timeline_end_ns.unwrap_or_else(|| {
                             target
@@ -9066,7 +9567,8 @@ pub fn build_window(
                 });
 
                 dialog.present();
-            }));
+            },
+        ));
     }
 
     // Wire on_match_color — triggers the inspector Match Color button via keyboard shortcut.
@@ -9964,133 +10466,129 @@ pub fn build_window(
                 let proj = project.borrow();
                 let mut lines: Vec<crate::ui::program_monitor::SubtitleLine> = Vec::new();
                 fn collect_subtitle_lines(
-                        tracks: &[crate::model::track::Track],
-                        pos_ns: u64,
-                        lines: &mut Vec<crate::ui::program_monitor::SubtitleLine>,
-                    ) {
-                        for track in tracks {
-                            for clip in &track.clips {
-                                // Recurse into compound clips with translated time
-                                if let Some(ref inner) = clip.compound_tracks {
-                                    let clip_end = clip.timeline_start + clip.duration();
-                                    if pos_ns >= clip.timeline_start && pos_ns < clip_end {
-                                        let internal_pos = pos_ns
-                                            .saturating_sub(clip.timeline_start)
-                                            .saturating_add(clip.source_in);
-                                        collect_subtitle_lines(inner, internal_pos, lines);
-                                    }
-                                    continue;
-                                }
-                                if clip.subtitle_segments.is_empty() {
-                                    continue;
-                                }
+                    tracks: &[crate::model::track::Track],
+                    pos_ns: u64,
+                    lines: &mut Vec<crate::ui::program_monitor::SubtitleLine>,
+                ) {
+                    for track in tracks {
+                        for clip in &track.clips {
+                            // Recurse into compound clips with translated time
+                            if let Some(ref inner) = clip.compound_tracks {
                                 let clip_end = clip.timeline_start + clip.duration();
                                 if pos_ns >= clip.timeline_start && pos_ns < clip_end {
-                                    let local_ns =
-                                        ((pos_ns - clip.timeline_start) as f64 * clip.speed) as u64;
-                                    for seg in &clip.subtitle_segments {
-                                        if local_ns >= seg.start_ns && local_ns < seg.end_ns {
-                                            let c = clip.subtitle_color;
-                                            let oc = clip.subtitle_outline_color;
-                                            let bc = clip.subtitle_bg_box_color;
-                                            let hc = clip.subtitle_highlight_color;
-                                            let base_size =
-                                                crate::media::title_font::parse_subtitle_font(
-                                                    &clip.subtitle_font,
-                                                )
-                                                .size_points();
-                                            let font_desc =
+                                    let internal_pos = pos_ns
+                                        .saturating_sub(clip.timeline_start)
+                                        .saturating_add(clip.source_in);
+                                    collect_subtitle_lines(inner, internal_pos, lines);
+                                }
+                                continue;
+                            }
+                            if clip.subtitle_segments.is_empty() {
+                                continue;
+                            }
+                            let clip_end = clip.timeline_start + clip.duration();
+                            if pos_ns >= clip.timeline_start && pos_ns < clip_end {
+                                let local_ns =
+                                    ((pos_ns - clip.timeline_start) as f64 * clip.speed) as u64;
+                                for seg in &clip.subtitle_segments {
+                                    if local_ns >= seg.start_ns && local_ns < seg.end_ns {
+                                        let c = clip.subtitle_color;
+                                        let oc = clip.subtitle_outline_color;
+                                        let bc = clip.subtitle_bg_box_color;
+                                        let hc = clip.subtitle_highlight_color;
+                                        let base_size =
+                                            crate::media::title_font::parse_subtitle_font(
+                                                &clip.subtitle_font,
+                                            )
+                                            .size_points();
+                                        let font_desc =
                                             crate::media::title_font::build_preview_subtitle_font_desc(
                                                 &clip.subtitle_font,
                                                 base_size,
                                             );
 
-                                            // Build word-level display with active word highlighting.
-                                            // Fixed groups: divide words into groups of N, show the
-                                            // group containing the active word. The group stays on
-                                            // screen until its last word finishes, then advances.
-                                            let group_size =
-                                                (clip.subtitle_word_window_secs as usize).max(2);
-                                            let mut word_displays = Vec::new();
-                                            if !seg.words.is_empty()
-                                                && !clip.subtitle_highlight_flags.is_none()
+                                        // Build word-level display with active word highlighting.
+                                        // Fixed groups: divide words into groups of N, show the
+                                        // group containing the active word. The group stays on
+                                        // screen until its last word finishes, then advances.
+                                        let group_size =
+                                            (clip.subtitle_word_window_secs as usize).max(2);
+                                        let mut word_displays = Vec::new();
+                                        if !seg.words.is_empty()
+                                            && !clip.subtitle_highlight_flags.is_none()
+                                        {
+                                            // Find which word is active.
+                                            let active_idx = seg.words.iter().position(|w| {
+                                                local_ns >= w.start_ns && local_ns < w.end_ns
+                                            });
+                                            // Determine which fixed group the active word belongs to.
+                                            let center = active_idx.unwrap_or(0);
+                                            let group_start = (center / group_size) * group_size;
+                                            let group_end =
+                                                (group_start + group_size).min(seg.words.len());
+                                            for (wi, word) in
+                                                seg.words[group_start..group_end].iter().enumerate()
                                             {
-                                                // Find which word is active.
-                                                let active_idx = seg.words.iter().position(|w| {
-                                                    local_ns >= w.start_ns && local_ns < w.end_ns
-                                                });
-                                                // Determine which fixed group the active word belongs to.
-                                                let center = active_idx.unwrap_or(0);
-                                                let group_start =
-                                                    (center / group_size) * group_size;
-                                                let group_end =
-                                                    (group_start + group_size).min(seg.words.len());
-                                                for (wi, word) in seg.words[group_start..group_end]
-                                                    .iter()
-                                                    .enumerate()
-                                                {
-                                                    word_displays.push(crate::ui::program_monitor::SubtitleWordDisplay {
+                                                word_displays.push(crate::ui::program_monitor::SubtitleWordDisplay {
                                                     text: word.text.clone(),
                                                     active: Some(group_start + wi) == active_idx,
                                                 });
-                                                }
                                             }
-
-                                            lines.push(crate::ui::program_monitor::SubtitleLine {
-                                                words: word_displays,
-                                                text: seg.text.clone(),
-                                                color: crate::ui::colors::rgba_u32_to_f64(c),
-                                                highlight_color: crate::ui::colors::rgba_u32_to_f64(hc),
-                                                highlight_flags: clip.subtitle_highlight_flags,
-                                                outline_color: crate::ui::colors::rgba_u32_to_f64(oc),
-                                                outline_width: clip.subtitle_outline_width,
-                                                bg_box: clip.subtitle_bg_box,
-                                                bg_box_color: crate::ui::colors::rgba_u32_to_f64(bc),
-                                                font_desc,
-                                                position_y: clip.subtitle_position_y,
-                                                subtitle_bold: clip.subtitle_bold,
-                                                subtitle_italic: clip.subtitle_italic,
-                                                subtitle_underline: clip.subtitle_underline,
-                                                subtitle_shadow: clip.subtitle_shadow,
-                                                subtitle_shadow_color:
-                                                    crate::ui::colors::rgba_u32_to_f64(
-                                                        clip.subtitle_shadow_color,
-                                                    ),
-                                                subtitle_shadow_offset: (
-                                                    clip.subtitle_shadow_offset_x,
-                                                    clip.subtitle_shadow_offset_y,
-                                                ),
-                                                bg_highlight_color:
-                                                    crate::ui::colors::rgba_u32_to_f64(
-                                                        clip.subtitle_bg_highlight_color,
-                                                    ),
-                                            });
-                                            break;
                                         }
+
+                                        lines.push(crate::ui::program_monitor::SubtitleLine {
+                                            words: word_displays,
+                                            text: seg.text.clone(),
+                                            color: crate::ui::colors::rgba_u32_to_f64(c),
+                                            highlight_color: crate::ui::colors::rgba_u32_to_f64(hc),
+                                            highlight_flags: clip.subtitle_highlight_flags,
+                                            outline_color: crate::ui::colors::rgba_u32_to_f64(oc),
+                                            outline_width: clip.subtitle_outline_width,
+                                            bg_box: clip.subtitle_bg_box,
+                                            bg_box_color: crate::ui::colors::rgba_u32_to_f64(bc),
+                                            font_desc,
+                                            position_y: clip.subtitle_position_y,
+                                            subtitle_bold: clip.subtitle_bold,
+                                            subtitle_italic: clip.subtitle_italic,
+                                            subtitle_underline: clip.subtitle_underline,
+                                            subtitle_shadow: clip.subtitle_shadow,
+                                            subtitle_shadow_color:
+                                                crate::ui::colors::rgba_u32_to_f64(
+                                                    clip.subtitle_shadow_color,
+                                                ),
+                                            subtitle_shadow_offset: (
+                                                clip.subtitle_shadow_offset_x,
+                                                clip.subtitle_shadow_offset_y,
+                                            ),
+                                            bg_highlight_color: crate::ui::colors::rgba_u32_to_f64(
+                                                clip.subtitle_bg_highlight_color,
+                                            ),
+                                        });
+                                        break;
                                     }
                                 }
                             }
                         }
                     }
-                    // When inside a compound deep-dive, collect subtitles
-                    // from the internal tracks using the player's compound-
-                    // internal position (pos_ns) directly.
-                    // When inside a compound deep-dive, collect subtitles
-                    // from the internal tracks using the player's compound-
-                    // internal position (pos_ns) directly.
-                    let editing_ptr = {
-                        let st = ts.borrow();
-                        if st.compound_nav_stack.is_empty() {
-                            proj.tracks.as_slice() as *const [crate::model::track::Track]
-                        } else {
-                            st.resolve_editing_tracks(&proj)
-                                as *const [crate::model::track::Track]
-                        }
-                    };
-                    // SAFETY: proj is borrowed immutably for this block.
-                    let editing: &[crate::model::track::Track] = unsafe { &*editing_ptr };
-                    collect_subtitle_lines(editing, pos_ns, &mut lines);
-                    prog_subtitle_setter_poll(lines);
+                }
+                // When inside a compound deep-dive, collect subtitles
+                // from the internal tracks using the player's compound-
+                // internal position (pos_ns) directly.
+                // When inside a compound deep-dive, collect subtitles
+                // from the internal tracks using the player's compound-
+                // internal position (pos_ns) directly.
+                let editing_ptr = {
+                    let st = ts.borrow();
+                    if st.compound_nav_stack.is_empty() {
+                        proj.tracks.as_slice() as *const [crate::model::track::Track]
+                    } else {
+                        st.resolve_editing_tracks(&proj) as *const [crate::model::track::Track]
+                    }
+                };
+                // SAFETY: proj is borrowed immutably for this block.
+                let editing: &[crate::model::track::Track] = unsafe { &*editing_ptr };
+                collect_subtitle_lines(editing, pos_ns, &mut lines);
+                prog_subtitle_setter_poll(lines);
             }
             glib::ControlFlow::Continue
         });
@@ -10252,6 +10750,7 @@ pub fn build_window(
                 is_image: marks.is_image,
                 is_animated_svg: marks.is_animated_svg,
                 source_timecode_base_ns: marks.source_timecode_base_ns,
+                audio_channel_mode: marks.audio_channel_mode,
             };
             drop(marks);
 
@@ -10291,6 +10790,7 @@ pub fn build_window(
                         out_ns,
                         timeline_start,
                         source_info.source_timecode_base_ns,
+                        source_info.audio_channel_mode,
                         media_dur_opt,
                         source_info.is_animated_svg,
                     ) {
@@ -10329,6 +10829,7 @@ pub fn build_window(
                 is_image: marks.is_image,
                 is_animated_svg: marks.is_animated_svg,
                 source_timecode_base_ns: marks.source_timecode_base_ns,
+                audio_channel_mode: marks.audio_channel_mode,
             };
             drop(marks);
 
@@ -10373,6 +10874,7 @@ pub fn build_window(
                     out_ns,
                     playhead,
                     source_info.source_timecode_base_ns,
+                    source_info.audio_channel_mode,
                     media_dur_opt,
                     source_info.is_animated_svg,
                 ) {
@@ -10436,6 +10938,7 @@ pub fn build_window(
                 is_image: marks.is_image,
                 is_animated_svg: marks.is_animated_svg,
                 source_timecode_base_ns: marks.source_timecode_base_ns,
+                audio_channel_mode: marks.audio_channel_mode,
             };
             drop(marks);
 
@@ -10483,6 +10986,7 @@ pub fn build_window(
                     out_ns,
                     playhead,
                     source_info.source_timecode_base_ns,
+                    source_info.audio_channel_mode,
                     media_dur_opt,
                     source_info.is_animated_svg,
                 ) {
@@ -10588,6 +11092,7 @@ pub fn build_window(
             m.is_image = source_info.is_image;
             m.is_animated_svg = source_info.is_animated_svg;
             m.source_timecode_base_ns = source_info.source_timecode_base_ns;
+            m.audio_channel_mode = source_info.audio_channel_mode;
             drop(m);
             *selected_source_keyword_id.borrow_mut() = None;
             source_keyword_entry.set_text("");
@@ -10692,10 +11197,7 @@ pub fn build_window(
             let mut clip_ids = Vec::new();
             {
                 let mut proj = project.borrow_mut();
-                let video_track = proj
-                    .tracks
-                    .iter_mut()
-                    .find(|t| t.is_video());
+                let video_track = proj.tracks.iter_mut().find(|t| t.is_video());
                 let Some(track) = video_track else { return };
                 let mut pos = track
                     .clips
@@ -11338,11 +11840,7 @@ pub fn build_window(
             // Prefer the selected track (if it's a video track), fall back to first video track.
             let selected_tid = timeline_state.borrow().selected_track_id.clone();
             let track_idx = selected_tid
-                .and_then(|tid| {
-                    proj.tracks
-                        .iter()
-                        .position(|t| t.id == tid && t.is_video())
-                })
+                .and_then(|tid| proj.tracks.iter().position(|t| t.id == tid && t.is_video()))
                 .or_else(|| proj.tracks.iter().position(|t| t.is_video()))
                 .unwrap_or_else(|| {
                     let t = crate::model::track::Track::new_video("Video 1");
@@ -13416,12 +13914,8 @@ pub fn build_window(
                 let interp_resolved = frame_interp_cache.borrow_mut().poll();
                 if !interp_resolved.is_empty() {
                     let proj = project_for_stt.borrow();
-                    let snapshot = frame_interp_cache
-                        .borrow()
-                        .snapshot_paths_by_clip_id(&proj);
-                    prog_player
-                        .borrow_mut()
-                        .update_frame_interp_paths(snapshot);
+                    let snapshot = frame_interp_cache.borrow().snapshot_paths_by_clip_id(&proj);
+                    prog_player.borrow_mut().update_frame_interp_paths(snapshot);
                 }
                 // Toggle the "AI Interpolation (RIFE)" dropdown entry in
                 // sync with the on-disk model. So users can drop the model
@@ -13459,21 +13953,27 @@ pub fn build_window(
                 let status_text = {
                     let proj = project_for_stt.borrow();
                     let selected = inspector_view.selected_clip_id.borrow().clone();
-                    selected.and_then(|id| proj.clip_ref(&id).cloned()).map(|clip| {
-                        match frame_interp_cache.borrow().status_for_clip(&clip) {
-                            FrameInterpStatus::NotApplicable => "",
-                            FrameInterpStatus::ModelMissing => "AI model not installed (Preferences → Models)",
-                            FrameInterpStatus::Generating => "AI sidecar: Generating…",
-                            FrameInterpStatus::Ready => "AI sidecar: Ready",
-                            FrameInterpStatus::Failed => "AI sidecar: generation failed",
-                        }
-                        .to_string()
-                    })
+                    selected
+                        .and_then(|id| proj.clip_ref(&id).cloned())
+                        .map(|clip| {
+                            match frame_interp_cache.borrow().status_for_clip(&clip) {
+                                FrameInterpStatus::NotApplicable => "",
+                                FrameInterpStatus::ModelMissing => {
+                                    "AI model not installed (Preferences → Models)"
+                                }
+                                FrameInterpStatus::Generating => "AI sidecar: Generating…",
+                                FrameInterpStatus::Ready => "AI sidecar: Ready",
+                                FrameInterpStatus::Failed => "AI sidecar: generation failed",
+                            }
+                            .to_string()
+                        })
                 };
                 let text = status_text.unwrap_or_default();
                 if inspector_view.frame_interp_status.text() != text.as_str() {
                     inspector_view.frame_interp_status.set_text(&text);
-                    inspector_view.frame_interp_status.set_visible(!text.is_empty());
+                    inspector_view
+                        .frame_interp_status
+                        .set_visible(!text.is_empty());
                 }
             }
             // Poll STT cache — apply generated subtitles via undo system.
@@ -15321,6 +15821,7 @@ fn handle_mcp_command(
                         source_out_ns,
                         timeline_start_ns,
                         source_info.source_timecode_base_ns,
+                        source_info.audio_channel_mode,
                         None,
                         source_info.is_animated_svg,
                     ) {
@@ -15568,6 +16069,71 @@ fn handle_mcp_command(
                         }))
                         .ok();
                     on_project_changed();
+                }
+                Err(error) => {
+                    reply.send(json!({"success": false, "error": error})).ok();
+                }
+            }
+        }
+
+        McpCommand::ConvertLtcAudioToTimecode {
+            clip_id,
+            ltc_channel,
+            frame_rate,
+            reply,
+        } => {
+            let context = {
+                let proj = project.borrow();
+                let lib = library.borrow();
+                resolve_ltc_conversion_context(&proj, &lib, &clip_id, frame_rate)
+            };
+            match context {
+                Ok(context) => {
+                    let prepared = crate::media::ltc::decode_ltc_from_clip(
+                        &context.source_path,
+                        context.source_in,
+                        context.source_out,
+                        ltc_channel,
+                        &context.frame_rate,
+                    )
+                    .map(|decode| PreparedLtcConversion { context, decode });
+                    match prepared {
+                        Ok(prepared) => {
+                            let applied = {
+                                let mut proj = project.borrow_mut();
+                                let mut lib = library.borrow_mut();
+                                let mut marks = source_marks.borrow_mut();
+                                apply_prepared_ltc_conversion(
+                                    &mut proj,
+                                    &mut lib,
+                                    Some(&mut *marks),
+                                    prepared,
+                                )
+                            };
+                            let timecode_label = timecode::format_ns_as_timecode(
+                                applied.source_timecode_base_ns,
+                                &applied.frame_rate,
+                            );
+                            reply
+                                .send(json!({
+                                    "success": true,
+                                    "clip_id": clip_id,
+                                    "source_path": applied.source_path,
+                                    "source_timecode_base_ns": applied.source_timecode_base_ns,
+                                    "timecode": timecode_label,
+                                    "resolved_ltc_channel": applied.resolved_channel.as_str(),
+                                    "applied_audio_channel_mode": applied.applied_audio_channel_mode.map(|mode| mode.as_str()),
+                                    "muted": applied.muted_clip_count > 0,
+                                    "updated_clip_count": applied.updated_clip_count,
+                                    "message": format_ltc_conversion_status(&applied),
+                                }))
+                                .ok();
+                            on_project_changed();
+                        }
+                        Err(error) => {
+                            reply.send(json!({"success": false, "error": error})).ok();
+                        }
+                    }
                 }
                 Err(error) => {
                     reply.send(json!({"success": false, "error": error})).ok();
@@ -16469,8 +17035,7 @@ fn handle_mcp_command(
             let mut proj = project.borrow_mut();
             let updated = if let Some(clip) = proj.clip_mut(&clip_id) {
                 if let Some(t) = threshold_db {
-                    clip.voice_isolation_silence_threshold_db =
-                        (t as f32).clamp(-60.0, -10.0);
+                    clip.voice_isolation_silence_threshold_db = (t as f32).clamp(-60.0, -10.0);
                 }
                 if let Some(m) = min_ms {
                     clip.voice_isolation_silence_min_ms = m.clamp(50, 2000);
@@ -16568,21 +17133,17 @@ fn handle_mcp_command(
                     ) {
                         Ok(silences) => {
                             let clip_duration_ns = source_out.saturating_sub(source_in);
-                            let new_intervals =
-                                crate::media::export::invert_silences_to_speech(
-                                    &silences,
-                                    clip_duration_ns,
-                                );
+                            let new_intervals = crate::media::export::invert_silences_to_speech(
+                                &silences,
+                                clip_duration_ns,
+                            );
                             let count = new_intervals.len();
-                            let intervals_json: Vec<_> = new_intervals
-                                .iter()
-                                .map(|(s, e)| json!([s, e]))
-                                .collect();
+                            let intervals_json: Vec<_> =
+                                new_intervals.iter().map(|(s, e)| json!([s, e])).collect();
                             {
                                 let mut proj = project.borrow_mut();
                                 if let Some(clip) = proj.clip_mut(&clip_id) {
-                                    clip.voice_isolation_speech_intervals =
-                                        new_intervals;
+                                    clip.voice_isolation_speech_intervals = new_intervals;
                                     proj.dirty = true;
                                 }
                             }
@@ -16891,8 +17452,7 @@ fn handle_mcp_command(
         McpCommand::ClearMatchEq { clip_id, reply } => {
             let old_match_eq_bands = {
                 let proj = project.borrow();
-                proj.clip_ref(&clip_id)
-                    .map(|c| c.match_eq_bands.clone())
+                proj.clip_ref(&clip_id).map(|c| c.match_eq_bands.clone())
             };
             match old_match_eq_bands {
                 Some(old_bands) => {
@@ -16997,11 +17557,8 @@ fn handle_mcp_command(
                 // Find or default audio track.
                 let track_id = {
                     let proj = project.borrow();
-                    let audio_tracks: Vec<_> = proj
-                        .tracks
-                        .iter()
-                        .filter(|t| t.is_audio())
-                        .collect();
+                    let audio_tracks: Vec<_> =
+                        proj.tracks.iter().filter(|t| t.is_audio()).collect();
                     let track = if let Some(idx) = track_index {
                         proj.tracks.get(idx).map(|t| t.id.clone())
                     } else {
@@ -17016,44 +17573,42 @@ fn handle_mcp_command(
                     // prompt.  Failures degrade gracefully — the original
                     // prompt is used and a warning is logged so the tool
                     // never fails just because the reference was unreadable.
-                    let final_prompt =
-                        if let Some(ref ref_path) = reference_audio_path {
-                            match crate::media::audio_features::analyze_audio_file(
-                                ref_path,
-                                0,
-                                u64::MAX,
-                            ) {
-                                Ok(features) => {
-                                    let hint = crate::media::audio_features::features_to_prompt_hint(
-                                        &features,
-                                    );
-                                    if hint.is_empty() {
-                                        prompt.clone()
-                                    } else {
-                                        let augmented =
-                                            format!("{}, {}", prompt.trim(), hint);
-                                        log::info!(
-                                            "generate_music: reference analysis OK for {}: \
-                                             augmented prompt = {:?}",
-                                            ref_path,
-                                            augmented
-                                        );
-                                        augmented
-                                    }
-                                }
-                                Err(e) => {
-                                    log::warn!(
-                                        "generate_music: reference analysis failed for {}: {}; \
-                                         falling back to original prompt",
-                                        ref_path,
-                                        e
-                                    );
+                    let final_prompt = if let Some(ref ref_path) = reference_audio_path {
+                        match crate::media::audio_features::analyze_audio_file(
+                            ref_path,
+                            0,
+                            u64::MAX,
+                        ) {
+                            Ok(features) => {
+                                let hint = crate::media::audio_features::features_to_prompt_hint(
+                                    &features,
+                                );
+                                if hint.is_empty() {
                                     prompt.clone()
+                                } else {
+                                    let augmented = format!("{}, {}", prompt.trim(), hint);
+                                    log::info!(
+                                        "generate_music: reference analysis OK for {}: \
+                                             augmented prompt = {:?}",
+                                        ref_path,
+                                        augmented
+                                    );
+                                    augmented
                                 }
                             }
-                        } else {
-                            prompt.clone()
-                        };
+                            Err(e) => {
+                                log::warn!(
+                                    "generate_music: reference analysis failed for {}: {}; \
+                                         falling back to original prompt",
+                                    ref_path,
+                                    e
+                                );
+                                prompt.clone()
+                            }
+                        }
+                    } else {
+                        prompt.clone()
+                    };
 
                     let playhead_ns = timeline_state.borrow().playhead_ns;
                     let start_ns = timeline_start_ns.unwrap_or(playhead_ns);
@@ -18745,6 +19300,7 @@ fn handle_mcp_command(
                     source_out_ns,
                     playhead,
                     source_info.source_timecode_base_ns,
+                    source_info.audio_channel_mode,
                     None,
                     source_info.is_animated_svg,
                 ) {
@@ -18853,6 +19409,7 @@ fn handle_mcp_command(
                     source_out_ns,
                     playhead,
                     source_info.source_timecode_base_ns,
+                    source_info.audio_channel_mode,
                     None,
                     source_info.is_animated_svg,
                 ) {
@@ -19602,12 +20159,8 @@ fn handle_mcp_command(
                 }
                 let clip_id = clip.id.clone();
                 let mut proj = project.borrow_mut();
-                let ti = track_index.unwrap_or_else(|| {
-                    proj.tracks
-                        .iter()
-                        .position(|t| t.is_video())
-                        .unwrap_or(0)
-                });
+                let ti = track_index
+                    .unwrap_or_else(|| proj.tracks.iter().position(|t| t.is_video()).unwrap_or(0));
                 if ti < proj.tracks.len() {
                     let magnetic_mode = timeline_state.borrow().magnetic_mode;
                     let change = insert_clip_at_playhead_on_track(

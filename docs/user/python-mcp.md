@@ -188,6 +188,23 @@ python3 tools/mcp_call.py match_clip_audio '{"source_clip_id":"clip-1","source_c
 
 When channel modes are omitted, `match_clip_audio` defaults to `auto`, which respects the clip's existing channel routing and automatically picks a dominant single side when the opposite channel is effectively silent.
 
+## LTC audio-to-timecode MCP example
+
+If a clip carries SMPTE LTC on one audio channel, decode it into normal source timecode metadata:
+
+```bash
+python3 tools/mcp_call.py convert_ltc_audio_to_timecode '{"clip_id":"clip-1","ltc_channel":"auto","frame_rate":"29.97"}'
+```
+
+Typical response fields:
+
+- `timecode` — decoded `HH:MM:SS:FF`
+- `resolved_ltc_channel` — which channel actually decoded (`left`, `right`, or `mono_mix`)
+- `applied_audio_channel_mode` — resulting program-audio routing (`left` or `right`) when stereo cleanup was possible
+- `muted` — `true` when the clip had only LTC audio and was muted after conversion
+
+After conversion, the clip can participate in grouped **Align Grouped Clips by Timecode** workflows just like media with imported source timecode.
+
 ## Project management examples
 
 Create a new empty project:

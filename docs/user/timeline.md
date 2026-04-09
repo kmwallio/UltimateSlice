@@ -144,6 +144,27 @@ Automatically find scene/shot boundaries in a clip using ffmpeg video analysis.
 
 Also available via MCP `detect_scene_cuts` tool for automation.
 
+### Convert LTC Audio to Timecode
+
+Decode **Linear Timecode (LTC)** from a clip's audio and turn it into normal clip/source timecode metadata.
+
+1. Right-click a single source-backed audio or video clip and choose **Convert LTC Audio to Timecode…**
+2. Pick the LTC source channel:
+   - **Auto Detect** tries left, right, then mono mix.
+   - **Left Channel** / **Right Channel** are best when one stereo side is known to carry LTC.
+   - **Mono Mix** is useful for mono LTC or already mixed-down recordings.
+3. Optionally override the LTC frame rate. **Project / Source Default** uses the source frame rate when known, otherwise the project frame rate.
+4. Click **Convert**.
+
+What happens next:
+
+- The decoded base timecode is stored on the media source and on every matching clip already in the project.
+- If LTC is on one stereo side, UltimateSlice routes the **other** side to both speakers using the existing clip channel-routing controls.
+- If the recording is effectively **mono LTC only**, the clip is muted after conversion.
+- You can then group clips and use **Align Grouped Clips by Timecode** normally.
+
+Also available via MCP `convert_ltc_audio_to_timecode` for automation.
+
 ### Generate Music on an Audio Track
 
 Use MusicGen to fill an empty span on an audio track with generated background music.

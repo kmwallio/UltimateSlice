@@ -1,5 +1,6 @@
+use crate::media::ltc::LtcChannelSelection;
 use crate::model::clip::{Clip, ClipKind, KeyframeInterpolation};
-use crate::model::project::Project;
+use crate::model::project::{FrameRate, Project};
 use crate::model::through_edit::detect_track_through_edit_boundaries;
 use crate::model::track::TrackKind;
 use crate::model::transition::{
@@ -379,6 +380,8 @@ pub struct TimelineState {
     /// Callback fired when user requests silence removal: (clip_id, track_id, source_path, source_in, source_out, noise_db, min_duration)
     pub on_remove_silent_parts: Option<Rc<dyn Fn(String, String, String, u64, u64, f64, f64)>>,
     pub on_detect_scene_cuts: Option<Rc<dyn Fn(String, String, String, u64, u64, f64)>>,
+    pub on_convert_ltc_to_timecode:
+        Option<Rc<dyn Fn(String, LtcChannelSelection, Option<FrameRate>)>>,
     pub on_generate_music: Option<Rc<dyn Fn(MusicGenerationTarget)>>,
     /// Lightweight status callback for the MusicGen region workflow.
     pub on_music_generation_status: Option<Rc<dyn Fn(String)>>,
@@ -459,6 +462,7 @@ impl TimelineState {
             on_sync_replace_audio: None,
             on_remove_silent_parts: None,
             on_detect_scene_cuts: None,
+            on_convert_ltc_to_timecode: None,
             on_generate_music: None,
             on_music_generation_status: None,
             magnetic_mode: false,
@@ -737,9 +741,7 @@ impl TimelineState {
         let mut proj = self.project.borrow_mut();
         self.history.execute(
             Box::new(crate::undo::set_track_duck_cmd(
-                track_id,
-                old_duck,
-                !old_duck,
+                track_id, old_duck, !old_duck,
             )),
             &mut proj,
         );
@@ -758,9 +760,7 @@ impl TimelineState {
         let mut proj = self.project.borrow_mut();
         self.history.execute(
             Box::new(crate::undo::set_track_solo_cmd(
-                track_id,
-                old_solo,
-                !old_solo,
+                track_id, old_solo, !old_solo,
             )),
             &mut proj,
         );
@@ -781,9 +781,7 @@ impl TimelineState {
         let mut proj = self.project.borrow_mut();
         self.history.execute(
             Box::new(crate::undo::set_track_solo_cmd(
-                track_id,
-                old_solo,
-                !old_solo,
+                track_id, old_solo, !old_solo,
             )),
             &mut proj,
         );
@@ -1337,6 +1335,27 @@ impl TimelineState {
             .unwrap_or(false)
     }
 
+    fn can_convert_ltc_to_timecode(&self) -> bool {
+        if self.on_convert_ltc_to_timecode.is_none() {
+            return false;
+        }
+        let ids = self.selected_ids_or_primary();
+        if ids.len() != 1 {
+            return false;
+        }
+        let Some(clip_id) = ids.iter().next() else {
+            return false;
+        };
+        let proj = self.project.borrow();
+        proj.clip_ref(clip_id)
+            .map(|clip| {
+                !clip.source_path.is_empty()
+                    && clip.source_out > clip.source_in
+                    && matches!(clip.kind, ClipKind::Video | ClipKind::Audio)
+            })
+            .unwrap_or(false)
+    }
+
     fn clip_context_menu_actionability(&self) -> ClipContextMenuActionability {
         ClipContextMenuActionability {
             join_through_edit: self.can_join_selected_through_edit(),
@@ -1348,6 +1367,7 @@ impl TimelineState {
             sync_replace_audio: self.can_sync_selected_clips_by_audio(),
             remove_silent_parts: self.can_remove_silent_parts(),
             detect_scene_cuts: self.can_detect_scene_cuts(),
+            convert_ltc: self.can_convert_ltc_to_timecode(),
             split_stereo: {
                 let ids = self.selected_ids_or_primary();
                 ids.len() == 1
@@ -3715,6 +3735,134 @@ pub fn open_detect_scene_cuts_dialog(state: Rc<RefCell<TimelineState>>) {
     dialog.present();
 }
 
+#[allow(deprecated)]
+pub fn open_convert_ltc_dialog(state: Rc<RefCell<TimelineState>>) {
+    if !state.borrow().can_convert_ltc_to_timecode() {
+        return;
+    }
+
+    let (clip_id, clip_label, default_frame_rate_label) = {
+        let st = state.borrow();
+        let ids = st.selected_ids_or_primary();
+        let Some(clip_id) = ids.iter().next().cloned() else {
+            return;
+        };
+        let proj = st.project.borrow();
+        let Some(clip) = proj.clip_ref(&clip_id) else {
+            return;
+        };
+        let clip_label = if clip.label.trim().is_empty() {
+            clip.source_path.clone()
+        } else {
+            clip.label.clone()
+        };
+        let default_frame_rate_label = format!("{:.3} fps", proj.frame_rate.as_f64());
+        (clip_id, clip_label, default_frame_rate_label)
+    };
+
+    let dialog = gtk::Dialog::builder()
+        .title("Convert LTC Audio to Timecode")
+        .default_width(420)
+        .modal(true)
+        .build();
+    dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+    dialog.add_button("Convert", gtk::ResponseType::Accept);
+
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    body.set_margin_start(16);
+    body.set_margin_end(16);
+    body.set_margin_top(16);
+    body.set_margin_bottom(16);
+
+    let intro = gtk::Label::new(Some(&format!(
+        "Decode LTC from \"{clip_label}\" and store the result as source timecode metadata."
+    )));
+    intro.set_halign(gtk::Align::Start);
+    intro.set_wrap(true);
+
+    let channel_label = gtk::Label::new(Some("LTC source channel:"));
+    channel_label.set_halign(gtk::Align::Start);
+    let channel_model = gtk::StringList::new(&[
+        LtcChannelSelection::Auto.label(),
+        LtcChannelSelection::Left.label(),
+        LtcChannelSelection::Right.label(),
+        LtcChannelSelection::MonoMix.label(),
+    ]);
+    let channel_dropdown = gtk::DropDown::new(Some(channel_model), gtk4::Expression::NONE);
+    channel_dropdown.set_selected(0);
+    channel_dropdown.set_halign(gtk::Align::Start);
+
+    let frame_rate_label = gtk::Label::new(Some("Timecode frame rate:"));
+    frame_rate_label.set_halign(gtk::Align::Start);
+    let frame_rate_model = gtk::StringList::new(&[
+        "Project / Source Default",
+        "23.976 fps",
+        "24 fps",
+        "25 fps",
+        "29.97 fps",
+        "30 fps",
+    ]);
+    let frame_rate_dropdown = gtk::DropDown::new(Some(frame_rate_model), gtk4::Expression::NONE);
+    frame_rate_dropdown.set_selected(0);
+    frame_rate_dropdown.set_halign(gtk::Align::Start);
+
+    let hint = gtk::Label::new(Some(&format!(
+        "When LTC is isolated on the left or right side, the opposite side will be played on both speakers. Default frame rate: {default_frame_rate_label}."
+    )));
+    hint.set_halign(gtk::Align::Start);
+    hint.set_wrap(true);
+    hint.add_css_class("dim-label");
+
+    body.append(&intro);
+    body.append(&channel_label);
+    body.append(&channel_dropdown);
+    body.append(&frame_rate_label);
+    body.append(&frame_rate_dropdown);
+    body.append(&hint);
+    dialog.content_area().append(&body);
+
+    dialog.connect_response(move |d, response| {
+        if response == gtk::ResponseType::Accept {
+            let channel = match channel_dropdown.selected() {
+                1 => LtcChannelSelection::Left,
+                2 => LtcChannelSelection::Right,
+                3 => LtcChannelSelection::MonoMix,
+                _ => LtcChannelSelection::Auto,
+            };
+            let frame_rate = match frame_rate_dropdown.selected() {
+                1 => Some(FrameRate {
+                    numerator: 24_000,
+                    denominator: 1_001,
+                }),
+                2 => Some(FrameRate {
+                    numerator: 24,
+                    denominator: 1,
+                }),
+                3 => Some(FrameRate {
+                    numerator: 25,
+                    denominator: 1,
+                }),
+                4 => Some(FrameRate {
+                    numerator: 30_000,
+                    denominator: 1_001,
+                }),
+                5 => Some(FrameRate {
+                    numerator: 30,
+                    denominator: 1,
+                }),
+                _ => None,
+            };
+            let callback = state.borrow().on_convert_ltc_to_timecode.clone();
+            if let Some(callback) = callback {
+                callback(clip_id.clone(), channel, frame_rate);
+            }
+        }
+        d.close();
+    });
+
+    dialog.present();
+}
+
 fn apply_pasted_attributes(target: &mut Clip, source: &Clip) -> bool {
     let before = target.clone();
     // Color grading (primary)
@@ -3845,6 +3993,7 @@ struct ClipContextMenuActionability {
     sync_replace_audio: bool,
     remove_silent_parts: bool,
     detect_scene_cuts: bool,
+    convert_ltc: bool,
     split_stereo: bool,
     create_compound: bool,
     break_apart_compound: bool,
@@ -3862,6 +4011,7 @@ impl ClipContextMenuActionability {
             || self.sync_replace_audio
             || self.remove_silent_parts
             || self.detect_scene_cuts
+            || self.convert_ltc
             || self.split_stereo
             || self.create_compound
             || self.break_apart_compound
@@ -3879,6 +4029,7 @@ fn apply_clip_context_menu_actionability(
     btn_sync_replace_audio: &gtk::Button,
     btn_remove_silent_parts: &gtk::Button,
     btn_detect_scene_cuts: &gtk::Button,
+    btn_convert_ltc: &gtk::Button,
     btn_split_stereo: &gtk::Button,
     btn_create_compound: &gtk::Button,
     btn_break_apart_compound: &gtk::Button,
@@ -3898,6 +4049,7 @@ fn apply_clip_context_menu_actionability(
     set_state(btn_sync_replace_audio, actionability.sync_replace_audio);
     set_state(btn_remove_silent_parts, actionability.remove_silent_parts);
     set_state(btn_detect_scene_cuts, actionability.detect_scene_cuts);
+    set_state(btn_convert_ltc, actionability.convert_ltc);
     set_state(btn_split_stereo, actionability.split_stereo);
     set_state(btn_create_compound, actionability.create_compound);
     set_state(btn_break_apart_compound, actionability.break_apart_compound);
@@ -3998,6 +4150,12 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         "Detect scene/shot changes and split this clip at each cut point using ffmpeg scdet",
     ));
     clip_context_box.append(&btn_detect_scene_cuts);
+    let btn_convert_ltc = gtk::Button::with_label("Convert LTC Audio to Timecode\u{2026}");
+    btn_convert_ltc.add_css_class("flat");
+    btn_convert_ltc.set_tooltip_text(Some(
+        "Decode LTC from the selected clip and store it as source timecode metadata",
+    ));
+    clip_context_box.append(&btn_convert_ltc);
     let btn_split_stereo = gtk::Button::with_label("Split Stereo to Mono Tracks");
     btn_split_stereo.add_css_class("flat");
     btn_split_stereo.set_tooltip_text(Some(
@@ -4213,6 +4371,17 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 pop.popdown();
             }
             open_detect_scene_cuts_dialog(state.clone());
+        });
+    }
+
+    {
+        let state = state.clone();
+        let pop_weak = clip_context_pop.downgrade();
+        btn_convert_ltc.connect_clicked(move |_| {
+            if let Some(pop) = pop_weak.upgrade() {
+                pop.popdown();
+            }
+            open_convert_ltc_dialog(state.clone());
         });
     }
 
@@ -4835,6 +5004,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 &btn_sync_replace_audio,
                                 &btn_remove_silent_parts,
                                 &btn_detect_scene_cuts,
+                                &btn_convert_ltc,
                                 &btn_split_stereo,
                                 &btn_create_compound,
                                 &btn_break_apart_compound,
@@ -5204,7 +5374,8 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         let raw_start = current_ns.saturating_sub(clip_offset_ns);
                         if grouped_move {
                             let move_set: HashSet<String> = move_clip_ids.iter().cloned().collect();
-                            let snap_ns = (SNAP_TOLERANCE_PX / st.pixels_per_second * NS_PER_SECOND) as u64;
+                            let snap_ns =
+                                (SNAP_TOLERANCE_PX / st.pixels_per_second * NS_PER_SECOND) as u64;
                             let snap_start = {
                                 let proj = st.project.borrow();
                                 let editing_tracks = st.resolve_editing_tracks(&proj);
@@ -5330,7 +5501,8 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 String::new()
                             };
 
-                            let snap_ns = (SNAP_TOLERANCE_PX / st.pixels_per_second * NS_PER_SECOND) as u64;
+                            let snap_ns =
+                                (SNAP_TOLERANCE_PX / st.pixels_per_second * NS_PER_SECOND) as u64;
                             let (_clip_dur, snap_start) = {
                                 let proj = st.project.borrow();
                                 let editing_tracks = st.resolve_editing_tracks(&proj);
@@ -5400,7 +5572,8 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     } => {
                         let drag_ns = current_ns as i64 - original_timeline_start as i64;
                         // Snap the new timeline_start to nearby clip edges
-                        let snap_ns = (SNAP_TOLERANCE_PX / st.pixels_per_second * NS_PER_SECOND) as i64;
+                        let snap_ns =
+                            (SNAP_TOLERANCE_PX / st.pixels_per_second * NS_PER_SECOND) as i64;
                         let new_start_raw =
                             (original_timeline_start as i64 + drag_ns).max(0) as u64;
 
@@ -5492,7 +5665,8 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         ref original_track_clips,
                     } => {
                         // Snap the out-point to nearby clip edges
-                        let snap_ns = (SNAP_TOLERANCE_PX / st.pixels_per_second * NS_PER_SECOND) as u64;
+                        let snap_ns =
+                            (SNAP_TOLERANCE_PX / st.pixels_per_second * NS_PER_SECOND) as u64;
                         let snapped_ns = {
                             let proj = st.project.borrow();
                             let edges: Vec<u64> = proj
@@ -9629,10 +9803,7 @@ mod tests {
             freeze_clip.freeze_frame_hold_duration_ns,
             Some(2_000_000_000)
         );
-        assert_eq!(
-            freeze_clip.source_duration(),
-            1
-        );
+        assert_eq!(freeze_clip.source_duration(), 1);
         assert_eq!(freeze_clip.volume, 0.0);
         assert!(freeze_clip.link_group_id.is_none());
 
@@ -9642,10 +9813,7 @@ mod tests {
             .find(|clip| clip.id == ids[0])
             .expect("left split clip should exist");
         assert_eq!(clip_a_left.timeline_start, 0);
-        assert_eq!(
-            clip_a_left.source_duration(),
-            1_000_000_000
-        );
+        assert_eq!(clip_a_left.source_duration(), 1_000_000_000);
 
         let clip_b = track
             .clips
@@ -9755,10 +9923,7 @@ mod tests {
             .find(|clip| clip.id == ids_b[0])
             .expect("left split on other track should keep original id");
         assert_eq!(x_left.timeline_start, 500_000_000);
-        assert_eq!(
-            x_left.source_duration(),
-            500_000_000
-        );
+        assert_eq!(x_left.source_duration(), 500_000_000);
 
         let x_right = other_track
             .clips
@@ -9766,10 +9931,7 @@ mod tests {
             .find(|clip| clip.source_path.ends_with("X.mp4") && clip.id != ids_b[0])
             .expect("right split on other track should exist");
         assert_eq!(x_right.timeline_start, 3_000_000_000);
-        assert_eq!(
-            x_right.source_duration(),
-            500_000_000
-        );
+        assert_eq!(x_right.source_duration(), 500_000_000);
 
         let y = other_track
             .clips
