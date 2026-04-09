@@ -289,6 +289,21 @@ if let Some(cb) = proj_cb { cb(); }           // safe: no active borrows
 This is why all callbacks in `TimelineState` are `Option<Rc<dyn Fn()>>` (not `Box`)
 — `Rc` is `Clone`, which allows extracting the callback before releasing the borrow.
 
+**Preferred for `on_project_changed`: use `TimelineState::notify_project_changed`.**
+The `notify_project_changed` helper does the borrow → clone → drop → call dance
+atomically, takes a `&Rc<RefCell<TimelineState>>` (so the caller doesn't need to
+manage any borrow), and is a no-op when the callback is unset. The caller still
+must release any outstanding `borrow_mut()` before calling the helper.
+
+```rust
+let mut st = state.borrow_mut();
+let changed = st.do_some_mutation();
+drop(st);                                     // release borrow_mut FIRST
+if changed {
+    TimelineState::notify_project_changed(&state); // safe: helper opens its own short borrow
+}
+```
+
 ### `on_project_changed` must always be called after dropping `state.borrow_mut()`
 
 The `on_project_changed` closure (defined in `window.rs`) calls

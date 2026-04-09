@@ -502,6 +502,32 @@ impl TimelineState {
         (secs.max(0.0) * NS_PER_SECOND) as u64
     }
 
+    /// Fire `on_project_changed` with no `TimelineState` borrow held.
+    ///
+    /// **Why this exists:** GTK4 callbacks run inside `extern "C"` trampolines
+    /// that cannot unwind, so a panic — including a `RefCell` double-borrow
+    /// from re-entering `state.borrow()` while a `borrow_mut()` is still
+    /// active — is a hard process abort. The `on_project_changed` closure
+    /// (defined in `window.rs`) re-borrows the same `Rc<RefCell<TimelineState>>`
+    /// to read `selected_clip_id`, so calling it while a `borrow_mut()` is
+    /// live is fatal.
+    ///
+    /// This helper does the borrow → clone → drop → call dance atomically:
+    /// it takes a *shared reference* to the `Rc` (so no caller borrow is
+    /// required), opens a brief shared `borrow()` to clone the `Rc<dyn Fn()>`
+    /// callback, drops the borrow before invoking the closure, and is a
+    /// no-op when the callback is unset.
+    ///
+    /// **Calling rule:** the caller must release any outstanding
+    /// `borrow_mut()` (e.g. via `drop(st)`) **before** calling this helper.
+    /// See `docs/ARCHITECTURE.md` "Critical Rules for GTK4 + RefCell".
+    pub fn notify_project_changed(state: &Rc<RefCell<Self>>) {
+        let cb = state.borrow().on_project_changed.clone();
+        if let Some(cb) = cb {
+            cb();
+        }
+    }
+
     fn track_index_at_y(&self, y: f64) -> Option<usize> {
         let project = self.project.borrow();
         let editing_tracks = self.resolve_editing_tracks(&project);
@@ -3438,11 +3464,6 @@ pub fn open_freeze_frame_dialog(state: Rc<RefCell<TimelineState>>, area: Drawing
             let hold_duration_ns = (hold_spin.value().max(0.1) * NS_PER_SECOND).round() as u64;
             let mut st = state.borrow_mut();
             let changed = st.create_freeze_frame_from_selected_at_playhead(hold_duration_ns);
-            let proj_cb = if changed {
-                st.on_project_changed.clone()
-            } else {
-                None
-            };
             let sel_cb = if changed {
                 st.on_clip_selected.clone()
             } else {
@@ -3452,9 +3473,7 @@ pub fn open_freeze_frame_dialog(state: Rc<RefCell<TimelineState>>, area: Drawing
             drop(st);
 
             if changed {
-                if let Some(cb) = proj_cb {
-                    cb();
-                }
+                TimelineState::notify_project_changed(&state);
                 if let Some(cb) = sel_cb {
                     cb(new_sel);
                 }
@@ -4049,11 +4068,6 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         btn_join_through_edit.connect_clicked(move |_| {
             let mut st = state.borrow_mut();
             let changed = st.join_selected_through_edit();
-            let proj_cb = if changed {
-                st.on_project_changed.clone()
-            } else {
-                None
-            };
             let sel_cb = if changed {
                 st.on_clip_selected.clone()
             } else {
@@ -4065,9 +4079,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 pop.popdown();
             }
             if changed {
-                if let Some(cb) = proj_cb {
-                    cb();
-                }
+                TimelineState::notify_project_changed(&state);
                 if let Some(cb) = sel_cb {
                     cb(new_sel);
                 }
@@ -4097,15 +4109,12 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         btn_link_selected.connect_clicked(move |_| {
             let mut st = state.borrow_mut();
             let changed = st.link_selected_clips();
-            let proj_cb = st.on_project_changed.clone();
             drop(st);
             if let Some(pop) = pop_weak.upgrade() {
                 pop.popdown();
             }
             if changed {
-                if let Some(cb) = proj_cb {
-                    cb();
-                }
+                TimelineState::notify_project_changed(&state);
                 if let Some(a) = area_weak.upgrade() {
                     a.queue_draw();
                 }
@@ -4120,15 +4129,12 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         btn_unlink_selected.connect_clicked(move |_| {
             let mut st = state.borrow_mut();
             let changed = st.unlink_selected_clips();
-            let proj_cb = st.on_project_changed.clone();
             drop(st);
             if let Some(pop) = pop_weak.upgrade() {
                 pop.popdown();
             }
             if changed {
-                if let Some(cb) = proj_cb {
-                    cb();
-                }
+                TimelineState::notify_project_changed(&state);
                 if let Some(a) = area_weak.upgrade() {
                     a.queue_draw();
                 }
@@ -4143,15 +4149,12 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         btn_align_grouped.connect_clicked(move |_| {
             let mut st = state.borrow_mut();
             let changed = st.align_selected_groups_by_timecode();
-            let proj_cb = st.on_project_changed.clone();
             drop(st);
             if let Some(pop) = pop_weak.upgrade() {
                 pop.popdown();
             }
             if changed {
-                if let Some(cb) = proj_cb {
-                    cb();
-                }
+                TimelineState::notify_project_changed(&state);
                 if let Some(a) = area_weak.upgrade() {
                     a.queue_draw();
                 }
@@ -4263,12 +4266,9 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     false
                 }
             };
-            let proj_cb = st.on_project_changed.clone();
             drop(st);
             if changed {
-                if let Some(cb) = proj_cb {
-                    cb();
-                }
+                TimelineState::notify_project_changed(&state);
             }
             if let Some(a) = area_weak.upgrade() {
                 a.queue_draw();
@@ -4287,12 +4287,9 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             }
             let mut st = state.borrow_mut();
             let changed = st.create_compound_from_selection();
-            let proj_cb = st.on_project_changed.clone();
             drop(st);
             if changed {
-                if let Some(cb) = proj_cb {
-                    cb();
-                }
+                TimelineState::notify_project_changed(&state);
             }
             if let Some(a) = area_weak.upgrade() {
                 a.queue_draw();
@@ -4311,12 +4308,9 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             }
             let mut st = state.borrow_mut();
             let changed = st.break_apart_compound();
-            let proj_cb = st.on_project_changed.clone();
             drop(st);
             if changed {
-                if let Some(cb) = proj_cb {
-                    cb();
-                }
+                TimelineState::notify_project_changed(&state);
             }
             if let Some(a) = area_weak.upgrade() {
                 a.queue_draw();
@@ -4366,19 +4360,12 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             let changed = track_idx
                 .map(|idx| st.set_track_height_preset_by_index(idx, preset))
                 .unwrap_or(false);
-            let proj_cb = if changed {
-                st.on_project_changed.clone()
-            } else {
-                None
-            };
             drop(st);
             if let Some(pop) = pop_weak.upgrade() {
                 pop.popdown();
             }
             if changed {
-                if let Some(cb) = proj_cb {
-                    cb();
-                }
+                TimelineState::notify_project_changed(&state);
                 if let Some(a) = area_weak.upgrade() {
                     a.queue_draw();
                 }
@@ -4411,11 +4398,8 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     let cmd = crate::undo::AddAdjustmentLayerCommand { clip, track_id };
                     let mut st = state.borrow_mut();
                     st.history.execute(Box::new(cmd), &mut proj_rc.borrow_mut());
-                    let proj_cb = st.on_project_changed.clone();
                     drop(st);
-                    if let Some(cb) = proj_cb {
-                        cb();
-                    }
+                    TimelineState::notify_project_changed(&state);
                     if let Some(a) = area_weak.upgrade() {
                         a.queue_draw();
                     }
@@ -4595,11 +4579,8 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     };
                     if let Some(id) = to_remove {
                         st.project.borrow_mut().remove_marker(&id);
-                        let proj_cb = st.on_project_changed.clone();
                         drop(st);
-                        if let Some(cb) = proj_cb {
-                            cb();
-                        }
+                        TimelineState::notify_project_changed(&state);
                     }
                 } else {
                     // Left-click in ruler → seek
@@ -4620,14 +4601,11 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         let track_idx = st.track_index_at_y(y);
                         let seek_cb = st.on_seek.clone();
                         st.razor_cut_at_playhead_on_track(track_idx);
-                        let proj_cb = st.on_project_changed.clone();
                         drop(st);
                         if let Some(cb) = seek_cb {
                             cb(ns);
                         }
-                        if let Some(cb) = proj_cb {
-                            cb();
-                        }
+                        TimelineState::notify_project_changed(&state);
                     }
                     ActiveTool::Select
                     | ActiveTool::Ripple
@@ -4639,15 +4617,8 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 .solo_badge_hit_track_index(x, y)
                                 .map(|track_idx| st.toggle_track_solo_by_index(track_idx))
                                 .unwrap_or(false);
-                            let proj_cb = if changed {
-                                st.on_project_changed.clone()
-                            } else {
-                                None
-                            };
                             drop(st);
-                            if let Some(cb) = proj_cb {
-                                cb();
-                            }
+                            TimelineState::notify_project_changed(&state);
                             if let Some(a) = area_weak.upgrade() {
                                 a.queue_draw();
                             }
@@ -4658,15 +4629,8 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 .duck_badge_hit_track_index(x, y)
                                 .map(|track_idx| st.toggle_track_duck_by_index(track_idx))
                                 .unwrap_or(false);
-                            let proj_cb = if changed {
-                                st.on_project_changed.clone()
-                            } else {
-                                None
-                            };
                             drop(st);
-                            if let Some(cb) = proj_cb {
-                                cb();
-                            }
+                            TimelineState::notify_project_changed(&state);
                             if let Some(a) = area_weak.upgrade() {
                                 a.queue_draw();
                             }
@@ -4744,11 +4708,8 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 };
                                 if is_compound {
                                     st.enter_compound(clip_id.clone());
-                                    let proj_cb = st.on_project_changed.clone();
                                     drop(st);
-                                    if let Some(cb) = proj_cb {
-                                        cb();
-                                    }
+                                    TimelineState::notify_project_changed(&state);
                                     if let Some(a) = area_weak.upgrade() {
                                         a.queue_draw();
                                     }
@@ -4809,12 +4770,9 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     let project_rc = st.project.clone();
                     let mut proj = project_rc.borrow_mut();
                     st.history.execute(Box::new(cmd), &mut proj);
-                    let proj_cb = st.on_project_changed.clone();
                     drop(proj);
                     drop(st);
-                    if let Some(cb) = proj_cb {
-                        cb();
-                    }
+                    TimelineState::notify_project_changed(&state);
                 } else {
                     let mut show_context_menu = false;
                     let mut show_track_context_menu = false;
@@ -6319,11 +6277,6 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 let music_status_cb = matches!(music_generation_outcome, Some(Err(_)))
                     .then(|| st.on_music_generation_status.clone())
                     .flatten();
-                let proj_cb = if should_notify_project {
-                    st.on_project_changed.clone()
-                } else {
-                    None
-                };
                 let sel_cb = if had_marquee || had_keyframe_marquee {
                     st.on_clip_selected.clone()
                 } else {
@@ -6334,9 +6287,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 if let Some(a) = area_weak.upgrade() {
                     a.queue_draw();
                 }
-                if let Some(cb) = proj_cb {
-                    cb();
-                }
+                TimelineState::notify_project_changed(&state);
                 if let Some(cb) = sel_cb {
                     cb(new_sel);
                 }
@@ -6743,11 +6694,6 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 _ => false,
             };
 
-            let proj_cb = if notify_project {
-                st.on_project_changed.clone()
-            } else {
-                None
-            };
             let sel_cb = if notify_selection {
                 st.on_clip_selected.clone()
             } else {
@@ -6765,9 +6711,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 }
             }
             drop(st);
-            if let Some(cb) = proj_cb {
-                cb();
-            }
+            TimelineState::notify_project_changed(&state);
             if let Some(cb) = sel_cb {
                 cb(new_sel);
             }

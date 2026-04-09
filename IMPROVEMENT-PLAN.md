@@ -35,32 +35,22 @@ invariants (see `docs/ARCHITECTURE.md`).
 
 ## P0 — Correctness & safety
 
-### P0.1 — Borrow-safety helper for callback dispatch
-**Files:** `src/ui/timeline/widget.rs`, `src/ui/window.rs`, `src/ui/inspector.rs`
+### ~~P0.1 — Borrow-safety helper for callback dispatch~~ ✅ DONE (widget.rs only)
 
 **(touches GTK callback safety)**
 
-The "clone Rc → drop borrow → call closure" pattern documented in
-`docs/ARCHITECTURE.md` is enforced only by convention. Any new code that
-forgets `drop(st)` before firing `on_project_changed` aborts the process.
-
-Propose adding helper methods on `TimelineState` that perform the
-drop-and-call atomically:
-
-```rust
-impl TimelineState {
-    /// Fire the project-changed callback with no borrow held.
-    /// Caller must hold `&mut self` (i.e. RefMut), which is consumed.
-    pub fn notify_project_changed(state: &Rc<RefCell<Self>>) {
-        let cb = state.borrow().on_project_changed.clone();
-        if let Some(cb) = cb { cb(); }
-    }
-}
-```
-
-Audit sites that currently use the explicit drop pattern and migrate them
-to the helper. The helper makes intent obvious and removes the easy-to-miss
-explicit `drop(st);` line.
+> **Landed:** `TimelineState::notify_project_changed(&state)` helper added in
+> `src/ui/timeline/widget.rs` with full documentation explaining the GTK
+> callback safety rationale. 18 explicit-drop sites in `widget.rs` migrated
+> (including 4 conditional-capture blocks that became dead code). The
+> architecture doc now points to the helper as the preferred pattern.
+>
+> **Still pending:** the equivalent sites in `window.rs` (~261 references —
+> most are call-paths from outside the timeline state where the helper is
+> not needed; the explicit-drop subset is small but each needs review) and
+> `inspector.rs` (~4 references). Sweep them in a follow-up PR alongside
+> the P3.2 / P3.3 splits where the surrounding callback structure changes
+> anyway.
 
 ### ~~P0.2 — Silent failures with `let _ =`~~ ✅ DONE (program_player GStreamer state-changes still pending)
 
