@@ -2,7 +2,8 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::model::clip::{
-    BlendMode, EqBand, NumericKeyframe, SubtitleHighlightMode, SubtitleSegment,
+    AudioChannelMode, BlendMode, EqBand, NumericKeyframe, SlowMotionInterp, SubtitleHighlightMode,
+    SubtitleSegment,
 };
 
 pub(crate) const ULTIMATESLICE_OTIO_METADATA_VERSION: u32 = 1;
@@ -33,6 +34,91 @@ pub(crate) struct UltimateSliceClipOtioMetadata {
     pub(crate) contrast: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) saturation: Option<f64>,
+    /// Color temperature in Kelvin (2000–10000, neutral 6500).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) temperature: Option<f64>,
+    /// Tint shift on the green–magenta axis (−1.0..1.0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) tint: Option<f64>,
+    /// Image filters: denoise, sharpness, blur (each −1.0..1.0 or 0..1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) denoise: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) sharpness: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) blur: Option<f64>,
+    /// Color grading sliders (10 fields, each −1.0..1.0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) shadows: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) midtones: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) highlights: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) exposure: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) black_point: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) highlights_warmth: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) highlights_tint: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) midtones_warmth: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) midtones_tint: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) shadows_warmth: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) shadows_tint: Option<f64>,
+    /// Pitch shift in semitones (−12.0..+12.0) and pitch-preserve flag.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) pitch_shift_semitones: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) pitch_preserve: Option<bool>,
+    /// Audio channel routing (Stereo / Left / Right / MonoMix).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) audio_channel_mode: Option<AudioChannelMode>,
+    /// Variable speed keyframes + slow-motion interpolation mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) speed_keyframes: Option<Vec<NumericKeyframe>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) slow_motion_interp: Option<SlowMotionInterp>,
+    /// Ordered .cube LUT file paths applied sequentially via FFmpeg lut3d.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) lut_paths: Option<Vec<String>>,
+    /// Color/image keyframes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) brightness_keyframes: Option<Vec<NumericKeyframe>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) contrast_keyframes: Option<Vec<NumericKeyframe>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) saturation_keyframes: Option<Vec<NumericKeyframe>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) temperature_keyframes: Option<Vec<NumericKeyframe>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) tint_keyframes: Option<Vec<NumericKeyframe>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) blur_keyframes: Option<Vec<NumericKeyframe>>,
+    /// Audio keyframes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) volume_keyframes: Option<Vec<NumericKeyframe>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) pan_keyframes: Option<Vec<NumericKeyframe>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) eq_low_gain_keyframes: Option<Vec<NumericKeyframe>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) eq_mid_gain_keyframes: Option<Vec<NumericKeyframe>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) eq_high_gain_keyframes: Option<Vec<NumericKeyframe>>,
+    /// Crop edge keyframes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) crop_left_keyframes: Option<Vec<NumericKeyframe>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) crop_right_keyframes: Option<Vec<NumericKeyframe>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) crop_top_keyframes: Option<Vec<NumericKeyframe>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) crop_bottom_keyframes: Option<Vec<NumericKeyframe>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) opacity: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]

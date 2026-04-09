@@ -232,6 +232,111 @@ fn write_otio_with_mode(
                 brightness: Some(clip.brightness as f64),
                 contrast: Some(clip.contrast as f64),
                 saturation: Some(clip.saturation as f64),
+                temperature: Some(clip.temperature as f64),
+                tint: Some(clip.tint as f64),
+                denoise: Some(clip.denoise as f64),
+                sharpness: Some(clip.sharpness as f64),
+                blur: Some(clip.blur as f64),
+                shadows: Some(clip.shadows as f64),
+                midtones: Some(clip.midtones as f64),
+                highlights: Some(clip.highlights as f64),
+                exposure: Some(clip.exposure as f64),
+                black_point: Some(clip.black_point as f64),
+                highlights_warmth: Some(clip.highlights_warmth as f64),
+                highlights_tint: Some(clip.highlights_tint as f64),
+                midtones_warmth: Some(clip.midtones_warmth as f64),
+                midtones_tint: Some(clip.midtones_tint as f64),
+                shadows_warmth: Some(clip.shadows_warmth as f64),
+                shadows_tint: Some(clip.shadows_tint as f64),
+                pitch_shift_semitones: Some(clip.pitch_shift_semitones),
+                pitch_preserve: Some(clip.pitch_preserve),
+                audio_channel_mode: Some(clip.audio_channel_mode),
+                speed_keyframes: if clip.speed_keyframes.is_empty() {
+                    None
+                } else {
+                    Some(clip.speed_keyframes.clone())
+                },
+                slow_motion_interp: Some(clip.slow_motion_interp),
+                lut_paths: if clip.lut_paths.is_empty() {
+                    None
+                } else {
+                    Some(clip.lut_paths.clone())
+                },
+                brightness_keyframes: if clip.brightness_keyframes.is_empty() {
+                    None
+                } else {
+                    Some(clip.brightness_keyframes.clone())
+                },
+                contrast_keyframes: if clip.contrast_keyframes.is_empty() {
+                    None
+                } else {
+                    Some(clip.contrast_keyframes.clone())
+                },
+                saturation_keyframes: if clip.saturation_keyframes.is_empty() {
+                    None
+                } else {
+                    Some(clip.saturation_keyframes.clone())
+                },
+                temperature_keyframes: if clip.temperature_keyframes.is_empty() {
+                    None
+                } else {
+                    Some(clip.temperature_keyframes.clone())
+                },
+                tint_keyframes: if clip.tint_keyframes.is_empty() {
+                    None
+                } else {
+                    Some(clip.tint_keyframes.clone())
+                },
+                blur_keyframes: if clip.blur_keyframes.is_empty() {
+                    None
+                } else {
+                    Some(clip.blur_keyframes.clone())
+                },
+                volume_keyframes: if clip.volume_keyframes.is_empty() {
+                    None
+                } else {
+                    Some(clip.volume_keyframes.clone())
+                },
+                pan_keyframes: if clip.pan_keyframes.is_empty() {
+                    None
+                } else {
+                    Some(clip.pan_keyframes.clone())
+                },
+                eq_low_gain_keyframes: if clip.eq_low_gain_keyframes.is_empty() {
+                    None
+                } else {
+                    Some(clip.eq_low_gain_keyframes.clone())
+                },
+                eq_mid_gain_keyframes: if clip.eq_mid_gain_keyframes.is_empty() {
+                    None
+                } else {
+                    Some(clip.eq_mid_gain_keyframes.clone())
+                },
+                eq_high_gain_keyframes: if clip.eq_high_gain_keyframes.is_empty() {
+                    None
+                } else {
+                    Some(clip.eq_high_gain_keyframes.clone())
+                },
+                crop_left_keyframes: if clip.crop_left_keyframes.is_empty() {
+                    None
+                } else {
+                    Some(clip.crop_left_keyframes.clone())
+                },
+                crop_right_keyframes: if clip.crop_right_keyframes.is_empty() {
+                    None
+                } else {
+                    Some(clip.crop_right_keyframes.clone())
+                },
+                crop_top_keyframes: if clip.crop_top_keyframes.is_empty() {
+                    None
+                } else {
+                    Some(clip.crop_top_keyframes.clone())
+                },
+                crop_bottom_keyframes: if clip.crop_bottom_keyframes.is_empty() {
+                    None
+                } else {
+                    Some(clip.crop_bottom_keyframes.clone())
+                },
                 opacity: Some(clip.opacity),
                 scale: Some(clip.scale),
                 position_x: Some(clip.position_x),

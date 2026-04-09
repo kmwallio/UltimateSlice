@@ -229,6 +229,117 @@ fn otio_clip_to_clip(
         if let Some(v) = us.saturation {
             clip.saturation = v as f32;
         }
+        if let Some(v) = us.temperature {
+            clip.temperature = v as f32;
+        }
+        if let Some(v) = us.tint {
+            clip.tint = v as f32;
+        }
+        if let Some(v) = us.denoise {
+            clip.denoise = v as f32;
+        }
+        if let Some(v) = us.sharpness {
+            clip.sharpness = v as f32;
+        }
+        if let Some(v) = us.blur {
+            clip.blur = v as f32;
+        }
+        if let Some(v) = us.shadows {
+            clip.shadows = v as f32;
+        }
+        if let Some(v) = us.midtones {
+            clip.midtones = v as f32;
+        }
+        if let Some(v) = us.highlights {
+            clip.highlights = v as f32;
+        }
+        if let Some(v) = us.exposure {
+            clip.exposure = v as f32;
+        }
+        if let Some(v) = us.black_point {
+            clip.black_point = v as f32;
+        }
+        if let Some(v) = us.highlights_warmth {
+            clip.highlights_warmth = v as f32;
+        }
+        if let Some(v) = us.highlights_tint {
+            clip.highlights_tint = v as f32;
+        }
+        if let Some(v) = us.midtones_warmth {
+            clip.midtones_warmth = v as f32;
+        }
+        if let Some(v) = us.midtones_tint {
+            clip.midtones_tint = v as f32;
+        }
+        if let Some(v) = us.shadows_warmth {
+            clip.shadows_warmth = v as f32;
+        }
+        if let Some(v) = us.shadows_tint {
+            clip.shadows_tint = v as f32;
+        }
+        if let Some(v) = us.pitch_shift_semitones {
+            clip.pitch_shift_semitones = v;
+        }
+        if let Some(v) = us.pitch_preserve {
+            clip.pitch_preserve = v;
+        }
+        if let Some(v) = us.audio_channel_mode {
+            clip.audio_channel_mode = v;
+        }
+        if let Some(v) = us.speed_keyframes.as_ref() {
+            clip.speed_keyframes = v.clone();
+        }
+        if let Some(v) = us.slow_motion_interp {
+            clip.slow_motion_interp = v;
+        }
+        if let Some(v) = us.lut_paths.as_ref() {
+            clip.lut_paths = v.clone();
+        }
+        if let Some(v) = us.brightness_keyframes.as_ref() {
+            clip.brightness_keyframes = v.clone();
+        }
+        if let Some(v) = us.contrast_keyframes.as_ref() {
+            clip.contrast_keyframes = v.clone();
+        }
+        if let Some(v) = us.saturation_keyframes.as_ref() {
+            clip.saturation_keyframes = v.clone();
+        }
+        if let Some(v) = us.temperature_keyframes.as_ref() {
+            clip.temperature_keyframes = v.clone();
+        }
+        if let Some(v) = us.tint_keyframes.as_ref() {
+            clip.tint_keyframes = v.clone();
+        }
+        if let Some(v) = us.blur_keyframes.as_ref() {
+            clip.blur_keyframes = v.clone();
+        }
+        if let Some(v) = us.volume_keyframes.as_ref() {
+            clip.volume_keyframes = v.clone();
+        }
+        if let Some(v) = us.pan_keyframes.as_ref() {
+            clip.pan_keyframes = v.clone();
+        }
+        if let Some(v) = us.eq_low_gain_keyframes.as_ref() {
+            clip.eq_low_gain_keyframes = v.clone();
+        }
+        if let Some(v) = us.eq_mid_gain_keyframes.as_ref() {
+            clip.eq_mid_gain_keyframes = v.clone();
+        }
+        if let Some(v) = us.eq_high_gain_keyframes.as_ref() {
+            clip.eq_high_gain_keyframes = v.clone();
+        }
+        if let Some(v) = us.crop_left_keyframes.as_ref() {
+            clip.crop_left_keyframes = v.clone();
+        }
+        if let Some(v) = us.crop_right_keyframes.as_ref() {
+            clip.crop_right_keyframes = v.clone();
+        }
+        if let Some(v) = us.crop_top_keyframes.as_ref() {
+            clip.crop_top_keyframes = v.clone();
+        }
+        if let Some(v) = us.crop_bottom_keyframes.as_ref() {
+            clip.crop_bottom_keyframes = v.clone();
+        }
         if let Some(v) = us.opacity {
             clip.opacity = v;
         }
@@ -983,6 +1094,139 @@ mod tests {
         assert_eq!(clip2.position_y_keyframes, clip.position_y_keyframes);
         assert_eq!(clip2.rotate_keyframes, clip.rotate_keyframes);
         assert_eq!(clip2.opacity_keyframes, clip.opacity_keyframes);
+    }
+
+    #[test]
+    fn test_roundtrip_batch_a_color_grading_and_keyframes() {
+        use crate::model::clip::{
+            AudioChannelMode, KeyframeInterpolation, NumericKeyframe, SlowMotionInterp,
+        };
+        use crate::model::track::Track;
+
+        let mut p = Project::new("Batch A Roundtrip");
+        p.frame_rate = FrameRate {
+            numerator: 30,
+            denominator: 1,
+        };
+        p.tracks.clear();
+
+        let mut track = Track::new_video("V1");
+        let mut clip = Clip::new(
+            "/footage/test.mov",
+            5_000_000_000,
+            0,
+            ClipKind::Video,
+        );
+
+        // Color correction
+        clip.temperature = 5200.0;
+        clip.tint = 0.15;
+        // Image filters
+        clip.denoise = 0.4;
+        clip.sharpness = 0.25;
+        clip.blur = 0.1;
+        // Color grading (10 sliders)
+        clip.shadows = -0.2;
+        clip.midtones = 0.1;
+        clip.highlights = 0.3;
+        clip.exposure = -0.15;
+        clip.black_point = 0.05;
+        clip.highlights_warmth = 0.2;
+        clip.highlights_tint = -0.1;
+        clip.midtones_warmth = -0.05;
+        clip.midtones_tint = 0.08;
+        clip.shadows_warmth = 0.12;
+        clip.shadows_tint = -0.18;
+        // Pitch
+        clip.pitch_shift_semitones = 2.5;
+        clip.pitch_preserve = true;
+        // Audio routing
+        clip.audio_channel_mode = AudioChannelMode::Left;
+        // Slow-motion interp
+        clip.slow_motion_interp = SlowMotionInterp::OpticalFlow;
+        // LUTs
+        clip.lut_paths = vec![
+            "/luts/film_warm.cube".to_string(),
+            "/luts/contrast_pop.cube".to_string(),
+        ];
+        // A small set of keyframes covering each lane
+        let kf = |t, v| NumericKeyframe {
+            time_ns: t,
+            value: v,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        };
+        clip.brightness_keyframes = vec![kf(0, 0.0), kf(2_000_000_000, 0.3)];
+        clip.contrast_keyframes = vec![kf(0, 1.0), kf(2_000_000_000, 1.4)];
+        clip.saturation_keyframes = vec![kf(1_000_000_000, 1.2)];
+        clip.temperature_keyframes = vec![kf(0, 5500.0), kf(3_000_000_000, 6500.0)];
+        clip.tint_keyframes = vec![kf(500_000_000, 0.05)];
+        clip.blur_keyframes = vec![kf(0, 0.0), kf(1_500_000_000, 0.5)];
+        clip.volume_keyframes = vec![kf(0, 1.0), kf(4_000_000_000, 0.6)];
+        clip.pan_keyframes = vec![kf(2_500_000_000, -0.4)];
+        clip.eq_low_gain_keyframes = vec![kf(0, -3.0), kf(2_000_000_000, 1.5)];
+        clip.eq_mid_gain_keyframes = vec![kf(1_000_000_000, 0.5)];
+        clip.eq_high_gain_keyframes = vec![kf(0, 2.0)];
+        clip.crop_left_keyframes = vec![kf(0, 0.0), kf(1_000_000_000, 20.0)];
+        clip.crop_right_keyframes = vec![kf(500_000_000, 5.0)];
+        clip.crop_top_keyframes = vec![kf(0, 10.0)];
+        clip.crop_bottom_keyframes = vec![kf(2_000_000_000, 15.0)];
+        clip.speed_keyframes = vec![kf(0, 1.0), kf(2_000_000_000, 0.5)];
+
+        track.add_clip(clip.clone());
+        p.tracks.push(track);
+
+        let json = crate::otio::writer::write_otio(&p).unwrap();
+        let p2 = parse_otio(&json).unwrap();
+        let clip2 = &p2.tracks[0].clips[0];
+
+        // Color correction
+        assert_eq!(clip2.temperature, clip.temperature);
+        assert_eq!(clip2.tint, clip.tint);
+        // Image filters
+        assert_eq!(clip2.denoise, clip.denoise);
+        assert_eq!(clip2.sharpness, clip.sharpness);
+        assert_eq!(clip2.blur, clip.blur);
+        // Color grading
+        assert_eq!(clip2.shadows, clip.shadows);
+        assert_eq!(clip2.midtones, clip.midtones);
+        assert_eq!(clip2.highlights, clip.highlights);
+        assert_eq!(clip2.exposure, clip.exposure);
+        assert_eq!(clip2.black_point, clip.black_point);
+        assert_eq!(clip2.highlights_warmth, clip.highlights_warmth);
+        assert_eq!(clip2.highlights_tint, clip.highlights_tint);
+        assert_eq!(clip2.midtones_warmth, clip.midtones_warmth);
+        assert_eq!(clip2.midtones_tint, clip.midtones_tint);
+        assert_eq!(clip2.shadows_warmth, clip.shadows_warmth);
+        assert_eq!(clip2.shadows_tint, clip.shadows_tint);
+        // Pitch + audio routing
+        assert_eq!(clip2.pitch_shift_semitones, clip.pitch_shift_semitones);
+        assert_eq!(clip2.pitch_preserve, clip.pitch_preserve);
+        assert_eq!(clip2.audio_channel_mode, clip.audio_channel_mode);
+        // Slow-motion interp
+        assert_eq!(clip2.slow_motion_interp, clip.slow_motion_interp);
+        // LUTs
+        assert_eq!(clip2.lut_paths, clip.lut_paths);
+        // Color/image keyframes
+        assert_eq!(clip2.brightness_keyframes, clip.brightness_keyframes);
+        assert_eq!(clip2.contrast_keyframes, clip.contrast_keyframes);
+        assert_eq!(clip2.saturation_keyframes, clip.saturation_keyframes);
+        assert_eq!(clip2.temperature_keyframes, clip.temperature_keyframes);
+        assert_eq!(clip2.tint_keyframes, clip.tint_keyframes);
+        assert_eq!(clip2.blur_keyframes, clip.blur_keyframes);
+        // Audio keyframes
+        assert_eq!(clip2.volume_keyframes, clip.volume_keyframes);
+        assert_eq!(clip2.pan_keyframes, clip.pan_keyframes);
+        assert_eq!(clip2.eq_low_gain_keyframes, clip.eq_low_gain_keyframes);
+        assert_eq!(clip2.eq_mid_gain_keyframes, clip.eq_mid_gain_keyframes);
+        assert_eq!(clip2.eq_high_gain_keyframes, clip.eq_high_gain_keyframes);
+        // Crop keyframes
+        assert_eq!(clip2.crop_left_keyframes, clip.crop_left_keyframes);
+        assert_eq!(clip2.crop_right_keyframes, clip.crop_right_keyframes);
+        assert_eq!(clip2.crop_top_keyframes, clip.crop_top_keyframes);
+        assert_eq!(clip2.crop_bottom_keyframes, clip.crop_bottom_keyframes);
+        // Speed keyframes
+        assert_eq!(clip2.speed_keyframes, clip.speed_keyframes);
     }
 
     #[test]

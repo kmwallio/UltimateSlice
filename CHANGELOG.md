@@ -5,6 +5,18 @@ All notable project changes and progress should be recorded here.
 ## [Unreleased]
 
 ### Added
+- **OTIO clip metadata coverage — Batch A** (color grading, image filters, audio routing, all keyframe lanes): closes a large pre-existing gap in OTIO round-trip coverage. Previously, exporting a project to OTIO and re-importing it silently dropped many user-visible adjustments. Batch A adds **35 new fields** to `UltimateSliceClipOtioMetadata`:
+  - **Color correction**: `temperature` (Kelvin), `tint` (g–m axis)
+  - **Image filters**: `denoise`, `sharpness`, `blur`
+  - **Color grading (10 fields)**: `shadows`, `midtones`, `highlights`, `exposure`, `black_point`, `highlights_warmth`/`tint`, `midtones_warmth`/`tint`, `shadows_warmth`/`tint`
+  - **Pitch & audio routing**: `pitch_shift_semitones`, `pitch_preserve`, `audio_channel_mode` (Stereo/Left/Right/MonoMix)
+  - **Speed**: `speed_keyframes`, `slow_motion_interp` (Off/Blend/OpticalFlow/Ai)
+  - **LUTs**: `lut_paths` (ordered .cube file list)
+  - **Color/image keyframes**: brightness, contrast, saturation, temperature, tint, blur
+  - **Audio keyframes**: volume, pan, EQ low/mid/high gain
+  - **Crop keyframes**: left, right, top, bottom
+  - All fields use `Option<T>` + `skip_serializing_if = "Option::is_none"` so existing OTIO files round-trip cleanly with no schema-version bump. Vec-typed fields are also serialized as `None` when empty so flat clips don't bloat the JSON.
+  - New end-to-end roundtrip test (`test_roundtrip_batch_a_color_grading_and_keyframes`) writes a clip with non-default values across all 35 fields, parses it back, and asserts each field is preserved exactly. All 913 tests pass.
 - **LTC audio-to-timecode conversion**: timeline clips can now decode Linear Timecode (LTC) from their source audio and store the result in the existing `source_timecode_base_ns` metadata path, so converted clips immediately participate in **Align Grouped Clips by Timecode** and newly placed clips from the same source reuse that timecode metadata.
   - **Timeline UI**: right-click a single source-backed audio/video clip and choose **Convert LTC Audio to Timecode…**. The dialog supports `Auto Detect`, `Left Channel`, `Right Channel`, and `Mono Mix`, plus an optional frame-rate override (`23.976`, `24`, `25`, `29.97`, `30`).
   - **Audio cleanup**: when LTC lives on one stereo side, UltimateSlice automatically routes the opposite side to both speakers using the existing `AudioChannelMode::{Left, Right}` behavior so the timecode tone is no longer audible. Mono-only LTC clips are muted after conversion.
