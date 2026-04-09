@@ -388,6 +388,7 @@ struct AudioMatchClipInfo {
     volume: f32,
     measured_loudness_lufs: Option<f64>,
     eq_bands: [crate::model::clip::EqBand; 3],
+    match_eq_bands: Vec<crate::model::clip::EqBand>,
     audio_channel_mode: crate::model::clip::AudioChannelMode,
     kind: ClipKind,
 }
@@ -458,6 +459,8 @@ struct PreparedAudioMatch {
     new_measured_loudness: Option<f64>,
     old_eq_bands: [crate::model::clip::EqBand; 3],
     new_eq_bands: [crate::model::clip::EqBand; 3],
+    old_match_eq_bands: Vec<crate::model::clip::EqBand>,
+    new_match_eq_bands: Vec<crate::model::clip::EqBand>,
     source_loudness_lufs: f64,
     reference_loudness_lufs: f64,
     volume_gain: f64,
@@ -476,6 +479,7 @@ fn collect_audio_match_clip_info(project: &Project, clip_id: &str) -> Option<Aud
         volume: clip.volume,
         measured_loudness_lufs: clip.measured_loudness_lufs,
         eq_bands: clip.eq_bands,
+        match_eq_bands: clip.match_eq_bands.clone(),
         audio_channel_mode: clip.audio_channel_mode,
         kind: clip.kind.clone(),
     })
@@ -536,6 +540,8 @@ fn run_audio_match_for_clips(
         new_measured_loudness: Some(outcome.source_loudness_lufs),
         old_eq_bands: source.eq_bands,
         new_eq_bands: outcome.eq_bands,
+        old_match_eq_bands: source.match_eq_bands.clone(),
+        new_match_eq_bands: outcome.match_eq_bands,
         source_loudness_lufs: outcome.source_loudness_lufs,
         reference_loudness_lufs: outcome.reference_loudness_lufs,
         volume_gain: outcome.volume_gain,
@@ -1847,6 +1853,7 @@ mod tests {
             volume: 1.0,
             measured_loudness_lufs: None,
             eq_bands: crate::model::clip::default_eq_bands(),
+            match_eq_bands: Vec::new(),
             audio_channel_mode: crate::model::clip::AudioChannelMode::Stereo,
             kind: ClipKind::Audio,
         }
@@ -3918,6 +3925,7 @@ fn clip_to_program_clips(
         eq_low_gain_keyframes: c.eq_low_gain_keyframes.clone(),
         eq_mid_gain_keyframes: c.eq_mid_gain_keyframes.clone(),
         eq_high_gain_keyframes: c.eq_high_gain_keyframes.clone(),
+        match_eq_bands: c.match_eq_bands.clone(),
         crop_left: c.crop_left,
         crop_left_keyframes: c.crop_left_keyframes.clone(),
         crop_right: c.crop_right,
@@ -5343,6 +5351,7 @@ pub fn build_window(
                 let timeline_state = timeline_state.clone();
                 let on_project_changed = on_project_changed.clone();
                 let window_weak = window_weak.clone();
+                let prog_player = prog_player.clone();
                 glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
                     let rx_opt = match_rx.borrow();
                     if let Some(ref rx) = *rx_opt {
@@ -5362,9 +5371,18 @@ pub fn build_window(
                                             new_measured_loudness: prepared.new_measured_loudness,
                                             old_eq_bands: prepared.old_eq_bands,
                                             new_eq_bands: prepared.new_eq_bands,
+                                            old_match_eq_bands: prepared.old_match_eq_bands.clone(),
+                                            new_match_eq_bands: prepared.new_match_eq_bands.clone(),
                                         };
                                         let mut ts = timeline_state.borrow_mut();
                                         ts.history.execute(Box::new(cmd), &mut proj);
+                                    }
+                                    {
+                                        let mut pp = prog_player.borrow_mut();
+                                        pp.update_match_eq_for_clip(
+                                            &prepared.clip_id,
+                                            prepared.new_match_eq_bands.clone(),
+                                        );
                                     }
                                     on_project_changed();
                                     if let Some(win) = window_weak.upgrade() {
@@ -5515,6 +5533,40 @@ pub fn build_window(
                     let mut st = timeline_state.borrow_mut();
                     let mut proj = project.borrow_mut();
                     st.history.execute(cmd, &mut proj);
+                }
+                on_project_changed();
+            }
+        },
+        // on_clear_match_eq: inspector clears the 7-band match EQ on a clip
+        {
+            let timeline_state = timeline_state.clone();
+            let project = project.clone();
+            let on_project_changed = on_project_changed.clone();
+            let prog_player = prog_player.clone();
+            move |clip_id: &str| {
+                let old_match_eq_bands = {
+                    let proj = project.borrow();
+                    proj.clip_ref(clip_id)
+                        .map(|c| c.match_eq_bands.clone())
+                };
+                let Some(old_bands) = old_match_eq_bands else {
+                    return;
+                };
+                if old_bands.is_empty() {
+                    return;
+                }
+                {
+                    let mut st = timeline_state.borrow_mut();
+                    let mut proj = project.borrow_mut();
+                    let cmd = crate::undo::ClearMatchEqCommand {
+                        clip_id: clip_id.to_string(),
+                        old_match_eq_bands: old_bands,
+                    };
+                    st.history.execute(Box::new(cmd), &mut proj);
+                }
+                {
+                    let mut pp = prog_player.borrow_mut();
+                    pp.update_match_eq_for_clip(clip_id, Vec::new());
                 }
                 on_project_changed();
             }
@@ -16768,9 +16820,18 @@ fn handle_mcp_command(
                             new_measured_loudness: prepared.new_measured_loudness,
                             old_eq_bands: prepared.old_eq_bands,
                             new_eq_bands: prepared.new_eq_bands,
+                            old_match_eq_bands: prepared.old_match_eq_bands.clone(),
+                            new_match_eq_bands: prepared.new_match_eq_bands.clone(),
                         };
                         let mut ts = timeline_state.borrow_mut();
                         ts.history.execute(Box::new(cmd), &mut proj);
+                    }
+                    {
+                        let mut pp = prog_player.borrow_mut();
+                        pp.update_match_eq_for_clip(
+                            &prepared.clip_id,
+                            prepared.new_match_eq_bands.clone(),
+                        );
                     }
                     reply
                         .send(serde_json::json!({
@@ -16797,6 +16858,11 @@ fn handle_mcp_command(
                                 "gain": band.gain,
                                 "q": band.q,
                             })).collect::<Vec<_>>(),
+                            "match_eq_bands": prepared.new_match_eq_bands.iter().map(|band| serde_json::json!({
+                                "freq": band.freq,
+                                "gain": band.gain,
+                                "q": band.q,
+                            })).collect::<Vec<_>>(),
                             "source_profile_db": {
                                 "low": prepared.source_profile.low_db,
                                 "mid": prepared.source_profile.mid_db,
@@ -16816,6 +16882,46 @@ fn handle_mcp_command(
                         .send(serde_json::json!({
                             "success": false,
                             "error": error,
+                        }))
+                        .ok();
+                }
+            }
+        }
+
+        McpCommand::ClearMatchEq { clip_id, reply } => {
+            let old_match_eq_bands = {
+                let proj = project.borrow();
+                proj.clip_ref(&clip_id)
+                    .map(|c| c.match_eq_bands.clone())
+            };
+            match old_match_eq_bands {
+                Some(old_bands) => {
+                    {
+                        let mut proj = project.borrow_mut();
+                        let cmd = crate::undo::ClearMatchEqCommand {
+                            clip_id: clip_id.clone(),
+                            old_match_eq_bands: old_bands,
+                        };
+                        let mut ts = timeline_state.borrow_mut();
+                        ts.history.execute(Box::new(cmd), &mut proj);
+                    }
+                    {
+                        let mut pp = prog_player.borrow_mut();
+                        pp.update_match_eq_for_clip(&clip_id, Vec::new());
+                    }
+                    on_project_changed();
+                    reply
+                        .send(serde_json::json!({
+                            "success": true,
+                            "clip_id": clip_id,
+                        }))
+                        .ok();
+                }
+                None => {
+                    reply
+                        .send(serde_json::json!({
+                            "success": false,
+                            "error": "Clip not found",
                         }))
                         .ok();
                 }

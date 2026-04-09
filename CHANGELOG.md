@@ -4,6 +4,15 @@ All notable project changes and progress should be recorded here.
 
 ## [Unreleased]
 
+### Added
+- **7-band match EQ for fine mic-matching** (audio matching improvement): the audio match engine now produces a 7-band EQ in addition to the existing 3-band EQ, allowing much finer corrections when matching one mic's tonal balance to another (e.g., making a lav mic sound more like a shotgun mic). The 7 bands cover ~100 Hz, 200 Hz, 400 Hz, 800 Hz, 2 kHz, 5 kHz, and 9 kHz — each mapped from the 11-band spectral analysis to address body/clothing resonance, chest/proximity, low-mid muddiness, fundamental speech, presence, and air. The match EQ is stored as `clip.match_eq_bands: Vec<EqBand>` independently of the user-facing 3-band EQ; both are applied in series during export, with the match EQ first. The 3-band EQ continues to be used for manual user adjustments.
+  - **Inspector UI**: a small frequency-response curve below the **Match Audio…** button visualizes the active 7-band correction (log-frequency X axis, ±12 dB Y axis, filled curve with band markers). A **Clear Match EQ** button (visible only when match EQ is set) resets the 7-band match without touching the user 3-band EQ.
+  - **Live preview**: the program player wires a dedicated `equalizer-nbands` element into each slot's audio chain (linked before the user EQ). Updating match EQ on the same band count is in-place (no rebuild); changing the band count triggers a slot rebuild. The audio-only multi-pipeline path also creates a per-branch match equalizer.
+  - **Export**: a `build_match_eq_filter()` FFmpeg filter chain is inserted before the user EQ in all three audio assembly sites (primary video clips, secondary video clips, audio-only clips).
+  - **MCP**: new `clear_match_eq` tool resets just the match EQ; the `match_clip_audio` response now includes `match_eq_bands` alongside `eq_bands`.
+  - **Persistence**: round-trips through FCPXML via the `us:match-eq-bands` custom attribute (writer + parser).
+  - **Tests**: 3 new audio match unit tests covering the 7-band output (lav→shotgun shape, deadzone, band count) plus an extended undo test covering the new match-eq fields.
+
 ### Changed
 - **Logging standardized on `log` crate** (P4.1): 34 `eprintln!` calls in production code migrated to `log::warn!` / `log::error!` / `log::info!` across `main.rs`, `mcp/server.rs`, `media/audio_sync.rs`, `media/export.rs`, `media/thumb_cache.rs`, and `ui/toolbar.rs` + `ui/window.rs`. The 2 `eprintln!` calls in `main.rs`'s `--mcp-attach` stdio proxy are intentionally left — they run before `env_logger::init()` and must go to stderr regardless of log configuration. The 2 remaining in `media/music_gen.rs` are inside `#[cfg(test)]`. (Item P4.1 from `IMPROVEMENT-PLAN.md`.)
 - **`#[allow(dead_code)]` audit** (P4.2 partial): removed one stale `#[allow(dead_code)]` from `media/probe_cache.rs` and `media/thumbnail.rs` where the annotated item IS now used. The 21 annotations in `program_player.rs` are deferred to the P3.1 file split. (Item P4.2 from `IMPROVEMENT-PLAN.md`.)

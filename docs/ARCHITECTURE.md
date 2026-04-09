@@ -546,6 +546,7 @@ Before declaring a task finished, agents must verify via MCP:
 | `set_clip_color` | Set brightness/contrast/saturation on a clip by id |
 | `set_clip_opacity` | Set a clip opacity value (`0.0`–`1.0`) by id |
 | `set_clip_eq` | Set 3-band parametric EQ on a clip (optional per-band `low_freq`/`low_gain`/`low_q`, `mid_freq`/`mid_gain`/`mid_q`, `high_freq`/`high_gain`/`high_q`; omitted fields keep current value) |
+| `clear_match_eq` | Clear the 7-band match EQ on a clip (set by `match_clip_audio`); leaves the user 3-band EQ untouched; undoable |
 | `normalize_clip_audio` | Analyze clip loudness and normalize volume; `mode` (`peak`/`lufs`), `target_level` (dB); blocks during ffmpeg analysis (1–5 s) |
 | `detect_scene_cuts` | Detect scene/shot changes in a clip using ffmpeg `scdet` and split at each cut point; `threshold` (1–50, default 10); blocks during analysis |
 | `generate_music` | Generate music from a text prompt using MusicGen AI; `prompt` (required), `duration_secs` (1–30, default 10), optional `track_index`/`timeline_start_ns`; returns immediately, clip appears when generation completes |

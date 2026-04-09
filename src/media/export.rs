@@ -891,6 +891,12 @@ pub fn export_project(
                 } else {
                     format!(",{ladspa_filter}")
                 };
+                let match_eq_filter = build_match_eq_filter(clip);
+                let match_eq_part = if match_eq_filter.is_empty() {
+                    String::new()
+                } else {
+                    format!(",{match_eq_filter}")
+                };
                 let eq_filter = build_eq_filter(clip);
                 let eq_part = if eq_filter.is_empty() {
                     String::new()
@@ -902,7 +908,7 @@ pub fn export_project(
                 let pre_pan = format!("{label}_prepan");
                 let post_pan = format!("{label}_panned");
                 filter.push_str(&format!(
-                ";[{i}:a]{areverse}{atempo}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{eq_part},{fade_filters}anull[{pre_pan}]"
+                ";[{i}:a]{areverse}{atempo}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{match_eq_part}{eq_part},{fade_filters}anull[{pre_pan}]"
             ));
                 append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
                 filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
@@ -949,6 +955,12 @@ pub fn export_project(
                 } else {
                     format!(",{ladspa_filter}")
                 };
+                let match_eq_filter = build_match_eq_filter(clip);
+                let match_eq_part = if match_eq_filter.is_empty() {
+                    String::new()
+                } else {
+                    format!(",{match_eq_filter}")
+                };
                 let eq_filter = build_eq_filter(clip);
                 let eq_part = if eq_filter.is_empty() {
                     String::new()
@@ -960,7 +972,7 @@ pub fn export_project(
                 let pre_pan = format!("{label}_prepan");
                 let post_pan = format!("{label}_panned");
                 filter.push_str(&format!(
-                ";[{in_idx}:a]{areverse}{atempo}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{eq_part},{fade_filters}anull[{pre_pan}]"
+                ";[{in_idx}:a]{areverse}{atempo}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{match_eq_part}{eq_part},{fade_filters}anull[{pre_pan}]"
             ));
                 append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
                 filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
@@ -1000,6 +1012,12 @@ pub fn export_project(
             } else {
                 format!(",{ladspa_filter}")
             };
+            let match_eq_filter = build_match_eq_filter(clip);
+            let match_eq_part = if match_eq_filter.is_empty() {
+                String::new()
+            } else {
+                format!(",{match_eq_filter}")
+            };
             let eq_filter = build_eq_filter(clip);
             let eq_part = if eq_filter.is_empty() {
                 String::new()
@@ -1023,7 +1041,7 @@ pub fn export_project(
             let pre_pan = format!("{label}_prepan");
             let post_pan = format!("{label}_panned");
             filter.push_str(&format!(
-            ";[{}:a]{areverse}{atempo}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{duck_part}{eq_part},{fade_filters}anull[{pre_pan}]",
+            ";[{}:a]{areverse}{atempo}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{duck_part}{match_eq_part}{eq_part},{fade_filters}anull[{pre_pan}]",
             audio_base + j
         ));
             append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
@@ -2533,6 +2551,27 @@ fn build_volume_filter(clip: &Clip) -> String {
 
 /// Build FFmpeg `equalizer` filter chain for the clip's 3-band parametric EQ.
 /// Returns an empty string when EQ is flat (all gains 0 and no keyframes).
+/// Build the FFmpeg `equalizer` filter chain for the clip's match EQ
+/// (7-band, populated by audio match). Static gains only — no keyframes.
+fn build_match_eq_filter(clip: &Clip) -> String {
+    if !clip.has_match_eq() {
+        return String::new();
+    }
+    let parts: Vec<String> = clip
+        .match_eq_bands
+        .iter()
+        .filter(|band| band.gain.abs() >= 0.001)
+        .map(|band| {
+            let bw = band.freq / band.q.max(0.1);
+            format!(
+                "equalizer=f={:.1}:t=h:w={:.1}:g={:.2}",
+                band.freq, bw, band.gain
+            )
+        })
+        .collect();
+    parts.join(",")
+}
+
 fn build_eq_filter(clip: &Clip) -> String {
     if !clip.has_eq() {
         return String::new();

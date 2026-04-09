@@ -801,7 +801,7 @@ impl EditCommand for SetClipEqCommand {
     }
 }
 
-/// Match clip audio tone using measured loudness plus 3-band EQ.
+/// Match clip audio tone using measured loudness plus 3-band EQ and 7-band match EQ.
 pub struct MatchClipAudioCommand {
     pub clip_id: String,
     pub old_volume: f32,
@@ -810,6 +810,8 @@ pub struct MatchClipAudioCommand {
     pub new_measured_loudness: Option<f64>,
     pub old_eq_bands: [crate::model::clip::EqBand; 3],
     pub new_eq_bands: [crate::model::clip::EqBand; 3],
+    pub old_match_eq_bands: Vec<crate::model::clip::EqBand>,
+    pub new_match_eq_bands: Vec<crate::model::clip::EqBand>,
 }
 
 impl MatchClipAudioCommand {
@@ -819,10 +821,12 @@ impl MatchClipAudioCommand {
                 clip.volume = self.new_volume;
                 clip.measured_loudness_lufs = self.new_measured_loudness;
                 clip.eq_bands = self.new_eq_bands;
+                clip.match_eq_bands = self.new_match_eq_bands.clone();
             } else {
                 clip.volume = self.old_volume;
                 clip.measured_loudness_lufs = self.old_measured_loudness;
                 clip.eq_bands = self.old_eq_bands;
+                clip.match_eq_bands = self.old_match_eq_bands.clone();
             }
         }
         project.dirty = true;
@@ -838,6 +842,30 @@ impl EditCommand for MatchClipAudioCommand {
     }
     fn description(&self) -> &str {
         "Match clip audio"
+    }
+}
+
+/// Clear 7-band match EQ from a clip.
+pub struct ClearMatchEqCommand {
+    pub clip_id: String,
+    pub old_match_eq_bands: Vec<crate::model::clip::EqBand>,
+}
+
+impl EditCommand for ClearMatchEqCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            clip.match_eq_bands.clear();
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            clip.match_eq_bands = self.old_match_eq_bands.clone();
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Clear match EQ"
     }
 }
 
@@ -2137,6 +2165,16 @@ mod tests {
             new_measured_loudness: Some(-19.5),
             old_eq_bands: crate::model::clip::default_eq_bands(),
             new_eq_bands: matched_eq,
+            old_match_eq_bands: Vec::new(),
+            new_match_eq_bands: vec![
+                crate::model::clip::EqBand { freq: 100.0, gain: -3.0, q: 1.5 },
+                crate::model::clip::EqBand { freq: 200.0, gain: -2.0, q: 1.0 },
+                crate::model::clip::EqBand { freq: 400.0, gain: 0.0, q: 1.5 },
+                crate::model::clip::EqBand { freq: 800.0, gain: 1.0, q: 1.0 },
+                crate::model::clip::EqBand { freq: 2000.0, gain: 3.0, q: 1.0 },
+                crate::model::clip::EqBand { freq: 5000.0, gain: 2.5, q: 1.0 },
+                crate::model::clip::EqBand { freq: 9000.0, gain: 0.0, q: 1.5 },
+            ],
         };
 
         cmd.execute(&mut project);
@@ -2147,6 +2185,8 @@ mod tests {
         assert_eq!(clip.eq_bands[0].gain, -2.5);
         assert_eq!(clip.eq_bands[1].gain, 1.0);
         assert_eq!(clip.eq_bands[2].gain, 3.5);
+        assert_eq!(clip.match_eq_bands.len(), 7);
+        assert_eq!(clip.match_eq_bands[4].gain, 3.0);
 
         cmd.undo(&mut project);
         let track = project.tracks.iter().find(|t| t.id == track_id).unwrap();
@@ -2154,6 +2194,7 @@ mod tests {
         assert_eq!(clip.volume, 0.8);
         assert_eq!(clip.measured_loudness_lufs, Some(-19.5));
         assert_eq!(clip.eq_bands, crate::model::clip::default_eq_bands());
+        assert!(clip.match_eq_bands.is_empty());
     }
 
     #[test]

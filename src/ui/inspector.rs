@@ -329,6 +329,9 @@ pub struct InspectorView {
     pub pan_slider: Scale,
     pub normalize_btn: Button,
     pub match_audio_btn: Button,
+    pub clear_match_eq_btn: Button,
+    pub match_eq_curve: gtk4::DrawingArea,
+    pub match_eq_curve_state: Rc<RefCell<Vec<crate::model::clip::EqBand>>>,
     pub measured_loudness_label: Label,
     // LADSPA effects
     pub ladspa_effects_list: GBox,
@@ -2377,6 +2380,16 @@ impl InspectorView {
                 } else {
                     self.measured_loudness_label.set_text("");
                 }
+                // Match EQ clear button + curve visibility/state
+                let show_match_eq = c.has_match_eq();
+                self.clear_match_eq_btn.set_visible(show_match_eq);
+                self.match_eq_curve.set_visible(show_match_eq);
+                {
+                    let mut state = self.match_eq_curve_state.borrow_mut();
+                    state.clear();
+                    state.extend_from_slice(&c.match_eq_bands);
+                }
+                self.match_eq_curve.queue_draw();
                 // LADSPA effects list — interactive controls
                 {
                     while let Some(child) = self.ladspa_effects_list.first_child() {
@@ -2834,6 +2847,9 @@ impl InspectorView {
                 self.vi_intervals_label.set_text("Not analyzed");
                 self.pan_slider.set_value(0.0);
                 self.measured_loudness_label.set_text("");
+                self.clear_match_eq_btn.set_visible(false);
+                self.match_eq_curve.set_visible(false);
+                self.match_eq_curve_state.borrow_mut().clear();
                 let eq_defaults = crate::model::clip::default_eq_bands();
                 for (i, band) in eq_defaults.iter().enumerate() {
                     if i < self.eq_freq_sliders.len() {
@@ -3146,6 +3162,7 @@ pub fn build_inspector(
     on_duck_changed: impl Fn(&str, bool, f64) + 'static,
     on_role_changed: impl Fn(&str, &str) + 'static,
     on_execute_command: impl Fn(Box<dyn crate::undo::EditCommand>) + 'static,
+    on_clear_match_eq: impl Fn(&str) + 'static,
 ) -> (GBox, Rc<InspectorView>) {
     // Bring transform-bound constants into scope so the slider/range/clamp
     // sites below can use them by short name instead of literal magic
@@ -3173,6 +3190,7 @@ pub fn build_inspector(
     > = Rc::new(on_match_audio);
     let on_duck_changed: Rc<dyn Fn(&str, bool, f64)> = Rc::new(on_duck_changed);
     let on_role_changed: Rc<dyn Fn(&str, &str)> = Rc::new(on_role_changed);
+    let on_clear_match_eq: Rc<dyn Fn(&str)> = Rc::new(on_clear_match_eq);
     let on_execute_command: Rc<dyn Fn(Box<dyn crate::undo::EditCommand>)> =
         Rc::new(on_execute_command);
     let on_vidstab_changed: Rc<dyn Fn()> = Rc::new(on_vidstab_changed);
@@ -4324,16 +4342,114 @@ pub fn build_inspector(
     ));
     let match_audio_btn = Button::with_label("Match Audio\u{2026}");
     match_audio_btn.set_tooltip_text(Some(
-        "Analyze this clip against a reference clip and apply matched loudness plus 3-band EQ",
+        "Analyze this clip against a reference clip and apply matched loudness plus a 7-band mic-match EQ (great for making a lav mic sound more like a shotgun mic)",
     ));
+    let clear_match_eq_btn = Button::with_label("Clear Match EQ");
+    clear_match_eq_btn.set_tooltip_text(Some(
+        "Clear the 7-band match EQ from the previous Match Audio (leaves the user 3-band EQ untouched)",
+    ));
+    clear_match_eq_btn.set_visible(false);
     let measured_loudness_label = Label::new(None);
     measured_loudness_label.add_css_class("dim-label");
     measured_loudness_label.set_halign(gtk4::Align::Start);
     measured_loudness_label.set_hexpand(true);
     normalize_row.append(&normalize_btn);
     normalize_row.append(&match_audio_btn);
+    normalize_row.append(&clear_match_eq_btn);
     normalize_row.append(&measured_loudness_label);
     audio_inner.append(&normalize_row);
+
+    // ── Match EQ frequency-response curve (7-band, read-only) ──
+    let match_eq_curve_state: Rc<RefCell<Vec<crate::model::clip::EqBand>>> =
+        Rc::new(RefCell::new(Vec::new()));
+    let match_eq_curve = gtk4::DrawingArea::new();
+    match_eq_curve.set_content_width(240);
+    match_eq_curve.set_content_height(60);
+    match_eq_curve.set_hexpand(true);
+    match_eq_curve.set_vexpand(false);
+    match_eq_curve.set_visible(false);
+    match_eq_curve.set_tooltip_text(Some(
+        "Match EQ — 7-band frequency response from the most recent Match Audio (mic match)",
+    ));
+    {
+        let curve_state = match_eq_curve_state.clone();
+        match_eq_curve.set_draw_func(move |_da, cr, ww, wh| {
+            let bands = curve_state.borrow();
+            if bands.is_empty() {
+                return;
+            }
+            let w = ww as f64;
+            let h = wh as f64;
+            // Background
+            cr.set_source_rgba(0.10, 0.10, 0.12, 0.95);
+            cr.rectangle(0.0, 0.0, w, h);
+            cr.fill().ok();
+            // Border
+            cr.set_source_rgba(0.30, 0.30, 0.34, 0.9);
+            cr.set_line_width(1.0);
+            cr.rectangle(0.5, 0.5, w - 1.0, h - 1.0);
+            cr.stroke().ok();
+            // 0 dB centerline
+            let mid_y = h * 0.5;
+            cr.set_source_rgba(0.45, 0.45, 0.48, 0.7);
+            cr.set_dash(&[2.0, 3.0], 0.0);
+            cr.move_to(0.0, mid_y);
+            cr.line_to(w, mid_y);
+            cr.stroke().ok();
+            cr.set_dash(&[], 0.0);
+
+            // Map frequency (log scale, 60 Hz to 12 kHz) to x.
+            let log_lo = 60f64.log10();
+            let log_hi = 12_000f64.log10();
+            let x_for_freq = |f: f64| -> f64 {
+                let lf = f.log10().clamp(log_lo, log_hi);
+                ((lf - log_lo) / (log_hi - log_lo)) * w
+            };
+            // Map gain (-12 to +12 dB) to y.
+            let max_gain_db = 12.0;
+            let y_for_gain = |g: f64| -> f64 {
+                let clamped = g.clamp(-max_gain_db, max_gain_db);
+                mid_y - (clamped / max_gain_db) * (h * 0.45)
+            };
+
+            // Build a smooth curve through the band peaks.
+            let mut points: Vec<(f64, f64)> = Vec::with_capacity(bands.len() + 2);
+            points.push((0.0, mid_y));
+            for band in bands.iter() {
+                points.push((x_for_freq(band.freq), y_for_gain(band.gain)));
+            }
+            points.push((w, mid_y));
+
+            // Filled curve (subtle teal)
+            cr.set_source_rgba(0.25, 0.78, 0.78, 0.20);
+            cr.move_to(0.0, mid_y);
+            for (x, y) in &points {
+                cr.line_to(*x, *y);
+            }
+            cr.line_to(w, mid_y);
+            cr.close_path();
+            cr.fill().ok();
+
+            // Stroke curve
+            cr.set_source_rgba(0.45, 0.95, 0.95, 0.95);
+            cr.set_line_width(1.6);
+            cr.move_to(points[0].0, points[0].1);
+            for (x, y) in points.iter().skip(1) {
+                cr.line_to(*x, *y);
+            }
+            cr.stroke().ok();
+
+            // Band markers (small circles)
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.85);
+            for band in bands.iter() {
+                let x = x_for_freq(band.freq);
+                let y = y_for_gain(band.gain);
+                cr.arc(x, y, 2.0, 0.0, std::f64::consts::TAU);
+                cr.fill().ok();
+            }
+        });
+    }
+    audio_inner.append(&match_eq_curve);
 
     // ── Audio keyframe navigation + animation mode ──
     let audio_keyframe_nav_row = GBox::new(Orientation::Horizontal, 4);
@@ -6064,6 +6180,16 @@ pub fn build_inspector(
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
                 on_normalize_audio(clip_id);
+            }
+        });
+    }
+    {
+        let selected_clip_id = selected_clip_id.clone();
+        let on_clear_match_eq = on_clear_match_eq.clone();
+        clear_match_eq_btn.connect_clicked(move |_btn| {
+            let id = selected_clip_id.borrow().clone();
+            if let Some(clip_id) = id {
+                on_clear_match_eq(&clip_id);
             }
         });
     }
@@ -9503,6 +9629,9 @@ pub fn build_inspector(
         pan_slider,
         normalize_btn,
         match_audio_btn,
+        clear_match_eq_btn,
+        match_eq_curve,
+        match_eq_curve_state,
         measured_loudness_label,
         ladspa_effects_list,
         channel_mode_dropdown,

@@ -1198,6 +1198,12 @@ fn parse_asset_clip(
             clip.eq_high_gain_keyframes =
                 serde_json::from_str::<Vec<NumericKeyframe>>(&json_str).unwrap_or_default();
         }
+        if let Some(v) = attrs.get("us:match-eq-bands") {
+            let json_str = v.replace("&quot;", "\"");
+            if let Ok(bands) = serde_json::from_str::<Vec<crate::model::clip::EqBand>>(&json_str) {
+                clip.match_eq_bands = bands;
+            }
+        }
         if let Some(v) = attrs.get("us:pitch-shift-semitones") {
             clip.pitch_shift_semitones = v.parse().unwrap_or(0.0);
         }
@@ -2805,6 +2811,7 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:eq-low-gain-keyframes"
             | "us:eq-mid-gain-keyframes"
             | "us:eq-high-gain-keyframes"
+            | "us:match-eq-bands"
             | "us:pitch-shift-semitones"
             | "us:pitch-preserve"
             | "us:audio-channel-mode"

@@ -803,6 +803,8 @@ pub struct ProgramClip {
     pub eq_low_gain_keyframes: Vec<NumericKeyframe>,
     pub eq_mid_gain_keyframes: Vec<NumericKeyframe>,
     pub eq_high_gain_keyframes: Vec<NumericKeyframe>,
+    /// 7-band match EQ from audio matching.
+    pub match_eq_bands: Vec<crate::model::clip::EqBand>,
     pub rotate_keyframes: Vec<NumericKeyframe>,
     pub crop_left_keyframes: Vec<NumericKeyframe>,
     pub crop_right_keyframes: Vec<NumericKeyframe>,
@@ -1400,6 +1402,9 @@ struct VideoSlot {
     audio_capsfilter: Option<gst::Element>,
     /// Optional per-slot `equalizer-nbands` element for 3-band parametric EQ.
     audio_equalizer: Option<gst::Element>,
+    /// Optional per-slot `equalizer-nbands` element for 7-band match EQ (mic match).
+    /// Linked before `audio_equalizer` so the user 3-band EQ can be applied on top.
+    audio_match_equalizer: Option<gst::Element>,
     /// Optional per-slot `audiopanorama` element for pan automation.
     audio_panorama: Option<gst::Element>,
     /// Optional per-slot `level` element for per-track metering.
@@ -5407,6 +5412,66 @@ impl ProgramPlayer {
                 "update_eq_for_clip: clip={} not found in clips or audio_clips",
                 clip_id
             );
+        }
+    }
+
+    /// Update 7-band match EQ for a specific clip (called from Inspector/MCP).
+    /// When the band count matches an existing live element, parameters are updated
+    /// in-place without a rebuild. Otherwise the slot is rebuilt at the current
+    /// playhead so the new band count takes effect (since `equalizer-nbands`
+    /// `num-bands` is construct-only).
+    pub fn update_match_eq_for_clip(
+        &mut self,
+        clip_id: &str,
+        match_eq_bands: Vec<crate::model::clip::EqBand>,
+    ) {
+        let mut needs_rebuild = false;
+        if let Some(i) = self.clips.iter().position(|c| c.id == clip_id) {
+            let old_count = self.clips[i].match_eq_bands.len();
+            self.clips[i].match_eq_bands = match_eq_bands.clone();
+            // Try in-place update if a live element exists with matching band count.
+            let mut updated_in_place = false;
+            if let Some(slot) = self
+                .slots
+                .iter()
+                .find(|s| s.clip_idx == i && !s.is_prerender_slot)
+            {
+                if let Some(ref m_eq) = slot.audio_match_equalizer {
+                    if match_eq_bands.len() == old_count && !match_eq_bands.is_empty() {
+                        for (bi, band) in match_eq_bands.iter().enumerate() {
+                            eq_set_band(m_eq, bi as u32, band.freq, band.gain, band.q);
+                        }
+                        updated_in_place = true;
+                        log::info!(
+                            "update_match_eq_for_clip: in-place update for clip={}",
+                            clip_id
+                        );
+                    }
+                }
+            }
+            if !updated_in_place && match_eq_bands.len() != old_count {
+                needs_rebuild = true;
+            }
+        }
+        if let Some(i) = self.audio_clips.iter().position(|c| c.id == clip_id) {
+            self.audio_clips[i].match_eq_bands = match_eq_bands.clone();
+            // Force a multi-audio pipeline rebuild so the new match EQ takes effect.
+            // teardown first so the should-rebuild guard inside rebuild_audio_multi_pipeline
+            // sees `pipeline_exists == false` and proceeds with the rebuild.
+            if self.audio_multi_pipeline.is_some() && self.audio_multi_active.contains(&i) {
+                let active = self.audio_multi_active.clone();
+                let pos = self.timeline_pos_ns;
+                self.teardown_audio_multi_pipeline();
+                self.rebuild_audio_multi_pipeline(&active, pos);
+            }
+        }
+        if needs_rebuild {
+            let pos = self.timeline_pos_ns;
+            log::info!(
+                "update_match_eq_for_clip: rebuilding pipeline for clip={} at pos={}ns",
+                clip_id, pos
+            );
+            self.rebuild_pipeline_at(pos);
         }
     }
 
@@ -9709,6 +9774,9 @@ impl ProgramPlayer {
         if let Some(ref eq_elem) = slot.audio_equalizer {
             self.pipeline.remove(eq_elem).ok();
         }
+        if let Some(ref meq_elem) = slot.audio_match_equalizer {
+            self.pipeline.remove(meq_elem).ok();
+        }
         if let Some(ref ap) = slot.audio_panorama {
             self.pipeline.remove(ap).ok();
         }
@@ -9742,6 +9810,10 @@ impl ProgramPlayer {
         if let Some(ref eq_elem) = slot.audio_equalizer {
             let _ = eq_elem.set_state(gst::State::Null);
             let _ = eq_elem.state(gst::ClockTime::from_mseconds(10));
+        }
+        if let Some(ref meq_elem) = slot.audio_match_equalizer {
+            let _ = meq_elem.set_state(gst::State::Null);
+            let _ = meq_elem.state(gst::ClockTime::from_mseconds(10));
         }
         if let Some(ref ap) = slot.audio_panorama {
             let _ = ap.set_state(gst::State::Null);
@@ -10834,6 +10906,7 @@ impl ProgramPlayer {
             audio_conv,
             audio_resample,
             audio_capsfilter,
+            audio_match_equalizer_built,
             audio_equalizer,
             audio_panorama,
             audio_level,
@@ -10845,6 +10918,15 @@ impl ProgramPlayer {
             let mut eq = if needs_eq {
                 gst::ElementFactory::make("equalizer-nbands")
                     .property("num-bands", 3u32)
+                    .build()
+                    .ok()
+            } else {
+                None
+            };
+            // 7-band match EQ — only built when the clip has a non-empty match_eq_bands.
+            let mut match_eq = if !clip.match_eq_bands.is_empty() {
+                gst::ElementFactory::make("equalizer-nbands")
+                    .property("num-bands", clip.match_eq_bands.len() as u32)
                     .build()
                     .ok()
             } else {
@@ -10884,6 +10966,7 @@ impl ProgramPlayer {
                         self.pipeline.remove(&ac_elem).ok();
                         ac = None;
                         eq = None;
+                        match_eq = None;
                         ap = None;
                         lv = None;
                         None
@@ -10891,6 +10974,33 @@ impl ProgramPlayer {
                     if link_src.is_none() {
                         None
                     } else {
+                        // Insert match EQ (7-band, before user EQ) when present.
+                        if let Some(ref m_eq) = match_eq {
+                            if self.pipeline.add(m_eq).is_ok() {
+                                for (i, band) in clip.match_eq_bands.iter().enumerate() {
+                                    eq_set_band(m_eq, i as u32, band.freq, band.gain, band.q);
+                                }
+                                if let (Some(prev_src), Some(meq_sink)) =
+                                    (link_src.clone(), m_eq.static_pad("sink"))
+                                {
+                                    if prev_src.link(&meq_sink).is_ok() {
+                                        link_src = m_eq.static_pad("src");
+                                        log::info!(
+                                            "build_audio_only_slot: match-eq ({} bands) linked OK",
+                                            clip.match_eq_bands.len()
+                                        );
+                                    } else {
+                                        self.pipeline.remove(m_eq).ok();
+                                        match_eq = None;
+                                    }
+                                } else {
+                                    self.pipeline.remove(m_eq).ok();
+                                    match_eq = None;
+                                }
+                            } else {
+                                match_eq = None;
+                            }
+                        }
                         // Insert equalizer between audioconvert and audiopanorama.
                         if let Some(ref equalizer) = eq {
                             if self.pipeline.add(equalizer).is_ok() {
@@ -10974,6 +11084,7 @@ impl ProgramPlayer {
                 } else {
                     ar = None;
                     cf = None;
+                    match_eq = None;
                     ap = None;
                     lv = None;
                     None
@@ -10982,11 +11093,12 @@ impl ProgramPlayer {
                 ar = None;
                 cf = None;
                 eq = None;
+                match_eq = None;
                 ap = None;
                 lv = None;
                 None
             };
-            (ac, ar, cf, eq, ap, lv, pad)
+            (ac, ar, cf, match_eq, eq, ap, lv, pad)
         };
 
         // Dynamic pad-added: only link audio pads (no video sink available).
@@ -11024,6 +11136,9 @@ impl ProgramPlayer {
         if let Some(ref cf) = audio_capsfilter {
             let _ = cf.sync_state_with_parent();
         }
+        if let Some(ref meq_elem) = audio_match_equalizer_built {
+            let _ = meq_elem.sync_state_with_parent();
+        }
         if let Some(ref eq_elem) = audio_equalizer {
             let _ = eq_elem.sync_state_with_parent();
         }
@@ -11050,6 +11165,7 @@ impl ProgramPlayer {
             audio_resample,
             audio_capsfilter,
             audio_equalizer,
+            audio_match_equalizer: audio_match_equalizer_built,
             audio_panorama,
             audio_level,
             videobalance: None,
@@ -11358,6 +11474,7 @@ impl ProgramPlayer {
             audio_resample,
             audio_capsfilter,
             audio_equalizer: None,
+            audio_match_equalizer: None,
             audio_panorama,
             audio_level,
             videobalance: None,
@@ -12636,6 +12753,7 @@ impl ProgramPlayer {
                 audio_resample: None,
                 audio_capsfilter: None,
                 audio_equalizer: None,
+                audio_match_equalizer: None,
                 audio_panorama: None,
                 audio_level: None,
                 videobalance: videobalance.clone(),
@@ -12718,6 +12836,7 @@ impl ProgramPlayer {
                 audio_resample: None,
                 audio_capsfilter: None,
                 audio_equalizer: None,
+                audio_match_equalizer: None,
                 audio_panorama: None,
                 audio_level: None,
                 videobalance,
@@ -12882,11 +13001,12 @@ impl ProgramPlayer {
         }
 
         // Create audio path: audioconvert → audioresample → capsfilter(48 kHz stereo)
-        // → [equalizer-nbands] → [audiopanorama] → [level] → audiomixer pad.
+        // → [match-equalizer-nbands] → [equalizer-nbands] → [audiopanorama] → [level] → audiomixer pad.
         let (
             audio_conv,
             audio_resample,
             audio_capsfilter,
+            audio_match_equalizer_built,
             audio_equalizer,
             audio_panorama,
             audio_level,
@@ -12899,6 +13019,15 @@ impl ProgramPlayer {
                 .property("num-bands", 3u32)
                 .build()
                 .ok();
+            // 7-band match EQ — only built when the clip has a non-empty match_eq_bands.
+            let mut match_eq = if !clip.match_eq_bands.is_empty() {
+                gst::ElementFactory::make("equalizer-nbands")
+                    .property("num-bands", clip.match_eq_bands.len() as u32)
+                    .build()
+                    .ok()
+            } else {
+                None
+            };
             let mut ap = gst::ElementFactory::make("audiopanorama").build().ok();
             let mut lv = gst::ElementFactory::make("level")
                 .property("post-messages", true)
@@ -12926,11 +13055,45 @@ impl ProgramPlayer {
                         self.pipeline.remove(&ac_elem).ok();
                         ac = None;
                         eq = None;
+                        match_eq = None;
                         ap = None;
                         lv = None;
                         None
                     };
                     if link_src.is_some() {
+                        // Insert match EQ (7-band, before user EQ) when present.
+                        if let Some(ref m_eq) = match_eq {
+                            if self.pipeline.add(m_eq).is_ok() {
+                                for (i, band) in clip.match_eq_bands.iter().enumerate() {
+                                    eq_set_band(m_eq, i as u32, band.freq, band.gain, band.q);
+                                }
+                                if let (Some(prev_src), Some(meq_sink)) =
+                                    (link_src.clone(), m_eq.static_pad("sink"))
+                                {
+                                    if prev_src.link(&meq_sink).is_ok() {
+                                        link_src = m_eq.static_pad("src");
+                                        log::info!(
+                                            "build_slot_for_clip: match-eq ({} bands) linked OK for clip_idx={}",
+                                            clip.match_eq_bands.len(), clip_idx
+                                        );
+                                    } else {
+                                        log::warn!(
+                                            "build_slot_for_clip: match-eq pad link FAILED"
+                                        );
+                                        self.pipeline.remove(m_eq).ok();
+                                        match_eq = None;
+                                    }
+                                } else {
+                                    self.pipeline.remove(m_eq).ok();
+                                    match_eq = None;
+                                }
+                            } else {
+                                log::warn!(
+                                    "build_slot_for_clip: failed to add match-eq to pipeline"
+                                );
+                                match_eq = None;
+                            }
+                        }
                         // Insert equalizer between audioconvert and audiopanorama.
                         if let Some(ref equalizer) = eq {
                             if self.pipeline.add(equalizer).is_ok() {
@@ -13029,6 +13192,7 @@ impl ProgramPlayer {
                     ar = None;
                     cf = None;
                     eq = None;
+                    match_eq = None;
                     ap = None;
                     lv = None;
                     None
@@ -13037,17 +13201,18 @@ impl ProgramPlayer {
                 ar = None;
                 cf = None;
                 eq = None;
+                match_eq = None;
                 ap = None;
                 lv = None;
                 None
             };
-            (ac, ar, cf, eq, ap, lv, pad)
+            (ac, ar, cf, match_eq, eq, ap, lv, pad)
         } else {
             log::info!(
                 "ProgramPlayer: skipping audio path for clip {} (no audio)",
                 clip.id
             );
-            (None, None, None, None, None, None, None)
+            (None, None, None, None, None, None, None, None)
         };
 
         // Connect uridecodebin pad-added for dynamic linking.
@@ -13163,6 +13328,7 @@ impl ProgramPlayer {
             audio_resample: audio_resample.clone(),
             audio_capsfilter: audio_capsfilter.clone(),
             audio_equalizer: audio_equalizer.clone(),
+            audio_match_equalizer: audio_match_equalizer_built.clone(),
             audio_panorama: audio_panorama.clone(),
             audio_level: audio_level.clone(),
             videobalance: videobalance.clone(),
@@ -13240,6 +13406,7 @@ impl ProgramPlayer {
             audio_resample,
             audio_capsfilter,
             audio_equalizer,
+            audio_match_equalizer: None,
             audio_panorama,
             audio_level,
             videobalance,
@@ -15383,6 +15550,24 @@ impl ProgramPlayer {
                     eq_set_band(eq, i, b.freq, b.gain, b.q);
                 }
             }
+            // Optional 7-band match EQ for this branch (skip when empty).
+            let needs_match_eq = clip_ref
+                .map(|c| !c.match_eq_bands.is_empty())
+                .unwrap_or(false);
+            let match_eq_elem = if needs_match_eq {
+                let band_count = clip_ref.map(|c| c.match_eq_bands.len()).unwrap_or(0);
+                gst::ElementFactory::make("equalizer-nbands")
+                    .property("num-bands", band_count as u32)
+                    .build()
+                    .ok()
+            } else {
+                None
+            };
+            if let (Some(ref m_eq), Some(clip)) = (&match_eq_elem, clip_ref) {
+                for (i, band) in clip.match_eq_bands.iter().enumerate() {
+                    eq_set_band(m_eq, i as u32, band.freq, band.gain, band.q);
+                }
+            }
             // Optional Rubberband pitch shifter (LADSPA).
             let needs_pitch = clip_ref
                 .map(|c| c.pitch_shift_semitones.abs() > 0.001)
@@ -15466,6 +15651,9 @@ impl ProgramPlayer {
                 continue;
             };
             let mut elems: Vec<&gst::Element> = Vec::new();
+            if let Some(ref m_eq) = match_eq_elem {
+                elems.push(m_eq);
+            }
             if let Some(ref eq) = eq_elem {
                 elems.push(eq);
             }
@@ -16206,6 +16394,7 @@ mod tests {
             eq_low_gain_keyframes: Vec::new(),
             eq_mid_gain_keyframes: Vec::new(),
             eq_high_gain_keyframes: Vec::new(),
+            match_eq_bands: Vec::new(),
             rotate_keyframes: Vec::new(),
             crop_left_keyframes: Vec::new(),
             crop_right_keyframes: Vec::new(),
@@ -17531,6 +17720,7 @@ mod tests {
             audio_resample: None,
             audio_capsfilter: None,
             audio_equalizer: None,
+            audio_match_equalizer: None,
             audio_panorama: None,
             audio_level: None,
             videobalance: if has_videobalance { identity() } else { None },

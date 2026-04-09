@@ -1471,6 +1471,11 @@ pub struct Clip {
     /// Optional EQ high-band gain keyframes over clip-local timeline.
     #[serde(default)]
     pub eq_high_gain_keyframes: Vec<NumericKeyframe>,
+    /// Matched EQ bands from audio matching (7-band, independent of user EQ).
+    /// Populated by the audio match engine; applied in series before the user's
+    /// 3-band EQ during preview and export.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub match_eq_bands: Vec<EqBand>,
     /// Pitch shift in semitones: −12.0 (one octave down) to +12.0 (one octave up).
     /// Applied via Rubberband (LADSPA in preview, FFmpeg rubberband filter in export).
     /// 0.0 = no shift.
@@ -1825,6 +1830,11 @@ impl Clip {
             || !self.eq_high_gain_keyframes.is_empty()
     }
 
+    /// Returns `true` when any match EQ band has non-zero gain.
+    pub fn has_match_eq(&self) -> bool {
+        self.match_eq_bands.iter().any(|b| b.gain.abs() > 0.001)
+    }
+
     pub fn lut_key(&self) -> Option<String> {
         if self.lut_paths.is_empty() {
             None
@@ -2101,6 +2111,7 @@ impl Clip {
             eq_low_gain_keyframes: Vec::new(),
             eq_mid_gain_keyframes: Vec::new(),
             eq_high_gain_keyframes: Vec::new(),
+            match_eq_bands: Vec::new(),
             pitch_shift_semitones: 0.0,
             pitch_preserve: false,
             audio_channel_mode: AudioChannelMode::default(),

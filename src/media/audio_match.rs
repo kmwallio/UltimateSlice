@@ -48,6 +48,22 @@ const EQ_LOW_FIT_BANDS: [usize; 4] = [0, 1, 2, 3];
 const EQ_MID_FIT_BANDS: [usize; 5] = [3, 4, 5, 6, 7];
 const EQ_HIGH_FIT_BANDS: [usize; 4] = [7, 8, 9, 10];
 
+/// 7-band match EQ output definitions: (center_hz, analysis band indices).
+/// Each band covers roughly one octave across the speech-relevant spectrum.
+const MATCH_BAND_COUNT: usize = 7;
+const MATCH_BAND_CENTERS: [f64; MATCH_BAND_COUNT] = [100.0, 200.0, 400.0, 800.0, 2000.0, 5000.0, 9000.0];
+const MATCH_BAND_INDICES: [&[usize]; MATCH_BAND_COUNT] = [
+    &[0],       // 80–120 Hz: body/clothing resonance
+    &[1, 2],    // 120–270 Hz: chest/proximity effect
+    &[3],       // 270–400 Hz: low-mid muddiness
+    &[4, 5],    // 400–1000 Hz: fundamental speech
+    &[6, 7],    // 1–2.5 kHz: presence lower
+    &[8, 9],    // 2.5–6.5 kHz: presence upper / sibilance
+    &[10],      // 6.5–9 kHz: air/brilliance
+];
+/// Q values for each match band — wider for broad regions, narrower for isolated.
+const MATCH_BAND_Q: [f64; MATCH_BAND_COUNT] = [1.5, 1.0, 1.5, 1.0, 1.0, 1.0, 1.5];
+
 const SPEECH_PRESENCE_BANDS: [usize; 7] = [2, 3, 4, 5, 6, 7, 8];
 const SPEECH_CORE_BANDS: [usize; 5] = [3, 4, 5, 6, 7];
 const LOW_NOISE_BANDS: [usize; 2] = [0, 1];
@@ -220,6 +236,8 @@ pub struct AudioMatchOutcome {
     pub reference_loudness_lufs: f64,
     pub volume_gain: f64,
     pub eq_bands: [EqBand; 3],
+    /// 7-band matched EQ for higher-resolution mic matching.
+    pub match_eq_bands: Vec<EqBand>,
     pub source_profile: SpectralProfile,
     pub reference_profile: SpectralProfile,
     pub source_resolved_channel_mode: AudioMatchChannelMode,
@@ -289,6 +307,7 @@ pub fn run_audio_match(params: &AudioMatchParams) -> Result<AudioMatchOutcome> {
             reference_loudness_lufs,
         ),
         eq_bands: matched_eq_bands(source_spectrum, reference_spectrum),
+        match_eq_bands: matched_eq_bands_detailed(source_spectrum, reference_spectrum),
         source_profile,
         reference_profile,
         source_resolved_channel_mode: source_audio.resolved_channel_mode,
@@ -523,6 +542,51 @@ fn matched_eq_band_for_group(
         gain,
         q: q_from_octave_spread(octave_spread),
     }
+}
+
+/// Produce a 7-band match EQ from the detailed spectral analysis.
+/// Each band maps to 1–2 analysis bands for higher-resolution mic matching
+/// than the 3-band user EQ.
+fn matched_eq_bands_detailed(
+    source_spectrum: DetailedSpectrum,
+    reference_spectrum: DetailedSpectrum,
+) -> Vec<EqBand> {
+    let deltas = source_spectrum.deltas_to(reference_spectrum);
+    let mean_delta = deltas.iter().sum::<f64>() / deltas.len() as f64;
+
+    (0..MATCH_BAND_COUNT)
+        .map(|band_idx| {
+            let indices = MATCH_BAND_INDICES[band_idx];
+            let center_hz = MATCH_BAND_CENTERS[band_idx];
+            let default_q = MATCH_BAND_Q[band_idx];
+
+            // Weighted average of the shaped (mean-subtracted) deltas for this band.
+            let band_deltas: Vec<f64> = indices
+                .iter()
+                .map(|&i| deltas[i] - mean_delta)
+                .collect();
+            let avg_delta = if band_deltas.is_empty() {
+                0.0
+            } else {
+                band_deltas.iter().sum::<f64>() / band_deltas.len() as f64
+            };
+
+            let gain = (avg_delta * EQ_RESPONSE_SCALE).clamp(-EQ_GAIN_LIMIT_DB, EQ_GAIN_LIMIT_DB);
+            if gain.abs() < EQ_GAIN_DEADZONE_DB {
+                return EqBand {
+                    freq: center_hz,
+                    gain: 0.0,
+                    q: default_q,
+                };
+            }
+
+            EqBand {
+                freq: center_hz,
+                gain,
+                q: default_q,
+            }
+        })
+        .collect()
 }
 
 fn detailed_spectrum_from_samples(
@@ -948,5 +1012,45 @@ mod tests {
             2,
         );
         assert_eq!(resolved, AudioMatchChannelMode::MonoMix);
+    }
+
+    #[test]
+    fn detailed_eq_produces_7_bands() {
+        let source = DetailedSpectrum::from_db_levels([0.0; ANALYSIS_BAND_COUNT]);
+        let reference = DetailedSpectrum::from_db_levels([0.0; ANALYSIS_BAND_COUNT]);
+        let bands = matched_eq_bands_detailed(source, reference);
+        assert_eq!(bands.len(), MATCH_BAND_COUNT);
+    }
+
+    #[test]
+    fn detailed_eq_lav_to_shotgun_shape() {
+        // Lav-like: boosted low end (body resonance), weak presence
+        let lav = DetailedSpectrum::from_db_levels([
+            -2.0, -3.0, -4.0, -6.0, -8.0, -9.0, -10.0, -11.0, -14.0, -16.0, -18.0,
+        ]);
+        // Shotgun-like: tighter low, stronger presence and air
+        let shotgun = DetailedSpectrum::from_db_levels([
+            -10.0, -9.0, -8.0, -7.0, -6.0, -5.0, -4.0, -3.0, -4.0, -6.0, -8.0,
+        ]);
+        let bands = matched_eq_bands_detailed(lav, shotgun);
+        assert_eq!(bands.len(), MATCH_BAND_COUNT);
+        // Low bands should be cut (source is louder than reference in lows)
+        assert!(bands[0].gain < 0.0, "band 0 (100Hz) should cut: {}", bands[0].gain);
+        // Presence bands should be boosted
+        assert!(bands[4].gain > 0.0, "band 4 (2kHz) should boost: {}", bands[4].gain);
+        assert!(bands[5].gain > 0.0, "band 5 (5kHz) should boost: {}", bands[5].gain);
+    }
+
+    #[test]
+    fn detailed_eq_zeroes_small_differences() {
+        let source = DetailedSpectrum::from_db_levels([0.0; ANALYSIS_BAND_COUNT]);
+        let reference = DetailedSpectrum::from_db_levels([
+            0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        ]);
+        let bands = matched_eq_bands_detailed(source, reference);
+        for band in &bands {
+            assert!(band.gain.abs() < EQ_GAIN_DEADZONE_DB + 0.01,
+                "small difference should produce near-zero gain, got {}", band.gain);
+        }
     }
 }

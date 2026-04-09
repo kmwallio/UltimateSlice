@@ -138,11 +138,15 @@ The **Match Audio...** button analyzes the selected clip against another audio-c
 - **Match voice** is the default and recommended mode: it analyzes the full trimmed source/reference clips while still prioritizing dialogue or voice regions automatically.
 - **Channel handling** defaults to **Auto (Recommended)**, which respects each clip's current channel routing and automatically switches to a single side when the other stereo channel is effectively silent. You can also force **Mono Mix**, **Left Only**, or **Right Only** analysis.
 - Switch **Match mode** to **Choose region...** to reveal **Source In/Out** and **Reference In/Out** timecode fields when you want to match only a selected phrase. Those fields default to each clip's full trimmed duration and use the project frame rate for timecode entry.
-- UltimateSlice measures both clips in the background and applies one undoable update to the source clip's volume, measured loudness, and 3-band EQ settings.
+- UltimateSlice measures both clips in the background and applies one undoable update to the source clip's volume, measured loudness, **3-band EQ**, and a separate **7-band match EQ** (`match_eq_bands`) for finer mic matching.
+- The 7-band match EQ centers are at ~100 Hz, 200 Hz, 400 Hz, 800 Hz, 2 kHz, 5 kHz, and 9 kHz — covering body/clothing resonance, chest/proximity effect, low-mid muddiness, fundamental speech, presence, and air. Both EQs are applied in series during export AND in live preview (the program player wires a dedicated 7-band equalizer element into each slot's audio chain when match EQ is present). The 3-band EQ remains available for manual tweaks on top.
+- When match EQ is active, the inspector shows a small **frequency-response curve** below the **Match Audio…** button (log-frequency X axis, ±12 dB Y axis, with band markers). A **Clear Match EQ** button next to it resets just the 7-band match correction without touching your manual 3-band EQ.
 - While the analysis is running, the bottom status bar shows **Matching audio...** and the shared progress bar pulses until the result is applied or fails.
-- The result is a tonal nudge, not full microphone cloning: room reflections, de-reverb, compression, and noise reduction are out of scope for this first pass.
+- The result is a tonal nudge, not full microphone cloning: room reflections, de-reverb, compression, and noise reduction are out of scope.
 
-MCP tool: `match_clip_audio` with `source_clip_id`, `reference_clip_id`, optional `source_start_ns`, `source_end_ns`, `reference_start_ns`, `reference_end_ns`, plus optional `source_channel_mode` / `reference_channel_mode`.
+MCP tools:
+- `match_clip_audio` with `source_clip_id`, `reference_clip_id`, optional `source_start_ns`, `source_end_ns`, `reference_start_ns`, `reference_end_ns`, plus optional `source_channel_mode` / `reference_channel_mode`. The response includes both `eq_bands` (3-band) and `match_eq_bands` (7-band).
+- `clear_match_eq` with `clip_id` resets just the 7-band match EQ on a clip, leaving the user 3-band EQ untouched.
 
 ### Audio keyframes (phase 1)
 

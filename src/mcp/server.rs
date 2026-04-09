@@ -1186,7 +1186,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "match_clip_audio",
-            "description": "Match a source clip's audio tone toward a reference clip using integrated loudness plus the built-in 3-band EQ. The matcher derives adaptive band frequency/gain/Q targets from speech-focused spectral differences, preferring subtitle/STT dialogue regions when available and otherwise weighting voice-active frames. Channel-aware analysis defaults to auto-detecting dominant one-sided audio while respecting existing clip routing; optional source/reference channel overrides and start/end ranges let you target a specific side or phrase. This is a conservative reference-based match, not full microphone cloning. The operation is undoable.",
+            "description": "Match a source clip's audio tone toward a reference clip using integrated loudness plus the built-in 3-band EQ AND a higher-resolution 7-band match EQ for fine mic-matching (e.g., making a lav mic sound more like a shotgun mic). The matcher derives adaptive band frequency/gain/Q targets from speech-focused spectral differences, preferring subtitle/STT dialogue regions when available and otherwise weighting voice-active frames. Channel-aware analysis defaults to auto-detecting dominant one-sided audio while respecting existing clip routing; optional source/reference channel overrides and start/end ranges let you target a specific side or phrase. The 7-band match EQ is independent of the user 3-band EQ — both are applied in series during export. The operation is undoable.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1200,6 +1200,17 @@ fn tools_list() -> Value {
                     "reference_channel_mode": { "type": "string", "description": "Optional reference channel analysis mode: `auto`, `mono_mix`, `left`, or `right`." }
                 },
                 "required": ["source_clip_id", "reference_clip_id"]
+            }
+        },
+        {
+            "name": "clear_match_eq",
+            "description": "Clear the 7-band match EQ on a clip (the result of a prior match_clip_audio call). Leaves the user 3-band EQ untouched. The operation is undoable.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id whose match EQ should be cleared." }
+                },
+                "required": ["clip_id"]
             }
         },
         {
@@ -2886,6 +2897,10 @@ fn dispatch_tool_payload(
                     .and_then(|v| v.as_str())
                     .unwrap_or("auto"),
             ),
+            reply: tx,
+        },
+        "clear_match_eq" => McpCommand::ClearMatchEq {
+            clip_id: arg_str!(args, "clip_id"),
             reply: tx,
         },
         "detect_scene_cuts" => McpCommand::DetectSceneCuts {

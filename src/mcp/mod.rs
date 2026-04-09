@@ -473,6 +473,10 @@ pub enum McpCommand {
         reference_channel_mode: crate::media::audio_match::AudioMatchChannelMode,
         reply: SyncSender<Value>,
     },
+    ClearMatchEq {
+        clip_id: String,
+        reply: SyncSender<Value>,
+    },
     DetectSceneCuts {
         clip_id: String,
         track_id: String,
