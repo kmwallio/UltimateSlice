@@ -2,9 +2,10 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::model::clip::{
-    AngleSwitch, AudioChannelMode, BlendMode, ClipColorLabel, EqBand, MulticamAngle,
-    NumericKeyframe, SlowMotionInterp, SubtitleHighlightFlags, SubtitleHighlightMode,
-    SubtitleSegment, VoiceIsolationSource,
+    AngleSwitch, AudioChannelMode, BlendMode, ClipColorLabel, ClipMask, EqBand, Frei0rEffect,
+    LadspaEffect, MotionTracker, MulticamAngle, NumericKeyframe, SlowMotionInterp,
+    SubtitleHighlightFlags, SubtitleHighlightMode, SubtitleSegment, TrackingBinding,
+    VoiceIsolationSource,
 };
 use crate::model::track::Track;
 
@@ -89,6 +90,21 @@ pub(crate) struct UltimateSliceClipOtioMetadata {
     /// True when this image clip is a prerendered animated SVG source.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) animated_svg: Option<bool>,
+    /// Frei0r video filter effects chain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) frei0r_effects: Option<Vec<Frei0rEffect>>,
+    /// LADSPA audio effects chain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) ladspa_effects: Option<Vec<LadspaEffect>>,
+    /// Shape masks (rectangles/ellipses) restricting the visible area.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) masks: Option<Vec<ClipMask>>,
+    /// Motion trackers authored on the source clip.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) motion_trackers: Option<Vec<MotionTracker>>,
+    /// Optional transform-level motion-tracking attachment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) tracking_binding: Option<TrackingBinding>,
     /// Internal tracks for compound (nested timeline) clips. Recursive — each
     /// internal track holds full `Clip` objects which themselves can be
     /// compound. Serialized via the existing serde derives on `Track`/`Clip`.

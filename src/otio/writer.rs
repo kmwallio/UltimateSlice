@@ -255,6 +255,27 @@ fn write_otio_with_mode(
                 link_group_id: clip.link_group_id.clone(),
                 source_timecode_base_ns: clip.source_timecode_base_ns,
                 animated_svg: Some(clip.animated_svg),
+                frei0r_effects: if clip.frei0r_effects.is_empty() {
+                    None
+                } else {
+                    Some(clip.frei0r_effects.clone())
+                },
+                ladspa_effects: if clip.ladspa_effects.is_empty() {
+                    None
+                } else {
+                    Some(clip.ladspa_effects.clone())
+                },
+                masks: if clip.masks.is_empty() {
+                    None
+                } else {
+                    Some(clip.masks.clone())
+                },
+                motion_trackers: if clip.motion_trackers.is_empty() {
+                    None
+                } else {
+                    Some(clip.motion_trackers.clone())
+                },
+                tracking_binding: clip.tracking_binding.clone(),
                 compound_tracks: clip.compound_tracks.clone(),
                 multicam_angles: clip.multicam_angles.clone(),
                 multicam_switches: clip.multicam_switches.clone(),

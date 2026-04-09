@@ -292,6 +292,21 @@ fn otio_clip_to_clip(
         if let Some(v) = us.animated_svg {
             clip.animated_svg = v;
         }
+        if let Some(v) = us.frei0r_effects.as_ref() {
+            clip.frei0r_effects = v.clone();
+        }
+        if let Some(v) = us.ladspa_effects.as_ref() {
+            clip.ladspa_effects = v.clone();
+        }
+        if let Some(v) = us.masks.as_ref() {
+            clip.masks = v.clone();
+        }
+        if let Some(v) = us.motion_trackers.as_ref() {
+            clip.motion_trackers = v.clone();
+        }
+        if let Some(v) = us.tracking_binding.as_ref() {
+            clip.tracking_binding = Some(v.clone());
+        }
         if let Some(v) = us.compound_tracks.as_ref() {
             clip.compound_tracks = Some(v.clone());
         }
@@ -1679,6 +1694,140 @@ mod tests {
         assert_eq!(switches[1].position_ns, 3_000_000_000);
         assert_eq!(switches[1].angle_index, 1);
         assert_eq!(switches[2].position_ns, 6_000_000_000);
+    }
+
+    #[test]
+    fn test_roundtrip_batch_e_effects_masks_motion_tracking() {
+        use crate::model::clip::{ClipMask, Frei0rEffect, LadspaEffect, MaskShape};
+        use crate::model::track::Track;
+        use std::collections::HashMap;
+
+        let mut p = Project::new("Batch E Roundtrip");
+        p.frame_rate = FrameRate {
+            numerator: 30,
+            denominator: 1,
+        };
+        p.tracks.clear();
+
+        let mut track = Track::new_video("V1");
+        let mut clip = Clip::new(
+            "/footage/test.mov",
+            5_000_000_000,
+            0,
+            ClipKind::Video,
+        );
+
+        // Two frei0r effects with mixed numeric + string params.
+        let mut frei0r_a_params = HashMap::new();
+        frei0r_a_params.insert("amount".to_string(), 0.75);
+        frei0r_a_params.insert("threshold".to_string(), 0.42);
+        let mut frei0r_a_strings = HashMap::new();
+        frei0r_a_strings.insert("blend-mode".to_string(), "normal".to_string());
+        clip.frei0r_effects = vec![
+            Frei0rEffect {
+                id: "fx-1".to_string(),
+                plugin_name: "cartoon".to_string(),
+                enabled: true,
+                params: frei0r_a_params,
+                string_params: frei0r_a_strings,
+            },
+            Frei0rEffect {
+                id: "fx-2".to_string(),
+                plugin_name: "vignette".to_string(),
+                enabled: false,
+                params: HashMap::new(),
+                string_params: HashMap::new(),
+            },
+        ];
+
+        // LADSPA audio effects.
+        let mut ladspa_params = HashMap::new();
+        ladspa_params.insert("gain".to_string(), 6.0);
+        ladspa_params.insert("ratio".to_string(), 4.0);
+        clip.ladspa_effects = vec![LadspaEffect {
+            id: "audio-fx-1".to_string(),
+            plugin_name: "compressor".to_string(),
+            gst_element_name: "ladspa-cmt-so-compress-stereo".to_string(),
+            enabled: true,
+            params: ladspa_params,
+        }];
+
+        // A non-default mask (ellipse, partly inverted, with feather).
+        clip.masks = vec![ClipMask {
+            id: "mask-1".to_string(),
+            shape: MaskShape::Ellipse,
+            enabled: true,
+            center_x: 0.6,
+            center_x_keyframes: Vec::new(),
+            center_y: 0.4,
+            center_y_keyframes: Vec::new(),
+            width: 0.3,
+            width_keyframes: Vec::new(),
+            height: 0.2,
+            height_keyframes: Vec::new(),
+            rotation: 15.0,
+            rotation_keyframes: Vec::new(),
+            feather: 0.05,
+            feather_keyframes: Vec::new(),
+            expansion: 0.02,
+            expansion_keyframes: Vec::new(),
+            invert: true,
+            path: None,
+            tracking_binding: None,
+        }];
+
+        track.add_clip(clip.clone());
+        p.tracks.push(track);
+
+        let json = crate::otio::writer::write_otio(&p).unwrap();
+        let p2 = parse_otio(&json).unwrap();
+        let clip2 = &p2.tracks[0].clips[0];
+
+        // Frei0r
+        assert_eq!(clip2.frei0r_effects.len(), 2);
+        assert_eq!(clip2.frei0r_effects[0].plugin_name, "cartoon");
+        assert!(clip2.frei0r_effects[0].enabled);
+        assert_eq!(
+            clip2.frei0r_effects[0].params.get("amount"),
+            Some(&0.75)
+        );
+        assert_eq!(
+            clip2.frei0r_effects[0].params.get("threshold"),
+            Some(&0.42)
+        );
+        assert_eq!(
+            clip2.frei0r_effects[0]
+                .string_params
+                .get("blend-mode")
+                .map(|s| s.as_str()),
+            Some("normal")
+        );
+        assert_eq!(clip2.frei0r_effects[1].plugin_name, "vignette");
+        assert!(!clip2.frei0r_effects[1].enabled);
+
+        // LADSPA
+        assert_eq!(clip2.ladspa_effects.len(), 1);
+        assert_eq!(clip2.ladspa_effects[0].plugin_name, "compressor");
+        assert_eq!(
+            clip2.ladspa_effects[0].gst_element_name,
+            "ladspa-cmt-so-compress-stereo"
+        );
+        assert_eq!(clip2.ladspa_effects[0].params.get("gain"), Some(&6.0));
+        assert_eq!(clip2.ladspa_effects[0].params.get("ratio"), Some(&4.0));
+
+        // Mask
+        assert_eq!(clip2.masks.len(), 1);
+        let m = &clip2.masks[0];
+        assert_eq!(m.shape, MaskShape::Ellipse);
+        assert!(m.enabled);
+        assert_eq!(m.center_x, 0.6);
+        assert_eq!(m.center_y, 0.4);
+        assert_eq!(m.width, 0.3);
+        assert_eq!(m.height, 0.2);
+        assert_eq!(m.rotation, 15.0);
+        assert_eq!(m.feather, 0.05);
+        assert_eq!(m.expansion, 0.02);
+        assert!(m.invert);
     }
 
     #[test]

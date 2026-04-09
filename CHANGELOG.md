@@ -5,6 +5,13 @@ All notable project changes and progress should be recorded here.
 ## [Unreleased]
 
 ### Added
+- **OTIO clip metadata coverage — Batch E** (effects, masks, motion tracking): closes the **last remaining major gap** in OTIO clip-metadata coverage. Adds 5 new fields:
+  - **`frei0r_effects`** (`Option<Vec<Frei0rEffect>>`): full visual filter chain with id, plugin name, enabled flag, numeric params (HashMap), and string params (HashMap).
+  - **`ladspa_effects`** (`Option<Vec<LadspaEffect>>`): full audio plugin chain with id, plugin name, GStreamer element name, enabled flag, and numeric params.
+  - **`masks`** (`Option<Vec<ClipMask>>`): shape masks (Rectangle/Ellipse/Path) including all per-mask geometry, keyframes, feather, expansion, invert, optional path data, and per-mask tracking binding.
+  - **`motion_trackers`** (`Option<Vec<MotionTracker>>`): authored motion trackers on the source clip.
+  - **`tracking_binding`** (`Option<TrackingBinding>`): transform-level motion-tracking attachment that binds the clip's transform to a tracker output.
+  - All fields use `Option<T>` + `skip_serializing_if = "Option::is_none"`, with Vec-typed fields emitted as `None` when empty so plain clips don't bloat the JSON. New end-to-end test (`test_roundtrip_batch_e_effects_masks_motion_tracking`) verifies frei0r effects (with both numeric and string params), LADSPA audio effects, and a non-default ellipse mask survive a writer→parser cycle. All 918 tests pass.
 - **OTIO clip metadata coverage — Batch D** (compound clips + multicam): closes the **highest-stakes** OTIO gap. Previously, exporting a compound clip to OTIO silently dropped its entire internal timeline (the nested tracks and clips disappeared on re-import); a multicam clip lost all its angle definitions and switch points. Adds 3 new fields:
   - **`compound_tracks`** (`Option<Vec<Track>>`): the full nested timeline of a compound clip. Recursive — internal clips can themselves be compound, and serde walks the whole tree via the existing `Track`/`Clip` derives. Only emitted when present so non-compound clips don't bloat the JSON.
   - **`multicam_angles`** (`Option<Vec<MulticamAngle>>`): camera angles with id, label, source path, in/out, sync offset, source timecode base, media duration, volume, mute.
