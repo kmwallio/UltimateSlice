@@ -256,6 +256,10 @@ pub enum McpCommand {
     },
     ExportMp4 {
         path: String,
+        /// Optional surround layout for advanced audio mode. Accepts
+        /// `"stereo"` (default), `"surround_5_1"` / `"5.1"`, or
+        /// `"surround_7_1"` / `"7.1"`. Unknown values fall back to stereo.
+        audio_channel_layout: String,
         reply: SyncSender<Value>,
     },
     ListExportPresets {
@@ -270,6 +274,8 @@ pub enum McpCommand {
         crf: u32,
         audio_codec: String,
         audio_bitrate_kbps: u32,
+        /// Advanced audio mode: see ExportMp4 for accepted values.
+        audio_channel_layout: String,
         reply: SyncSender<Value>,
     },
     DeleteExportPreset {

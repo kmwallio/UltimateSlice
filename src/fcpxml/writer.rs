@@ -14,6 +14,13 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Copy)]
 struct WriterOptions {
     strict_dtd: bool,
+    /// Optional audio channel layout to declare on the strict-DTD `<sequence>`
+    /// element. `None` keeps the legacy `audioLayout="stereo"` value, which
+    /// preserves byte-identical output for every existing caller and the
+    /// FCPXML round-trip test suite. When set, emits the matching FCPXML
+    /// layout token; 7.1 falls back to `"5.1"` because FCPXML X has no
+    /// canonical 7.1 enumeration.
+    audio_layout: Option<crate::media::export::AudioChannelLayout>,
 }
 
 /// Per-media-file export info probed at export time.
@@ -40,12 +47,43 @@ struct ExportContext {
 
 /// Serialize a `Project` to FCPXML format.
 pub fn write_fcpxml(project: &Project) -> Result<String> {
-    write_fcpxml_with_options(project, WriterOptions { strict_dtd: false })
+    write_fcpxml_with_options(
+        project,
+        WriterOptions {
+            strict_dtd: false,
+            audio_layout: None,
+        },
+    )
 }
 
 /// Serialize a `Project` to strict DTD-safe FCPXML for distribution workflows.
 pub fn write_fcpxml_strict(project: &Project) -> Result<String> {
-    write_fcpxml_with_options(project, WriterOptions { strict_dtd: true })
+    write_fcpxml_with_options(
+        project,
+        WriterOptions {
+            strict_dtd: true,
+            audio_layout: None,
+        },
+    )
+}
+
+/// Strict-DTD variant that also declares a non-stereo `audioLayout` on the
+/// `<sequence>` element. Used by callers that have just exported in 5.1 / 7.1
+/// surround and want the sidecar FCPXML to reflect the chosen layout.
+///
+/// 7.1 is not a standard FCPXML X audio layout; it falls back to `"5.1"` and
+/// emits a warning so the FCPXML still imports cleanly into Final Cut.
+pub fn write_fcpxml_strict_with_audio_layout(
+    project: &Project,
+    layout: crate::media::export::AudioChannelLayout,
+) -> Result<String> {
+    write_fcpxml_with_options(
+        project,
+        WriterOptions {
+            strict_dtd: true,
+            audio_layout: Some(layout),
+        },
+    )
 }
 
 pub fn use_strict_fcpxml_for_path(path: &Path) -> bool {
@@ -222,7 +260,22 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
     seq.push_attribute(("format", format_ref));
     seq.push_attribute(("tcFormat", "NDF"));
     if options.strict_dtd {
-        seq.push_attribute(("audioLayout", "stereo"));
+        // Resolve the FCPXML audioLayout token. Default behavior (no opt-in)
+        // is byte-identical to the pre-surround code: emit `"stereo"`. When a
+        // surround layout is requested, map to FCPXML X's allowed enumeration.
+        // 7.1 has no canonical FCPXML X equivalent — fall back to "5.1" with
+        // a warning so the file still imports cleanly into Final Cut.
+        let audio_layout_token = match options.audio_layout {
+            None | Some(crate::media::export::AudioChannelLayout::Stereo) => "stereo",
+            Some(crate::media::export::AudioChannelLayout::Surround51) => "5.1",
+            Some(crate::media::export::AudioChannelLayout::Surround71) => {
+                log::warn!(
+                    "FCPXML strict DTD has no 7.1 audioLayout — falling back to 5.1"
+                );
+                "5.1"
+            }
+        };
+        seq.push_attribute(("audioLayout", audio_layout_token));
         seq.push_attribute(("audioRate", "48k"));
     }
     if !strip_unknown_fields {

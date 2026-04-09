@@ -175,6 +175,32 @@ Collapsible section inside Audio with three bands: **Low**, **Mid**, **High**.
 - Gain per band supports keyframe animation via `eq_low_gain`, `eq_mid_gain`, `eq_high_gain` keyframe properties.
 - MCP tool: `set_clip_eq` with 9 optional parameters.
 
+### Track audio: Audio Role + Surround Position + Ducking
+
+The collapsible **Track Audio** sub-section inside Audio shows controls that
+apply to the *track* the selected clip lives on (not just the clip):
+
+| Control | Effect |
+|---|---|
+| **Audio Role** | Tags the track as `Dialogue` / `Effects` / `Music` / `None`. Drives the per-role submix bus during stereo export and the auto-routing destination during surround export. |
+| **Surround Position** | Per-track override for **Advanced Audio Mode** surround exports (5.1 / 7.1). `Auto (by role)` (default) uses the role-based mapping; explicit values pin the track to a specific channel. Has no effect on stereo exports. |
+| **Duck this track…** | When enabled, automatically lowers this track's volume whenever audio is present on any non-ducked track at the same timeline position (typical use: duck music under dialogue). |
+| **Duck Amount (dB)** | Negative dB applied while ducking is active. Default −6 dB. |
+
+**Surround Position** options:
+
+- **Auto (by role)** — recommended; uses Dialogue → Front Center, Music → Front L/R, Effects → Front L/R + Surround L/R
+- **Front L/R**, **Front Center**, **Front L/R + Surround L/R**, **Surround L/R**
+- **LFE (bass only)** — pin this track to the subwoofer channel
+- Single-channel pins: **Front Left**, **Front Right**, **Back Left**, **Back Right**, **Side Left**, **Side Right** (Side Left/Right alias to Back Left/Right in 5.1 since 5.1 has no side speakers)
+
+The override is stored on the track (not the clip) and round-trips through
+project save/load (`.uspxml`) as well as OTIO export. Switching the Inspector
+selection between clips on the same track shows the same value.
+
+For the full surround export pipeline (auto-routing table, automatic LFE bass
+tap, codec compatibility), see [`docs/user/export.md`](export.md#audio-channels--advanced-audio-mode-surround).
+
 ---
 
 ## Video Transform

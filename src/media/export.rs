@@ -45,6 +45,102 @@ pub enum AudioCodec {
     Flac,
     Pcm,
 }
+
+/// Output audio channel layout for export.
+///
+/// `Stereo` (default) preserves the legacy export pipeline byte-for-byte.
+/// `Surround51` and `Surround71` opt into the multichannel mix graph that
+/// upmixes per-track stems based on each track's `audio_role` and (optionally)
+/// `surround_position` override.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AudioChannelLayout {
+    #[default]
+    Stereo,
+    Surround51,
+    Surround71,
+}
+
+impl AudioChannelLayout {
+    pub fn channel_count(self) -> u32 {
+        match self {
+            Self::Stereo => 2,
+            Self::Surround51 => 6,
+            Self::Surround71 => 8,
+        }
+    }
+
+    /// ffmpeg `pan=` / `aformat=channel_layouts=` token name.
+    pub fn ffmpeg_layout(self) -> &'static str {
+        match self {
+            Self::Stereo => "stereo",
+            Self::Surround51 => "5.1",
+            Self::Surround71 => "7.1",
+        }
+    }
+
+    /// Stable string identifier used in serialized presets / MCP arguments.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stereo => "stereo",
+            Self::Surround51 => "surround_5_1",
+            Self::Surround71 => "surround_7_1",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "surround_5_1" | "5.1" | "51" => Self::Surround51,
+            "surround_7_1" | "7.1" | "71" => Self::Surround71,
+            _ => Self::Stereo,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Stereo => "Stereo",
+            Self::Surround51 => "5.1 Surround",
+            Self::Surround71 => "7.1 Surround",
+        }
+    }
+}
+
+/// Resolved per-stem destination in a surround mix.
+///
+/// This is the value the mix graph builder uses to construct an upmix `pan=`
+/// expression. It is computed at export time from the track's `AudioRole` and
+/// optional `SurroundPositionOverride`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurroundPosition {
+    /// Front L + Front R (default for Music / None).
+    FrontLR,
+    /// Front Center only (default for Dialogue).
+    FrontCenter,
+    /// Front L/R plus rear surrounds at lower gain (default for Effects).
+    FrontLRPlusSurroundLR,
+    /// Surround L + Surround R only (pure ambience).
+    SurroundLR,
+    /// LFE only (pre-filtered low-pass content).
+    Lfe,
+    FrontLeft,
+    FrontRight,
+    BackLeft,
+    BackRight,
+    SideLeft,
+    SideRight,
+}
+
+/// One labeled audio stem ready to enter the final mix.
+///
+/// Built from per-clip filter chains. The role + override fields are only
+/// consulted by the surround mix path (`build_audio_mix_graph` with a
+/// non-stereo target); the stereo path uses just `label` + `role` exactly as
+/// the legacy code did.
+#[derive(Debug, Clone)]
+struct AudioStem {
+    label: String,
+    role: crate::model::track::AudioRole,
+    surround_override: crate::model::track::SurroundPositionOverride,
+}
 #[derive(Debug, Clone, PartialEq)]
 pub enum Container {
     Mp4,
@@ -80,6 +176,8 @@ pub struct ExportOptions {
     pub audio_bitrate_kbps: u32,
     /// Frames per second for GIF output (None = use project frame rate). Only used when container = Gif.
     pub gif_fps: Option<u32>,
+    /// Output audio channel layout. Default = Stereo (legacy pipeline unchanged).
+    pub audio_channel_layout: AudioChannelLayout,
 }
 
 impl Default for ExportOptions {
@@ -93,6 +191,7 @@ impl Default for ExportOptions {
             audio_codec: AudioCodec::Aac,
             audio_bitrate_kbps: 192,
             gif_fps: None,
+            audio_channel_layout: AudioChannelLayout::Stereo,
         }
     }
 }
@@ -158,12 +257,24 @@ fn split_active_video_tracks_for_export<'a>(
 pub fn export_project(
     project: &Project,
     output_path: &str,
-    options: ExportOptions,
+    mut options: ExportOptions,
     estimated_size_bytes: Option<u64>,
     bg_removal_paths: &std::collections::HashMap<String, String>,
     frame_interp_paths: &std::collections::HashMap<String, String>,
     tx: mpsc::Sender<ExportProgress>,
 ) -> Result<()> {
+    // GIF outputs have no audio stream — surround layouts have nothing to do
+    // there. Silently downgrade so the rest of the pipeline can ignore the
+    // edge case.
+    if options.container == Container::Gif
+        && options.audio_channel_layout != AudioChannelLayout::Stereo
+    {
+        log::warn!(
+            "Surround audio layout {:?} requested with GIF container; downgrading to Stereo",
+            options.audio_channel_layout
+        );
+        options.audio_channel_layout = AudioChannelLayout::Stereo;
+    }
     let out_w = if options.output_width == 0 {
         project.width
     } else {
@@ -810,7 +921,11 @@ pub fn export_project(
     let vout_label = prev_label;
 
     // === Audio pipeline ===
-    let mut audio_labels: Vec<(String, crate::model::track::AudioRole)> = Vec::new();
+    // Each entry: (stem label, owning track audio role, owning track surround
+    // override). The third element is only consulted by the surround mix path;
+    // the stereo mix path ignores it and produces a byte-identical filtergraph
+    // to the pre-surround code.
+    let mut audio_labels: Vec<AudioStem> = Vec::new();
     let clip_audio_fades: HashMap<String, ClipAudioFade> =
         if crossfade_enabled && crossfade_duration_ns > 0 {
             let mut crossfade_tracks: Vec<Vec<&Clip>> = Vec::new();
@@ -910,16 +1025,29 @@ pub fn export_project(
                 filter.push_str(&format!(
                 ";[{i}:a]{areverse}{atempo}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{match_eq_part}{eq_part},{fade_filters}anull[{pre_pan}]"
             ));
-                append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
+                append_pan_filter_chain(
+                    &mut filter,
+                    clip,
+                    &pre_pan,
+                    &post_pan,
+                    &label,
+                    options.audio_channel_layout,
+                );
                 filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
-                // Primary video clips — find track role from project.
-                let role = project
+                // Primary video clips — find owning track for role + surround position.
+                let owning_track = project
                     .tracks
                     .iter()
-                    .find(|t| t.clips.iter().any(|c| c.id == clip.id))
-                    .map(|t| t.audio_role)
+                    .find(|t| t.clips.iter().any(|c| c.id == clip.id));
+                let role = owning_track.map(|t| t.audio_role).unwrap_or_default();
+                let surround_override = owning_track
+                    .map(|t| t.surround_position)
                     .unwrap_or_default();
-                audio_labels.push((label, role));
+                audio_labels.push(AudioStem {
+                    label,
+                    role,
+                    surround_override,
+                });
             }
         }
 
@@ -974,16 +1102,29 @@ pub fn export_project(
                 filter.push_str(&format!(
                 ";[{in_idx}:a]{areverse}{atempo}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{match_eq_part}{eq_part},{fade_filters}anull[{pre_pan}]"
             ));
-                append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
+                append_pan_filter_chain(
+                    &mut filter,
+                    clip,
+                    &pre_pan,
+                    &post_pan,
+                    &label,
+                    options.audio_channel_layout,
+                );
                 filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
-                // Find the track for this secondary clip to get its role.
-                let role = project
+                // Find the track for this secondary clip to get its role + surround position.
+                let owning_track = project
                     .tracks
                     .iter()
-                    .find(|t| t.clips.iter().any(|c| c.id == clip.id))
-                    .map(|t| t.audio_role)
+                    .find(|t| t.clips.iter().any(|c| c.id == clip.id));
+                let role = owning_track.map(|t| t.audio_role).unwrap_or_default();
+                let surround_override = owning_track
+                    .map(|t| t.surround_position)
                     .unwrap_or_default();
-                audio_labels.push((label, role));
+                audio_labels.push(AudioStem {
+                    label,
+                    role,
+                    surround_override,
+                });
             }
         }
 
@@ -1044,15 +1185,28 @@ pub fn export_project(
             ";[{}:a]{areverse}{atempo}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{duck_part}{match_eq_part}{eq_part},{fade_filters}anull[{pre_pan}]",
             audio_base + j
         ));
-            append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
+            append_pan_filter_chain(
+                &mut filter,
+                clip,
+                &pre_pan,
+                &post_pan,
+                &label,
+                options.audio_channel_layout,
+            );
             filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
-            let role = project
+            let owning_track = project
                 .tracks
                 .iter()
-                .find(|t| t.clips.iter().any(|c| c.id == clip.id))
-                .map(|t| t.audio_role)
+                .find(|t| t.clips.iter().any(|c| c.id == clip.id));
+            let role = owning_track.map(|t| t.audio_role).unwrap_or_default();
+            let surround_override = owning_track
+                .map(|t| t.surround_position)
                 .unwrap_or_default();
-            audio_labels.push((label, role));
+            audio_labels.push(AudioStem {
+                label,
+                role,
+                surround_override,
+            });
         }
     } // end `if options.container != Container::Gif` for per-clip audio filters
 
@@ -1067,52 +1221,176 @@ pub fn export_project(
     if has_audio && options.container != Container::Gif {
         use crate::model::track::AudioRole;
         let project_dur_s = project.duration() as f64 / 1_000_000_000.0;
+        let layout = options.audio_channel_layout;
 
-        // Group audio labels by role for submix routing.
-        let roles_in_use: Vec<AudioRole> = {
-            let mut roles: Vec<AudioRole> = audio_labels.iter().map(|(_, r)| *r).collect();
-            roles.sort_by_key(|r| *r as u8);
-            roles.dedup();
-            roles
-        };
+        if layout == AudioChannelLayout::Stereo {
+            // ============================================================
+            // STEREO MIX PATH — byte-identical to the pre-surround code.
+            // The structure (single-role fast path vs multi-role submix
+            // path) and every emitted character must remain unchanged so
+            // existing tests and stereo exports stay regression-free.
+            // ============================================================
 
-        if roles_in_use.len() <= 1 {
-            // Single role (or all None) — no submix needed, mix directly.
-            let n = audio_labels.len();
-            filter.push(';');
-            for (label, _) in &audio_labels {
-                filter.push_str(&format!("[{label}]"));
-            }
-            filter.push_str(&format!(
-                "amix=inputs={n}:normalize=0,atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
-            ));
-        } else {
-            // Multiple roles — create per-role submixes, then master mix.
-            let mut submix_labels: Vec<String> = Vec::new();
-            for role in &roles_in_use {
-                let role_labels: Vec<&str> = audio_labels
-                    .iter()
-                    .filter(|(_, r)| r == role)
-                    .map(|(l, _)| l.as_str())
-                    .collect();
-                if role_labels.is_empty() {
-                    continue;
-                }
-                let submix_name = format!("submix_{}", role.as_str());
-                let n = role_labels.len();
+            // Group audio labels by role for submix routing.
+            let roles_in_use: Vec<AudioRole> = {
+                let mut roles: Vec<AudioRole> =
+                    audio_labels.iter().map(|s| s.role).collect();
+                roles.sort_by_key(|r| *r as u8);
+                roles.dedup();
+                roles
+            };
+
+            if roles_in_use.len() <= 1 {
+                // Single role (or all None) — no submix needed, mix directly.
+                let n = audio_labels.len();
                 filter.push(';');
-                for l in &role_labels {
+                for stem in &audio_labels {
+                    filter.push_str(&format!("[{}]", stem.label));
+                }
+                filter.push_str(&format!(
+                    "amix=inputs={n}:normalize=0,atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
+                ));
+            } else {
+                // Multiple roles — create per-role submixes, then master mix.
+                let mut submix_labels: Vec<String> = Vec::new();
+                for role in &roles_in_use {
+                    let role_labels: Vec<&str> = audio_labels
+                        .iter()
+                        .filter(|s| s.role == *role)
+                        .map(|s| s.label.as_str())
+                        .collect();
+                    if role_labels.is_empty() {
+                        continue;
+                    }
+                    let submix_name = format!("submix_{}", role.as_str());
+                    let n = role_labels.len();
+                    filter.push(';');
+                    for l in &role_labels {
+                        filter.push_str(&format!("[{l}]"));
+                    }
+                    if n == 1 {
+                        // Single input — just rename, no amix needed.
+                        filter.push_str(&format!("anull[{submix_name}]"));
+                    } else {
+                        filter.push_str(&format!(
+                            "amix=inputs={n}:normalize=0[{submix_name}]"
+                        ));
+                    }
+                    submix_labels.push(submix_name);
+                }
+                // Master mix from submixes.
+                let n = submix_labels.len();
+                filter.push(';');
+                for l in &submix_labels {
                     filter.push_str(&format!("[{l}]"));
                 }
                 if n == 1 {
-                    // Single input — just rename, no amix needed.
-                    filter.push_str(&format!("anull[{submix_name}]"));
+                    filter.push_str(&format!(
+                        "atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
+                    ));
                 } else {
-                    filter.push_str(&format!("amix=inputs={n}:normalize=0[{submix_name}]"));
+                    filter.push_str(&format!(
+                        "amix=inputs={n}:normalize=0,atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
+                    ));
+                }
+            }
+        } else {
+            // ============================================================
+            // SURROUND MIX PATH (5.1 / 7.1)
+            //
+            // Per-stem upmix → role-based submixes → master mix.
+            //
+            // For each stem we emit a `pan=5.1|...` (or `pan=7.1|...`)
+            // expression mapping the stereo input to its destination
+            // channels, plus an optional parallel LFE bass-tap for stems
+            // on Music/Effects roles. Every stem terminates in the target
+            // layout via `aformat=channel_layouts={layout}` so amix
+            // produces a multichannel buffer instead of silently
+            // downmixing to stereo.
+            // ============================================================
+            let layout_token = layout.ffmpeg_layout();
+
+            // 1. Per-stem upmix + optional LFE tap. Build, by role (in
+            //    insertion order), a list of upmixed stem labels feeding
+            //    the role's submix. We use a Vec rather than BTreeMap so
+            //    we don't have to require `Ord` on `AudioRole`, and to
+            //    keep the emitted graph deterministic for snapshot tests.
+            let mut role_inputs: Vec<(AudioRole, Vec<String>)> = Vec::new();
+            let mut push_role_input = |role: AudioRole, label: String| {
+                if let Some(entry) = role_inputs.iter_mut().find(|(r, _)| *r == role) {
+                    entry.1.push(label);
+                } else {
+                    role_inputs.push((role, vec![label]));
+                }
+            };
+
+            // Capture stem facts up front so the per-stem filter writes
+            // don't fight the &mut borrow on `role_inputs`.
+            let stems_meta: Vec<(String, AudioRole, SurroundPosition)> = audio_labels
+                .iter()
+                .map(|stem| {
+                    let pos = resolve_stem_position(
+                        stem.role,
+                        stem.surround_override,
+                        layout,
+                    );
+                    (stem.label.clone(), stem.role, pos)
+                })
+                .collect();
+
+            for (label, role, position) in &stems_meta {
+                let upmix_label = format!("{label}_u");
+                filter.push_str(&build_surround_upmix_filter(
+                    label,
+                    &upmix_label,
+                    *position,
+                    layout,
+                ));
+                push_role_input(*role, upmix_label);
+
+                // Auto LFE bass tap for Music / Effects (and only when not
+                // already explicitly routed to LFE — that case already puts
+                // bass content there via the upmix filter).
+                let auto_lfe_eligible = matches!(
+                    role,
+                    AudioRole::Music | AudioRole::Effects
+                ) && *position != SurroundPosition::Lfe;
+                if auto_lfe_eligible {
+                    let lfe_label = format!("{label}_lfe");
+                    filter.push_str(&build_surround_lfe_tap_filter(
+                        label,
+                        &lfe_label,
+                        layout,
+                    ));
+                    push_role_input(*role, lfe_label);
+                }
+            }
+
+            // 2. Per-role submix in the target layout.
+            let mut submix_labels: Vec<String> = Vec::new();
+            for (role, labels) in &role_inputs {
+                if labels.is_empty() {
+                    continue;
+                }
+                let submix_name = format!("submix_{}", role.as_str());
+                let n = labels.len();
+                filter.push(';');
+                for l in labels {
+                    filter.push_str(&format!("[{l}]"));
+                }
+                if n == 1 {
+                    filter.push_str(&format!(
+                        "aformat=channel_layouts={layout_token}[{submix_name}]"
+                    ));
+                } else {
+                    filter.push_str(&format!(
+                        "amix=inputs={n}:normalize=0,aformat=channel_layouts={layout_token}[{submix_name}]"
+                    ));
                 }
                 submix_labels.push(submix_name);
             }
-            // Master mix from submixes.
+
+            // 3. Master mix of submixes → final [aout] in the target layout.
             let n = submix_labels.len();
             filter.push(';');
             for l in &submix_labels {
@@ -1120,11 +1398,11 @@ pub fn export_project(
             }
             if n == 1 {
                 filter.push_str(&format!(
-                    "atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
+                    "aformat=channel_layouts={layout_token},atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
                 ));
             } else {
                 filter.push_str(&format!(
-                    "amix=inputs={n}:normalize=0,atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
+                    "amix=inputs={n}:normalize=0,aformat=channel_layouts={layout_token},atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
                 ));
             }
         }
@@ -1169,6 +1447,12 @@ pub fn export_project(
                     .arg("libopus")
                     .arg("-b:a")
                     .arg(format!("{}k", options.audio_bitrate_kbps));
+                // libopus refuses multichannel layouts unless mapping_family
+                // is set to 1 (Vorbis-style). Stereo uses the default
+                // family 0 so we leave the existing command line alone.
+                if options.audio_channel_layout != AudioChannelLayout::Stereo {
+                    cmd.arg("-mapping_family").arg("1");
+                }
             }
             AudioCodec::Flac => {
                 cmd.arg("-c:a").arg("flac");
@@ -1176,6 +1460,16 @@ pub fn export_project(
             AudioCodec::Pcm => {
                 cmd.arg("-c:a").arg("pcm_s24le");
             }
+        }
+        // Surround target — pin channel count, channel layout, and 48kHz
+        // sample rate. Stereo path is left untouched so the command line
+        // remains byte-identical to the pre-surround code.
+        if options.audio_channel_layout != AudioChannelLayout::Stereo {
+            cmd.arg("-ac")
+                .arg(options.audio_channel_layout.channel_count().to_string());
+            cmd.arg("-channel_layout")
+                .arg(options.audio_channel_layout.ffmpeg_layout());
+            cmd.arg("-ar").arg("48000");
         }
     }
 
@@ -2616,6 +2910,7 @@ fn append_pan_filter_chain(
     input_label: &str,
     output_label: &str,
     label_prefix: &str,
+    target_layout: AudioChannelLayout,
 ) {
     if clip.pan.abs() <= f32::EPSILON && clip.pan_keyframes.is_empty() {
         filter.push_str(&format!(";[{input_label}]anull[{output_label}]"));
@@ -2625,22 +2920,40 @@ fn append_pan_filter_chain(
     let pan_expr = build_pan_expression(clip);
     let left_gain_expr = format!("if(gt({pan_expr},0),1-({pan_expr}),1)");
     let right_gain_expr = format!("if(lt({pan_expr},0),1+({pan_expr}),1)");
-    let left_label = format!("{label_prefix}_pan_l");
-    let right_label = format!("{label_prefix}_pan_r");
-    let left_scaled_label = format!("{label_prefix}_pan_lv");
-    let right_scaled_label = format!("{label_prefix}_pan_rv");
 
+    if target_layout == AudioChannelLayout::Stereo {
+        // Legacy stereo path — left untouched so the filter graph remains
+        // byte-identical to the pre-surround code. Tested by
+        // `append_pan_filter_chain_emits_dynamic_channel_gains_for_keyframed_pan`.
+        let left_label = format!("{label_prefix}_pan_l");
+        let right_label = format!("{label_prefix}_pan_r");
+        let left_scaled_label = format!("{label_prefix}_pan_lv");
+        let right_scaled_label = format!("{label_prefix}_pan_rv");
+
+        filter.push_str(&format!(
+            ";[{input_label}]aformat=channel_layouts=stereo,channelsplit=channel_layout=stereo[{left_label}][{right_label}]"
+        ));
+        filter.push_str(&format!(
+            ";[{left_label}]volume='{left_gain_expr}':eval=frame[{left_scaled_label}]"
+        ));
+        filter.push_str(&format!(
+            ";[{right_label}]volume='{right_gain_expr}':eval=frame[{right_scaled_label}]"
+        ));
+        filter.push_str(&format!(
+            ";[{left_scaled_label}][{right_scaled_label}]amerge=inputs=2,aformat=channel_layouts=stereo[{output_label}]"
+        ));
+        return;
+    }
+
+    // Surround target — keep the stem in stereo and bake the L/R balance into
+    // c0/c1 via a single in-stem pan expression. The downstream upmix matrix
+    // (built in `build_audio_mix_graph`) decides which surround channels each
+    // stem contributes to. We deliberately do NOT use `channelsplit=stereo`
+    // here because that would corrupt a stem that's about to be routed to the
+    // center channel.
     filter.push_str(&format!(
-        ";[{input_label}]aformat=channel_layouts=stereo,channelsplit=channel_layout=stereo[{left_label}][{right_label}]"
-    ));
-    filter.push_str(&format!(
-        ";[{left_label}]volume='{left_gain_expr}':eval=frame[{left_scaled_label}]"
-    ));
-    filter.push_str(&format!(
-        ";[{right_label}]volume='{right_gain_expr}':eval=frame[{right_scaled_label}]"
-    ));
-    filter.push_str(&format!(
-        ";[{left_scaled_label}][{right_scaled_label}]amerge=inputs=2,aformat=channel_layouts=stereo[{output_label}]"
+        ";[{input_label}]aformat=channel_layouts=stereo,\
+         pan=stereo|c0='{left_gain_expr}*c0'|c1='{right_gain_expr}*c1':eval=frame[{output_label}]"
     ));
 }
 
@@ -4443,6 +4756,195 @@ fn build_pitch_filter(clip: &crate::model::clip::Clip) -> String {
     format!("rubberband={}", params.join(":"))
 }
 
+/// Resolve a stem's destination position for the surround upmix matrix.
+///
+/// - Stereo target → always `FrontLR` (no-op; the surround code path is gated
+///   off elsewhere so this is a defensive default).
+/// - Surround target with `Auto` override → role-based defaults:
+///   Dialogue=FrontCenter, Music=FrontLR, Effects=FrontLRPlusSurroundLR,
+///   None=FrontLR.
+/// - Surround target with explicit override → that override directly.
+fn resolve_stem_position(
+    role: crate::model::track::AudioRole,
+    track_override: crate::model::track::SurroundPositionOverride,
+    target: AudioChannelLayout,
+) -> SurroundPosition {
+    use crate::model::track::{AudioRole, SurroundPositionOverride};
+    if target == AudioChannelLayout::Stereo {
+        return SurroundPosition::FrontLR;
+    }
+    match track_override {
+        SurroundPositionOverride::Auto => match role {
+            AudioRole::Dialogue => SurroundPosition::FrontCenter,
+            AudioRole::Music => SurroundPosition::FrontLR,
+            AudioRole::Effects => SurroundPosition::FrontLRPlusSurroundLR,
+            AudioRole::None => SurroundPosition::FrontLR,
+        },
+        SurroundPositionOverride::FrontLR => SurroundPosition::FrontLR,
+        SurroundPositionOverride::FrontCenter => SurroundPosition::FrontCenter,
+        SurroundPositionOverride::FrontLRPlusSurroundLR => {
+            SurroundPosition::FrontLRPlusSurroundLR
+        }
+        SurroundPositionOverride::SurroundLR => SurroundPosition::SurroundLR,
+        SurroundPositionOverride::Lfe => SurroundPosition::Lfe,
+        SurroundPositionOverride::FrontLeft => SurroundPosition::FrontLeft,
+        SurroundPositionOverride::FrontRight => SurroundPosition::FrontRight,
+        SurroundPositionOverride::BackLeft => SurroundPosition::BackLeft,
+        SurroundPositionOverride::BackRight => SurroundPosition::BackRight,
+        SurroundPositionOverride::SideLeft => SurroundPosition::SideLeft,
+        SurroundPositionOverride::SideRight => SurroundPosition::SideRight,
+    }
+}
+
+/// Build the per-channel weight expressions for one stem's surround upmix.
+///
+/// Returns a vector of `(channel_name, expression)` pairs ordered by the
+/// FFmpeg layout's canonical channel order. Both 5.1 and 7.1 share `FL FR FC
+/// LFE BL BR` as the first six channels; 7.1 appends `SL SR`. Side channels
+/// in 5.1 are aliased to back channels (no separate side speakers exist).
+///
+/// All expressions reference `c0` (left input) and `c1` (right input) of a
+/// stereo source stem. The weighting constants are intentionally conservative
+/// to avoid clipping when multiple stems are summed by `amix=normalize=0`.
+fn surround_pan_weights(
+    position: SurroundPosition,
+    target: AudioChannelLayout,
+) -> Vec<(&'static str, String)> {
+    fn ch(name: &'static str, expr: &str) -> (&'static str, String) {
+        (name, expr.to_string())
+    }
+    let is_71 = matches!(target, AudioChannelLayout::Surround71);
+    let mut out: Vec<(&'static str, String)> = Vec::new();
+    let order: &[&'static str] = if is_71 {
+        &["FL", "FR", "FC", "LFE", "BL", "BR", "SL", "SR"]
+    } else {
+        &["FL", "FR", "FC", "LFE", "BL", "BR"]
+    };
+    let zero = "0".to_string();
+    let mut weights: std::collections::HashMap<&'static str, String> =
+        std::collections::HashMap::new();
+    for ch_name in order {
+        weights.insert(*ch_name, zero.clone());
+    }
+    match position {
+        SurroundPosition::FrontLR => {
+            weights.insert("FL", "c0".to_string());
+            weights.insert("FR", "c1".to_string());
+        }
+        SurroundPosition::FrontCenter => {
+            weights.insert("FC", "0.707*c0+0.707*c1".to_string());
+        }
+        SurroundPosition::FrontLRPlusSurroundLR => {
+            weights.insert("FL", "0.85*c0".to_string());
+            weights.insert("FR", "0.85*c1".to_string());
+            if is_71 {
+                // Spread to both back and side rears at lower gain.
+                weights.insert("BL", "0.40*c0".to_string());
+                weights.insert("BR", "0.40*c1".to_string());
+                weights.insert("SL", "0.40*c0".to_string());
+                weights.insert("SR", "0.40*c1".to_string());
+            } else {
+                weights.insert("BL", "0.55*c0".to_string());
+                weights.insert("BR", "0.55*c1".to_string());
+            }
+        }
+        SurroundPosition::SurroundLR => {
+            if is_71 {
+                weights.insert("SL", "c0".to_string());
+                weights.insert("SR", "c1".to_string());
+            } else {
+                weights.insert("BL", "c0".to_string());
+                weights.insert("BR", "c1".to_string());
+            }
+        }
+        SurroundPosition::Lfe => {
+            weights.insert("LFE", "0.707*c0+0.707*c1".to_string());
+        }
+        SurroundPosition::FrontLeft => {
+            weights.insert("FL", "0.707*c0+0.707*c1".to_string());
+        }
+        SurroundPosition::FrontRight => {
+            weights.insert("FR", "0.707*c0+0.707*c1".to_string());
+        }
+        SurroundPosition::BackLeft => {
+            weights.insert("BL", "0.707*c0+0.707*c1".to_string());
+        }
+        SurroundPosition::BackRight => {
+            weights.insert("BR", "0.707*c0+0.707*c1".to_string());
+        }
+        SurroundPosition::SideLeft => {
+            if is_71 {
+                weights.insert("SL", "0.707*c0+0.707*c1".to_string());
+            } else {
+                // 5.1 has no side channels — alias to BL.
+                weights.insert("BL", "0.707*c0+0.707*c1".to_string());
+            }
+        }
+        SurroundPosition::SideRight => {
+            if is_71 {
+                weights.insert("SR", "0.707*c0+0.707*c1".to_string());
+            } else {
+                weights.insert("BR", "0.707*c0+0.707*c1".to_string());
+            }
+        }
+    }
+    for ch_name in order {
+        out.push(ch(ch_name, &weights[ch_name]));
+    }
+    out
+}
+
+/// Render a single per-stem upmix filter chain into the surround target
+/// layout. Returns the filter string starting with `;` so it can be appended
+/// directly to the running filtergraph.
+///
+/// Output label is `{input_label}_u`. The output is in the canonical surround
+/// layout (5.1 or 7.1) and is `aformat`-pinned so the downstream `amix` is
+/// guaranteed to receive matching layouts (otherwise amix silently downmixes).
+fn build_surround_upmix_filter(
+    input_label: &str,
+    output_label: &str,
+    position: SurroundPosition,
+    target: AudioChannelLayout,
+) -> String {
+    let layout = target.ffmpeg_layout();
+    let weights = surround_pan_weights(position, target);
+    let pan_body: Vec<String> = weights
+        .iter()
+        .map(|(ch, expr)| format!("{ch}={expr}"))
+        .collect();
+    format!(
+        ";[{input_label}]aformat=channel_layouts=stereo,pan={layout}|{},aformat=channel_layouts={layout}[{output_label}]",
+        pan_body.join("|")
+    )
+}
+
+/// Build a parallel LFE bass-tap filter for a stem.
+///
+/// Used in surround mode for stems on `Music` / `Effects` tracks (and not
+/// already explicitly routed to `Lfe`) so the subwoofer channel automatically
+/// receives bass content. Two cascaded `lowpass=f=120` biquads give roughly a
+/// 24 dB/oct slope. The pan coefficients are conservative to avoid LFE
+/// summation clipping when multiple stems contribute.
+fn build_surround_lfe_tap_filter(
+    input_label: &str,
+    output_label: &str,
+    target: AudioChannelLayout,
+) -> String {
+    let layout = target.ffmpeg_layout();
+    // Build a pan expression that puts bass content into LFE only (all other
+    // channels = 0). Reuse `surround_pan_weights(Lfe, target)`.
+    let weights = surround_pan_weights(SurroundPosition::Lfe, target);
+    let pan_body: Vec<String> = weights
+        .iter()
+        .map(|(ch, expr)| format!("{ch}={expr}"))
+        .collect();
+    format!(
+        ";[{input_label}]aformat=channel_layouts=stereo,lowpass=f=120,lowpass=f=120,pan={layout}|{},aformat=channel_layouts={layout}[{output_label}]",
+        pan_body.join("|")
+    )
+}
+
 /// Build an FFmpeg filter for audio channel routing (Left/Right/MonoMix).
 /// Returns empty string for Stereo (default passthrough).
 fn build_channel_filter(clip: &crate::model::clip::Clip) -> String {
@@ -5502,16 +6004,18 @@ mod tests {
         build_adjustment_scope_alpha_expression, build_audio_crossfade_filters, build_color_filter,
         build_crop_filter, build_grading_filter, build_keyframed_property_expression,
         build_pan_expression, build_rotation_filter, build_scale_position_filter,
-        build_subtitle_filter_composited, build_temperature_tint_filter, build_timing_filter,
+        build_subtitle_filter_composited, build_surround_lfe_tap_filter,
+        build_surround_upmix_filter, build_temperature_tint_filter, build_timing_filter,
         build_title_filter, build_volume_filter, clamped_primary_transition_timing,
         clamped_primary_xfade_duration_s, compute_clip_audio_fades, compute_export_coloradj_params,
         estimate_export_size_bytes, find_ffmpeg, flatten_compound_tracks, has_linked_audio_peer,
         has_transform_keyframes, parse_progress_line, primary_clip_transition_stop_pad_ns,
-        resolve_subtitle_font_style, split_active_video_tracks_for_export,
+        resolve_stem_position, resolve_subtitle_font_style, split_active_video_tracks_for_export,
         video_input_seek_and_duration, write_chapter_metadata, AdjustmentExportRoi,
-        AdjustmentMatteInput, AudioCodec, ClipAudioFade, ColorFilterCapabilities, ExportOptions,
-        VideoCodec,
+        AdjustmentMatteInput, AudioChannelLayout, AudioCodec, ClipAudioFade,
+        ColorFilterCapabilities, ExportOptions, SurroundPosition, VideoCodec,
     };
+    use crate::model::track::{AudioRole, SurroundPositionOverride};
     use crate::media::program_player::ProgramPlayer;
     use crate::model::clip::{
         Clip, ClipKind, KeyframeInterpolation, NumericKeyframe, SubtitleSegment, SubtitleWord,
@@ -5581,6 +6085,7 @@ mod tests {
             audio_codec: AudioCodec::Aac,
             ..ExportOptions::default()
         };
+        assert_eq!(options.audio_channel_layout, AudioChannelLayout::Stereo);
         let est = estimate_export_size_bytes(&project, &options, project.width, project.height);
         assert!(est.unwrap_or(0) > 0);
     }
@@ -6014,7 +6519,14 @@ mod tests {
     fn append_pan_filter_chain_uses_anull_for_center_pan_without_keyframes() {
         let clip = Clip::new("/tmp/test.wav", 2_000_000_000, 0, ClipKind::Audio);
         let mut graph = String::new();
-        append_pan_filter_chain(&mut graph, &clip, "in", "out", "clip1");
+        append_pan_filter_chain(
+            &mut graph,
+            &clip,
+            "in",
+            "out",
+            "clip1",
+            AudioChannelLayout::Stereo,
+        );
         assert_eq!(graph, ";[in]anull[out]");
     }
 
@@ -6036,11 +6548,63 @@ mod tests {
             },
         ];
         let mut graph = String::new();
-        append_pan_filter_chain(&mut graph, &clip, "in", "out", "clip1");
+        append_pan_filter_chain(
+            &mut graph,
+            &clip,
+            "in",
+            "out",
+            "clip1",
+            AudioChannelLayout::Stereo,
+        );
         assert!(graph.contains("channelsplit=channel_layout=stereo"));
         assert!(graph.contains("volume='if(gt("));
         assert!(graph.contains("':eval=frame"));
         assert!(graph.contains("amerge=inputs=2"));
+    }
+
+    /// Surround target — the stereo channelsplit MUST be omitted because the
+    /// stem is destined for an upmix matrix that decides channel placement.
+    /// Stereo path is unaffected.
+    #[test]
+    fn append_pan_filter_chain_surround_target_omits_stereo_split() {
+        let mut clip = Clip::new("/tmp/test.wav", 2_000_000_000, 0, ClipKind::Audio);
+        clip.pan = 0.3;
+        let mut graph = String::new();
+        append_pan_filter_chain(
+            &mut graph,
+            &clip,
+            "in",
+            "out",
+            "clip1",
+            AudioChannelLayout::Surround51,
+        );
+        assert!(
+            !graph.contains("channelsplit=channel_layout=stereo"),
+            "surround target should NOT use channelsplit; got: {graph}"
+        );
+        assert!(
+            graph.contains("pan=stereo|c0='"),
+            "surround target should bake pan into c0/c1; got: {graph}"
+        );
+        assert!(graph.contains(":eval=frame[out]"));
+    }
+
+    /// Center pan + surround target still collapses to anull (no pan applied),
+    /// matching the stereo-target shortcut. Important so that a stem with pan=0
+    /// passes through unchanged regardless of layout.
+    #[test]
+    fn append_pan_filter_chain_surround_target_preserves_center_anull_shortcut() {
+        let clip = Clip::new("/tmp/test.wav", 2_000_000_000, 0, ClipKind::Audio);
+        let mut graph = String::new();
+        append_pan_filter_chain(
+            &mut graph,
+            &clip,
+            "in",
+            "out",
+            "clip1",
+            AudioChannelLayout::Surround51,
+        );
+        assert_eq!(graph, ";[in]anull[out]");
     }
 
     #[test]
@@ -7545,5 +8109,271 @@ mod tests {
             .collect();
         assert!(!video_clips.is_empty());
         assert_eq!(video_clips[0].timeline_start, 2_000);
+    }
+
+    // ── Advanced Audio Mode (surround) tests ──────────────────────────────
+
+    #[test]
+    fn export_options_default_is_stereo() {
+        let opts = ExportOptions::default();
+        assert_eq!(opts.audio_channel_layout, AudioChannelLayout::Stereo);
+    }
+
+    #[test]
+    fn audio_channel_layout_channel_counts_and_tokens() {
+        assert_eq!(AudioChannelLayout::Stereo.channel_count(), 2);
+        assert_eq!(AudioChannelLayout::Surround51.channel_count(), 6);
+        assert_eq!(AudioChannelLayout::Surround71.channel_count(), 8);
+        assert_eq!(AudioChannelLayout::Stereo.ffmpeg_layout(), "stereo");
+        assert_eq!(AudioChannelLayout::Surround51.ffmpeg_layout(), "5.1");
+        assert_eq!(AudioChannelLayout::Surround71.ffmpeg_layout(), "7.1");
+    }
+
+    #[test]
+    fn audio_channel_layout_from_str_round_trip() {
+        for layout in [
+            AudioChannelLayout::Stereo,
+            AudioChannelLayout::Surround51,
+            AudioChannelLayout::Surround71,
+        ] {
+            assert_eq!(AudioChannelLayout::from_str(layout.as_str()), layout);
+        }
+        // Aliases
+        assert_eq!(
+            AudioChannelLayout::from_str("5.1"),
+            AudioChannelLayout::Surround51
+        );
+        assert_eq!(
+            AudioChannelLayout::from_str("7.1"),
+            AudioChannelLayout::Surround71
+        );
+        assert_eq!(
+            AudioChannelLayout::from_str("not_a_layout"),
+            AudioChannelLayout::Stereo
+        );
+    }
+
+    #[test]
+    fn resolve_stem_position_collapses_to_front_lr_for_stereo_target() {
+        // For a stereo target, every override resolves to FrontLR (the
+        // surround code path is gated off so this is a defensive default).
+        for ovr in [
+            SurroundPositionOverride::Auto,
+            SurroundPositionOverride::FrontCenter,
+            SurroundPositionOverride::Lfe,
+            SurroundPositionOverride::SideRight,
+        ] {
+            let p = resolve_stem_position(
+                AudioRole::Dialogue,
+                ovr,
+                AudioChannelLayout::Stereo,
+            );
+            assert_eq!(p, SurroundPosition::FrontLR);
+        }
+    }
+
+    #[test]
+    fn resolve_stem_position_auto_uses_role_defaults_for_5_1() {
+        let layout = AudioChannelLayout::Surround51;
+        assert_eq!(
+            resolve_stem_position(
+                AudioRole::Dialogue,
+                SurroundPositionOverride::Auto,
+                layout
+            ),
+            SurroundPosition::FrontCenter
+        );
+        assert_eq!(
+            resolve_stem_position(
+                AudioRole::Music,
+                SurroundPositionOverride::Auto,
+                layout
+            ),
+            SurroundPosition::FrontLR
+        );
+        assert_eq!(
+            resolve_stem_position(
+                AudioRole::Effects,
+                SurroundPositionOverride::Auto,
+                layout
+            ),
+            SurroundPosition::FrontLRPlusSurroundLR
+        );
+        assert_eq!(
+            resolve_stem_position(
+                AudioRole::None,
+                SurroundPositionOverride::Auto,
+                layout
+            ),
+            SurroundPosition::FrontLR
+        );
+    }
+
+    #[test]
+    fn resolve_stem_position_explicit_override_wins() {
+        let layout = AudioChannelLayout::Surround71;
+        // Even with role=Dialogue (which would default to FrontCenter), an
+        // explicit override pins the stem to its target.
+        assert_eq!(
+            resolve_stem_position(
+                AudioRole::Dialogue,
+                SurroundPositionOverride::SideLeft,
+                layout
+            ),
+            SurroundPosition::SideLeft
+        );
+        assert_eq!(
+            resolve_stem_position(
+                AudioRole::Music,
+                SurroundPositionOverride::Lfe,
+                layout
+            ),
+            SurroundPosition::Lfe
+        );
+    }
+
+    #[test]
+    fn build_surround_upmix_filter_dialogue_5_1_targets_center() {
+        let s = build_surround_upmix_filter(
+            "aa0",
+            "aa0_u",
+            SurroundPosition::FrontCenter,
+            AudioChannelLayout::Surround51,
+        );
+        // Filter must start with the input label and end with the output
+        // label, in the canonical 5.1 layout.
+        assert!(s.starts_with(";[aa0]"));
+        assert!(s.ends_with("[aa0_u]"));
+        assert!(s.contains("aformat=channel_layouts=stereo"));
+        assert!(s.contains("pan=5.1|"));
+        assert!(
+            s.contains("FC=0.707*c0+0.707*c1"),
+            "dialogue should sum L+R into FC at -3 dB; got: {s}"
+        );
+        // Other channels must be silent.
+        assert!(s.contains("FL=0"));
+        assert!(s.contains("FR=0"));
+        assert!(s.contains("LFE=0"));
+        assert!(s.contains("BL=0"));
+        assert!(s.contains("BR=0"));
+        // The trailing aformat is the load-bearing line for amix.
+        assert!(s.contains("aformat=channel_layouts=5.1"));
+    }
+
+    #[test]
+    fn build_surround_upmix_filter_front_lr_passthrough_for_5_1() {
+        let s = build_surround_upmix_filter(
+            "aa1",
+            "aa1_u",
+            SurroundPosition::FrontLR,
+            AudioChannelLayout::Surround51,
+        );
+        assert!(s.contains("FL=c0"));
+        assert!(s.contains("FR=c1"));
+        assert!(s.contains("FC=0"));
+        assert!(s.contains("LFE=0"));
+    }
+
+    #[test]
+    fn build_surround_upmix_filter_effects_spreads_for_7_1() {
+        let s = build_surround_upmix_filter(
+            "aa2",
+            "aa2_u",
+            SurroundPosition::FrontLRPlusSurroundLR,
+            AudioChannelLayout::Surround71,
+        );
+        assert!(s.contains("pan=7.1|"));
+        assert!(s.contains("FL=0.85*c0"));
+        assert!(s.contains("FR=0.85*c1"));
+        // 7.1 splits to both back and side rears at lower gain.
+        assert!(s.contains("BL=0.40*c0"));
+        assert!(s.contains("BR=0.40*c1"));
+        assert!(s.contains("SL=0.40*c0"));
+        assert!(s.contains("SR=0.40*c1"));
+        assert!(s.contains("aformat=channel_layouts=7.1"));
+    }
+
+    #[test]
+    fn build_surround_upmix_filter_5_1_aliases_side_to_back() {
+        // 5.1 has no side speakers — SideLeft override aliases to BL.
+        let s = build_surround_upmix_filter(
+            "aa3",
+            "aa3_u",
+            SurroundPosition::SideLeft,
+            AudioChannelLayout::Surround51,
+        );
+        assert!(s.contains("BL=0.707*c0+0.707*c1"));
+        assert!(s.contains("BR=0"));
+    }
+
+    #[test]
+    fn build_surround_lfe_tap_emits_two_lowpass_stages() {
+        let s = build_surround_lfe_tap_filter(
+            "aa4",
+            "aa4_lfe",
+            AudioChannelLayout::Surround51,
+        );
+        assert!(s.starts_with(";[aa4]"));
+        assert!(s.ends_with("[aa4_lfe]"));
+        // Cascaded lowpass for ~24 dB/oct.
+        let lp_count = s.matches("lowpass=f=120").count();
+        assert_eq!(
+            lp_count, 2,
+            "LFE tap should chain two lowpass stages; got {lp_count}"
+        );
+        // LFE channel must receive the bass content.
+        assert!(s.contains("LFE=0.707*c0+0.707*c1"));
+        assert!(s.contains("FL=0"));
+        assert!(s.contains("FC=0"));
+    }
+
+    /// Helper for the mix-graph snapshot tests: build a tiny project with
+    /// `n_audio_clips` audio clips on a single audio track with the given
+    /// role + override, then drive `export_project`'s filter graph builder
+    /// indirectly via `build_surround_upmix_filter` calls. We don't actually
+    /// invoke `export_project` (it requires ffmpeg) — instead we exercise
+    /// the per-stem helpers directly to validate the surround expressions.
+    /// The byte-for-byte stereo regression is covered by the existing
+    /// pan-filter and audio-fade tests + the full-suite run.
+    #[test]
+    fn surround_upmix_5_1_canonical_channel_order() {
+        // Confirm the canonical channel order is FL FR FC LFE BL BR for 5.1.
+        let s = build_surround_upmix_filter(
+            "x",
+            "y",
+            SurroundPosition::FrontLR,
+            AudioChannelLayout::Surround51,
+        );
+        let after_pan = s
+            .split_once("pan=5.1|")
+            .map(|(_, rest)| rest)
+            .unwrap_or("");
+        // Strip the trailing `,aformat=...[y]`
+        let body = after_pan.split(',').next().unwrap();
+        let order: Vec<&str> = body
+            .split('|')
+            .map(|p| p.split('=').next().unwrap_or(""))
+            .collect();
+        assert_eq!(order, vec!["FL", "FR", "FC", "LFE", "BL", "BR"]);
+    }
+
+    #[test]
+    fn surround_upmix_7_1_canonical_channel_order() {
+        let s = build_surround_upmix_filter(
+            "x",
+            "y",
+            SurroundPosition::FrontLR,
+            AudioChannelLayout::Surround71,
+        );
+        let after_pan = s
+            .split_once("pan=7.1|")
+            .map(|(_, rest)| rest)
+            .unwrap_or("");
+        let body = after_pan.split(',').next().unwrap();
+        let order: Vec<&str> = body
+            .split('|')
+            .map(|p| p.split('=').next().unwrap_or(""))
+            .collect();
+        assert_eq!(order, vec!["FL", "FR", "FC", "LFE", "BL", "BR", "SL", "SR"]);
     }
 }

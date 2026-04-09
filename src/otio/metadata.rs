@@ -337,6 +337,12 @@ pub(crate) struct UltimateSliceTrackOtioMetadata {
     pub(crate) duck: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) duck_amount_db: Option<f64>,
+    /// Per-track surround channel routing override for advanced audio mode
+    /// (5.1 / 7.1 surround exports). Stored as the snake_case `as_str()`
+    /// representation of `SurroundPositionOverride`. `None` (or missing on
+    /// older OTIO files) means `Auto`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) surround_position: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

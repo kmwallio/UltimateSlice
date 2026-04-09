@@ -342,6 +342,7 @@ pub struct InspectorView {
     pub pitch_preserve_check: gtk4::CheckButton,
     // Track audio controls
     pub role_dropdown: gtk4::ComboBoxText,
+    pub surround_position_dropdown: gtk4::ComboBoxText,
     pub duck_check: gtk4::CheckButton,
     pub duck_amount_slider: Scale,
     // EQ sliders (3 bands × 3 params)
@@ -2608,6 +2609,9 @@ impl InspectorView {
                     #[allow(deprecated)]
                     self.role_dropdown
                         .set_active_id(Some(track.audio_role.as_str()));
+                    #[allow(deprecated)]
+                    self.surround_position_dropdown
+                        .set_active_id(Some(track.surround_position.as_str()));
                     self.duck_check.set_active(track.duck);
                     self.duck_amount_slider.set_value(track.duck_amount_db);
                 }
@@ -3161,6 +3165,7 @@ pub fn build_inspector(
         ) + 'static,
     on_duck_changed: impl Fn(&str, bool, f64) + 'static,
     on_role_changed: impl Fn(&str, &str) + 'static,
+    on_surround_position_changed: impl Fn(&str, &str) + 'static,
     on_execute_command: impl Fn(Box<dyn crate::undo::EditCommand>) + 'static,
     on_clear_match_eq: impl Fn(&str) + 'static,
 ) -> (GBox, Rc<InspectorView>) {
@@ -3190,6 +3195,8 @@ pub fn build_inspector(
     > = Rc::new(on_match_audio);
     let on_duck_changed: Rc<dyn Fn(&str, bool, f64)> = Rc::new(on_duck_changed);
     let on_role_changed: Rc<dyn Fn(&str, &str)> = Rc::new(on_role_changed);
+    let on_surround_position_changed: Rc<dyn Fn(&str, &str)> =
+        Rc::new(on_surround_position_changed);
     let on_clear_match_eq: Rc<dyn Fn(&str)> = Rc::new(on_clear_match_eq);
     let on_execute_command: Rc<dyn Fn(Box<dyn crate::undo::EditCommand>)> =
         Rc::new(on_execute_command);
@@ -4743,6 +4750,25 @@ pub fn build_inspector(
     #[allow(deprecated)]
     role_dropdown.set_active_id(Some("none"));
     duck_inner.append(&role_dropdown);
+
+    // Surround Position dropdown — controls per-track channel routing in
+    // surround (5.1 / 7.1) exports. `Auto` resolves the destination from
+    // `audio_role` (Dialogue → Center, Music → Front L/R, etc.). Has no
+    // effect on stereo exports.
+    row_label(&duck_inner, "Surround Position");
+    #[allow(deprecated)]
+    let surround_position_dropdown = gtk4::ComboBoxText::new();
+    for pos in crate::model::track::SurroundPositionOverride::ALL {
+        #[allow(deprecated)]
+        surround_position_dropdown.append(Some(pos.as_str()), pos.label());
+    }
+    #[allow(deprecated)]
+    surround_position_dropdown.set_active_id(Some("auto"));
+    surround_position_dropdown.set_tooltip_text(Some(
+        "Per-track destination for the multichannel upmix when exporting in 5.1 / 7.1 surround. \
+         Auto picks a sensible default based on Audio Role. Ignored for stereo exports.",
+    ));
+    duck_inner.append(&surround_position_dropdown);
 
     let duck_check = gtk4::CheckButton::with_label("Duck this track when dialogue is present");
     duck_check.set_active(false);
@@ -6814,6 +6840,24 @@ pub fn build_inspector(
             #[allow(deprecated)]
             if let (Some(ref clip_id), Some(role_id)) = (id, combo.active_id()) {
                 on_role_changed(clip_id, &role_id);
+            }
+        });
+    }
+
+    // Wire Surround Position dropdown
+    {
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_surround_position_changed = on_surround_position_changed.clone();
+        #[allow(deprecated)]
+        surround_position_dropdown.connect_changed(move |combo| {
+            if *updating.borrow() {
+                return;
+            }
+            let id = selected_clip_id.borrow().clone();
+            #[allow(deprecated)]
+            if let (Some(ref clip_id), Some(pos_id)) = (id, combo.active_id()) {
+                on_surround_position_changed(clip_id, &pos_id);
             }
         });
     }
@@ -9804,6 +9848,7 @@ pub fn build_inspector(
         pitch_shift_slider,
         pitch_preserve_check,
         role_dropdown,
+        surround_position_dropdown,
         duck_check,
         duck_amount_slider,
         eq_freq_sliders,

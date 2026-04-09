@@ -5921,6 +5921,29 @@ pub fn build_window(
                 on_project_changed();
             }
         },
+        // on_surround_position_changed: update track surround position override
+        // from inspector. Affects only surround exports — the value is read by
+        // `resolve_stem_position` in `media/export.rs` when the export channel
+        // layout is 5.1 or 7.1. Stereo exports ignore the field.
+        {
+            let project = project.clone();
+            let on_project_changed = on_project_changed.clone();
+            move |clip_id: &str, position_str: &str| {
+                let mut proj = project.borrow_mut();
+                for track in &mut proj.tracks {
+                    if track.clips.iter().any(|c| c.id == clip_id) {
+                        track.surround_position =
+                            crate::model::track::SurroundPositionOverride::from_str(
+                                position_str,
+                            );
+                        proj.dirty = true;
+                        break;
+                    }
+                }
+                drop(proj);
+                on_project_changed();
+            }
+        },
         // on_execute_command: inspector pushes undo-tracked commands through here
         {
             let timeline_state = timeline_state.clone();
@@ -18171,20 +18194,31 @@ fn handle_mcp_command(
             });
         }
 
-        McpCommand::ExportMp4 { path, reply } => {
+        McpCommand::ExportMp4 {
+            path,
+            audio_channel_layout,
+            reply,
+        } => {
             let proj = project.borrow().clone();
             let bg_paths = bg_removal_cache.borrow().paths.clone();
             let interp_paths = frame_interp_cache.borrow().snapshot_paths_by_clip_id(&proj);
+            let layout = crate::media::export::AudioChannelLayout::from_str(
+                &audio_channel_layout,
+            );
             std::thread::spawn(move || {
                 let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
                 let proj_worker = proj.clone();
                 let path_worker = path.clone();
                 std::thread::spawn(move || {
                     let (tx, _rx) = std::sync::mpsc::channel();
+                    let options = crate::media::export::ExportOptions {
+                        audio_channel_layout: layout,
+                        ..crate::media::export::ExportOptions::default()
+                    };
                     let result = crate::media::export::export_project(
                         &proj_worker,
                         &path_worker,
-                        crate::media::export::ExportOptions::default(),
+                        options,
                         None,
                         &bg_paths,
                         &interp_paths,
@@ -18244,7 +18278,8 @@ fn handle_mcp_command(
                             crate::media::export::AudioCodec::Flac => "flac",
                             crate::media::export::AudioCodec::Pcm => "pcm",
                         },
-                        "audio_bitrate_kbps": options.audio_bitrate_kbps
+                        "audio_bitrate_kbps": options.audio_bitrate_kbps,
+                        "audio_channel_layout": options.audio_channel_layout.as_str(),
                     })
                 })
                 .collect();
@@ -18262,6 +18297,7 @@ fn handle_mcp_command(
             crf,
             audio_codec,
             audio_bitrate_kbps,
+            audio_channel_layout,
             reply,
         } => {
             let video_codec = match video_codec.as_str() {
@@ -18308,6 +18344,9 @@ fn handle_mcp_command(
                     .ok();
                 return;
             }
+            let layout = crate::media::export::AudioChannelLayout::from_str(
+                &audio_channel_layout,
+            );
             let options = crate::media::export::ExportOptions {
                 video_codec,
                 container,
@@ -18317,6 +18356,7 @@ fn handle_mcp_command(
                 audio_codec,
                 audio_bitrate_kbps,
                 gif_fps: None,
+                audio_channel_layout: layout,
             };
             let mut state = crate::ui_state::load_export_presets_state();
             match state.upsert_preset(crate::ui_state::ExportPreset::from_export_options(
@@ -20376,6 +20416,8 @@ fn handle_mcp_command(
                         audio_codec: crate::ui_state::ExportAudioCodec::Aac,
                         audio_bitrate_kbps: 192,
                         gif_fps: None,
+                        audio_channel_layout:
+                            crate::ui_state::ExportAudioChannelLayout::Stereo,
                     })
             };
             let job = crate::ui_state::ExportQueueJob::new(&output_path, preset);

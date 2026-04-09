@@ -1,4 +1,6 @@
-use crate::media::export::{AudioCodec, Container, ExportOptions, VideoCodec};
+use crate::media::export::{
+    AudioChannelLayout, AudioCodec, Container, ExportOptions, VideoCodec,
+};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -709,6 +711,37 @@ pub enum ExportAudioCodec {
     Pcm,
 }
 
+/// Serialized mirror of `AudioChannelLayout` for preset round-trip.
+///
+/// Has its own `Default` (Stereo) and `#[serde(default)]` so existing preset
+/// JSON files (which lack this field) load unchanged.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportAudioChannelLayout {
+    #[default]
+    Stereo,
+    Surround51,
+    Surround71,
+}
+
+impl ExportAudioChannelLayout {
+    pub fn from_layout(layout: &AudioChannelLayout) -> Self {
+        match layout {
+            AudioChannelLayout::Stereo => Self::Stereo,
+            AudioChannelLayout::Surround51 => Self::Surround51,
+            AudioChannelLayout::Surround71 => Self::Surround71,
+        }
+    }
+
+    pub fn to_layout(&self) -> AudioChannelLayout {
+        match self {
+            Self::Stereo => AudioChannelLayout::Stereo,
+            Self::Surround51 => AudioChannelLayout::Surround51,
+            Self::Surround71 => AudioChannelLayout::Surround71,
+        }
+    }
+}
+
 impl Default for ExportAudioCodec {
     fn default() -> Self {
         Self::Aac
@@ -757,6 +790,10 @@ pub struct ExportPreset {
     /// Frames per second override for GIF output. None = use project frame rate.
     #[serde(default)]
     pub gif_fps: Option<u32>,
+    /// Output audio channel layout. Defaults to Stereo so legacy preset JSON
+    /// without this field continues to load unchanged.
+    #[serde(default)]
+    pub audio_channel_layout: ExportAudioChannelLayout,
 }
 
 impl ExportPreset {
@@ -771,6 +808,9 @@ impl ExportPreset {
             audio_codec: ExportAudioCodec::from_audio_codec(&options.audio_codec),
             audio_bitrate_kbps: options.audio_bitrate_kbps,
             gif_fps: options.gif_fps,
+            audio_channel_layout: ExportAudioChannelLayout::from_layout(
+                &options.audio_channel_layout,
+            ),
         }
     }
 
@@ -784,6 +824,7 @@ impl ExportPreset {
             audio_codec: self.audio_codec.to_audio_codec(),
             audio_bitrate_kbps: self.audio_bitrate_kbps,
             gif_fps: self.gif_fps,
+            audio_channel_layout: self.audio_channel_layout.to_layout(),
         }
     }
 }
@@ -882,6 +923,7 @@ fn default_export_presets() -> Vec<ExportPreset> {
             audio_codec: ExportAudioCodec::Aac,
             audio_bitrate_kbps: 192,
             gif_fps: None,
+            audio_channel_layout: ExportAudioChannelLayout::Stereo,
         },
         ExportPreset {
             name: "High Quality H.264 4K".to_string(),
@@ -893,6 +935,7 @@ fn default_export_presets() -> Vec<ExportPreset> {
             audio_codec: ExportAudioCodec::Aac,
             audio_bitrate_kbps: 320,
             gif_fps: None,
+            audio_channel_layout: ExportAudioChannelLayout::Stereo,
         },
         ExportPreset {
             name: "Archive ProRes 4K".to_string(),
@@ -904,6 +947,7 @@ fn default_export_presets() -> Vec<ExportPreset> {
             audio_codec: ExportAudioCodec::Pcm,
             audio_bitrate_kbps: 320,
             gif_fps: None,
+            audio_channel_layout: ExportAudioChannelLayout::Stereo,
         },
         ExportPreset {
             name: "WebM VP9 1080p".to_string(),
@@ -915,6 +959,7 @@ fn default_export_presets() -> Vec<ExportPreset> {
             audio_codec: ExportAudioCodec::Opus,
             audio_bitrate_kbps: 160,
             gif_fps: None,
+            audio_channel_layout: ExportAudioChannelLayout::Stereo,
         },
         ExportPreset {
             name: "Animated GIF".to_string(),
@@ -926,6 +971,22 @@ fn default_export_presets() -> Vec<ExportPreset> {
             audio_codec: ExportAudioCodec::Aac,
             audio_bitrate_kbps: 128,
             gif_fps: Some(15),
+            audio_channel_layout: ExportAudioChannelLayout::Stereo,
+        },
+        // Cinema-style 5.1 surround at 1080p / 448 kbps AAC. Auto-routes
+        // dialogue to Front Center, music to Front L/R, and effects to
+        // Front L/R + Surround L/R, with an automatic LFE bass tap.
+        ExportPreset {
+            name: "Cinema H.264 5.1 1080p".to_string(),
+            video_codec: ExportVideoCodec::H264,
+            container: ExportContainer::Mp4,
+            output_width: 1920,
+            output_height: 1080,
+            crf: 20,
+            audio_codec: ExportAudioCodec::Aac,
+            audio_bitrate_kbps: 448,
+            gif_fps: None,
+            audio_channel_layout: ExportAudioChannelLayout::Surround51,
         },
     ]
 }
@@ -1308,6 +1369,7 @@ mod tests {
             audio_codec: AudioCodec::Opus,
             audio_bitrate_kbps: 256,
             gif_fps: None,
+            audio_channel_layout: AudioChannelLayout::Surround51,
         };
         let preset = ExportPreset::from_export_options("High Quality", &options);
         assert_eq!(preset.name, "High Quality");
@@ -1318,6 +1380,57 @@ mod tests {
         assert_eq!(preset.to_export_options().crf, 18);
         assert_eq!(preset.to_export_options().audio_codec, AudioCodec::Opus);
         assert_eq!(preset.to_export_options().audio_bitrate_kbps, 256);
+        assert_eq!(
+            preset.to_export_options().audio_channel_layout,
+            AudioChannelLayout::Surround51
+        );
+    }
+
+    /// Back-compat regression: existing JSON preset files predate the
+    /// `audio_channel_layout` field. They must still load and default to Stereo.
+    #[test]
+    fn export_preset_deserializes_legacy_json_without_audio_channel_layout_as_stereo() {
+        let legacy_json = r#"{
+            "name": "Legacy",
+            "video_codec": "h264",
+            "container": "mp4",
+            "output_width": 1920,
+            "output_height": 1080,
+            "crf": 23,
+            "audio_codec": "aac",
+            "audio_bitrate_kbps": 192,
+            "gif_fps": null
+        }"#;
+        let preset: ExportPreset =
+            serde_json::from_str(legacy_json).expect("legacy JSON should still load");
+        assert_eq!(
+            preset.audio_channel_layout,
+            ExportAudioChannelLayout::Stereo
+        );
+        assert_eq!(
+            preset.to_export_options().audio_channel_layout,
+            AudioChannelLayout::Stereo
+        );
+    }
+
+    #[test]
+    fn export_preset_round_trip_preserves_surround_5_1() {
+        let options = ExportOptions {
+            audio_channel_layout: AudioChannelLayout::Surround51,
+            ..ExportOptions::default()
+        };
+        let preset = ExportPreset::from_export_options("Cinema", &options);
+        let json = serde_json::to_string(&preset).expect("serialize");
+        let parsed: ExportPreset =
+            serde_json::from_str(&json).expect("round-trip deserialize");
+        assert_eq!(
+            parsed.audio_channel_layout,
+            ExportAudioChannelLayout::Surround51
+        );
+        assert_eq!(
+            parsed.to_export_options().audio_channel_layout,
+            AudioChannelLayout::Surround51
+        );
     }
 
     #[test]
@@ -1361,6 +1474,7 @@ mod tests {
                 "Archive ProRes 4K",
                 "WebM VP9 1080p",
                 "Animated GIF",
+                "Cinema H.264 5.1 1080p",
             ]
         );
         assert!(parsed.export_presets.last_used_preset.is_none());

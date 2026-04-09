@@ -489,6 +489,15 @@ fn write_otio_with_mode(
             audio_role: Some(track.audio_role.as_str().to_string()),
             duck: Some(track.duck),
             duck_amount_db: Some(track.duck_amount_db),
+            // Only emit when non-default so legacy OTIO consumers don't see
+            // a noisy new key on every track.
+            surround_position: if track.surround_position
+                != crate::model::track::SurroundPositionOverride::Auto
+            {
+                Some(track.surround_position.as_str().to_string())
+            } else {
+                None
+            },
         });
 
         otio_tracks.push(OtioTrack {

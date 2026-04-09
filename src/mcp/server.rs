@@ -729,11 +729,16 @@ fn tools_list() -> Value {
         },
         {
             "name": "export_mp4",
-            "description": "Export the current project to MP4/H.264 at the given absolute path.",
+            "description": "Export the current project to MP4/H.264 at the given absolute path. Optional advanced audio mode picks a surround channel layout.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Absolute path for the output .mp4 file." }
+                    "path": { "type": "string", "description": "Absolute path for the output .mp4 file." },
+                    "audio_channel_layout": {
+                        "type": "string",
+                        "enum": ["stereo", "surround_5_1", "surround_7_1"],
+                        "description": "Output audio channel layout. Defaults to stereo. Surround uses role-based auto-routing with an LFE bass tap."
+                    }
                 },
                 "required": ["path"]
             }
@@ -756,7 +761,12 @@ fn tools_list() -> Value {
                     "output_height": { "type": "integer", "description": "Output height, or 0 to use project height." },
                     "crf": { "type": "integer", "description": "CRF quality value (0-51)." },
                     "audio_codec": { "type": "string", "enum": ["aac", "opus", "flac", "pcm"] },
-                    "audio_bitrate_kbps": { "type": "integer", "description": "Audio bitrate in kbps." }
+                    "audio_bitrate_kbps": { "type": "integer", "description": "Audio bitrate in kbps." },
+                    "audio_channel_layout": {
+                        "type": "string",
+                        "enum": ["stereo", "surround_5_1", "surround_7_1"],
+                        "description": "Output audio channel layout. Optional; defaults to stereo."
+                    }
                 },
                 "required": ["name", "video_codec", "container", "output_width", "output_height", "crf", "audio_codec", "audio_bitrate_kbps"]
             }
@@ -2467,6 +2477,7 @@ fn dispatch_tool_payload(
 
         "export_mp4" => McpCommand::ExportMp4 {
             path: arg_str!(args, "path"),
+            audio_channel_layout: arg_str!(args, "audio_channel_layout", "stereo"),
             reply: tx,
         },
 
@@ -2481,6 +2492,7 @@ fn dispatch_tool_payload(
             crf: arg_u64!(args, "crf", 23) as u32,
             audio_codec: arg_str!(args, "audio_codec", "aac"),
             audio_bitrate_kbps: arg_u64!(args, "audio_bitrate_kbps", 192) as u32,
+            audio_channel_layout: arg_str!(args, "audio_channel_layout", "stereo"),
             reply: tx,
         },
 

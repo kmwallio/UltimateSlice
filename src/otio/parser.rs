@@ -77,6 +77,10 @@ pub fn parse_otio_with_path(json: &str, otio_path: Option<&Path>) -> Result<Proj
             if let Some(db) = us.duck_amount_db {
                 track.duck_amount_db = db;
             }
+            if let Some(pos) = us.surround_position.as_deref() {
+                track.surround_position =
+                    crate::model::track::SurroundPositionOverride::from_str(pos);
+            }
         }
 
         // Walk children: Clips advance cursor, Gaps advance cursor without
