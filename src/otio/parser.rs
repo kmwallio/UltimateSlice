@@ -220,6 +220,78 @@ fn otio_clip_to_clip(
         if let Some(v) = us.voice_isolation {
             clip.voice_isolation = v as f32;
         }
+        if let Some(v) = us.voice_isolation_pad_ms {
+            clip.voice_isolation_pad_ms = v as f32;
+        }
+        if let Some(v) = us.voice_isolation_fade_ms {
+            clip.voice_isolation_fade_ms = v as f32;
+        }
+        if let Some(v) = us.voice_isolation_floor {
+            clip.voice_isolation_floor = v as f32;
+        }
+        if let Some(v) = us.voice_isolation_source {
+            clip.voice_isolation_source = v;
+        }
+        if let Some(v) = us.voice_isolation_silence_threshold_db {
+            clip.voice_isolation_silence_threshold_db = v as f32;
+        }
+        if let Some(v) = us.voice_isolation_silence_min_ms {
+            clip.voice_isolation_silence_min_ms = v;
+        }
+        if let Some(v) = us.measured_loudness_lufs {
+            clip.measured_loudness_lufs = Some(v);
+        }
+        if let Some(v) = us.chroma_key_enabled {
+            clip.chroma_key_enabled = v;
+        }
+        if let Some(v) = us.chroma_key_color {
+            clip.chroma_key_color = v;
+        }
+        if let Some(v) = us.chroma_key_tolerance {
+            clip.chroma_key_tolerance = v as f32;
+        }
+        if let Some(v) = us.chroma_key_softness {
+            clip.chroma_key_softness = v as f32;
+        }
+        if let Some(v) = us.bg_removal_enabled {
+            clip.bg_removal_enabled = v;
+        }
+        if let Some(v) = us.bg_removal_threshold {
+            clip.bg_removal_threshold = v;
+        }
+        if let Some(v) = us.freeze_frame {
+            clip.freeze_frame = v;
+        }
+        if let Some(v) = us.freeze_frame_source_ns {
+            clip.freeze_frame_source_ns = Some(v);
+        }
+        if let Some(v) = us.freeze_frame_hold_duration_ns {
+            clip.freeze_frame_hold_duration_ns = Some(v);
+        }
+        if let Some(v) = us.vidstab_enabled {
+            clip.vidstab_enabled = v;
+        }
+        if let Some(v) = us.vidstab_smoothing {
+            clip.vidstab_smoothing = v as f32;
+        }
+        if let Some(v) = us.color_label {
+            clip.color_label = v;
+        }
+        if let Some(v) = us.anamorphic_desqueeze {
+            clip.anamorphic_desqueeze = v;
+        }
+        if let Some(v) = us.group_id.as_ref() {
+            clip.group_id = Some(v.clone());
+        }
+        if let Some(v) = us.link_group_id.as_ref() {
+            clip.link_group_id = Some(v.clone());
+        }
+        if let Some(v) = us.source_timecode_base_ns {
+            clip.source_timecode_base_ns = Some(v);
+        }
+        if let Some(v) = us.animated_svg {
+            clip.animated_svg = v;
+        }
         if let Some(v) = us.brightness {
             clip.brightness = v as f32;
         }
@@ -1227,6 +1299,120 @@ mod tests {
         assert_eq!(clip2.crop_bottom_keyframes, clip.crop_bottom_keyframes);
         // Speed keyframes
         assert_eq!(clip2.speed_keyframes, clip.speed_keyframes);
+    }
+
+    #[test]
+    fn test_roundtrip_batch_b_voice_iso_chroma_freeze_misc() {
+        use crate::model::clip::{ClipColorLabel, VoiceIsolationSource};
+        use crate::model::track::Track;
+
+        let mut p = Project::new("Batch B Roundtrip");
+        p.frame_rate = FrameRate {
+            numerator: 30,
+            denominator: 1,
+        };
+        p.tracks.clear();
+
+        let mut track = Track::new_video("V1");
+        let mut clip = Clip::new(
+            "/footage/test.mov",
+            5_000_000_000,
+            0,
+            ClipKind::Video,
+        );
+
+        // Voice isolation (6 fields + base)
+        clip.voice_isolation = 0.6;
+        clip.voice_isolation_pad_ms = 120.0;
+        clip.voice_isolation_fade_ms = 35.0;
+        clip.voice_isolation_floor = 0.15;
+        clip.voice_isolation_source = VoiceIsolationSource::Silence;
+        clip.voice_isolation_silence_threshold_db = -28.0;
+        clip.voice_isolation_silence_min_ms = 250;
+        clip.measured_loudness_lufs = Some(-19.5);
+
+        // Chroma key
+        clip.chroma_key_enabled = true;
+        clip.chroma_key_color = 0x00FF80;
+        clip.chroma_key_tolerance = 0.42;
+        clip.chroma_key_softness = 0.18;
+
+        // BG removal
+        clip.bg_removal_enabled = true;
+        clip.bg_removal_threshold = 0.65;
+
+        // Freeze frame
+        clip.freeze_frame = true;
+        clip.freeze_frame_source_ns = Some(1_500_000_000);
+        clip.freeze_frame_hold_duration_ns = Some(3_000_000_000);
+
+        // Stabilization
+        clip.vidstab_enabled = true;
+        clip.vidstab_smoothing = 0.7;
+
+        // Misc
+        clip.color_label = ClipColorLabel::Teal;
+        clip.anamorphic_desqueeze = 1.33;
+        clip.group_id = Some("group-A".to_string());
+        clip.link_group_id = Some("link-42".to_string());
+        clip.source_timecode_base_ns = Some(86_400_000_000_000);
+        clip.animated_svg = true;
+
+        track.add_clip(clip.clone());
+        p.tracks.push(track);
+
+        let json = crate::otio::writer::write_otio(&p).unwrap();
+        let p2 = parse_otio(&json).unwrap();
+        let clip2 = &p2.tracks[0].clips[0];
+
+        // Voice isolation
+        assert_eq!(clip2.voice_isolation, clip.voice_isolation);
+        assert_eq!(clip2.voice_isolation_pad_ms, clip.voice_isolation_pad_ms);
+        assert_eq!(clip2.voice_isolation_fade_ms, clip.voice_isolation_fade_ms);
+        assert_eq!(clip2.voice_isolation_floor, clip.voice_isolation_floor);
+        assert_eq!(clip2.voice_isolation_source, clip.voice_isolation_source);
+        assert_eq!(
+            clip2.voice_isolation_silence_threshold_db,
+            clip.voice_isolation_silence_threshold_db
+        );
+        assert_eq!(
+            clip2.voice_isolation_silence_min_ms,
+            clip.voice_isolation_silence_min_ms
+        );
+        assert_eq!(clip2.measured_loudness_lufs, clip.measured_loudness_lufs);
+
+        // Chroma key
+        assert_eq!(clip2.chroma_key_enabled, clip.chroma_key_enabled);
+        assert_eq!(clip2.chroma_key_color, clip.chroma_key_color);
+        assert_eq!(clip2.chroma_key_tolerance, clip.chroma_key_tolerance);
+        assert_eq!(clip2.chroma_key_softness, clip.chroma_key_softness);
+
+        // BG removal
+        assert_eq!(clip2.bg_removal_enabled, clip.bg_removal_enabled);
+        assert_eq!(clip2.bg_removal_threshold, clip.bg_removal_threshold);
+
+        // Freeze frame
+        assert_eq!(clip2.freeze_frame, clip.freeze_frame);
+        assert_eq!(clip2.freeze_frame_source_ns, clip.freeze_frame_source_ns);
+        assert_eq!(
+            clip2.freeze_frame_hold_duration_ns,
+            clip.freeze_frame_hold_duration_ns
+        );
+
+        // Stabilization
+        assert_eq!(clip2.vidstab_enabled, clip.vidstab_enabled);
+        assert_eq!(clip2.vidstab_smoothing, clip.vidstab_smoothing);
+
+        // Misc
+        assert_eq!(clip2.color_label, clip.color_label);
+        assert_eq!(clip2.anamorphic_desqueeze, clip.anamorphic_desqueeze);
+        assert_eq!(clip2.group_id, clip.group_id);
+        assert_eq!(clip2.link_group_id, clip.link_group_id);
+        assert_eq!(
+            clip2.source_timecode_base_ns,
+            clip.source_timecode_base_ns
+        );
+        assert_eq!(clip2.animated_svg, clip.animated_svg);
     }
 
     #[test]

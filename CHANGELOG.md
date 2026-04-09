@@ -5,6 +5,14 @@ All notable project changes and progress should be recorded here.
 ## [Unreleased]
 
 ### Added
+- **OTIO clip metadata coverage — Batch B** (voice isolation, chroma key, background removal, freeze frame, stabilization, misc): adds **24 more fields** to `UltimateSliceClipOtioMetadata` so the second tier of per-clip features now round-trips:
+  - **Voice isolation (6 + measured loudness)**: `voice_isolation_pad_ms`, `voice_isolation_fade_ms`, `voice_isolation_floor`, `voice_isolation_source` (`Subtitles`/`Silence`), `voice_isolation_silence_threshold_db`, `voice_isolation_silence_min_ms`, `measured_loudness_lufs`
+  - **Chroma key (4)**: `chroma_key_enabled`, `chroma_key_color`, `chroma_key_tolerance`, `chroma_key_softness`
+  - **AI background removal (2)**: `bg_removal_enabled`, `bg_removal_threshold`
+  - **Freeze frame (3)**: `freeze_frame`, `freeze_frame_source_ns`, `freeze_frame_hold_duration_ns`
+  - **Stabilization (2)**: `vidstab_enabled`, `vidstab_smoothing`
+  - **Misc (7)**: `color_label` (semantic timeline tint), `anamorphic_desqueeze`, `group_id`, `link_group_id` (loose group + strict A/V link), `source_timecode_base_ns`, `animated_svg`
+  - All fields use the same `Option<T>` + `skip_serializing_if` pattern as Batch A so existing OTIO files continue to round-trip cleanly with no schema-version bump. New end-to-end test (`test_roundtrip_batch_b_voice_iso_chroma_freeze_misc`) verifies all 24 fields survive a writer→parser cycle. All 914 tests pass.
 - **OTIO clip metadata coverage — Batch A** (color grading, image filters, audio routing, all keyframe lanes): closes a large pre-existing gap in OTIO round-trip coverage. Previously, exporting a project to OTIO and re-importing it silently dropped many user-visible adjustments. Batch A adds **35 new fields** to `UltimateSliceClipOtioMetadata`:
   - **Color correction**: `temperature` (Kelvin), `tint` (g–m axis)
   - **Image filters**: `denoise`, `sharpness`, `blur`

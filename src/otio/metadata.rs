@@ -2,8 +2,8 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::model::clip::{
-    AudioChannelMode, BlendMode, EqBand, NumericKeyframe, SlowMotionInterp, SubtitleHighlightMode,
-    SubtitleSegment,
+    AudioChannelMode, BlendMode, ClipColorLabel, EqBand, NumericKeyframe, SlowMotionInterp,
+    SubtitleHighlightMode, SubtitleSegment, VoiceIsolationSource,
 };
 
 pub(crate) const ULTIMATESLICE_OTIO_METADATA_VERSION: u32 = 1;
@@ -28,6 +28,65 @@ pub(crate) struct UltimateSliceClipOtioMetadata {
     pub(crate) match_eq_bands: Option<Vec<EqBand>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) voice_isolation: Option<f64>,
+    /// Voice isolation tunables.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) voice_isolation_pad_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) voice_isolation_fade_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) voice_isolation_floor: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) voice_isolation_source: Option<VoiceIsolationSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) voice_isolation_silence_threshold_db: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) voice_isolation_silence_min_ms: Option<u32>,
+    /// Last measured integrated loudness in LUFS (informational).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) measured_loudness_lufs: Option<f64>,
+    /// Chroma key (green/blue screen).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) chroma_key_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) chroma_key_color: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) chroma_key_tolerance: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) chroma_key_softness: Option<f64>,
+    /// AI background removal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) bg_removal_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) bg_removal_threshold: Option<f64>,
+    /// Freeze frame.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) freeze_frame: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) freeze_frame_source_ns: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) freeze_frame_hold_duration_ns: Option<u64>,
+    /// Video stabilization (export-only via libvidstab).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) vidstab_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) vidstab_smoothing: Option<f64>,
+    /// Semantic clip color label for timeline tinting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) color_label: Option<ClipColorLabel>,
+    /// Anamorphic desqueeze factor (1.0, 1.33, 1.5, 1.8, 2.0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) anamorphic_desqueeze: Option<f64>,
+    /// Clip group identifiers (loose group + strict A/V link group).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) group_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) link_group_id: Option<String>,
+    /// Source media absolute timecode base (ns).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) source_timecode_base_ns: Option<u64>,
+    /// True when this image clip is a prerendered animated SVG source.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) animated_svg: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) brightness: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
