@@ -1202,6 +1202,112 @@ impl ClipMask {
         self.tracking_binding.is_some()
     }
 }
+
+/// HSL Qualifier (Phase 1): secondary color correction that isolates a pixel
+/// range by Hue/Saturation/Luminance and applies a follow-up grade only inside
+/// the matched region. A single qualifier per clip for now — Phase 2 can promote
+/// to `Vec<HslQualifier>`.
+///
+/// * `hue_*` are in degrees (0..360). When `hue_min > hue_max`, the range wraps
+///   around 360 (useful for reds that straddle 0°).
+/// * `sat_*` and `lum_*` are normalized (0..1).
+/// * `*_softness` widens the smoothstep transition on both sides of each range
+///   edge (0..0.5 typical).
+/// * `view_mask` is a preview-only debug aid and is never persisted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HslQualifier {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    #[serde(default)]
+    pub hue_min: f64,
+    #[serde(default = "default_hue_max")]
+    pub hue_max: f64,
+    #[serde(default)]
+    pub hue_softness: f64,
+
+    #[serde(default)]
+    pub sat_min: f64,
+    #[serde(default = "one_f64")]
+    pub sat_max: f64,
+    #[serde(default)]
+    pub sat_softness: f64,
+
+    #[serde(default)]
+    pub lum_min: f64,
+    #[serde(default = "one_f64")]
+    pub lum_max: f64,
+    #[serde(default)]
+    pub lum_softness: f64,
+
+    #[serde(default)]
+    pub invert: bool,
+
+    /// Debug-only preview flag — never serialized.
+    #[serde(default, skip_serializing)]
+    pub view_mask: bool,
+
+    /// Brightness delta applied to matched pixels (-1.0..+1.0, 0 = neutral).
+    #[serde(default)]
+    pub brightness: f64,
+    /// Contrast multiplier applied to matched pixels (0.0..+2.0, 1 = neutral).
+    #[serde(default = "one_f64")]
+    pub contrast: f64,
+    /// Saturation multiplier applied to matched pixels (0.0..+2.0, 1 = neutral).
+    #[serde(default = "one_f64")]
+    pub saturation: f64,
+}
+
+fn default_hue_max() -> f64 {
+    360.0
+}
+fn one_f64() -> f64 {
+    1.0
+}
+
+impl Default for HslQualifier {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            hue_min: 0.0,
+            hue_max: 360.0,
+            hue_softness: 0.0,
+            sat_min: 0.0,
+            sat_max: 1.0,
+            sat_softness: 0.0,
+            lum_min: 0.0,
+            lum_max: 1.0,
+            lum_softness: 0.0,
+            invert: false,
+            view_mask: false,
+            brightness: 0.0,
+            contrast: 1.0,
+            saturation: 1.0,
+        }
+    }
+}
+
+impl HslQualifier {
+    /// Returns `true` when this qualifier has no observable effect and can be
+    /// skipped entirely (disabled, or full open range + neutral secondary grade
+    /// and not in view-mask debug mode).
+    pub fn is_neutral(&self) -> bool {
+        if !self.enabled {
+            return true;
+        }
+        if self.view_mask {
+            return false;
+        }
+        let grade_neutral = self.brightness.abs() < 1e-6
+            && (self.contrast - 1.0).abs() < 1e-6
+            && (self.saturation - 1.0).abs() < 1e-6;
+        let full_hue = self.hue_min <= 0.0 + 1e-6 && self.hue_max >= 360.0 - 1e-6;
+        let full_sat = self.sat_min <= 1e-6 && self.sat_max >= 1.0 - 1e-6;
+        let full_lum = self.lum_min <= 1e-6 && self.lum_max >= 1.0 - 1e-6;
+        grade_neutral && full_hue && full_sat && full_lum && !self.invert
+    }
+}
+
 fn default_bg_removal_threshold() -> f64 {
     0.5
 }
@@ -1709,6 +1815,9 @@ pub struct Clip {
     /// Shape masks applied to this clip (empty = no mask).
     #[serde(default)]
     pub masks: Vec<ClipMask>,
+    /// Optional HSL Qualifier (secondary color correction).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hsl_qualifier: Option<HslQualifier>,
     /// Motion trackers authored on this source clip.
     #[serde(default)]
     pub motion_trackers: Vec<MotionTracker>,
@@ -2183,6 +2292,7 @@ impl Clip {
             frei0r_effects: Vec::new(),
             ladspa_effects: Vec::new(),
             masks: Vec::new(),
+            hsl_qualifier: None,
             motion_trackers: Vec::new(),
             tracking_binding: None,
             subtitle_segments: Vec::new(),

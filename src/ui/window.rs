@@ -4438,6 +4438,7 @@ fn clip_to_program_clips(
         frei0r_effects: c.frei0r_effects.clone(),
         tracking_binding: c.tracking_binding.clone(),
         masks: c.masks.clone(),
+        hsl_qualifier: c.hsl_qualifier.clone(),
     }]
 }
 
@@ -5421,6 +5422,21 @@ pub fn build_window(
                                 .borrow_mut()
                                 .update_masks_for_clip(&clip_id, &masks);
                         }
+                    }
+                }
+                // Also update HSL qualifier shared state for live slider feedback.
+                // Uses recursive `clip_ref` so clips inside compound tracks work.
+                {
+                    let proj = project.borrow();
+                    let selected = timeline_state.borrow().selected_clip_id.clone();
+                    if let Some(clip_id) = selected {
+                        let qualifier = proj
+                            .clip_ref(&clip_id)
+                            .and_then(|c| c.hsl_qualifier.clone());
+                        drop(proj);
+                        prog_player
+                            .borrow_mut()
+                            .update_hsl_qualifier_for_clip(&clip_id, qualifier);
                     }
                 }
                 if let Some(effects) = effects {
@@ -17015,6 +17031,26 @@ fn handle_mcp_command(
                 if let Some(v) = threshold {
                     clip.bg_removal_threshold = v;
                 }
+                proj.dirty = true;
+                true
+            } else {
+                false
+            };
+            drop(proj);
+            reply.send(json!({"success": found})).ok();
+            if found {
+                on_project_changed();
+            }
+        }
+
+        McpCommand::SetClipHslQualifier {
+            clip_id,
+            qualifier,
+            reply,
+        } => {
+            let mut proj = project.borrow_mut();
+            let found = if let Some(clip) = proj.clip_mut(&clip_id) {
+                clip.hsl_qualifier = qualifier.clone();
                 proj.dirty = true;
                 true
             } else {

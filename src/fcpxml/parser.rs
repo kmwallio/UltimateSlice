@@ -1432,6 +1432,11 @@ fn parse_asset_clip(
         if let Some(v) = attrs.get("us:shadows-tint") {
             clip.shadows_tint = v.parse().unwrap_or(0.0);
         }
+        if let Some(v) = attrs.get("us:hsl-qualifier") {
+            if let Ok(q) = serde_json::from_str::<crate::model::clip::HslQualifier>(v) {
+                clip.hsl_qualifier = Some(q);
+            }
+        }
         if let Some(v) = attrs.get("us:chroma-key-enabled") {
             clip.chroma_key_enabled = v == "true" || v == "1";
         }
@@ -2777,6 +2782,7 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:midtones-tint"
             | "us:shadows-warmth"
             | "us:shadows-tint"
+            | "us:hsl-qualifier"
             | "us:chroma-key-enabled"
             | "us:chroma-key-color"
             | "us:chroma-key-tolerance"

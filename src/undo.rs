@@ -1751,6 +1751,34 @@ impl EditCommand for SetClipMaskCommand {
     }
 }
 
+/// Replace a clip's HSL qualifier (secondary color correction) with a full
+/// snapshot. Undo restores the previous qualifier. `None` means the clip has
+/// no qualifier at all.
+pub struct SetClipHslQualifierCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old: Option<crate::model::clip::HslQualifier>,
+    pub new: Option<crate::model::clip::HslQualifier>,
+}
+
+impl EditCommand for SetClipHslQualifierCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.hsl_qualifier = self.new.clone();
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.hsl_qualifier = self.old.clone();
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set HSL qualifier"
+    }
+}
+
 // ── Subtitle commands ─────────────────────────────────────────────────────
 
 /// Set (or replace) all subtitle segments on a clip (used after STT generation).

@@ -576,6 +576,32 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_clip_hsl_qualifier",
+            "description": "Set (or clear) an HSL Qualifier on a clip — secondary color correction that isolates pixels by hue/saturation/luminance range and applies a follow-up brightness/contrast/saturation grade only inside the matched region. Pass 'clear: true' to remove the qualifier entirely.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id":      { "type": "string",  "description": "Clip id (from list_clips)." },
+                    "clear":        { "type": "boolean", "description": "When true, clear the qualifier entirely. Default false." },
+                    "enabled":      { "type": "boolean", "description": "Whether the qualifier is active. Default true when first set." },
+                    "hue_min":      { "type": "number",  "description": "Hue range minimum in degrees (0..360). Default 0." },
+                    "hue_max":      { "type": "number",  "description": "Hue range maximum in degrees (0..360). When min > max, the range wraps around 360 (selects reds). Default 360." },
+                    "hue_softness": { "type": "number",  "description": "Hue feather band in degrees (0..60). Default 0." },
+                    "sat_min":      { "type": "number",  "description": "Saturation range minimum (0..1). Default 0." },
+                    "sat_max":      { "type": "number",  "description": "Saturation range maximum (0..1). Default 1." },
+                    "sat_softness": { "type": "number",  "description": "Saturation feather band (0..0.5). Default 0." },
+                    "lum_min":      { "type": "number",  "description": "Luminance range minimum (0..1). Default 0." },
+                    "lum_max":      { "type": "number",  "description": "Luminance range maximum (0..1). Default 1." },
+                    "lum_softness": { "type": "number",  "description": "Luminance feather band (0..0.5). Default 0." },
+                    "invert":       { "type": "boolean", "description": "Invert the matte. Default false." },
+                    "brightness":   { "type": "number",  "description": "Secondary brightness delta applied inside the matte (-1..1). Default 0." },
+                    "contrast":     { "type": "number",  "description": "Secondary contrast multiplier inside the matte (0..2). Default 1." },
+                    "saturation":   { "type": "number",  "description": "Secondary saturation multiplier inside the matte (0..2). Default 1." }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
             "name": "set_clip_chroma_key",
             "description": "Set chroma key (green/blue screen) settings for a clip by id. Makes the keyed color transparent so lower tracks show through.",
             "inputSchema": {
@@ -2383,6 +2409,68 @@ fn dispatch_tool_payload(
             color_label: arg_str!(args, "color_label", "none"),
             reply: tx,
         },
+
+        "set_clip_hsl_qualifier" => {
+            let clip_id = arg_str!(args, "clip_id");
+            let clear = args
+                .get("clear")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let qualifier = if clear {
+                None
+            } else {
+                let mut q = crate::model::clip::HslQualifier::default();
+                q.enabled = args
+                    .get("enabled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                if let Some(v) = args.get("hue_min").and_then(|v| v.as_f64()) {
+                    q.hue_min = v;
+                }
+                if let Some(v) = args.get("hue_max").and_then(|v| v.as_f64()) {
+                    q.hue_max = v;
+                }
+                if let Some(v) = args.get("hue_softness").and_then(|v| v.as_f64()) {
+                    q.hue_softness = v;
+                }
+                if let Some(v) = args.get("sat_min").and_then(|v| v.as_f64()) {
+                    q.sat_min = v;
+                }
+                if let Some(v) = args.get("sat_max").and_then(|v| v.as_f64()) {
+                    q.sat_max = v;
+                }
+                if let Some(v) = args.get("sat_softness").and_then(|v| v.as_f64()) {
+                    q.sat_softness = v;
+                }
+                if let Some(v) = args.get("lum_min").and_then(|v| v.as_f64()) {
+                    q.lum_min = v;
+                }
+                if let Some(v) = args.get("lum_max").and_then(|v| v.as_f64()) {
+                    q.lum_max = v;
+                }
+                if let Some(v) = args.get("lum_softness").and_then(|v| v.as_f64()) {
+                    q.lum_softness = v;
+                }
+                if let Some(v) = args.get("invert").and_then(|v| v.as_bool()) {
+                    q.invert = v;
+                }
+                if let Some(v) = args.get("brightness").and_then(|v| v.as_f64()) {
+                    q.brightness = v;
+                }
+                if let Some(v) = args.get("contrast").and_then(|v| v.as_f64()) {
+                    q.contrast = v;
+                }
+                if let Some(v) = args.get("saturation").and_then(|v| v.as_f64()) {
+                    q.saturation = v;
+                }
+                Some(q)
+            };
+            McpCommand::SetClipHslQualifier {
+                clip_id,
+                qualifier,
+                reply: tx,
+            }
+        }
 
         "set_clip_chroma_key" => McpCommand::SetClipChromaKey {
             clip_id: arg_str!(args, "clip_id"),

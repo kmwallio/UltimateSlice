@@ -494,6 +494,23 @@ pub struct InspectorView {
     pub mask_invert_check: CheckButton,
     pub mask_path_editor_box: GBox,
     pub mask_rect_ellipse_controls: GBox,
+    // HSL Qualifier (secondary color correction)
+    pub hsl_section: GBox,
+    pub hsl_enable: CheckButton,
+    pub hsl_invert: CheckButton,
+    pub hsl_view_mask: CheckButton,
+    pub hsl_hue_min: Scale,
+    pub hsl_hue_max: Scale,
+    pub hsl_hue_softness: Scale,
+    pub hsl_sat_min: Scale,
+    pub hsl_sat_max: Scale,
+    pub hsl_sat_softness: Scale,
+    pub hsl_lum_min: Scale,
+    pub hsl_lum_max: Scale,
+    pub hsl_lum_softness: Scale,
+    pub hsl_brightness: Scale,
+    pub hsl_contrast: Scale,
+    pub hsl_saturation: Scale,
     // Motion tracking
     pub tracking_section: GBox,
     pub tracking_tracker_dropdown: gtk4::DropDown,
@@ -2131,6 +2148,43 @@ impl InspectorView {
                     self.mask_feather_slider.set_value(0.0);
                     self.mask_expansion_slider.set_value(0.0);
                     self.mask_invert_check.set_active(false);
+                }
+
+                // HSL Qualifier section visibility — same eligible kinds as
+                // the primary Color panel (visual clips only).
+                self.hsl_section.set_visible(is_visual && !is_compound);
+                if let Some(q) = c.hsl_qualifier.as_ref() {
+                    self.hsl_enable.set_active(q.enabled);
+                    self.hsl_invert.set_active(q.invert);
+                    self.hsl_view_mask.set_active(q.view_mask);
+                    self.hsl_hue_min.set_value(q.hue_min);
+                    self.hsl_hue_max.set_value(q.hue_max);
+                    self.hsl_hue_softness.set_value(q.hue_softness);
+                    self.hsl_sat_min.set_value(q.sat_min);
+                    self.hsl_sat_max.set_value(q.sat_max);
+                    self.hsl_sat_softness.set_value(q.sat_softness);
+                    self.hsl_lum_min.set_value(q.lum_min);
+                    self.hsl_lum_max.set_value(q.lum_max);
+                    self.hsl_lum_softness.set_value(q.lum_softness);
+                    self.hsl_brightness.set_value(q.brightness);
+                    self.hsl_contrast.set_value(q.contrast);
+                    self.hsl_saturation.set_value(q.saturation);
+                } else {
+                    self.hsl_enable.set_active(false);
+                    self.hsl_invert.set_active(false);
+                    self.hsl_view_mask.set_active(false);
+                    self.hsl_hue_min.set_value(0.0);
+                    self.hsl_hue_max.set_value(360.0);
+                    self.hsl_hue_softness.set_value(0.0);
+                    self.hsl_sat_min.set_value(0.0);
+                    self.hsl_sat_max.set_value(1.0);
+                    self.hsl_sat_softness.set_value(0.0);
+                    self.hsl_lum_min.set_value(0.0);
+                    self.hsl_lum_max.set_value(1.0);
+                    self.hsl_lum_softness.set_value(0.0);
+                    self.hsl_brightness.set_value(0.0);
+                    self.hsl_contrast.set_value(1.0);
+                    self.hsl_saturation.set_value(1.0);
                 }
 
                 self.sync_tracking_tracker_controls(c);
@@ -4089,6 +4143,125 @@ pub fn build_inspector(
 
     let add_point_btn = Button::with_label("Add Point");
     mask_path_editor_box.append(&add_point_btn);
+
+    // ── HSL Qualifier section (secondary color correction) ────────────
+    let hsl_section = GBox::new(Orientation::Vertical, 8);
+    content_box.append(&hsl_section);
+    hsl_section.append(&Separator::new(Orientation::Horizontal));
+    let hsl_expander = Expander::new(Some("HSL Qualifier"));
+    hsl_expander.set_expanded(false);
+    hsl_section.append(&hsl_expander);
+    let hsl_inner = GBox::new(Orientation::Vertical, 8);
+    hsl_expander.set_child(Some(&hsl_inner));
+
+    // Enable / invert / view-mask toggles.
+    let hsl_toggles_row = GBox::new(Orientation::Horizontal, 8);
+    let hsl_enable = CheckButton::with_label("Enable");
+    let hsl_invert = CheckButton::with_label("Invert");
+    let hsl_view_mask = CheckButton::with_label("View Mask");
+    hsl_toggles_row.append(&hsl_enable);
+    hsl_toggles_row.append(&hsl_invert);
+    hsl_toggles_row.append(&hsl_view_mask);
+    hsl_inner.append(&hsl_toggles_row);
+
+    // Range subgroup.
+    let hsl_range_label = Label::new(Some("Range"));
+    hsl_range_label.set_halign(gtk::Align::Start);
+    hsl_range_label.add_css_class("browser-header");
+    hsl_inner.append(&hsl_range_label);
+
+    row_label(&hsl_inner, "Hue Min");
+    let hsl_hue_min = Scale::with_range(Orientation::Horizontal, 0.0, 360.0, 1.0);
+    hsl_hue_min.set_value(0.0);
+    hsl_hue_min.set_draw_value(true);
+    hsl_hue_min.set_digits(0);
+    hsl_inner.append(&hsl_hue_min);
+
+    row_label(&hsl_inner, "Hue Max");
+    let hsl_hue_max = Scale::with_range(Orientation::Horizontal, 0.0, 360.0, 1.0);
+    hsl_hue_max.set_value(360.0);
+    hsl_hue_max.set_draw_value(true);
+    hsl_hue_max.set_digits(0);
+    hsl_inner.append(&hsl_hue_max);
+
+    row_label(&hsl_inner, "Hue Softness");
+    let hsl_hue_softness = Scale::with_range(Orientation::Horizontal, 0.0, 60.0, 1.0);
+    hsl_hue_softness.set_value(0.0);
+    hsl_hue_softness.set_draw_value(true);
+    hsl_hue_softness.set_digits(0);
+    hsl_inner.append(&hsl_hue_softness);
+
+    row_label(&hsl_inner, "Sat Min");
+    let hsl_sat_min = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    hsl_sat_min.set_value(0.0);
+    hsl_sat_min.set_draw_value(true);
+    hsl_sat_min.set_digits(2);
+    hsl_inner.append(&hsl_sat_min);
+
+    row_label(&hsl_inner, "Sat Max");
+    let hsl_sat_max = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    hsl_sat_max.set_value(1.0);
+    hsl_sat_max.set_draw_value(true);
+    hsl_sat_max.set_digits(2);
+    hsl_inner.append(&hsl_sat_max);
+
+    row_label(&hsl_inner, "Sat Softness");
+    let hsl_sat_softness = Scale::with_range(Orientation::Horizontal, 0.0, 0.5, 0.01);
+    hsl_sat_softness.set_value(0.0);
+    hsl_sat_softness.set_draw_value(true);
+    hsl_sat_softness.set_digits(2);
+    hsl_inner.append(&hsl_sat_softness);
+
+    row_label(&hsl_inner, "Lum Min");
+    let hsl_lum_min = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    hsl_lum_min.set_value(0.0);
+    hsl_lum_min.set_draw_value(true);
+    hsl_lum_min.set_digits(2);
+    hsl_inner.append(&hsl_lum_min);
+
+    row_label(&hsl_inner, "Lum Max");
+    let hsl_lum_max = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    hsl_lum_max.set_value(1.0);
+    hsl_lum_max.set_draw_value(true);
+    hsl_lum_max.set_digits(2);
+    hsl_inner.append(&hsl_lum_max);
+
+    row_label(&hsl_inner, "Lum Softness");
+    let hsl_lum_softness = Scale::with_range(Orientation::Horizontal, 0.0, 0.5, 0.01);
+    hsl_lum_softness.set_value(0.0);
+    hsl_lum_softness.set_draw_value(true);
+    hsl_lum_softness.set_digits(2);
+    hsl_inner.append(&hsl_lum_softness);
+
+    // Secondary grade subgroup.
+    let hsl_grade_label = Label::new(Some("Secondary Grade"));
+    hsl_grade_label.set_halign(gtk::Align::Start);
+    hsl_grade_label.add_css_class("browser-header");
+    hsl_inner.append(&hsl_grade_label);
+
+    row_label(&hsl_inner, "Brightness");
+    let hsl_brightness = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    hsl_brightness.set_value(0.0);
+    hsl_brightness.set_draw_value(true);
+    hsl_brightness.set_digits(2);
+    hsl_brightness.add_mark(0.0, gtk4::PositionType::Bottom, None);
+    hsl_inner.append(&hsl_brightness);
+
+    row_label(&hsl_inner, "Contrast");
+    let hsl_contrast = Scale::with_range(Orientation::Horizontal, 0.0, 2.0, 0.01);
+    hsl_contrast.set_value(1.0);
+    hsl_contrast.set_draw_value(true);
+    hsl_contrast.set_digits(2);
+    hsl_contrast.add_mark(1.0, gtk4::PositionType::Bottom, None);
+    hsl_inner.append(&hsl_contrast);
+
+    row_label(&hsl_inner, "Saturation");
+    let hsl_saturation = Scale::with_range(Orientation::Horizontal, 0.0, 2.0, 0.01);
+    hsl_saturation.set_value(1.0);
+    hsl_saturation.set_draw_value(true);
+    hsl_saturation.set_digits(2);
+    hsl_saturation.add_mark(1.0, gtk4::PositionType::Bottom, None);
+    hsl_inner.append(&hsl_saturation);
 
     // Create shared state needed by effects and later sections.
     let selected_clip_id: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
@@ -9792,6 +9965,134 @@ pub fn build_inspector(
         });
     }
 
+    // ── HSL Qualifier wiring ──────────────────────────────────────────
+    // The HSL pad probe is always present in the effects chain; it reads
+    // the clip's Option<HslQualifier> from the shared slot state. Live
+    // updates do not require a pipeline rebuild.
+    {
+        let project = project.clone();
+        let updating = updating.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let on_hsl_changed = on_frei0r_params_changed.clone();
+        hsl_enable.connect_toggled(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let enabled = btn.is_active();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        if clip.hsl_qualifier.is_none() {
+                            clip.hsl_qualifier =
+                                Some(crate::model::clip::HslQualifier::default());
+                        }
+                        if let Some(ref mut q) = clip.hsl_qualifier {
+                            q.enabled = enabled;
+                        }
+                    }
+                    proj.dirty = true;
+                }
+                on_hsl_changed();
+            }
+        });
+    }
+    {
+        let project = project.clone();
+        let updating = updating.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let on_hsl_changed = on_frei0r_params_changed.clone();
+        hsl_invert.connect_toggled(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let v = btn.is_active();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        if let Some(ref mut q) = clip.hsl_qualifier {
+                            q.invert = v;
+                        }
+                    }
+                    proj.dirty = true;
+                }
+                on_hsl_changed();
+            }
+        });
+    }
+    {
+        let project = project.clone();
+        let updating = updating.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let on_hsl_changed = on_frei0r_params_changed.clone();
+        hsl_view_mask.connect_toggled(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let v = btn.is_active();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        if let Some(ref mut q) = clip.hsl_qualifier {
+                            q.view_mask = v;
+                        }
+                    }
+                    // view_mask is a preview-only debug flag, not a
+                    // persistent project mutation.
+                }
+                on_hsl_changed();
+            }
+        });
+    }
+    macro_rules! wire_hsl_slider {
+        ($slider:expr, $field:ident) => {{
+            let project = project.clone();
+            let updating = updating.clone();
+            let selected_clip_id = selected_clip_id.clone();
+            let on_hsl_live = on_frei0r_params_changed.clone();
+            $slider.connect_value_changed(move |s| {
+                if *updating.borrow() {
+                    return;
+                }
+                let val = s.value();
+                let id = selected_clip_id.borrow().clone();
+                if let Some(ref clip_id) = id {
+                    {
+                        let mut proj = project.borrow_mut();
+                        if let Some(clip) = proj.clip_mut(clip_id) {
+                            if clip.hsl_qualifier.is_none() {
+                                clip.hsl_qualifier =
+                                    Some(crate::model::clip::HslQualifier::default());
+                            }
+                            if let Some(ref mut q) = clip.hsl_qualifier {
+                                q.$field = val;
+                            }
+                        }
+                        proj.dirty = true;
+                    }
+                    on_hsl_live();
+                }
+            });
+        }};
+    }
+    wire_hsl_slider!(hsl_hue_min, hue_min);
+    wire_hsl_slider!(hsl_hue_max, hue_max);
+    wire_hsl_slider!(hsl_hue_softness, hue_softness);
+    wire_hsl_slider!(hsl_sat_min, sat_min);
+    wire_hsl_slider!(hsl_sat_max, sat_max);
+    wire_hsl_slider!(hsl_sat_softness, sat_softness);
+    wire_hsl_slider!(hsl_lum_min, lum_min);
+    wire_hsl_slider!(hsl_lum_max, lum_max);
+    wire_hsl_slider!(hsl_lum_softness, lum_softness);
+    wire_hsl_slider!(hsl_brightness, brightness);
+    wire_hsl_slider!(hsl_contrast, contrast);
+    wire_hsl_slider!(hsl_saturation, saturation);
+
     let view = Rc::new(InspectorView {
         name_entry,
         path_value,
@@ -9977,6 +10278,22 @@ pub fn build_inspector(
         mask_invert_check,
         mask_path_editor_box,
         mask_rect_ellipse_controls,
+        hsl_section,
+        hsl_enable,
+        hsl_invert,
+        hsl_view_mask,
+        hsl_hue_min,
+        hsl_hue_max,
+        hsl_hue_softness,
+        hsl_sat_min,
+        hsl_sat_max,
+        hsl_sat_softness,
+        hsl_lum_min,
+        hsl_lum_max,
+        hsl_lum_softness,
+        hsl_brightness,
+        hsl_contrast,
+        hsl_saturation,
         tracking_section,
         tracking_tracker_dropdown,
         tracking_add_btn,

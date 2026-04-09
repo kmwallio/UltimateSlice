@@ -515,6 +515,7 @@ pub fn export_project(
         let denoise_filter = build_denoise_filter(clip);
         let sharpen_filter = build_sharpen_filter(clip);
         let blur_filter = build_blur_filter(clip);
+        let hsl_filter = build_hsl_qualifier_filter(clip);
         let vidstab_filter =
             build_vidstab_filter(clip, vidstab_trf.get(&clip.id).map(|s| s.as_str()));
         let frei0r_effects_filter = build_frei0r_effects_filter(clip);
@@ -593,7 +594,7 @@ pub fn export_project(
                 )
             };
             filter.push_str(&format!(
-                "[{i}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{speed_filter}\
+                "[{i}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{speed_filter}\
                  ,scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[pv{i}fg];\
                  color=c=black:size={out_w}x{out_h}:r={}/{}:d={clip_duration_s:.6}[pv{i}bg];\
                  [pv{i}bg][pv{i}fg]overlay=x='{overlay_x_expr}':y='{overlay_y_expr}':eval=frame\
@@ -625,14 +626,14 @@ pub fn export_project(
             let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
             let anamorphic_filter = build_anamorphic_filter(clip);
             filter.push_str(&format!(
-                "[{i}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{speed_filter}[pv{i}raw];[pv{i}raw]format=yuv420p{transition_stop_pad_filter}[pv{i}];",
+                "[{i}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{speed_filter}[pv{i}raw];[pv{i}raw]format=yuv420p{transition_stop_pad_filter}[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
             ));
         } else {
             let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
             let anamorphic_filter = build_anamorphic_filter(clip);
             filter.push_str(&format!(
-                "[{i}:v]{lut_prefix}{anamorphic_filter}scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{},format=yuv420p{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{title_filter}{subtitle_filter}{speed_filter}{transition_stop_pad_filter}[pv{i}];",
+                "[{i}:v]{lut_prefix}{anamorphic_filter}scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{},format=yuv420p{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{title_filter}{subtitle_filter}{speed_filter}{transition_stop_pad_filter}[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
             ));
         }
@@ -691,6 +692,7 @@ pub fn export_project(
         let denoise_filter = build_denoise_filter(clip);
         let sharpen_filter = build_sharpen_filter(clip);
         let blur_filter = build_blur_filter(clip);
+        let hsl_filter = build_hsl_qualifier_filter(clip);
         let vidstab_filter =
             build_vidstab_filter(clip, vidstab_trf.get(&clip.id).map(|s| s.as_str()));
         let frei0r_effects_filter = build_frei0r_effects_filter(clip);
@@ -774,7 +776,7 @@ pub fn export_project(
                 )
             };
             filter.push_str(&format!(
-                ";[{in_idx}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{crop_filter}{rotate_filter}{speed_filter}\
+                ";[{in_idx}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{crop_filter}{rotate_filter}{speed_filter}\
                  ,scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[ov{k}fg];\
                  color=c=black@0:size={out_w}x{out_h}:r={}/{}:d={clip_duration_s:.6}[ov{k}bg];\
                  [ov{k}bg][ov{k}fg]overlay=x='{overlay_x_expr}':y='{overlay_y_expr}':eval=frame\
@@ -797,7 +799,7 @@ pub fn export_project(
             let opacity = clip.opacity.clamp(0.0, 1.0);
             let anamorphic_filter = build_anamorphic_filter(clip);
             filter.push_str(&format!(
-                ";[{in_idx}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{crop_filter}{scale_pos_filter}{rotate_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
+                ";[{in_idx}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{crop_filter}{scale_pos_filter}{rotate_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
                 , project.frame_rate.numerator, project.frame_rate.denominator
             ));
         }
@@ -3063,6 +3065,90 @@ fn build_blur_filter(clip: &crate::model::clip::Clip) -> String {
     } else {
         String::new()
     }
+}
+
+/// Build an inline HSL Qualifier filter fragment (secondary color correction).
+///
+/// Emits a single `geq` filter wrapped in `format=gbrp` / `format=yuva420p`
+/// bridges so the surrounding YUV chain stays intact while the per-pixel HSL
+/// math runs on RGB data.
+///
+/// The `r` channel expression does all the shared setup (RGB→HSL conversion,
+/// range membership, secondary grade, alpha blend) and stores the final
+/// r/g/b output in registers 25/26/27. The `g` and `b` expressions just read
+/// those registers — FFmpeg's `geq` shares stored-variable state across the
+/// channel expressions evaluated for the same pixel.
+///
+/// Returns an empty string when the qualifier is neutral so primary-only
+/// clips stay byte-identical to before.
+fn build_hsl_qualifier_filter(clip: &crate::model::clip::Clip) -> String {
+    let q = match &clip.hsl_qualifier {
+        Some(q) if !q.is_neutral() => q,
+        _ => return String::new(),
+    };
+
+    let alpha_expr = crate::media::hsl_qualifier::build_hsl_qualifier_geq_alpha(q);
+    let br = q.brightness;
+    let co = q.contrast;
+    let sa = q.saturation;
+
+    // Setup: read the three source channels, derive H/S/L into stored vars,
+    // compute the qualifier alpha, apply secondary grade, blend with original,
+    // and stash the final channel values in regs 25/26/27. The returned value
+    // of the `r` expression itself is 255*final_r.
+    //
+    // Register layout inside a single pixel evaluation:
+    //   20..22  r0 g0 b0 (source 0..1)
+    //   0..2    alias of 20..22 (build_hsl_qualifier_geq_alpha expects that)
+    //   3       V = max(r,g,b)
+    //   4       min(r,g,b)
+    //   5       delta
+    //   6       L
+    //   7       S
+    //   8       H (0..1)
+    //   9       qualifier alpha
+    //   23..24  luma + scratch
+    //   25..27  graded + blended final r/g/b (0..1)
+    //
+    // `alpha_expr` already contains st() calls that populate 0..9 from
+    // r(X,Y)/g(X,Y)/b(X,Y), so calling it once gives us both the setup and
+    // the alpha. We then reuse 20..22 (captured before the alpha math)
+    // for the blend step.
+    //
+    // Format bridges keep the surrounding YUV chain honest.
+    let setup_and_grade = format!(
+        "st(20,r(X,Y)/255)\
+         +st(21,g(X,Y)/255)\
+         +st(22,b(X,Y)/255)\
+         +st(9,{alpha_expr})\
+         +st(25,ld(20)+{br})\
+         +st(26,ld(21)+{br})\
+         +st(27,ld(22)+{br})\
+         +st(25,(ld(25)-0.5)*{co}+0.5)\
+         +st(26,(ld(26)-0.5)*{co}+0.5)\
+         +st(27,(ld(27)-0.5)*{co}+0.5)\
+         +st(23,0.2126*ld(25)+0.7152*ld(26)+0.0722*ld(27))\
+         +st(25,ld(23)+(ld(25)-ld(23))*{sa})\
+         +st(26,ld(23)+(ld(26)-ld(23))*{sa})\
+         +st(27,ld(23)+(ld(27)-ld(23))*{sa})\
+         +st(25,clip(ld(20)*(1-ld(9))+ld(25)*ld(9),0,1))\
+         +st(26,clip(ld(21)*(1-ld(9))+ld(26)*ld(9),0,1))\
+         +st(27,clip(ld(22)*(1-ld(9))+ld(27)*ld(9),0,1))",
+        alpha_expr = alpha_expr,
+        br = br,
+        co = co,
+        sa = sa,
+    );
+    // r expression returns 255*ld(25) while also evaluating all the setup.
+    // Multiplying the setup sum by 0 discards its numeric value but keeps
+    // every st() side effect.
+    let r_expr = format!("0*({setup_and_grade})+255*ld(25)");
+    let g_expr = "255*ld(26)";
+    let b_expr = "255*ld(27)";
+
+    format!(
+        ",format=gbrp,geq=r='{r_expr}':g='{g_expr}':b='{b_expr}',format=yuva420p"
+    )
 }
 
 /// Run vidstab analysis (pass 1) for a clip, producing a .trf transform file.
@@ -6002,7 +6088,8 @@ mod tests {
         adjustment_roi_padding_px, append_pan_filter_chain, audio_crossfade_curve_name,
         build_adjustment_export_roi, build_adjustment_layer_filter_graph,
         build_adjustment_scope_alpha_expression, build_audio_crossfade_filters, build_color_filter,
-        build_crop_filter, build_grading_filter, build_keyframed_property_expression,
+        build_crop_filter, build_grading_filter, build_hsl_qualifier_filter,
+        build_keyframed_property_expression,
         build_pan_expression, build_rotation_filter, build_scale_position_filter,
         build_subtitle_filter_composited, build_surround_lfe_tap_filter,
         build_surround_upmix_filter, build_temperature_tint_filter, build_timing_filter,
@@ -7058,6 +7145,47 @@ mod tests {
         assert!(f.contains(",eq=brightness="));
         assert!(f.contains(":contrast="));
         assert!(!f.contains(":gamma="));
+    }
+
+    #[test]
+    fn hsl_qualifier_filter_empty_when_none() {
+        let clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        assert_eq!(build_hsl_qualifier_filter(&clip), "");
+    }
+
+    #[test]
+    fn hsl_qualifier_filter_empty_when_neutral() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.hsl_qualifier = Some(crate::model::clip::HslQualifier::default());
+        // Disabled default is neutral.
+        assert_eq!(build_hsl_qualifier_filter(&clip), "");
+    }
+
+    #[test]
+    fn hsl_qualifier_filter_emits_geq_when_active() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        let mut q = crate::model::clip::HslQualifier::default();
+        q.enabled = true;
+        q.hue_min = 200.0;
+        q.hue_max = 260.0;
+        q.brightness = 0.1;
+        clip.hsl_qualifier = Some(q);
+        let f = build_hsl_qualifier_filter(&clip);
+        assert!(f.starts_with(",format=gbrp,geq="), "filter: {f}");
+        assert!(f.ends_with(",format=yuva420p"), "filter: {f}");
+        // Secondary grade registers referenced.
+        assert!(f.contains("ld(25)"));
+        assert!(f.contains("ld(26)"));
+        assert!(f.contains("ld(27)"));
+        // No bare apostrophes in expression values — would break filter parsing.
+        let payload = f.trim_start_matches(",format=gbrp,geq=");
+        assert!(
+            payload
+                .trim_start_matches(|c: char| c == 'r' || c == '=' || c == '\'')
+                .len()
+                > 0,
+            "payload: {f}"
+        );
     }
 
     #[test]

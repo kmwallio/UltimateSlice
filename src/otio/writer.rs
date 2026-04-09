@@ -298,6 +298,7 @@ fn write_otio_with_mode(
                 midtones_tint: Some(clip.midtones_tint as f64),
                 shadows_warmth: Some(clip.shadows_warmth as f64),
                 shadows_tint: Some(clip.shadows_tint as f64),
+                hsl_qualifier: clip.hsl_qualifier.clone(),
                 pitch_shift_semitones: Some(clip.pitch_shift_semitones),
                 pitch_preserve: Some(clip.pitch_preserve),
                 audio_channel_mode: Some(clip.audio_channel_mode),

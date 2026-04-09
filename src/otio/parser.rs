@@ -377,6 +377,9 @@ fn otio_clip_to_clip(
         if let Some(v) = us.shadows_tint {
             clip.shadows_tint = v as f32;
         }
+        if let Some(q) = us.hsl_qualifier.as_ref() {
+            clip.hsl_qualifier = Some(q.clone());
+        }
         if let Some(v) = us.pitch_shift_semitones {
             clip.pitch_shift_semitones = v;
         }

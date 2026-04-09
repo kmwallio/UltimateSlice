@@ -1232,6 +1232,12 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                         "us:shadows-tint",
                         clip.shadows_tint.to_string().as_str(),
                     ));
+                    let hsl_json = clip.hsl_qualifier.as_ref().and_then(|q| {
+                        serde_json::to_string(q).ok()
+                    });
+                    if let Some(ref json) = hsl_json {
+                        asset_clip.push_attribute(("us:hsl-qualifier", json.as_str()));
+                    }
                     if clip.chroma_key_enabled {
                         asset_clip.push_attribute(("us:chroma-key-enabled", "true"));
                         asset_clip.push_attribute((
@@ -4376,6 +4382,7 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:midtones-tint"
             | "us:shadows-warmth"
             | "us:shadows-tint"
+            | "us:hsl-qualifier"
             | "us:bg-removal-enabled"
             | "us:bg-removal-threshold"
             | "us:clip-id"

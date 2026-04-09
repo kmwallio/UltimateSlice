@@ -159,6 +159,9 @@ pub(crate) struct UltimateSliceClipOtioMetadata {
     pub(crate) shadows_warmth: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) shadows_tint: Option<f64>,
+    /// HSL Qualifier (secondary color correction).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) hsl_qualifier: Option<crate::model::clip::HslQualifier>,
     /// Pitch shift in semitones (−12.0..+12.0) and pitch-preserve flag.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) pitch_shift_semitones: Option<f64>,

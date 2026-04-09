@@ -66,6 +66,61 @@ Adjustments are applied live via GStreamer `videobalance` and rendered through f
 
 ---
 
+## HSL Qualifier (Secondary Color Correction)
+
+Isolates pixels by **Hue**, **Saturation**, and **Luminance** range, then
+applies a follow-up brightness / contrast / saturation grade **only inside
+the matched region**. This is the DaVinci-style workflow for grading a
+specific color — punch the sky cyan without tinting skin, desaturate green
+foliage, boost magenta rim light, etc.
+
+Open the **HSL Qualifier** expander below Color & Denoise.
+
+| Control | Range | Default | Notes |
+|---|---|---|---|
+| **Enable** | toggle | off | Turns the qualifier on. |
+| **Invert** | toggle | off | Flip the matte — grade the pixels *outside* the range. |
+| **View Mask** | toggle | off | Debug overlay — Program Monitor shows the computed matte as grayscale so you can dial ranges. Not persisted; never applied at export. |
+| **Hue Min / Hue Max** | 0–360° | 0 / 360 | Range of matched hues. When `Min > Max` the range **wraps around 360°**, which is how you select reds that straddle 0° (e.g. `Min=340`, `Max=20`). |
+| **Hue Softness** | 0–60° | 0 | Smoothstep feather band on both edges of the hue range. |
+| **Sat Min / Sat Max** | 0.0–1.0 | 0.0 / 1.0 | Saturation range. Narrow to isolate pastels vs. vivid tones. |
+| **Sat Softness** | 0.0–0.5 | 0.0 | Feather band on saturation edges. |
+| **Lum Min / Lum Max** | 0.0–1.0 | 0.0 / 1.0 | Luminance range. Narrow to isolate shadows / midtones / highlights. |
+| **Lum Softness** | 0.0–0.5 | 0.0 | Feather band on luminance edges. |
+| **Secondary Brightness** | −1.0 → 1.0 | 0.0 | Brightness delta added to matched pixels. |
+| **Secondary Contrast** | 0.0 → 2.0 | 1.0 | Contrast multiplier (around 0.5 mid) on matched pixels. |
+| **Secondary Saturation** | 0.0 → 2.0 | 1.0 | Saturation multiplier on matched pixels — 0 = desaturate the range, 2 = pump it. |
+
+### Workflow
+
+1. Enable the qualifier.
+2. Toggle **View Mask** so the Program Monitor shows the matte in grayscale.
+3. Drag the **Hue Min / Max** sliders until only the region you want is white.
+4. Pinch **Sat Min / Max** and **Lum Min / Max** to drop any false hits.
+5. Nudge the **Softness** sliders to feather the edges.
+6. Toggle View Mask off and adjust **Secondary Brightness / Contrast /
+   Saturation** — you will see the secondary grade applied only to the
+   matched pixels.
+
+### Under the hood
+
+Program Monitor and FFmpeg export share the exact same HSL math. Preview
+runs a CPU pad probe on a dedicated `us-hsl-identity` element placed after
+the primary color chain (so the qualifier sees your primary grade, not the
+raw source). Export emits a single inline `geq` filter wrapped in
+`format=gbrp` / `format=yuva420p` bridges that encodes the RGB→HSL
+conversion, range membership, secondary grade, and alpha blend in one pass.
+Neutral or disabled qualifiers are skipped entirely so existing clips stay
+byte-identical.
+
+Automation: the **`set_clip_hsl_qualifier`** MCP tool accepts every field
+as an optional argument and supports `clear: true` to remove the qualifier.
+Persistence: `.uspxml` projects round-trip the qualifier via a
+`us:hsl-qualifier` attribute; OTIO exports round-trip via
+`metadata.ultimateslice.hsl_qualifier`.
+
+---
+
 ## Denoise / Sharpness / Blur
 
 Applied via GStreamer `gaussianblur` (preview) and ffmpeg `hqdn3d`/`unsharp`/`boxblur` (export).

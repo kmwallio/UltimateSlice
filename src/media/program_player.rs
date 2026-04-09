@@ -941,6 +941,8 @@ pub struct ProgramClip {
     pub tracking_binding: Option<crate::model::clip::TrackingBinding>,
     /// Shape masks applied to this clip.
     pub masks: Vec<crate::model::clip::ClipMask>,
+    /// Optional HSL Qualifier (secondary color correction).
+    pub hsl_qualifier: Option<crate::model::clip::HslQualifier>,
 }
 
 impl ProgramClip {
@@ -1465,6 +1467,9 @@ struct VideoSlot {
     /// Shared mask data read by the mask pad probe.  Updated live from
     /// inspector slider changes without requiring a pipeline rebuild.
     mask_data: Arc<Mutex<Vec<crate::model::clip::ClipMask>>>,
+    /// Shared HSL qualifier read by the HSL pad probe.  Updated live from
+    /// inspector slider changes without requiring a pipeline rebuild.
+    hsl_data: Arc<Mutex<Option<crate::model::clip::HslQualifier>>>,
 }
 
 /// Result of `compute_reuse_plan()`: whether all current decoder slots can be
@@ -5137,6 +5142,30 @@ impl ProgramPlayer {
         }
     }
 
+    /// Push a new HSL qualifier into the matching slot's shared state so the
+    /// pad probe picks it up on the next frame without a pipeline rebuild.
+    /// Accepts `None` to clear the qualifier entirely.
+    pub fn update_hsl_qualifier_for_clip(
+        &mut self,
+        clip_id: &str,
+        qualifier: Option<crate::model::clip::HslQualifier>,
+    ) {
+        let Some(clip_idx) = self.clips.iter().position(|clip| clip.id == clip_id) else {
+            return;
+        };
+        if let Some(clip) = self.clips.get_mut(clip_idx) {
+            clip.hsl_qualifier = qualifier.clone();
+        }
+        if let Some(slot) = self.slot_for_clip(clip_idx) {
+            if let Ok(mut guard) = slot.hsl_data.lock() {
+                *guard = qualifier;
+            }
+            if self.state != PlayerState::Playing {
+                self.reseek_slot_by_clip_idx(clip_idx);
+            }
+        }
+    }
+
     pub fn update_current_chroma_key(
         &mut self,
         enabled: bool,
@@ -7349,6 +7378,7 @@ impl ProgramPlayer {
             self.project_height,
             None,
             Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(None)),
         );
         let _ = effects_bin.set_state(gst::State::Null);
         const MAX_PREPREROLL_SIDECARS: usize = 8;
@@ -9922,6 +9952,7 @@ impl ProgramPlayer {
         project_height: u32,
         lut: Option<Arc<CubeLut>>,
         mask_shared: Arc<Mutex<Vec<crate::model::clip::ClipMask>>>,
+        hsl_shared: Arc<Mutex<Option<crate::model::clip::HslQualifier>>>,
     ) -> (
         gst::Bin,
         Option<gst::Element>,                                 // videobalance
@@ -10617,6 +10648,76 @@ impl ProgramPlayer {
         if let Some(ref e) = colorbalance_3pt {
             chain.push(e.clone());
         }
+        // 3a'. HSL Qualifier pad probe — secondary color correction that
+        // isolates pixels by hue/saturation/luminance and applies a follow-up
+        // grade only to the matched region. Placed HERE — after the primary
+        // color chain (videobalance / coloradj_RGB / 3-point balance) and
+        // BEFORE denoise/sharpen/blur — because:
+        //   1. videobalance + both frei0r color elements preserve RGBA, so
+        //      the buffer format is guaranteed RGBA at this point (required
+        //      for the pad probe's byte-addressing). `gaussianblur` runs on
+        //      AYUV downstream, which would break the probe.
+        //   2. Secondary color correction should not see blurred/denoised
+        //      pixels or the HSL matte edges would bleed.
+        *hsl_shared.lock().unwrap() = clip.hsl_qualifier.clone();
+        if let Some(hsl_identity) = gst::ElementFactory::make("identity")
+            .property("name", "us-hsl-identity")
+            .build()
+            .ok()
+        {
+            let hsl_ref = hsl_shared.clone();
+            hsl_identity.static_pad("src").unwrap().add_probe(
+                gst::PadProbeType::BUFFER,
+                move |_pad, info| {
+                    if let Some(gst::PadProbeData::Buffer(ref mut buffer)) = info.data {
+                        let q_opt = hsl_ref.lock().unwrap().clone();
+                        if let Some(q) = q_opt {
+                            if !q.is_neutral() {
+                                // Read format + dimensions from live caps.
+                                // Bail unless the format is a 4-byte RGBA-like
+                                // layout so we never scribble over AYUV/YUV
+                                // buffers (safety: `gaussianblur` is AYUV but
+                                // we're placed before it, so this is a belt
+                                // and suspenders check).
+                                let caps = _pad.current_caps();
+                                let (width, height, is_rgba) = if let Some(caps) = caps {
+                                    if let Some(s) = caps.structure(0) {
+                                        let format = s
+                                            .get::<&str>("format")
+                                            .unwrap_or("")
+                                            .to_string();
+                                        let w = s.get::<i32>("width").unwrap_or(0) as usize;
+                                        let h = s.get::<i32>("height").unwrap_or(0) as usize;
+                                        let is_rgba = matches!(
+                                            format.as_str(),
+                                            "RGBA" | "BGRA" | "ARGB" | "ABGR"
+                                        );
+                                        (w, h, is_rgba)
+                                    } else {
+                                        (0, 0, false)
+                                    }
+                                } else {
+                                    (0, 0, false)
+                                };
+                                if is_rgba && width > 0 && height > 0 {
+                                    let buf = buffer.make_mut();
+                                    if let Ok(mut map) = buf.map_writable() {
+                                        let data = map.as_mut_slice();
+                                        if width * height * 4 <= data.len() {
+                                            crate::media::hsl_qualifier::apply_hsl_qualifier_to_rgba_buffer(
+                                                &q, data, width, height,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    gst::PadProbeReturn::Ok
+                },
+            );
+            chain.push(hsl_identity);
+        }
         if let Some(ref e) = conv2 {
             chain.push(e.clone());
         }
@@ -10626,7 +10727,7 @@ impl ProgramPlayer {
         if let Some(ref e) = squareblur {
             chain.push(e.clone());
         }
-        // 3a. User-applied frei0r filter effects (after built-in color/blur).
+        // 3b. User-applied frei0r filter effects (after built-in color/blur and HSL).
         for e in &frei0r_user_effects {
             chain.push(e.clone());
         }
@@ -11189,6 +11290,7 @@ impl ProgramPlayer {
             is_blend_mode: false,
             blend_alpha: Arc::new(Mutex::new(1.0)),
             mask_data: Arc::new(Mutex::new(Vec::new())),
+            hsl_data: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -11498,6 +11600,7 @@ impl ProgramPlayer {
             is_blend_mode: false,
             blend_alpha: Arc::new(Mutex::new(1.0)),
             mask_data: Arc::new(Mutex::new(Vec::new())),
+            hsl_data: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -12587,6 +12690,8 @@ impl ProgramPlayer {
         // Build per-slot effects bin.
         let slot_mask_data: Arc<Mutex<Vec<crate::model::clip::ClipMask>>> =
             Arc::new(Mutex::new(Vec::new()));
+        let slot_hsl_data: Arc<Mutex<Option<crate::model::clip::HslQualifier>>> =
+            Arc::new(Mutex::new(None));
         let (
             effects_bin,
             videobalance,
@@ -12615,6 +12720,7 @@ impl ProgramPlayer {
             self.project_height,
             realtime_lut,
             slot_mask_data.clone(),
+            slot_hsl_data.clone(),
         );
 
         // Title clips use videotestsrc (solid color) instead of uridecodebin.
@@ -12772,6 +12878,7 @@ impl ProgramPlayer {
                 is_blend_mode,
                 blend_alpha: blend_alpha.clone(),
                 mask_data: slot_mask_data.clone(),
+                hsl_data: slot_hsl_data.clone(),
             };
             Self::apply_transform_to_slot(
                 &slot_ref_for_transform,
@@ -12854,6 +12961,7 @@ impl ProgramPlayer {
                 is_blend_mode,
                 blend_alpha,
                 mask_data: slot_mask_data.clone(),
+                hsl_data: slot_hsl_data.clone(),
             });
         }
 
@@ -13345,6 +13453,7 @@ impl ProgramPlayer {
             is_blend_mode,
             blend_alpha: blend_alpha.clone(),
             mask_data: slot_mask_data.clone(),
+            hsl_data: slot_hsl_data.clone(),
         };
         Self::apply_transform_to_slot(
             &slot_ref_for_transform,
@@ -13422,6 +13531,7 @@ impl ProgramPlayer {
             is_blend_mode,
             blend_alpha,
             mask_data: slot_mask_data,
+            hsl_data: slot_hsl_data,
         })
     }
 
@@ -16463,6 +16573,7 @@ mod tests {
             is_title: false,
             anamorphic_desqueeze: 1.0,
             masks: Vec::new(),
+            hsl_qualifier: None,
         }
     }
 
@@ -17110,8 +17221,10 @@ mod tests {
         let _ = gst::init();
         let clip = make_clip();
         let mask_shared = Arc::new(Mutex::new(Vec::new()));
-        let (effects_bin, ..) =
-            ProgramPlayer::build_effects_bin(&clip, false, 640, 360, 640, 360, None, mask_shared);
+        let hsl_shared = Arc::new(Mutex::new(None));
+        let (effects_bin, ..) = ProgramPlayer::build_effects_bin(
+            &clip, false, 640, 360, 640, 360, None, mask_shared, hsl_shared,
+        );
         assert!(
             effects_bin.by_name("us-mask-identity").is_some(),
             "effects bin should keep the live mask stage even when clip.masks is empty"
@@ -17742,6 +17855,7 @@ mod tests {
             is_blend_mode: false,
             blend_alpha: Arc::new(Mutex::new(1.0)),
             mask_data: Arc::new(Mutex::new(Vec::new())),
+            hsl_data: Arc::new(Mutex::new(None)),
         }
     }
 

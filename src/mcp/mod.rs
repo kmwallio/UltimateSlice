@@ -190,6 +190,13 @@ pub enum McpCommand {
         color_label: String,
         reply: SyncSender<Value>,
     },
+    /// Set (or clear) the HSL Qualifier on a clip. Pass `qualifier: None`
+    /// to clear the qualifier entirely.
+    SetClipHslQualifier {
+        clip_id: String,
+        qualifier: Option<crate::model::clip::HslQualifier>,
+        reply: SyncSender<Value>,
+    },
     SetClipChromaKey {
         clip_id: String,
         enabled: Option<bool>,

@@ -444,7 +444,8 @@ Tracking docs:
   - [ ] Preview/export comparison overlay — a split-screen or A/B toggle in the Program Monitor that shows the prerender frame beside a single-frame export render, allowing direct visual parity inspection without a full export cycle
 - [x] Advanced color grading
   - [x] Match Clip Colors — automatic Reinhard-style color transfer: analyzes source and reference clip frames in CIE L\*a\*b\* space to compute slider adjustments (brightness, contrast, saturation, temperature, tint) and optional 17³ 3D LUT for fine-grained matching. Inspector "Match Color…" button, `Ctrl+Alt+M` shortcut, and `match_clip_colors` MCP tool with full undo support.
-  - [ ] HSL Qualifiers (Secondary color correction for specific hue/saturation/luminance ranges)
+  - [x] HSL Qualifiers (Secondary color correction for specific hue/saturation/luminance ranges)
+    - [x] Phase 1: single HSL qualifier per clip with enable/invert/view-mask, per-channel min/max/softness (Hue/Sat/Lum), secondary brightness/contrast/saturation grade applied only to matched pixels, hue wrap-around, Inspector section, Program Monitor preview via CPU pad probe, FFmpeg export via inline `geq`, FCPXML/OTIO round-trip (`us:hsl-qualifier` / `UltimateSliceClipOtioMetadata::hsl_qualifier`), MCP `set_clip_hsl_qualifier`, undo command, 21 new tests
   - [ ] Video Limiter / Legalizer (Ensure brightness/color levels stay within broadcast-safe limits)
 - [ ] Color management pipeline via OpenColorIO (OCIO)
   - [ ] Rust FFI bindings for OpenColorIO C++ library (bindgen wrapper against OCIO C API; build.rs pkg-config detection + static/dynamic linking)
