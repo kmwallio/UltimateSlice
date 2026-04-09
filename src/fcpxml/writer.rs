@@ -3910,6 +3910,72 @@ fn keyframe_curve_attr(kf: &crate::model::clip::NumericKeyframe) -> Option<&'sta
     }
 }
 
+/// Emit a single `<param><keyframeAnimation><keyframe …/>…</keyframeAnimation></param>`
+/// block. Used by every per-property keyframe writer (scale, rotation,
+/// opacity, volume, pan) so they share one source of truth for keyframe
+/// time formatting and attribute layout. Does nothing when `keyframes` is
+/// empty so callers can pass an empty slice unconditionally.
+///
+/// - `param_base_value` is the optional `value="…"` attribute on the outer
+///   `<param>` element. Some callers (opacity / volume / pan) include the
+///   non-keyframed base value here; others (scale / rotation) omit it.
+/// - `format_value` builds the per-keyframe `value` attribute from a
+///   `NumericKeyframe`. This is where the per-property formatting lives:
+///   `format!("{} {}", v, v)` for scale, `linear_volume_to_fcpxml_db` for
+///   volume, etc.
+/// - `omit_interp` skips both the `interp` and `curve` attributes. FCP
+///   ignores `interp` on volume and pan keyframes, so the strict-mode
+///   writers pass `true` here for byte-perfect FCP-style output.
+fn emit_keyframe_animation_param(
+    writer: &mut Writer<Cursor<Vec<u8>>>,
+    param_name: &str,
+    param_base_value: Option<&str>,
+    keyframes: &[crate::model::clip::NumericKeyframe],
+    source_start_ns: u64,
+    fps: &crate::model::project::FrameRate,
+    format_value: impl Fn(&crate::model::clip::NumericKeyframe) -> String,
+    omit_interp: bool,
+) -> Result<()> {
+    if keyframes.is_empty() {
+        return Ok(());
+    }
+    let mut param = BytesStart::new("param");
+    param.push_attribute(("name", param_name));
+    if let Some(v) = param_base_value {
+        param.push_attribute(("value", v));
+    }
+    writer.write_event(Event::Start(param))?;
+
+    let kfa = BytesStart::new("keyframeAnimation");
+    writer.write_event(Event::Start(kfa))?;
+
+    let mut sorted: Vec<&crate::model::clip::NumericKeyframe> = keyframes.iter().collect();
+    sorted.sort_by_key(|kf| kf.time_ns);
+
+    for kf in &sorted {
+        let mut kf_elem = BytesStart::new("keyframe");
+        // Offset clip-local time back to absolute source time for FCP.
+        kf_elem.push_attribute((
+            "time",
+            ns_to_fcpxml_time(kf.time_ns + source_start_ns, fps).as_str(),
+        ));
+        let value_str = format_value(kf);
+        kf_elem.push_attribute(("value", value_str.as_str()));
+        if !omit_interp {
+            kf_elem.push_attribute(("interp", kf.interpolation.to_fcpxml()));
+            if let Some(curve) = keyframe_curve_attr(kf) {
+                kf_elem.push_attribute(("curve", curve));
+            }
+        }
+        writer.write_event(Event::Empty(kf_elem))?;
+    }
+
+    writer.write_event(Event::End(BytesEnd::new("keyframeAnimation")))?;
+    writer.write_event(Event::End(BytesEnd::new("param")))?;
+
+    Ok(())
+}
+
 /// Write native `<param>/<keyframeAnimation>/<keyframe>` children for transform properties.
 /// `source_start_ns` is the FCPXML `start` attribute value in nanoseconds — keyframe times
 /// are offset by this amount so they appear in absolute source time as FCP expects.
@@ -3986,69 +4052,29 @@ fn write_transform_keyframe_params(
         writer.write_event(Event::End(BytesEnd::new("param")))?;
     }
 
-    // Scale keyframes — FCP uses lowercase "scale"
-    if !clip.scale_keyframes.is_empty() {
-        let mut param = BytesStart::new("param");
-        param.push_attribute(("name", "scale"));
-        writer.write_event(Event::Start(param))?;
-
-        let kfa = BytesStart::new("keyframeAnimation");
-        writer.write_event(Event::Start(kfa))?;
-
-        let mut sorted: Vec<&crate::model::clip::NumericKeyframe> =
-            clip.scale_keyframes.iter().collect();
-        sorted.sort_by_key(|kf| kf.time_ns);
-
-        for kf in &sorted {
-            let mut kf_elem = BytesStart::new("keyframe");
-            // Offset clip-local time back to absolute source time for FCP
-            kf_elem.push_attribute((
-                "time",
-                ns_to_fcpxml_time(kf.time_ns + source_start_ns, fps).as_str(),
-            ));
-            kf_elem.push_attribute(("value", format!("{} {}", kf.value, kf.value).as_str()));
-            kf_elem.push_attribute(("interp", kf.interpolation.to_fcpxml()));
-            if let Some(curve) = keyframe_curve_attr(kf) {
-                kf_elem.push_attribute(("curve", curve));
-            }
-            writer.write_event(Event::Empty(kf_elem))?;
-        }
-
-        writer.write_event(Event::End(BytesEnd::new("keyframeAnimation")))?;
-        writer.write_event(Event::End(BytesEnd::new("param")))?;
-    }
+    // Scale keyframes — FCP uses lowercase "scale" with `"v v"` value pairs.
+    emit_keyframe_animation_param(
+        writer,
+        "scale",
+        None,
+        &clip.scale_keyframes,
+        source_start_ns,
+        fps,
+        |kf| format!("{} {}", kf.value, kf.value),
+        false,
+    )?;
 
     // Rotation keyframes
-    if !clip.rotate_keyframes.is_empty() {
-        let mut param = BytesStart::new("param");
-        param.push_attribute(("name", "rotation"));
-        writer.write_event(Event::Start(param))?;
-
-        let kfa = BytesStart::new("keyframeAnimation");
-        writer.write_event(Event::Start(kfa))?;
-
-        let mut sorted: Vec<&crate::model::clip::NumericKeyframe> =
-            clip.rotate_keyframes.iter().collect();
-        sorted.sort_by_key(|kf| kf.time_ns);
-
-        for kf in &sorted {
-            let mut kf_elem = BytesStart::new("keyframe");
-            // Offset clip-local time back to absolute source time for FCP
-            kf_elem.push_attribute((
-                "time",
-                ns_to_fcpxml_time(kf.time_ns + source_start_ns, fps).as_str(),
-            ));
-            kf_elem.push_attribute(("value", kf.value.to_string().as_str()));
-            kf_elem.push_attribute(("interp", kf.interpolation.to_fcpxml()));
-            if let Some(curve) = keyframe_curve_attr(kf) {
-                kf_elem.push_attribute(("curve", curve));
-            }
-            writer.write_event(Event::Empty(kf_elem))?;
-        }
-
-        writer.write_event(Event::End(BytesEnd::new("keyframeAnimation")))?;
-        writer.write_event(Event::End(BytesEnd::new("param")))?;
-    }
+    emit_keyframe_animation_param(
+        writer,
+        "rotation",
+        None,
+        &clip.rotate_keyframes,
+        source_start_ns,
+        fps,
+        |kf| kf.value.to_string(),
+        false,
+    )?;
 
     Ok(())
 }
@@ -4060,41 +4086,17 @@ fn write_opacity_keyframe_params(
     fps: &crate::model::project::FrameRate,
     source_start_ns: u64,
 ) -> Result<()> {
-    if clip.opacity_keyframes.is_empty() {
-        return Ok(());
-    }
-
-    let mut param = BytesStart::new("param");
-    param.push_attribute(("name", "amount"));
-    param.push_attribute(("value", clip.opacity.to_string().as_str()));
-    writer.write_event(Event::Start(param))?;
-
-    let kfa = BytesStart::new("keyframeAnimation");
-    writer.write_event(Event::Start(kfa))?;
-
-    let mut sorted: Vec<&crate::model::clip::NumericKeyframe> =
-        clip.opacity_keyframes.iter().collect();
-    sorted.sort_by_key(|kf| kf.time_ns);
-
-    for kf in &sorted {
-        let mut kf_elem = BytesStart::new("keyframe");
-        // Offset clip-local time back to absolute source time for FCP
-        kf_elem.push_attribute((
-            "time",
-            ns_to_fcpxml_time(kf.time_ns + source_start_ns, fps).as_str(),
-        ));
-        kf_elem.push_attribute(("value", kf.value.to_string().as_str()));
-        kf_elem.push_attribute(("interp", kf.interpolation.to_fcpxml()));
-        if let Some(curve) = keyframe_curve_attr(kf) {
-            kf_elem.push_attribute(("curve", curve));
-        }
-        writer.write_event(Event::Empty(kf_elem))?;
-    }
-
-    writer.write_event(Event::End(BytesEnd::new("keyframeAnimation")))?;
-    writer.write_event(Event::End(BytesEnd::new("param")))?;
-
-    Ok(())
+    let base = clip.opacity.to_string();
+    emit_keyframe_animation_param(
+        writer,
+        "amount",
+        Some(&base),
+        &clip.opacity_keyframes,
+        source_start_ns,
+        fps,
+        |kf| kf.value.to_string(),
+        false,
+    )
 }
 
 /// Write native `<param>/<keyframeAnimation>/<keyframe>` children for volume (dB).
@@ -4105,47 +4107,18 @@ fn write_volume_keyframe_params(
     source_start_ns: u64,
     strict: bool,
 ) -> Result<()> {
-    if clip.volume_keyframes.is_empty() {
-        return Ok(());
-    }
-
-    let mut param = BytesStart::new("param");
-    param.push_attribute(("name", "amount"));
-    param.push_attribute((
-        "value",
-        linear_volume_to_fcpxml_db(clip.volume as f64).as_str(),
-    ));
-    writer.write_event(Event::Start(param))?;
-
-    let kfa = BytesStart::new("keyframeAnimation");
-    writer.write_event(Event::Start(kfa))?;
-
-    let mut sorted: Vec<&crate::model::clip::NumericKeyframe> =
-        clip.volume_keyframes.iter().collect();
-    sorted.sort_by_key(|kf| kf.time_ns);
-
-    for kf in &sorted {
-        let mut kf_elem = BytesStart::new("keyframe");
-        // Offset clip-local time back to source time for FCP
-        kf_elem.push_attribute((
-            "time",
-            ns_to_fcpxml_time(kf.time_ns + source_start_ns, fps).as_str(),
-        ));
-        kf_elem.push_attribute(("value", linear_volume_to_fcpxml_db(kf.value).as_str()));
+    let base = linear_volume_to_fcpxml_db(clip.volume as f64);
+    emit_keyframe_animation_param(
+        writer,
+        "amount",
+        Some(&base),
+        &clip.volume_keyframes,
+        source_start_ns,
+        fps,
+        |kf| linear_volume_to_fcpxml_db(kf.value),
         // FCP ignores interp on volume param keyframes — omit in strict mode.
-        if !strict {
-            kf_elem.push_attribute(("interp", kf.interpolation.to_fcpxml()));
-            if let Some(curve) = keyframe_curve_attr(kf) {
-                kf_elem.push_attribute(("curve", curve));
-            }
-        }
-        writer.write_event(Event::Empty(kf_elem))?;
-    }
-
-    writer.write_event(Event::End(BytesEnd::new("keyframeAnimation")))?;
-    writer.write_event(Event::End(BytesEnd::new("param")))?;
-
-    Ok(())
+        strict,
+    )
 }
 
 /// Write native `<param>/<keyframeAnimation>/<keyframe>` children for pan.
@@ -4156,48 +4129,18 @@ fn write_pan_keyframe_params(
     source_start_ns: u64,
     strict: bool,
 ) -> Result<()> {
-    if clip.pan_keyframes.is_empty() {
-        return Ok(());
-    }
-
-    let mut param = BytesStart::new("param");
-    param.push_attribute(("name", "amount"));
-    param.push_attribute((
-        "value",
-        format!("{:.6}", clip.pan.clamp(-1.0, 1.0)).as_str(),
-    ));
-    writer.write_event(Event::Start(param))?;
-
-    let kfa = BytesStart::new("keyframeAnimation");
-    writer.write_event(Event::Start(kfa))?;
-
-    let mut sorted: Vec<&crate::model::clip::NumericKeyframe> = clip.pan_keyframes.iter().collect();
-    sorted.sort_by_key(|kf| kf.time_ns);
-
-    for kf in &sorted {
-        let mut kf_elem = BytesStart::new("keyframe");
-        // Offset clip-local time back to source time for FCP
-        kf_elem.push_attribute((
-            "time",
-            ns_to_fcpxml_time(kf.time_ns + source_start_ns, fps).as_str(),
-        ));
-        kf_elem.push_attribute((
-            "value",
-            format!("{:.6}", kf.value.clamp(-1.0, 1.0)).as_str(),
-        ));
+    let base = format!("{:.6}", clip.pan.clamp(-1.0, 1.0));
+    emit_keyframe_animation_param(
+        writer,
+        "amount",
+        Some(&base),
+        &clip.pan_keyframes,
+        source_start_ns,
+        fps,
+        |kf| format!("{:.6}", kf.value.clamp(-1.0, 1.0)),
         // FCP ignores interp on pan param keyframes — omit in strict mode.
-        if !strict {
-            kf_elem.push_attribute(("interp", kf.interpolation.to_fcpxml()));
-            if let Some(curve) = keyframe_curve_attr(kf) {
-                kf_elem.push_attribute(("curve", curve));
-            }
-        }
-        writer.write_event(Event::Empty(kf_elem))?;
-    }
-
-    writer.write_event(Event::End(BytesEnd::new("keyframeAnimation")))?;
-    writer.write_event(Event::End(BytesEnd::new("param")))?;
-    Ok(())
+        strict,
+    )
 }
 
 /// Convert nanoseconds to FCPXML rational time string (e.g. "48048/24000s").

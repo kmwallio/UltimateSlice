@@ -245,30 +245,20 @@ Also: ripple-edit logic at lines 120-248 is duplicated between
 `RippleTrimOutCommand` and `RippleTrimInCommand`. Extract
 `apply_ripple_delta(track: &mut Track, threshold_ns: u64, delta_ns: i64)`.
 
-### P1.5 — FCPXML keyframe emission duplication
-**File:** `src/fcpxml/writer.rs` (lines roughly 3966-4200)
+### ~~P1.5 — FCPXML keyframe emission duplication~~ ✅ DONE (position merge still pending)
 
-Five near-identical functions emit keyframe animations for transform,
-scale, opacity, volume, and pan — each iterates the keyframe list,
-builds a `<keyframe>` element with time/value/interp/curve, and writes
-it. The only differences are the parameter name and the value formatter.
-
-Extract:
-
-```rust
-fn emit_keyframe_animation(
-    writer: &mut Writer<Cursor<Vec<u8>>>,
-    param_name: &str,
-    keyframes: &[NumericKeyframe],
-    source_start_ns: u64,
-    fps: &FrameRate,
-    format_value: impl Fn(&NumericKeyframe) -> String,
-) -> Result<()> { ... }
-```
-
-Also: keyframe-time merging logic at 3933-3945 (merging position_x and
-position_y times into a single sorted set) appears in two places — extract
-`merge_keyframe_times(kfs: &[&NumericKeyframe]) -> Vec<u64>`.
+> **Landed:** `emit_keyframe_animation_param` helper extracted in
+> `src/fcpxml/writer.rs`. Five sites migrated — the scale and rotation
+> blocks inside `write_transform_keyframe_params`, plus the standalone
+> `write_opacity_keyframe_params`, `write_volume_keyframe_params`, and
+> `write_pan_keyframe_params` functions. Each former 30-40 line block is
+> now a 10-line helper invocation with a per-property `format_value`
+> closure. All 144 FCPXML round-trip tests still pass.
+>
+> **Still pending:** the position-merge `merge_keyframe_times` extraction —
+> the position writer still has its own x/y merge loop because it doesn't
+> fit the simple shape of the helper. Defer to a follow-up PR if a third
+> caller appears.
 
 ### ~~P1.6 — RGBA-from-u32 unpacking~~ ✅ DONE
 
@@ -353,27 +343,20 @@ the closed PR's version of this file.
 > `src/ui/program_monitor.rs`. The plan's "preview.rs" citation was stale —
 > the duplicates were actually in `program_monitor.rs`.
 
-### P2.4 — Frame rates and resolution presets
-**File:** `src/ui/toolbar.rs`
+### ~~P2.4 — Frame rates and resolution presets~~ ✅ DONE (export-dialog presets still pending)
 
-- 6 framerate (num, den) pairs at lines 1338-1343 (23.976, 24, 25, 29.97,
-  30, 60) and again at 1384/1396/1400
-- 5 resolution presets at lines 1189-1213 and 1505 (4K UHD, QHD, XGA,
-  SD NTSC, 4K square)
-
-Replace with a small table that the toolbar dropdown reads from:
-
-```rust
-struct FramerateOption { label: &'static str, num: u32, den: u32 }
-const FRAMERATE_OPTIONS: &[FramerateOption] = &[
-    FramerateOption { label: "23.976", num: 24000, den: 1001 },
-    FramerateOption { label: "24",     num: 24,    den: 1    },
-    // ...
-];
-```
-
-Same shape for `RESOLUTION_PRESETS`. Adding a new preset later becomes
-a one-line edit.
+> **Landed:** `FRAMERATE_OPTIONS` and `ASPECT_RATIO_PRESETS` const tables in
+> `src/ui/toolbar.rs`. The Project Settings dialog now reads from those
+> tables in all four places (label list, init lookup, change handler,
+> response handler). The `(2997, 125)` simplified-form detection of
+> 23.976 fps is preserved as an `or_else` fallback so old projects still
+> match the right preset.
+>
+> **Still pending:** the export-dialog resolution dropdown at
+> `toolbar.rs:1503` still has its own hard-coded 5-entry list (Same as
+> project / 4K / 1080p / 720p / 480p). It uses different presets than
+> the Project Settings dialog, so it deserves its own table; defer to a
+> follow-up.
 
 ### P2.5 — Color palette / theme
 ~30 RGBA tuples in `src/ui/timeline/widget.rs` draw functions

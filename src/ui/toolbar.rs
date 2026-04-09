@@ -14,6 +14,161 @@ use gtk4::{self as gtk, Button, HeaderBar, Label, Separator, ToggleButton};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+// -----------------------------------------------------------------------
+// Project-settings dropdown tables
+// -----------------------------------------------------------------------
+//
+// Both the project-settings dialog (frame rate + canvas resolution) and
+// the export dialog historically duplicated the same constant lists in
+// three or four places — once for the dropdown labels, once for the
+// init-from-current-state lookup, once inside the change handler, and
+// once inside the dialog response handler. The structs below collapse
+// each of those to a single source of truth so adding a new framerate
+// or resolution preset is a one-line edit.
+
+/// One option in the Project Settings frame-rate dropdown.
+struct FramerateOption {
+    label: &'static str,
+    num: u32,
+    den: u32,
+}
+
+/// Project-settings frame-rate options. The display label is what appears
+/// in the dropdown; `(num, den)` is what gets written into `Project::frame_rate`.
+const FRAMERATE_OPTIONS: &[FramerateOption] = &[
+    FramerateOption {
+        label: "23.976 fps",
+        num: 24000,
+        den: 1001,
+    },
+    FramerateOption {
+        label: "24 fps",
+        num: 24,
+        den: 1,
+    },
+    FramerateOption {
+        label: "25 fps",
+        num: 25,
+        den: 1,
+    },
+    FramerateOption {
+        label: "29.97 fps",
+        num: 30000,
+        den: 1001,
+    },
+    FramerateOption {
+        label: "30 fps",
+        num: 30,
+        den: 1,
+    },
+    FramerateOption {
+        label: "60 fps",
+        num: 60,
+        den: 1,
+    },
+];
+
+/// Default frame-rate index used when the current project's frame rate
+/// doesn't match any preset (24 fps).
+const DEFAULT_FRAMERATE_INDEX: usize = 1;
+
+/// One canvas-resolution preset within an aspect-ratio group.
+struct ResolutionPreset {
+    width: u32,
+    height: u32,
+    label: &'static str,
+}
+
+/// One aspect-ratio group in the Project Settings dialog.
+struct AspectRatioGroup {
+    label: &'static str,
+    presets: &'static [ResolutionPreset],
+}
+
+/// Project-settings aspect-ratio groups, each containing the discrete
+/// resolution presets that share that aspect.
+const ASPECT_RATIO_PRESETS: &[AspectRatioGroup] = &[
+    AspectRatioGroup {
+        label: "16:9 (Widescreen)",
+        presets: &[
+            ResolutionPreset {
+                width: 3840,
+                height: 2160,
+                label: "3840 × 2160  (4K UHD)",
+            },
+            ResolutionPreset {
+                width: 2560,
+                height: 1440,
+                label: "2560 × 1440  (1440p QHD)",
+            },
+            ResolutionPreset {
+                width: 1920,
+                height: 1080,
+                label: "1920 × 1080  (1080p HD)",
+            },
+            ResolutionPreset {
+                width: 1280,
+                height: 720,
+                label: "1280 × 720   (720p HD)",
+            },
+        ],
+    },
+    AspectRatioGroup {
+        label: "4:3 (Standard)",
+        presets: &[
+            ResolutionPreset {
+                width: 1440,
+                height: 1080,
+                label: "1440 × 1080  (HD 4:3)",
+            },
+            ResolutionPreset {
+                width: 1024,
+                height: 768,
+                label: "1024 × 768   (XGA)",
+            },
+            ResolutionPreset {
+                width: 720,
+                height: 480,
+                label: "720 × 480    (SD NTSC)",
+            },
+        ],
+    },
+    AspectRatioGroup {
+        label: "9:16 (Vertical)",
+        presets: &[
+            ResolutionPreset {
+                width: 1080,
+                height: 1920,
+                label: "1080 × 1920  (Full HD Vertical)",
+            },
+            ResolutionPreset {
+                width: 720,
+                height: 1280,
+                label: "720 × 1280   (HD Vertical)",
+            },
+        ],
+    },
+    AspectRatioGroup {
+        label: "1:1 (Square)",
+        presets: &[
+            ResolutionPreset {
+                width: 2160,
+                height: 2160,
+                label: "2160 × 2160  (4K Square)",
+            },
+            ResolutionPreset {
+                width: 1080,
+                height: 1080,
+                label: "1080 × 1080  (HD Square)",
+            },
+        ],
+    },
+];
+
+/// Label for the "Custom" entry appended after `ASPECT_RATIO_PRESETS` in the
+/// dropdown. Selecting this hides the preset dropdown and reveals W×H spinners.
+const CUSTOM_ASPECT_LABEL: &str = "Custom";
+
 fn save_project_to_path(
     project: &Rc<RefCell<Project>>,
     library: &Rc<RefCell<MediaLibrary>>,
@@ -1181,47 +1336,17 @@ pub fn build_toolbar(
             grid.set_column_spacing(12);
 
             // ── Aspect ratio / resolution presets ──
-            // Each aspect ratio group: (label, [(width, height, display_label)])
-            let ar_presets: Vec<(&str, Vec<(u32, u32, &str)>)> = vec![
-                (
-                    "16:9 (Widescreen)",
-                    vec![
-                        (3840, 2160, "3840 × 2160  (4K UHD)"),
-                        (2560, 1440, "2560 × 1440  (1440p QHD)"),
-                        (1920, 1080, "1920 × 1080  (1080p HD)"),
-                        (1280, 720, "1280 × 720   (720p HD)"),
-                    ],
-                ),
-                (
-                    "4:3 (Standard)",
-                    vec![
-                        (1440, 1080, "1440 × 1080  (HD 4:3)"),
-                        (1024, 768, "1024 × 768   (XGA)"),
-                        (720, 480, "720 × 480    (SD NTSC)"),
-                    ],
-                ),
-                (
-                    "9:16 (Vertical)",
-                    vec![
-                        (1080, 1920, "1080 × 1920  (Full HD Vertical)"),
-                        (720, 1280, "720 × 1280   (HD Vertical)"),
-                    ],
-                ),
-                (
-                    "1:1 (Square)",
-                    vec![
-                        (2160, 2160, "2160 × 2160  (4K Square)"),
-                        (1080, 1080, "1080 × 1080  (HD Square)"),
-                    ],
-                ),
-            ];
+            // Source of truth: ASPECT_RATIO_PRESETS at the top of this file.
 
-            // Detect current aspect ratio and resolution index
+            // Detect current aspect ratio and resolution index. Falls back to
+            // the "Custom" sentinel index (= ASPECT_RATIO_PRESETS.len()) when
+            // the project's W×H doesn't match any preset.
+            let custom_ar_idx = ASPECT_RATIO_PRESETS.len() as u32;
             let (init_ar_idx, init_res_idx) = {
-                let mut found = (4u32, 0u32); // default: Custom
-                'outer: for (ai, (_label, resolutions)) in ar_presets.iter().enumerate() {
-                    for (ri, &(w, h, _)) in resolutions.iter().enumerate() {
-                        if w == proj.width && h == proj.height {
+                let mut found = (custom_ar_idx, 0u32);
+                'outer: for (ai, group) in ASPECT_RATIO_PRESETS.iter().enumerate() {
+                    for (ri, preset) in group.presets.iter().enumerate() {
+                        if preset.width == proj.width && preset.height == proj.height {
                             found = (ai as u32, ri as u32);
                             break 'outer;
                         }
@@ -1233,28 +1358,22 @@ pub fn build_toolbar(
             // Row 0: Aspect Ratio dropdown
             let ar_label = gtk::Label::new(Some("Aspect Ratio:"));
             ar_label.set_halign(gtk::Align::End);
-            let ar_combo = gtk::DropDown::from_strings(&[
-                "16:9 (Widescreen)",
-                "4:3 (Standard)",
-                "9:16 (Vertical)",
-                "1:1 (Square)",
-                "Custom",
-            ]);
+            let mut ar_dropdown_labels: Vec<&str> =
+                ASPECT_RATIO_PRESETS.iter().map(|g| g.label).collect();
+            ar_dropdown_labels.push(CUSTOM_ASPECT_LABEL);
+            let ar_combo = gtk::DropDown::from_strings(&ar_dropdown_labels);
             grid.attach(&ar_label, 0, 0, 1, 1);
             grid.attach(&ar_combo, 1, 0, 2, 1);
 
             // Row 1: Resolution dropdown (hidden when Custom)
             let res_label = gtk::Label::new(Some("Resolution:"));
             res_label.set_halign(gtk::Align::End);
-            let initial_res_strings: Vec<&str> = if (init_ar_idx as usize) < ar_presets.len() {
-                ar_presets[init_ar_idx as usize]
-                    .1
-                    .iter()
-                    .map(|r| r.2)
-                    .collect()
-            } else {
-                vec!["1920 × 1080  (1080p HD)"]
-            };
+            let initial_res_strings: Vec<&str> =
+                if let Some(group) = ASPECT_RATIO_PRESETS.get(init_ar_idx as usize) {
+                    group.presets.iter().map(|p| p.label).collect()
+                } else {
+                    vec!["1920 × 1080  (1080p HD)"]
+                };
             let res_string_list = gtk::StringList::new(
                 &initial_res_strings
                     .iter()
@@ -1282,7 +1401,7 @@ pub fn build_toolbar(
             grid.attach(&custom_box, 0, 2, 3, 1);
 
             // Show/hide based on initial state
-            let is_custom = init_ar_idx == 4;
+            let is_custom = init_ar_idx == custom_ar_idx;
             res_label.set_visible(!is_custom);
             res_combo.set_visible(!is_custom);
             custom_box.set_visible(is_custom);
@@ -1298,16 +1417,11 @@ pub fn build_toolbar(
                 let res_combo = res_combo.clone();
                 let res_label = res_label.clone();
                 let custom_box = custom_box.clone();
-                let ar_presets_labels: Vec<Vec<String>> = ar_presets
-                    .iter()
-                    .map(|(_, resolutions)| resolutions.iter().map(|r| r.2.to_string()).collect())
-                    .collect();
                 ar_combo.connect_selected_notify(move |combo| {
                     let idx = combo.selected() as usize;
-                    if idx < ar_presets_labels.len() {
+                    if let Some(group) = ASPECT_RATIO_PRESETS.get(idx) {
                         // Preset aspect ratio: show resolution dropdown, hide custom
-                        let labels: Vec<&str> =
-                            ar_presets_labels[idx].iter().map(|s| s.as_str()).collect();
+                        let labels: Vec<&str> = group.presets.iter().map(|p| p.label).collect();
                         let new_model = gtk::StringList::new(&labels);
                         res_combo.set_model(Some(&new_model));
                         res_combo.set_selected(0);
@@ -1323,26 +1437,27 @@ pub fn build_toolbar(
                 });
             }
 
-            // Row 3: Frame rate preset (unchanged)
+            // Row 3: Frame rate preset
             let fps_label = gtk::Label::new(Some("Frame Rate:"));
             fps_label.set_halign(gtk::Align::End);
-            let fps_combo = gtk::DropDown::from_strings(&[
-                "23.976 fps",
-                "24 fps",
-                "25 fps",
-                "29.97 fps",
-                "30 fps",
-                "60 fps",
-            ]);
-            let fps_idx = match (proj.frame_rate.numerator, proj.frame_rate.denominator) {
-                (24000, 1001) | (2997, 125) => 0,
-                (24, 1) => 1,
-                (25, 1) => 2,
-                (30000, 1001) => 3,
-                (30, 1) => 4,
-                (60, 1) => 5,
-                _ => 1,
-            };
+            let fps_dropdown_labels: Vec<&str> =
+                FRAMERATE_OPTIONS.iter().map(|o| o.label).collect();
+            let fps_combo = gtk::DropDown::from_strings(&fps_dropdown_labels);
+            let fps_idx = FRAMERATE_OPTIONS
+                .iter()
+                .position(|o| {
+                    o.num == proj.frame_rate.numerator && o.den == proj.frame_rate.denominator
+                })
+                .or_else(|| {
+                    // Backwards compat: 2997/125 is the simplified form of
+                    // 24000/1001 (= 23.976). Old project files may store either.
+                    if proj.frame_rate.numerator == 2997 && proj.frame_rate.denominator == 125 {
+                        Some(0)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(DEFAULT_FRAMERATE_INDEX) as u32;
             fps_combo.set_selected(fps_idx);
             grid.attach(&fps_label, 0, 3, 1, 1);
             grid.attach(&fps_combo, 1, 3, 2, 1);
@@ -1351,59 +1466,31 @@ pub fn build_toolbar(
             dialog.add_button("Cancel", gtk::ResponseType::Cancel);
             dialog.add_button("Apply", gtk::ResponseType::Accept);
 
-            // Clone presets data for the response handler
-            let ar_res_data: Vec<Vec<(u32, u32)>> = ar_presets
-                .iter()
-                .map(|(_, resolutions)| resolutions.iter().map(|r| (r.0, r.1)).collect())
-                .collect();
-
             drop(proj);
             let project = project.clone();
             let on_project_changed = on_project_changed.clone();
             dialog.connect_response(move |d, resp| {
                 if resp == gtk::ResponseType::Accept {
                     let ar_idx = ar_combo.selected() as usize;
-                    let (w, h) = if ar_idx < ar_res_data.len() {
+                    let (w, h) = if let Some(group) = ASPECT_RATIO_PRESETS.get(ar_idx) {
                         // Preset aspect ratio + resolution
                         let res_idx = res_combo.selected() as usize;
-                        if res_idx < ar_res_data[ar_idx].len() {
-                            ar_res_data[ar_idx][res_idx]
-                        } else {
-                            ar_res_data[ar_idx][0]
-                        }
+                        let preset = group
+                            .presets
+                            .get(res_idx)
+                            .or_else(|| group.presets.first())
+                            .expect("aspect ratio group should have at least one preset");
+                        (preset.width, preset.height)
                     } else {
                         // Custom
                         (w_spin.value() as u32, h_spin.value() as u32)
                     };
-                    let fr = match fps_combo.selected() {
-                        0 => FrameRate {
-                            numerator: 24000,
-                            denominator: 1001,
-                        },
-                        1 => FrameRate {
-                            numerator: 24,
-                            denominator: 1,
-                        },
-                        2 => FrameRate {
-                            numerator: 25,
-                            denominator: 1,
-                        },
-                        3 => FrameRate {
-                            numerator: 30000,
-                            denominator: 1001,
-                        },
-                        4 => FrameRate {
-                            numerator: 30,
-                            denominator: 1,
-                        },
-                        5 => FrameRate {
-                            numerator: 60,
-                            denominator: 1,
-                        },
-                        _ => FrameRate {
-                            numerator: 24,
-                            denominator: 1,
-                        },
+                    let opt = FRAMERATE_OPTIONS
+                        .get(fps_combo.selected() as usize)
+                        .unwrap_or(&FRAMERATE_OPTIONS[DEFAULT_FRAMERATE_INDEX]);
+                    let fr = FrameRate {
+                        numerator: opt.num,
+                        denominator: opt.den,
                     };
                     let mut proj = project.borrow_mut();
                     proj.width = w;
