@@ -2,9 +2,11 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::model::clip::{
-    AudioChannelMode, BlendMode, ClipColorLabel, EqBand, NumericKeyframe, SlowMotionInterp,
-    SubtitleHighlightFlags, SubtitleHighlightMode, SubtitleSegment, VoiceIsolationSource,
+    AngleSwitch, AudioChannelMode, BlendMode, ClipColorLabel, EqBand, MulticamAngle,
+    NumericKeyframe, SlowMotionInterp, SubtitleHighlightFlags, SubtitleHighlightMode,
+    SubtitleSegment, VoiceIsolationSource,
 };
+use crate::model::track::Track;
 
 pub(crate) const ULTIMATESLICE_OTIO_METADATA_VERSION: u32 = 1;
 
@@ -87,6 +89,18 @@ pub(crate) struct UltimateSliceClipOtioMetadata {
     /// True when this image clip is a prerendered animated SVG source.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) animated_svg: Option<bool>,
+    /// Internal tracks for compound (nested timeline) clips. Recursive — each
+    /// internal track holds full `Clip` objects which themselves can be
+    /// compound. Serialized via the existing serde derives on `Track`/`Clip`.
+    /// Only emitted when present so non-compound clips don't bloat the JSON.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) compound_tracks: Option<Vec<Track>>,
+    /// Camera angles for multicam clips.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) multicam_angles: Option<Vec<MulticamAngle>>,
+    /// Angle switch points for multicam clips, sorted by `position_ns`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) multicam_switches: Option<Vec<AngleSwitch>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) brightness: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]

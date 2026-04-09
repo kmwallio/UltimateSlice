@@ -5,6 +5,12 @@ All notable project changes and progress should be recorded here.
 ## [Unreleased]
 
 ### Added
+- **OTIO clip metadata coverage — Batch D** (compound clips + multicam): closes the **highest-stakes** OTIO gap. Previously, exporting a compound clip to OTIO silently dropped its entire internal timeline (the nested tracks and clips disappeared on re-import); a multicam clip lost all its angle definitions and switch points. Adds 3 new fields:
+  - **`compound_tracks`** (`Option<Vec<Track>>`): the full nested timeline of a compound clip. Recursive — internal clips can themselves be compound, and serde walks the whole tree via the existing `Track`/`Clip` derives. Only emitted when present so non-compound clips don't bloat the JSON.
+  - **`multicam_angles`** (`Option<Vec<MulticamAngle>>`): camera angles with id, label, source path, in/out, sync offset, source timecode base, media duration, volume, mute.
+  - **`multicam_switches`** (`Option<Vec<AngleSwitch>>`): angle switch points within the multicam clip (position + angle index).
+  - The OTIO writer was already routing sourceless clips (Title/Adjustment) through `MissingReference`; Compound and Multicam clips fall through the same path because their `source_path` is empty. The OTIO parser already understood `Compound`/`Multicam` kinds via its `parse_clip_kind` helper, so the round-trip works end-to-end with no further parser changes beyond restoring the three new fields onto the clip.
+  - 2 new end-to-end tests (`test_roundtrip_batch_d_compound_clip_preserves_internal_tracks`, `test_roundtrip_batch_d_multicam_clip_preserves_angles_and_switches`) write a compound clip with nested video+audio tracks and a multicam clip with angles + switches, parse them back, and verify every nested element survives. All 917 tests pass.
 - **OTIO clip metadata coverage — Batch C** (subtitle styling completion): adds **9 more fields** that complete the subtitle metadata story:
   - Base text styles: `subtitle_bold`, `subtitle_italic`, `subtitle_underline`, `subtitle_shadow` + `subtitle_shadow_color`, `subtitle_shadow_offset_x`, `subtitle_shadow_offset_y`
   - Multi-effect karaoke highlight: `subtitle_highlight_flags` (full `SubtitleHighlightFlags` struct: bold, color, underline, stroke, italic, background, shadow combinable)

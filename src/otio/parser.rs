@@ -292,6 +292,15 @@ fn otio_clip_to_clip(
         if let Some(v) = us.animated_svg {
             clip.animated_svg = v;
         }
+        if let Some(v) = us.compound_tracks.as_ref() {
+            clip.compound_tracks = Some(v.clone());
+        }
+        if let Some(v) = us.multicam_angles.as_ref() {
+            clip.multicam_angles = Some(v.clone());
+        }
+        if let Some(v) = us.multicam_switches.as_ref() {
+            clip.multicam_switches = Some(v.clone());
+        }
         if let Some(v) = us.brightness {
             clip.brightness = v as f32;
         }
@@ -1508,6 +1517,168 @@ mod tests {
             clip2.subtitle_bg_highlight_color,
             clip.subtitle_bg_highlight_color
         );
+    }
+
+    #[test]
+    fn test_roundtrip_batch_d_compound_clip_preserves_internal_tracks() {
+        use crate::model::track::Track;
+
+        let mut p = Project::new("Batch D Compound Roundtrip");
+        p.frame_rate = FrameRate {
+            numerator: 30,
+            denominator: 1,
+        };
+        p.tracks.clear();
+
+        // Build internal compound tracks: one video track with two clips
+        // (one of which has its own non-trivial transform/color settings).
+        let mut inner_v_track = Track::new_video("V1");
+        let mut inner_clip_a = Clip::new(
+            "/footage/inner_a.mov",
+            2_000_000_000,
+            0,
+            ClipKind::Video,
+        );
+        inner_clip_a.scale = 1.25;
+        inner_clip_a.brightness = 0.15;
+        inner_v_track.add_clip(inner_clip_a);
+        let mut inner_clip_b = Clip::new(
+            "/footage/inner_b.mov",
+            3_000_000_000,
+            2_000_000_000,
+            ClipKind::Video,
+        );
+        inner_clip_b.contrast = 1.4;
+        inner_v_track.add_clip(inner_clip_b);
+
+        let mut inner_a_track = Track::new_audio("A1");
+        let mut inner_audio = Clip::new(
+            "/footage/inner_audio.wav",
+            5_000_000_000,
+            0,
+            ClipKind::Audio,
+        );
+        inner_audio.volume = 0.8;
+        inner_a_track.add_clip(inner_audio);
+
+        // Outer compound clip placed on a video track at the project level.
+        let mut outer_track = Track::new_video("V_outer");
+        let mut compound = Clip::new("", 5_000_000_000, 0, ClipKind::Compound);
+        compound.label = "My Compound".to_string();
+        compound.compound_tracks = Some(vec![inner_v_track, inner_a_track]);
+        outer_track.add_clip(compound.clone());
+        p.tracks.push(outer_track);
+
+        let json = crate::otio::writer::write_otio(&p).unwrap();
+        let p2 = parse_otio(&json).unwrap();
+
+        let clip2 = &p2.tracks[0].clips[0];
+        assert_eq!(clip2.kind, ClipKind::Compound);
+        assert_eq!(clip2.label, "My Compound");
+        let inner_tracks = clip2
+            .compound_tracks
+            .as_ref()
+            .expect("compound_tracks should round-trip");
+        assert_eq!(inner_tracks.len(), 2);
+        // Inner video track + clips
+        let v = &inner_tracks[0];
+        assert_eq!(v.clips.len(), 2);
+        assert_eq!(v.clips[0].source_path, "/footage/inner_a.mov");
+        assert_eq!(v.clips[0].scale, 1.25);
+        assert_eq!(v.clips[0].brightness, 0.15);
+        assert_eq!(v.clips[1].source_path, "/footage/inner_b.mov");
+        assert_eq!(v.clips[1].contrast, 1.4);
+        // Inner audio track
+        let a = &inner_tracks[1];
+        assert_eq!(a.clips.len(), 1);
+        assert_eq!(a.clips[0].source_path, "/footage/inner_audio.wav");
+        assert_eq!(a.clips[0].volume, 0.8);
+    }
+
+    #[test]
+    fn test_roundtrip_batch_d_multicam_clip_preserves_angles_and_switches() {
+        use crate::model::clip::{AngleSwitch, MulticamAngle};
+        use crate::model::track::Track;
+
+        let mut p = Project::new("Batch D Multicam Roundtrip");
+        p.frame_rate = FrameRate {
+            numerator: 30,
+            denominator: 1,
+        };
+        p.tracks.clear();
+
+        let mut track = Track::new_video("V1");
+        let mut multicam = Clip::new("", 8_000_000_000, 0, ClipKind::Multicam);
+        multicam.label = "MC".to_string();
+        multicam.multicam_angles = Some(vec![
+            MulticamAngle {
+                id: "angle-0".to_string(),
+                label: "Cam A".to_string(),
+                source_path: "/footage/cam_a.mov".to_string(),
+                source_in: 0,
+                source_out: 8_000_000_000,
+                sync_offset_ns: 0,
+                source_timecode_base_ns: None,
+                media_duration_ns: Some(8_000_000_000),
+                volume: 1.0,
+                muted: false,
+            },
+            MulticamAngle {
+                id: "angle-1".to_string(),
+                label: "Cam B".to_string(),
+                source_path: "/footage/cam_b.mov".to_string(),
+                source_in: 250_000_000,
+                source_out: 8_250_000_000,
+                sync_offset_ns: -250_000_000,
+                source_timecode_base_ns: Some(86_400_000_000_000),
+                media_duration_ns: Some(8_500_000_000),
+                volume: 0.0,
+                muted: true,
+            },
+        ]);
+        multicam.multicam_switches = Some(vec![
+            AngleSwitch {
+                position_ns: 0,
+                angle_index: 0,
+            },
+            AngleSwitch {
+                position_ns: 3_000_000_000,
+                angle_index: 1,
+            },
+            AngleSwitch {
+                position_ns: 6_000_000_000,
+                angle_index: 0,
+            },
+        ]);
+        track.add_clip(multicam.clone());
+        p.tracks.push(track);
+
+        let json = crate::otio::writer::write_otio(&p).unwrap();
+        let p2 = parse_otio(&json).unwrap();
+
+        let clip2 = &p2.tracks[0].clips[0];
+        assert_eq!(clip2.kind, ClipKind::Multicam);
+        let angles = clip2
+            .multicam_angles
+            .as_ref()
+            .expect("multicam_angles should round-trip");
+        assert_eq!(angles.len(), 2);
+        assert_eq!(angles[0].label, "Cam A");
+        assert_eq!(angles[0].source_path, "/footage/cam_a.mov");
+        assert!(!angles[0].muted);
+        assert_eq!(angles[1].label, "Cam B");
+        assert_eq!(angles[1].sync_offset_ns, -250_000_000);
+        assert!(angles[1].muted);
+        assert_eq!(angles[1].volume, 0.0);
+        let switches = clip2
+            .multicam_switches
+            .as_ref()
+            .expect("multicam_switches should round-trip");
+        assert_eq!(switches.len(), 3);
+        assert_eq!(switches[0].angle_index, 0);
+        assert_eq!(switches[1].position_ns, 3_000_000_000);
+        assert_eq!(switches[1].angle_index, 1);
+        assert_eq!(switches[2].position_ns, 6_000_000_000);
     }
 
     #[test]
