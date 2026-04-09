@@ -222,6 +222,12 @@ fn write_otio_with_mode(
                 reverse: Some(clip.reverse),
                 volume: Some(clip.volume as f64),
                 pan: Some(clip.pan as f64),
+                eq_bands: Some(clip.eq_bands),
+                match_eq_bands: if clip.match_eq_bands.is_empty() {
+                    None
+                } else {
+                    Some(clip.match_eq_bands.clone())
+                },
                 voice_isolation: Some(clip.voice_isolation as f64),
                 brightness: Some(clip.brightness as f64),
                 contrast: Some(clip.contrast as f64),

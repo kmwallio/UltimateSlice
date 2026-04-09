@@ -1,7 +1,7 @@
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::model::clip::{BlendMode, NumericKeyframe, SubtitleHighlightMode, SubtitleSegment};
+use crate::model::clip::{BlendMode, EqBand, NumericKeyframe, SubtitleHighlightMode, SubtitleSegment};
 
 pub(crate) const ULTIMATESLICE_OTIO_METADATA_VERSION: u32 = 1;
 
@@ -17,6 +17,12 @@ pub(crate) struct UltimateSliceClipOtioMetadata {
     pub(crate) volume: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) pan: Option<f64>,
+    /// 3-band parametric EQ: low/mid/high. Stored as a fixed-size array.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) eq_bands: Option<[EqBand; 3]>,
+    /// 7-band match EQ from audio matching (mic-match correction).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) match_eq_bands: Option<Vec<EqBand>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) voice_isolation: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -289,6 +295,47 @@ mod tests {
         let parsed = track_metadata_from_root(&value).expect("track metadata should parse");
         assert_eq!(parsed.muted, Some(true));
         assert_eq!(parsed.audio_role.as_deref(), Some("dialogue"));
+    }
+
+    #[test]
+    fn clip_metadata_roundtrips_user_eq_and_match_eq_bands() {
+        let user_eq = [
+            EqBand { freq: 200.0, gain: -2.5, q: 1.0 },
+            EqBand { freq: 1000.0, gain: 1.0, q: 1.2 },
+            EqBand { freq: 5000.0, gain: 3.5, q: 0.9 },
+        ];
+        let match_eq = vec![
+            EqBand { freq: 100.0, gain: -3.0, q: 1.5 },
+            EqBand { freq: 200.0, gain: -2.0, q: 1.0 },
+            EqBand { freq: 400.0, gain: 0.0, q: 1.5 },
+            EqBand { freq: 800.0, gain: 1.0, q: 1.0 },
+            EqBand { freq: 2000.0, gain: 3.0, q: 1.0 },
+            EqBand { freq: 5000.0, gain: 2.5, q: 1.0 },
+            EqBand { freq: 9000.0, gain: 0.0, q: 1.5 },
+        ];
+        let value = wrap_clip_metadata(&UltimateSliceClipOtioMetadata {
+            eq_bands: Some(user_eq),
+            match_eq_bands: Some(match_eq.clone()),
+            ..UltimateSliceClipOtioMetadata::default()
+        });
+
+        let parsed = clip_metadata_from_root(&value).expect("clip metadata should parse");
+        let parsed_user_eq = parsed.eq_bands.expect("user eq should round-trip");
+        assert_eq!(parsed_user_eq[0].gain, -2.5);
+        assert_eq!(parsed_user_eq[1].freq, 1000.0);
+        assert_eq!(parsed_user_eq[2].q, 0.9);
+        let parsed_match_eq = parsed.match_eq_bands.expect("match eq should round-trip");
+        assert_eq!(parsed_match_eq.len(), 7);
+        assert_eq!(parsed_match_eq[0].gain, -3.0);
+        assert_eq!(parsed_match_eq[4].gain, 3.0);
+    }
+
+    #[test]
+    fn clip_metadata_omits_empty_match_eq_bands() {
+        let value = wrap_clip_metadata(&UltimateSliceClipOtioMetadata::default());
+        // Both fields are Option::None by default — must not appear in JSON.
+        assert!(value["ultimateslice"]["clip"].get("match_eq_bands").is_none());
+        assert!(value["ultimateslice"]["clip"].get("eq_bands").is_none());
     }
 
     #[test]

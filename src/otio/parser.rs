@@ -211,6 +211,12 @@ fn otio_clip_to_clip(
         if let Some(v) = us.pan {
             clip.pan = v as f32;
         }
+        if let Some(v) = us.eq_bands {
+            clip.eq_bands = v;
+        }
+        if let Some(v) = us.match_eq_bands.clone() {
+            clip.match_eq_bands = v;
+        }
         if let Some(v) = us.voice_isolation {
             clip.voice_isolation = v as f32;
         }
