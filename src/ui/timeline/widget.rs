@@ -4618,7 +4618,9 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 .map(|track_idx| st.toggle_track_solo_by_index(track_idx))
                                 .unwrap_or(false);
                             drop(st);
-                            TimelineState::notify_project_changed(&state);
+                            if changed {
+                                TimelineState::notify_project_changed(&state);
+                            }
                             if let Some(a) = area_weak.upgrade() {
                                 a.queue_draw();
                             }
@@ -4630,7 +4632,9 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 .map(|track_idx| st.toggle_track_duck_by_index(track_idx))
                                 .unwrap_or(false);
                             drop(st);
-                            TimelineState::notify_project_changed(&state);
+                            if changed {
+                                TimelineState::notify_project_changed(&state);
+                            }
                             if let Some(a) = area_weak.upgrade() {
                                 a.queue_draw();
                             }
@@ -6287,7 +6291,9 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 if let Some(a) = area_weak.upgrade() {
                     a.queue_draw();
                 }
-                TimelineState::notify_project_changed(&state);
+                if should_notify_project {
+                    TimelineState::notify_project_changed(&state);
+                }
                 if let Some(cb) = sel_cb {
                     cb(new_sel);
                 }
@@ -6711,7 +6717,9 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 }
             }
             drop(st);
-            TimelineState::notify_project_changed(&state);
+            if notify_project {
+                TimelineState::notify_project_changed(&state);
+            }
             if let Some(cb) = sel_cb {
                 cb(new_sel);
             }
@@ -7969,7 +7977,7 @@ fn draw_clip(
         let inner_h = (ch - 2.0).max(0.0);
 
         if inner_w > 1.0 && inner_h > 1.0 {
-            let src_span = clip.source_out.saturating_sub(clip.source_in);
+            let src_span = clip.source_duration();
             let scale_y = inner_h / 90.0;
 
             cr.save().ok();
@@ -8065,7 +8073,7 @@ fn draw_clip(
         let vis_x1 = (cx + cw).min(view_width);
         let vis_px = (vis_x1 - vis_x0).ceil().max(0.0) as usize;
         if vis_px > 0 {
-            let src_span_ns = clip.source_out.saturating_sub(clip.source_in) as f64;
+            let src_span_ns = clip.source_duration() as f64;
             let frac0 = ((vis_x0 - cx) / cw).clamp(0.0, 1.0);
             let frac1 = ((vis_x1 - cx) / cw).clamp(0.0, 1.0);
             let vis_src_in = clip.source_in + (frac0 * src_span_ns) as u64;
@@ -8093,7 +8101,7 @@ fn draw_clip(
         let vis_x1 = (cx + cw).min(view_width);
         let vis_px = (vis_x1 - vis_x0).ceil().max(0.0) as usize;
         if vis_px > 0 {
-            let src_span_ns = clip.source_out.saturating_sub(clip.source_in) as f64;
+            let src_span_ns = clip.source_duration() as f64;
             let frac0 = ((vis_x0 - cx) / cw).clamp(0.0, 1.0);
             let frac1 = ((vis_x1 - cx) / cw).clamp(0.0, 1.0);
             let vis_src_in = clip.source_in + (frac0 * src_span_ns) as u64;
@@ -9622,7 +9630,7 @@ mod tests {
             Some(2_000_000_000)
         );
         assert_eq!(
-            freeze_clip.source_out.saturating_sub(freeze_clip.source_in),
+            freeze_clip.source_duration(),
             1
         );
         assert_eq!(freeze_clip.volume, 0.0);
@@ -9635,7 +9643,7 @@ mod tests {
             .expect("left split clip should exist");
         assert_eq!(clip_a_left.timeline_start, 0);
         assert_eq!(
-            clip_a_left.source_out.saturating_sub(clip_a_left.source_in),
+            clip_a_left.source_duration(),
             1_000_000_000
         );
 
@@ -9748,7 +9756,7 @@ mod tests {
             .expect("left split on other track should keep original id");
         assert_eq!(x_left.timeline_start, 500_000_000);
         assert_eq!(
-            x_left.source_out.saturating_sub(x_left.source_in),
+            x_left.source_duration(),
             500_000_000
         );
 
@@ -9759,7 +9767,7 @@ mod tests {
             .expect("right split on other track should exist");
         assert_eq!(x_right.timeline_start, 3_000_000_000);
         assert_eq!(
-            x_right.source_out.saturating_sub(x_right.source_in),
+            x_right.source_duration(),
             500_000_000
         );
 

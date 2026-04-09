@@ -159,30 +159,24 @@ becomes impossible to forget because the helper enforces it.
 > the LADSPA params object at server.rs ~2086) are short enough that a
 > macro doesn't pay for itself; promote later if a third site appears.
 
-### P1.3 — Manual `project.tracks` iteration where recursive helpers exist
+### ~~P1.3 — Manual `project.tracks` iteration where recursive helpers exist~~ ✅ DONE (helper landed; 4 sites migrated)
+
 **(touches compound clips)**
 
-`docs/ARCHITECTURE.md` mandates `Project::clip_ref` / `clip_mut` / `track_mut`
-for all lookups so compound-internal clips are reachable. Past sessions
-replaced ~130 sites, but new code occasionally adds inline iteration.
-
-Sweep periodically with grep for patterns like
-`for track in &mut .*proj.*tracks`, `proj.tracks.iter().flat_map`,
-`tracks.iter().find_map(|t| t.clips.iter().find(`.
-
-Also add a convenience helper to `Project` for the common
-"given clip_id, give me the track id" pattern:
-
-```rust
-impl Project {
-    pub fn find_track_id_for_clip(&self, clip_id: &str) -> Option<String> { ... }
-}
-```
-
-Existing callsites that would benefit:
-- `src/ui/inspector.rs:838-843`, `5080-5086`
-- `src/ui/window.rs:1367-1374`
-- `src/ui/timeline/widget.rs:2665-2675`
+> **Landed:** `Project::find_track_id_for_clip(&str) -> Option<String>` helper
+> in `src/model/project.rs` (recursive walk through compound `compound_tracks`,
+> mirroring the existing `clip_ref` / `clip_mut` / `track_mut` pattern). Four
+> inspector.rs sites migrated — frei0r toggle/remove, subtitle delete, color
+> grade paste — all of which build undo commands that need the track id and
+> were silently producing empty strings for compound-internal clips.
+>
+> **Intentionally NOT migrated:** the 8 other hits of the inline pattern
+> across `timeline/widget.rs` (4 sites) and `media/export.rs` (4 sites). The
+> widget.rs sites operate on `resolve_editing_tracks(&proj)` which is the
+> drill-down editing scope, and the export.rs sites operate on the post-flatten
+> project where there are no compound clips at all. Migrating them to the
+> recursive helper would change semantics. Sweep periodically for new sites
+> that *do* belong on the helper.
 
 ### P1.4 — Undo command boilerplate
 **File:** `src/undo.rs`
@@ -608,9 +602,16 @@ Many are necessary for GTK callback safety, but the visual noise hides
 intent. A `clone_for_callback!(state, project, history => { closure })`
 macro could eliminate the boilerplate without changing semantics.
 
-### P4.7 — `clip.duration()` vs inline `source_out - source_in`
-`Clip::duration()` exists, but several call sites still compute
-`source_out - source_in` inline. Sweep and replace.
+### ~~P4.7 — `clip.duration()` vs inline `source_out - source_in`~~ ✅ DONE
+
+> **Landed:** 13 inline `clip.source_out.saturating_sub(clip.source_in)` sites
+> in `widget.rs`, `inspector.rs`, and `window.rs` now use the existing
+> `Clip::source_duration()` helper. Note: this is `source_duration()` (raw
+> source-time span), not `duration()` (timeline-time, speed-adjusted). The
+> remaining inline-pattern sites operate on `MulticamAngle` (which has its
+> own `source_in`/`source_out` fields and no `source_duration()` method) or
+> on bare `source_in`/`source_out` local variables, and were intentionally
+> left alone.
 
 ---
 

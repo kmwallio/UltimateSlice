@@ -317,7 +317,7 @@ const AUDIO_MATCH_SPEECH_PAD_NS: u64 = 80_000_000;
 fn collect_audio_match_speech_regions(
     clip: &Clip,
 ) -> Vec<crate::media::audio_match::AnalysisRegionNs> {
-    let clip_len_ns = clip.source_out.saturating_sub(clip.source_in);
+    let clip_len_ns = clip.source_duration();
     if clip_len_ns == 0 {
         return Vec::new();
     }
@@ -471,7 +471,7 @@ fn collect_audio_match_clip_info(project: &Project, clip_id: &str) -> Option<Aud
         source_path: clip.source_path.clone(),
         source_in: clip.source_in,
         source_out: clip.source_out,
-        duration_ns: clip.source_out.saturating_sub(clip.source_in),
+        duration_ns: clip.source_duration(),
         speech_regions: collect_audio_match_speech_regions(clip),
         volume: clip.volume,
         measured_loudness_lufs: clip.measured_loudness_lufs,
@@ -3056,7 +3056,7 @@ fn apply_remove_silent_parts_results(
                 return;
             }
         };
-        let dur = clip.source_out.saturating_sub(clip.source_in);
+        let dur = clip.source_duration();
         (clip, track.clips.clone(), dur)
     };
 
@@ -3250,7 +3250,7 @@ fn apply_scene_cut_results(
                 return;
             }
         };
-        let dur = clip.source_out.saturating_sub(clip.source_in);
+        let dur = clip.source_duration();
         (clip, track.clips.clone(), dur)
     };
 

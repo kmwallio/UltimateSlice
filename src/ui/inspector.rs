@@ -876,14 +876,10 @@ impl InspectorView {
                     // Clone clip_id and drop the borrow BEFORE calling on_changed.
                     let cid = selected_clip_id.borrow().clone();
                     if let Some(cid) = cid {
-                        let track_id = {
-                            let proj = project.borrow();
-                            proj.tracks
-                                .iter()
-                                .find(|t| t.clips.iter().any(|c| c.id == cid))
-                                .map(|t| t.id.clone())
-                                .unwrap_or_default()
-                        };
+                        let track_id = project
+                            .borrow()
+                            .find_track_id_for_clip(&cid)
+                            .unwrap_or_default();
                         on_execute_command(Box::new(crate::undo::ToggleFrei0rEffectCommand {
                             clip_id: cid,
                             track_id,
@@ -1004,14 +1000,10 @@ impl InspectorView {
                 remove_btn.connect_clicked(move |_| {
                     let cid = selected_clip_id.borrow().clone();
                     if let Some(cid) = cid {
-                        let track_id = {
-                            let proj = project.borrow();
-                            proj.tracks
-                                .iter()
-                                .find(|t| t.clips.iter().any(|c| c.id == cid))
-                                .map(|t| t.id.clone())
-                                .unwrap_or_default()
-                        };
+                        let track_id = project
+                            .borrow()
+                            .find_track_id_for_clip(&cid)
+                            .unwrap_or_default();
                         on_execute_command(Box::new(crate::undo::RemoveFrei0rEffectCommand {
                             clip_id: cid,
                             track_id,
@@ -1922,14 +1914,10 @@ impl InspectorView {
                                 let project_d = project.clone();
                                 let on_cmd_d = on_cmd.clone();
                                 del_btn.connect_clicked(move |_| {
-                                    let track_id = {
-                                        let proj = project_d.borrow();
-                                        proj.tracks
-                                            .iter()
-                                            .find(|t| t.clips.iter().any(|c| c.id == clip_id_d))
-                                            .map(|t| t.id.clone())
-                                            .unwrap_or_default()
-                                    };
+                                    let track_id = project_d
+                                        .borrow()
+                                        .find_track_id_for_clip(&clip_id_d)
+                                        .unwrap_or_default();
                                     on_cmd_d(Box::new(crate::undo::DeleteSubtitleSegmentCommand {
                                         clip_id: clip_id_d.clone(),
                                         track_id,
@@ -4169,14 +4157,10 @@ pub fn build_inspector(
             };
             let cid = selected_clip_id.borrow().clone();
             if let Some(cid) = cid {
-                let track_id = {
-                    let proj = project.borrow();
-                    proj.tracks
-                        .iter()
-                        .find(|t| t.clips.iter().any(|c| c.id == cid))
-                        .map(|t| t.id.clone())
-                        .unwrap_or_default()
-                };
+                let track_id = project
+                    .borrow()
+                    .find_track_id_for_clip(&cid)
+                    .unwrap_or_default();
                 let insert_index = {
                     let proj = project.borrow();
                     proj.tracks
@@ -6097,7 +6081,7 @@ pub fn build_inspector(
                 let proj = project.borrow();
                 // Use recursive lookup for source clip (may be inside a compound).
                 let source_duration_ns = proj.clip_ref(&source_clip_id).map(|c| {
-                    c.source_out.saturating_sub(c.source_in)
+                    c.source_duration()
                 });
                 // Collect candidate clips from ALL tracks (including inside compounds).
                 let mut candidates = Vec::new();
@@ -6117,7 +6101,7 @@ pub fn build_inspector(
                                 crate::model::clip::ClipKind::Video
                                     | crate::model::clip::ClipKind::Audio
                             ) {
-                                let duration_ns = clip.source_out.saturating_sub(clip.source_in);
+                                let duration_ns = clip.source_duration();
                                 let clip_label = audio_match_clip_label(&clip.label, &clip.id);
                                 candidates.push(MatchAudioCandidate {
                                     clip_id: clip.id.clone(),

@@ -301,6 +301,39 @@ impl Project {
         Self::find_clip_mut_recursive(&mut self.tracks, clip_id)
     }
 
+    /// Look up the id of the track that contains the given clip, searching
+    /// recursively through compound clips.
+    ///
+    /// Replaces the inline `project.tracks.iter().find(|t| t.clips.iter().any(|c| c.id == cid))`
+    /// pattern that misses clips inside compound `compound_tracks`. Returns
+    /// the id of the *innermost* track containing the clip — i.e. when the
+    /// clip lives inside a compound, the returned id is the inner track's id,
+    /// not the outer compound's enclosing track id. Callers that need the
+    /// outer-compound track id must walk up themselves; for the existing call
+    /// sites (effect-toggle commands, undo dispatch) the inner id is what
+    /// the corresponding command needs.
+    pub fn find_track_id_for_clip(&self, clip_id: &str) -> Option<String> {
+        Self::find_track_id_for_clip_recursive(&self.tracks, clip_id)
+    }
+
+    fn find_track_id_for_clip_recursive(tracks: &[Track], clip_id: &str) -> Option<String> {
+        for track in tracks {
+            for clip in &track.clips {
+                if clip.id == clip_id {
+                    return Some(track.id.clone());
+                }
+                if let Some(ref compound_tracks) = clip.compound_tracks {
+                    if let Some(found) =
+                        Self::find_track_id_for_clip_recursive(compound_tracks, clip_id)
+                    {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     fn find_clip_mut_recursive<'a>(
         tracks: &'a mut [Track],
         clip_id: &str,
