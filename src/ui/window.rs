@@ -1923,7 +1923,7 @@ mod tests {
         let video_idx = project
             .tracks
             .iter()
-            .position(|track| track.kind == TrackKind::Video)
+            .position(|track| track.is_video())
             .expect("video track should exist");
 
         let mut title_a = Clip::new("", 4_000_000_000, 0, ClipKind::Title);
@@ -1953,7 +1953,7 @@ mod tests {
         let preferred_audio_track_id = project
             .tracks
             .iter()
-            .find(|track| track.kind == TrackKind::Audio)
+            .find(|track| track.is_audio())
             .map(|track| track.id.clone())
             .expect("audio track should exist");
         let source_info = SourcePlacementInfo {
@@ -2035,11 +2035,11 @@ mod tests {
         let mut project_video_only = Project::new("Test");
         project_video_only
             .tracks
-            .retain(|track| track.kind == TrackKind::Video);
+            .retain(|track| track.is_video());
         let mut project_audio_only = Project::new("Test");
         project_audio_only
             .tracks
-            .retain(|track| track.kind == TrackKind::Audio);
+            .retain(|track| track.is_audio());
         let source_info = SourcePlacementInfo {
             is_audio_only: false,
             has_audio: true,
@@ -2113,7 +2113,7 @@ mod tests {
         let mut project = Project::new("Test");
         project
             .tracks
-            .retain(|track| track.kind == TrackKind::Audio);
+            .retain(|track| track.is_audio());
         let source_info = SourcePlacementInfo {
             is_audio_only: false,
             has_audio: false,
@@ -2129,7 +2129,7 @@ mod tests {
         assert!(project
             .tracks
             .iter()
-            .any(|track| track.kind == TrackKind::Video));
+            .any(|track| track.is_video()));
 
         let plan = build_source_placement_plan_by_track_id(&project, None, source_info, true);
         assert_eq!(plan.targets.len(), 1);
@@ -2141,7 +2141,7 @@ mod tests {
         let mut project = Project::new("Test");
         project
             .tracks
-            .retain(|track| track.kind == TrackKind::Video);
+            .retain(|track| track.is_video());
         let source_info = SourcePlacementInfo {
             is_audio_only: true,
             has_audio: true,
@@ -2157,7 +2157,7 @@ mod tests {
         assert!(project
             .tracks
             .iter()
-            .any(|track| track.kind == TrackKind::Audio));
+            .any(|track| track.is_audio()));
 
         let plan = build_source_placement_plan_by_track_id(&project, None, source_info, true);
         assert_eq!(plan.targets.len(), 1);
@@ -2171,7 +2171,7 @@ mod tests {
             .tracks
             .iter()
             .enumerate()
-            .find(|(_, track)| track.kind == TrackKind::Audio)
+            .find(|(_, track)| track.is_audio())
             .expect("audio track should exist");
         let source_info = SourcePlacementInfo {
             is_audio_only: false,
@@ -2210,14 +2210,14 @@ mod tests {
             .tracks
             .iter()
             .enumerate()
-            .find(|(_, track)| track.kind == TrackKind::Video)
+            .find(|(_, track)| track.is_video())
             .map(|(idx, _)| idx)
             .expect("video track should exist");
         let preferred_audio_track_idx = project
             .tracks
             .iter()
             .enumerate()
-            .find(|(_, track)| track.kind == TrackKind::Audio)
+            .find(|(_, track)| track.is_audio())
             .map(|(idx, _)| idx)
             .expect("audio track should exist");
         let source_info = SourcePlacementInfo {
@@ -2247,7 +2247,7 @@ mod tests {
             .tracks
             .iter()
             .enumerate()
-            .find(|(_, track)| track.kind == TrackKind::Video)
+            .find(|(_, track)| track.is_video())
             .map(|(idx, _)| idx)
             .expect("video track should exist");
         let source_info = SourcePlacementInfo {
@@ -2290,7 +2290,7 @@ mod tests {
         let mut project = Project::new("Test");
         project
             .tracks
-            .retain(|track| track.kind == TrackKind::Video);
+            .retain(|track| track.is_video());
         let source_info = SourcePlacementInfo {
             is_audio_only: true,
             has_audio: true,
@@ -3583,7 +3583,7 @@ fn collect_unique_proxy_variants(
     project
         .tracks
         .iter()
-        .filter(|t| t.kind == TrackKind::Video)
+        .filter(|t| t.is_video())
         .flat_map(|t| t.clips.iter())
         .filter_map(|c| {
             let spec = crate::media::proxy_cache::ProxyVariantSpec::new(
@@ -3613,7 +3613,7 @@ fn collect_unique_preview_lut_proxy_variants(
     project
         .tracks
         .iter()
-        .filter(|t| t.kind == TrackKind::Video)
+        .filter(|t| t.is_video())
         .flat_map(|t| t.clips.iter())
         .filter_map(|c| {
             let lut = c.lut_key()?;
@@ -3652,7 +3652,7 @@ fn collect_near_playhead_proxy_variants(
     let mut candidates: Vec<(u64, u64, crate::media::proxy_cache::ProxyVariantSpec)> = project
         .tracks
         .iter()
-        .filter(|t| t.kind == TrackKind::Video)
+        .filter(|t| t.is_video())
         .flat_map(|t| t.clips.iter())
         .filter(|c| c.timeline_end() >= window_start && c.timeline_start <= window_end)
         .map(|c| {
@@ -3761,34 +3761,16 @@ fn clip_to_program_clips(
             let window_end = c.source_out;
             let mut result = Vec::new();
             for (inner_idx, inner_track) in internal_tracks.iter().enumerate() {
-                let inner_audio = inner_track.kind == crate::model::track::TrackKind::Audio;
+                let inner_audio = inner_track.is_audio();
                 for inner_clip in &inner_track.clips {
-                    // Skip clips entirely outside the visible window
-                    if inner_clip.timeline_end() <= window_start
-                        || inner_clip.timeline_start >= window_end
-                    {
+                    // Window the clip to the compound's [source_in, source_out)
+                    // range. Skip / trim / rebase keyframes & subtitles all
+                    // happen inside the helper.
+                    let Some(mut windowed) = inner_clip.rebase_to_window(window_start, window_end)
+                    else {
                         continue;
-                    }
+                    };
                     let inner_track_idx = track_index + inner_idx;
-                    // Trim clips that partially overlap the window boundaries
-                    let mut windowed = inner_clip.clone();
-                    let orig_duration = windowed.duration();
-                    let left_trim = window_start.saturating_sub(windowed.timeline_start);
-                    if left_trim > 0 {
-                        windowed.source_in = windowed.source_in.saturating_add(left_trim);
-                        windowed.timeline_start = window_start;
-                    }
-                    let mut right_trim = 0u64;
-                    if windowed.timeline_end() > window_end {
-                        right_trim = windowed.timeline_end() - window_end;
-                        windowed.source_out = windowed.source_out.saturating_sub(right_trim);
-                    }
-                    // Rebase keyframes and subtitles so they stay aligned with clip content
-                    if left_trim > 0 || right_trim > 0 {
-                        let range_end = orig_duration.saturating_sub(right_trim);
-                        windowed.retain_keyframes_in_local_range(left_trim, range_end);
-                        windowed.retain_subtitles_in_local_range(left_trim, range_end);
-                    }
                     // Rebase: offset from window start + compound parent pos
                     windowed.timeline_start = windowed.timeline_start.saturating_sub(window_start);
                     result.extend(clip_to_program_clips(
@@ -7364,16 +7346,13 @@ pub fn build_window(
                                 .and_then(|tid| {
                                     proj.tracks
                                         .iter()
-                                        .find(|t| {
-                                            t.id == tid
-                                                && t.kind == crate::model::track::TrackKind::Audio
-                                        })
+                                        .find(|t| t.id == tid && t.is_audio())
                                         .map(|t| t.id.clone())
                                 })
                                 .or_else(|| {
                                     proj.tracks
                                         .iter()
-                                        .find(|t| t.kind == crate::model::track::TrackKind::Audio)
+                                        .find(|t| t.is_audio())
                                         .map(|t| t.id.clone())
                                 })
                         };
@@ -7484,15 +7463,11 @@ pub fn build_window(
                     let selected_tid = ts.selected_track_id.clone();
                     let target = selected_tid
                         .and_then(|tid| {
-                            proj.tracks.iter().find(|t| {
-                                t.id == tid && t.kind == crate::model::track::TrackKind::Audio
-                            })
-                        })
-                        .or_else(|| {
                             proj.tracks
                                 .iter()
-                                .find(|t| t.kind == crate::model::track::TrackKind::Audio)
-                        });
+                                .find(|t| t.id == tid && t.is_audio())
+                        })
+                        .or_else(|| proj.tracks.iter().find(|t| t.is_audio()));
                     if let Some(t) = target {
                         format!("Target track: {}", t.label)
                     } else {
@@ -10694,7 +10669,7 @@ pub fn build_window(
                 let video_track = proj
                     .tracks
                     .iter_mut()
-                    .find(|t| t.kind == crate::model::track::TrackKind::Video);
+                    .find(|t| t.is_video());
                 let Some(track) = video_track else { return };
                 let mut pos = track
                     .clips
@@ -11340,9 +11315,9 @@ pub fn build_window(
                 .and_then(|tid| {
                     proj.tracks
                         .iter()
-                        .position(|t| t.id == tid && t.kind == TrackKind::Video)
+                        .position(|t| t.id == tid && t.is_video())
                 })
-                .or_else(|| proj.tracks.iter().position(|t| t.kind == TrackKind::Video))
+                .or_else(|| proj.tracks.iter().position(|t| t.is_video()))
                 .unwrap_or_else(|| {
                     let t = crate::model::track::Track::new_video("Video 1");
                     proj.tracks.push(t);
@@ -11755,7 +11730,7 @@ pub fn build_window(
                     .enumerate()
                     .filter(|(_, t)| proj.track_is_active_for_output(t))
                     .flat_map(|(t_idx, t)| {
-                        let audio_only = t.kind == TrackKind::Audio;
+                        let audio_only = t.is_audio();
                         let suppress = suppress_embedded_audio_ids.clone();
                         t.clips.iter().flat_map(move |c| {
                             clip_to_program_clips(
@@ -16945,7 +16920,7 @@ fn handle_mcp_command(
                     let audio_tracks: Vec<_> = proj
                         .tracks
                         .iter()
-                        .filter(|t| t.kind == crate::model::track::TrackKind::Audio)
+                        .filter(|t| t.is_audio())
                         .collect();
                     let track = if let Some(idx) = track_index {
                         proj.tracks.get(idx).map(|t| t.id.clone())
@@ -17051,7 +17026,7 @@ fn handle_mcp_command(
                     } else {
                         proj.tracks
                             .iter()
-                            .find(|t| t.kind == crate::model::track::TrackKind::Audio)
+                            .find(|t| t.is_audio())
                             .map(|t| t.id.clone())
                             .or_else(|| {
                                 let new_track = crate::model::track::Track::new_audio("Audio 1");
@@ -19550,7 +19525,7 @@ fn handle_mcp_command(
                 let ti = track_index.unwrap_or_else(|| {
                     proj.tracks
                         .iter()
-                        .position(|t| t.kind == TrackKind::Video)
+                        .position(|t| t.is_video())
                         .unwrap_or(0)
                 });
                 if ti < proj.tracks.len() {

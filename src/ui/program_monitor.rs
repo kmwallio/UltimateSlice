@@ -1,5 +1,6 @@
 use crate::media::program_player::{ProgramPlayer, ScopeFrame};
 use crate::model::project::FrameRate;
+use crate::ui::colors::{LUMA_B, LUMA_G, LUMA_R};
 use crate::ui::timecode;
 use gtk4::prelude::*;
 use gtk4::{
@@ -429,7 +430,7 @@ pub fn build_program_monitor(
                     let r = data[base] as f64 / 255.0;
                     let g = data[base + 1] as f64 / 255.0;
                     let b = data[base + 2] as f64 / 255.0;
-                    let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                    let luma = LUMA_R * r + LUMA_G * g + LUMA_B * b;
                     let (fr, fg, fb) = false_color_luma(luma);
                     cr.set_source_rgb(fr, fg, fb);
                     cr.rectangle(fx as f64 * sw, fy as f64 * sh, sw + 0.5, sh + 0.5);
@@ -475,7 +476,7 @@ pub fn build_program_monitor(
                     let r = data[base] as f64 / 255.0;
                     let g = data[base + 1] as f64 / 255.0;
                     let b = data[base + 2] as f64 / 255.0;
-                    let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                    let luma = LUMA_R * r + LUMA_G * g + LUMA_B * b;
                     if luma >= threshold && (fx + fy) % 8 < 4 {
                         cr.set_source_rgba(1.0, 0.85, 0.0, 0.85);
                         cr.rectangle(fx as f64 * sw, fy as f64 * sh, sw + 0.5, sh + 0.5);

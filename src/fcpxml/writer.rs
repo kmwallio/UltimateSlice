@@ -6918,12 +6918,12 @@ mod tests {
         let video_tracks_with_clips = parsed
             .tracks
             .iter()
-            .filter(|t| t.kind == crate::model::track::TrackKind::Video && !t.clips.is_empty())
+            .filter(|t| t.is_video() && !t.clips.is_empty())
             .count();
         let audio_tracks_with_clips = parsed
             .tracks
             .iter()
-            .filter(|t| t.kind == crate::model::track::TrackKind::Audio && !t.clips.is_empty())
+            .filter(|t| t.is_audio() && !t.clips.is_empty())
             .count();
         assert!(
             video_tracks_with_clips >= 2,

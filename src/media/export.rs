@@ -4,7 +4,7 @@ use crate::media::{
 };
 use crate::model::clip::{Clip, ClipKind, MaskShape, NumericKeyframe, SlowMotionInterp};
 use crate::model::project::Project;
-use crate::model::track::{Track, TrackKind};
+use crate::model::track::Track;
 use crate::model::transform_bounds::{
     CROP_MAX_PX, CROP_MIN_PX, OPACITY_MAX, OPACITY_MIN, POSITION_MAX, POSITION_MIN, ROTATE_MAX_DEG,
     ROTATE_MIN_DEG, SCALE_MAX, SCALE_MIN,
@@ -119,7 +119,7 @@ fn split_active_video_tracks_for_export<'a>(
 ) -> Option<ActiveVideoTrackExportLayout<'a>> {
     let active_video_tracks: Vec<&Track> = flattened_project_tracks
         .iter()
-        .filter(|track| track.kind == TrackKind::Video)
+        .filter(|track| track.is_video())
         .filter(|track| project.track_is_active_for_output(track))
         .collect();
     let primary_track_idx = active_video_tracks.iter().position(|track| {
@@ -205,7 +205,7 @@ pub fn export_project(
     // Collect audio-only clips from active audio tracks.
     let audio_track_clips: Vec<Vec<&crate::model::clip::Clip>> = flattened_project_tracks
         .iter()
-        .filter(|t| t.kind == crate::model::track::TrackKind::Audio)
+        .filter(|t| t.is_audio())
         .filter(|t| project.track_is_active_for_output(t))
         .map(|t| {
             let mut clips: Vec<&Clip> = t.clips.iter().collect();
@@ -5344,7 +5344,7 @@ pub(crate) fn flatten_compound_tracks(
     for track in tracks {
         let flat = flatten_clips(&track.clips, 0, 0);
         // Separate audio clips that landed on a video track (from compound/multicam expansion)
-        if track.kind == crate::model::track::TrackKind::Video {
+        if track.is_video() {
             let mut video_clips = Vec::new();
             for clip in flat {
                 if clip.kind == ClipKind::Audio {
@@ -5368,7 +5368,7 @@ pub(crate) fn flatten_compound_tracks(
         // Find an existing audio track or create one
         let audio_track = result
             .iter_mut()
-            .find(|t| t.kind == crate::model::track::TrackKind::Audio);
+            .find(|t| t.is_audio());
         if let Some(track) = audio_track {
             track.clips.extend(extracted_audio_clips);
             track.clips.sort_by_key(|c| c.timeline_start);
@@ -5401,31 +5401,14 @@ fn flatten_clips(clips: &[Clip], timeline_offset: u64, depth: usize) -> Vec<Clip
                 let window_end = clip.source_out;
                 for inner_track in internal_tracks {
                     for inner_clip in &inner_track.clips {
-                        // Skip clips entirely outside the visible window
-                        if inner_clip.timeline_end() <= window_start
-                            || inner_clip.timeline_start >= window_end
-                        {
+                        // Window the clip to the compound's [source_in, source_out)
+                        // range. Skip / trim / rebase keyframes & subtitles all
+                        // happen inside the helper.
+                        let Some(mut rebased) =
+                            inner_clip.rebase_to_window(window_start, window_end)
+                        else {
                             continue;
-                        }
-                        let mut rebased = inner_clip.clone();
-                        // Trim clips that partially overlap window boundaries
-                        let orig_duration = rebased.duration();
-                        let left_trim = window_start.saturating_sub(rebased.timeline_start);
-                        if left_trim > 0 {
-                            rebased.source_in = rebased.source_in.saturating_add(left_trim);
-                            rebased.timeline_start = window_start;
-                        }
-                        let mut right_trim = 0u64;
-                        if rebased.timeline_end() > window_end {
-                            right_trim = rebased.timeline_end() - window_end;
-                            rebased.source_out = rebased.source_out.saturating_sub(right_trim);
-                        }
-                        // Rebase keyframes and subtitles so they stay aligned with clip content
-                        if left_trim > 0 || right_trim > 0 {
-                            let range_end = orig_duration.saturating_sub(right_trim);
-                            rebased.retain_keyframes_in_local_range(left_trim, range_end);
-                            rebased.retain_subtitles_in_local_range(left_trim, range_end);
-                        }
+                        };
                         // Rebase: offset from window start + compound parent pos
                         rebased.timeline_start = compound_offset
                             .saturating_add(rebased.timeline_start.saturating_sub(window_start));
@@ -7118,11 +7101,11 @@ mod tests {
         // Should have at least 2 tracks: original video track + audio track for extracted audio
         let video_tracks: Vec<_> = flattened
             .iter()
-            .filter(|t| t.kind == crate::model::track::TrackKind::Video)
+            .filter(|t| t.is_video())
             .collect();
         let audio_tracks: Vec<_> = flattened
             .iter()
-            .filter(|t| t.kind == crate::model::track::TrackKind::Audio)
+            .filter(|t| t.is_audio())
             .collect();
 
         // Video track should have the video clip, no audio clips
@@ -7433,7 +7416,7 @@ mod tests {
         // Video track: should have 2 video segments (angle 0: 5000-15000, angle 1: 15000-25000)
         let video_tracks: Vec<_> = flattened
             .iter()
-            .filter(|t| t.kind == crate::model::track::TrackKind::Video)
+            .filter(|t| t.is_video())
             .collect();
         assert!(!video_tracks.is_empty());
         let video_clips: Vec<_> = video_tracks.iter().flat_map(|t| &t.clips).collect();
@@ -7448,7 +7431,7 @@ mod tests {
         // Audio tracks: should have 2 audio clips (one per unmuted angle, continuous)
         let audio_tracks: Vec<_> = flattened
             .iter()
-            .filter(|t| t.kind == crate::model::track::TrackKind::Audio)
+            .filter(|t| t.is_audio())
             .collect();
         let audio_clips: Vec<_> = audio_tracks.iter().flat_map(|t| &t.clips).collect();
         assert_eq!(
@@ -7504,7 +7487,7 @@ mod tests {
         let flattened = flatten_compound_tracks(&[root]);
         let audio_clips: Vec<_> = flattened
             .iter()
-            .filter(|t| t.kind == crate::model::track::TrackKind::Audio)
+            .filter(|t| t.is_audio())
             .flat_map(|t| &t.clips)
             .collect();
         assert_eq!(
@@ -7564,7 +7547,7 @@ mod tests {
         // Video clip should be at compound offset
         let video_clips: Vec<_> = flattened
             .iter()
-            .filter(|t| t.kind == crate::model::track::TrackKind::Video)
+            .filter(|t| t.is_video())
             .flat_map(|t| &t.clips)
             .collect();
         assert!(!video_clips.is_empty());

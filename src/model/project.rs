@@ -1,4 +1,4 @@
-use super::track::{Track, TrackKind};
+use super::track::Track;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -183,11 +183,11 @@ impl Project {
     }
 
     pub fn video_tracks(&self) -> impl Iterator<Item = &Track> {
-        self.tracks.iter().filter(|t| t.kind == TrackKind::Video)
+        self.tracks.iter().filter(|t| t.is_video())
     }
 
     pub fn audio_tracks(&self) -> impl Iterator<Item = &Track> {
-        self.tracks.iter().filter(|t| t.kind == TrackKind::Audio)
+        self.tracks.iter().filter(|t| t.is_audio())
     }
 
     pub fn has_solo_tracks(&self) -> bool {

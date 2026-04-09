@@ -11,6 +11,7 @@ mod recent;
 mod ui;
 mod ui_state;
 mod undo;
+mod units;
 
 /// PID file used to track a running `--mcp` instance so a new invocation
 /// can terminate the old one before taking over.

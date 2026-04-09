@@ -29,10 +29,10 @@ const TRACK_LABEL_SOLO_BADGE_WIDTH: f64 = 16.0;
 const TRACK_LABEL_SOLO_BADGE_HEIGHT: f64 = 14.0;
 const RULER_HEIGHT: f64 = 24.0;
 const PIXELS_PER_SECOND_DEFAULT: f64 = 100.0;
-const NS_PER_SECOND: f64 = 1_000_000_000.0;
+use crate::units::NS_PER_SECOND_F as NS_PER_SECOND;
 /// Pixels from clip edge that activate trim mode
 const TRIM_HANDLE_PX: f64 = 10.0;
-const MUSIC_GEN_MIN_DURATION_NS: u64 = 1_000_000_000;
+const MUSIC_GEN_MIN_DURATION_NS: u64 = crate::units::NS_PER_SECOND;
 const MUSIC_GEN_MAX_DURATION_NS: u64 = 30 * MUSIC_GEN_MIN_DURATION_NS;
 
 fn track_row_height(track: &crate::model::track::Track) -> f64 {
@@ -2688,32 +2688,10 @@ impl TimelineState {
 
         // Helper: rebase an internal clip to the parent timeline, accounting
         // for source_in (non-zero after a razor cut) and clipping to the
-        // visible [source_in, source_out] window.
-        let rebase_clip = |mut clip: Clip| -> Option<Clip> {
-            // Skip clips entirely outside the visible window
-            if clip.timeline_end() <= compound_source_in
-                || clip.timeline_start >= compound_source_out
-            {
-                return None;
-            }
-            // Trim clips that partially overlap window boundaries
-            let orig_duration = clip.duration();
-            let left_trim = compound_source_in.saturating_sub(clip.timeline_start);
-            if left_trim > 0 {
-                clip.source_in = clip.source_in.saturating_add(left_trim);
-                clip.timeline_start = compound_source_in;
-            }
-            let mut right_trim = 0u64;
-            if clip.timeline_end() > compound_source_out {
-                right_trim = clip.timeline_end() - compound_source_out;
-                clip.source_out = clip.source_out.saturating_sub(right_trim);
-            }
-            // Rebase keyframes and subtitles so they stay aligned with clip content
-            if left_trim > 0 || right_trim > 0 {
-                let range_end = orig_duration.saturating_sub(right_trim);
-                clip.retain_keyframes_in_local_range(left_trim, range_end);
-                clip.retain_subtitles_in_local_range(left_trim, range_end);
-            }
+        // visible [source_in, source_out] window. Skip / trim / keyframe and
+        // subtitle rebasing all happen inside `Clip::rebase_to_window`.
+        let rebase_clip = |clip: Clip| -> Option<Clip> {
+            let mut clip = clip.rebase_to_window(compound_source_in, compound_source_out)?;
             // After windowing, timeline_start >= source_in, so this
             // subtraction is safe. Add compound's parent position to get
             // the absolute timeline position without u64 underflow.
@@ -2742,7 +2720,7 @@ impl TimelineState {
 
         // Add rebased internal video clips to compound's track
         for int_track in &internal_tracks {
-            if int_track.kind == crate::model::track::TrackKind::Video {
+            if int_track.is_video() {
                 for clip in int_track.clips.clone() {
                     if let Some(rebased) = rebase_clip(clip) {
                         new_clips.push(rebased);
@@ -2760,16 +2738,13 @@ impl TimelineState {
         // Handle internal audio clips — find first audio track or skip
         let audio_clips: Vec<Clip> = internal_tracks
             .iter()
-            .filter(|t| t.kind == crate::model::track::TrackKind::Audio)
+            .filter(|t| t.is_audio())
             .flat_map(|t| t.clips.clone())
             .filter_map(|c| rebase_clip(c))
             .collect();
 
         if !audio_clips.is_empty() {
-            if let Some(audio_track) = editing_tracks
-                .iter()
-                .find(|t| t.kind == crate::model::track::TrackKind::Audio)
-            {
+            if let Some(audio_track) = editing_tracks.iter().find(|t| t.is_audio()) {
                 let old_clips = audio_track.clips.clone();
                 let mut new_clips = old_clips.clone();
                 new_clips.extend(audio_clips);
@@ -4409,8 +4384,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 let (playhead, track_id, is_video, proj_rc) = {
                     let st = state.borrow();
                     let proj = st.project.borrow();
-                    let valid =
-                        idx < proj.tracks.len() && proj.tracks[idx].kind == TrackKind::Video;
+                    let valid = idx < proj.tracks.len() && proj.tracks[idx].is_video();
                     let tid = proj
                         .tracks
                         .get(idx)
@@ -4485,7 +4459,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 let proj = st.project.borrow();
                 st.resolve_editing_tracks(&proj)
                     .get(idx)
-                    .filter(|track| track.kind == TrackKind::Audio)
+                    .filter(|track| track.is_audio())
                     .map(|track| (track.id.clone(), track.label.clone()))
             });
             let mut status_cb = None;
@@ -7550,7 +7524,7 @@ fn draw_track_row(
     let _ = cr.show_text(&track.label);
 
     // Audio role label (below track name, dimmed).
-    if track.kind == TrackKind::Audio && track.audio_role != crate::model::track::AudioRole::None {
+    if track.is_audio() && track.audio_role != crate::model::track::AudioRole::None {
         let role_label = track.audio_role.short_label();
         let (role_r, role_g, role_b) = match track.audio_role {
             crate::model::track::AudioRole::Dialogue => (0.9, 0.7, 0.3),
@@ -7584,7 +7558,7 @@ fn draw_track_row(
     let _ = cr.show_text("S");
 
     // Duck badge (only for audio tracks).
-    if track.kind == TrackKind::Audio {
+    if track.is_audio() {
         let duck_x = solo_x - TRACK_LABEL_SOLO_BADGE_WIDTH - 2.0;
         let duck_y = solo_y;
         if track.duck {
@@ -8015,7 +7989,7 @@ fn draw_clip(
     }
 
     // ── Thumbnail strip for video clips ──────────────────────────────────
-    if track.kind == TrackKind::Video
+    if track.is_video()
         && clip.kind != crate::model::clip::ClipKind::Title
         && clip.kind != crate::model::clip::ClipKind::Adjustment
         && clip.kind != crate::model::clip::ClipKind::Compound
@@ -8120,7 +8094,7 @@ fn draw_clip(
     }
 
     // ── Waveform for audio clips ───────────────────────────────────────────
-    if track.kind == TrackKind::Audio && cw > 8.0 {
+    if track.is_audio() && cw > 8.0 {
         wcache.request(&clip.source_path);
         // Only compute peaks for the visible portion of the clip to avoid
         // allocating/iterating over tens of thousands of off-screen pixels.
@@ -8150,7 +8124,7 @@ fn draw_clip(
     }
 
     // ── Waveform overlay for video clips (when preference enabled) ────────
-    if track.kind == TrackKind::Video && st.show_waveform_on_video && cw > 8.0 {
+    if track.is_video() && st.show_waveform_on_video && cw > 8.0 {
         wcache.request(&clip.source_path);
         let vis_x0 = cx.max(TRACK_LABEL_WIDTH);
         let vis_x1 = (cx + cw).min(view_width);
@@ -9008,7 +8982,7 @@ mod tests {
         let video_idx = project
             .tracks
             .iter()
-            .position(|t| t.kind == TrackKind::Video)
+            .position(|t| t.is_video())
             .expect("default project should include a video track");
         let track_id = project.tracks[video_idx].id.clone();
         let mut ids = Vec::new();
@@ -9036,7 +9010,7 @@ mod tests {
             .tracks
             .iter()
             .enumerate()
-            .filter_map(|(idx, t)| (t.kind == TrackKind::Video).then_some(idx))
+            .filter_map(|(idx, t)| t.is_video().then_some(idx))
             .collect();
         let first_idx = video_indices[0];
         let second_idx = video_indices[1];
@@ -9072,7 +9046,7 @@ mod tests {
         let audio_idx = project
             .tracks
             .iter()
-            .position(|t| t.kind == TrackKind::Audio)
+            .position(|t| t.is_audio())
             .expect("default project should include an audio track");
         let track_id = project.tracks[audio_idx].id.clone();
         let mut ids = Vec::new();
@@ -9094,7 +9068,7 @@ mod tests {
         let video_idx = project
             .tracks
             .iter()
-            .position(|t| t.kind == TrackKind::Video)
+            .position(|t| t.is_video())
             .expect("default project should include a video track");
 
         let track = &mut project.tracks[video_idx];
@@ -9132,7 +9106,7 @@ mod tests {
         let video_idx = project
             .tracks
             .iter()
-            .position(|t| t.kind == TrackKind::Video)
+            .position(|t| t.is_video())
             .expect("default project should include a video track");
         let track = &mut project.tracks[video_idx];
         track.clips.clear();

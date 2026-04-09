@@ -131,7 +131,7 @@ pub fn write_edl(project: &Project) -> String {
                 let audio_idx = project
                     .tracks
                     .iter()
-                    .filter(|t| t.kind == TrackKind::Audio)
+                    .filter(|t| t.is_audio())
                     .position(|t| t.id == track.id)
                     .unwrap_or(0);
                 if audio_idx == 0 {

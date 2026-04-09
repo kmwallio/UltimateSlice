@@ -334,7 +334,7 @@ fn write_otio_with_mode(
         let target_idx = project
             .tracks
             .iter()
-            .position(|t| t.kind == TrackKind::Video)
+            .position(|t| t.is_video())
             .unwrap_or(0);
         if target_idx < otio_tracks.len() {
             for marker in &project.markers {

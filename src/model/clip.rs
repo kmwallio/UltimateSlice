@@ -3256,6 +3256,44 @@ impl Clip {
     pub fn timeline_end(&self) -> u64 {
         self.timeline_start + self.duration()
     }
+
+    /// Trim a clone of this clip to the visible window `[window_start, window_end)`.
+    ///
+    /// Returns `None` if the clip is entirely outside the window. Keyframes and
+    /// subtitles are rebased to clip-local time so they stay aligned with the
+    /// trimmed content.
+    ///
+    /// **Coordinate space note:** The returned clip's `timeline_start` is still
+    /// in the same space as `self.timeline_start` (clamped up to `window_start`
+    /// if the left edge was trimmed). Callers that need to map the clip into a
+    /// parent timeline must do their own offset arithmetic afterward — see
+    /// `docs/ARCHITECTURE.md` "Compound Clips, Timelines & Coordinate Spaces"
+    /// for the no-underflow rebasing pattern. Folding parent rebasing into this
+    /// helper would re-introduce the 2026-04 compound-clip windowing bugs.
+    pub fn rebase_to_window(&self, window_start: u64, window_end: u64) -> Option<Clip> {
+        if self.timeline_end() <= window_start || self.timeline_start >= window_end {
+            return None;
+        }
+        let mut windowed = self.clone();
+        let orig_duration = windowed.duration();
+
+        let left_trim = window_start.saturating_sub(windowed.timeline_start);
+        if left_trim > 0 {
+            windowed.source_in = windowed.source_in.saturating_add(left_trim);
+            windowed.timeline_start = window_start;
+        }
+        let mut right_trim = 0u64;
+        if windowed.timeline_end() > window_end {
+            right_trim = windowed.timeline_end() - window_end;
+            windowed.source_out = windowed.source_out.saturating_sub(right_trim);
+        }
+        if left_trim > 0 || right_trim > 0 {
+            let range_end = orig_duration.saturating_sub(right_trim);
+            windowed.retain_keyframes_in_local_range(left_trim, range_end);
+            windowed.retain_subtitles_in_local_range(left_trim, range_end);
+        }
+        Some(windowed)
+    }
 }
 
 #[cfg(test)]
@@ -4894,5 +4932,175 @@ mod tests {
             "default volume should be 1.0"
         );
         assert!(!angle.muted, "default muted should be false");
+    }
+
+    // -------------------------------------------------------------------
+    // rebase_to_window — covers the windowing edge cases that the 2026-04
+    // compound-clip session uncovered. Three call sites in window.rs,
+    // export.rs, and timeline/widget.rs all delegate to this helper.
+    // -------------------------------------------------------------------
+
+    fn linear_kf(time_ns: u64, value: f64) -> NumericKeyframe {
+        NumericKeyframe {
+            time_ns,
+            value,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        }
+    }
+
+    fn make_subtitle(start_ns: u64, end_ns: u64, text: &str) -> SubtitleSegment {
+        SubtitleSegment {
+            id: "seg-1".to_string(),
+            start_ns,
+            end_ns,
+            text: text.to_string(),
+            words: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn rebase_to_window_clip_entirely_before_returns_none() {
+        // Clip occupies [0, 5s); window starts at 6s.
+        let clip = make_test_clip(5_000_000_000, 0);
+        assert!(clip
+            .rebase_to_window(6_000_000_000, 10_000_000_000)
+            .is_none());
+    }
+
+    #[test]
+    fn rebase_to_window_clip_entirely_after_returns_none() {
+        // Clip occupies [10s, 15s); window ends at 8s.
+        let clip = make_test_clip(5_000_000_000, 10_000_000_000);
+        assert!(clip
+            .rebase_to_window(0, 8_000_000_000)
+            .is_none());
+    }
+
+    #[test]
+    fn rebase_to_window_clip_touching_left_edge_excluded() {
+        // Clip [0, 5s); window [5s, 10s). The skip check uses
+        // `timeline_end() <= window_start`, so a clip whose end exactly meets
+        // window_start contributes nothing.
+        let clip = make_test_clip(5_000_000_000, 0);
+        assert!(clip
+            .rebase_to_window(5_000_000_000, 10_000_000_000)
+            .is_none());
+    }
+
+    #[test]
+    fn rebase_to_window_clip_fully_inside_unchanged() {
+        // Clip [3s, 8s) sits entirely inside window [0, 10s) — no edge trims.
+        let clip = make_test_clip(5_000_000_000, 3_000_000_000);
+        let out = clip
+            .rebase_to_window(0, 10_000_000_000)
+            .expect("clip is inside the window");
+        assert_eq!(out.timeline_start, 3_000_000_000);
+        assert_eq!(out.source_in, 0);
+        assert_eq!(out.source_out, 5_000_000_000);
+    }
+
+    #[test]
+    fn rebase_to_window_trims_left_edge() {
+        // Clip [0, 5s); window [2s, 10s). Left edge is trimmed by 2s.
+        let clip = make_test_clip(5_000_000_000, 0);
+        let out = clip
+            .rebase_to_window(2_000_000_000, 10_000_000_000)
+            .expect("clip overlaps the window");
+        assert_eq!(out.timeline_start, 2_000_000_000);
+        assert_eq!(out.source_in, 2_000_000_000);
+        assert_eq!(out.source_out, 5_000_000_000);
+    }
+
+    #[test]
+    fn rebase_to_window_trims_right_edge() {
+        // Clip [0, 5s); window [0, 3s). Right edge is trimmed by 2s.
+        let clip = make_test_clip(5_000_000_000, 0);
+        let out = clip
+            .rebase_to_window(0, 3_000_000_000)
+            .expect("clip overlaps the window");
+        assert_eq!(out.timeline_start, 0);
+        assert_eq!(out.source_in, 0);
+        assert_eq!(out.source_out, 3_000_000_000);
+    }
+
+    #[test]
+    fn rebase_to_window_trims_both_edges() {
+        // Clip [0, 10s); window [2s, 7s). Both edges are trimmed.
+        let clip = make_test_clip(10_000_000_000, 0);
+        let out = clip
+            .rebase_to_window(2_000_000_000, 7_000_000_000)
+            .expect("clip overlaps the window");
+        assert_eq!(out.timeline_start, 2_000_000_000);
+        assert_eq!(out.source_in, 2_000_000_000);
+        assert_eq!(out.source_out, 7_000_000_000);
+    }
+
+    #[test]
+    fn rebase_to_window_rebases_keyframes_after_left_trim() {
+        // Clip [0, 10s) with scale keyframes at 1s, 4s, 8s. Trim 3s off the
+        // left — the 1s keyframe falls out, the 4s and 8s keyframes shift to
+        // 1s and 5s in clip-local time.
+        let mut clip = make_test_clip(10_000_000_000, 0);
+        clip.scale_keyframes = vec![
+            linear_kf(1_000_000_000, 1.0),
+            linear_kf(4_000_000_000, 1.5),
+            linear_kf(8_000_000_000, 2.0),
+        ];
+        let out = clip
+            .rebase_to_window(3_000_000_000, 20_000_000_000)
+            .expect("clip overlaps the window");
+        let times: Vec<u64> = out.scale_keyframes.iter().map(|k| k.time_ns).collect();
+        assert_eq!(times, vec![1_000_000_000, 5_000_000_000]);
+        // Values are preserved 1:1.
+        let values: Vec<f64> = out.scale_keyframes.iter().map(|k| k.value).collect();
+        assert_eq!(values, vec![1.5, 2.0]);
+    }
+
+    #[test]
+    fn rebase_to_window_rebases_keyframes_after_right_trim() {
+        // Clip [0, 10s) with opacity keyframes at 2s, 6s, 9s. Trim back to
+        // [0, 7s) — the 9s keyframe falls out, others stay in place
+        // (no left trim, so no rebase needed).
+        let mut clip = make_test_clip(10_000_000_000, 0);
+        clip.opacity_keyframes = vec![
+            linear_kf(2_000_000_000, 1.0),
+            linear_kf(6_000_000_000, 0.5),
+            linear_kf(9_000_000_000, 0.0),
+        ];
+        let out = clip
+            .rebase_to_window(0, 7_000_000_000)
+            .expect("clip overlaps the window");
+        let times: Vec<u64> = out.opacity_keyframes.iter().map(|k| k.time_ns).collect();
+        assert_eq!(times, vec![2_000_000_000, 6_000_000_000]);
+    }
+
+    #[test]
+    fn rebase_to_window_rebases_subtitles_after_left_trim() {
+        // Clip [0, 10s) with one subtitle [4s, 6s). Trim 3s off the left;
+        // the subtitle shifts to [1s, 3s) in clip-local time.
+        let mut clip = make_test_clip(10_000_000_000, 0);
+        clip.subtitle_segments
+            .push(make_subtitle(4_000_000_000, 6_000_000_000, "hello"));
+        let out = clip
+            .rebase_to_window(3_000_000_000, 20_000_000_000)
+            .expect("clip overlaps the window");
+        assert_eq!(out.subtitle_segments.len(), 1);
+        assert_eq!(out.subtitle_segments[0].start_ns, 1_000_000_000);
+        assert_eq!(out.subtitle_segments[0].end_ns, 3_000_000_000);
+    }
+
+    #[test]
+    fn rebase_to_window_does_not_mutate_self() {
+        // Sanity check: the helper takes &self and clones, so the original
+        // clip's state must be unchanged after the call.
+        let mut clip = make_test_clip(10_000_000_000, 0);
+        clip.scale_keyframes = vec![linear_kf(5_000_000_000, 1.0)];
+        let _ = clip.rebase_to_window(2_000_000_000, 7_000_000_000);
+        assert_eq!(clip.timeline_start, 0);
+        assert_eq!(clip.source_in, 0);
+        assert_eq!(clip.source_out, 10_000_000_000);
+        assert_eq!(clip.scale_keyframes.len(), 1);
+        assert_eq!(clip.scale_keyframes[0].time_ns, 5_000_000_000);
     }
 }

@@ -9,7 +9,7 @@ use gtk4::{
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-const NS_PER_SECOND: f64 = 1_000_000_000.0;
+use crate::units::NS_PER_SECOND_F as NS_PER_SECOND;
 /// Default frame duration at 24 fps (nanoseconds)
 const DEFAULT_FRAME_NS: u64 = 41_666_667;
 
