@@ -62,24 +62,22 @@ Audit sites that currently use the explicit drop pattern and migrate them
 to the helper. The helper makes intent obvious and removes the easy-to-miss
 explicit `drop(st);` line.
 
-### P0.2 — Silent failures with `let _ =`
-**Files:**
-- `src/media/tracking.rs` — 8 sites (file ops, process kill, channel sends)
-- `src/media/animated_svg.rs` — 4 sites (file removal)
-- `src/media/program_player.rs` — 5+ sites (GStreamer state, frame pulls)
+### ~~P0.2 — Silent failures with `let _ =`~~ ✅ DONE (program_player GStreamer state-changes still pending)
 
-The `let _ = op;` pattern silently drops errors. In background threads
-(tracking, animated SVG render, program player) this can mask hangs and
-unexpected job failures. Replace with:
-
-```rust
-if let Err(e) = op {
-    log::warn!("op failed: {e}");
-}
-```
-
-If failure is genuinely uninteresting, leave the discard but add a comment
-explaining why it's safe to ignore.
+> **Landed:** All 8 cited sites in `tracking.rs`, all 4 in `animated_svg.rs`,
+> and the 2 appsink drain sites in `program_player.rs` now either log a
+> `warn!` (for cache dir creation, work channel sends, partial-file cleanup)
+> or carry an explanatory comment (for genuinely uninteresting discards like
+> cache-file-already-gone, periodic progress channel sends, child kill/wait
+> races on cancel, scope appsink drains).
+>
+> **Still pending:** the ~230 `let _ = self.pipeline.set_state(…)` and
+> `let _ = decoder.seek(…)` sites in `program_player.rs` are intentionally
+> deferred. Many of those are in shutdown / cleanup / fast-path code where
+> partial failures are expected during state transitions, and a blanket
+> sweep would generate noise without surfacing actionable errors. Pick them
+> up alongside the P3.1 program_player split where each one can be reviewed
+> in the context of its containing function.
 
 ### P0.3 — `Result<_, String>` mixed with `anyhow::Result`
 Eighteen files return `Result<_, String>` while neighbours return
@@ -158,32 +156,18 @@ impl Clip {
 All three sites collapse to a single call. The architectural invariant
 becomes impossible to forget because the helper enforces it.
 
-### P1.2 — MCP argument extraction boilerplate
-**File:** `src/mcp/server.rs` (lines roughly 2041-2600)
+### ~~P1.2 — MCP argument extraction boilerplate~~ ✅ DONE
 
-40+ instances of `args["key"].as_str().unwrap_or("")`, 20+ of
-`as_f64().unwrap_or(default)`, 15+ of `as_bool().unwrap_or(false)`. The
-worst single block is the color-correction extraction at lines 2235-2253
-(19 near-identical lines).
-
-Add small macros (or methods on a thin `&Value` wrapper):
-
-```rust
-macro_rules! arg_str { ($args:expr, $key:expr) => {
-    $args[$key].as_str().unwrap_or("").to_string()
-}; }
-
-macro_rules! arg_f64 { ($args:expr, $key:expr, $default:expr) => {
-    $args[$key].as_f64().unwrap_or($default)
-}; }
-
-macro_rules! arg_bool { ($args:expr, $key:expr) => {
-    $args[$key].as_bool().unwrap_or(false)
-}; }
-```
-
-Also helpful: `arg_string_array!`, `arg_f64_map!` for the array/object
-patterns at lines 2172-2191 and 2085-2093.
+> **Landed:** five `arg_str!` / `arg_bool!` / `arg_f64!` / `arg_u64!` /
+> `arg_i64!` macros in `src/mcp/server.rs`, replacing **191 inline sites**
+> (the plan's "75+" estimate was low). Each macro has two forms — with and
+> without an explicit default — to cover the empty-default and the
+> per-tool custom-default cases (`"smooth"`, `"medium"`, `"none"`, etc.).
+>
+> **Still pending:** `arg_string_array!` and `arg_f64_map!` for the array/
+> object extraction patterns. The current implementations of those (e.g.
+> the LADSPA params object at server.rs ~2086) are short enough that a
+> macro doesn't pay for itself; promote later if a third site appears.
 
 ### P1.3 — Manual `project.tracks` iteration where recursive helpers exist
 **(touches compound clips)**

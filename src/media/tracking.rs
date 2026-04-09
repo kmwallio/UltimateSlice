@@ -654,7 +654,12 @@ impl TrackingCache {
         let (work_tx, work_rx) = mpsc::channel::<TrackingWorkerJob>();
         let work_rx = Arc::new(std::sync::Mutex::new(work_rx));
         let cache_root = tracking_cache_root();
-        let _ = std::fs::create_dir_all(&cache_root);
+        if let Err(e) = std::fs::create_dir_all(&cache_root) {
+            log::warn!(
+                "tracking: failed to create cache dir {}: {e}",
+                cache_root.display()
+            );
+        }
 
         let worker_count = 2;
         for _ in 0..worker_count {
@@ -730,12 +735,16 @@ impl TrackingCache {
         self.cancel_flags
             .insert(cache_key.clone(), cancel_flag.clone());
         if let Some(ref tx) = self.work_tx {
-            let _ = tx.send(TrackingWorkerJob {
+            if let Err(e) = tx.send(TrackingWorkerJob {
                 cache_key: cache_key.clone(),
                 job,
                 cancel_flag,
                 cache_path,
-            });
+            }) {
+                log::warn!(
+                    "tracking: failed to enqueue work for {cache_key}: worker channel disconnected ({e})"
+                );
+            }
         }
         cache_key
     }
@@ -843,6 +852,8 @@ impl TrackingCache {
         self.results.remove(cache_key);
         self.failed.remove(cache_key);
         self.progress_by_key.remove(cache_key);
+        // Cache file may not exist yet (invalidating before any analysis ran).
+        // ENOENT is the expected case here, so we don't surface failures.
         let _ = std::fs::remove_file(self.cache_path_for_key(cache_key));
     }
 
@@ -855,7 +866,14 @@ impl TrackingCache {
         self.last_error = None;
         if let Ok(entries) = std::fs::read_dir(&self.cache_root) {
             for entry in entries.flatten() {
-                let _ = std::fs::remove_file(entry.path());
+                // Best-effort sweep — a single failure shouldn't abort the
+                // rest. The user can re-trigger invalidate_all if needed.
+                if let Err(e) = std::fs::remove_file(entry.path()) {
+                    log::warn!(
+                        "tracking: failed to remove cache file {}: {e}",
+                        entry.path().display()
+                    );
+                }
             }
         }
     }
@@ -966,6 +984,10 @@ fn analyze_tracking_job(
     let frames = extract_gray_frames(job, &worker_job.cancel_flag)?;
     let analysis =
         track_motion_in_frames(&frames, job, &worker_job.cancel_flag, |processed, total| {
+            // Periodic progress update — main thread may have dropped the
+            // receiver if the user closed the project. A dropped progress
+            // message is not fatal: the worker continues, the cache file
+            // is still written on completion, and a future poll picks it up.
             let _ = progress_tx.send(WorkerUpdate::Progress {
                 cache_key: worker_job.cache_key.clone(),
                 processed_samples: processed,
@@ -1103,6 +1125,8 @@ fn extract_gray_frames(
 
     let status = loop {
         if cancel_flag.load(Ordering::Relaxed) {
+            // ffmpeg child cleanup on cancel: kill+wait may race if the
+            // process already exited; either way we just want it gone.
             let _ = child.kill();
             let _ = child.wait();
             return Err((TrackingFailure::Cancelled, "Tracking canceled".to_string()));
@@ -1111,6 +1135,7 @@ fn extract_gray_frames(
             Ok(Some(status)) => break status,
             Ok(None) => std::thread::sleep(Duration::from_millis(25)),
             Err(e) => {
+                // Same race as above — kill+wait are best-effort.
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err((

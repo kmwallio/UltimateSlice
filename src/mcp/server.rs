@@ -2010,6 +2010,59 @@ fn tool_error_payload(code: i32, message: impl Into<String>) -> Value {
     json!({"code": code, "message": message.into()})
 }
 
+// -----------------------------------------------------------------------
+// MCP argument extraction macros
+// -----------------------------------------------------------------------
+//
+// `dispatch_tool_payload` and the per-tool match arms below historically
+// repeated `arg_str!(args, "key")` and friends
+// hundreds of times. These macros compress that boilerplate. Each macro has
+// two forms: one with no default (uses the type's empty / falsy value) and
+// one with an explicit default. Returning `String` for `arg_str!` matches
+// the dominant call style — every existing site immediately called
+// `.to_string()` on the borrowed `&str`.
+
+/// Extract a JSON string argument as `String`. Default: empty string.
+macro_rules! arg_str {
+    ($args:expr, $key:expr) => {
+        $args[$key].as_str().unwrap_or("").to_string()
+    };
+    ($args:expr, $key:expr, $default:expr) => {
+        $args[$key].as_str().unwrap_or($default).to_string()
+    };
+}
+
+/// Extract a JSON bool argument. Default: `false`.
+macro_rules! arg_bool {
+    ($args:expr, $key:expr) => {
+        $args[$key].as_bool().unwrap_or(false)
+    };
+    ($args:expr, $key:expr, $default:expr) => {
+        $args[$key].as_bool().unwrap_or($default)
+    };
+}
+
+/// Extract a JSON `f64` argument. Caller-supplied default.
+macro_rules! arg_f64 {
+    ($args:expr, $key:expr, $default:expr) => {
+        $args[$key].as_f64().unwrap_or($default)
+    };
+}
+
+/// Extract a JSON `u64` argument. Caller-supplied default.
+macro_rules! arg_u64 {
+    ($args:expr, $key:expr, $default:expr) => {
+        $args[$key].as_u64().unwrap_or($default)
+    };
+}
+
+/// Extract a JSON `i64` argument. Caller-supplied default.
+macro_rules! arg_i64 {
+    ($args:expr, $key:expr, $default:expr) => {
+        $args[$key].as_i64().unwrap_or($default)
+    };
+}
+
 fn is_cacheable_read_tool(name: &str) -> bool {
     matches!(
         name,
@@ -2049,39 +2102,39 @@ fn dispatch_tool_payload(
     let cmd = match name {
         "get_project" => McpCommand::GetProject { reply: tx },
         "list_tracks" => McpCommand::ListTracks {
-            compact: args["compact"].as_bool().unwrap_or(false),
+            compact: arg_bool!(args, "compact"),
             reply: tx,
         },
         "list_clips" => McpCommand::ListClips {
-            compact: args["compact"].as_bool().unwrap_or(false),
+            compact: arg_bool!(args, "compact"),
             reply: tx,
         },
         "get_timeline_settings" => McpCommand::GetTimelineSettings { reply: tx },
         "get_playhead_position" => McpCommand::GetPlayheadPosition { reply: tx },
         "get_performance_snapshot" => McpCommand::GetPerformanceSnapshot { reply: tx },
         "set_magnetic_mode" => McpCommand::SetMagneticMode {
-            enabled: args["enabled"].as_bool().unwrap_or(false),
+            enabled: arg_bool!(args, "enabled"),
             reply: tx,
         },
         "set_track_solo" => McpCommand::SetTrackSolo {
-            track_id: args["track_id"].as_str().unwrap_or("").to_string(),
-            solo: args["solo"].as_bool().unwrap_or(false),
+            track_id: arg_str!(args, "track_id"),
+            solo: arg_bool!(args, "solo"),
             reply: tx,
         },
         "list_ladspa_plugins" => McpCommand::ListLadspaPlugins { reply: tx },
         "add_clip_ladspa_effect" => McpCommand::AddClipLadspaEffect {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
-            plugin_name: args["plugin_name"].as_str().unwrap_or("").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
+            plugin_name: arg_str!(args, "plugin_name"),
             reply: tx,
         },
         "remove_clip_ladspa_effect" => McpCommand::RemoveClipLadspaEffect {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
-            effect_id: args["effect_id"].as_str().unwrap_or("").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
+            effect_id: arg_str!(args, "effect_id"),
             reply: tx,
         },
         "set_clip_ladspa_effect_params" => McpCommand::SetClipLadspaEffectParams {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
-            effect_id: args["effect_id"].as_str().unwrap_or("").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
+            effect_id: arg_str!(args, "effect_id"),
             params: args
                 .get("params")
                 .and_then(|v| v.as_object())
@@ -2094,17 +2147,17 @@ fn dispatch_tool_payload(
             reply: tx,
         },
         "set_track_role" => McpCommand::SetTrackRole {
-            track_id: args["track_id"].as_str().unwrap_or("").to_string(),
-            role: args["role"].as_str().unwrap_or("none").to_string(),
+            track_id: arg_str!(args, "track_id"),
+            role: arg_str!(args, "role", "none"),
             reply: tx,
         },
         "set_track_duck" => McpCommand::SetTrackDuck {
-            track_id: args["track_id"].as_str().unwrap_or("").to_string(),
-            duck: args["duck"].as_bool().unwrap_or(false),
+            track_id: arg_str!(args, "track_id"),
+            duck: arg_bool!(args, "duck"),
             reply: tx,
         },
         "set_track_height_preset" => McpCommand::SetTrackHeightPreset {
-            track_id: args["track_id"].as_str().unwrap_or("").to_string(),
+            track_id: arg_str!(args, "track_id"),
             height_preset: args["height_preset"]
                 .as_str()
                 .unwrap_or("medium")
@@ -2114,15 +2167,15 @@ fn dispatch_tool_payload(
         "close_source_preview" => McpCommand::CloseSourcePreview { reply: tx },
         "get_preferences" => McpCommand::GetPreferences { reply: tx },
         "set_hardware_acceleration" => McpCommand::SetHardwareAcceleration {
-            enabled: args["enabled"].as_bool().unwrap_or(false),
+            enabled: arg_bool!(args, "enabled"),
             reply: tx,
         },
         "set_playback_priority" => McpCommand::SetPlaybackPriority {
-            priority: args["priority"].as_str().unwrap_or("smooth").to_string(),
+            priority: arg_str!(args, "priority", "smooth"),
             reply: tx,
         },
         "set_source_playback_priority" => McpCommand::SetSourcePlaybackPriority {
-            priority: args["priority"].as_str().unwrap_or("smooth").to_string(),
+            priority: arg_str!(args, "priority", "smooth"),
             reply: tx,
         },
         "set_crossfade_settings" => {
@@ -2150,22 +2203,22 @@ fn dispatch_tool_payload(
         }
 
         "add_clip" => McpCommand::AddClip {
-            source_path: args["source_path"].as_str().unwrap_or("").to_string(),
-            track_index: args["track_index"].as_u64().unwrap_or(0) as usize,
-            timeline_start_ns: args["timeline_start_ns"].as_u64().unwrap_or(0),
-            source_in_ns: args["source_in_ns"].as_u64().unwrap_or(0),
-            source_out_ns: args["source_out_ns"].as_u64().unwrap_or(0),
+            source_path: arg_str!(args, "source_path"),
+            track_index: arg_u64!(args, "track_index", 0) as usize,
+            timeline_start_ns: arg_u64!(args, "timeline_start_ns", 0),
+            source_in_ns: arg_u64!(args, "source_in_ns", 0),
+            source_out_ns: arg_u64!(args, "source_out_ns", 0),
             reply: tx,
         },
 
         "remove_clip" => McpCommand::RemoveClip {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
             reply: tx,
         },
 
         "move_clip" => McpCommand::MoveClip {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
-            new_start_ns: args["new_start_ns"].as_u64().unwrap_or(0),
+            clip_id: arg_str!(args, "clip_id"),
+            new_start_ns: arg_u64!(args, "new_start_ns", 0),
             reply: tx,
         },
         "link_clips" => McpCommand::LinkClips {
@@ -2203,15 +2256,15 @@ fn dispatch_tool_payload(
         },
 
         "trim_clip" => McpCommand::TrimClip {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
-            source_in_ns: args["source_in_ns"].as_u64().unwrap_or(0),
-            source_out_ns: args["source_out_ns"].as_u64().unwrap_or(0),
+            clip_id: arg_str!(args, "clip_id"),
+            source_in_ns: arg_u64!(args, "source_in_ns", 0),
+            source_out_ns: arg_u64!(args, "source_out_ns", 0),
             reply: tx,
         },
 
         "set_clip_speed" => McpCommand::SetClipSpeed {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
-            speed: args["speed"].as_f64().unwrap_or(1.0),
+            clip_id: arg_str!(args, "clip_id"),
+            speed: arg_f64!(args, "speed", 1.0),
             slow_motion_interp: args["slow_motion_interp"]
                 .as_str()
                 .map(|s| s.to_string()),
@@ -2219,48 +2272,48 @@ fn dispatch_tool_payload(
         },
 
         "slip_clip" => McpCommand::SlipClip {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
-            delta_ns: args["delta_ns"].as_i64().unwrap_or(0),
+            clip_id: arg_str!(args, "clip_id"),
+            delta_ns: arg_i64!(args, "delta_ns", 0),
             reply: tx,
         },
 
         "slide_clip" => McpCommand::SlideClip {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
-            delta_ns: args["delta_ns"].as_i64().unwrap_or(0),
+            clip_id: arg_str!(args, "clip_id"),
+            delta_ns: arg_i64!(args, "delta_ns", 0),
             reply: tx,
         },
 
         "set_clip_color" => McpCommand::SetClipColor {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
-            brightness: args["brightness"].as_f64().unwrap_or(0.0),
-            contrast: args["contrast"].as_f64().unwrap_or(1.0),
-            saturation: args["saturation"].as_f64().unwrap_or(1.0),
-            temperature: args["temperature"].as_f64().unwrap_or(6500.0),
-            tint: args["tint"].as_f64().unwrap_or(0.0),
-            denoise: args["denoise"].as_f64().unwrap_or(0.0),
-            sharpness: args["sharpness"].as_f64().unwrap_or(0.0),
-            blur: args["blur"].as_f64().unwrap_or(0.0),
-            shadows: args["shadows"].as_f64().unwrap_or(0.0),
-            midtones: args["midtones"].as_f64().unwrap_or(0.0),
-            highlights: args["highlights"].as_f64().unwrap_or(0.0),
-            exposure: args["exposure"].as_f64().unwrap_or(0.0),
-            black_point: args["black_point"].as_f64().unwrap_or(0.0),
-            highlights_warmth: args["highlights_warmth"].as_f64().unwrap_or(0.0),
-            highlights_tint: args["highlights_tint"].as_f64().unwrap_or(0.0),
-            midtones_warmth: args["midtones_warmth"].as_f64().unwrap_or(0.0),
-            midtones_tint: args["midtones_tint"].as_f64().unwrap_or(0.0),
-            shadows_warmth: args["shadows_warmth"].as_f64().unwrap_or(0.0),
-            shadows_tint: args["shadows_tint"].as_f64().unwrap_or(0.0),
+            clip_id: arg_str!(args, "clip_id"),
+            brightness: arg_f64!(args, "brightness", 0.0),
+            contrast: arg_f64!(args, "contrast", 1.0),
+            saturation: arg_f64!(args, "saturation", 1.0),
+            temperature: arg_f64!(args, "temperature", 6500.0),
+            tint: arg_f64!(args, "tint", 0.0),
+            denoise: arg_f64!(args, "denoise", 0.0),
+            sharpness: arg_f64!(args, "sharpness", 0.0),
+            blur: arg_f64!(args, "blur", 0.0),
+            shadows: arg_f64!(args, "shadows", 0.0),
+            midtones: arg_f64!(args, "midtones", 0.0),
+            highlights: arg_f64!(args, "highlights", 0.0),
+            exposure: arg_f64!(args, "exposure", 0.0),
+            black_point: arg_f64!(args, "black_point", 0.0),
+            highlights_warmth: arg_f64!(args, "highlights_warmth", 0.0),
+            highlights_tint: arg_f64!(args, "highlights_tint", 0.0),
+            midtones_warmth: arg_f64!(args, "midtones_warmth", 0.0),
+            midtones_tint: arg_f64!(args, "midtones_tint", 0.0),
+            shadows_warmth: arg_f64!(args, "shadows_warmth", 0.0),
+            shadows_tint: arg_f64!(args, "shadows_tint", 0.0),
             reply: tx,
         },
         "set_clip_color_label" => McpCommand::SetClipColorLabel {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
-            color_label: args["color_label"].as_str().unwrap_or("none").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
+            color_label: arg_str!(args, "color_label", "none"),
             reply: tx,
         },
 
         "set_clip_chroma_key" => McpCommand::SetClipChromaKey {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
             enabled: args.get("enabled").and_then(|v| v.as_bool()),
             color: args.get("color").and_then(|v| v.as_u64()).map(|v| v as u32),
             tolerance: args.get("tolerance").and_then(|v| v.as_f64()),
@@ -2269,14 +2322,14 @@ fn dispatch_tool_payload(
         },
 
         "set_clip_bg_removal" => McpCommand::SetClipBgRemoval {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
             enabled: args.get("enabled").and_then(|v| v.as_bool()),
             threshold: args.get("threshold").and_then(|v| v.as_f64()),
             reply: tx,
         },
 
         "set_clip_mask" => McpCommand::SetClipMask {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
             enabled: args.get("enabled").and_then(|v| v.as_bool()),
             shape: args
                 .get("shape")
@@ -2295,22 +2348,22 @@ fn dispatch_tool_payload(
         },
 
         "set_project_title" => McpCommand::SetTitle {
-            title: args["title"].as_str().unwrap_or("").to_string(),
+            title: arg_str!(args, "title"),
             reply: tx,
         },
 
         "save_fcpxml" => McpCommand::SaveFcpxml {
-            path: args["path"].as_str().unwrap_or("").to_string(),
+            path: arg_str!(args, "path"),
             reply: tx,
         },
 
         "save_edl" => McpCommand::SaveEdl {
-            path: args["path"].as_str().unwrap_or("").to_string(),
+            path: arg_str!(args, "path"),
             reply: tx,
         },
 
         "save_otio" => McpCommand::SaveOtio {
-            path: args["path"].as_str().unwrap_or("").to_string(),
+            path: arg_str!(args, "path"),
             path_mode: args
                 .get("path_mode")
                 .and_then(|v| v.as_str())
@@ -2320,12 +2373,12 @@ fn dispatch_tool_payload(
         },
 
         "save_project_with_media" => McpCommand::SaveProjectWithMedia {
-            path: args["path"].as_str().unwrap_or("").to_string(),
+            path: arg_str!(args, "path"),
             reply: tx,
         },
 
         "collect_project_files" => {
-            let directory_path = args["directory_path"].as_str().unwrap_or("").to_string();
+            let directory_path = arg_str!(args, "directory_path");
             if directory_path.is_empty() {
                 return Err(tool_error_payload(-32602, "directory_path is required"));
             }
@@ -2354,78 +2407,78 @@ fn dispatch_tool_payload(
         }
 
         "open_fcpxml" => McpCommand::OpenFcpxml {
-            path: args["path"].as_str().unwrap_or("").to_string(),
+            path: arg_str!(args, "path"),
             reply: tx,
         },
 
         "open_otio" => McpCommand::OpenOtio {
-            path: args["path"].as_str().unwrap_or("").to_string(),
+            path: arg_str!(args, "path"),
             reply: tx,
         },
 
         "export_mp4" => McpCommand::ExportMp4 {
-            path: args["path"].as_str().unwrap_or("").to_string(),
+            path: arg_str!(args, "path"),
             reply: tx,
         },
 
         "list_export_presets" => McpCommand::ListExportPresets { reply: tx },
 
         "save_export_preset" => McpCommand::SaveExportPreset {
-            name: args["name"].as_str().unwrap_or("").to_string(),
-            video_codec: args["video_codec"].as_str().unwrap_or("h264").to_string(),
-            container: args["container"].as_str().unwrap_or("mp4").to_string(),
-            output_width: args["output_width"].as_u64().unwrap_or(0) as u32,
-            output_height: args["output_height"].as_u64().unwrap_or(0) as u32,
-            crf: args["crf"].as_u64().unwrap_or(23) as u32,
-            audio_codec: args["audio_codec"].as_str().unwrap_or("aac").to_string(),
-            audio_bitrate_kbps: args["audio_bitrate_kbps"].as_u64().unwrap_or(192) as u32,
+            name: arg_str!(args, "name"),
+            video_codec: arg_str!(args, "video_codec", "h264"),
+            container: arg_str!(args, "container", "mp4"),
+            output_width: arg_u64!(args, "output_width", 0) as u32,
+            output_height: arg_u64!(args, "output_height", 0) as u32,
+            crf: arg_u64!(args, "crf", 23) as u32,
+            audio_codec: arg_str!(args, "audio_codec", "aac"),
+            audio_bitrate_kbps: arg_u64!(args, "audio_bitrate_kbps", 192) as u32,
             reply: tx,
         },
 
         "delete_export_preset" => McpCommand::DeleteExportPreset {
-            name: args["name"].as_str().unwrap_or("").to_string(),
+            name: arg_str!(args, "name"),
             reply: tx,
         },
 
         "list_workspace_layouts" => McpCommand::ListWorkspaceLayouts { reply: tx },
 
         "save_workspace_layout" => McpCommand::SaveWorkspaceLayout {
-            name: args["name"].as_str().unwrap_or("").to_string(),
+            name: arg_str!(args, "name"),
             reply: tx,
         },
 
         "apply_workspace_layout" => McpCommand::ApplyWorkspaceLayout {
-            name: args["name"].as_str().unwrap_or("").to_string(),
+            name: arg_str!(args, "name"),
             reply: tx,
         },
 
         "rename_workspace_layout" => McpCommand::RenameWorkspaceLayout {
-            old_name: args["old_name"].as_str().unwrap_or("").to_string(),
-            new_name: args["new_name"].as_str().unwrap_or("").to_string(),
+            old_name: arg_str!(args, "old_name"),
+            new_name: arg_str!(args, "new_name"),
             reply: tx,
         },
 
         "delete_workspace_layout" => McpCommand::DeleteWorkspaceLayout {
-            name: args["name"].as_str().unwrap_or("").to_string(),
+            name: arg_str!(args, "name"),
             reply: tx,
         },
 
         "reset_workspace_layout" => McpCommand::ResetWorkspaceLayout { reply: tx },
 
         "export_with_preset" => McpCommand::ExportWithPreset {
-            path: args["path"].as_str().unwrap_or("").to_string(),
-            preset_name: args["preset_name"].as_str().unwrap_or("").to_string(),
+            path: arg_str!(args, "path"),
+            preset_name: arg_str!(args, "preset_name"),
             reply: tx,
         },
 
         "list_library" => McpCommand::ListLibrary { reply: tx },
 
         "import_media" => McpCommand::ImportMedia {
-            path: args["path"].as_str().unwrap_or("").to_string(),
+            path: arg_str!(args, "path"),
             reply: tx,
         },
         "relink_media" => McpCommand::RelinkMedia {
-            root_path: args["root_path"].as_str().unwrap_or("").to_string(),
+            root_path: arg_str!(args, "root_path"),
             reply: tx,
         },
 
@@ -2706,15 +2759,15 @@ fn dispatch_tool_payload(
         }
 
         "reorder_track" => McpCommand::ReorderTrack {
-            from_index: args["from_index"].as_u64().unwrap_or(0) as usize,
-            to_index: args["to_index"].as_u64().unwrap_or(0) as usize,
+            from_index: arg_u64!(args, "from_index", 0) as usize,
+            to_index: arg_u64!(args, "to_index", 0) as usize,
             reply: tx,
         },
         "set_transition" => McpCommand::SetTransition {
-            track_index: args["track_index"].as_u64().unwrap_or(0) as usize,
-            clip_index: args["clip_index"].as_u64().unwrap_or(0) as usize,
-            kind: args["kind"].as_str().unwrap_or("").to_string(),
-            duration_ns: args["duration_ns"].as_u64().unwrap_or(0),
+            track_index: arg_u64!(args, "track_index", 0) as usize,
+            clip_index: arg_u64!(args, "clip_index", 0) as usize,
+            kind: arg_str!(args, "kind"),
+            duration_ns: arg_u64!(args, "duration_ns", 0),
             alignment: args["alignment"]
                 .as_str()
                 .unwrap_or("end_on_cut")
@@ -2722,15 +2775,15 @@ fn dispatch_tool_payload(
             reply: tx,
         },
         "set_proxy_mode" => McpCommand::SetProxyMode {
-            mode: args["mode"].as_str().unwrap_or("off").to_string(),
+            mode: arg_str!(args, "mode", "off"),
             reply: tx,
         },
         "set_proxy_sidecar_persistence" => McpCommand::SetProxySidecarPersistence {
-            enabled: args["enabled"].as_bool().unwrap_or(false),
+            enabled: arg_bool!(args, "enabled"),
             reply: tx,
         },
         "set_clip_lut" => McpCommand::SetClipLut {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
             lut_paths: {
                 // Accept: array of strings, single string, "lut_paths" key, or legacy "lut_path" key
                 let raw = if !args["lut_paths"].is_null() {
@@ -2750,31 +2803,31 @@ fn dispatch_tool_payload(
             reply: tx,
         },
         "set_clip_transform" => McpCommand::SetClipTransform {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
-            scale: args["scale"].as_f64().unwrap_or(1.0),
-            position_x: args["position_x"].as_f64().unwrap_or(0.0),
-            position_y: args["position_y"].as_f64().unwrap_or(0.0),
+            clip_id: arg_str!(args, "clip_id"),
+            scale: arg_f64!(args, "scale", 1.0),
+            position_x: arg_f64!(args, "position_x", 0.0),
+            position_y: arg_f64!(args, "position_y", 0.0),
             rotate: args["rotate"].as_i64().map(|v| v as i32),
             anamorphic_desqueeze: args["anamorphic_desqueeze"].as_f64(),
             reply: tx,
         },
         "set_clip_opacity" => McpCommand::SetClipOpacity {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
-            opacity: args["opacity"].as_f64().unwrap_or(1.0),
+            clip_id: arg_str!(args, "clip_id"),
+            opacity: arg_f64!(args, "opacity", 1.0),
             reply: tx,
         },
         "set_clip_voice_isolation" => McpCommand::SetClipVoiceIsolation {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
-            voice_isolation: args["voice_isolation"].as_f64().unwrap_or(0.0),
+            clip_id: arg_str!(args, "clip_id"),
+            voice_isolation: arg_f64!(args, "voice_isolation", 0.0),
             reply: tx,
         },
         "set_voice_isolation_source" => McpCommand::SetVoiceIsolationSource {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
-            source: args["source"].as_str().unwrap_or("subtitles").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
+            source: arg_str!(args, "source", "subtitles"),
             reply: tx,
         },
         "set_voice_isolation_silence_params" => McpCommand::SetVoiceIsolationSilenceParams {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
             threshold_db: args.get("threshold_db").and_then(|v| v.as_f64()),
             min_ms: args
                 .get("min_ms")
@@ -2783,15 +2836,15 @@ fn dispatch_tool_payload(
             reply: tx,
         },
         "suggest_voice_isolation_threshold" => McpCommand::SuggestVoiceIsolationThreshold {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
             reply: tx,
         },
         "analyze_voice_isolation_silence" => McpCommand::AnalyzeVoiceIsolationSilence {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
             reply: tx,
         },
         "set_clip_eq" => McpCommand::SetClipEq {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
             low_freq: args.get("low_freq").and_then(|v| v.as_f64()),
             low_gain: args.get("low_gain").and_then(|v| v.as_f64()),
             low_q: args.get("low_q").and_then(|v| v.as_f64()),
@@ -2804,7 +2857,7 @@ fn dispatch_tool_payload(
             reply: tx,
         },
         "normalize_clip_audio" => McpCommand::NormalizeClipAudio {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
             mode: args
                 .get("mode")
                 .and_then(|v| v.as_str())
@@ -2817,7 +2870,7 @@ fn dispatch_tool_payload(
             reply: tx,
         },
         "match_clip_audio" => McpCommand::MatchClipAudio {
-            source_clip_id: args["source_clip_id"].as_str().unwrap_or("").to_string(),
+            source_clip_id: arg_str!(args, "source_clip_id"),
             source_start_ns: args.get("source_start_ns").and_then(|v| v.as_u64()),
             source_end_ns: args.get("source_end_ns").and_then(|v| v.as_u64()),
             source_channel_mode: crate::media::audio_match::AudioMatchChannelMode::from_str(
@@ -2825,7 +2878,7 @@ fn dispatch_tool_payload(
                     .and_then(|v| v.as_str())
                     .unwrap_or("auto"),
             ),
-            reference_clip_id: args["reference_clip_id"].as_str().unwrap_or("").to_string(),
+            reference_clip_id: arg_str!(args, "reference_clip_id"),
             reference_start_ns: args.get("reference_start_ns").and_then(|v| v.as_u64()),
             reference_end_ns: args.get("reference_end_ns").and_then(|v| v.as_u64()),
             reference_channel_mode: crate::media::audio_match::AudioMatchChannelMode::from_str(
@@ -2836,8 +2889,8 @@ fn dispatch_tool_payload(
             reply: tx,
         },
         "detect_scene_cuts" => McpCommand::DetectSceneCuts {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
-            track_id: args["track_id"].as_str().unwrap_or("").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
+            track_id: arg_str!(args, "track_id"),
             threshold: args
                 .get("threshold")
                 .and_then(|v| v.as_f64())
@@ -2845,7 +2898,7 @@ fn dispatch_tool_payload(
             reply: tx,
         },
         "generate_music" => McpCommand::GenerateMusic {
-            prompt: args["prompt"].as_str().unwrap_or("").to_string(),
+            prompt: arg_str!(args, "prompt"),
             duration_secs: args
                 .get("duration_secs")
                 .and_then(|v| v.as_f64())
@@ -2863,7 +2916,7 @@ fn dispatch_tool_payload(
             reply: tx,
         },
         "record_voiceover" => McpCommand::RecordVoiceover {
-            duration_ns: args["duration_ns"].as_u64().unwrap_or(0),
+            duration_ns: arg_u64!(args, "duration_ns", 0),
             track_index: args
                 .get("track_index")
                 .and_then(|v| v.as_u64())
@@ -2871,15 +2924,15 @@ fn dispatch_tool_payload(
             reply: tx,
         },
         "set_clip_blend_mode" => McpCommand::SetClipBlendMode {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
-            blend_mode: args["blend_mode"].as_str().unwrap_or("normal").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
+            blend_mode: arg_str!(args, "blend_mode", "normal"),
             reply: tx,
         },
         "set_clip_keyframe" => McpCommand::SetClipKeyframe {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
-            property: args["property"].as_str().unwrap_or("").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
+            property: arg_str!(args, "property"),
             timeline_pos_ns: args.get("timeline_pos_ns").and_then(|v| v.as_u64()),
-            value: args["value"].as_f64().unwrap_or(0.0),
+            value: arg_f64!(args, "value", 0.0),
             interpolation: args
                 .get("interpolation")
                 .and_then(|v| v.as_str())
@@ -2895,41 +2948,41 @@ fn dispatch_tool_payload(
             reply: tx,
         },
         "remove_clip_keyframe" => McpCommand::RemoveClipKeyframe {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
-            property: args["property"].as_str().unwrap_or("").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
+            property: arg_str!(args, "property"),
             timeline_pos_ns: args.get("timeline_pos_ns").and_then(|v| v.as_u64()),
             reply: tx,
         },
 
         "create_project" => McpCommand::CreateProject {
-            title: args["title"].as_str().unwrap_or("Untitled").to_string(),
+            title: arg_str!(args, "title", "Untitled"),
             reply: tx,
         },
 
         "set_gsk_renderer" => McpCommand::SetGskRenderer {
-            renderer: args["renderer"].as_str().unwrap_or("auto").to_string(),
+            renderer: arg_str!(args, "renderer", "auto"),
             reply: tx,
         },
 
         "set_preview_quality" => McpCommand::SetPreviewQuality {
-            quality: args["quality"].as_str().unwrap_or("full").to_string(),
+            quality: arg_str!(args, "quality", "full"),
             reply: tx,
         },
 
         "set_realtime_preview" => McpCommand::SetRealtimePreview {
-            enabled: args["enabled"].as_bool().unwrap_or(false),
+            enabled: arg_bool!(args, "enabled"),
             reply: tx,
         },
 
         "set_experimental_preview_optimizations" => {
             McpCommand::SetExperimentalPreviewOptimizations {
-                enabled: args["enabled"].as_bool().unwrap_or(false),
+                enabled: arg_bool!(args, "enabled"),
                 reply: tx,
             }
         }
 
         "set_background_prerender" => McpCommand::SetBackgroundPrerender {
-            enabled: args["enabled"].as_bool().unwrap_or(false),
+            enabled: arg_bool!(args, "enabled"),
             reply: tx,
         },
         "set_prerender_quality" => {
@@ -2944,27 +2997,27 @@ fn dispatch_tool_payload(
             }
         }
         "set_prerender_project_persistence" => McpCommand::SetPrerenderProjectPersistence {
-            enabled: args["enabled"].as_bool().unwrap_or(false),
+            enabled: arg_bool!(args, "enabled"),
             reply: tx,
         },
         "set_preview_luts" => McpCommand::SetPreviewLuts {
-            enabled: args["enabled"].as_bool().unwrap_or(false),
+            enabled: arg_bool!(args, "enabled"),
             reply: tx,
         },
 
         "insert_clip" => McpCommand::InsertClip {
-            source_path: args["source_path"].as_str().unwrap_or("").to_string(),
-            source_in_ns: args["source_in_ns"].as_u64().unwrap_or(0),
-            source_out_ns: args["source_out_ns"].as_u64().unwrap_or(0),
+            source_path: arg_str!(args, "source_path"),
+            source_in_ns: arg_u64!(args, "source_in_ns", 0),
+            source_out_ns: arg_u64!(args, "source_out_ns", 0),
             track_index: args["track_index"].as_u64().map(|v| v as usize),
             timeline_pos_ns: args["timeline_pos_ns"].as_u64(),
             reply: tx,
         },
 
         "overwrite_clip" => McpCommand::OverwriteClip {
-            source_path: args["source_path"].as_str().unwrap_or("").to_string(),
-            source_in_ns: args["source_in_ns"].as_u64().unwrap_or(0),
-            source_out_ns: args["source_out_ns"].as_u64().unwrap_or(0),
+            source_path: arg_str!(args, "source_path"),
+            source_in_ns: arg_u64!(args, "source_in_ns", 0),
+            source_out_ns: arg_u64!(args, "source_out_ns", 0),
             track_index: args["track_index"].as_u64().map(|v| v as usize),
             timeline_pos_ns: args["timeline_pos_ns"].as_u64(),
             reply: tx,
@@ -2974,22 +3027,22 @@ fn dispatch_tool_payload(
         "pause" => McpCommand::Pause { reply: tx },
         "stop" => McpCommand::Stop { reply: tx },
         "seek_playhead" => McpCommand::SeekPlayhead {
-            timeline_pos_ns: args["timeline_pos_ns"].as_u64().unwrap_or(0),
+            timeline_pos_ns: arg_u64!(args, "timeline_pos_ns", 0),
             reply: tx,
         },
         "export_displayed_frame" => McpCommand::ExportDisplayedFrame {
-            path: args["path"].as_str().unwrap_or("").to_string(),
+            path: arg_str!(args, "path"),
             reply: tx,
         },
         "export_timeline_snapshot" => McpCommand::ExportTimelineSnapshot {
-            path: args["path"].as_str().unwrap_or("").to_string(),
-            width: args["width"].as_u64().unwrap_or(1920) as u32,
-            height: args["height"].as_u64().unwrap_or(1080) as u32,
+            path: arg_str!(args, "path"),
+            width: arg_u64!(args, "width", 1920) as u32,
+            height: arg_u64!(args, "height", 1080) as u32,
             reply: tx,
         },
         "take_screenshot" => McpCommand::TakeScreenshot { reply: tx },
         "select_library_item" => McpCommand::SelectLibraryItem {
-            path: args["path"].as_str().unwrap_or("").to_string(),
+            path: arg_str!(args, "path"),
             reply: tx,
         },
         "source_play" => McpCommand::SourcePlay { reply: tx },
@@ -3004,19 +3057,19 @@ fn dispatch_tool_payload(
         "list_backups" => McpCommand::ListBackups { reply: tx },
         "list_project_snapshots" => McpCommand::ListProjectSnapshots { reply: tx },
         "create_project_snapshot" => McpCommand::CreateProjectSnapshot {
-            name: args["name"].as_str().unwrap_or("").to_string(),
+            name: arg_str!(args, "name"),
             reply: tx,
         },
         "restore_project_snapshot" => McpCommand::RestoreProjectSnapshot {
-            snapshot_id: args["snapshot_id"].as_str().unwrap_or("").to_string(),
+            snapshot_id: arg_str!(args, "snapshot_id"),
             reply: tx,
         },
         "delete_project_snapshot" => McpCommand::DeleteProjectSnapshot {
-            snapshot_id: args["snapshot_id"].as_str().unwrap_or("").to_string(),
+            snapshot_id: arg_str!(args, "snapshot_id"),
             reply: tx,
         },
         "set_clip_stabilization" => McpCommand::SetClipStabilization {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
             enabled: args
                 .get("enabled")
                 .and_then(|v| v.as_bool())
@@ -3043,16 +3096,16 @@ fn dispatch_tool_payload(
             reply: tx,
         },
         "copy_clip_color_grade" => McpCommand::CopyClipColorGrade {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
             reply: tx,
         },
         "paste_clip_color_grade" => McpCommand::PasteClipColorGrade {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
             reply: tx,
         },
         "match_clip_colors" => McpCommand::MatchClipColors {
-            source_clip_id: args["source_clip_id"].as_str().unwrap_or("").to_string(),
-            reference_clip_id: args["reference_clip_id"].as_str().unwrap_or("").to_string(),
+            source_clip_id: arg_str!(args, "source_clip_id"),
+            reference_clip_id: arg_str!(args, "reference_clip_id"),
             generate_lut: args
                 .get("generate_lut")
                 .and_then(|v| v.as_bool())
@@ -3061,12 +3114,12 @@ fn dispatch_tool_payload(
         },
         "list_frei0r_plugins" => McpCommand::ListFrei0rPlugins { reply: tx },
         "list_clip_frei0r_effects" => McpCommand::ListClipFrei0rEffects {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
             reply: tx,
         },
         "add_clip_frei0r_effect" => McpCommand::AddClipFrei0rEffect {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
-            plugin_name: args["plugin_name"].as_str().unwrap_or("").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
+            plugin_name: arg_str!(args, "plugin_name"),
             params: args.get("params").and_then(|v| v.as_object()).map(|obj| {
                 obj.iter()
                     .filter_map(|(k, v)| v.as_f64().map(|f| (k.clone(), f)))
@@ -3083,13 +3136,13 @@ fn dispatch_tool_payload(
             reply: tx,
         },
         "remove_clip_frei0r_effect" => McpCommand::RemoveClipFrei0rEffect {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
-            effect_id: args["effect_id"].as_str().unwrap_or("").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
+            effect_id: arg_str!(args, "effect_id"),
             reply: tx,
         },
         "set_clip_frei0r_effect_params" => McpCommand::SetClipFrei0rEffectParams {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
-            effect_id: args["effect_id"].as_str().unwrap_or("").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
+            effect_id: arg_str!(args, "effect_id"),
             params: args
                 .get("params")
                 .and_then(|v| v.as_object())
@@ -3110,7 +3163,7 @@ fn dispatch_tool_payload(
             reply: tx,
         },
         "reorder_clip_frei0r_effects" => McpCommand::ReorderClipFrei0rEffects {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
             effect_ids: args["effect_ids"]
                 .as_array()
                 .map(|a| {
@@ -3122,7 +3175,7 @@ fn dispatch_tool_payload(
             reply: tx,
         },
         "add_title_clip" => McpCommand::AddTitleClip {
-            template_id: args["template_id"].as_str().unwrap_or("").to_string(),
+            template_id: arg_str!(args, "template_id"),
             track_index: args["track_index"].as_u64().map(|v| v as usize),
             timeline_start_ns: args["timeline_start_ns"].as_u64(),
             duration_ns: args["duration_ns"].as_u64(),
@@ -3130,13 +3183,13 @@ fn dispatch_tool_payload(
             reply: tx,
         },
         "add_adjustment_layer" => McpCommand::AddAdjustmentLayer {
-            track_index: args["track_index"].as_u64().unwrap_or(0) as usize,
-            timeline_start_ns: args["timeline_start_ns"].as_u64().unwrap_or(0),
-            duration_ns: args["duration_ns"].as_u64().unwrap_or(5_000_000_000),
+            track_index: arg_u64!(args, "track_index", 0) as usize,
+            timeline_start_ns: arg_u64!(args, "timeline_start_ns", 0),
+            duration_ns: arg_u64!(args, "duration_ns", 5_000_000_000),
             reply: tx,
         },
         "set_clip_title_style" => McpCommand::SetClipTitleStyle {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
             title_text: args["title_text"].as_str().map(String::from),
             title_font: args["title_font"].as_str().map(String::from),
             title_color: args["title_color"].as_u64().map(|v| v as u32),
@@ -3156,7 +3209,7 @@ fn dispatch_tool_payload(
             reply: tx,
         },
         "add_to_export_queue" => McpCommand::AddToExportQueue {
-            output_path: args["output_path"].as_str().unwrap_or("").to_string(),
+            output_path: arg_str!(args, "output_path"),
             preset_name: args["preset_name"].as_str().map(String::from),
             reply: tx,
         },
@@ -3181,7 +3234,7 @@ fn dispatch_tool_payload(
             }
         }
         "break_apart_compound_clip" => McpCommand::BreakApartCompoundClip {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
             reply: tx,
         },
         "create_multicam_clip" => {
@@ -3199,51 +3252,51 @@ fn dispatch_tool_payload(
             }
         }
         "add_angle_switch" => McpCommand::AddAngleSwitch {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
-            position_ns: args["position_ns"].as_u64().unwrap_or(0),
-            angle_index: args["angle_index"].as_u64().unwrap_or(0) as usize,
+            clip_id: arg_str!(args, "clip_id"),
+            position_ns: arg_u64!(args, "position_ns", 0),
+            angle_index: arg_u64!(args, "angle_index", 0) as usize,
             reply: tx,
         },
         "list_multicam_angles" => McpCommand::ListMulticamAngles {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
             reply: tx,
         },
         "set_multicam_angle_audio" => McpCommand::SetMulticamAngleAudio {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
-            angle_index: args["angle_index"].as_u64().unwrap_or(0) as usize,
+            clip_id: arg_str!(args, "clip_id"),
+            angle_index: arg_u64!(args, "angle_index", 0) as usize,
             volume: args["volume"].as_f64().map(|v| v as f32),
             muted: args["muted"].as_bool(),
             reply: tx,
         },
         // ── Subtitle / STT tools ──────────────────────────────────────────
         "generate_subtitles" => McpCommand::GenerateSubtitles {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
-            language: args["language"].as_str().unwrap_or("auto").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
+            language: arg_str!(args, "language", "auto"),
             reply: tx,
         },
         "get_clip_subtitles" => McpCommand::GetClipSubtitles {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
             reply: tx,
         },
         "edit_subtitle_text" => McpCommand::EditSubtitleText {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
-            segment_id: args["segment_id"].as_str().unwrap_or("").to_string(),
-            text: args["text"].as_str().unwrap_or("").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
+            segment_id: arg_str!(args, "segment_id"),
+            text: arg_str!(args, "text"),
             reply: tx,
         },
         "edit_subtitle_timing" => McpCommand::EditSubtitleTiming {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
-            segment_id: args["segment_id"].as_str().unwrap_or("").to_string(),
-            start_ns: args["start_ns"].as_u64().unwrap_or(0),
-            end_ns: args["end_ns"].as_u64().unwrap_or(0),
+            clip_id: arg_str!(args, "clip_id"),
+            segment_id: arg_str!(args, "segment_id"),
+            start_ns: arg_u64!(args, "start_ns", 0),
+            end_ns: arg_u64!(args, "end_ns", 0),
             reply: tx,
         },
         "clear_subtitles" => McpCommand::ClearSubtitles {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
             reply: tx,
         },
         "set_subtitle_style" => McpCommand::SetSubtitleStyle {
-            clip_id: args["clip_id"].as_str().unwrap_or("").to_string(),
+            clip_id: arg_str!(args, "clip_id"),
             font: args["font"].as_str().map(String::from),
             color: args["color"].as_u64().map(|v| v as u32),
             outline_color: args["outline_color"].as_u64().map(|v| v as u32),
@@ -3267,7 +3320,7 @@ fn dispatch_tool_payload(
             reply: tx,
         },
         "export_srt" => McpCommand::ExportSrt {
-            path: args["path"].as_str().unwrap_or("").to_string(),
+            path: arg_str!(args, "path"),
             reply: tx,
         },
 
@@ -3302,8 +3355,8 @@ fn call_tool(
         let Some(calls) = args.get("calls").and_then(Value::as_array) else {
             return err(id.clone(), -32602, "calls must be an array");
         };
-        let stop_on_error = args["stop_on_error"].as_bool().unwrap_or(false);
-        let include_timing = args["include_timing"].as_bool().unwrap_or(false);
+        let stop_on_error = arg_bool!(args, "stop_on_error");
+        let include_timing = arg_bool!(args, "include_timing");
         let batch_started = std::time::Instant::now();
         let mut results = Vec::with_capacity(calls.len());
         let mut stopped_on_error = false;

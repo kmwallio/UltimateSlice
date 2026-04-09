@@ -2048,6 +2048,10 @@ impl ProgramPlayer {
                 gstreamer_app::AppSinkCallbacks::builder()
                     .new_preroll(move |appsink| {
                         if !scope_en_preroll.load(Ordering::Relaxed) {
+                            // Scope disabled — drain the preroll buffer so
+                            // the pipeline doesn't stall on a backed-up
+                            // sink. Errors here are uninteresting because
+                            // we're not consuming the sample anyway.
                             let _ = appsink.pull_preroll();
                             return Ok(gst::FlowSuccess::Ok);
                         }
@@ -2079,6 +2083,8 @@ impl ProgramPlayer {
                     })
                     .new_sample(move |appsink| {
                         if !scope_en_sample.load(Ordering::Relaxed) {
+                            // Same drain-on-disable rationale as new_preroll
+                            // above — discarding the sample on purpose.
                             let _ = appsink.pull_sample();
                             return Ok(gst::FlowSuccess::Ok);
                         }
