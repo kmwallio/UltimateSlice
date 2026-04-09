@@ -342,6 +342,7 @@ Clips with subtitle segments show subtitle style controls in the Inspector.
 - Export burns subtitle styling above the composited video.
 - Subtitle font selection now uses the same normalized family/style/size parsing in preview and export, so descriptions like `Bold`, `Italic`, `Oblique`, and narrowed families stay closer between the Program Monitor and exported burn-in.
 - Preview and export still use different subtitle renderers, so very fine styling details can still vary slightly.
+- **See also: [Transcript panel](transcript.md)** — once you've generated subtitles, the bottom-of-window Transcript panel lets you click words to seek and select word ranges to ripple-delete the underlying clip in one undo entry.
 
 ---
 

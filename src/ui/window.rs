@@ -4901,6 +4901,8 @@ pub fn build_window(
     let match_audio_in_progress: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
     let keyframe_editor_cell: Rc<RefCell<Option<Rc<keyframe_editor::KeyframeEditorView>>>> =
         Rc::new(RefCell::new(None));
+    let transcript_panel_cell: Rc<RefCell<Option<Rc<crate::ui::transcript_panel::TranscriptPanelView>>>> =
+        Rc::new(RefCell::new(None));
     // transform_overlay_cell holds the TransformOverlay after the program monitor is built.
     let transform_overlay_cell: Rc<
         RefCell<Option<Rc<crate::ui::transform_overlay::TransformOverlay>>>,
@@ -10274,6 +10276,7 @@ pub fn build_window(
         let picture_b_poll = picture_b.clone();
         let transform_overlay_poll = transform_overlay_cell.clone();
         let keyframe_editor_poll = keyframe_editor_cell.clone();
+        let transcript_panel_poll = transcript_panel_cell.clone();
         let timeline_state_poll = timeline_state.clone();
         let inspector_view_poll = inspector_view.clone();
         let prog_frame_updater_poll = prog_frame_updater.clone();
@@ -10477,6 +10480,10 @@ pub fn build_window(
                 }
                 if let Some(ref editor) = *keyframe_editor_poll.borrow() {
                     editor.queue_redraw();
+                }
+                if let Some(ref tp) = *transcript_panel_poll.borrow() {
+                    let proj = project.borrow();
+                    tp.update_playhead(&proj, pos_ns);
                 }
                 last_pos_ns_c.set(pos_ns);
             }
@@ -12172,6 +12179,7 @@ pub fn build_window(
         let panel_weak = timeline_area.downgrade();
         let transform_overlay_cell = transform_overlay_cell.clone();
         let keyframe_editor_cell = keyframe_editor_cell.clone();
+        let transcript_panel_cell = transcript_panel_cell.clone();
         let prog_canvas_frame = prog_canvas_frame.clone();
         let program_empty_hint = program_empty_hint.clone();
         let picture_a = picture_a.clone();
@@ -12230,6 +12238,9 @@ pub fn build_window(
                 let playhead_ns = timeline_state.borrow().playhead_ns;
                 if let Some(ref editor) = *keyframe_editor_cell.borrow() {
                     editor.queue_redraw();
+                }
+                if let Some(ref tp) = *transcript_panel_cell.borrow() {
+                    tp.rebuild_from_project(&proj);
                 }
 
                 // Sync transform overlay: show handles when a clip is selected,
@@ -12722,7 +12733,7 @@ pub fn build_window(
         project.clone(),
         timeline_state.clone(),
         on_project_changed.clone(),
-        dopesheet_on_seek,
+        dopesheet_on_seek.clone(),
     );
     keyframe_editor_widget.set_size_request(-1, 120);
     // Wrap in a vertical-only ScrolledWindow so the dopesheet is usable on
@@ -12732,8 +12743,29 @@ pub fn build_window(
     let keyframe_scroller = ScrolledWindow::new();
     keyframe_scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     keyframe_scroller.set_child(Some(&keyframe_editor_widget));
-    keyframe_scroller.set_visible(false);
-    timeline_paned.set_end_child(Some(&keyframe_scroller));
+
+    // Transcript panel — peer of the dopesheet, sharing the same vertical
+    // slot in `timeline_paned` via a `gtk::Stack`. The Stack lets the user
+    // toggle between Keyframes and Transcript without ever showing both at
+    // once (cleaner on laptops than a 3-way vertical split).
+    let (transcript_widget, transcript_view) = crate::ui::transcript_panel::build_transcript_panel(
+        project.clone(),
+        timeline_state.clone(),
+        on_project_changed.clone(),
+        dopesheet_on_seek,
+    );
+    transcript_widget.set_size_request(-1, 120);
+    let transcript_scroller = ScrolledWindow::new();
+    transcript_scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    transcript_scroller.set_child(Some(&transcript_widget));
+
+    let bottom_panel_stack = gtk::Stack::new();
+    bottom_panel_stack.set_transition_type(gtk::StackTransitionType::None);
+    bottom_panel_stack.add_named(&keyframe_scroller, Some("keyframes"));
+    bottom_panel_stack.add_named(&transcript_scroller, Some("transcript"));
+    bottom_panel_stack.set_visible_child_name("keyframes");
+    bottom_panel_stack.set_visible(false);
+    timeline_paned.set_end_child(Some(&bottom_panel_stack));
     // Default split: allocate ~70% to timeline, ~30% to dopesheet.
     // We'll set a reasonable initial position after the first allocation.
     {
@@ -12746,16 +12778,23 @@ pub fn build_window(
         });
     }
     *keyframe_editor_cell.borrow_mut() = Some(keyframe_editor_view);
+    *transcript_panel_cell.borrow_mut() = Some(transcript_view);
 
-    // Add spacer + toggle button to the track-management bar.
+    // Add spacer + toggle buttons to the track-management bar. Both toggles
+    // share the same `bottom_panel_stack`: clicking one switches the visible
+    // child to that panel (and ensures the stack is showing); clicking the
+    // active panel's toggle hides the stack entirely.
     let keyframes_toggle = gtk::Button::with_label("Show Keyframes");
     keyframes_toggle.add_css_class("small-btn");
+    let transcript_toggle = gtk::Button::with_label("Show Transcript");
+    transcript_toggle.add_css_class("small-btn");
     if let Some(ref bar_widget) = timeline_bar_widget {
         if let Ok(bar) = bar_widget.clone().downcast::<gtk::Box>() {
             let spacer = gtk::Box::new(Orientation::Horizontal, 0);
             spacer.set_hexpand(true);
             bar.append(&spacer);
             bar.append(&keyframes_toggle);
+            bar.append(&transcript_toggle);
         }
     }
 
@@ -12792,24 +12831,82 @@ pub fn build_window(
             });
         });
     }
+    // Shared toggle handlers for the two bottom panels (Keyframes /
+    // Transcript). Each toggle either:
+    //   * activates its panel (and shows the stack if it was hidden), or
+    //   * hides the stack entirely (clicking the active panel's toggle).
+    // After mutating the stack, both buttons' labels are refreshed to match
+    // the new visibility state.
+    let refresh_bottom_toggle_labels: Rc<dyn Fn()> = {
+        let stack = bottom_panel_stack.clone();
+        let kf = keyframes_toggle.clone();
+        let tr = transcript_toggle.clone();
+        Rc::new(move || {
+            let visible = stack.is_visible();
+            let active = stack.visible_child_name();
+            let kf_active =
+                visible && active.as_deref() == Some("keyframes");
+            let tr_active =
+                visible && active.as_deref() == Some("transcript");
+            kf.set_label(if kf_active {
+                "Hide Keyframes"
+            } else {
+                "Show Keyframes"
+            });
+            tr.set_label(if tr_active {
+                "Hide Transcript"
+            } else {
+                "Show Transcript"
+            });
+        })
+    };
     {
-        let scroller = keyframe_scroller.clone();
+        let stack = bottom_panel_stack.clone();
         let paned = timeline_paned.clone();
         let workspace_layouts_applying = workspace_layouts_applying.clone();
         let sync_workspace_layout_state = sync_workspace_layout_state.clone();
-        keyframes_toggle.connect_clicked(move |btn| {
-            let visible = scroller.is_visible();
-            scroller.set_visible(!visible);
-            if !visible {
-                // Restoring: set a sensible split.
-                let total = paned.allocation().height();
-                if total > 0 {
-                    paned.set_position((total as f64 * 0.7) as i32);
-                }
-                btn.set_label("Hide Keyframes");
+        let refresh_labels = refresh_bottom_toggle_labels.clone();
+        keyframes_toggle.connect_clicked(move |_| {
+            let active = stack.visible_child_name();
+            if stack.is_visible() && active.as_deref() == Some("keyframes") {
+                stack.set_visible(false);
             } else {
-                btn.set_label("Show Keyframes");
+                stack.set_visible_child_name("keyframes");
+                if !stack.is_visible() {
+                    stack.set_visible(true);
+                    let total = paned.allocation().height();
+                    if total > 0 {
+                        paned.set_position((total as f64 * 0.7) as i32);
+                    }
+                }
             }
+            refresh_labels();
+            if !workspace_layouts_applying.get() {
+                sync_workspace_layout_state();
+            }
+        });
+    }
+    {
+        let stack = bottom_panel_stack.clone();
+        let paned = timeline_paned.clone();
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
+        let refresh_labels = refresh_bottom_toggle_labels.clone();
+        transcript_toggle.connect_clicked(move |_| {
+            let active = stack.visible_child_name();
+            if stack.is_visible() && active.as_deref() == Some("transcript") {
+                stack.set_visible(false);
+            } else {
+                stack.set_visible_child_name("transcript");
+                if !stack.is_visible() {
+                    stack.set_visible(true);
+                    let total = paned.allocation().height();
+                    if total > 0 {
+                        paned.set_position((total as f64 * 0.7) as i32);
+                    }
+                }
+            }
+            refresh_labels();
             if !workspace_layouts_applying.get() {
                 sync_workspace_layout_state();
             }
@@ -20975,6 +21072,72 @@ fn handle_mcp_command(
                 reply
                     .send(json!({"error": format!("Clip not found: {clip_id}")}))
                     .ok();
+            }
+        }
+        McpCommand::DeleteTranscriptRange {
+            clip_id,
+            start_word_index,
+            end_word_index,
+            reply,
+        } => {
+            // Resolve word indices to clip-local time bounds inside a scoped
+            // borrow of the project, then call the same TimelineState helper
+            // the UI uses so the edit is one undo entry and walks compound
+            // tracks correctly.
+            let resolved: Result<(u64, u64), String> = {
+                let proj = project.borrow();
+                if let Some(clip) = proj.clip_ref(&clip_id) {
+                    if end_word_index <= start_word_index {
+                        Err(format!(
+                            "end_word_index ({end_word_index}) must be > start_word_index ({start_word_index})"
+                        ))
+                    } else {
+                        // Flatten clip words in segment-then-word order.
+                        let mut flat: Vec<(u64, u64)> = Vec::new();
+                        for seg in &clip.subtitle_segments {
+                            for w in &seg.words {
+                                flat.push((w.start_ns, w.end_ns));
+                            }
+                        }
+                        let last_idx = end_word_index.saturating_sub(1) as usize;
+                        if (start_word_index as usize) >= flat.len() || last_idx >= flat.len() {
+                            Err(format!(
+                                "Word index out of range: clip has {} word(s)",
+                                flat.len()
+                            ))
+                        } else {
+                            let start_ns = flat[start_word_index as usize].0;
+                            let end_ns = flat[last_idx].1;
+                            Ok((start_ns, end_ns))
+                        }
+                    }
+                } else {
+                    Err(format!("Clip not found: {clip_id}"))
+                }
+            };
+
+            match resolved {
+                Ok((word_start_ns, word_end_ns)) => {
+                    let changed = timeline_state
+                        .borrow_mut()
+                        .delete_transcript_word_range(&clip_id, word_start_ns, word_end_ns);
+                    if changed {
+                        on_project_changed();
+                        reply
+                            .send(json!({
+                                "success": true,
+                                "deleted_word_count": end_word_index - start_word_index,
+                            }))
+                            .ok();
+                    } else {
+                        reply
+                            .send(json!({"error": "No change applied (zero-length range or clip not found)"}))
+                            .ok();
+                    }
+                }
+                Err(msg) => {
+                    reply.send(json!({"error": msg})).ok();
+                }
             }
         }
         McpCommand::SetSubtitleStyle {

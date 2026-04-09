@@ -112,6 +112,18 @@ All Inspector controls are mouse-driven sliders and text fields. Transform edits
 
 ---
 
+## Transcript
+
+The Transcript panel lives next to the keyframe dopesheet at the bottom of the timeline; toggle it via **Show Transcript** in the track-management bar. See [transcript.md](transcript.md) for details.
+
+| Shortcut | Action |
+|---|---|
+| `Click` *(Transcript panel)* | Seek the playhead to the clicked word |
+| `Shift+Click` *(Transcript panel)* | Extend the word selection within the same clip |
+| `Delete` / `Backspace` *(Transcript panel focused)* | Split the underlying clip at the selection edges and ripple-delete the middle slice as one undo entry |
+
+---
+
 ## Notes
 
 - **J/K/L** shuttle works globally: J/K/L control the **Program Monitor** from anywhere in the window (no focus needed). In the Source Monitor, J/K/L still work as before when the Source Monitor panel has focus.

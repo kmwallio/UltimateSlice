@@ -66,9 +66,13 @@ src/
     preview.rs              Source Monitor — video display, scrubber, in/out marks, transport
     inspector.rs            Right-side clip inspector — shows/edits selected clip properties
     preferences.rs          Preferences dialog — categorized app-level settings UI
+    transcript_panel.rs     Transcript-Based Editing panel — flat-word TextView, click-to-seek,
+                            range-select + Delete to ripple-cut the underlying clip in one undo
     timeline/
       mod.rs                Re-exports TimelineState and build_timeline()
       widget.rs             Full timeline: Cairo drawing + all gesture/key controllers
+                            (also owns delete_transcript_word_range, the helper that backs
+                            both the Transcript panel and the delete_transcript_range MCP tool)
 
   mcp/
     mod.rs                  McpCommand enum; start_mcp_server() → mpsc::Receiver<McpCommand>
@@ -84,6 +88,7 @@ docs/
     source-monitor.md       Source preview, In/Out points, shuttle controls
     timeline.md             Clip arrangement, trimming, tools, markers
     inspector.md            Per-clip color, effects, audio, transform, titles, speed
+    transcript.md           Transcript-Based Editing panel walkthrough
     preferences.md          Application-level settings and performance preferences
     program-monitor.md      Assembled timeline playback
     export.md               Advanced export: codecs, resolution, audio

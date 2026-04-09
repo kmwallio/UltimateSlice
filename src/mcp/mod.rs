@@ -808,6 +808,12 @@ pub enum McpCommand {
         clip_id: String,
         reply: SyncSender<Value>,
     },
+    DeleteTranscriptRange {
+        clip_id: String,
+        start_word_index: u32,
+        end_word_index: u32, // exclusive
+        reply: SyncSender<Value>,
+    },
     SetSubtitleStyle {
         clip_id: String,
         font: Option<String>,

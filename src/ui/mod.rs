@@ -19,6 +19,7 @@ pub mod timeline;
 pub mod title_templates;
 pub mod titles_browser;
 pub mod toolbar;
+pub mod transcript_panel;
 pub mod transform_overlay;
 pub mod welcome;
 pub mod window;

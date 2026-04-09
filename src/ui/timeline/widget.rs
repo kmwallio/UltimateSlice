@@ -832,6 +832,139 @@ impl TimelineState {
         self.delete_selected_internal(true, "Ripple delete");
     }
 
+    /// Delete a clip-local word range from a clip's transcript and ripple-shift
+    /// any clips that started after the original clip's right edge.
+    ///
+    /// `word_start_ns` and `word_end_ns` are in clip-local 1× time (0 = the
+    /// clip's `source_in`, matching how `SubtitleWord::start_ns` is stored).
+    /// The method:
+    ///
+    /// 1. Splits the source clip into a left half ending at `word_start_ns`
+    ///    and a right half starting at `word_end_ns`, rebasing keyframes and
+    ///    subtitles on each side via `retain_*_in_local_range`.
+    /// 2. Slides the right half left so it sits flush against the left half
+    ///    (closing the deleted span).
+    /// 3. Subtracts the deleted timeline span (`(word_end - word_start) /
+    ///    speed`) from every other clip on the same track whose
+    ///    `timeline_start` was at or after the original clip's `timeline_end`,
+    ///    leaving intentional gaps elsewhere on the track untouched.
+    /// 4. Commits the new clip list as a single `SetTrackClipsCommand` so the
+    ///    whole edit is one undo entry.
+    ///
+    /// Compound clips work transparently: `project.find_track_id_for_clip` and
+    /// `project.track_mut` walk into nested `compound_tracks`.
+    ///
+    /// Returns `true` if a change was applied. The caller is responsible for
+    /// invoking `TimelineState::notify_project_changed` after dropping its
+    /// borrow (matching the pattern used by `ripple_delete_selected`).
+    pub fn delete_transcript_word_range(
+        &mut self,
+        clip_id: &str,
+        word_start_ns: u64,
+        word_end_ns: u64,
+    ) -> bool {
+        if word_end_ns <= word_start_ns {
+            return false;
+        }
+        let mut proj = self.project.borrow_mut();
+        let Some(track_id) = proj.find_track_id_for_clip(clip_id) else {
+            return false;
+        };
+        // Read the original clip + full clip list inside a scoped block so the
+        // immutable borrow of `proj` is released before we hand `&mut proj` to
+        // `history.execute` below.
+        let (original, original_pos, old_clips) = {
+            let Some(track) = proj.track_ref(&track_id) else {
+                return false;
+            };
+            let Some(pos) = track.clips.iter().position(|c| c.id == clip_id) else {
+                return false;
+            };
+            let original = track.clips[pos].clone();
+            let old_clips = track.clips.clone();
+            (original, pos, old_clips)
+        };
+
+        // Local 1× duration (the upper bound of subtitle/keyframe times).
+        let original_local_duration = original
+            .source_out
+            .saturating_sub(original.source_in);
+        // Clamp the requested word range to the clip's actual local duration.
+        let word_start_ns = word_start_ns.min(original_local_duration);
+        let word_end_ns = word_end_ns.min(original_local_duration);
+        if word_end_ns <= word_start_ns {
+            return false;
+        }
+
+        // Speed-aware timeline offsets. `clip.duration()` divides by speed for
+        // us, but we need the offsets of arbitrary local times, not just the
+        // full duration, so we apply the same `/ speed` ourselves. Guard
+        // against zero/negative speed (shouldn't happen but stay defensive).
+        let speed = if original.speed > 0.0 { original.speed } else { 1.0 };
+        let cut_a_local_timeline = (word_start_ns as f64 / speed as f64) as u64;
+        let cut_b_local_timeline = (word_end_ns as f64 / speed as f64) as u64;
+        let deleted_timeline_span = cut_b_local_timeline.saturating_sub(cut_a_local_timeline);
+        if deleted_timeline_span == 0 {
+            return false;
+        }
+
+        let original_timeline_end = original.timeline_end();
+
+        // Build the left half — ends exactly where the deletion begins.
+        let mut left = original.clone();
+        left.source_out = original.source_in.saturating_add(word_start_ns);
+        left.retain_subtitles_in_local_range(0, word_start_ns);
+        left.retain_keyframes_in_local_range(0, word_start_ns);
+
+        // Build the right half — fresh id, sliced source window, and
+        // pre-shifted timeline_start so it sits immediately after `left`.
+        let mut right = original.clone();
+        right.id = uuid::Uuid::new_v4().to_string();
+        right.source_in = original.source_in.saturating_add(word_end_ns);
+        right.timeline_start = original.timeline_start.saturating_add(cut_a_local_timeline);
+        right.retain_subtitles_in_local_range(word_end_ns, original_local_duration);
+        right.retain_keyframes_in_local_range(word_end_ns, original_local_duration);
+
+        // Walk the existing clip list, replace the original with [left,
+        // right], and ripple-shift any clip that started at or after the
+        // original's timeline_end. Other clips (including any positioned
+        // before the original) are left untouched.
+        let mut new_clips: Vec<Clip> = Vec::with_capacity(old_clips.len() + 1);
+        for (idx, c) in old_clips.iter().enumerate() {
+            if idx == original_pos {
+                // Skip clips with no remaining content on either side. The
+                // most common path keeps both, but a delete that covers the
+                // entire clip should still produce a valid edit (drops the
+                // clip outright).
+                if left.source_out > left.source_in {
+                    new_clips.push(left.clone());
+                }
+                if right.source_out > right.source_in {
+                    new_clips.push(right.clone());
+                }
+            } else if c.timeline_start >= original_timeline_end {
+                let mut moved = c.clone();
+                moved.timeline_start = c.timeline_start.saturating_sub(deleted_timeline_span);
+                new_clips.push(moved);
+            } else {
+                new_clips.push(c.clone());
+            }
+        }
+
+        if new_clips == old_clips {
+            return false;
+        }
+
+        let cmd = SetTrackClipsCommand {
+            track_id: track_id.clone(),
+            old_clips,
+            new_clips,
+            label: "Delete transcript range".to_string(),
+        };
+        self.history.execute(Box::new(cmd), &mut proj);
+        true
+    }
+
     fn delete_selected_internal(&mut self, compact: bool, label: &str) {
         let Some(_primary_clip_id) = self.selected_clip_id.clone() else {
             return;
@@ -10776,5 +10909,285 @@ mod tests {
         let times = collect_keyframe_local_times_in_range(&clip, 900_000_000, 3_000_000_000);
         assert_eq!(times.len(), 1);
         assert!(times.contains(&1_000_000_000));
+    }
+
+    // ── delete_transcript_word_range tests ─────────────────────────────────
+    //
+    // These cover the load-bearing helper that the Transcript-Based Editing
+    // panel and the `delete_transcript_range` MCP tool both call. The helper
+    // splits a clip at clip-local 1× word boundaries, ripple-shifts any
+    // downstream clips on the same track, and commits via SetTrackClipsCommand
+    // so the whole edit is one undo entry.
+
+    use crate::model::clip::{SubtitleSegment, SubtitleWord};
+
+    /// Build a Project containing a single video track with one or more
+    /// clips. Each clip starts at the given timeline position with the given
+    /// 1× source duration.
+    fn project_with_track_clips(specs: &[(&str, u64, u64)]) -> (Project, String, Vec<String>) {
+        let mut project = Project::new("Transcript edit tests");
+        // The default Project::new ships with one Video and one Audio track —
+        // we use the Video track for these tests.
+        let video_idx = project
+            .tracks
+            .iter()
+            .position(|t| t.is_video())
+            .expect("default project should include a video track");
+        let track_id = project.tracks[video_idx].id.clone();
+        // Clear any pre-existing default clips so the spec is authoritative.
+        project.tracks[video_idx].clips.clear();
+        let mut ids = Vec::new();
+        for (id, timeline_start, source_duration) in specs {
+            let mut clip = Clip::new(
+                format!("{id}.mp4"),
+                *source_duration,
+                *timeline_start,
+                ClipKind::Video,
+            );
+            clip.id = (*id).to_string();
+            clip.source_in = 0;
+            clip.source_out = *source_duration;
+            project.tracks[video_idx].add_clip(clip);
+            ids.push((*id).to_string());
+        }
+        (project, track_id, ids)
+    }
+
+    fn make_segment_with_words(words: &[(u64, u64, &str)]) -> SubtitleSegment {
+        let words_vec: Vec<SubtitleWord> = words
+            .iter()
+            .map(|(s, e, t)| SubtitleWord {
+                start_ns: *s,
+                end_ns: *e,
+                text: (*t).to_string(),
+            })
+            .collect();
+        let start = words_vec.first().map(|w| w.start_ns).unwrap_or(0);
+        let end = words_vec.last().map(|w| w.end_ns).unwrap_or(0);
+        SubtitleSegment {
+            id: format!("seg-{start}-{end}"),
+            start_ns: start,
+            end_ns: end,
+            text: words.iter().map(|w| w.2).collect::<Vec<_>>().join(" "),
+            words: words_vec,
+        }
+    }
+
+    #[test]
+    fn delete_transcript_middle_word_splits_clip_and_ripples_downstream() {
+        // Two clips on a video track:
+        //   A: timeline 0..10s, three words at 2..3, 4..5, 6..7 seconds
+        //   B: timeline 10s..20s, no transcript
+        // Delete the middle word (4..5s) from A. Expected:
+        //   - A becomes two clips: left = 0..4s, right = 5..6s (timeline)
+        //     because the right half is shifted left by the deleted span (1s)
+        //   - B shifts from timeline_start=10s to 9s
+        //   - One undo entry — Ctrl+Z restores both clips exactly.
+        let s = 1_000_000_000_u64;
+        let (project, track_id, ids) =
+            project_with_track_clips(&[("A", 0, 10 * s), ("B", 10 * s, 10 * s)]);
+        let project = Rc::new(RefCell::new(project));
+
+        // Attach a transcript to clip A.
+        {
+            let mut proj = project.borrow_mut();
+            let clip_a = proj
+                .clip_mut(&ids[0])
+                .expect("clip A should exist");
+            clip_a.subtitle_segments = vec![make_segment_with_words(&[
+                (2 * s, 3 * s, "alpha"),
+                (4 * s, 5 * s, "beta"),
+                (6 * s, 7 * s, "gamma"),
+            ])];
+        }
+
+        let mut state = TimelineState::new(project.clone());
+        let changed = state.delete_transcript_word_range(&ids[0], 4 * s, 5 * s);
+        assert!(changed, "delete_transcript_word_range should report change");
+
+        // After the edit:
+        let proj = project.borrow();
+        let track = proj
+            .tracks
+            .iter()
+            .find(|t| t.id == track_id)
+            .expect("track");
+        assert_eq!(track.clips.len(), 3, "A split into 2, plus B");
+
+        // Left half of A:
+        let left = track
+            .clips
+            .iter()
+            .find(|c| c.id == ids[0])
+            .expect("left half retains original id");
+        assert_eq!(left.timeline_start, 0);
+        assert_eq!(left.source_in, 0);
+        assert_eq!(left.source_out, 4 * s);
+        // Left half subtitles must contain only the first word (rebased to 0
+        // is a no-op since left starts at 0 already).
+        assert_eq!(left.subtitle_segments.len(), 1);
+        assert_eq!(left.subtitle_segments[0].words.len(), 1);
+        assert_eq!(left.subtitle_segments[0].words[0].text, "alpha");
+
+        // Right half of A: the only other video clip whose source_in == 5s.
+        let right = track
+            .clips
+            .iter()
+            .find(|c| c.id != ids[0] && c.id != ids[1])
+            .expect("right half clip");
+        assert_eq!(right.source_in, 5 * s);
+        assert_eq!(right.source_out, 10 * s);
+        // Right half should sit immediately after left (timeline_start = 4s).
+        assert_eq!(right.timeline_start, 4 * s);
+        // Right half subtitles must contain only the third word, REBASED to
+        // local time 0 = source_in. Word "gamma" was at 6..7s in the original
+        // clip-local 1× space, so after a 5s left rebase it should be at
+        // 1s..2s.
+        assert_eq!(right.subtitle_segments.len(), 1);
+        assert_eq!(right.subtitle_segments[0].words.len(), 1);
+        assert_eq!(right.subtitle_segments[0].words[0].text, "gamma");
+        assert_eq!(right.subtitle_segments[0].words[0].start_ns, 1 * s);
+        assert_eq!(right.subtitle_segments[0].words[0].end_ns, 2 * s);
+
+        // Downstream clip B: shifted left by the deleted span (1s).
+        let b = track
+            .clips
+            .iter()
+            .find(|c| c.id == ids[1])
+            .expect("clip B");
+        assert_eq!(b.timeline_start, 9 * s);
+        assert_eq!(b.duration(), 10 * s);
+    }
+
+    #[test]
+    fn delete_transcript_word_undo_restores_state() {
+        let s = 1_000_000_000_u64;
+        let (project, _track_id, ids) =
+            project_with_track_clips(&[("A", 0, 10 * s), ("B", 10 * s, 10 * s)]);
+        let project = Rc::new(RefCell::new(project));
+        {
+            let mut proj = project.borrow_mut();
+            proj.clip_mut(&ids[0]).unwrap().subtitle_segments = vec![make_segment_with_words(&[
+                (2 * s, 3 * s, "one"),
+                (4 * s, 5 * s, "two"),
+                (6 * s, 7 * s, "three"),
+            ])];
+        }
+        // Snapshot expected post-undo state.
+        let snapshot = project.borrow().clone();
+
+        let mut state = TimelineState::new(project.clone());
+        assert!(state.delete_transcript_word_range(&ids[0], 4 * s, 5 * s));
+        // Undo should restore the original 2-clip layout.
+        state.history.undo(&mut project.borrow_mut());
+        let restored = project.borrow();
+        assert_eq!(restored.tracks.len(), snapshot.tracks.len());
+        for (got, want) in restored.tracks.iter().zip(snapshot.tracks.iter()) {
+            assert_eq!(got.clips.len(), want.clips.len(), "track clip count");
+            for (gc, wc) in got.clips.iter().zip(want.clips.iter()) {
+                assert_eq!(gc.id, wc.id);
+                assert_eq!(gc.timeline_start, wc.timeline_start);
+                assert_eq!(gc.source_in, wc.source_in);
+                assert_eq!(gc.source_out, wc.source_out);
+                assert_eq!(
+                    gc.subtitle_segments.len(),
+                    wc.subtitle_segments.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn delete_transcript_word_respects_clip_speed() {
+        // Clip with speed=2.0: 10s of source content plays back in 5s of
+        // timeline. Deleting word at clip-local 4..6s removes 2s of source,
+        // which is 1s of timeline. Downstream clip should shift by 1s.
+        let s = 1_000_000_000_u64;
+        let (project, track_id, ids) =
+            project_with_track_clips(&[("A", 0, 10 * s), ("B", 5 * s, 4 * s)]);
+        let project = Rc::new(RefCell::new(project));
+        {
+            let mut proj = project.borrow_mut();
+            let clip_a = proj.clip_mut(&ids[0]).unwrap();
+            clip_a.speed = 2.0;
+            clip_a.subtitle_segments = vec![make_segment_with_words(&[
+                (1 * s, 2 * s, "first"),
+                (4 * s, 6 * s, "middle"),
+                (8 * s, 9 * s, "last"),
+            ])];
+        }
+        let mut state = TimelineState::new(project.clone());
+        assert!(state.delete_transcript_word_range(&ids[0], 4 * s, 6 * s));
+
+        let proj = project.borrow();
+        let track = proj.tracks.iter().find(|t| t.id == track_id).unwrap();
+        // Downstream clip B should have shifted left by 1s (the deleted
+        // span in timeline time = 2s clip-local / 2.0 speed).
+        let b = track.clips.iter().find(|c| c.id == ids[1]).unwrap();
+        assert_eq!(b.timeline_start, 4 * s);
+    }
+
+    #[test]
+    fn delete_transcript_word_inside_compound_clip() {
+        // A compound clip on a root video track contains an inner video
+        // track with a single clip. We delete a word from the inner clip
+        // and verify the inner track was mutated and the outer compound
+        // remained intact.
+        use crate::model::track::Track as TrackModel;
+        let s = 1_000_000_000_u64;
+        let mut project = Project::new("Compound transcript test");
+        let outer_track_idx = project
+            .tracks
+            .iter()
+            .position(|t| t.is_video())
+            .expect("default video track");
+        let outer_track_id = project.tracks[outer_track_idx].id.clone();
+        // Inner clip lives inside the compound's compound_tracks.
+        let mut inner_clip = Clip::new("inner.mp4", 10 * s, 0, ClipKind::Video);
+        inner_clip.id = "INNER".to_string();
+        inner_clip.source_in = 0;
+        inner_clip.source_out = 10 * s;
+        inner_clip.subtitle_segments = vec![make_segment_with_words(&[
+            (2 * s, 3 * s, "left"),
+            (4 * s, 5 * s, "mid"),
+            (6 * s, 7 * s, "right"),
+        ])];
+        let mut inner_track = TrackModel::new_video("Inner V1");
+        let inner_track_id = inner_track.id.clone();
+        inner_track.clips.push(inner_clip);
+
+        let mut compound = Clip::new("compound", 10 * s, 0, ClipKind::Compound);
+        compound.id = "COMPOUND".to_string();
+        compound.source_in = 0;
+        compound.source_out = 10 * s;
+        compound.compound_tracks = Some(vec![inner_track]);
+        project.tracks[outer_track_idx].clips.clear();
+        project.tracks[outer_track_idx].add_clip(compound);
+        let project = Rc::new(RefCell::new(project));
+
+        let mut state = TimelineState::new(project.clone());
+        assert!(state.delete_transcript_word_range("INNER", 4 * s, 5 * s));
+
+        let proj = project.borrow();
+        // Outer track unchanged: still one compound clip.
+        let outer = proj
+            .tracks
+            .iter()
+            .find(|t| t.id == outer_track_id)
+            .unwrap();
+        assert_eq!(outer.clips.len(), 1);
+        assert_eq!(outer.clips[0].id, "COMPOUND");
+        // Inner track was mutated: now two clips (left + right halves).
+        let compound = &outer.clips[0];
+        let inner_tracks = compound.compound_tracks.as_ref().unwrap();
+        let inner_track_after = inner_tracks
+            .iter()
+            .find(|t| t.id == inner_track_id)
+            .unwrap();
+        assert_eq!(
+            inner_track_after.clips.len(),
+            2,
+            "inner clip should have been split"
+        );
     }
 }

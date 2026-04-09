@@ -2005,6 +2005,19 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "delete_transcript_range",
+            "description": "Delete a contiguous range of words from a clip's transcript and ripple-shift downstream clips. Splits the clip at the selected word boundaries and removes the middle slice as a single undo entry. Word indices reference the clip's flattened word list (segment 0 word 0, segment 0 word 1, segment 1 word 0, ...). Use list_clips or get_clip_subtitles to discover available words.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "ID of the clip whose transcript range should be deleted" },
+                    "start_word_index": { "type": "integer", "minimum": 0, "description": "Index of the first word to delete (inclusive)" },
+                    "end_word_index": { "type": "integer", "minimum": 1, "description": "Index one past the last word to delete (exclusive)" }
+                },
+                "required": ["clip_id", "start_word_index", "end_word_index"]
+            }
+        },
+        {
             "name": "set_subtitle_style",
             "description": "Set subtitle display style for a clip (font, colors, base styles, highlight flags).",
             "inputSchema": {
@@ -3358,6 +3371,12 @@ fn dispatch_tool_payload(
         },
         "clear_subtitles" => McpCommand::ClearSubtitles {
             clip_id: arg_str!(args, "clip_id"),
+            reply: tx,
+        },
+        "delete_transcript_range" => McpCommand::DeleteTranscriptRange {
+            clip_id: arg_str!(args, "clip_id"),
+            start_word_index: args["start_word_index"].as_u64().unwrap_or(0) as u32,
+            end_word_index: args["end_word_index"].as_u64().unwrap_or(0) as u32,
             reply: tx,
         },
         "set_subtitle_style" => McpCommand::SetSubtitleStyle {
