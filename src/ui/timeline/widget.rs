@@ -736,11 +736,11 @@ impl TimelineState {
         };
         let mut proj = self.project.borrow_mut();
         self.history.execute(
-            Box::new(crate::undo::SetTrackDuckCommand {
+            Box::new(crate::undo::set_track_duck_cmd(
                 track_id,
                 old_duck,
-                new_duck: !old_duck,
-            }),
+                !old_duck,
+            )),
             &mut proj,
         );
         true
@@ -757,11 +757,11 @@ impl TimelineState {
         self.selected_track_id = Some(track_id.clone());
         let mut proj = self.project.borrow_mut();
         self.history.execute(
-            Box::new(crate::undo::SetTrackSoloCommand {
+            Box::new(crate::undo::set_track_solo_cmd(
                 track_id,
                 old_solo,
-                new_solo: !old_solo,
-            }),
+                !old_solo,
+            )),
             &mut proj,
         );
         true
@@ -780,11 +780,11 @@ impl TimelineState {
         };
         let mut proj = self.project.borrow_mut();
         self.history.execute(
-            Box::new(crate::undo::SetTrackSoloCommand {
+            Box::new(crate::undo::set_track_solo_cmd(
                 track_id,
                 old_solo,
-                new_solo: !old_solo,
-            }),
+                !old_solo,
+            )),
             &mut proj,
         );
         true

@@ -178,56 +178,26 @@ becomes impossible to forget because the helper enforces it.
 > recursive helper would change semantics. Sweep periodically for new sites
 > that *do* belong on the helper.
 
-### P1.4 — Undo command boilerplate
-**File:** `src/undo.rs`
+### ~~P1.4 — Undo command boilerplate~~ ✅ DONE (helpers landed; migration started)
 
-30+ `EditCommand` impls all share the same skeleton:
-
-```rust
-fn execute(&self, project: &mut Project) {
-    if let Some(track) = project.track_mut(&self.track_id) {
-        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
-            // mutate
-        }
-    }
-    project.dirty = true;
-}
-```
-
-(See `TrimClipCommand` 56-78, `TrimOutCommand` 88-108, `SplitClipCommand`
-498-535 as representative examples.)
-
-**Proposed fix:** Generic clip-mutation wrapper:
-
-```rust
-pub struct ClipMutateCommand<T: Clone> {
-    pub clip_id: String,
-    pub old_state: T,
-    pub new_state: T,
-    pub apply: fn(&mut Clip, T),
-    pub label: &'static str,
-}
-
-impl<T: Clone> EditCommand for ClipMutateCommand<T> {
-    fn execute(&self, project: &mut Project) {
-        if let Some(clip) = project.clip_mut(&self.clip_id) {
-            (self.apply)(clip, self.new_state.clone());
-        }
-        project.dirty = true;
-    }
-    fn undo(&self, project: &mut Project) {
-        if let Some(clip) = project.clip_mut(&self.clip_id) {
-            (self.apply)(clip, self.old_state.clone());
-        }
-        project.dirty = true;
-    }
-    fn description(&self) -> &str { self.label }
-}
-```
-
-Also: ripple-edit logic at lines 120-248 is duplicated between
-`RippleTrimOutCommand` and `RippleTrimInCommand`. Extract
-`apply_ripple_delta(track: &mut Track, threshold_ns: u64, delta_ns: i64)`.
+> **Landed:** `ClipMutateCommand<T>` and `TrackMutateCommand<T>` generic
+> wrappers in `src/undo.rs` with 3 unit tests (root clip, compound-internal
+> clip, track property). Three track-level commands (`SetTrackMuteCommand`,
+> `SetTrackSoloCommand`, `SetTrackDuckCommand`) migrated as proof of concept
+> using constructor functions `set_track_mute_cmd()` etc.
+>
+> **Still pending — mechanical follow-ups:**
+> - Migrate the ~12 simple "set one clip property" commands (TrimOutCommand,
+>   SetClipLabelCommand, SetClipEqCommand, SetClipVoiceIsolationCommand,
+>   SetClipVoiceIsolationSourceCommand, SetClipSpeedCommand, SetClipColorCommand,
+>   etc.) to `ClipMutateCommand<T>`.
+> - Migrate multi-field commands (NormalizeClipAudioCommand, SetClipVolumeCommand,
+>   MatchClipAudioCommand, etc.) — these need the `T` to be a tuple or struct.
+> - Extract `apply_ripple_delta(track, threshold_ns, delta_ns)` from the two
+>   ripple commands.
+> - Complex commands (MoveClipCommand, SplitClipCommand, DeleteClipCommand,
+>   JoinThroughEditCommand, etc.) intentionally stay as-is — they have custom
+>   logic that doesn't fit the simple set/revert pattern.
 
 ### ~~P1.5 — FCPXML keyframe emission duplication~~ ✅ DONE (position merge still pending)
 

@@ -10,6 +10,83 @@ pub trait EditCommand {
     fn description(&self) -> &str;
 }
 
+// -----------------------------------------------------------------------
+// Generic clip-property and track-property mutation wrappers (P1.4)
+// -----------------------------------------------------------------------
+//
+// Many EditCommand impls in this file share the same skeleton:
+//
+//   fn execute(&self, project: &mut Project) {
+//       if let Some(clip) = project.clip_mut(&self.clip_id) {
+//           clip.field = self.new_value.clone();
+//       }
+//       project.dirty = true;
+//   }
+//
+// The two helpers below collapse that pattern into a single generic struct.
+// New property setters can use `ClipMutateCommand` instead of adding a
+// 30-line per-property struct + impl. The `apply` function pointer is
+// called for both execute (with `new_state`) and undo (with `old_state`),
+// so the setter logic only has to be written once.
+//
+// For track-level properties (mute, solo, duck) use `TrackMutateCommand`.
+
+/// Generic "set one clip property" undo command. Replace individual
+/// per-property command structs with an instantiation of this. The `apply`
+/// function receives a `&mut Clip` and the state value to apply.
+pub struct ClipMutateCommand<T: Clone> {
+    pub clip_id: String,
+    pub old_state: T,
+    pub new_state: T,
+    pub apply: fn(&mut Clip, T),
+    pub label: &'static str,
+}
+
+impl<T: Clone + 'static> EditCommand for ClipMutateCommand<T> {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            (self.apply)(clip, self.new_state.clone());
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            (self.apply)(clip, self.old_state.clone());
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        self.label
+    }
+}
+
+/// Generic "set one track property" undo command.
+pub struct TrackMutateCommand<T: Clone> {
+    pub track_id: String,
+    pub old_state: T,
+    pub new_state: T,
+    pub apply: fn(&mut crate::model::track::Track, T),
+    pub label: &'static str,
+}
+
+impl<T: Clone + 'static> EditCommand for TrackMutateCommand<T> {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            (self.apply)(track, self.new_state.clone());
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            (self.apply)(track, self.old_state.clone());
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        self.label
+    }
+}
+
 /// Move a clip to a new track / timeline position
 pub struct MoveClipCommand {
     pub clip_id: String,
@@ -974,78 +1051,54 @@ impl EditCommand for SetClipLabelCommand {
     }
 }
 
-/// Toggle a track's mute state.
-pub struct SetTrackMuteCommand {
-    pub track_id: String,
-    pub old_muted: bool,
-    pub new_muted: bool,
-}
-
-impl EditCommand for SetTrackMuteCommand {
-    fn execute(&self, project: &mut Project) {
-        if let Some(track) = project.track_mut(&self.track_id) {
-            track.muted = self.new_muted;
-        }
-        project.dirty = true;
-    }
-    fn undo(&self, project: &mut Project) {
-        if let Some(track) = project.track_mut(&self.track_id) {
-            track.muted = self.old_muted;
-        }
-        project.dirty = true;
-    }
-    fn description(&self) -> &str {
-        "Toggle track mute"
+/// Toggle a track's mute state. Construct via `set_track_mute_cmd()`.
+pub fn set_track_mute_cmd(
+    track_id: String,
+    old_muted: bool,
+    new_muted: bool,
+) -> TrackMutateCommand<bool> {
+    TrackMutateCommand {
+        track_id,
+        old_state: old_muted,
+        new_state: new_muted,
+        apply: |track, v| {
+            track.muted = v;
+        },
+        label: "Toggle track mute",
     }
 }
 
-/// Toggle a track's solo state.
-pub struct SetTrackSoloCommand {
-    pub track_id: String,
-    pub old_solo: bool,
-    pub new_solo: bool,
-}
-
-impl EditCommand for SetTrackSoloCommand {
-    fn execute(&self, project: &mut Project) {
-        if let Some(track) = project.track_mut(&self.track_id) {
-            track.soloed = self.new_solo;
-        }
-        project.dirty = true;
-    }
-    fn undo(&self, project: &mut Project) {
-        if let Some(track) = project.track_mut(&self.track_id) {
-            track.soloed = self.old_solo;
-        }
-        project.dirty = true;
-    }
-    fn description(&self) -> &str {
-        "Toggle track solo"
+/// Toggle a track's solo state. Construct via `set_track_solo_cmd()`.
+pub fn set_track_solo_cmd(
+    track_id: String,
+    old_solo: bool,
+    new_solo: bool,
+) -> TrackMutateCommand<bool> {
+    TrackMutateCommand {
+        track_id,
+        old_state: old_solo,
+        new_state: new_solo,
+        apply: |track, v| {
+            track.soloed = v;
+        },
+        label: "Toggle track solo",
     }
 }
 
-/// Toggle a track's duck (sidechain) state.
-pub struct SetTrackDuckCommand {
-    pub track_id: String,
-    pub old_duck: bool,
-    pub new_duck: bool,
-}
-
-impl EditCommand for SetTrackDuckCommand {
-    fn execute(&self, project: &mut Project) {
-        if let Some(track) = project.track_mut(&self.track_id) {
-            track.duck = self.new_duck;
-        }
-        project.dirty = true;
-    }
-    fn undo(&self, project: &mut Project) {
-        if let Some(track) = project.track_mut(&self.track_id) {
-            track.duck = self.old_duck;
-        }
-        project.dirty = true;
-    }
-    fn description(&self) -> &str {
-        "Toggle track duck"
+/// Toggle a track's duck (sidechain) state. Construct via `set_track_duck_cmd()`.
+pub fn set_track_duck_cmd(
+    track_id: String,
+    old_duck: bool,
+    new_duck: bool,
+) -> TrackMutateCommand<bool> {
+    TrackMutateCommand {
+        track_id,
+        old_state: old_duck,
+        new_state: new_duck,
+        apply: |track, v| {
+            track.duck = v;
+        },
+        label: "Toggle track duck",
     }
 }
 
@@ -2548,6 +2601,93 @@ mod tests {
         assert!(project.clip_ref("A").is_some());
         let inner = project.track_ref(&inner_track_id).unwrap();
         assert_eq!(inner.clips.len(), 1);
+    }
+
+    #[test]
+    fn clip_mutate_command_sets_and_reverts_property() {
+        let mut project = Project::new("Test");
+        let track = &project.tracks[0];
+        let track_id = track.id.clone();
+        let mut clip = Clip::new("test.mp4", 5_000_000_000, 0, ClipKind::Video);
+        clip.id = "c1".into();
+        clip.volume = 1.0;
+        project.track_mut(&track_id).unwrap().add_clip(clip);
+
+        let cmd = ClipMutateCommand {
+            clip_id: "c1".into(),
+            old_state: 1.0_f32,
+            new_state: 0.5_f32,
+            apply: |clip, v| {
+                clip.volume = v;
+            },
+            label: "Set volume",
+        };
+
+        cmd.execute(&mut project);
+        assert!((project.clip_ref("c1").unwrap().volume - 0.5).abs() < 1e-6);
+        assert!(project.dirty);
+
+        project.dirty = false;
+        cmd.undo(&mut project);
+        assert!((project.clip_ref("c1").unwrap().volume - 1.0).abs() < 1e-6);
+        assert!(project.dirty);
+    }
+
+    #[test]
+    fn clip_mutate_command_finds_compound_internal_clips() {
+        let mut project = Project::new("Test");
+        project.tracks.clear();
+
+        let mut inner_track = Track::new_video("Inner");
+        let mut inner_clip = Clip::new("inner.mp4", 5_000, 0, ClipKind::Video);
+        inner_clip.id = "inner-c1".into();
+        inner_clip.volume = 1.0;
+        inner_track.add_clip(inner_clip);
+
+        let mut compound = Clip::new_compound(0, vec![inner_track]);
+        compound.id = "compound".into();
+        let mut root = Track::new_video("Root");
+        root.add_clip(compound);
+        project.tracks.push(root);
+
+        let cmd = ClipMutateCommand {
+            clip_id: "inner-c1".into(),
+            old_state: 1.0_f32,
+            new_state: 0.3_f32,
+            apply: |clip, v| {
+                clip.volume = v;
+            },
+            label: "Set inner volume",
+        };
+
+        cmd.execute(&mut project);
+        assert!((project.clip_ref("inner-c1").unwrap().volume - 0.3).abs() < 1e-6);
+
+        cmd.undo(&mut project);
+        assert!((project.clip_ref("inner-c1").unwrap().volume - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn track_mutate_command_sets_and_reverts_property() {
+        let mut project = Project::new("Test");
+        let track_id = project.tracks[0].id.clone();
+        assert!(!project.tracks[0].muted);
+
+        let cmd = TrackMutateCommand {
+            track_id: track_id.clone(),
+            old_state: false,
+            new_state: true,
+            apply: |track, v| {
+                track.muted = v;
+            },
+            label: "Toggle mute",
+        };
+
+        cmd.execute(&mut project);
+        assert!(project.track_ref(&track_id).unwrap().muted);
+
+        cmd.undo(&mut project);
+        assert!(!project.track_ref(&track_id).unwrap().muted);
     }
 
     #[test]
