@@ -9984,60 +9984,34 @@ pub fn build_window(
                                                 }
                                             }
 
-                                            let sc = clip.subtitle_shadow_color;
-                                            let bhc = clip.subtitle_bg_highlight_color;
                                             lines.push(crate::ui::program_monitor::SubtitleLine {
                                                 words: word_displays,
                                                 text: seg.text.clone(),
-                                                color: (
-                                                    ((c >> 24) & 0xFF) as f64 / 255.0,
-                                                    ((c >> 16) & 0xFF) as f64 / 255.0,
-                                                    ((c >> 8) & 0xFF) as f64 / 255.0,
-                                                    (c & 0xFF) as f64 / 255.0,
-                                                ),
-                                                highlight_color: (
-                                                    ((hc >> 24) & 0xFF) as f64 / 255.0,
-                                                    ((hc >> 16) & 0xFF) as f64 / 255.0,
-                                                    ((hc >> 8) & 0xFF) as f64 / 255.0,
-                                                    (hc & 0xFF) as f64 / 255.0,
-                                                ),
+                                                color: crate::ui::colors::rgba_u32_to_f64(c),
+                                                highlight_color: crate::ui::colors::rgba_u32_to_f64(hc),
                                                 highlight_flags: clip.subtitle_highlight_flags,
-                                                outline_color: (
-                                                    ((oc >> 24) & 0xFF) as f64 / 255.0,
-                                                    ((oc >> 16) & 0xFF) as f64 / 255.0,
-                                                    ((oc >> 8) & 0xFF) as f64 / 255.0,
-                                                    (oc & 0xFF) as f64 / 255.0,
-                                                ),
+                                                outline_color: crate::ui::colors::rgba_u32_to_f64(oc),
                                                 outline_width: clip.subtitle_outline_width,
                                                 bg_box: clip.subtitle_bg_box,
-                                                bg_box_color: (
-                                                    ((bc >> 24) & 0xFF) as f64 / 255.0,
-                                                    ((bc >> 16) & 0xFF) as f64 / 255.0,
-                                                    ((bc >> 8) & 0xFF) as f64 / 255.0,
-                                                    (bc & 0xFF) as f64 / 255.0,
-                                                ),
+                                                bg_box_color: crate::ui::colors::rgba_u32_to_f64(bc),
                                                 font_desc,
                                                 position_y: clip.subtitle_position_y,
                                                 subtitle_bold: clip.subtitle_bold,
                                                 subtitle_italic: clip.subtitle_italic,
                                                 subtitle_underline: clip.subtitle_underline,
                                                 subtitle_shadow: clip.subtitle_shadow,
-                                                subtitle_shadow_color: (
-                                                    ((sc >> 24) & 0xFF) as f64 / 255.0,
-                                                    ((sc >> 16) & 0xFF) as f64 / 255.0,
-                                                    ((sc >> 8) & 0xFF) as f64 / 255.0,
-                                                    (sc & 0xFF) as f64 / 255.0,
-                                                ),
+                                                subtitle_shadow_color:
+                                                    crate::ui::colors::rgba_u32_to_f64(
+                                                        clip.subtitle_shadow_color,
+                                                    ),
                                                 subtitle_shadow_offset: (
                                                     clip.subtitle_shadow_offset_x,
                                                     clip.subtitle_shadow_offset_y,
                                                 ),
-                                                bg_highlight_color: (
-                                                    ((bhc >> 24) & 0xFF) as f64 / 255.0,
-                                                    ((bhc >> 16) & 0xFF) as f64 / 255.0,
-                                                    ((bhc >> 8) & 0xFF) as f64 / 255.0,
-                                                    (bhc & 0xFF) as f64 / 255.0,
-                                                ),
+                                                bg_highlight_color:
+                                                    crate::ui::colors::rgba_u32_to_f64(
+                                                        clip.subtitle_bg_highlight_color,
+                                                    ),
                                             });
                                             break;
                                         }

@@ -32,6 +32,20 @@ const PIXELS_PER_SECOND_DEFAULT: f64 = 100.0;
 use crate::units::NS_PER_SECOND_F as NS_PER_SECOND;
 /// Pixels from clip edge that activate trim mode
 const TRIM_HANDLE_PX: f64 = 10.0;
+/// Snap tolerance (in pixels) used by clip drag/trim to lock onto neighbouring
+/// clip edges and the playhead. Converted to nanoseconds via the current
+/// `pixels_per_second` zoom level at each call site.
+const SNAP_TOLERANCE_PX: f64 = 10.0;
+/// Font size for the timeline ruler tick labels.
+const RULER_FONT_SIZE: f64 = 10.0;
+/// Font size for marker labels drawn on the ruler.
+const MARKER_FONT_SIZE: f64 = 9.0;
+/// Lower clamp for the dynamic clip-label font size (8 px is the smallest size
+/// that stays legible when track height shrinks).
+const TRACK_LABEL_FONT_SIZE_MIN: f64 = 8.0;
+/// Upper clamp for the dynamic clip-label font size (above ~16 px the label
+/// looks oversized vs. the surrounding chrome).
+const TRACK_LABEL_FONT_SIZE_MAX: f64 = 16.0;
 const MUSIC_GEN_MIN_DURATION_NS: u64 = crate::units::NS_PER_SECOND;
 const MUSIC_GEN_MAX_DURATION_NS: u64 = 30 * MUSIC_GEN_MIN_DURATION_NS;
 
@@ -5228,7 +5242,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         let raw_start = current_ns.saturating_sub(clip_offset_ns);
                         if grouped_move {
                             let move_set: HashSet<String> = move_clip_ids.iter().cloned().collect();
-                            let snap_ns = (10.0 / st.pixels_per_second * NS_PER_SECOND) as u64;
+                            let snap_ns = (SNAP_TOLERANCE_PX / st.pixels_per_second * NS_PER_SECOND) as u64;
                             let snap_start = {
                                 let proj = st.project.borrow();
                                 let editing_tracks = st.resolve_editing_tracks(&proj);
@@ -5354,7 +5368,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 String::new()
                             };
 
-                            let snap_ns = (10.0 / st.pixels_per_second * NS_PER_SECOND) as u64;
+                            let snap_ns = (SNAP_TOLERANCE_PX / st.pixels_per_second * NS_PER_SECOND) as u64;
                             let (_clip_dur, snap_start) = {
                                 let proj = st.project.borrow();
                                 let editing_tracks = st.resolve_editing_tracks(&proj);
@@ -5424,7 +5438,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     } => {
                         let drag_ns = current_ns as i64 - original_timeline_start as i64;
                         // Snap the new timeline_start to nearby clip edges
-                        let snap_ns = (10.0 / st.pixels_per_second * NS_PER_SECOND) as i64;
+                        let snap_ns = (SNAP_TOLERANCE_PX / st.pixels_per_second * NS_PER_SECOND) as i64;
                         let new_start_raw =
                             (original_timeline_start as i64 + drag_ns).max(0) as u64;
 
@@ -5516,7 +5530,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         ref original_track_clips,
                     } => {
                         // Snap the out-point to nearby clip edges
-                        let snap_ns = (10.0 / st.pixels_per_second * NS_PER_SECOND) as u64;
+                        let snap_ns = (SNAP_TOLERANCE_PX / st.pixels_per_second * NS_PER_SECOND) as u64;
                         let snapped_ns = {
                             let proj = st.project.borrow();
                             let edges: Vec<u64> = proj
@@ -7359,7 +7373,7 @@ fn draw_ruler(cr: &gtk::cairo::Context, width: f64, st: &TimelineState) {
 
     cr.set_source_rgb(0.6, 0.6, 0.6);
     cr.set_line_width(1.0);
-    cr.set_font_size(10.0);
+    cr.set_font_size(RULER_FONT_SIZE);
 
     let visible_secs = (width - TRACK_LABEL_WIDTH) / st.pixels_per_second;
     let start_sec = st.scroll_offset / st.pixels_per_second;
@@ -7407,15 +7421,13 @@ fn draw_ruler(cr: &gtk::cairo::Context, width: f64, st: &TimelineState) {
     // Draw timeline markers (chapter points)
     {
         let proj = st.project.borrow();
-        cr.set_font_size(9.0);
+        cr.set_font_size(MARKER_FONT_SIZE);
         for marker in &proj.markers {
             let mx = st.ns_to_x(marker.position_ns);
             if mx < TRACK_LABEL_WIDTH || mx > width {
                 continue;
             }
-            let r = ((marker.color >> 24) & 0xFF) as f64 / 255.0;
-            let g = ((marker.color >> 16) & 0xFF) as f64 / 255.0;
-            let b = ((marker.color >> 8) & 0xFF) as f64 / 255.0;
+            let (r, g, b, _a) = crate::ui::colors::rgba_u32_to_f64(marker.color);
             cr.set_source_rgb(r, g, b);
             // Triangle pointing down from ruler top
             cr.move_to(mx, 2.0);
@@ -7794,7 +7806,7 @@ fn draw_clip(
             display.to_string()
         };
         cr.set_source_rgba(1.0, 1.0, 1.0, 0.9);
-        cr.set_font_size((ch * 0.4).clamp(8.0, 16.0));
+        cr.set_font_size((ch * 0.4).clamp(TRACK_LABEL_FONT_SIZE_MIN, TRACK_LABEL_FONT_SIZE_MAX));
         let te = cr
             .text_extents(&truncated)
             .unwrap_or_else(|_| cr.text_extents("X").unwrap());
@@ -7842,7 +7854,7 @@ fn draw_clip(
             clip.label.clone()
         };
         cr.set_source_rgba(1.0, 1.0, 1.0, 0.9);
-        cr.set_font_size((ch * 0.4).clamp(8.0, 16.0));
+        cr.set_font_size((ch * 0.4).clamp(TRACK_LABEL_FONT_SIZE_MIN, TRACK_LABEL_FONT_SIZE_MAX));
         let te = cr
             .text_extents(&truncated)
             .unwrap_or_else(|_| cr.text_extents("X").unwrap());
@@ -7878,7 +7890,7 @@ fn draw_clip(
 
         // Centered label
         cr.save().ok();
-        let font_sz = (ch * 0.35).clamp(8.0, 16.0);
+        let font_sz = (ch * 0.35).clamp(TRACK_LABEL_FONT_SIZE_MIN, TRACK_LABEL_FONT_SIZE_MAX);
         cr.set_font_size(font_sz);
         cr.set_source_rgba(1.0, 1.0, 1.0, 0.85);
         let label_text = &clip.label;
@@ -7962,7 +7974,7 @@ fn draw_clip(
 
         // Centered label
         cr.save().ok();
-        let font_sz = (ch * 0.35).clamp(8.0, 16.0);
+        let font_sz = (ch * 0.35).clamp(TRACK_LABEL_FONT_SIZE_MIN, TRACK_LABEL_FONT_SIZE_MAX);
         cr.set_font_size(font_sz);
         cr.set_source_rgba(1.0, 1.0, 1.0, 0.85);
         let label_text = &clip.label;

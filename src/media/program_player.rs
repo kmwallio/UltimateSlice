@@ -5523,11 +5523,11 @@ impl ProgramPlayer {
             if let Some(ref to) = slot.textoverlay {
                 to.set_property("draw-outline", outline_width > 0.0);
                 if outline_width > 0.0 {
-                    let r = (outline_color >> 24) & 0xFF;
-                    let g = (outline_color >> 16) & 0xFF;
-                    let b = (outline_color >> 8) & 0xFF;
-                    let a = outline_color & 0xFF;
-                    let argb: u32 = (a << 24) | (r << 16) | (g << 8) | b;
+                    let (r, g, b, a) = crate::ui::colors::rgba_u32_to_u8(outline_color);
+                    let argb: u32 = ((a as u32) << 24)
+                        | ((r as u32) << 16)
+                        | ((g as u32) << 8)
+                        | b as u32;
                     to.set_property("outline-color", argb);
                 }
                 to.set_property("draw-shadow", shadow);
@@ -5550,11 +5550,11 @@ impl ProgramPlayer {
             if let Some(ref to) = slot.textoverlay {
                 to.set_property("draw-outline", outline_width > 0.0);
                 if outline_width > 0.0 {
-                    let r = (outline_color >> 24) & 0xFF;
-                    let g = (outline_color >> 16) & 0xFF;
-                    let b = (outline_color >> 8) & 0xFF;
-                    let a = outline_color & 0xFF;
-                    let argb: u32 = (a << 24) | (r << 16) | (g << 8) | b;
+                    let (r, g, b, a) = crate::ui::colors::rgba_u32_to_u8(outline_color);
+                    let argb: u32 = ((a as u32) << 24)
+                        | ((r as u32) << 16)
+                        | ((g as u32) << 8)
+                        | b as u32;
                     to.set_property("outline-color", argb);
                 }
                 to.set_property("draw-shadow", shadow);
@@ -8987,11 +8987,11 @@ impl ProgramPlayer {
                 let dy = ((rel_y - 0.5) * proc_h as f64 + text_h_px * 0.35).round() as i32;
                 to.set_property("deltax", dx);
                 to.set_property("deltay", dy);
-                let r = (color_rgba >> 24) & 0xFF;
-                let g = (color_rgba >> 16) & 0xFF;
-                let b = (color_rgba >> 8) & 0xFF;
-                let a = color_rgba & 0xFF;
-                let argb: u32 = (a << 24) | (r << 16) | (g << 8) | b;
+                let (r, g, b, a) = crate::ui::colors::rgba_u32_to_u8(color_rgba);
+                let argb: u32 = ((a as u32) << 24)
+                    | ((r as u32) << 16)
+                    | ((g as u32) << 8)
+                    | b as u32;
                 to.set_property("color", argb);
             }
         }
@@ -9003,12 +9003,11 @@ impl ProgramPlayer {
             // Outline (GStreamer textoverlay uses draw-outline, fixed ~1px width)
             to.set_property("draw-outline", clip.title_outline_width > 0.0);
             if clip.title_outline_width > 0.0 {
-                let rgba = clip.title_outline_color;
-                let r = (rgba >> 24) & 0xFF;
-                let g = (rgba >> 16) & 0xFF;
-                let b = (rgba >> 8) & 0xFF;
-                let a = rgba & 0xFF;
-                let argb: u32 = (a << 24) | (r << 16) | (g << 8) | b;
+                let (r, g, b, a) = crate::ui::colors::rgba_u32_to_u8(clip.title_outline_color);
+                let argb: u32 = ((a as u32) << 24)
+                    | ((r as u32) << 16)
+                    | ((g as u32) << 8)
+                    | b as u32;
                 to.set_property("outline-color", argb);
             }
             // Shadow: GStreamer textoverlay only supports a fixed ~1px shadow
@@ -10233,12 +10232,12 @@ impl ProgramPlayer {
                     st.set_property("deltax", dx + sx);
                     st.set_property("deltay", dy + sy);
                     // Shadow color (RRGGBBAA → AARRGGBB for GStreamer)
-                    let sc = clip.title_shadow_color;
-                    let sr = (sc >> 24) & 0xFF;
-                    let sg = (sc >> 16) & 0xFF;
-                    let sb = (sc >> 8) & 0xFF;
-                    let sa = sc & 0xFF;
-                    let s_argb: u32 = (sa << 24) | (sr << 16) | (sg << 8) | sb;
+                    let (sr, sg, sb, sa) =
+                        crate::ui::colors::rgba_u32_to_u8(clip.title_shadow_color);
+                    let s_argb: u32 = ((sa as u32) << 24)
+                        | ((sr as u32) << 16)
+                        | ((sg as u32) << 8)
+                        | sb as u32;
                     st.set_property("color", s_argb);
                 }
             }
@@ -11747,11 +11746,8 @@ impl ProgramPlayer {
         duration_s: f64,
     ) -> String {
         let bg = clip.title_clip_bg_color;
-        let a = bg & 0xFF;
+        let (r, g, b, a) = crate::ui::colors::rgba_u32_to_u8(bg);
         if a > 0 {
-            let r = (bg >> 24) & 0xFF;
-            let g = (bg >> 16) & 0xFF;
-            let b = (bg >> 8) & 0xFF;
             let color_str = format!("#{r:02x}{g:02x}{b:02x}");
             format!(
                 "color=c={color_str}:size={out_w}x{out_h}:r={fps}:d={duration_s:.6},format=yuv420p,trim=duration={duration_s:.6},setpts=PTS-STARTPTS"
@@ -12345,22 +12341,15 @@ impl ProgramPlayer {
         let rel_y = clip.title_y.clamp(0.0, 1.0);
         let scale_factor = out_h as f64 / REF_H;
         let scaled_size = font_size * (4.0 / 3.0) * scale_factor;
-        let rgba = clip.title_color;
-        let r = ((rgba >> 24) & 0xFF) as u8;
-        let g = ((rgba >> 16) & 0xFF) as u8;
-        let b = ((rgba >> 8) & 0xFF) as u8;
-        let a = (rgba & 0xFF) as u8;
+        let (r, g, b, a) = crate::ui::colors::rgba_u32_to_u8(clip.title_color);
         let alpha = (a as f64 / 255.0).clamp(0.0, 1.0);
         let mut filter = format!(
             ",drawtext={font_option}:text='{text}':fontsize={scaled_size:.2}:fontcolor={r:02x}{g:02x}{b:02x}@{alpha:.4}:x='({rel_x:.6})*w-text_w/2':y='({rel_y:.6})*h-text_h/2'"
         );
         if clip.title_outline_width > 0.0 {
             let bw = (clip.title_outline_width * scale_factor).max(0.5);
-            let oc = clip.title_outline_color;
-            let or_ = ((oc >> 24) & 0xFF) as u8;
-            let og = ((oc >> 16) & 0xFF) as u8;
-            let ob = ((oc >> 8) & 0xFF) as u8;
-            let oa = (oc & 0xFF) as u8;
+            let (or_, og, ob, oa) =
+                crate::ui::colors::rgba_u32_to_u8(clip.title_outline_color);
             let o_alpha = (oa as f64 / 255.0).clamp(0.0, 1.0);
             filter.push_str(&format!(
                 ":borderw={bw:.1}:bordercolor={or_:02x}{og:02x}{ob:02x}@{o_alpha:.4}"
@@ -12369,11 +12358,8 @@ impl ProgramPlayer {
         if clip.title_shadow {
             let sx = (clip.title_shadow_offset_x * scale_factor).round() as i32;
             let sy = (clip.title_shadow_offset_y * scale_factor).round() as i32;
-            let sc = clip.title_shadow_color;
-            let sr = ((sc >> 24) & 0xFF) as u8;
-            let sg = ((sc >> 16) & 0xFF) as u8;
-            let sb = ((sc >> 8) & 0xFF) as u8;
-            let sa = (sc & 0xFF) as u8;
+            let (sr, sg, sb, sa) =
+                crate::ui::colors::rgba_u32_to_u8(clip.title_shadow_color);
             let s_alpha = (sa as f64 / 255.0).clamp(0.0, 1.0);
             filter.push_str(&format!(
                 ":shadowx={sx}:shadowy={sy}:shadowcolor={sr:02x}{sg:02x}{sb:02x}@{s_alpha:.4}"
@@ -12381,11 +12367,8 @@ impl ProgramPlayer {
         }
         if clip.title_bg_box {
             let pad = (clip.title_bg_box_padding * scale_factor).round() as i32;
-            let bc = clip.title_bg_box_color;
-            let br = ((bc >> 24) & 0xFF) as u8;
-            let bgg = ((bc >> 16) & 0xFF) as u8;
-            let bb = ((bc >> 8) & 0xFF) as u8;
-            let ba = (bc & 0xFF) as u8;
+            let (br, bgg, bb, ba) =
+                crate::ui::colors::rgba_u32_to_u8(clip.title_bg_box_color);
             let b_alpha = (ba as f64 / 255.0).clamp(0.0, 1.0);
             filter.push_str(&format!(
                 ":box=1:boxcolor={br:02x}{bgg:02x}{bb:02x}@{b_alpha:.4}:boxborderw={pad}"
@@ -12525,14 +12508,10 @@ impl ProgramPlayer {
 
         // Title clips use videotestsrc (solid color) instead of uridecodebin.
         if clip.is_title {
-            let bg_color = clip.title_clip_bg_color;
-            let fg = if (bg_color & 0xFF) > 0 {
+            let (r, g, b, a) = crate::ui::colors::rgba_u32_to_u8(clip.title_clip_bg_color);
+            let fg: u32 = if a > 0 {
                 // RRGGBBAA → AARRGGBB for GStreamer foreground-color
-                let r = (bg_color >> 24) & 0xFF;
-                let g = (bg_color >> 16) & 0xFF;
-                let b = (bg_color >> 8) & 0xFF;
-                let a = bg_color & 0xFF;
-                (a << 24) | (r << 16) | (g << 8) | b
+                ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32
             } else {
                 0 // fully transparent black
             };

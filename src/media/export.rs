@@ -3181,11 +3181,7 @@ fn build_title_filter(clip: &crate::model::clip::Clip, out_h: u32) -> String {
     // Scale Pango points → pixels (×4/3) then proportionally to output height
     let scaled_size = font_size * (4.0 / 3.0) * scale_factor;
 
-    let rgba = clip.title_color;
-    let r = ((rgba >> 24) & 0xFF) as u8;
-    let g = ((rgba >> 16) & 0xFF) as u8;
-    let b = ((rgba >> 8) & 0xFF) as u8;
-    let a = (rgba & 0xFF) as u8;
+    let (r, g, b, a) = crate::ui::colors::rgba_u32_to_u8(clip.title_color);
     let alpha = (a as f64 / 255.0).clamp(0.0, 1.0);
 
     // Base drawtext filter
@@ -3196,11 +3192,7 @@ fn build_title_filter(clip: &crate::model::clip::Clip, out_h: u32) -> String {
     // Outline (border)
     if clip.title_outline_width > 0.0 {
         let bw = (clip.title_outline_width * scale_factor).max(0.5);
-        let oc = clip.title_outline_color;
-        let or = ((oc >> 24) & 0xFF) as u8;
-        let og = ((oc >> 16) & 0xFF) as u8;
-        let ob = ((oc >> 8) & 0xFF) as u8;
-        let oa = (oc & 0xFF) as u8;
+        let (or, og, ob, oa) = crate::ui::colors::rgba_u32_to_u8(clip.title_outline_color);
         let o_alpha = (oa as f64 / 255.0).clamp(0.0, 1.0);
         filter.push_str(&format!(
             ":borderw={bw:.1}:bordercolor={or:02x}{og:02x}{ob:02x}@{o_alpha:.4}"
@@ -3211,11 +3203,7 @@ fn build_title_filter(clip: &crate::model::clip::Clip, out_h: u32) -> String {
     if clip.title_shadow {
         let sx = (clip.title_shadow_offset_x * scale_factor).round() as i32;
         let sy = (clip.title_shadow_offset_y * scale_factor).round() as i32;
-        let sc = clip.title_shadow_color;
-        let sr = ((sc >> 24) & 0xFF) as u8;
-        let sg = ((sc >> 16) & 0xFF) as u8;
-        let sb = ((sc >> 8) & 0xFF) as u8;
-        let sa = (sc & 0xFF) as u8;
+        let (sr, sg, sb, sa) = crate::ui::colors::rgba_u32_to_u8(clip.title_shadow_color);
         let s_alpha = (sa as f64 / 255.0).clamp(0.0, 1.0);
         filter.push_str(&format!(
             ":shadowx={sx}:shadowy={sy}:shadowcolor={sr:02x}{sg:02x}{sb:02x}@{s_alpha:.4}"
@@ -3225,11 +3213,7 @@ fn build_title_filter(clip: &crate::model::clip::Clip, out_h: u32) -> String {
     // Background box
     if clip.title_bg_box {
         let pad = (clip.title_bg_box_padding * scale_factor).round() as i32;
-        let bc = clip.title_bg_box_color;
-        let br = ((bc >> 24) & 0xFF) as u8;
-        let bg = ((bc >> 16) & 0xFF) as u8;
-        let bb = ((bc >> 8) & 0xFF) as u8;
-        let ba = (bc & 0xFF) as u8;
+        let (br, bg, bb, ba) = crate::ui::colors::rgba_u32_to_u8(clip.title_bg_box_color);
         let b_alpha = (ba as f64 / 255.0).clamp(0.0, 1.0);
         filter.push_str(&format!(
             ":box=1:boxcolor={br:02x}{bg:02x}{bb:02x}@{b_alpha:.4}:boxborderw={pad}"
@@ -3319,10 +3303,7 @@ fn build_subtitle_filter_composited(
     let ass_bold = ass_bool(font_style.bold || style_clip.subtitle_bold);
     let ass_italic = ass_bool(font_style.italic || style_clip.subtitle_italic);
 
-    let rgba = style_clip.subtitle_color;
-    let r = ((rgba >> 24) & 0xFF) as u8;
-    let g = ((rgba >> 16) & 0xFF) as u8;
-    let b = ((rgba >> 8) & 0xFF) as u8;
+    let (r, g, b, _a) = crate::ui::colors::rgba_u32_to_u8(style_clip.subtitle_color);
     let ass_primary = format!("&H00{b:02X}{g:02X}{r:02X}");
 
     // Map position_y to ASS alignment + MarginV.
@@ -3342,21 +3323,16 @@ fn build_subtitle_filter_composited(
 
     if style_clip.subtitle_outline_width > 0.0 {
         let bw = (style_clip.subtitle_outline_width * scale_factor).round() as u32;
-        let oc = style_clip.subtitle_outline_color;
-        let obr = ((oc >> 24) & 0xFF) as u8;
-        let obg = ((oc >> 16) & 0xFF) as u8;
-        let obb = ((oc >> 8) & 0xFF) as u8;
+        let (obr, obg, obb, _) =
+            crate::ui::colors::rgba_u32_to_u8(style_clip.subtitle_outline_color);
         style_parts.push_str(&format!(
             ",OutlineColour=&H00{obb:02X}{obg:02X}{obr:02X},Outline={bw}"
         ));
     }
 
     if style_clip.subtitle_bg_box {
-        let bc = style_clip.subtitle_bg_box_color;
-        let bbr = ((bc >> 24) & 0xFF) as u8;
-        let bbg = ((bc >> 16) & 0xFF) as u8;
-        let bbb = ((bc >> 8) & 0xFF) as u8;
-        let bba = (bc & 0xFF) as u8;
+        let (bbr, bbg, bbb, bba) =
+            crate::ui::colors::rgba_u32_to_u8(style_clip.subtitle_bg_box_color);
         let ass_alpha = format!("{:02X}", 255 - bba);
         style_parts.push_str(&format!(
             ",BorderStyle=3,BackColour=&H{ass_alpha}{bbb:02X}{bbg:02X}{bbr:02X}"
@@ -3382,10 +3358,7 @@ fn build_subtitle_filter_composited(
             Err(_) => return (String::new(), None),
         };
 
-        let hc = style_clip.subtitle_highlight_color;
-        let hr = ((hc >> 24) & 0xFF) as u8;
-        let hg = ((hc >> 16) & 0xFF) as u8;
-        let hb = ((hc >> 8) & 0xFF) as u8;
+        let (hr, hg, hb, _) = crate::ui::colors::rgba_u32_to_u8(style_clip.subtitle_highlight_color);
         let group_size = (style_clip.subtitle_word_window_secs as usize).max(2);
 
         {
@@ -3406,10 +3379,8 @@ fn build_subtitle_filter_composited(
             let mut border_style = 1u32;
             let mut back_color = "&H00000000".to_string();
             if style_clip.subtitle_outline_width > 0.0 {
-                let oc = style_clip.subtitle_outline_color;
-                let obr = ((oc >> 24) & 0xFF) as u8;
-                let obg = ((oc >> 16) & 0xFF) as u8;
-                let obb = ((oc >> 8) & 0xFF) as u8;
+                let (obr, obg, obb, _) =
+                    crate::ui::colors::rgba_u32_to_u8(style_clip.subtitle_outline_color);
                 outline_color = format!("&H00{obb:02X}{obg:02X}{obr:02X}");
                 outline_w = (style_clip.subtitle_outline_width * scale_factor).round() as u32;
             }
@@ -3424,11 +3395,8 @@ fn build_subtitle_filter_composited(
                 0i32
             };
             if style_clip.subtitle_bg_box {
-                let bc = style_clip.subtitle_bg_box_color;
-                let bbr = ((bc >> 24) & 0xFF) as u8;
-                let bbg = ((bc >> 16) & 0xFF) as u8;
-                let bbb = ((bc >> 8) & 0xFF) as u8;
-                let bba = (bc & 0xFF) as u8;
+                let (bbr, bbg, bbb, bba) =
+                    crate::ui::colors::rgba_u32_to_u8(style_clip.subtitle_bg_box_color);
                 let ass_alpha = 255 - bba;
                 back_color = format!("&H{ass_alpha:02X}{bbb:02X}{bbg:02X}{bbr:02X}");
                 if flags.stroke {
@@ -3508,10 +3476,9 @@ fn build_subtitle_filter_composited(
                                     .push_str(&format!("\\bord4\\3c&H{hb:02X}{hg:02X}{hr:02X}&"));
                             }
                             if flags.background {
-                                let bhc = style_clip.subtitle_bg_highlight_color;
-                                let bhr = ((bhc >> 24) & 0xFF) as u8;
-                                let bhg = ((bhc >> 16) & 0xFF) as u8;
-                                let bhb = ((bhc >> 8) & 0xFF) as u8;
+                                let (bhr, bhg, bhb, _) = crate::ui::colors::rgba_u32_to_u8(
+                                    style_clip.subtitle_bg_highlight_color,
+                                );
                                 overrides.push_str(&format!(
                                     "\\4c&H{bhb:02X}{bhg:02X}{bhr:02X}&\\shad2"
                                 ));
@@ -3879,12 +3846,9 @@ fn title_clip_lavfi_color(
     dur_s: f64,
 ) -> String {
     let bg = clip.title_clip_bg_color;
-    let a = bg & 0xFF;
+    let (r, g, b, a) = crate::ui::colors::rgba_u32_to_u8(bg);
     if a > 0 {
         // Opaque or semi-transparent background — use opaque yuv420p.
-        let r = (bg >> 24) & 0xFF;
-        let g = (bg >> 16) & 0xFF;
-        let b = (bg >> 8) & 0xFF;
         let color_str = format!("#{r:02x}{g:02x}{b:02x}");
         format!(
             "color=c={color_str}:size={out_w}x{out_h}:r={fr_n}/{fr_d}:d={dur_s:.6},format=yuv420p,trim=duration={dur_s:.6},setpts=PTS-STARTPTS"

@@ -9,6 +9,12 @@ const IMAGE_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "bmp", "tiff", "tif", "webp", "svg", "heic", "heif",
 ];
 
+/// Tolerance (in nanoseconds, ~half a frame at 24 fps) used when looking up an
+/// existing keyframe near a given timeline position. Keyframes within this
+/// distance are treated as the same keyframe so close-but-not-exact playhead
+/// positions update the existing entry instead of creating a near-duplicate.
+pub const KEYFRAME_SNAP_TOLERANCE_NS: u64 = 20_000_000;
+
 /// Returns `true` when `path` has a file extension matching a known still-image
 /// format.  Used across import, placement, playback, and export to distinguish
 /// image clips from video/audio.
@@ -2753,13 +2759,10 @@ impl Clip {
                 None
             };
         let keyframes = self.keyframes_for_phase1_property_mut(property);
-        // Snap to an existing keyframe within half a frame (~20ms) to avoid
-        // creating near-duplicates when the playhead is close but not exact.
-        const SNAP_TOLERANCE_NS: u64 = 20_000_000;
         let mut changed_time_ns: Option<u64> = None;
         if let Some(existing) = keyframes
             .iter_mut()
-            .find(|kf| kf.time_ns.abs_diff(local_time_ns) <= SNAP_TOLERANCE_NS)
+            .find(|kf| kf.time_ns.abs_diff(local_time_ns) <= KEYFRAME_SNAP_TOLERANCE_NS)
         {
             changed_time_ns = Some(existing.time_ns);
             existing.value = clamped_value;
@@ -2804,8 +2807,7 @@ impl Clip {
         };
         let keyframes = self.keyframes_for_phase1_property_mut(property);
         let before = keyframes.len();
-        const SNAP_TOLERANCE_NS: u64 = 20_000_000;
-        keyframes.retain(|kf| kf.time_ns.abs_diff(local_time_ns) > SNAP_TOLERANCE_NS);
+        keyframes.retain(|kf| kf.time_ns.abs_diff(local_time_ns) > KEYFRAME_SNAP_TOLERANCE_NS);
         keyframes.len() != before
     }
 

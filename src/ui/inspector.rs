@@ -2004,11 +2004,7 @@ impl InspectorView {
                 // Style controls are always visible so users can configure before generating.
                 self.subtitle_style_box.set_visible(true);
                 sync_subtitle_font_button(&self.subtitle_font_btn, &c.subtitle_font);
-                let rgba = c.subtitle_color;
-                let r = ((rgba >> 24) & 0xFF) as f32 / 255.0;
-                let g = ((rgba >> 16) & 0xFF) as f32 / 255.0;
-                let b = ((rgba >> 8) & 0xFF) as f32 / 255.0;
-                let a = (rgba & 0xFF) as f32 / 255.0;
+                let (r, g, b, a) = crate::ui::colors::rgba_u32_to_f32(c.subtitle_color);
                 self.subtitle_color_btn
                     .set_rgba(&gdk4::RGBA::new(r, g, b, a));
                 // Sync base style toggles
@@ -2041,38 +2037,26 @@ impl InspectorView {
                     .set_visible(!flags.is_none());
                 self.subtitle_position_slider
                     .set_value(c.subtitle_position_y);
-                let oc = c.subtitle_outline_color;
-                self.subtitle_outline_color_btn.set_rgba(&gdk4::RGBA::new(
-                    ((oc >> 24) & 0xFF) as f32 / 255.0,
-                    ((oc >> 16) & 0xFF) as f32 / 255.0,
-                    ((oc >> 8) & 0xFF) as f32 / 255.0,
-                    (oc & 0xFF) as f32 / 255.0,
-                ));
+                let (or_, og, ob, oa) =
+                    crate::ui::colors::rgba_u32_to_f32(c.subtitle_outline_color);
+                self.subtitle_outline_color_btn
+                    .set_rgba(&gdk4::RGBA::new(or_, og, ob, oa));
                 self.subtitle_bg_box_check.set_active(c.subtitle_bg_box);
-                let bgc = c.subtitle_bg_box_color;
-                self.subtitle_bg_color_btn.set_rgba(&gdk4::RGBA::new(
-                    ((bgc >> 24) & 0xFF) as f32 / 255.0,
-                    ((bgc >> 16) & 0xFF) as f32 / 255.0,
-                    ((bgc >> 8) & 0xFF) as f32 / 255.0,
-                    (bgc & 0xFF) as f32 / 255.0,
-                ));
+                let (bgr, bgg, bgb, bga) =
+                    crate::ui::colors::rgba_u32_to_f32(c.subtitle_bg_box_color);
+                self.subtitle_bg_color_btn
+                    .set_rgba(&gdk4::RGBA::new(bgr, bgg, bgb, bga));
                 self.subtitle_export_srt_btn
                     .set_sensitive(!c.subtitle_segments.is_empty());
                 if flags.color || flags.stroke {
-                    let hc = c.subtitle_highlight_color;
-                    let hr = ((hc >> 24) & 0xFF) as f32 / 255.0;
-                    let hg = ((hc >> 16) & 0xFF) as f32 / 255.0;
-                    let hb = ((hc >> 8) & 0xFF) as f32 / 255.0;
-                    let ha = (hc & 0xFF) as f32 / 255.0;
+                    let (hr, hg, hb, ha) =
+                        crate::ui::colors::rgba_u32_to_f32(c.subtitle_highlight_color);
                     self.subtitle_highlight_color_btn
                         .set_rgba(&gdk4::RGBA::new(hr, hg, hb, ha));
                 }
                 if flags.background {
-                    let bhc = c.subtitle_bg_highlight_color;
-                    let bhr = ((bhc >> 24) & 0xFF) as f32 / 255.0;
-                    let bhg = ((bhc >> 16) & 0xFF) as f32 / 255.0;
-                    let bhb = ((bhc >> 8) & 0xFF) as f32 / 255.0;
-                    let bha = (bhc & 0xFF) as f32 / 255.0;
+                    let (bhr, bhg, bhb, bha) =
+                        crate::ui::colors::rgba_u32_to_f32(c.subtitle_bg_highlight_color);
                     self.subtitle_bg_highlight_color_btn
                         .set_rgba(&gdk4::RGBA::new(bhr, bhg, bhb, bha));
                 }
@@ -2646,11 +2630,7 @@ impl InspectorView {
                 self.title_entry.set_text(&c.title_text);
                 sync_title_font_button(&self.title_font_btn, &c.title_font);
                 {
-                    let rgba = c.title_color;
-                    let r = ((rgba >> 24) & 0xFF) as f32 / 255.0;
-                    let g = ((rgba >> 16) & 0xFF) as f32 / 255.0;
-                    let b = ((rgba >> 8) & 0xFF) as f32 / 255.0;
-                    let a = (rgba & 0xFF) as f32 / 255.0;
+                    let (r, g, b, a) = crate::ui::colors::rgba_u32_to_f32(c.title_color);
                     self.title_color_btn.set_rgba(&gdk4::RGBA::new(r, g, b, a));
                 }
                 self.title_x_slider.set_value(c.title_x);
@@ -2658,21 +2638,13 @@ impl InspectorView {
                 self.title_outline_width_slider
                     .set_value(c.title_outline_width);
                 {
-                    let rgba = c.title_outline_color;
-                    let r = ((rgba >> 24) & 0xFF) as f32 / 255.0;
-                    let g = ((rgba >> 16) & 0xFF) as f32 / 255.0;
-                    let b = ((rgba >> 8) & 0xFF) as f32 / 255.0;
-                    let a = (rgba & 0xFF) as f32 / 255.0;
+                    let (r, g, b, a) = crate::ui::colors::rgba_u32_to_f32(c.title_outline_color);
                     self.title_outline_color_btn
                         .set_rgba(&gdk4::RGBA::new(r, g, b, a));
                 }
                 self.title_shadow_check.set_active(c.title_shadow);
                 {
-                    let rgba = c.title_shadow_color;
-                    let r = ((rgba >> 24) & 0xFF) as f32 / 255.0;
-                    let g = ((rgba >> 16) & 0xFF) as f32 / 255.0;
-                    let b = ((rgba >> 8) & 0xFF) as f32 / 255.0;
-                    let a = (rgba & 0xFF) as f32 / 255.0;
+                    let (r, g, b, a) = crate::ui::colors::rgba_u32_to_f32(c.title_shadow_color);
                     self.title_shadow_color_btn
                         .set_rgba(&gdk4::RGBA::new(r, g, b, a));
                 }
@@ -2682,11 +2654,7 @@ impl InspectorView {
                     .set_value(c.title_shadow_offset_y);
                 self.title_bg_box_check.set_active(c.title_bg_box);
                 {
-                    let rgba = c.title_bg_box_color;
-                    let r = ((rgba >> 24) & 0xFF) as f32 / 255.0;
-                    let g = ((rgba >> 16) & 0xFF) as f32 / 255.0;
-                    let b = ((rgba >> 8) & 0xFF) as f32 / 255.0;
-                    let a = (rgba & 0xFF) as f32 / 255.0;
+                    let (r, g, b, a) = crate::ui::colors::rgba_u32_to_f32(c.title_bg_box_color);
                     self.title_bg_box_color_btn
                         .set_rgba(&gdk4::RGBA::new(r, g, b, a));
                 }

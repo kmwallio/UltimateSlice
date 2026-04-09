@@ -2,6 +2,9 @@ use crate::media::program_player::{ProgramPlayer, ScopeFrame};
 use crate::model::project::FrameRate;
 use crate::ui::colors::{LUMA_B, LUMA_G, LUMA_R};
 use crate::ui::timecode;
+
+/// Discrete zoom levels for the program monitor zoom in/out buttons.
+const PROGRAM_MONITOR_ZOOM_LEVELS: &[f64] = &[0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
 use gtk4::prelude::*;
 use gtk4::{
     self as gtk, AspectFrame, Box as GBox, Button, CheckButton, DrawingArea, EventControllerScroll,
@@ -826,7 +829,7 @@ pub fn build_program_monitor(
 
     // apply_zoom: when leaving zoom=1.0, records the natural canvas_frame size as baseline.
     // At non-1.0 zoom, disables hexpand/vexpand so the frame can grow beyond viewport.
-    let zoom_levels: &[f64] = &[0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
+    let zoom_levels: &[f64] = PROGRAM_MONITOR_ZOOM_LEVELS;
     let apply_zoom = {
         let canvas_frame = canvas_frame.clone();
         let scroll = scroll.clone();
@@ -936,15 +939,14 @@ pub fn build_program_monitor(
         let az = apply_zoom.clone();
         let zl = zoom_level.clone();
         let lbl = zoom_label.clone();
-        let zoom_levels_v = vec![0.25_f64, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
         zoom_out_btn.connect_clicked(move |_| {
             let z = zl.get();
-            let idx = zoom_levels_v
+            let idx = PROGRAM_MONITOR_ZOOM_LEVELS
                 .iter()
                 .position(|&l| (l - z).abs() < 0.01)
                 .unwrap_or(3);
             let new_idx = idx.saturating_sub(1);
-            let new_z = zoom_levels_v[new_idx];
+            let new_z = PROGRAM_MONITOR_ZOOM_LEVELS[new_idx];
             az(new_z);
             lbl.set_label(&format!("{}%", (new_z * 100.0) as u32));
         });
@@ -953,15 +955,14 @@ pub fn build_program_monitor(
         let az = apply_zoom.clone();
         let zl = zoom_level.clone();
         let lbl = zoom_label.clone();
-        let zoom_levels_v = vec![0.25_f64, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
         zoom_in_btn.connect_clicked(move |_| {
             let z = zl.get();
-            let idx = zoom_levels_v
+            let idx = PROGRAM_MONITOR_ZOOM_LEVELS
                 .iter()
                 .position(|&l| (l - z).abs() < 0.01)
                 .unwrap_or(3);
-            let new_idx = (idx + 1).min(zoom_levels_v.len() - 1);
-            let new_z = zoom_levels_v[new_idx];
+            let new_idx = (idx + 1).min(PROGRAM_MONITOR_ZOOM_LEVELS.len() - 1);
+            let new_z = PROGRAM_MONITOR_ZOOM_LEVELS[new_idx];
             az(new_z);
             lbl.set_label(&format!("{}%", (new_z * 100.0) as u32));
         });

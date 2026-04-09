@@ -14,9 +14,16 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 /// Radius (px) of the drawn corner handle circles.
-const HANDLE_R: f64 = 7.0;
+const HANDLE_R: f64 = TRANSFORM_HANDLE_RADIUS_PX;
 /// Hit-test radius for corner handles (a bit larger than drawn for ease of use).
-const HANDLE_HIT: f64 = 16.0;
+const HANDLE_HIT: f64 = TRANSFORM_HANDLE_HIT_RADIUS_PX;
+
+/// Drawn radius (px) of the transform overlay's corner/edge handle circles.
+pub const TRANSFORM_HANDLE_RADIUS_PX: f64 = 7.0;
+/// Hit-test radius (px) for the transform overlay's corner/edge handles. Larger
+/// than the drawn radius so the handle is easier to grab without pixel-perfect
+/// aim.
+pub const TRANSFORM_HANDLE_HIT_RADIUS_PX: f64 = 16.0;
 /// Inspector crop slider max (pixels).
 ///
 /// Sourced from `crate::model::transform_bounds::CROP_MAX_PX_I32` so the

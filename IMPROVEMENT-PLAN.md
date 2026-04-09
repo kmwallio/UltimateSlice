@@ -286,25 +286,14 @@ Also: keyframe-time merging logic at 3933-3945 (merging position_x and
 position_y times into a single sorted set) appears in two places — extract
 `merge_keyframe_times(kfs: &[&NumericKeyframe]) -> Vec<u64>`.
 
-### P1.6 — RGBA-from-u32 unpacking (~15 sites)
-Pattern: `let r = ((c >> 24) & 0xFF) as f64 / 255.0; ...` repeated in
-timeline drawing (e.g. `src/ui/timeline/widget.rs:7442-7445`) and inspector
-subtitle color handlers.
+### ~~P1.6 — RGBA-from-u32 unpacking~~ ✅ DONE
 
-Add a single utility:
-
-```rust
-pub fn color_u32_to_rgba(color: u32) -> (f64, f64, f64, f64) {
-    (
-        ((color >> 24) & 0xFF) as f64 / 255.0,
-        ((color >> 16) & 0xFF) as f64 / 255.0,
-        ((color >>  8) & 0xFF) as f64 / 255.0,
-        ( color        & 0xFF) as f64 / 255.0,
-    )
-}
-```
-
-Live it under `src/ui/theme.rs` (created in P2.5) or `src/ui/colors.rs`.
+> **Landed:** `src/ui/colors.rs` now exports three helpers — `rgba_u32_to_u8`,
+> `rgba_u32_to_f64`, `rgba_u32_to_f32` — covering the three byte-shift call
+> patterns that the original plan only saw one of (the inspector's
+> `gdk4::RGBA::new` call sites need `f32`, not `f64`). All 91 sites across
+> `media/export.rs`, `media/program_player.rs`, `ui/window.rs`,
+> `ui/inspector.rs`, `ui/timeline/widget.rs`, and `otio/writer.rs` were swept.
 
 ### P1.7 — Inspector slider connect-handler boilerplate
 **File:** `src/ui/inspector.rs`
@@ -363,23 +352,22 @@ removed from this PR for being unused (`NS_PER_MS`, `NS_PER_MS_F`,
 `NS_PER_US`, `US_PER_SECOND`, `MS_PER_SECOND`) — the spec for them is in
 the closed PR's version of this file.
 
-### P2.2 — Snap & hit-test thresholds
-- Snap tolerance `10.0` pixels — `src/ui/timeline/widget.rs:5257, 5383, 5453, 5545`
-- Keyframe snap `20_000_000` ns — `src/model/clip.rs:2758, 2807`
-- Trim handle `10.0` already a constant (`TRIM_HANDLE_PX`)
-- Transform handle radius `7.0`/`16.0` — `src/ui/transform_overlay.rs:17, 19`
-- Curve point hit radius — `src/ui/curves_editor.rs:13, 14`
+### ~~P2.2 — Snap & hit-test thresholds~~ ✅ DONE (curves_editor still pending)
 
-Promote to `SNAP_TOLERANCE_PX`, `KEYFRAME_SNAP_TOLERANCE_NS`,
-`TRANSFORM_HANDLE_RADIUS_PX`, `TRANSFORM_HANDLE_HIT_RADIUS_PX`.
+> **Landed:** `SNAP_TOLERANCE_PX` (timeline/widget.rs), `KEYFRAME_SNAP_TOLERANCE_NS`
+> (model/clip.rs, promoted from two private `const`s inside `impl Clip` methods
+> to a single module-level public constant), `TRANSFORM_HANDLE_RADIUS_PX` /
+> `TRANSFORM_HANDLE_HIT_RADIUS_PX` (transform_overlay.rs).
+>
+> **Still pending:** Curve point hit radius in `src/ui/curves_editor.rs:13,14` —
+> defer with a follow-up since that file uses its own naming conventions and a
+> rename should be reviewed alongside any other curves-editor cleanup.
 
-### P2.3 — Preview zoom levels (defined ×3)
-The literal `[0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0]` array appears at
-`src/ui/preview.rs:828`, `938`, and `955`. Extract:
+### ~~P2.3 — Preview zoom levels (defined ×3)~~ ✅ DONE
 
-```rust
-const PREVIEW_ZOOM_LEVELS: &[f64] = &[0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
-```
+> **Landed:** `PROGRAM_MONITOR_ZOOM_LEVELS` constant in
+> `src/ui/program_monitor.rs`. The plan's "preview.rs" citation was stale —
+> the duplicates were actually in `program_monitor.rs`.
 
 ### P2.4 — Frame rates and resolution presets
 **File:** `src/ui/toolbar.rs`
@@ -453,11 +441,13 @@ Group into named constants per inspector section (`COLOR_SLIDER_MIN`,
 `COLOR_SLIDER_MAX`, `COLOR_SLIDER_STEP`, `VOLUME_DB_MIN`, etc.). Reduces
 magic numbers and makes UI consistent if a range needs retuning.
 
-### P2.8 — Font sizes
-Ruler font 10.0, marker font 9.0, track-label clamp 8.0..16.0 in
-`src/ui/timeline/widget.rs:7388, 7425, 7436, 7823, 7871, 7907, 7991`.
-Promote to `RULER_FONT_SIZE`, `MARKER_FONT_SIZE`,
-`TRACK_LABEL_FONT_SIZE_MIN`, `TRACK_LABEL_FONT_SIZE_MAX`.
+### ~~P2.8 — Font sizes~~ ✅ DONE
+
+> **Landed:** `RULER_FONT_SIZE`, `MARKER_FONT_SIZE`,
+> `TRACK_LABEL_FONT_SIZE_MIN/MAX` in `src/ui/timeline/widget.rs`. The other
+> `set_font_size(10.0)` sites in widget.rs (badge labels for Solo / Duck /
+> "T" / "ADJ") were intentionally left alone — they happen to share the
+> ruler's pixel size but are semantically independent.
 
 ---
 
@@ -681,8 +671,8 @@ A reasonable rollout that minimizes risk and gets early wins:
 
 1. ~~**P2.1** — `src/units.rs` time constants (mechanical, low risk)~~ ✅ module landed; full sweep deferred
 2. ~~**P1.1** — Extract `Clip::rebase_to_window` (high impact, removes a class of compound-clip bugs forever)~~ ✅ DONE
-3. **P1.6** — RGBA helper, ~~**P1.8** — track-kind helpers~~ ✅ P1.8 DONE; P1.6 still pending
-4. **P2.2 / P2.3** ~~**P2.6**~~ **/ P2.8** — small constants (mechanical) — ✅ P2.6 DONE
+3. ~~**P1.6** — RGBA helper~~ ✅ DONE, ~~**P1.8** — track-kind helpers~~ ✅ DONE
+4. ~~**P2.2 / P2.3 / P2.6 / P2.8**~~ ✅ DONE (curves_editor hit radius still pending under P2.2)
 5. **P0.2** — Audit `let _ =` patterns in background-thread code
 6. **P1.2** — MCP arg extraction macros
 7. **P1.4** — Generic `ClipMutateCommand<T>` wrapper in undo.rs

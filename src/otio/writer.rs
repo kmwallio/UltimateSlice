@@ -379,9 +379,7 @@ fn write_otio_with_mode(
 /// Map a packed RGBA colour to a human-readable OTIO marker colour name.
 fn marker_color_name(rgba: u32) -> String {
     // Extract rough hue from the RGB bytes.
-    let r = ((rgba >> 24) & 0xFF) as u8;
-    let g = ((rgba >> 16) & 0xFF) as u8;
-    let b = ((rgba >> 8) & 0xFF) as u8;
+    let (r, g, b, _a) = crate::ui::colors::rgba_u32_to_u8(rgba);
     let max = r.max(g).max(b);
     if max < 40 {
         return "BLACK".into();
