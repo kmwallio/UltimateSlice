@@ -1779,6 +1779,28 @@ impl EditCommand for SetClipHslQualifierCommand {
     }
 }
 
+/// Set the project's master audio gain (dB). Applied post-mixdown in both
+/// preview and export. Clamped to ±24 dB on execute. Used by the Loudness
+/// Radar "Normalize to Target" and "Reset Gain" actions.
+pub struct SetProjectMasterGainCommand {
+    pub old_db: f64,
+    pub new_db: f64,
+}
+
+impl EditCommand for SetProjectMasterGainCommand {
+    fn execute(&self, project: &mut Project) {
+        project.master_gain_db = self.new_db.clamp(-24.0, 24.0);
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        project.master_gain_db = self.old_db.clamp(-24.0, 24.0);
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set project master gain"
+    }
+}
+
 // ── Subtitle commands ─────────────────────────────────────────────────────
 
 /// Set (or replace) all subtitle segments on a clip (used after STT generation).
@@ -2017,6 +2039,46 @@ mod tests {
     use crate::model::clip::{Clip, ClipKind};
     use crate::model::project::Project;
     use crate::model::track::Track;
+
+    #[test]
+    fn master_gain_command_round_trip() {
+        let mut project = Project::new("Loudness Test");
+        assert_eq!(project.master_gain_db, 0.0);
+
+        let cmd = SetProjectMasterGainCommand { old_db: 0.0, new_db: -3.5 };
+        cmd.execute(&mut project);
+        assert!((project.master_gain_db + 3.5).abs() < 1e-9);
+        assert!(project.dirty);
+
+        project.dirty = false;
+        cmd.undo(&mut project);
+        assert_eq!(project.master_gain_db, 0.0);
+        assert!(project.dirty);
+    }
+
+    #[test]
+    fn master_gain_command_clamps_to_plus_minus_24() {
+        let mut project = Project::new("Loudness Test");
+        let cmd = SetProjectMasterGainCommand { old_db: 0.0, new_db: 99.0 };
+        cmd.execute(&mut project);
+        assert_eq!(project.master_gain_db, 24.0, "upper clamp");
+
+        let cmd2 = SetProjectMasterGainCommand { old_db: 0.0, new_db: -99.0 };
+        cmd2.execute(&mut project);
+        assert_eq!(project.master_gain_db, -24.0, "lower clamp");
+    }
+
+    #[test]
+    fn master_gain_linear_matches_decibel_formula() {
+        let mut project = Project::new("Gain Test");
+        project.master_gain_db = 0.0;
+        assert!((project.master_gain_linear() - 1.0).abs() < 1e-9);
+        project.master_gain_db = 6.0;
+        // 10^(6/20) ≈ 1.9953
+        assert!((project.master_gain_linear() - 10.0_f64.powf(0.3)).abs() < 1e-9);
+        project.master_gain_db = -20.0;
+        assert!((project.master_gain_linear() - 0.1).abs() < 1e-9);
+    }
 
     #[test]
     fn test_ripple_trim_out() {

@@ -481,6 +481,18 @@ pub enum McpCommand {
         target_level: f64,
         reply: SyncSender<Value>,
     },
+    /// Render the full timeline mixdown to a temp file and return a
+    /// full EBU R128 loudness report (integrated, short-term max,
+    /// momentary max, LRA, true peak).
+    AnalyzeProjectLoudness {
+        reply: SyncSender<Value>,
+    },
+    /// Set (or clear with 0.0) the project-level master audio gain in dB.
+    /// Applied to both preview and export. Clamped to ±24 dB.
+    SetProjectMasterGainDb {
+        master_gain_db: f64,
+        reply: SyncSender<Value>,
+    },
     MatchClipAudio {
         source_clip_id: String,
         source_start_ns: Option<u64>,

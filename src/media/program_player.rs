@@ -1813,6 +1813,10 @@ pub struct ProgramPlayer {
     audio_stream_probe_cache: HashMap<String, bool>,
     /// GStreamer `level` element on audiomixer output for metering.
     level_element: Option<gst::Element>,
+    /// GStreamer `volume` element applied to the post-mix master bus.
+    /// Set by `set_master_gain_db()` to implement the Loudness Radar
+    /// project-level master gain without a pipeline rebuild.
+    master_volume_element: Option<gst::Element>,
     /// GStreamer `level` element on the audio-only pipeline for metering.
     #[allow(dead_code)]
     level_element_audio: Option<gst::Element>,
@@ -2227,6 +2231,15 @@ impl ProgramPlayer {
             .build()?;
 
         let audio_conv_out = gst::ElementFactory::make("audioconvert").build()?;
+        // Project-level master gain element for the Loudness Radar
+        // "Normalize to Target" workflow. Applied AFTER audiomixer so the
+        // existing per-track meters see the pre-gain signal and the master
+        // VU meter (via `level_element` below) sees the post-gain signal
+        // — i.e. what the user will actually hear / export.
+        let master_volume_element = gst::ElementFactory::make("volume").build().ok();
+        if let Some(ref vol) = master_volume_element {
+            vol.set_property("volume", 1.0_f64);
+        }
         let level_element = gst::ElementFactory::make("level")
             .property("post-messages", true)
             .property("interval", 50_000_000u64)
@@ -2256,6 +2269,9 @@ impl ProgramPlayer {
             &audio_conv_out,
             &audio_sink,
         ])?;
+        if let Some(ref mv) = master_volume_element {
+            pipeline.add(mv)?;
+        }
         if let Some(ref lv) = level_element {
             pipeline.add(lv)?;
         }
@@ -2458,23 +2474,28 @@ impl ProgramPlayer {
         amix_bg_pad.set_property("volume", 1.0_f64);
         silence_caps.static_pad("src").unwrap().link(&amix_bg_pad)?;
 
-        // Link audiomixer → [scaletempo] → audioconvert → [level →] autoaudiosink
+        // Link audiomixer → [scaletempo] → audioconvert → [master_volume →] [level →] autoaudiosink
         // scaletempo preserves pitch during rate-based seeks (J/K/L shuttle).
+        // master_volume applies the project-level Loudness Radar gain *before*
+        // the level tap so the master VU meter reflects the post-gain mix.
         let scaletempo = gst::ElementFactory::make("scaletempo").build().ok();
-        if let Some(ref st) = scaletempo {
-            pipeline.add(st)?;
-            if let Some(ref lv) = level_element {
-                gst::Element::link_many([&audiomixer, st, &audio_conv_out, lv, &audio_sink])?;
+        {
+            let mut chain: Vec<&gst::Element> = vec![&audiomixer];
+            if let Some(ref st) = scaletempo {
+                pipeline.add(st)?;
+                chain.push(st);
             } else {
-                gst::Element::link_many([&audiomixer, st, &audio_conv_out, &audio_sink])?;
+                log::warn!("scaletempo element not available — J/K/L shuttle will shift pitch");
             }
-        } else {
-            log::warn!("scaletempo element not available — J/K/L shuttle will shift pitch");
+            chain.push(&audio_conv_out);
+            if let Some(ref mv) = master_volume_element {
+                chain.push(mv);
+            }
             if let Some(ref lv) = level_element {
-                gst::Element::link_many([&audiomixer, &audio_conv_out, lv, &audio_sink])?;
-            } else {
-                gst::Element::link_many([&audiomixer, &audio_conv_out, &audio_sink])?;
+                chain.push(lv);
             }
+            chain.push(&audio_sink);
+            gst::Element::link_many(&chain)?;
         }
 
         // -- Audio-only pipeline (playbin, unchanged) --------------------------
@@ -2607,6 +2628,7 @@ impl ProgramPlayer {
                 frame_interp_paths: HashMap::new(),
                 audio_stream_probe_cache: HashMap::new(),
                 level_element,
+                master_volume_element,
                 level_element_audio,
                 audio_volume_element,
                 audio_eq_element,
@@ -5163,6 +5185,21 @@ impl ProgramPlayer {
             if self.state != PlayerState::Playing {
                 self.reseek_slot_by_clip_idx(clip_idx);
             }
+        }
+    }
+
+    /// Apply the project-level master audio gain (from the Loudness Radar
+    /// "Normalize to Target" workflow) to the post-mix bus. Values are
+    /// clamped to ±24 dB and applied as a linear `volume` property on the
+    /// dedicated master volume element — no pipeline rebuild required.
+    ///
+    /// Call this from `window.rs` whenever `project.master_gain_db` changes
+    /// (load, normalize, undo/redo, reset).
+    pub fn set_master_gain_db(&mut self, db: f64) {
+        let clamped = db.clamp(-24.0, 24.0);
+        let linear = 10.0_f64.powf(clamped / 20.0);
+        if let Some(ref vol) = self.master_volume_element {
+            vol.set_property("volume", linear);
         }
     }
 

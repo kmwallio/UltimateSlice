@@ -554,6 +554,11 @@ fn write_otio_with_mode(
         metadata: wrap_project_metadata(&UltimateSliceProjectOtioMetadata {
             width: Some(project.width),
             height: Some(project.height),
+            master_gain_db: if project.master_gain_db.abs() > 1e-9 {
+                Some(project.master_gain_db)
+            } else {
+                None
+            },
         }),
     };
 

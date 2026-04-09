@@ -1427,6 +1427,27 @@ pub fn export_project(
         (filter, vout_label)
     };
 
+    // Apply the project-level master gain (from the Loudness Radar
+    // "Normalize to Target" action) post-mix, right before the final
+    // `[aout]` label. Only one of the four audio-chain branches above
+    // actually emits `[aout]` at runtime so a targeted rfind+splice is safe
+    // and leaves the stereo / 5.1 / 7.1 / audio-only paths unchanged when
+    // `master_gain_db == 0.0`.
+    let filter = if project.master_gain_db.abs() > f64::EPSILON {
+        let gain = project.master_gain_linear();
+        if let Some(pos) = filter.rfind("[aout]") {
+            let mut rewritten = String::with_capacity(filter.len() + 48);
+            rewritten.push_str(&filter[..pos]);
+            rewritten.push_str(&format!("[apremaster];[apremaster]volume={gain:.6}[aout]"));
+            rewritten.push_str(&filter[pos + "[aout]".len()..]);
+            rewritten
+        } else {
+            filter
+        }
+    } else {
+        filter
+    };
+
     let mut filter_script_file = tempfile::NamedTempFile::new()?;
     filter_script_file.write_all(filter.as_bytes())?;
 
@@ -5700,20 +5721,186 @@ pub(crate) fn detect_scene_cuts(
 
 /// Measure integrated loudness (LUFS) of a clip's audio via FFmpeg `ebur128` filter.
 /// Returns the integrated loudness value in LUFS (e.g. -18.3).
-pub(crate) fn analyze_loudness_lufs(
+/// Full EBU R128 loudness report for a measured audio source.
+///
+/// All fields are in standard R128 units. `short_term_max_lufs` and
+/// `momentary_max_lufs` track the running max across the per-frame log;
+/// `true_peak_dbtp` is populated only when FFmpeg is invoked with
+/// `ebur128=peak=true` (otherwise defaults to 0.0 on parse).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LoudnessReport {
+    /// Integrated loudness over the full duration (I:). LUFS.
+    pub integrated_lufs: f64,
+    /// Loudness Range (LRA:). LU.
+    pub loudness_range_lu: f64,
+    /// Integrated threshold (I Threshold:). LUFS.
+    pub threshold_lufs: f64,
+    /// Maximum short-term (3 s window) loudness observed. LUFS.
+    pub short_term_max_lufs: f64,
+    /// Maximum momentary (400 ms window) loudness observed. LUFS.
+    pub momentary_max_lufs: f64,
+    /// True-peak (dBTP) from the Summary block's Peak: line. dBFS equivalent.
+    pub true_peak_dbtp: f64,
+}
+
+/// Parse a LoudnessReport out of an ffmpeg stderr dump that used
+/// `ebur128=peak=true:framelog=verbose`.
+///
+/// Exposed (pub(crate)) so unit tests can feed canned strings without
+/// spawning a subprocess.
+pub(crate) fn parse_loudness_report(stderr: &str) -> Result<LoudnessReport> {
+    let mut report = LoudnessReport::default();
+    let mut saw_summary_i = false;
+    let mut in_summary = false;
+
+    // First pass: scan per-frame log lines of the form
+    //   [Parsed_ebur128_0 @ 0x...] t: 0.4  M: -25.3 S:-inf     I: -25.3 LUFS  LRA:  0.0 LU
+    // and track max(M) and max(S). `-inf` / `nan` are ignored.
+    for line in stderr.lines() {
+        if !line.contains("[Parsed_ebur128") {
+            continue;
+        }
+        // `M: -25.3` and `S: -18.7` — spaces between key and value vary.
+        if let Some(m) = extract_ebur128_metric(line, " M:") {
+            if m > report.momentary_max_lufs || report.momentary_max_lufs == 0.0 {
+                report.momentary_max_lufs = m;
+            }
+        }
+        if let Some(s) = extract_ebur128_metric(line, " S:") {
+            if s > report.short_term_max_lufs || report.short_term_max_lufs == 0.0 {
+                report.short_term_max_lufs = s;
+            }
+        }
+    }
+
+    // Second pass: walk the trailing Summary block and extract
+    // I:, I Threshold:, LRA:, Peak:.
+    //
+    // The Summary block looks like:
+    //   [Parsed_ebur128_0 @ ...] Summary:
+    //
+    //     Integrated loudness:
+    //       I:         -23.0 LUFS
+    //       Threshold: -33.0 LUFS
+    //
+    //     Loudness range:
+    //       LRA:        8.4 LU
+    //       Threshold: -43.0 LUFS
+    //       LRA low:   -28.1 LUFS
+    //       LRA high:  -19.7 LUFS
+    //
+    //     True peak:
+    //       Peak:       -1.2 dBFS
+    //
+    // "Threshold:" appears twice (integrated + range); we only want the
+    // first ("I Threshold" in our struct). We disambiguate by tracking
+    // which subsection ("Integrated loudness" vs. "Loudness range") we're
+    // currently in.
+    let mut in_integrated = false;
+    let mut in_range = false;
+    let mut in_true_peak = false;
+    for line in stderr.lines() {
+        let trimmed = line.trim_start_matches(|c: char| !c.is_alphabetic()).trim();
+        if line.contains("Summary:") {
+            in_summary = true;
+            in_integrated = false;
+            in_range = false;
+            in_true_peak = false;
+            continue;
+        }
+        if !in_summary {
+            continue;
+        }
+        if trimmed.starts_with("Integrated loudness") {
+            in_integrated = true;
+            in_range = false;
+            in_true_peak = false;
+            continue;
+        }
+        if trimmed.starts_with("Loudness range") {
+            in_integrated = false;
+            in_range = true;
+            in_true_peak = false;
+            continue;
+        }
+        if trimmed.starts_with("True peak") {
+            in_integrated = false;
+            in_range = false;
+            in_true_peak = true;
+            continue;
+        }
+        if in_integrated && trimmed.starts_with("I:") {
+            if let Some(val) = parse_leading_f64(&trimmed["I:".len()..]) {
+                report.integrated_lufs = val;
+                saw_summary_i = true;
+            }
+        } else if in_integrated && trimmed.starts_with("Threshold:") {
+            if let Some(val) = parse_leading_f64(&trimmed["Threshold:".len()..]) {
+                report.threshold_lufs = val;
+            }
+        } else if in_range && trimmed.starts_with("LRA:") {
+            if let Some(val) = parse_leading_f64(&trimmed["LRA:".len()..]) {
+                report.loudness_range_lu = val;
+            }
+        } else if in_true_peak && trimmed.starts_with("Peak:") {
+            if let Some(val) = parse_leading_f64(&trimmed["Peak:".len()..]) {
+                report.true_peak_dbtp = val;
+            }
+        }
+    }
+
+    if !saw_summary_i {
+        return Err(anyhow!(
+            "Could not parse integrated loudness from ffmpeg ebur128 output"
+        ));
+    }
+    Ok(report)
+}
+
+/// Extract a numeric metric from a per-frame ebur128 log line.
+/// Handles `-inf`, `nan`, and whitespace variations between the key and value.
+fn extract_ebur128_metric(line: &str, key: &str) -> Option<f64> {
+    let idx = line.find(key)?;
+    let rest = &line[idx + key.len()..];
+    let token = rest
+        .trim_start()
+        .split_whitespace()
+        .next()
+        .unwrap_or("");
+    if token.is_empty() || token.contains("inf") || token.contains("nan") {
+        return None;
+    }
+    token.parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
+/// Parse the leading f64 from a stringified metric value, ignoring the unit.
+/// `"  -23.0 LUFS"` → `Some(-23.0)`. `"-inf LUFS"` → `None`.
+fn parse_leading_f64(s: &str) -> Option<f64> {
+    let token = s.trim().split_whitespace().next().unwrap_or("");
+    if token.is_empty() || token.contains("inf") || token.contains("nan") {
+        return None;
+    }
+    token.parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
+/// Analyze a source file and return the full EBU R128 loudness report.
+/// Invokes FFmpeg with `ebur128=peak=true:framelog=verbose` so the stderr
+/// dump contains both per-frame M/S values and the Summary block with the
+/// True Peak line.
+pub(crate) fn analyze_loudness_full(
     source_path: &str,
     source_in_ns: u64,
     source_out_ns: u64,
-) -> Result<f64> {
-    analyze_loudness_lufs_with_prefilter(source_path, source_in_ns, source_out_ns, None)
+) -> Result<LoudnessReport> {
+    analyze_loudness_full_with_prefilter(source_path, source_in_ns, source_out_ns, None)
 }
 
-pub(crate) fn analyze_loudness_lufs_with_prefilter(
+pub(crate) fn analyze_loudness_full_with_prefilter(
     source_path: &str,
     source_in_ns: u64,
     source_out_ns: u64,
     prefilter: Option<String>,
-) -> Result<f64> {
+) -> Result<LoudnessReport> {
     let ffmpeg = find_ffmpeg()?;
     if !probe_has_audio(&ffmpeg, source_path) {
         return Err(anyhow!("Clip has no audio stream"));
@@ -5723,11 +5910,14 @@ pub(crate) fn analyze_loudness_lufs_with_prefilter(
     if duration_sec <= 0.0 {
         return Err(anyhow!("Clip has zero duration"));
     }
+    let ebur128_filter = "ebur128=peak=true:framelog=verbose";
     let audio_filter = prefilter
-        .map(|filter| format!("{filter},ebur128"))
-        .unwrap_or_else(|| "ebur128".to_string());
+        .map(|filter| format!("{filter},{ebur128_filter}"))
+        .unwrap_or_else(|| ebur128_filter.to_string());
     let output = Command::new(&ffmpeg)
         .args([
+            "-nostats",
+            "-hide_banner",
             "-ss",
             &format!("{src_in_sec}"),
             "-t",
@@ -5747,39 +5937,28 @@ pub(crate) fn analyze_loudness_lufs_with_prefilter(
         .map_err(|e| anyhow!("Failed to run ffmpeg ebur128: {e}"))?;
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    // Parse the summary block. The ebur128 filter outputs lines like:
-    //   [Parsed_ebur128_0 @ 0x...] Summary:
-    //
-    //     Integrated loudness:
-    //       I:         -25.9 LUFS
-    // The "Summary:" line has a filter tag prefix; the "I:" line does not.
-    let mut in_summary = false;
-    for line in stderr.lines() {
-        let trimmed = line.trim();
-        // "Summary:" may be prefixed by "[Parsed_ebur128_0 @ 0x...]"
-        if trimmed.contains("Summary:") {
-            in_summary = true;
-            continue;
-        }
-        if in_summary {
-            // e.g. "    I:         -25.9 LUFS"
-            if trimmed.starts_with("I:") {
-                let rest = trimmed["I:".len()..].trim();
-                if let Some(val) = rest
-                    .split_whitespace()
-                    .next()
-                    .and_then(|s| s.parse::<f64>().ok())
-                {
-                    if val.is_finite() {
-                        return Ok(val);
-                    }
-                }
-            }
-        }
-    }
-    Err(anyhow!(
-        "Could not parse integrated loudness from ffmpeg ebur128 output"
-    ))
+    parse_loudness_report(&stderr)
+}
+
+/// Scalar wrapper — returns only the integrated LUFS value. Preserved for
+/// the existing per-clip Inspector **Normalize…** button, `normalize_clip_audio`
+/// MCP tool, and `match_clip_audio` paths which don't need the full report.
+pub(crate) fn analyze_loudness_lufs(
+    source_path: &str,
+    source_in_ns: u64,
+    source_out_ns: u64,
+) -> Result<f64> {
+    Ok(analyze_loudness_full(source_path, source_in_ns, source_out_ns)?.integrated_lufs)
+}
+
+pub(crate) fn analyze_loudness_lufs_with_prefilter(
+    source_path: &str,
+    source_in_ns: u64,
+    source_out_ns: u64,
+    prefilter: Option<String>,
+) -> Result<f64> {
+    Ok(analyze_loudness_full_with_prefilter(source_path, source_in_ns, source_out_ns, prefilter)?
+        .integrated_lufs)
 }
 
 /// Measure peak amplitude (dB) of a clip's audio via FFmpeg `volumedetect` filter.
@@ -5836,6 +6015,64 @@ pub(crate) fn analyze_peak_db(
     Err(anyhow!(
         "Could not parse max_volume from ffmpeg volumedetect output"
     ))
+}
+
+/// Render the full project timeline to a temp `.mp4` via `export_project`,
+/// then run `analyze_loudness_full` on the result and return the report.
+///
+/// Used by the Loudness Radar **Analyze Project** action and the
+/// `analyze_project_loudness` MCP tool. The render uses a tiny 160×90 H.264
+/// video stream to keep encode cost minimal; we immediately discard the
+/// temp file once analysis completes.
+///
+/// **Important**: the measurement is taken with `project.master_gain_db`
+/// forced to `0.0` on a cloned project. This way the caller gets the
+/// *pre-gain* loudness and can compute `delta = target - integrated`
+/// correctly even when a master gain is already applied.
+pub fn analyze_project_loudness(project: &Project) -> Result<LoudnessReport> {
+    let temp = tempfile::Builder::new()
+        .prefix("us_loudness_")
+        .suffix(".mp4")
+        .tempfile()
+        .map_err(|e| anyhow!("Failed to create temp file for loudness analysis: {e}"))?;
+    let path = temp.path().to_string_lossy().to_string();
+
+    // Clone + zero master gain so analysis reflects the raw mix.
+    let mut analysis_project = project.clone();
+    analysis_project.master_gain_db = 0.0;
+
+    let options = ExportOptions {
+        video_codec: VideoCodec::H264,
+        container: Container::Mp4,
+        output_width: 160,
+        output_height: 90,
+        crf: 51,
+        audio_codec: AudioCodec::Aac,
+        audio_bitrate_kbps: 320,
+        gif_fps: None,
+        audio_channel_layout: AudioChannelLayout::Stereo,
+    };
+
+    let (tx, _rx) = mpsc::channel();
+    let empty_bg: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let empty_fi: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    export_project(
+        &analysis_project,
+        &path,
+        options,
+        None,
+        &empty_bg,
+        &empty_fi,
+        tx,
+    )?;
+
+    let duration_ns = analysis_project.duration();
+    let report = analyze_loudness_full(&path, 0, duration_ns)?;
+    // `temp` drops here — file cleaned up even on error paths above thanks
+    // to the NamedTempFile RAII guard.
+    Ok(report)
 }
 
 /// Compute the linear gain multiplier needed to shift measured LUFS to a target LUFS.
@@ -6096,11 +6333,11 @@ mod tests {
         build_title_filter, build_volume_filter, clamped_primary_transition_timing,
         clamped_primary_xfade_duration_s, compute_clip_audio_fades, compute_export_coloradj_params,
         estimate_export_size_bytes, find_ffmpeg, flatten_compound_tracks, has_linked_audio_peer,
-        has_transform_keyframes, parse_progress_line, primary_clip_transition_stop_pad_ns,
-        resolve_stem_position, resolve_subtitle_font_style, split_active_video_tracks_for_export,
-        video_input_seek_and_duration, write_chapter_metadata, AdjustmentExportRoi,
-        AdjustmentMatteInput, AudioChannelLayout, AudioCodec, ClipAudioFade,
-        ColorFilterCapabilities, ExportOptions, SurroundPosition, VideoCodec,
+        has_transform_keyframes, parse_loudness_report, parse_progress_line,
+        primary_clip_transition_stop_pad_ns, resolve_stem_position, resolve_subtitle_font_style,
+        split_active_video_tracks_for_export, video_input_seek_and_duration, write_chapter_metadata,
+        AdjustmentExportRoi, AdjustmentMatteInput, AudioChannelLayout, AudioCodec, ClipAudioFade,
+        ColorFilterCapabilities, ExportOptions, LoudnessReport, SurroundPosition, VideoCodec,
     };
     use crate::model::track::{AudioRole, SurroundPositionOverride};
     use crate::media::program_player::ProgramPlayer;
@@ -7159,6 +7396,100 @@ mod tests {
         clip.hsl_qualifier = Some(crate::model::clip::HslQualifier::default());
         // Disabled default is neutral.
         assert_eq!(build_hsl_qualifier_filter(&clip), "");
+    }
+
+    #[test]
+    fn parse_loudness_report_full_summary() {
+        let stderr = r#"
+[Parsed_ebur128_0 @ 0x7f] t: 0.4  M: -25.3 S: -inf     I: -25.3 LUFS  LRA:  0.0 LU
+[Parsed_ebur128_0 @ 0x7f] t: 0.8  M: -20.1 S: -22.4    I: -23.8 LUFS  LRA:  2.1 LU
+[Parsed_ebur128_0 @ 0x7f] t: 1.2  M: -18.7 S: -19.9    I: -22.4 LUFS  LRA:  4.2 LU
+[Parsed_ebur128_0 @ 0x7f] Summary:
+
+  Integrated loudness:
+    I:         -23.0 LUFS
+    Threshold: -33.0 LUFS
+
+  Loudness range:
+    LRA:         8.4 LU
+    Threshold: -43.0 LUFS
+    LRA low:   -28.1 LUFS
+    LRA high:  -19.7 LUFS
+
+  True peak:
+    Peak:       -1.2 dBFS
+"#;
+        let r = parse_loudness_report(stderr).expect("parse ok");
+        assert!((r.integrated_lufs + 23.0).abs() < 1e-6, "I: {}", r.integrated_lufs);
+        assert!((r.loudness_range_lu - 8.4).abs() < 1e-6, "LRA: {}", r.loudness_range_lu);
+        assert!((r.threshold_lufs + 33.0).abs() < 1e-6, "Thresh: {}", r.threshold_lufs);
+        assert!((r.true_peak_dbtp + 1.2).abs() < 1e-6, "TP: {}", r.true_peak_dbtp);
+        // Max of per-frame M values: -18.7 (largest / loudest).
+        assert!((r.momentary_max_lufs + 18.7).abs() < 1e-6, "M max: {}", r.momentary_max_lufs);
+        // Max of per-frame S values (ignoring -inf): -19.9.
+        assert!((r.short_term_max_lufs + 19.9).abs() < 1e-6, "S max: {}", r.short_term_max_lufs);
+    }
+
+    #[test]
+    fn parse_loudness_report_missing_true_peak_defaults_to_zero() {
+        let stderr = r#"
+[Parsed_ebur128_0 @ 0x7f] t: 0.4 M: -20.0 S: -20.0 I: -20.0 LUFS LRA: 0.0 LU
+[Parsed_ebur128_0 @ 0x7f] Summary:
+
+  Integrated loudness:
+    I:         -20.0 LUFS
+    Threshold: -30.0 LUFS
+
+  Loudness range:
+    LRA:         3.0 LU
+    Threshold: -40.0 LUFS
+    LRA low:   -21.5 LUFS
+    LRA high:  -18.5 LUFS
+"#;
+        let r = parse_loudness_report(stderr).expect("parse ok");
+        assert!((r.integrated_lufs + 20.0).abs() < 1e-6);
+        assert!((r.loudness_range_lu - 3.0).abs() < 1e-6);
+        assert!(r.true_peak_dbtp == 0.0, "TP should default to 0.0, got {}", r.true_peak_dbtp);
+    }
+
+    #[test]
+    fn parse_loudness_report_rejects_empty_input() {
+        assert!(parse_loudness_report("").is_err());
+        assert!(parse_loudness_report("totally unrelated ffmpeg chatter").is_err());
+    }
+
+    #[test]
+    fn parse_loudness_report_ignores_inf_in_per_frame_log() {
+        // First frame emits -inf for both M and S (silence); parser must not
+        // pick them up as the running max.
+        let stderr = r#"
+[Parsed_ebur128_0 @ 0x7f] t: 0.4 M: -inf S: -inf I: -inf LUFS LRA: 0.0 LU
+[Parsed_ebur128_0 @ 0x7f] t: 0.8 M: -30.5 S: -31.0 I: -30.5 LUFS LRA: 0.5 LU
+[Parsed_ebur128_0 @ 0x7f] Summary:
+
+  Integrated loudness:
+    I:         -30.5 LUFS
+    Threshold: -40.5 LUFS
+
+  Loudness range:
+    LRA:         0.5 LU
+    Threshold: -50.0 LUFS
+    LRA low:   -30.8 LUFS
+    LRA high:  -30.3 LUFS
+
+  True peak:
+    Peak:      -10.0 dBFS
+"#;
+        let r = parse_loudness_report(stderr).expect("parse ok");
+        assert!((r.momentary_max_lufs + 30.5).abs() < 1e-6);
+        assert!((r.short_term_max_lufs + 31.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn loudness_report_default_is_zeros() {
+        let r = LoudnessReport::default();
+        assert_eq!(r.integrated_lufs, 0.0);
+        assert_eq!(r.true_peak_dbtp, 0.0);
     }
 
     #[test]

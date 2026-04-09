@@ -195,6 +195,10 @@ pub fn build_program_monitor(
     initial_show_zebra: bool,
     initial_zebra_threshold: f64,
     on_zebra_changed: impl Fn(bool, f64) + 'static,
+    // Optional extra button to append to the Program Monitor header
+    // controls row (e.g. the Loudness Radar popover toggle). When `None`
+    // the header looks exactly as before.
+    extra_header_button: Option<gtk::Widget>,
 ) -> (
     GBox,
     Label,
@@ -302,6 +306,13 @@ pub fn build_program_monitor(
     overlays_menu_btn.set_popover(Some(&overlays_popover));
     overlays_menu_btn.set_tooltip_text(Some("Toggle Safe Areas, False Color, and Zebra overlays"));
     controls_row.append(&overlays_menu_btn);
+
+    // Optional caller-provided extra header button (e.g. the Loudness
+    // Radar popover toggle). Added right after the Overlays menu so the
+    // audio + video monitoring controls sit together.
+    if let Some(ref w) = extra_header_button {
+        controls_row.append(w);
+    }
 
     let controls_spacer = gtk::Separator::new(Orientation::Horizontal);
     controls_spacer.set_hexpand(true);

@@ -219,6 +219,10 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                                     selected_sequence_format_applied = true;
                                 }
                             }
+                            // Project master audio gain from the Loudness Radar.
+                            if let Some(v) = attrs.get("us:master-gain-db") {
+                                project.master_gain_db = v.parse().unwrap_or(0.0);
+                            }
                             project.fcpxml_unknown_sequence.attrs =
                                 collect_unknown_attrs(&attrs, is_known_sequence_attr);
                         } else {
@@ -2883,7 +2887,7 @@ fn is_known_project_attr(key: &str) -> bool {
 }
 
 fn is_known_sequence_attr(key: &str) -> bool {
-    matches!(key, "duration" | "format")
+    matches!(key, "duration" | "format" | "us:master-gain-db")
 }
 
 fn is_known_spine_attr(_key: &str) -> bool {

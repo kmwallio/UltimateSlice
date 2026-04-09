@@ -9627,6 +9627,13 @@ pub fn build_window(
     let monitor_state = Rc::new(RefCell::new(crate::ui_state::load_program_monitor_state()));
     let popout_window_cell: Rc<RefCell<Option<ApplicationWindow>>> = Rc::new(RefCell::new(None));
     let monitor_popped = Rc::new(Cell::new(false));
+    // Loudness Radar popover is built inside the build_program_monitor
+    // call (so its button can be passed as `extra_header_button`) but the
+    // view is cached here so poll-timer drains + callback wiring can
+    // reach it later in this function.
+    let loudness_popover_view_cell: Rc<
+        RefCell<Option<Rc<crate::ui::loudness_popover::LoudnessPopoverView>>>,
+    > = Rc::new(RefCell::new(None));
     let on_toggle_popout_impl: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
     let on_toggle_popout: Rc<dyn Fn()> = {
         let cb = on_toggle_popout_impl.clone();
@@ -10146,6 +10153,10 @@ pub fn build_window(
                     }
                 }
             },
+            // The Loudness Radar popover button is placed next to the
+            // Scopes toggle below `prog_monitor_host`, not in the
+            // Program Monitor header, so we pass None here.
+            None,
         )
     };
 
@@ -10196,6 +10207,174 @@ pub fn build_window(
     let prog_monitor_overlay = gtk4::Overlay::new();
     prog_monitor_overlay.set_child(Some(&prog_monitor_widget));
     prog_monitor_overlay.add_overlay(&countdown_overlay_da);
+
+    // ── Loudness Radar popover callbacks ──────────────────────────────
+    //
+    // The popover view was constructed inside the build_program_monitor
+    // call so its button could be passed as `extra_header_button`. Now
+    // that the project + preferences + prog_player refs are all stable,
+    // we can wire up the three actions.
+    //
+    // `on_analyze` spawns a background thread that renders the project
+    // audio to a temp file and runs ebur128; the result is drained on a
+    // 100 ms poll timer (mirrors the `on_normalize_audio` pattern).
+    // `on_normalize` and `on_reset_gain` push a
+    // `SetProjectMasterGainCommand` through the undo history and update
+    // the preview in place via `prog_player.set_master_gain_db`.
+    if let Some(view) = loudness_popover_view_cell.borrow().clone() {
+        // Channel for background-thread analysis results.
+        let (loudness_tx, loudness_rx) =
+            std::sync::mpsc::channel::<Result<crate::media::export::LoudnessReport, String>>();
+        let loudness_tx = Rc::new(RefCell::new(Some(loudness_tx)));
+        let loudness_rx = Rc::new(RefCell::new(Some(loudness_rx)));
+
+        // Poll the channel every 100 ms and push results into the popover.
+        // When a result arrives we also restore the window title to its
+        // idle form so the "Analyzing project loudness…" flash goes away.
+        {
+            let view_poll = view.clone();
+            let rx = loudness_rx.clone();
+            let project_poll = project.clone();
+            let window_weak = window_weak.clone();
+            glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+                if let Some(ref r) = *rx.borrow() {
+                    while let Ok(result) = r.try_recv() {
+                        match result {
+                            Ok(report) => {
+                                let current_gain = project_poll.borrow().master_gain_db;
+                                view_poll.set_report(report, current_gain);
+                            }
+                            Err(msg) => view_poll.set_analyze_error(&msg),
+                        }
+                        if let Some(win) = window_weak.upgrade() {
+                            let proj = project_poll.borrow();
+                            win.set_title(Some(&format!(
+                                "UltimateSlice \u{2014} {} \u{2022}",
+                                proj.title
+                            )));
+                        }
+                    }
+                }
+                glib::ControlFlow::Continue
+            });
+        }
+
+        // Analyze button: set UI state, flash window title, spawn
+        // background thread. The title is restored by the poll-drain
+        // above when the result (or error) comes back.
+        {
+            let project = project.clone();
+            let view_click = view.clone();
+            let tx_rc = loudness_tx.clone();
+            let window_weak = window_weak.clone();
+            view.analyze_btn.connect_clicked(move |_btn| {
+                if view_click.analyzing.get() {
+                    return;
+                }
+                view_click.set_analyzing();
+                if let Some(win) = window_weak.upgrade() {
+                    let proj = project.borrow();
+                    win.set_title(Some(&format!(
+                        "UltimateSlice \u{2014} {} (Analyzing project loudness\u{2026})",
+                        proj.title
+                    )));
+                }
+                // Clone the project snapshot so the background thread
+                // doesn't need to cross the Rc boundary.
+                let project_snapshot = project.borrow().clone();
+                let tx_clone = tx_rc.borrow().as_ref().cloned();
+                if let Some(tx_send) = tx_clone {
+                    std::thread::spawn(move || {
+                        let result = crate::media::export::analyze_project_loudness(
+                            &project_snapshot,
+                        )
+                        .map_err(|e| e.to_string());
+                        let _ = tx_send.send(result);
+                    });
+                }
+            });
+        }
+
+        // Normalize button: compute delta from last report + current
+        // target, apply as SetProjectMasterGainCommand via timeline_state
+        // history. The action is effectively instant so we confirm
+        // success with a terse status message in the popover header
+        // (cleared on next Analyze).
+        {
+            let project = project.clone();
+            let timeline_state_c = timeline_state.clone();
+            let prog_player = prog_player.clone();
+            let view_click = view.clone();
+            let on_project_changed = on_project_changed.clone();
+            view.normalize_btn.connect_clicked(move |_btn| {
+                let Some(report) = view_click.last_report.borrow().clone() else {
+                    return;
+                };
+                let target = view_click.current_target_lufs();
+                let old_db = project.borrow().master_gain_db;
+                let delta = target - report.integrated_lufs;
+                let new_db = (old_db + delta).clamp(-24.0, 24.0);
+                if (new_db - old_db).abs() < 1e-6 {
+                    view_click
+                        .status_label
+                        .set_text("Already at target — nothing to apply");
+                    return;
+                }
+                let applied_db = new_db - old_db;
+                let cmd: Box<dyn crate::undo::EditCommand> =
+                    Box::new(crate::undo::SetProjectMasterGainCommand { old_db, new_db });
+                {
+                    let mut proj = project.borrow_mut();
+                    timeline_state_c
+                        .borrow_mut()
+                        .history
+                        .execute(cmd, &mut proj);
+                }
+                prog_player.borrow_mut().set_master_gain_db(new_db);
+                view_click.set_current_gain(new_db);
+                view_click.status_label.set_text(&format!(
+                    "Normalized ({:+.2} dB applied)",
+                    applied_db
+                ));
+                on_project_changed();
+            });
+        }
+
+        // Reset Gain button: snap back to 0.0.
+        {
+            let project = project.clone();
+            let timeline_state_c = timeline_state.clone();
+            let prog_player = prog_player.clone();
+            let view_click = view.clone();
+            let on_project_changed = on_project_changed.clone();
+            view.reset_gain_btn.connect_clicked(move |_btn| {
+                let old_db = project.borrow().master_gain_db;
+                if old_db.abs() < 1e-6 {
+                    view_click.status_label.set_text("Gain already 0 dB");
+                    return;
+                }
+                let cmd: Box<dyn crate::undo::EditCommand> = Box::new(
+                    crate::undo::SetProjectMasterGainCommand {
+                        old_db,
+                        new_db: 0.0,
+                    },
+                );
+                {
+                    let mut proj = project.borrow_mut();
+                    timeline_state_c
+                        .borrow_mut()
+                        .history
+                        .execute(cmd, &mut proj);
+                }
+                prog_player.borrow_mut().set_master_gain_db(0.0);
+                view_click.set_current_gain(0.0);
+                view_click
+                    .status_label
+                    .set_text(&format!("Gain reset ({:+.2} dB → 0.00 dB)", old_db));
+                on_project_changed();
+            });
+        }
+    }
     // Poll to redraw the countdown overlay when active.
     {
         let cv = voiceover_countdown.clone();
@@ -10686,7 +10865,23 @@ pub fn build_window(
             }
         });
     }
-    prog_monitor_host.append(&scopes_btn);
+    // Build the Loudness Radar popover next to the Scopes toggle. The
+    // popover view is cached in `loudness_popover_view_cell` so later
+    // wiring (analyze/normalize/reset callbacks + MCP + poll-timer
+    // drain) can reach it.
+    let loudness_row = gtk::Box::new(Orientation::Horizontal, 4);
+    loudness_row.set_halign(gtk::Align::Start);
+    loudness_row.set_margin_start(4);
+    loudness_row.append(&scopes_btn);
+    {
+        let view = crate::ui::loudness_popover::build_loudness_popover(
+            &preferences_state.borrow(),
+            project.borrow().master_gain_db,
+        );
+        loudness_row.append(&view.button);
+        *loudness_popover_view_cell.borrow_mut() = Some(view);
+    }
+    prog_monitor_host.append(&loudness_row);
     let program_empty_hint = gtk::Label::new(Some(
         "Import media, then append or insert a clip to preview your timeline here.",
     ));
@@ -12562,6 +12757,7 @@ pub fn build_window(
                     .update_animated_svg_paths(animated_svg_paths);
 
                 let project_file_path = { project_reload.borrow().file_path.clone() };
+                let master_gain_db = { project_reload.borrow().master_gain_db };
                 {
                     let mut pp = prog_player_reload.borrow_mut();
                     pp.set_prerender_project_path(
@@ -12573,6 +12769,9 @@ pub fn build_window(
                     pp.set_project_dimensions(proj_w, proj_h);
                     pp.set_frame_rate(fr_num, fr_den);
                     pp.load_clips(clips);
+                    // Apply the project's Loudness Radar master gain so
+                    // playback reflects the normalized mix.
+                    pp.set_master_gain_db(master_gain_db);
                 }
                 log::debug!(
                     "window:on_project_changed phase1_load ticket={} elapsed_ms={}",
@@ -17388,6 +17587,80 @@ fn handle_mcp_command(
             if found {
                 on_project_changed();
             }
+        }
+
+        McpCommand::AnalyzeProjectLoudness { reply } => {
+            // Snapshot the project so the render/analyze can run on the
+            // main thread without holding a borrow across the ffmpeg
+            // subprocess (MCP dispatch already runs on the GTK loop,
+            // which is acceptable for a blocking tool call — matches
+            // export_mp4 and normalize_clip_audio patterns).
+            let project_snapshot = project.borrow().clone();
+            let current_gain = project_snapshot.master_gain_db;
+            let result = crate::media::export::analyze_project_loudness(&project_snapshot);
+            let (pref_preset, pref_target) = {
+                let p = preferences_state.borrow();
+                (p.loudness_target_preset.clone(), p.loudness_target_lufs)
+            };
+            match result {
+                Ok(report) => {
+                    let target_lufs = crate::ui_state::loudness_target_preset_to_lufs(
+                        &pref_preset,
+                    )
+                    .unwrap_or(pref_target);
+                    let delta = target_lufs - report.integrated_lufs;
+                    reply
+                        .send(json!({
+                            "success": true,
+                            "integrated_lufs": report.integrated_lufs,
+                            "short_term_max_lufs": report.short_term_max_lufs,
+                            "momentary_max_lufs": report.momentary_max_lufs,
+                            "loudness_range_lu": report.loudness_range_lu,
+                            "true_peak_dbtp": report.true_peak_dbtp,
+                            "threshold_lufs": report.threshold_lufs,
+                            "current_master_gain_db": current_gain,
+                            "target_preset": pref_preset,
+                            "target_lufs": target_lufs,
+                            "delta_db": delta,
+                        }))
+                        .ok();
+                }
+                Err(e) => {
+                    reply
+                        .send(json!({"success": false, "error": e.to_string()}))
+                        .ok();
+                }
+            }
+        }
+
+        McpCommand::SetProjectMasterGainDb {
+            master_gain_db,
+            reply,
+        } => {
+            let clamped = master_gain_db.clamp(-24.0, 24.0);
+            let old_db = project.borrow().master_gain_db;
+            if (clamped - old_db).abs() > 1e-9 {
+                let cmd: Box<dyn crate::undo::EditCommand> = Box::new(
+                    crate::undo::SetProjectMasterGainCommand {
+                        old_db,
+                        new_db: clamped,
+                    },
+                );
+                {
+                    let mut proj = project.borrow_mut();
+                    timeline_state.borrow_mut().history.execute(cmd, &mut proj);
+                }
+                prog_player.borrow_mut().set_master_gain_db(clamped);
+                // Note: the Loudness popover's current-gain label is
+                // refreshed on next analyze / open. We can't reach the
+                // popover view from the MCP dispatch scope without
+                // lifting the cell further up, which Phase 1 doesn't
+                // warrant.
+                on_project_changed();
+            }
+            reply
+                .send(json!({"success": true, "master_gain_db": clamped}))
+                .ok();
         }
 
         McpCommand::NormalizeClipAudio {

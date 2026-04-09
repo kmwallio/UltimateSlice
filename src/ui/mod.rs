@@ -7,6 +7,7 @@ pub mod effects_browser;
 pub mod export_queue;
 pub mod inspector;
 pub mod keyframe_editor;
+pub mod loudness_popover;
 pub mod levels_editor;
 pub mod media_browser;
 pub mod multicam_viewer;

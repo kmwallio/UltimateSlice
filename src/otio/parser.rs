@@ -32,13 +32,17 @@ pub fn parse_otio_with_path(json: &str, otio_path: Option<&Path>) -> Result<Proj
         .unwrap_or(24.0);
     let frame_rate = rate_to_frame_rate(rate);
 
-    // -- Resolution from metadata -------------------------------------------
+    // -- Resolution + master gain from metadata -----------------------------
     let (width, height) = extract_resolution(&timeline.metadata);
+    let us_project = project_metadata_from_root(&timeline.metadata).unwrap_or_default();
 
     let mut project = Project::new(&timeline.name);
     project.width = width;
     project.height = height;
     project.frame_rate = frame_rate;
+    if let Some(gain) = us_project.master_gain_db {
+        project.master_gain_db = gain;
+    }
     // Clear default tracks that Project::new creates.
     project.tracks.clear();
 

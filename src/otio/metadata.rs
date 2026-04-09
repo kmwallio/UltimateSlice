@@ -354,6 +354,12 @@ pub(crate) struct UltimateSliceProjectOtioMetadata {
     pub(crate) width: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) height: Option<u32>,
+    /// Project master audio gain in dB (Loudness Radar normalize target).
+    /// `None` means "not authored" and reimport leaves the project default
+    /// (0.0). Serialized only when non-zero so pre-loudness projects don't
+    /// gain any new bytes on round-trip.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) master_gain_db: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

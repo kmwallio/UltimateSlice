@@ -1141,6 +1141,14 @@ pub struct PreferencesState {
     /// Maximum number of versioned backups per project title.
     #[serde(default = "default_backup_max_versions")]
     pub backup_max_versions: usize,
+    /// Loudness Radar target preset id. One of: `"ebu_r128"` | `"atsc_a85"`
+    /// | `"netflix"` | `"apple_pod"` | `"streaming"` | `"custom"`.
+    #[serde(default = "default_loudness_target_preset")]
+    pub loudness_target_preset: String,
+    /// Loudness Radar target integrated LUFS value. Mirrors the preset
+    /// when a preset is selected; carries the custom value otherwise.
+    #[serde(default = "default_loudness_target_lufs")]
+    pub loudness_target_lufs: f64,
 }
 
 impl Default for PreferencesState {
@@ -1175,6 +1183,8 @@ impl Default for PreferencesState {
             duck_amount_db: default_duck_amount_db(),
             backup_enabled: default_backup_enabled(),
             backup_max_versions: default_backup_max_versions(),
+            loudness_target_preset: default_loudness_target_preset(),
+            loudness_target_lufs: default_loudness_target_lufs(),
         }
     }
 }
@@ -1241,6 +1251,39 @@ fn default_crossfade_duration_ns() -> u64 {
 }
 fn default_duck_amount_db() -> f64 {
     -6.0
+}
+fn default_loudness_target_preset() -> String {
+    "ebu_r128".to_string()
+}
+fn default_loudness_target_lufs() -> f64 {
+    -23.0
+}
+
+/// Resolve a Loudness Radar target preset id to its canonical LUFS value.
+/// Returns `None` for unknown or `"custom"` ids so the caller can fall
+/// back to the stored `loudness_target_lufs`.
+pub fn loudness_target_preset_to_lufs(preset_id: &str) -> Option<f64> {
+    match preset_id {
+        "ebu_r128" => Some(-23.0),
+        "atsc_a85" => Some(-24.0),
+        "netflix" => Some(-27.0),
+        "apple_pod" => Some(-16.0),
+        "streaming" => Some(-14.0),
+        _ => None,
+    }
+}
+
+/// Human-readable label for a Loudness Radar target preset id.
+pub fn loudness_target_preset_label(preset_id: &str) -> &'static str {
+    match preset_id {
+        "ebu_r128" => "EBU R128 (−23 LUFS)",
+        "atsc_a85" => "ATSC A/85 (−24 LUFS)",
+        "netflix" => "Netflix (−27 LUFS)",
+        "apple_pod" => "Apple Podcasts (−16 LUFS)",
+        "streaming" => "Streaming (−14 LUFS)",
+        "custom" => "Custom",
+        _ => "Custom",
+    }
 }
 fn default_backup_enabled() -> bool {
     true

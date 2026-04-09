@@ -1245,6 +1245,29 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "analyze_project_loudness",
+            "description": "Render the full timeline mixdown (all tracks, effects, crossfades, ducking, per-role submixes) to a temp file and run EBU R128 analysis on it. Returns the complete loudness report: integrated LUFS, short-term max, momentary max, LRA, true peak. Use this before `set_project_master_gain_db` to compute the delta for a broadcast-standard normalize. Blocks while ffmpeg renders + analyzes (typically 5–30 seconds depending on timeline length).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        },
+        {
+            "name": "set_project_master_gain_db",
+            "description": "Set the project-level master audio gain in dB. Applied post-mixdown in both the Program Monitor preview and the final export. Use this to normalize the entire timeline to a broadcast-standard loudness target (−23 LUFS EBU R128, −24 ATSC A/85, −27 Netflix, −16 Apple Podcasts, −14 Spotify/YouTube). Clamped to ±24 dB. Undoable. Pass 0.0 to reset.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "master_gain_db": {
+                        "type": "number",
+                        "description": "Gain in dB. Clamped to ±24 dB. Positive values boost, negative values attenuate. 0.0 = no-op (default)."
+                    }
+                },
+                "required": ["master_gain_db"]
+            }
+        },
+        {
             "name": "match_clip_audio",
             "description": "Match a source clip's audio tone toward a reference clip using integrated loudness plus the built-in 3-band EQ AND a higher-resolution 7-band match EQ for fine mic-matching (e.g., making a lav mic sound more like a shotgun mic). The matcher derives adaptive band frequency/gain/Q targets from speech-focused spectral differences, preferring subtitle/STT dialogue regions when available and otherwise weighting voice-active frames. Channel-aware analysis defaults to auto-detecting dominant one-sided audio while respecting existing clip routing; optional source/reference channel overrides and start/end ranges let you target a specific side or phrase. The 7-band match EQ is independent of the user 3-band EQ — both are applied in series during export. The operation is undoable.",
             "inputSchema": {
@@ -3029,6 +3052,14 @@ fn dispatch_tool_payload(
                 .get("target_level")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(-14.0),
+            reply: tx,
+        },
+        "analyze_project_loudness" => McpCommand::AnalyzeProjectLoudness { reply: tx },
+        "set_project_master_gain_db" => McpCommand::SetProjectMasterGainDb {
+            master_gain_db: args
+                .get("master_gain_db")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0),
             reply: tx,
         },
         "match_clip_audio" => McpCommand::MatchClipAudio {

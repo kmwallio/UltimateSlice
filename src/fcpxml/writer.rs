@@ -259,6 +259,13 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
     seq.push_attribute(("duration", duration_str.as_str()));
     seq.push_attribute(("format", format_ref));
     seq.push_attribute(("tcFormat", "NDF"));
+    // Project-level master audio gain (Loudness Radar "Normalize to Target").
+    // Only emitted when non-zero and only in non-strict mode — strict DTD
+    // doesn't allow arbitrary namespaced attrs on <sequence>.
+    if !options.strict_dtd && project.master_gain_db.abs() > 1e-9 {
+        let gain_str = format!("{:.6}", project.master_gain_db);
+        seq.push_attribute(("us:master-gain-db", gain_str.as_str()));
+    }
     if options.strict_dtd {
         // Resolve the FCPXML audioLayout token. Default behavior (no opt-in)
         // is byte-identical to the pre-surround code: emit `"stereo"`. When a
@@ -4269,7 +4276,12 @@ fn is_writer_managed_project_attr(key: &str) -> bool {
 fn is_writer_managed_sequence_attr(key: &str) -> bool {
     matches!(
         key,
-        "duration" | "format" | "tcFormat" | "audioLayout" | "audioRate"
+        "duration"
+            | "format"
+            | "tcFormat"
+            | "audioLayout"
+            | "audioRate"
+            | "us:master-gain-db"
     )
 }
 
