@@ -1948,8 +1948,7 @@ impl InspectorView {
                             // EditSubtitleTextCommand spanning from the last
                             // committed text to the current text so undo works at
                             // sentence-level granularity instead of per-keystroke.
-                            let last_committed_text =
-                                Rc::new(RefCell::new(seg.text.clone()));
+                            let last_committed_text = Rc::new(RefCell::new(seg.text.clone()));
                             let clip_id_c = clip_id.clone();
                             let project_c = project.clone();
                             let on_cmd_c = on_cmd.clone();
@@ -2357,7 +2356,8 @@ impl InspectorView {
                 self.vi_silence_min_ms_slider
                     .set_value(c.voice_isolation_silence_min_ms as f64);
                 let silence_visible = vi_detail_visible && is_silence_mode;
-                self.vi_silence_threshold_slider.set_visible(silence_visible);
+                self.vi_silence_threshold_slider
+                    .set_visible(silence_visible);
                 self.vi_silence_min_ms_slider.set_visible(silence_visible);
                 self.vi_silence_actions_row.set_visible(silence_visible);
                 if c.voice_isolation_speech_intervals.is_empty() {
@@ -3349,7 +3349,12 @@ pub fn build_inspector(
     color_expander.set_child(Some(&color_inner));
 
     row_label(&color_inner, "Exposure");
-    let exposure_slider = Scale::with_range(Orientation::Horizontal, COLOR_SLIDER_MIN, COLOR_SLIDER_MAX, COLOR_SLIDER_STEP);
+    let exposure_slider = Scale::with_range(
+        Orientation::Horizontal,
+        COLOR_SLIDER_MIN,
+        COLOR_SLIDER_MAX,
+        COLOR_SLIDER_STEP,
+    );
     exposure_slider.set_value(0.0);
     exposure_slider.set_draw_value(true);
     exposure_slider.set_digits(2);
@@ -3357,7 +3362,12 @@ pub fn build_inspector(
     color_inner.append(&exposure_slider);
 
     row_label(&color_inner, "Brightness");
-    let brightness_slider = Scale::with_range(Orientation::Horizontal, COLOR_SLIDER_MIN, COLOR_SLIDER_MAX, COLOR_SLIDER_STEP);
+    let brightness_slider = Scale::with_range(
+        Orientation::Horizontal,
+        COLOR_SLIDER_MIN,
+        COLOR_SLIDER_MAX,
+        COLOR_SLIDER_STEP,
+    );
     brightness_slider.set_value(0.0);
     brightness_slider.set_draw_value(true);
     brightness_slider.set_digits(2);
@@ -3365,7 +3375,12 @@ pub fn build_inspector(
     color_inner.append(&brightness_slider);
 
     row_label(&color_inner, "Contrast");
-    let contrast_slider = Scale::with_range(Orientation::Horizontal, DOUBLE_SLIDER_MIN, DOUBLE_SLIDER_MAX, DOUBLE_SLIDER_STEP);
+    let contrast_slider = Scale::with_range(
+        Orientation::Horizontal,
+        DOUBLE_SLIDER_MIN,
+        DOUBLE_SLIDER_MAX,
+        DOUBLE_SLIDER_STEP,
+    );
     contrast_slider.set_value(1.0);
     contrast_slider.set_draw_value(true);
     contrast_slider.set_digits(2);
@@ -3373,7 +3388,12 @@ pub fn build_inspector(
     color_inner.append(&contrast_slider);
 
     row_label(&color_inner, "Saturation");
-    let saturation_slider = Scale::with_range(Orientation::Horizontal, DOUBLE_SLIDER_MIN, DOUBLE_SLIDER_MAX, DOUBLE_SLIDER_STEP);
+    let saturation_slider = Scale::with_range(
+        Orientation::Horizontal,
+        DOUBLE_SLIDER_MIN,
+        DOUBLE_SLIDER_MAX,
+        DOUBLE_SLIDER_STEP,
+    );
     saturation_slider.set_value(1.0);
     saturation_slider.set_draw_value(true);
     saturation_slider.set_digits(2);
@@ -3381,7 +3401,12 @@ pub fn build_inspector(
     color_inner.append(&saturation_slider);
 
     row_label(&color_inner, "Temperature (K)");
-    let temperature_slider = Scale::with_range(Orientation::Horizontal, COLOR_TEMPERATURE_MIN_K, COLOR_TEMPERATURE_MAX_K, COLOR_TEMPERATURE_STEP_K);
+    let temperature_slider = Scale::with_range(
+        Orientation::Horizontal,
+        COLOR_TEMPERATURE_MIN_K,
+        COLOR_TEMPERATURE_MAX_K,
+        COLOR_TEMPERATURE_STEP_K,
+    );
     temperature_slider.set_value(6500.0);
     temperature_slider.set_draw_value(true);
     temperature_slider.set_digits(0);
@@ -3389,7 +3414,12 @@ pub fn build_inspector(
     color_inner.append(&temperature_slider);
 
     row_label(&color_inner, "Tint");
-    let tint_slider = Scale::with_range(Orientation::Horizontal, COLOR_SLIDER_MIN, COLOR_SLIDER_MAX, COLOR_SLIDER_STEP);
+    let tint_slider = Scale::with_range(
+        Orientation::Horizontal,
+        COLOR_SLIDER_MIN,
+        COLOR_SLIDER_MAX,
+        COLOR_SLIDER_STEP,
+    );
     tint_slider.set_value(0.0);
     tint_slider.set_draw_value(true);
     tint_slider.set_digits(2);
@@ -3397,7 +3427,12 @@ pub fn build_inspector(
     color_inner.append(&tint_slider);
 
     row_label(&color_inner, "Black Point");
-    let black_point_slider = Scale::with_range(Orientation::Horizontal, COLOR_SLIDER_MIN, COLOR_SLIDER_MAX, COLOR_SLIDER_STEP);
+    let black_point_slider = Scale::with_range(
+        Orientation::Horizontal,
+        COLOR_SLIDER_MIN,
+        COLOR_SLIDER_MAX,
+        COLOR_SLIDER_STEP,
+    );
     black_point_slider.set_value(0.0);
     black_point_slider.set_draw_value(true);
     black_point_slider.set_digits(2);
@@ -3410,7 +3445,12 @@ pub fn build_inspector(
     color_inner.append(&ds_title);
 
     row_label(&color_inner, "Denoise");
-    let denoise_slider = Scale::with_range(Orientation::Horizontal, UNIT_SLIDER_MIN, UNIT_SLIDER_MAX, UNIT_SLIDER_STEP);
+    let denoise_slider = Scale::with_range(
+        Orientation::Horizontal,
+        UNIT_SLIDER_MIN,
+        UNIT_SLIDER_MAX,
+        UNIT_SLIDER_STEP,
+    );
     denoise_slider.set_value(0.0);
     denoise_slider.set_draw_value(true);
     denoise_slider.set_digits(2);
@@ -3418,7 +3458,12 @@ pub fn build_inspector(
     color_inner.append(&denoise_slider);
 
     row_label(&color_inner, "Sharpness");
-    let sharpness_slider = Scale::with_range(Orientation::Horizontal, COLOR_SLIDER_MIN, COLOR_SLIDER_MAX, COLOR_SLIDER_STEP);
+    let sharpness_slider = Scale::with_range(
+        Orientation::Horizontal,
+        COLOR_SLIDER_MIN,
+        COLOR_SLIDER_MAX,
+        COLOR_SLIDER_STEP,
+    );
     sharpness_slider.set_value(0.0);
     sharpness_slider.set_draw_value(true);
     sharpness_slider.set_digits(2);
@@ -3426,7 +3471,12 @@ pub fn build_inspector(
     color_inner.append(&sharpness_slider);
 
     row_label(&color_inner, "Blur");
-    let blur_slider = Scale::with_range(Orientation::Horizontal, UNIT_SLIDER_MIN, UNIT_SLIDER_MAX, UNIT_SLIDER_STEP);
+    let blur_slider = Scale::with_range(
+        Orientation::Horizontal,
+        UNIT_SLIDER_MIN,
+        UNIT_SLIDER_MAX,
+        UNIT_SLIDER_STEP,
+    );
     blur_slider.set_value(0.0);
     blur_slider.set_draw_value(true);
     blur_slider.set_digits(2);
@@ -3448,7 +3498,12 @@ pub fn build_inspector(
     color_inner.append(&vidstab_row);
 
     row_label(&color_inner, "Smoothing");
-    let vidstab_slider = Scale::with_range(Orientation::Horizontal, UNIT_SLIDER_MIN, UNIT_SLIDER_MAX, UNIT_SLIDER_STEP);
+    let vidstab_slider = Scale::with_range(
+        Orientation::Horizontal,
+        UNIT_SLIDER_MIN,
+        UNIT_SLIDER_MAX,
+        UNIT_SLIDER_STEP,
+    );
     vidstab_slider.set_value(0.5);
     vidstab_slider.set_draw_value(true);
     vidstab_slider.set_digits(2);
@@ -3461,7 +3516,12 @@ pub fn build_inspector(
     color_inner.append(&grading_title);
 
     row_label(&color_inner, "Shadows");
-    let shadows_slider = Scale::with_range(Orientation::Horizontal, COLOR_SLIDER_MIN, COLOR_SLIDER_MAX, COLOR_SLIDER_STEP);
+    let shadows_slider = Scale::with_range(
+        Orientation::Horizontal,
+        COLOR_SLIDER_MIN,
+        COLOR_SLIDER_MAX,
+        COLOR_SLIDER_STEP,
+    );
     shadows_slider.set_value(0.0);
     shadows_slider.set_draw_value(true);
     shadows_slider.set_digits(2);
@@ -3469,7 +3529,12 @@ pub fn build_inspector(
     color_inner.append(&shadows_slider);
 
     row_label(&color_inner, "Midtones");
-    let midtones_slider = Scale::with_range(Orientation::Horizontal, COLOR_SLIDER_MIN, COLOR_SLIDER_MAX, COLOR_SLIDER_STEP);
+    let midtones_slider = Scale::with_range(
+        Orientation::Horizontal,
+        COLOR_SLIDER_MIN,
+        COLOR_SLIDER_MAX,
+        COLOR_SLIDER_STEP,
+    );
     midtones_slider.set_value(0.0);
     midtones_slider.set_draw_value(true);
     midtones_slider.set_digits(2);
@@ -3477,7 +3542,12 @@ pub fn build_inspector(
     color_inner.append(&midtones_slider);
 
     row_label(&color_inner, "Highlights");
-    let highlights_slider = Scale::with_range(Orientation::Horizontal, COLOR_SLIDER_MIN, COLOR_SLIDER_MAX, COLOR_SLIDER_STEP);
+    let highlights_slider = Scale::with_range(
+        Orientation::Horizontal,
+        COLOR_SLIDER_MIN,
+        COLOR_SLIDER_MAX,
+        COLOR_SLIDER_STEP,
+    );
     highlights_slider.set_value(0.0);
     highlights_slider.set_draw_value(true);
     highlights_slider.set_digits(2);
@@ -3485,7 +3555,12 @@ pub fn build_inspector(
     color_inner.append(&highlights_slider);
 
     row_label(&color_inner, "Highlights Warmth");
-    let highlights_warmth_slider = Scale::with_range(Orientation::Horizontal, COLOR_SLIDER_MIN, COLOR_SLIDER_MAX, COLOR_SLIDER_STEP);
+    let highlights_warmth_slider = Scale::with_range(
+        Orientation::Horizontal,
+        COLOR_SLIDER_MIN,
+        COLOR_SLIDER_MAX,
+        COLOR_SLIDER_STEP,
+    );
     highlights_warmth_slider.set_value(0.0);
     highlights_warmth_slider.set_draw_value(true);
     highlights_warmth_slider.set_digits(2);
@@ -3493,7 +3568,12 @@ pub fn build_inspector(
     color_inner.append(&highlights_warmth_slider);
 
     row_label(&color_inner, "Highlights Tint");
-    let highlights_tint_slider = Scale::with_range(Orientation::Horizontal, COLOR_SLIDER_MIN, COLOR_SLIDER_MAX, COLOR_SLIDER_STEP);
+    let highlights_tint_slider = Scale::with_range(
+        Orientation::Horizontal,
+        COLOR_SLIDER_MIN,
+        COLOR_SLIDER_MAX,
+        COLOR_SLIDER_STEP,
+    );
     highlights_tint_slider.set_value(0.0);
     highlights_tint_slider.set_draw_value(true);
     highlights_tint_slider.set_digits(2);
@@ -3501,7 +3581,12 @@ pub fn build_inspector(
     color_inner.append(&highlights_tint_slider);
 
     row_label(&color_inner, "Midtones Warmth");
-    let midtones_warmth_slider = Scale::with_range(Orientation::Horizontal, COLOR_SLIDER_MIN, COLOR_SLIDER_MAX, COLOR_SLIDER_STEP);
+    let midtones_warmth_slider = Scale::with_range(
+        Orientation::Horizontal,
+        COLOR_SLIDER_MIN,
+        COLOR_SLIDER_MAX,
+        COLOR_SLIDER_STEP,
+    );
     midtones_warmth_slider.set_value(0.0);
     midtones_warmth_slider.set_draw_value(true);
     midtones_warmth_slider.set_digits(2);
@@ -3509,7 +3594,12 @@ pub fn build_inspector(
     color_inner.append(&midtones_warmth_slider);
 
     row_label(&color_inner, "Midtones Tint");
-    let midtones_tint_slider = Scale::with_range(Orientation::Horizontal, COLOR_SLIDER_MIN, COLOR_SLIDER_MAX, COLOR_SLIDER_STEP);
+    let midtones_tint_slider = Scale::with_range(
+        Orientation::Horizontal,
+        COLOR_SLIDER_MIN,
+        COLOR_SLIDER_MAX,
+        COLOR_SLIDER_STEP,
+    );
     midtones_tint_slider.set_value(0.0);
     midtones_tint_slider.set_draw_value(true);
     midtones_tint_slider.set_digits(2);
@@ -3517,7 +3607,12 @@ pub fn build_inspector(
     color_inner.append(&midtones_tint_slider);
 
     row_label(&color_inner, "Shadows Warmth");
-    let shadows_warmth_slider = Scale::with_range(Orientation::Horizontal, COLOR_SLIDER_MIN, COLOR_SLIDER_MAX, COLOR_SLIDER_STEP);
+    let shadows_warmth_slider = Scale::with_range(
+        Orientation::Horizontal,
+        COLOR_SLIDER_MIN,
+        COLOR_SLIDER_MAX,
+        COLOR_SLIDER_STEP,
+    );
     shadows_warmth_slider.set_value(0.0);
     shadows_warmth_slider.set_draw_value(true);
     shadows_warmth_slider.set_digits(2);
@@ -3525,7 +3620,12 @@ pub fn build_inspector(
     color_inner.append(&shadows_warmth_slider);
 
     row_label(&color_inner, "Shadows Tint");
-    let shadows_tint_slider = Scale::with_range(Orientation::Horizontal, COLOR_SLIDER_MIN, COLOR_SLIDER_MAX, COLOR_SLIDER_STEP);
+    let shadows_tint_slider = Scale::with_range(
+        Orientation::Horizontal,
+        COLOR_SLIDER_MIN,
+        COLOR_SLIDER_MAX,
+        COLOR_SLIDER_STEP,
+    );
     shadows_tint_slider.set_value(0.0);
     shadows_tint_slider.set_draw_value(true);
     shadows_tint_slider.set_digits(2);
@@ -3578,7 +3678,12 @@ pub fn build_inspector(
     chroma_custom_color_row.set_visible(false);
 
     row_label(&chroma_key_inner, "Tolerance");
-    let chroma_tolerance_slider = Scale::with_range(Orientation::Horizontal, UNIT_SLIDER_MIN, UNIT_SLIDER_MAX, UNIT_SLIDER_STEP);
+    let chroma_tolerance_slider = Scale::with_range(
+        Orientation::Horizontal,
+        UNIT_SLIDER_MIN,
+        UNIT_SLIDER_MAX,
+        UNIT_SLIDER_STEP,
+    );
     chroma_tolerance_slider.set_value(0.3);
     chroma_tolerance_slider.set_draw_value(true);
     chroma_tolerance_slider.set_digits(2);
@@ -3586,7 +3691,12 @@ pub fn build_inspector(
     chroma_key_inner.append(&chroma_tolerance_slider);
 
     row_label(&chroma_key_inner, "Edge Softness");
-    let chroma_softness_slider = Scale::with_range(Orientation::Horizontal, UNIT_SLIDER_MIN, UNIT_SLIDER_MAX, UNIT_SLIDER_STEP);
+    let chroma_softness_slider = Scale::with_range(
+        Orientation::Horizontal,
+        UNIT_SLIDER_MIN,
+        UNIT_SLIDER_MAX,
+        UNIT_SLIDER_STEP,
+    );
     chroma_softness_slider.set_value(0.1);
     chroma_softness_slider.set_draw_value(true);
     chroma_softness_slider.set_digits(2);
@@ -3608,7 +3718,12 @@ pub fn build_inspector(
     bg_removal_inner.append(&bg_removal_enable);
 
     row_label(&bg_removal_inner, "Threshold");
-    let bg_removal_threshold_slider = Scale::with_range(Orientation::Horizontal, UNIT_SLIDER_MIN, UNIT_SLIDER_MAX, UNIT_SLIDER_STEP);
+    let bg_removal_threshold_slider = Scale::with_range(
+        Orientation::Horizontal,
+        UNIT_SLIDER_MIN,
+        UNIT_SLIDER_MAX,
+        UNIT_SLIDER_STEP,
+    );
     bg_removal_threshold_slider.set_value(0.5);
     bg_removal_threshold_slider.set_draw_value(true);
     bg_removal_threshold_slider.set_digits(2);
@@ -3892,7 +4007,12 @@ pub fn build_inspector(
     mask_inner.append(&mask_rect_ellipse_controls);
 
     row_label(&mask_rect_ellipse_controls, "Center X");
-    let mask_center_x_slider = Scale::with_range(Orientation::Horizontal, UNIT_SLIDER_MIN, UNIT_SLIDER_MAX, UNIT_SLIDER_STEP);
+    let mask_center_x_slider = Scale::with_range(
+        Orientation::Horizontal,
+        UNIT_SLIDER_MIN,
+        UNIT_SLIDER_MAX,
+        UNIT_SLIDER_STEP,
+    );
     mask_center_x_slider.set_value(0.5);
     mask_center_x_slider.set_draw_value(true);
     mask_center_x_slider.set_digits(2);
@@ -3900,7 +4020,12 @@ pub fn build_inspector(
     mask_rect_ellipse_controls.append(&mask_center_x_slider);
 
     row_label(&mask_rect_ellipse_controls, "Center Y");
-    let mask_center_y_slider = Scale::with_range(Orientation::Horizontal, UNIT_SLIDER_MIN, UNIT_SLIDER_MAX, UNIT_SLIDER_STEP);
+    let mask_center_y_slider = Scale::with_range(
+        Orientation::Horizontal,
+        UNIT_SLIDER_MIN,
+        UNIT_SLIDER_MAX,
+        UNIT_SLIDER_STEP,
+    );
     mask_center_y_slider.set_value(0.5);
     mask_center_y_slider.set_draw_value(true);
     mask_center_y_slider.set_digits(2);
@@ -4005,7 +4130,12 @@ pub fn build_inspector(
     tracking_inner.append(&tracking_edit_region_btn);
 
     row_label(&tracking_inner, "Region Center X");
-    let tracking_center_x_slider = Scale::with_range(Orientation::Horizontal, UNIT_SLIDER_MIN, UNIT_SLIDER_MAX, UNIT_SLIDER_STEP);
+    let tracking_center_x_slider = Scale::with_range(
+        Orientation::Horizontal,
+        UNIT_SLIDER_MIN,
+        UNIT_SLIDER_MAX,
+        UNIT_SLIDER_STEP,
+    );
     tracking_center_x_slider.set_value(0.5);
     tracking_center_x_slider.set_draw_value(true);
     tracking_center_x_slider.set_digits(2);
@@ -4013,7 +4143,12 @@ pub fn build_inspector(
     tracking_inner.append(&tracking_center_x_slider);
 
     row_label(&tracking_inner, "Region Center Y");
-    let tracking_center_y_slider = Scale::with_range(Orientation::Horizontal, UNIT_SLIDER_MIN, UNIT_SLIDER_MAX, UNIT_SLIDER_STEP);
+    let tracking_center_y_slider = Scale::with_range(
+        Orientation::Horizontal,
+        UNIT_SLIDER_MIN,
+        UNIT_SLIDER_MAX,
+        UNIT_SLIDER_STEP,
+    );
     tracking_center_y_slider.set_value(0.5);
     tracking_center_y_slider.set_draw_value(true);
     tracking_center_y_slider.set_digits(2);
@@ -4276,8 +4411,7 @@ pub fn build_inspector(
 
     // ── Voice isolation source: Subtitles (default) or Silence-detect ──
     row_label(&audio_inner, "  Source");
-    let vi_source_dropdown =
-        gtk4::DropDown::from_strings(&["Subtitles", "Silence Detect"]);
+    let vi_source_dropdown = gtk4::DropDown::from_strings(&["Subtitles", "Silence Detect"]);
     vi_source_dropdown.set_tooltip_text(Some(
         "Where to derive speech regions from. Subtitles uses generated word timings. \
          Silence Detect uses ffmpeg silencedetect — works without subtitles.",
@@ -4286,17 +4420,13 @@ pub fn build_inspector(
 
     // Silence-mode-only controls (visible only when source = Silence Detect)
     row_label(&audio_inner, "  Silence threshold");
-    let vi_silence_threshold_slider =
-        Scale::with_range(Orientation::Horizontal, -60.0, -10.0, 1.0);
+    let vi_silence_threshold_slider = Scale::with_range(Orientation::Horizontal, -60.0, -10.0, 1.0);
     vi_silence_threshold_slider.set_value(-30.0);
     vi_silence_threshold_slider.set_draw_value(true);
     vi_silence_threshold_slider.set_digits(0);
-    vi_silence_threshold_slider
-        .add_mark(-60.0, gtk4::PositionType::Bottom, Some("-60 dB"));
-    vi_silence_threshold_slider
-        .add_mark(-30.0, gtk4::PositionType::Bottom, Some("-30 dB"));
-    vi_silence_threshold_slider
-        .add_mark(-10.0, gtk4::PositionType::Bottom, Some("-10 dB"));
+    vi_silence_threshold_slider.add_mark(-60.0, gtk4::PositionType::Bottom, Some("-60 dB"));
+    vi_silence_threshold_slider.add_mark(-30.0, gtk4::PositionType::Bottom, Some("-30 dB"));
+    vi_silence_threshold_slider.add_mark(-10.0, gtk4::PositionType::Bottom, Some("-10 dB"));
     vi_silence_threshold_slider.set_tooltip_text(Some(
         "Audio below this dB level is treated as silence. Lower = stricter \
          (only treat near-silence as gaps). Click Suggest to auto-pick.",
@@ -4304,8 +4434,7 @@ pub fn build_inspector(
     audio_inner.append(&vi_silence_threshold_slider);
 
     row_label(&audio_inner, "  Min gap (ms)");
-    let vi_silence_min_ms_slider =
-        Scale::with_range(Orientation::Horizontal, 50.0, 2000.0, 10.0);
+    let vi_silence_min_ms_slider = Scale::with_range(Orientation::Horizontal, 50.0, 2000.0, 10.0);
     vi_silence_min_ms_slider.set_value(200.0);
     vi_silence_min_ms_slider.set_draw_value(true);
     vi_silence_min_ms_slider.set_digits(0);
@@ -4474,7 +4603,12 @@ pub fn build_inspector(
     audio_inner.append(&audio_animation_mode_btn);
 
     row_label(&audio_inner, "Pan");
-    let pan_slider = Scale::with_range(Orientation::Horizontal, COLOR_SLIDER_MIN, COLOR_SLIDER_MAX, COLOR_SLIDER_STEP);
+    let pan_slider = Scale::with_range(
+        Orientation::Horizontal,
+        COLOR_SLIDER_MIN,
+        COLOR_SLIDER_MAX,
+        COLOR_SLIDER_STEP,
+    );
     pan_slider.set_value(0.0);
     pan_slider.set_draw_value(true);
     pan_slider.set_digits(2);
@@ -4720,7 +4854,12 @@ pub fn build_inspector(
     transform_inner.append(&scale_keyframe_row);
 
     row_label(&transform_inner, "Opacity");
-    let opacity_slider = Scale::with_range(Orientation::Horizontal, UNIT_SLIDER_MIN, UNIT_SLIDER_MAX, UNIT_SLIDER_STEP);
+    let opacity_slider = Scale::with_range(
+        Orientation::Horizontal,
+        UNIT_SLIDER_MIN,
+        UNIT_SLIDER_MAX,
+        UNIT_SLIDER_STEP,
+    );
     opacity_slider.set_value(1.0);
     opacity_slider.set_draw_value(true);
     opacity_slider.set_digits(2);
@@ -4803,8 +4942,9 @@ pub fn build_inspector(
     crop_right_slider.set_value(0.0);
     crop_right_slider.set_draw_value(true);
     crop_right_slider.set_digits(0);
-    crop_right_slider
-        .set_tooltip_text(Some("Crop from the right edge, in project pixels (0–4000)."));
+    crop_right_slider.set_tooltip_text(Some(
+        "Crop from the right edge, in project pixels (0–4000).",
+    ));
     transform_inner.append(&crop_right_slider);
     let crop_right_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let crop_right_set_keyframe_btn = Button::with_label("Set Crop Right Keyframe");
@@ -4814,8 +4954,7 @@ pub fn build_inspector(
     transform_inner.append(&crop_right_keyframe_row);
 
     row_label(&transform_inner, "Crop Top");
-    let crop_top_slider =
-        Scale::with_range(Orientation::Horizontal, CROP_MIN_PX, CROP_MAX_PX, 2.0);
+    let crop_top_slider = Scale::with_range(Orientation::Horizontal, CROP_MIN_PX, CROP_MAX_PX, 2.0);
     crop_top_slider.set_value(0.0);
     crop_top_slider.set_draw_value(true);
     crop_top_slider.set_digits(0);
@@ -4834,8 +4973,9 @@ pub fn build_inspector(
     crop_bottom_slider.set_value(0.0);
     crop_bottom_slider.set_draw_value(true);
     crop_bottom_slider.set_digits(0);
-    crop_bottom_slider
-        .set_tooltip_text(Some("Crop from the bottom edge, in project pixels (0–4000)."));
+    crop_bottom_slider.set_tooltip_text(Some(
+        "Crop from the bottom edge, in project pixels (0–4000).",
+    ));
     transform_inner.append(&crop_bottom_slider);
     let crop_bottom_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let crop_bottom_set_keyframe_btn = Button::with_label("Set Crop Bottom Keyframe");
@@ -4939,13 +5079,23 @@ pub fn build_inspector(
     title_inner.append(&title_color_btn);
 
     row_label(&title_inner, "Position X");
-    let title_x_slider = Scale::with_range(Orientation::Horizontal, UNIT_SLIDER_MIN, UNIT_SLIDER_MAX, UNIT_SLIDER_STEP);
+    let title_x_slider = Scale::with_range(
+        Orientation::Horizontal,
+        UNIT_SLIDER_MIN,
+        UNIT_SLIDER_MAX,
+        UNIT_SLIDER_STEP,
+    );
     title_x_slider.set_value(0.5);
     title_x_slider.set_hexpand(true);
     title_inner.append(&title_x_slider);
 
     row_label(&title_inner, "Position Y");
-    let title_y_slider = Scale::with_range(Orientation::Horizontal, UNIT_SLIDER_MIN, UNIT_SLIDER_MAX, UNIT_SLIDER_STEP);
+    let title_y_slider = Scale::with_range(
+        Orientation::Horizontal,
+        UNIT_SLIDER_MIN,
+        UNIT_SLIDER_MAX,
+        UNIT_SLIDER_STEP,
+    );
     title_y_slider.set_value(0.9);
     title_y_slider.set_hexpand(true);
     title_inner.append(&title_y_slider);
@@ -5058,10 +5208,14 @@ pub fn build_inspector(
     // entry is only shown when the RIFE ONNX model is actually installed —
     // the window glue toggles it dynamically as the model appears/disappears.
     row_label(&speed_inner, "Slow-Motion Interpolation:");
-    let smo_initial_has_ai =
-        crate::media::frame_interp_cache::find_model_path().is_some();
+    let smo_initial_has_ai = crate::media::frame_interp_cache::find_model_path().is_some();
     let smo_interp_items: &[&str] = if smo_initial_has_ai {
-        &["Off", "Frame Blending", "Optical Flow", "AI Interpolation (RIFE)"]
+        &[
+            "Off",
+            "Frame Blending",
+            "Optical Flow",
+            "AI Interpolation (RIFE)",
+        ]
     } else {
         &["Off", "Frame Blending", "Optical Flow"]
     };
@@ -5983,14 +6137,12 @@ pub fn build_inspector(
                         }
                     }
                 }
-                on_execute_command(Box::new(
-                    crate::undo::SetClipVoiceIsolationSourceCommand {
-                        clip_id: clip_id.clone(),
-                        track_id: String::new(),
-                        old_source,
-                        new_source,
-                    },
-                ));
+                on_execute_command(Box::new(crate::undo::SetClipVoiceIsolationSourceCommand {
+                    clip_id: clip_id.clone(),
+                    track_id: String::new(),
+                    old_source,
+                    new_source,
+                }));
                 on_clip_changed();
             }
         });
@@ -5999,8 +6151,7 @@ pub fn build_inspector(
     // Wire silence-mode threshold + min-gap sliders. Param changes invalidate
     // the cached intervals so the user must re-Analyze.
     {
-        type SilenceParamsSnap =
-            Rc<RefCell<Option<(String, f32, u32, Vec<(u64, u64)>)>>>;
+        type SilenceParamsSnap = Rc<RefCell<Option<(String, f32, u32, Vec<(u64, u64)>)>>>;
         let snap: SilenceParamsSnap = Rc::new(RefCell::new(None));
 
         let do_snap = {
@@ -7729,7 +7880,12 @@ pub fn build_inspector(
         on_clip_changed.clone(),
         Rc::new({
             let crop_left_slider = crop_left_slider.clone();
-            move || crop_left_slider.value().clamp(CROP_MIN_PX, CROP_MAX_PX).round()
+            move || {
+                crop_left_slider
+                    .value()
+                    .clamp(CROP_MIN_PX, CROP_MAX_PX)
+                    .round()
+            }
         }),
         interp_provider.clone(),
     );
@@ -7764,7 +7920,12 @@ pub fn build_inspector(
         on_clip_changed.clone(),
         Rc::new({
             let crop_top_slider = crop_top_slider.clone();
-            move || crop_top_slider.value().clamp(CROP_MIN_PX, CROP_MAX_PX).round()
+            move || {
+                crop_top_slider
+                    .value()
+                    .clamp(CROP_MIN_PX, CROP_MAX_PX)
+                    .round()
+            }
         }),
         interp_provider.clone(),
     );
@@ -7799,7 +7960,12 @@ pub fn build_inspector(
         on_clip_changed.clone(),
         Rc::new({
             let rotate_spin = rotate_spin.clone();
-            move || rotate_spin.value().clamp(ROTATE_MIN_DEG, ROTATE_MAX_DEG).round()
+            move || {
+                rotate_spin
+                    .value()
+                    .clamp(ROTATE_MIN_DEG, ROTATE_MAX_DEG)
+                    .round()
+            }
         }),
         interp_provider.clone(),
     );

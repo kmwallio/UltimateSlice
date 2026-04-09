@@ -51,15 +51,16 @@ const EQ_HIGH_FIT_BANDS: [usize; 4] = [7, 8, 9, 10];
 /// 7-band match EQ output definitions: (center_hz, analysis band indices).
 /// Each band covers roughly one octave across the speech-relevant spectrum.
 const MATCH_BAND_COUNT: usize = 7;
-const MATCH_BAND_CENTERS: [f64; MATCH_BAND_COUNT] = [100.0, 200.0, 400.0, 800.0, 2000.0, 5000.0, 9000.0];
+const MATCH_BAND_CENTERS: [f64; MATCH_BAND_COUNT] =
+    [100.0, 200.0, 400.0, 800.0, 2000.0, 5000.0, 9000.0];
 const MATCH_BAND_INDICES: [&[usize]; MATCH_BAND_COUNT] = [
-    &[0],       // 80–120 Hz: body/clothing resonance
-    &[1, 2],    // 120–270 Hz: chest/proximity effect
-    &[3],       // 270–400 Hz: low-mid muddiness
-    &[4, 5],    // 400–1000 Hz: fundamental speech
-    &[6, 7],    // 1–2.5 kHz: presence lower
-    &[8, 9],    // 2.5–6.5 kHz: presence upper / sibilance
-    &[10],      // 6.5–9 kHz: air/brilliance
+    &[0],    // 80–120 Hz: body/clothing resonance
+    &[1, 2], // 120–270 Hz: chest/proximity effect
+    &[3],    // 270–400 Hz: low-mid muddiness
+    &[4, 5], // 400–1000 Hz: fundamental speech
+    &[6, 7], // 1–2.5 kHz: presence lower
+    &[8, 9], // 2.5–6.5 kHz: presence upper / sibilance
+    &[10],   // 6.5–9 kHz: air/brilliance
 ];
 /// Q values for each match band — wider for broad regions, narrower for isolated.
 const MATCH_BAND_Q: [f64; MATCH_BAND_COUNT] = [1.5, 1.0, 1.5, 1.0, 1.0, 1.0, 1.5];
@@ -561,10 +562,7 @@ fn matched_eq_bands_detailed(
             let default_q = MATCH_BAND_Q[band_idx];
 
             // Weighted average of the shaped (mean-subtracted) deltas for this band.
-            let band_deltas: Vec<f64> = indices
-                .iter()
-                .map(|&i| deltas[i] - mean_delta)
-                .collect();
+            let band_deltas: Vec<f64> = indices.iter().map(|&i| deltas[i] - mean_delta).collect();
             let avg_delta = if band_deltas.is_empty() {
                 0.0
             } else {
@@ -1035,10 +1033,22 @@ mod tests {
         let bands = matched_eq_bands_detailed(lav, shotgun);
         assert_eq!(bands.len(), MATCH_BAND_COUNT);
         // Low bands should be cut (source is louder than reference in lows)
-        assert!(bands[0].gain < 0.0, "band 0 (100Hz) should cut: {}", bands[0].gain);
+        assert!(
+            bands[0].gain < 0.0,
+            "band 0 (100Hz) should cut: {}",
+            bands[0].gain
+        );
         // Presence bands should be boosted
-        assert!(bands[4].gain > 0.0, "band 4 (2kHz) should boost: {}", bands[4].gain);
-        assert!(bands[5].gain > 0.0, "band 5 (5kHz) should boost: {}", bands[5].gain);
+        assert!(
+            bands[4].gain > 0.0,
+            "band 4 (2kHz) should boost: {}",
+            bands[4].gain
+        );
+        assert!(
+            bands[5].gain > 0.0,
+            "band 5 (5kHz) should boost: {}",
+            bands[5].gain
+        );
     }
 
     #[test]
@@ -1049,8 +1059,11 @@ mod tests {
         ]);
         let bands = matched_eq_bands_detailed(source, reference);
         for band in &bands {
-            assert!(band.gain.abs() < EQ_GAIN_DEADZONE_DB + 0.01,
-                "small difference should produce near-zero gain, got {}", band.gain);
+            assert!(
+                band.gain.abs() < EQ_GAIN_DEADZONE_DB + 0.01,
+                "small difference should produce near-zero gain, got {}",
+                band.gain
+            );
         }
     }
 }

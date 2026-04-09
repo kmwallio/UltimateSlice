@@ -1157,8 +1157,7 @@ fn parse_asset_clip(
             clip.voice_isolation = v.parse().unwrap_or(0.0);
         }
         if let Some(v) = attrs.get("us:voice-isolation-source") {
-            clip.voice_isolation_source =
-                crate::model::clip::VoiceIsolationSource::from_str(v);
+            clip.voice_isolation_source = crate::model::clip::VoiceIsolationSource::from_str(v);
         }
         if let Some(v) = attrs.get("us:voice-isolation-silence-threshold-db") {
             clip.voice_isolation_silence_threshold_db = v.parse().unwrap_or(-30.0);
@@ -1726,8 +1725,7 @@ fn apply_adjust_voice_isolation(
         }
         // Vendor attrs for silence-detect source mode (UltimateSlice extension).
         if let Some(s) = attrs.get("us:source") {
-            clip.voice_isolation_source =
-                crate::model::clip::VoiceIsolationSource::from_str(s);
+            clip.voice_isolation_source = crate::model::clip::VoiceIsolationSource::from_str(s);
         }
         if let Some(t) = attrs
             .get("us:silence-threshold-db")

@@ -5469,7 +5469,8 @@ impl ProgramPlayer {
             let pos = self.timeline_pos_ns;
             log::info!(
                 "update_match_eq_for_clip: rebuilding pipeline for clip={} at pos={}ns",
-                clip_id, pos
+                clip_id,
+                pos
             );
             self.rebuild_pipeline_at(pos);
         }
@@ -5595,10 +5596,8 @@ impl ProgramPlayer {
                 to.set_property("draw-outline", outline_width > 0.0);
                 if outline_width > 0.0 {
                     let (r, g, b, a) = crate::ui::colors::rgba_u32_to_u8(outline_color);
-                    let argb: u32 = ((a as u32) << 24)
-                        | ((r as u32) << 16)
-                        | ((g as u32) << 8)
-                        | b as u32;
+                    let argb: u32 =
+                        ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32;
                     to.set_property("outline-color", argb);
                 }
                 to.set_property("draw-shadow", shadow);
@@ -5622,10 +5621,8 @@ impl ProgramPlayer {
                 to.set_property("draw-outline", outline_width > 0.0);
                 if outline_width > 0.0 {
                     let (r, g, b, a) = crate::ui::colors::rgba_u32_to_u8(outline_color);
-                    let argb: u32 = ((a as u32) << 24)
-                        | ((r as u32) << 16)
-                        | ((g as u32) << 8)
-                        | b as u32;
+                    let argb: u32 =
+                        ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32;
                     to.set_property("outline-color", argb);
                 }
                 to.set_property("draw-shadow", shadow);
@@ -9059,10 +9056,8 @@ impl ProgramPlayer {
                 to.set_property("deltax", dx);
                 to.set_property("deltay", dy);
                 let (r, g, b, a) = crate::ui::colors::rgba_u32_to_u8(color_rgba);
-                let argb: u32 = ((a as u32) << 24)
-                    | ((r as u32) << 16)
-                    | ((g as u32) << 8)
-                    | b as u32;
+                let argb: u32 =
+                    ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32;
                 to.set_property("color", argb);
             }
         }
@@ -9075,10 +9070,8 @@ impl ProgramPlayer {
             to.set_property("draw-outline", clip.title_outline_width > 0.0);
             if clip.title_outline_width > 0.0 {
                 let (r, g, b, a) = crate::ui::colors::rgba_u32_to_u8(clip.title_outline_color);
-                let argb: u32 = ((a as u32) << 24)
-                    | ((r as u32) << 16)
-                    | ((g as u32) << 8)
-                    | b as u32;
+                let argb: u32 =
+                    ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32;
                 to.set_property("outline-color", argb);
             }
             // Shadow: GStreamer textoverlay only supports a fixed ~1px shadow
@@ -10312,10 +10305,8 @@ impl ProgramPlayer {
                     // Shadow color (RRGGBBAA → AARRGGBB for GStreamer)
                     let (sr, sg, sb, sa) =
                         crate::ui::colors::rgba_u32_to_u8(clip.title_shadow_color);
-                    let s_argb: u32 = ((sa as u32) << 24)
-                        | ((sr as u32) << 16)
-                        | ((sg as u32) << 8)
-                        | sb as u32;
+                    let s_argb: u32 =
+                        ((sa as u32) << 24) | ((sr as u32) << 16) | ((sg as u32) << 8) | sb as u32;
                     st.set_property("color", s_argb);
                 }
             }
@@ -12471,8 +12462,7 @@ impl ProgramPlayer {
         );
         if clip.title_outline_width > 0.0 {
             let bw = (clip.title_outline_width * scale_factor).max(0.5);
-            let (or_, og, ob, oa) =
-                crate::ui::colors::rgba_u32_to_u8(clip.title_outline_color);
+            let (or_, og, ob, oa) = crate::ui::colors::rgba_u32_to_u8(clip.title_outline_color);
             let o_alpha = (oa as f64 / 255.0).clamp(0.0, 1.0);
             filter.push_str(&format!(
                 ":borderw={bw:.1}:bordercolor={or_:02x}{og:02x}{ob:02x}@{o_alpha:.4}"
@@ -12481,8 +12471,7 @@ impl ProgramPlayer {
         if clip.title_shadow {
             let sx = (clip.title_shadow_offset_x * scale_factor).round() as i32;
             let sy = (clip.title_shadow_offset_y * scale_factor).round() as i32;
-            let (sr, sg, sb, sa) =
-                crate::ui::colors::rgba_u32_to_u8(clip.title_shadow_color);
+            let (sr, sg, sb, sa) = crate::ui::colors::rgba_u32_to_u8(clip.title_shadow_color);
             let s_alpha = (sa as f64 / 255.0).clamp(0.0, 1.0);
             filter.push_str(&format!(
                 ":shadowx={sx}:shadowy={sy}:shadowcolor={sr:02x}{sg:02x}{sb:02x}@{s_alpha:.4}"
@@ -12490,8 +12479,7 @@ impl ProgramPlayer {
         }
         if clip.title_bg_box {
             let pad = (clip.title_bg_box_padding * scale_factor).round() as i32;
-            let (br, bgg, bb, ba) =
-                crate::ui::colors::rgba_u32_to_u8(clip.title_bg_box_color);
+            let (br, bgg, bb, ba) = crate::ui::colors::rgba_u32_to_u8(clip.title_bg_box_color);
             let b_alpha = (ba as f64 / 255.0).clamp(0.0, 1.0);
             filter.push_str(&format!(
                 ":box=1:boxcolor={br:02x}{bgg:02x}{bb:02x}@{b_alpha:.4}:boxborderw={pad}"
@@ -13077,9 +13065,7 @@ impl ProgramPlayer {
                                             clip.match_eq_bands.len(), clip_idx
                                         );
                                     } else {
-                                        log::warn!(
-                                            "build_slot_for_clip: match-eq pad link FAILED"
-                                        );
+                                        log::warn!("build_slot_for_clip: match-eq pad link FAILED");
                                         self.pipeline.remove(m_eq).ok();
                                         match_eq = None;
                                     }

@@ -2167,13 +2167,41 @@ mod tests {
             new_eq_bands: matched_eq,
             old_match_eq_bands: Vec::new(),
             new_match_eq_bands: vec![
-                crate::model::clip::EqBand { freq: 100.0, gain: -3.0, q: 1.5 },
-                crate::model::clip::EqBand { freq: 200.0, gain: -2.0, q: 1.0 },
-                crate::model::clip::EqBand { freq: 400.0, gain: 0.0, q: 1.5 },
-                crate::model::clip::EqBand { freq: 800.0, gain: 1.0, q: 1.0 },
-                crate::model::clip::EqBand { freq: 2000.0, gain: 3.0, q: 1.0 },
-                crate::model::clip::EqBand { freq: 5000.0, gain: 2.5, q: 1.0 },
-                crate::model::clip::EqBand { freq: 9000.0, gain: 0.0, q: 1.5 },
+                crate::model::clip::EqBand {
+                    freq: 100.0,
+                    gain: -3.0,
+                    q: 1.5,
+                },
+                crate::model::clip::EqBand {
+                    freq: 200.0,
+                    gain: -2.0,
+                    q: 1.0,
+                },
+                crate::model::clip::EqBand {
+                    freq: 400.0,
+                    gain: 0.0,
+                    q: 1.5,
+                },
+                crate::model::clip::EqBand {
+                    freq: 800.0,
+                    gain: 1.0,
+                    q: 1.0,
+                },
+                crate::model::clip::EqBand {
+                    freq: 2000.0,
+                    gain: 3.0,
+                    q: 1.0,
+                },
+                crate::model::clip::EqBand {
+                    freq: 5000.0,
+                    gain: 2.5,
+                    q: 1.0,
+                },
+                crate::model::clip::EqBand {
+                    freq: 9000.0,
+                    gain: 0.0,
+                    q: 1.5,
+                },
             ],
         };
 

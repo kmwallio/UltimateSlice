@@ -2388,15 +2388,15 @@ fn write_strict_audio_channel_sources(
         let mut adjust_vi = BytesStart::new("adjust-voiceIsolation");
         let vi_amount = format!("{:.0}", clip.voice_isolation * 100.0);
         adjust_vi.push_attribute(("amount", vi_amount.as_str()));
-        if clip.voice_isolation_source
-            != crate::model::clip::VoiceIsolationSource::default()
-        {
+        if clip.voice_isolation_source != crate::model::clip::VoiceIsolationSource::default() {
             adjust_vi.push_attribute(("us:source", clip.voice_isolation_source.as_str()));
         }
         if (clip.voice_isolation_silence_threshold_db - (-30.0)).abs() > 0.01 {
             adjust_vi.push_attribute((
                 "us:silence-threshold-db",
-                clip.voice_isolation_silence_threshold_db.to_string().as_str(),
+                clip.voice_isolation_silence_threshold_db
+                    .to_string()
+                    .as_str(),
             ));
         }
         if clip.voice_isolation_silence_min_ms != 200 {

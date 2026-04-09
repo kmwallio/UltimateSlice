@@ -102,7 +102,10 @@ pub fn analyze_audio_file(
 
 /// Pure-DSP entry point — used both internally and from unit tests so we can
 /// feed synthetic signals without involving GStreamer.
-pub fn analyze_samples(samples: &[f32], sample_rate: f32) -> Result<AudioFeatures, AudioFeaturesError> {
+pub fn analyze_samples(
+    samples: &[f32],
+    sample_rate: f32,
+) -> Result<AudioFeatures, AudioFeaturesError> {
     if samples.len() < FFT_WINDOW {
         return Err(AudioFeaturesError::TooShort);
     }
@@ -138,7 +141,11 @@ pub fn features_to_prompt_hint(features: &AudioFeatures) -> String {
             KeyMode::Major => "major",
             KeyMode::Minor => "minor",
         };
-        parts.push(format!("in the key of {} {}", pitch_class_name(pc), mode_word));
+        parts.push(format!(
+            "in the key of {} {}",
+            pitch_class_name(pc),
+            mode_word
+        ));
     }
     parts.push(
         match features.brightness {
@@ -249,8 +256,7 @@ fn estimate_bpm(frames: &[Frame], sample_rate: f32) -> Option<f32> {
     if mean <= 1e-6 {
         return None;
     }
-    let variance =
-        smoothed.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / smoothed.len() as f32;
+    let variance = smoothed.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / smoothed.len() as f32;
     let std = variance.sqrt();
     if std / mean.max(1e-6) < 0.1 {
         return None;
@@ -300,7 +306,11 @@ fn estimate_bpm(frames: &[Frame], sample_rate: f32) -> Option<f32> {
         if scores[lag] < threshold {
             continue;
         }
-        let left = if lag > min_lag { scores[lag - 1] } else { f32::NEG_INFINITY };
+        let left = if lag > min_lag {
+            scores[lag - 1]
+        } else {
+            f32::NEG_INFINITY
+        };
         let right = if lag < max_lag {
             scores[lag + 1]
         } else {
@@ -549,7 +559,12 @@ mod tests {
         let samples = synth_sine(440.0, sr, 4.0);
         let f = analyze_samples(&samples, sr).expect("analysis");
         // 440 Hz is A — pitch class 9.
-        assert_eq!(f.key_pitch_class, Some(9), "expected A, got {:?}", f.key_pitch_class);
+        assert_eq!(
+            f.key_pitch_class,
+            Some(9),
+            "expected A, got {:?}",
+            f.key_pitch_class
+        );
     }
 
     #[test]
@@ -558,10 +573,7 @@ mod tests {
         let samples = synth_clicks(120.0, sr, 6.0);
         let f = analyze_samples(&samples, sr).expect("analysis");
         let bpm = f.bpm.expect("bpm should be detected");
-        assert!(
-            (bpm - 120.0).abs() < 6.0,
-            "expected ~120 BPM, got {bpm}"
-        );
+        assert!((bpm - 120.0).abs() < 6.0, "expected ~120 BPM, got {bpm}");
     }
 
     #[test]

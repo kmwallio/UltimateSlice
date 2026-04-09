@@ -89,7 +89,10 @@ pub fn sync_clips_by_audio(clips: &[(String, String, u64, u64)]) -> Vec<AudioSyn
         let offset_ns = (sample_offset as f64 * NS_PER_SAMPLE) as i64;
         log::debug!(
             "audio_sync: clip '{}' gcc_phat => sample_offset={}, offset_ns={}, confidence={:.2}",
-            clip.0, sample_offset, offset_ns, confidence
+            clip.0,
+            sample_offset,
+            offset_ns,
+            confidence
         );
 
         // Attempt two-point drift measurement if clips are long enough.
@@ -189,7 +192,11 @@ fn measure_drift(
     if (speed_ratio - 1.0).abs() > 0.005 {
         log::warn!(
             "audio_sync: drift {:.6} rejected (> 0.5%): start_off={} end_off={} conf={:.1}/{:.1}",
-            speed_ratio, start_offset, end_offset, start_conf, end_conf
+            speed_ratio,
+            start_offset,
+            end_offset,
+            start_conf,
+            end_conf
         );
         return None;
     }

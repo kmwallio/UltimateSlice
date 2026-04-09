@@ -134,10 +134,7 @@ impl SubtitleSegment {
     /// total time range is redistributed evenly across the new words so
     /// the karaoke timeline still spans the segment.
     pub fn set_text_and_resync_words(&mut self, new_text: String) {
-        let new_words: Vec<String> = new_text
-            .split_whitespace()
-            .map(|s| s.to_string())
-            .collect();
+        let new_words: Vec<String> = new_text.split_whitespace().map(|s| s.to_string()).collect();
         self.text = new_text;
 
         if self.words.is_empty() {
@@ -1983,8 +1980,7 @@ impl Clip {
                         intervals.push((seg.start_ns.saturating_sub(pad_ns), seg.end_ns + pad_ns));
                     } else {
                         for w in &seg.words {
-                            intervals
-                                .push((w.start_ns.saturating_sub(pad_ns), w.end_ns + pad_ns));
+                            intervals.push((w.start_ns.saturating_sub(pad_ns), w.end_ns + pad_ns));
                         }
                     }
                 }
@@ -4060,7 +4056,10 @@ mod tests {
             999.0
         );
         assert_eq!(
-            Clip::clamp_phase1_property_value(Phase1KeyframeProperty::CropTop, CROP_MAX_PX + 1000.0),
+            Clip::clamp_phase1_property_value(
+                Phase1KeyframeProperty::CropTop,
+                CROP_MAX_PX + 1000.0
+            ),
             CROP_MAX_PX
         );
         // Position can now be pushed past ±1 so clips can swing off-canvas.
@@ -4069,7 +4068,10 @@ mod tests {
             2.5
         );
         assert_eq!(
-            Clip::clamp_phase1_property_value(Phase1KeyframeProperty::PositionY, POSITION_MIN - 10.0),
+            Clip::clamp_phase1_property_value(
+                Phase1KeyframeProperty::PositionY,
+                POSITION_MIN - 10.0
+            ),
             POSITION_MIN
         );
     }
@@ -4985,9 +4987,7 @@ mod tests {
     fn rebase_to_window_clip_entirely_after_returns_none() {
         // Clip occupies [10s, 15s); window ends at 8s.
         let clip = make_test_clip(5_000_000_000, 10_000_000_000);
-        assert!(clip
-            .rebase_to_window(0, 8_000_000_000)
-            .is_none());
+        assert!(clip.rebase_to_window(0, 8_000_000_000).is_none());
     }
 
     #[test]

@@ -1,7 +1,9 @@
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::model::clip::{BlendMode, EqBand, NumericKeyframe, SubtitleHighlightMode, SubtitleSegment};
+use crate::model::clip::{
+    BlendMode, EqBand, NumericKeyframe, SubtitleHighlightMode, SubtitleSegment,
+};
 
 pub(crate) const ULTIMATESLICE_OTIO_METADATA_VERSION: u32 = 1;
 
@@ -300,18 +302,58 @@ mod tests {
     #[test]
     fn clip_metadata_roundtrips_user_eq_and_match_eq_bands() {
         let user_eq = [
-            EqBand { freq: 200.0, gain: -2.5, q: 1.0 },
-            EqBand { freq: 1000.0, gain: 1.0, q: 1.2 },
-            EqBand { freq: 5000.0, gain: 3.5, q: 0.9 },
+            EqBand {
+                freq: 200.0,
+                gain: -2.5,
+                q: 1.0,
+            },
+            EqBand {
+                freq: 1000.0,
+                gain: 1.0,
+                q: 1.2,
+            },
+            EqBand {
+                freq: 5000.0,
+                gain: 3.5,
+                q: 0.9,
+            },
         ];
         let match_eq = vec![
-            EqBand { freq: 100.0, gain: -3.0, q: 1.5 },
-            EqBand { freq: 200.0, gain: -2.0, q: 1.0 },
-            EqBand { freq: 400.0, gain: 0.0, q: 1.5 },
-            EqBand { freq: 800.0, gain: 1.0, q: 1.0 },
-            EqBand { freq: 2000.0, gain: 3.0, q: 1.0 },
-            EqBand { freq: 5000.0, gain: 2.5, q: 1.0 },
-            EqBand { freq: 9000.0, gain: 0.0, q: 1.5 },
+            EqBand {
+                freq: 100.0,
+                gain: -3.0,
+                q: 1.5,
+            },
+            EqBand {
+                freq: 200.0,
+                gain: -2.0,
+                q: 1.0,
+            },
+            EqBand {
+                freq: 400.0,
+                gain: 0.0,
+                q: 1.5,
+            },
+            EqBand {
+                freq: 800.0,
+                gain: 1.0,
+                q: 1.0,
+            },
+            EqBand {
+                freq: 2000.0,
+                gain: 3.0,
+                q: 1.0,
+            },
+            EqBand {
+                freq: 5000.0,
+                gain: 2.5,
+                q: 1.0,
+            },
+            EqBand {
+                freq: 9000.0,
+                gain: 0.0,
+                q: 1.5,
+            },
         ];
         let value = wrap_clip_metadata(&UltimateSliceClipOtioMetadata {
             eq_bands: Some(user_eq),
@@ -334,7 +376,9 @@ mod tests {
     fn clip_metadata_omits_empty_match_eq_bands() {
         let value = wrap_clip_metadata(&UltimateSliceClipOtioMetadata::default());
         // Both fields are Option::None by default — must not appear in JSON.
-        assert!(value["ultimateslice"]["clip"].get("match_eq_bands").is_none());
+        assert!(value["ultimateslice"]["clip"]
+            .get("match_eq_bands")
+            .is_none());
         assert!(value["ultimateslice"]["clip"].get("eq_bands").is_none());
     }
 

@@ -399,9 +399,7 @@ pub fn find_model_path() -> Option<String> {
         })
         .join("ultimateslice/models");
     let dirs: [PathBuf; 4] = [
-        exe_dir
-            .map(|d| d.join("data/models"))
-            .unwrap_or_default(),
+        exe_dir.map(|d| d.join("data/models")).unwrap_or_default(),
         PathBuf::from("data/models"),
         PathBuf::from("/app/share/ultimateslice/models"),
         xdg_dir,
@@ -419,7 +417,9 @@ pub fn find_model_path() -> Option<String> {
 }
 
 fn sidecar_file_is_ready(path: &str) -> bool {
-    std::fs::metadata(path).map(|m| m.len() > 0).unwrap_or(false)
+    std::fs::metadata(path)
+        .map(|m| m.len() > 0)
+        .unwrap_or(false)
 }
 
 // ── Worker: pairwise RIFE inference ────────────────────────────────────────
@@ -431,7 +431,12 @@ fn sidecar_file_is_ready(path: &str) -> bool {
 /// as the source so consumers can swap the input path without changing
 /// `setpts` math.
 #[cfg(feature = "ai-inference")]
-fn run_frame_interp(source_path: &str, output_path: &str, model_path: &str, multiplier: u32) -> bool {
+fn run_frame_interp(
+    source_path: &str,
+    output_path: &str,
+    model_path: &str,
+    multiplier: u32,
+) -> bool {
     use ort::session::Session;
     use ort::value::TensorRef;
 
@@ -822,12 +827,21 @@ mod tests {
 
     #[test]
     fn requests_only_when_ai_and_slow() {
-        assert!(!clip_requests_ai_interp(&make_clip(0.5, SlowMotionInterp::Off)));
+        assert!(!clip_requests_ai_interp(&make_clip(
+            0.5,
+            SlowMotionInterp::Off
+        )));
         assert!(!clip_requests_ai_interp(&make_clip(
             0.5,
             SlowMotionInterp::OpticalFlow
         )));
-        assert!(!clip_requests_ai_interp(&make_clip(1.0, SlowMotionInterp::Ai)));
-        assert!(clip_requests_ai_interp(&make_clip(0.5, SlowMotionInterp::Ai)));
+        assert!(!clip_requests_ai_interp(&make_clip(
+            1.0,
+            SlowMotionInterp::Ai
+        )));
+        assert!(clip_requests_ai_interp(&make_clip(
+            0.5,
+            SlowMotionInterp::Ai
+        )));
     }
 }

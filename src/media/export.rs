@@ -1235,10 +1235,7 @@ pub fn export_project(
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
 
-    log::debug!(
-        "ffmpeg args: {:?}",
-        cmd.get_args().collect::<Vec<_>>()
-    );
+    log::debug!("ffmpeg args: {:?}", cmd.get_args().collect::<Vec<_>>());
 
     let mut child = cmd
         .spawn()
@@ -3397,7 +3394,8 @@ fn build_subtitle_filter_composited(
             Err(_) => return (String::new(), None),
         };
 
-        let (hr, hg, hb, _) = crate::ui::colors::rgba_u32_to_u8(style_clip.subtitle_highlight_color);
+        let (hr, hg, hb, _) =
+            crate::ui::colors::rgba_u32_to_u8(style_clip.subtitle_highlight_color);
         let group_size = (style_clip.subtitle_word_window_secs as usize).max(2);
 
         {
@@ -4996,8 +4994,8 @@ pub(crate) fn suggest_silence_threshold_db(
     // astats with reset=0.5 gives one measurement per 0.5 s window. ametadata=print
     // emits the RMS_level metadata to stderr (alongside other lavfi.astats keys).
     // We're only interested in lavfi.astats.Overall.RMS_level lines.
-    let af =
-        "astats=metadata=1:reset=0.5,ametadata=print:key=lavfi.astats.Overall.RMS_level".to_string();
+    let af = "astats=metadata=1:reset=0.5,ametadata=print:key=lavfi.astats.Overall.RMS_level"
+        .to_string();
     let output = Command::new(&ffmpeg)
         .args([
             "-nostats",
@@ -5369,9 +5367,7 @@ pub(crate) fn flatten_compound_tracks(
     // Place extracted audio clips onto an audio track
     if !extracted_audio_clips.is_empty() {
         // Find an existing audio track or create one
-        let audio_track = result
-            .iter_mut()
-            .find(|t| t.is_audio());
+        let audio_track = result.iter_mut().find(|t| t.is_audio());
         if let Some(track) = audio_track {
             track.clips.extend(extracted_audio_clips);
             track.clips.sort_by_key(|c| c.timeline_start);
@@ -6185,8 +6181,14 @@ mod tests {
         clip.crop_bottom = 200;
         let f = build_crop_filter(&clip, 1920, 1080, 1920, 1080, true);
         // Expect a static crop+pad filter, NOT empty.
-        assert!(!f.is_empty(), "crop filter was empty for crop=(400,400,200,200): {f}");
-        assert!(f.contains("crop=1120:680:400:200"), "unexpected crop filter: {f}");
+        assert!(
+            !f.is_empty(),
+            "crop filter was empty for crop=(400,400,200,200): {f}"
+        );
+        assert!(
+            f.contains("crop=1120:680:400:200"),
+            "unexpected crop filter: {f}"
+        );
         assert!(
             f.contains("pad=1920:1080:400:200:black@0.0"),
             "unexpected pad in filter: {f}"
@@ -7102,14 +7104,8 @@ mod tests {
         let flattened = flatten_compound_tracks(&[video_track]);
 
         // Should have at least 2 tracks: original video track + audio track for extracted audio
-        let video_tracks: Vec<_> = flattened
-            .iter()
-            .filter(|t| t.is_video())
-            .collect();
-        let audio_tracks: Vec<_> = flattened
-            .iter()
-            .filter(|t| t.is_audio())
-            .collect();
+        let video_tracks: Vec<_> = flattened.iter().filter(|t| t.is_video()).collect();
+        let audio_tracks: Vec<_> = flattened.iter().filter(|t| t.is_audio()).collect();
 
         // Video track should have the video clip, no audio clips
         assert!(!video_tracks.is_empty());
@@ -7417,10 +7413,7 @@ mod tests {
         let flattened = flatten_compound_tracks(&[root]);
 
         // Video track: should have 2 video segments (angle 0: 5000-15000, angle 1: 15000-25000)
-        let video_tracks: Vec<_> = flattened
-            .iter()
-            .filter(|t| t.is_video())
-            .collect();
+        let video_tracks: Vec<_> = flattened.iter().filter(|t| t.is_video()).collect();
         assert!(!video_tracks.is_empty());
         let video_clips: Vec<_> = video_tracks.iter().flat_map(|t| &t.clips).collect();
         assert_eq!(
@@ -7432,10 +7425,7 @@ mod tests {
         assert_eq!(video_clips[1].source_path, "cam2.mp4");
 
         // Audio tracks: should have 2 audio clips (one per unmuted angle, continuous)
-        let audio_tracks: Vec<_> = flattened
-            .iter()
-            .filter(|t| t.is_audio())
-            .collect();
+        let audio_tracks: Vec<_> = flattened.iter().filter(|t| t.is_audio()).collect();
         let audio_clips: Vec<_> = audio_tracks.iter().flat_map(|t| &t.clips).collect();
         assert_eq!(
             audio_clips.len(),
