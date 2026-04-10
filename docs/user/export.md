@@ -108,9 +108,7 @@ the surround upmix:
 | Effects | Front L/R + Surround L/R (FL+FR+BL+BR) | Front L/R + back **and** side rears (FL+FR+BL+BR+SL+SR at lower gain) |
 | None | Front L/R | Front L/R |
 
-This means a typical project with one Dialogue track, one Music track, and one
-Effects track will produce a usable 5.1 mix the moment you switch the dropdown
-to **5.1 Surround** — no per-track configuration required.
+This means a typical project with one Dialogue track, one Music track, and one effects track will produce a usable 5.1 mix the moment you switch the dropdown to **5.1 Surround** — no per-track configuration required.
 
 #### Per-track surround override (Inspector)
 
