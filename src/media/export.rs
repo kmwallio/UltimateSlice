@@ -879,7 +879,7 @@ pub fn export_project(
         let mut sub_idx = 0usize;
         for track in flattened_project_tracks {
             for clip in &track.clips {
-                if clip.subtitle_segments.is_empty() {
+                if clip.subtitle_segments.is_empty() || !clip.subtitle_visible {
                     continue;
                 }
                 log::debug!(
@@ -995,6 +995,12 @@ pub fn export_project(
                 } else {
                     format!(",{ch_filter}")
                 };
+                let enhance_filter = build_voice_enhance_filter(clip);
+                let enhance_part = if enhance_filter.is_empty() {
+                    String::new()
+                } else {
+                    format!("{enhance_filter},")
+                };
                 let volume_filter = build_volume_filter(clip);
                 let pitch_filter = build_pitch_filter(clip);
                 let pitch_part = if pitch_filter.is_empty() {
@@ -1025,7 +1031,7 @@ pub fn export_project(
                 let pre_pan = format!("{label}_prepan");
                 let post_pan = format!("{label}_panned");
                 filter.push_str(&format!(
-                ";[{i}:a]{areverse}{atempo}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{match_eq_part}{eq_part},{fade_filters}anull[{pre_pan}]"
+                ";[{i}:a]{areverse}{atempo}{enhance_part}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{match_eq_part}{eq_part},{fade_filters}anull[{pre_pan}]"
             ));
                 append_pan_filter_chain(
                     &mut filter,
@@ -1072,6 +1078,12 @@ pub fn export_project(
                 } else {
                     format!(",{ch_filter}")
                 };
+                let enhance_filter = build_voice_enhance_filter(clip);
+                let enhance_part = if enhance_filter.is_empty() {
+                    String::new()
+                } else {
+                    format!("{enhance_filter},")
+                };
                 let volume_filter = build_volume_filter(clip);
                 let pitch_filter = build_pitch_filter(clip);
                 let pitch_part = if pitch_filter.is_empty() {
@@ -1102,7 +1114,7 @@ pub fn export_project(
                 let pre_pan = format!("{label}_prepan");
                 let post_pan = format!("{label}_panned");
                 filter.push_str(&format!(
-                ";[{in_idx}:a]{areverse}{atempo}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{match_eq_part}{eq_part},{fade_filters}anull[{pre_pan}]"
+                ";[{in_idx}:a]{areverse}{atempo}{enhance_part}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{match_eq_part}{eq_part},{fade_filters}anull[{pre_pan}]"
             ));
                 append_pan_filter_chain(
                     &mut filter,
@@ -1141,6 +1153,12 @@ pub fn export_project(
                 String::new()
             } else {
                 format!(",{ch_filter}")
+            };
+            let enhance_filter = build_voice_enhance_filter(clip);
+            let enhance_part = if enhance_filter.is_empty() {
+                String::new()
+            } else {
+                format!("{enhance_filter},")
             };
             let volume_filter = build_volume_filter(clip);
             let pitch_filter = build_pitch_filter(clip);
@@ -1184,7 +1202,7 @@ pub fn export_project(
             let pre_pan = format!("{label}_prepan");
             let post_pan = format!("{label}_panned");
             filter.push_str(&format!(
-            ";[{}:a]{areverse}{atempo}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{duck_part}{match_eq_part}{eq_part},{fade_filters}anull[{pre_pan}]",
+            ";[{}:a]{areverse}{atempo}{enhance_part}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{duck_part}{match_eq_part}{eq_part},{fade_filters}anull[{pre_pan}]",
             audio_base + j
         ));
             append_pan_filter_chain(
@@ -2819,6 +2837,45 @@ fn build_duck_filter(
     format!("volume='if({cond_expr},{duck_gain:.6},1.0)':eval=frame")
 }
 
+/// Build the FFmpeg filter chain for the one-knob "Enhance Voice" feature.
+///
+/// Returns an empty string when the feature is disabled. When enabled,
+/// returns a comma-separated chain of filters (no leading/trailing comma)
+/// suitable for splicing into a per-clip audio chain. The chain is:
+///
+///   highpass(80Hz) → afftdn (noise reduction) → mud-cut EQ →
+///   presence-boost EQ → acompressor (gentle leveling)
+///
+/// `strength` (0.0..=1.0) scales the noise-reduction depth, the EQ gains,
+/// the compressor ratio, and the makeup gain so the same toggle covers
+/// "subtle clean-up" through "broadcast voice" with one slider.
+fn build_voice_enhance_filter(clip: &Clip) -> String {
+    if !clip.voice_enhance {
+        return String::new();
+    }
+    let s = clip.voice_enhance_strength.clamp(0.0, 1.0) as f64;
+
+    // Noise reduction depth in dB. 6 dB at s=0 is gentle; 24 dB at s=1
+    // is aggressive but stops short of the "watery" zone (~30+).
+    let nr_db = 6.0 + 18.0 * s;
+    // Mud cut around 300 Hz: -1 dB at s=0, -3 dB at s=1.
+    let mud_g = -1.0 - 2.0 * s;
+    // Presence boost around 4 kHz: +1 dB at s=0, +5 dB at s=1.
+    let pres_g = 1.0 + 4.0 * s;
+    // Compressor ratio: 2:1 at s=0, 5:1 at s=1.
+    let comp_ratio = 2.0 + 3.0 * s;
+    // Makeup gain to roughly compensate for the compression: +1 dB to +3 dB.
+    let makeup = 1.0 + 2.0 * s;
+
+    format!(
+        "highpass=f=80,\
+         afftdn=nr={nr_db:.1}:nf=-25,\
+         equalizer=f=300:t=q:w=1.0:g={mud_g:.2},\
+         equalizer=f=4000:t=q:w=1.5:g={pres_g:.2},\
+         acompressor=threshold=0.05:ratio={comp_ratio:.2}:attack=20:release=250:makeup={makeup:.2}"
+    )
+}
+
 fn build_volume_filter(clip: &Clip) -> String {
     let base_expr = if clip.volume_keyframes.is_empty() {
         format!("{:.4}", clip.volume.clamp(0.0, 4.0))
@@ -4061,7 +4118,7 @@ pub fn export_srt(project: &Project, output_path: &str) -> Result<()> {
 
     for track in &project.tracks {
         for clip in &track.clips {
-            if clip.subtitle_segments.is_empty() {
+            if clip.subtitle_segments.is_empty() || !clip.subtitle_visible {
                 continue;
             }
             for seg in &clip.subtitle_segments {

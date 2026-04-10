@@ -4315,6 +4315,8 @@ fn clip_to_program_clips(
         vidstab_smoothing: c.vidstab_smoothing,
         volume: c.volume as f64,
         voice_isolation: c.voice_isolation as f64,
+        voice_enhance: c.voice_enhance,
+        voice_enhance_strength: c.voice_enhance_strength,
         voice_isolation_pad_ns: (c.voice_isolation_pad_ms as f64 * 1_000_000.0) as u64,
         voice_isolation_fade_ns: (c.voice_isolation_fade_ms as f64 * 1_000_000.0) as u64,
         voice_isolation_floor: c.voice_isolation_floor as f64,
@@ -4647,6 +4649,9 @@ pub fn build_window(
     );
     let bg_removal_cache = Rc::new(RefCell::new(
         crate::media::bg_removal_cache::BgRemovalCache::new(),
+    ));
+    let voice_enhance_cache = Rc::new(RefCell::new(
+        crate::media::voice_enhance_cache::VoiceEnhanceCache::new(),
     ));
     let frame_interp_cache = Rc::new(RefCell::new(
         crate::media::frame_interp_cache::FrameInterpCache::new(),
@@ -6926,6 +6931,34 @@ pub fn build_window(
                 on_project_changed();
             }
         });
+    }
+    // Wire "Render subtitles" visibility toggle. Hides this clip's
+    // subtitles from the preview overlay, export burn-in, and SRT
+    // sidecar without removing the segment data, so the transcript
+    // editor and voice isolation continue to work.
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let updating = inspector_view.updating.clone();
+        inspector_view
+            .sub_visible_check
+            .connect_toggled(move |btn| {
+                if *updating.borrow() {
+                    return;
+                }
+                let active = btn.is_active();
+                let selected = timeline_state.borrow().selected_clip_id.clone();
+                if let Some(ref clip_id) = selected {
+                    let mut proj = project.borrow_mut();
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.subtitle_visible = active;
+                    }
+                    proj.dirty = true;
+                    drop(proj);
+                    on_project_changed();
+                }
+            });
     }
     {
         let project = project.clone();
@@ -10743,7 +10776,7 @@ pub fn build_window(
                                 }
                                 continue;
                             }
-                            if clip.subtitle_segments.is_empty() {
+                            if clip.subtitle_segments.is_empty() || !clip.subtitle_visible {
                                 continue;
                             }
                             let clip_end = clip.timeline_start + clip.duration();
@@ -12436,6 +12469,7 @@ pub fn build_window(
         let prog_player = prog_player.clone();
         let proxy_cache = proxy_cache.clone();
         let bg_removal_cache = bg_removal_cache.clone();
+        let voice_enhance_cache = voice_enhance_cache.clone();
         let frame_interp_cache = frame_interp_cache.clone();
         let preferences_state = preferences_state.clone();
         let panel_weak = timeline_area.downgrade();
@@ -12666,6 +12700,7 @@ pub fn build_window(
             let project_reload = project.clone();
             let proxy_cache_reload = proxy_cache.clone();
             let bg_removal_cache_reload = bg_removal_cache.clone();
+            let voice_enhance_cache_reload = voice_enhance_cache.clone();
             let frame_interp_cache_reload = frame_interp_cache.clone();
             let reload_ticket = pending_reload_ticket.get().wrapping_add(1);
             pending_reload_ticket.set(reload_ticket);
@@ -12732,6 +12767,40 @@ pub fn build_window(
                         prog_player_reload
                             .borrow_mut()
                             .update_bg_removal_paths(paths);
+                    }
+
+                    // Request voice-enhance prerender for clips that
+                    // have it enabled. The cache is keyed by
+                    // (source_path, strength) so changing the strength
+                    // slider produces a new request, and toggling
+                    // voice_enhance off doesn't invalidate previously
+                    // generated files.
+                    {
+                        let proj = project_reload.borrow();
+                        let mut cache = voice_enhance_cache_reload.borrow_mut();
+                        fn walk_voice_enhance_request(
+                            cache: &mut crate::media::voice_enhance_cache::VoiceEnhanceCache,
+                            tracks: &[crate::model::track::Track],
+                        ) {
+                            for track in tracks {
+                                for clip in &track.clips {
+                                    if clip.voice_enhance {
+                                        cache.request(
+                                            &clip.source_path,
+                                            clip.voice_enhance_strength,
+                                        );
+                                    }
+                                    if let Some(ref ctracks) = clip.compound_tracks {
+                                        walk_voice_enhance_request(cache, ctracks);
+                                    }
+                                }
+                            }
+                        }
+                        walk_voice_enhance_request(&mut cache, &proj.tracks);
+                        let paths = cache.paths.clone();
+                        prog_player_reload
+                            .borrow_mut()
+                            .update_voice_enhance_paths(paths);
                     }
 
                     // Request AI frame interpolation for slow-motion clips
@@ -14220,6 +14289,8 @@ pub fn build_window(
     {
         let proxy_cache = proxy_cache.clone();
         let bg_removal_cache = bg_removal_cache.clone();
+        let voice_enhance_cache = voice_enhance_cache.clone();
+        let on_project_changed_voice_enhance = on_project_changed.clone();
         let frame_interp_cache = frame_interp_cache.clone();
         let stt_cache = stt_cache.clone();
         let tracking_cache = tracking_cache.clone();
@@ -14292,6 +14363,22 @@ pub fn build_window(
                 inspector_view
                     .stt_model_available
                     .set(stt_cache.borrow().is_available());
+            }
+            // Poll voice-enhance prerender cache. When a new file becomes
+            // ready we push the updated path map AND trigger a project-
+            // changed cycle so the slot rebuild swaps in the cached file
+            // immediately — otherwise the user has to scrub or replay
+            // before they hear the effect.
+            {
+                let ve_resolved = voice_enhance_cache.borrow_mut().poll();
+                let any_paths = !voice_enhance_cache.borrow().paths.is_empty();
+                if !ve_resolved.is_empty() || any_paths {
+                    let paths = voice_enhance_cache.borrow().paths.clone();
+                    prog_player.borrow_mut().update_voice_enhance_paths(paths);
+                }
+                if !ve_resolved.is_empty() {
+                    on_project_changed_voice_enhance();
+                }
             }
             // Poll AI frame-interpolation cache. New sidecars are pushed to
             // the Program Monitor as a clip-id-keyed snapshot so the next
@@ -14525,11 +14612,13 @@ pub fn build_window(
             let bg_progress = bg_removal_cache.borrow().progress();
             let stt_progress = stt_cache.borrow().progress();
             let tracking_progress = tracking_cache.borrow().progress();
+            let voice_enhance_progress = voice_enhance_cache.borrow().progress();
             let proxy_active = proxy_progress.in_flight;
             let prerender_active = prerender_progress.in_flight;
             let bg_active = bg_progress.in_flight;
             let stt_active = stt_progress.in_flight;
             let tracking_active = tracking_progress.in_flight;
+            let voice_enhance_active = voice_enhance_progress.in_flight;
             let syncing_audio = audio_sync_in_progress.get();
             let detecting_silence = silence_detect_in_progress.get();
             let detecting_scene_cuts = scene_detect_in_progress.get();
@@ -14618,6 +14707,7 @@ pub fn build_window(
                 || bg_active
                 || tracking_active
                 || stt_active
+                || voice_enhance_active
             {
                 status_label.set_visible(true);
                 let mut parts = Vec::new();
@@ -14659,6 +14749,12 @@ pub fn build_window(
                 }
                 if stt_active {
                     parts.push("Generating subtitles…".to_string());
+                }
+                if voice_enhance_active {
+                    parts.push(format!(
+                        "Enhancing voice… {}/{}",
+                        voice_enhance_progress.completed, voice_enhance_progress.total
+                    ));
                 }
                 status_label.set_text(&parts.join(" | "));
                 if proxy_active {

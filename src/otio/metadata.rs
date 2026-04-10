@@ -29,6 +29,13 @@ pub(crate) struct UltimateSliceClipOtioMetadata {
     /// 7-band match EQ from audio matching (mic-match correction).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) match_eq_bands: Option<Vec<EqBand>>,
+    /// One-knob "Enhance Voice" toggle (FFmpeg HPF + denoise + EQ + compressor
+    /// chain, applied at export only). Defaults to false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) voice_enhance: Option<bool>,
+    /// Strength of the voice-enhance chain, 0.0..=1.0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) voice_enhance_strength: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) voice_isolation: Option<f64>,
     /// Voice isolation tunables.
@@ -301,6 +308,12 @@ pub(crate) struct UltimateSliceClipOtioMetadata {
     pub(crate) subtitle_underline: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) subtitle_shadow: Option<bool>,
+    /// Whether subtitles are rendered/exported for this clip. When `false`,
+    /// the segment data is preserved (transcript editor and voice isolation
+    /// keep working) but the preview overlay, export burn-in, and SRT
+    /// sidecar all skip the clip.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) subtitle_visible: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) subtitle_shadow_color: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]

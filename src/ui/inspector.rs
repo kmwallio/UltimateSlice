@@ -316,6 +316,8 @@ pub struct InspectorView {
     pub shadows_tint_slider: Scale,
     // Audio sliders
     pub volume_slider: Scale,
+    pub voice_enhance_check: CheckButton,
+    pub voice_enhance_strength_slider: Scale,
     pub voice_isolation_slider: Scale,
     pub vi_pad_slider: Scale,
     pub vi_fade_slider: Scale,
@@ -461,6 +463,7 @@ pub struct InspectorView {
     pub sub_italic_btn: gtk4::ToggleButton,
     pub sub_underline_btn: gtk4::ToggleButton,
     pub sub_shadow_btn: gtk4::ToggleButton,
+    pub sub_visible_check: CheckButton,
     pub hl_bold_check: CheckButton,
     pub hl_color_check: CheckButton,
     pub hl_underline_check: CheckButton,
@@ -2145,6 +2148,7 @@ impl InspectorView {
                 self.sub_italic_btn.set_active(c.subtitle_italic);
                 self.sub_underline_btn.set_active(c.subtitle_underline);
                 self.sub_shadow_btn.set_active(c.subtitle_shadow);
+                self.sub_visible_check.set_active(c.subtitle_visible);
 
                 // Sync highlight flags checkboxes
                 let flags = &c.subtitle_highlight_flags;
@@ -2480,6 +2484,11 @@ impl InspectorView {
                     playhead_ns,
                 );
                 self.volume_slider.set_value(linear_to_db_volume(vol_val));
+                self.voice_enhance_check.set_active(c.voice_enhance);
+                self.voice_enhance_strength_slider
+                    .set_value((c.voice_enhance_strength * 100.0) as f64);
+                self.voice_enhance_strength_slider
+                    .set_sensitive(c.voice_enhance);
                 self.voice_isolation_slider
                     .set_value((c.voice_isolation * 100.0) as f64);
                 self.voice_isolation_slider.set_sensitive(true);
@@ -2991,6 +3000,9 @@ impl InspectorView {
                 self.midtones_slider.set_value(0.0);
                 self.highlights_slider.set_value(0.0);
                 self.volume_slider.set_value(0.0);
+                self.voice_enhance_check.set_active(false);
+                self.voice_enhance_strength_slider.set_value(50.0);
+                self.voice_enhance_strength_slider.set_sensitive(false);
                 self.voice_isolation_slider.set_value(0.0);
                 self.vi_source_dropdown.set_visible(false);
                 self.vi_silence_threshold_slider.set_visible(false);
@@ -3966,6 +3978,19 @@ pub fn build_inspector(
     let subtitle_style_box = GBox::new(Orientation::Vertical, 6);
     subtitle_controls_box.append(&subtitle_style_box);
 
+    // Render-subtitles toggle: hides this clip's subtitles from the
+    // preview overlay, export burn-in, and SRT sidecar without
+    // touching the underlying segment data. The transcript editor and
+    // voice isolation (Subtitles source) keep working when off.
+    let sub_visible_check = CheckButton::with_label("Render subtitles");
+    sub_visible_check.set_tooltip_text(Some(
+        "When off, subtitles are hidden from the preview, export burn-in, \
+         and SRT sidecar. The transcript editor and voice isolation still \
+         use the segment data.",
+    ));
+    sub_visible_check.set_active(true);
+    subtitle_style_box.append(&sub_visible_check);
+
     subtitle_style_box.append(&Separator::new(Orientation::Horizontal));
     let style_label = Label::new(Some("Style"));
     style_label.set_halign(gtk::Align::Start);
@@ -4652,6 +4677,31 @@ pub fn build_inspector(
     volume_keyframe_row.append(&volume_set_keyframe_btn);
     volume_keyframe_row.append(&volume_remove_keyframe_btn);
     audio_inner.append(&volume_keyframe_row);
+
+    // ── Enhance Voice (one-knob FFmpeg chain, applied before voice isolation) ──
+    let voice_enhance_check = CheckButton::with_label("Enhance Voice");
+    voice_enhance_check.set_tooltip_text(Some(
+        "Apply a fixed cleanup chain (high-pass, presence EQ, gentle \
+         compressor) to this clip's audio, before Voice Isolation. \
+         Realtime preview reflects the toggle live. Note: full FFT \
+         noise reduction only runs at export time.",
+    ));
+    audio_inner.append(&voice_enhance_check);
+
+    row_label(&audio_inner, "  Strength");
+    let voice_enhance_strength_slider =
+        Scale::with_range(Orientation::Horizontal, 0.0, 100.0, 1.0);
+    voice_enhance_strength_slider.set_value(50.0);
+    voice_enhance_strength_slider.set_draw_value(true);
+    voice_enhance_strength_slider.set_digits(0);
+    voice_enhance_strength_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("Subtle"));
+    voice_enhance_strength_slider.add_mark(100.0, gtk4::PositionType::Bottom, Some("Strong"));
+    voice_enhance_strength_slider.set_sensitive(false);
+    voice_enhance_strength_slider.set_tooltip_text(Some(
+        "Scales noise-reduction depth, presence boost, and compression. \
+         0 = subtle clean-up, 100 = broadcast voice.",
+    ));
+    audio_inner.append(&voice_enhance_strength_slider);
 
     row_label(&audio_inner, "Voice Isolation");
     let voice_isolation_slider = Scale::with_range(Orientation::Horizontal, 0.0, 100.0, 1.0);
@@ -5900,6 +5950,87 @@ pub fn build_inspector(
                     proj.dirty = true;
                 }
                 on_vidstab_changed();
+            }
+        });
+    }
+
+    // Wire "Enhance Voice" toggle. The toggle changes the SHAPE of the
+    // GStreamer chain (elements added/removed), so it triggers a slot
+    // rebuild via `on_clip_changed`. The strength slider below stays
+    // on the live-update path because it only changes property values
+    // on already-existing elements.
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_clip_changed = on_clip_changed.clone();
+        let strength_slider = voice_enhance_strength_slider.clone();
+        voice_enhance_check.connect_toggled(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let enabled = btn.is_active();
+            strength_slider.set_sensitive(enabled);
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.voice_enhance = enabled;
+                    }
+                    proj.dirty = true;
+                }
+                on_clip_changed();
+            }
+        });
+    }
+    // Strength slider — writes the model immediately, but debounces the
+    // `on_clip_changed` call by ~350 ms so dragging the slider doesn't
+    // spawn a new ffmpeg prerender job per tick. The cache key includes
+    // the strength rounded to 1%, so the trailing-edge value the user
+    // releases on is the one that gets a job — and bouncing back to a
+    // previously-rendered strength is an instant cache hit.
+    {
+        use glib::translate::FromGlib;
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_clip_changed = on_clip_changed.clone();
+        // Raw glib SourceId of the pending debounce timer (0 = none).
+        // Stored as u32 inside a Cell so the slider closure can read,
+        // cancel, and replace it without inner mutability gymnastics.
+        let debounce_timer: Rc<Cell<u32>> = Rc::new(Cell::new(0));
+        voice_enhance_strength_slider.connect_value_changed(move |s| {
+            if *updating.borrow() {
+                return;
+            }
+            let val = (s.value() / 100.0).clamp(0.0, 1.0) as f32;
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.voice_enhance_strength = val;
+                    }
+                    proj.dirty = true;
+                }
+                // Cancel any in-flight debounce timer so we always
+                // fire after the user has been still for ~350 ms.
+                let prev = debounce_timer.get();
+                if prev != 0 {
+                    unsafe { glib::SourceId::from_glib(prev) }.remove();
+                    debounce_timer.set(0);
+                }
+                let timer = debounce_timer.clone();
+                let cb = on_clip_changed.clone();
+                let new_id = glib::timeout_add_local_once(
+                    std::time::Duration::from_millis(350),
+                    move || {
+                        timer.set(0);
+                        cb();
+                    },
+                );
+                debounce_timer.set(new_id.as_raw());
             }
         });
     }
@@ -10279,6 +10410,8 @@ pub fn build_inspector(
         shadows_warmth_slider,
         shadows_tint_slider,
         volume_slider,
+        voice_enhance_check,
+        voice_enhance_strength_slider,
         voice_isolation_slider,
         vi_pad_slider,
         vi_fade_slider,
@@ -10399,6 +10532,7 @@ pub fn build_inspector(
         sub_italic_btn,
         sub_underline_btn,
         sub_shadow_btn,
+        sub_visible_check,
         hl_bold_check,
         hl_color_check,
         hl_underline_check,

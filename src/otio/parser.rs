@@ -225,6 +225,12 @@ fn otio_clip_to_clip(
         if let Some(v) = us.match_eq_bands.clone() {
             clip.match_eq_bands = v;
         }
+        if let Some(v) = us.voice_enhance {
+            clip.voice_enhance = v;
+        }
+        if let Some(v) = us.voice_enhance_strength {
+            clip.voice_enhance_strength = v as f32;
+        }
         if let Some(v) = us.voice_isolation {
             clip.voice_isolation = v as f32;
         }
@@ -575,6 +581,9 @@ fn otio_clip_to_clip(
         }
         if let Some(v) = us.subtitle_shadow {
             clip.subtitle_shadow = v;
+        }
+        if let Some(v) = us.subtitle_visible {
+            clip.subtitle_visible = v;
         }
         if let Some(v) = us.subtitle_shadow_color {
             clip.subtitle_shadow_color = v;
@@ -1393,6 +1402,10 @@ mod tests {
             ClipKind::Video,
         );
 
+        // Voice enhance (one-knob FFmpeg chain)
+        clip.voice_enhance = true;
+        clip.voice_enhance_strength = 0.75;
+
         // Voice isolation (6 fields + base)
         clip.voice_isolation = 0.6;
         clip.voice_isolation_pad_ms = 120.0;
@@ -1436,6 +1449,10 @@ mod tests {
         let json = crate::otio::writer::write_otio(&p).unwrap();
         let p2 = parse_otio(&json).unwrap();
         let clip2 = &p2.tracks[0].clips[0];
+
+        // Voice enhance
+        assert_eq!(clip2.voice_enhance, clip.voice_enhance);
+        assert_eq!(clip2.voice_enhance_strength, clip.voice_enhance_strength);
 
         // Voice isolation
         assert_eq!(clip2.voice_isolation, clip.voice_isolation);
@@ -1511,6 +1528,7 @@ mod tests {
         clip.subtitle_italic = true;
         clip.subtitle_underline = false;
         clip.subtitle_shadow = true;
+        clip.subtitle_visible = false;
         clip.subtitle_shadow_color = 0x000000CC;
         clip.subtitle_shadow_offset_x = 2.5;
         clip.subtitle_shadow_offset_y = 3.0;
@@ -1536,6 +1554,7 @@ mod tests {
         assert_eq!(clip2.subtitle_italic, clip.subtitle_italic);
         assert_eq!(clip2.subtitle_underline, clip.subtitle_underline);
         assert_eq!(clip2.subtitle_shadow, clip.subtitle_shadow);
+        assert_eq!(clip2.subtitle_visible, clip.subtitle_visible);
         assert_eq!(clip2.subtitle_shadow_color, clip.subtitle_shadow_color);
         assert_eq!(
             clip2.subtitle_shadow_offset_x,

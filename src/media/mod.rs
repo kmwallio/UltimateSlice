@@ -23,6 +23,7 @@ pub mod thumb_cache;
 pub mod thumbnail;
 pub mod title_font;
 pub mod tracking;
+pub mod voice_enhance_cache;
 pub mod voiceover;
 pub mod waveform_cache;
 

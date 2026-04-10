@@ -228,6 +228,8 @@ fn write_otio_with_mode(
                 } else {
                     Some(clip.match_eq_bands.clone())
                 },
+                voice_enhance: Some(clip.voice_enhance),
+                voice_enhance_strength: Some(clip.voice_enhance_strength as f64),
                 voice_isolation: Some(clip.voice_isolation as f64),
                 voice_isolation_pad_ms: Some(clip.voice_isolation_pad_ms as f64),
                 voice_isolation_fade_ms: Some(clip.voice_isolation_fade_ms as f64),
@@ -435,6 +437,7 @@ fn write_otio_with_mode(
                 subtitle_italic: Some(clip.subtitle_italic),
                 subtitle_underline: Some(clip.subtitle_underline),
                 subtitle_shadow: Some(clip.subtitle_shadow),
+                subtitle_visible: Some(clip.subtitle_visible),
                 subtitle_shadow_color: Some(clip.subtitle_shadow_color),
                 subtitle_shadow_offset_x: Some(clip.subtitle_shadow_offset_x),
                 subtitle_shadow_offset_y: Some(clip.subtitle_shadow_offset_y),

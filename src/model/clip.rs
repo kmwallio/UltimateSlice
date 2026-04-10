@@ -751,6 +751,9 @@ fn default_vi_silence_min_ms() -> u32 {
 fn default_vidstab_smoothing() -> f32 {
     0.5
 }
+fn default_voice_enhance_strength() -> f32 {
+    0.5
+}
 fn default_speed() -> f64 {
     1.0
 }
@@ -1540,6 +1543,18 @@ pub struct Clip {
     /// Audio volume multiplier: 0.0 (silent) to 2.0 (double), default 1.0
     #[serde(default = "default_volume")]
     pub volume: f32,
+    /// One-knob "Enhance Voice" toggle. When true, runs a fixed FFmpeg
+    /// chain (HPF + denoise + presence EQ + gentle compressor) on this
+    /// clip's audio at export time, applied BEFORE voice isolation so
+    /// the ducking decision sees a cleaner signal.
+    /// Realtime preview is not affected (Phase 1 is export-only).
+    #[serde(default)]
+    pub voice_enhance: bool,
+    /// Strength of the voice-enhance chain, 0.0..=1.0. Scales the
+    /// noise-reduction depth, presence boost gain, and compressor
+    /// ratio/makeup. 0.0 = subtle, 1.0 = aggressive. Default 0.5.
+    #[serde(default = "default_voice_enhance_strength")]
+    pub voice_enhance_strength: f32,
     /// Voice Isolation (Smart Noise Gating via Whisper timings): 0.0 (off) to 1.0 (full ducking)
     #[serde(default)]
     pub voice_isolation: f32,
@@ -1867,6 +1882,14 @@ pub struct Clip {
     /// Base style: draw a shadow behind all subtitle text.
     #[serde(default)]
     pub subtitle_shadow: bool,
+    /// When false, subtitles for this clip are NOT rendered in the
+    /// Program Monitor overlay, NOT burned into exports, and NOT
+    /// included in sidecar SRT export. Segment data is preserved so
+    /// the transcript editor and voice isolation (when its source is
+    /// `Subtitles`) continue to work normally. Defaults to `true` for
+    /// backward compatibility with pre-existing projects.
+    #[serde(default = "default_true")]
+    pub subtitle_visible: bool,
     /// Shadow color (0xRRGGBBAA). Default: 0x000000AA (black, ~67% opaque).
     #[serde(default = "default_subtitle_shadow_color")]
     pub subtitle_shadow_color: u32,
@@ -2242,6 +2265,8 @@ impl Clip {
             vidstab_enabled: false,
             vidstab_smoothing: default_vidstab_smoothing(),
             volume: 1.0,
+            voice_enhance: false,
+            voice_enhance_strength: default_voice_enhance_strength(),
             voice_isolation: 0.0,
             voice_isolation_pad_ms: default_voice_iso_pad_ms(),
             voice_isolation_fade_ms: default_voice_iso_fade_ms(),
@@ -2344,6 +2369,7 @@ impl Clip {
             subtitle_italic: false,
             subtitle_underline: false,
             subtitle_shadow: false,
+            subtitle_visible: true,
             subtitle_shadow_color: default_subtitle_shadow_color(),
             subtitle_shadow_offset_x: default_subtitle_shadow_offset(),
             subtitle_shadow_offset_y: default_subtitle_shadow_offset(),

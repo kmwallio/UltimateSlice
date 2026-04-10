@@ -786,6 +786,13 @@ pub struct ProgramClip {
     pub voice_isolation_pad_ns: u64,
     pub voice_isolation_fade_ns: u64,
     pub voice_isolation_floor: f64,
+    /// One-knob "Enhance Voice" toggle. When true, the realtime audio
+    /// chain runs HPF + presence/mud EQ + gentle compression. Noise
+    /// reduction is export-only (no GStreamer equivalent of `afftdn`).
+    pub voice_enhance: bool,
+    /// Strength of the realtime enhance chain, 0.0..=1.0. Mirrors the
+    /// export-side scaling so the slider feels consistent across both.
+    pub voice_enhance_strength: f32,
     pub volume_keyframes: Vec<NumericKeyframe>,
     /// Pre-merged speech intervals (clip-local source-time ns), padded by
     /// `voice_isolation_pad_ns`. Computed from either subtitle word timings
@@ -1805,6 +1812,14 @@ pub struct ProgramPlayer {
     animated_svg_paths: HashMap<String, String>,
     /// Bg-removed file paths: source_path → bg_removed file path.
     bg_removal_paths: HashMap<String, String>,
+    /// Voice-enhance prerendered file paths, keyed by
+    /// `voice_enhance_cache::cache_key(source_path, strength)`.
+    /// Populated by [`Self::update_voice_enhance_paths`] from
+    /// `VoiceEnhanceCache::paths`. The video stream of the cached
+    /// file is a copy of the source; the audio has been re-encoded
+    /// through the same FFmpeg chain that the export side uses, so
+    /// preview and export are byte-identical.
+    voice_enhance_paths: HashMap<String, String>,
     /// AI frame-interpolation sidecar paths: clip_id → sidecar file path.
     /// Populated by [`Self::update_frame_interp_paths`] from
     /// `FrameInterpCache::snapshot_paths_by_clip_id`.
@@ -2625,6 +2640,7 @@ impl ProgramPlayer {
                 proxy_fallback_warned_keys: HashSet::new(),
                 animated_svg_paths: HashMap::new(),
                 bg_removal_paths: HashMap::new(),
+                voice_enhance_paths: HashMap::new(),
                 frame_interp_paths: HashMap::new(),
                 audio_stream_probe_cache: HashMap::new(),
                 level_element,
@@ -2984,6 +3000,18 @@ impl ProgramPlayer {
             self.bg_removal_paths = paths;
             self.prewarmed_boundary_ns = None;
             self.invalidate_short_frame_cache("bg-removal-paths-updated");
+        }
+    }
+
+    /// Hand off a freshly snapshotted voice-enhance cache key → output
+    /// path map. The Program Monitor swaps in the prerendered file at
+    /// `resolve_source_path_for_clip` time for any clip whose
+    /// `(source_path, voice_enhance_strength)` matches a ready entry.
+    pub fn update_voice_enhance_paths(&mut self, paths: HashMap<String, String>) {
+        if self.voice_enhance_paths != paths {
+            self.voice_enhance_paths = paths;
+            self.prewarmed_boundary_ns = None;
+            self.invalidate_short_frame_cache("voice-enhance-paths-updated");
         }
     }
 
@@ -6684,6 +6712,33 @@ impl ProgramPlayer {
                     .is_some()
                 {
                     return (interp_path.clone(), false, String::new(), false);
+                }
+            }
+        }
+
+        // Voice-enhance prerender: when the toggle is on, the cache
+        // produces a media file with the original video stream-copied
+        // and the audio re-encoded through the same chain that the
+        // export side uses. Swapping the source path here is what
+        // makes preview audio match export — without trying to do
+        // any GStreamer-side audio processing.
+        //
+        // The cache is keyed by `(source_path, strength)`, so different
+        // strengths for the same source map to different files and
+        // dropping the strength back to a previously-rendered value is
+        // an instant cache hit.
+        if clip.voice_enhance && !self.voice_enhance_paths.is_empty() {
+            let key = crate::media::voice_enhance_cache::cache_key(
+                &clip.source_path,
+                clip.voice_enhance_strength,
+            );
+            if let Some(ve_path) = self.voice_enhance_paths.get(&key) {
+                if std::fs::metadata(ve_path)
+                    .ok()
+                    .filter(|m| m.len() > 0)
+                    .is_some()
+                {
+                    return (ve_path.clone(), false, String::new(), false);
                 }
             }
         }
@@ -11031,6 +11086,7 @@ impl ProgramPlayer {
         // Skip level metering for audio-only track clips to reduce CPU — the per-track
         // meters will use the main pipeline's level elements for video-embedded audio.
         let needs_level = !clip.is_audio_only;
+        // Voice enhance is built whenever the clip has the toggle on, so the
         let (
             audio_conv,
             audio_resample,
@@ -13134,7 +13190,11 @@ impl ProgramPlayer {
         }
 
         // Create audio path: audioconvert → audioresample → capsfilter(48 kHz stereo)
-        // → [match-equalizer-nbands] → [equalizer-nbands] → [audiopanorama] → [level] → audiomixer pad.
+        // → [match-equalizer-nbands] → [equalizer-nbands] → [audiopanorama]
+        // → [level] → audiomixer pad. (Voice enhance is applied via the
+        // prerender cache that swaps `clip.source_path` for an
+        // ffmpeg-processed file in `resolve_source_path_for_clip`, so the
+        // realtime audio path needs no special handling.)
         let (
             audio_conv,
             audio_resample,
@@ -13343,7 +13403,9 @@ impl ProgramPlayer {
                 "ProgramPlayer: skipping audio path for clip {} (no audio)",
                 clip.id
             );
-            (None, None, None, None, None, None, None, None)
+            (
+                None, None, None, None, None, None, None, None,
+            )
         };
 
         // Connect uridecodebin pad-added for dynamic linking.
@@ -16515,6 +16577,8 @@ mod tests {
             vidstab_smoothing: 0.5,
             volume: 1.0,
             voice_isolation: 0.0,
+            voice_enhance: false,
+            voice_enhance_strength: 0.5,
             voice_isolation_pad_ns: 80_000_000,
             voice_isolation_fade_ns: 25_000_000,
             voice_isolation_floor: 0.0,
