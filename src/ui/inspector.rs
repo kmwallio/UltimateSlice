@@ -73,6 +73,7 @@ pub struct SubtitleStyleClipboard {
     pub subtitle_shadow_offset_y: f64,
     pub highlight_flags: crate::model::clip::SubtitleHighlightFlags,
     pub bg_highlight_color: u32,
+    pub highlight_stroke_color: u32,
 }
 use crate::model::project::{FrameRate, MotionTrackerReference, Project};
 use gdk4;
@@ -462,6 +463,8 @@ pub struct InspectorView {
     pub hl_bg_check: CheckButton,
     pub hl_shadow_check: CheckButton,
     pub subtitle_bg_highlight_color_btn: gtk4::ColorDialogButton,
+    pub subtitle_highlight_stroke_color_btn: gtk4::ColorDialogButton,
+    pub subtitle_highlight_stroke_color_row: GBox,
     pub subtitle_bg_highlight_color_row: GBox,
     pub subtitle_highlight_color_btn: gtk4::ColorDialogButton,
     pub subtitle_highlight_color_row: GBox,
@@ -2077,6 +2080,11 @@ impl InspectorView {
                 // Show highlight color row when color or stroke is checked
                 self.subtitle_highlight_color_row
                     .set_visible(flags.color || flags.stroke);
+                // Show stroke color row only when stroke is checked, so the
+                // user can pick a different colour for the karaoke stroke
+                // than for the karaoke text fill.
+                self.subtitle_highlight_stroke_color_row
+                    .set_visible(flags.stroke);
                 // Show bg highlight color row when background is checked
                 self.subtitle_bg_highlight_color_row
                     .set_visible(flags.background);
@@ -2104,6 +2112,13 @@ impl InspectorView {
                         crate::ui::colors::rgba_u32_to_f32(c.subtitle_highlight_color);
                     self.subtitle_highlight_color_btn
                         .set_rgba(&gdk4::RGBA::new(hr, hg, hb, ha));
+                }
+                if flags.stroke {
+                    let (sr, sg, sb, sa) = crate::ui::colors::rgba_u32_to_f32(
+                        c.subtitle_highlight_stroke_color,
+                    );
+                    self.subtitle_highlight_stroke_color_btn
+                        .set_rgba(&gdk4::RGBA::new(sr, sg, sb, sa));
                 }
                 if flags.background {
                     let (bhr, bhg, bhb, bha) =
@@ -3943,6 +3958,20 @@ pub fn build_inspector(
     subtitle_highlight_color_btn.set_rgba(&gdk4::RGBA::new(1.0, 1.0, 0.0, 1.0));
     subtitle_highlight_color_row.append(&subtitle_highlight_color_btn);
     subtitle_style_box.append(&subtitle_highlight_color_row);
+
+    // Independent stroke colour for the karaoke stroke effect — only
+    // visible when the Stroke highlight flag is enabled. Defaults to the
+    // same value as the highlight colour for legacy projects.
+    let subtitle_highlight_stroke_color_row = GBox::new(Orientation::Vertical, 4);
+    row_label(&subtitle_highlight_stroke_color_row, "Highlight Stroke Color");
+    let sub_hl_stroke_color_dialog = gtk4::ColorDialog::new();
+    sub_hl_stroke_color_dialog.set_with_alpha(true);
+    let subtitle_highlight_stroke_color_btn =
+        gtk4::ColorDialogButton::new(Some(sub_hl_stroke_color_dialog));
+    subtitle_highlight_stroke_color_btn.set_rgba(&gdk4::RGBA::new(0.0, 0.0, 0.0, 1.0));
+    subtitle_highlight_stroke_color_row.append(&subtitle_highlight_stroke_color_btn);
+    subtitle_highlight_stroke_color_row.set_visible(false);
+    subtitle_style_box.append(&subtitle_highlight_stroke_color_row);
 
     let subtitle_bg_highlight_color_row = GBox::new(Orientation::Vertical, 4);
     row_label(&subtitle_bg_highlight_color_row, "BG Highlight Color");
@@ -10249,6 +10278,8 @@ pub fn build_inspector(
         hl_bg_check,
         hl_shadow_check,
         subtitle_bg_highlight_color_btn,
+        subtitle_highlight_stroke_color_btn,
+        subtitle_highlight_stroke_color_row,
         subtitle_bg_highlight_color_row,
         subtitle_highlight_color_btn,
         subtitle_highlight_color_row,

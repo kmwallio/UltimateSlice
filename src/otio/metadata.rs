@@ -321,6 +321,8 @@ pub(crate) struct UltimateSliceClipOtioMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) subtitle_highlight_color: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) subtitle_highlight_stroke_color: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) subtitle_word_window_secs: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) subtitle_position_y: Option<f64>,

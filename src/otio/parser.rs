@@ -606,6 +606,9 @@ fn otio_clip_to_clip(
         if let Some(v) = us.subtitle_highlight_color {
             clip.subtitle_highlight_color = v;
         }
+        if let Some(v) = us.subtitle_highlight_stroke_color {
+            clip.subtitle_highlight_stroke_color = v;
+        }
         if let Some(v) = us.subtitle_word_window_secs {
             clip.subtitle_word_window_secs = v;
         }

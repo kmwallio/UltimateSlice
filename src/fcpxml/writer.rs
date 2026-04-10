@@ -860,6 +860,12 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                             clip.subtitle_highlight_color.to_string().as_str(),
                         ));
                     }
+                    if clip.subtitle_highlight_stroke_color != 0xFFFF00FF {
+                        asset_clip.push_attribute((
+                            "us:subtitle-highlight-stroke-color",
+                            clip.subtitle_highlight_stroke_color.to_string().as_str(),
+                        ));
+                    }
                     if (clip.subtitle_word_window_secs - 2.0).abs() > 0.001 {
                         asset_clip.push_attribute((
                             "us:subtitle-word-window-secs",
@@ -4434,6 +4440,7 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:subtitle-bg-box-color"
             | "us:subtitle-highlight-mode"
             | "us:subtitle-highlight-color"
+            | "us:subtitle-highlight-stroke-color"
             | "us:subtitle-word-window-secs"
             | "us:subtitle-position-y"
     )

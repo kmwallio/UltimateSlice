@@ -1144,6 +1144,9 @@ fn parse_asset_clip(
         if let Some(v) = attrs.get("us:subtitle-highlight-color") {
             clip.subtitle_highlight_color = v.parse().unwrap_or(0xFFFF00FF);
         }
+        if let Some(v) = attrs.get("us:subtitle-highlight-stroke-color") {
+            clip.subtitle_highlight_stroke_color = v.parse().unwrap_or(0xFFFF00FF);
+        }
         if let Some(v) = attrs.get("us:subtitle-word-window-secs") {
             clip.subtitle_word_window_secs = v.parse().unwrap_or(2.0);
         }
@@ -2836,6 +2839,7 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:subtitle-bg-box-color"
             | "us:subtitle-highlight-mode"
             | "us:subtitle-highlight-color"
+            | "us:subtitle-highlight-stroke-color"
             | "us:subtitle-word-window-secs"
             | "us:subtitle-position-y"
     )

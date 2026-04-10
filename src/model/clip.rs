@@ -1873,9 +1873,19 @@ pub struct Clip {
     /// Word-level highlight mode for karaoke-style rendering.
     #[serde(default)]
     pub subtitle_highlight_mode: SubtitleHighlightMode,
-    /// Highlight color for the active word (0xRRGGBBAA).
+    /// Highlight color for the active word (0xRRGGBBAA). Used by the
+    /// `color` flag and as the default for the stroke flag when
+    /// `subtitle_highlight_stroke_color` is left at its sentinel.
     #[serde(default = "default_subtitle_highlight_color")]
     pub subtitle_highlight_color: u32,
+    /// Independent stroke colour for the active-word stroke highlight
+    /// (0xRRGGBBAA). Defaults to `default_subtitle_highlight_color()` so
+    /// pre-existing projects keep behaving exactly as they did before
+    /// this field was introduced — both fill and stroke shared a single
+    /// colour. Set explicitly to give the karaoke stroke a different
+    /// colour from the karaoke text fill.
+    #[serde(default = "default_subtitle_highlight_color")]
+    pub subtitle_highlight_stroke_color: u32,
     /// Multi-effect highlight flags (replaces single-mode enum for new projects).
     #[serde(default)]
     pub subtitle_highlight_flags: SubtitleHighlightFlags,
@@ -2312,6 +2322,7 @@ impl Clip {
             subtitle_bg_box_color: default_subtitle_bg_box_color(),
             subtitle_highlight_mode: SubtitleHighlightMode::None,
             subtitle_highlight_color: default_subtitle_highlight_color(),
+            subtitle_highlight_stroke_color: default_subtitle_highlight_color(),
             subtitle_highlight_flags: SubtitleHighlightFlags::default(),
             subtitle_bg_highlight_color: default_subtitle_bg_highlight_color(),
             subtitle_word_window_secs: default_subtitle_word_window_secs(),

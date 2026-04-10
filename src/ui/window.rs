@@ -6871,6 +6871,39 @@ pub fn build_window(
             });
     }
 
+    // Wire subtitle highlight stroke color button (independent from the
+    // text-fill highlight colour so users can pick e.g. yellow text + black
+    // stroke).
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let updating = inspector_view.updating.clone();
+        inspector_view
+            .subtitle_highlight_stroke_color_btn
+            .connect_notify_local(Some("rgba"), move |btn, _| {
+                if *updating.borrow() {
+                    return;
+                }
+                let rgba = btn.rgba();
+                let r = (rgba.red() * 255.0) as u32;
+                let g = (rgba.green() * 255.0) as u32;
+                let b = (rgba.blue() * 255.0) as u32;
+                let a = (rgba.alpha() * 255.0) as u32;
+                let color = (r << 24) | (g << 16) | (b << 8) | a;
+                let selected = timeline_state.borrow().selected_clip_id.clone();
+                if let Some(ref clip_id) = selected {
+                    let mut proj = project.borrow_mut();
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.subtitle_highlight_stroke_color = color;
+                    }
+                    proj.dirty = true;
+                    drop(proj);
+                    on_project_changed();
+                }
+            });
+    }
+
     // Wire subtitle base style toggle buttons.
     {
         let project = project.clone();
@@ -7440,6 +7473,7 @@ pub fn build_window(
                                 subtitle_shadow_offset_y: clip.subtitle_shadow_offset_y,
                                 highlight_flags: clip.subtitle_highlight_flags,
                                 bg_highlight_color: clip.subtitle_bg_highlight_color,
+                                highlight_stroke_color: clip.subtitle_highlight_stroke_color,
                             });
                         paste_btn.set_sensitive(true);
                     }
@@ -7480,6 +7514,7 @@ pub fn build_window(
                         clip.subtitle_shadow_offset_y = style.subtitle_shadow_offset_y;
                         clip.subtitle_highlight_flags = style.highlight_flags;
                         clip.subtitle_bg_highlight_color = style.bg_highlight_color;
+                        clip.subtitle_highlight_stroke_color = style.highlight_stroke_color;
                     }
                     proj.dirty = true;
                     drop(proj);
@@ -10766,6 +10801,10 @@ pub fn build_window(
                                             text: seg.text.clone(),
                                             color: crate::ui::colors::rgba_u32_to_f64(c),
                                             highlight_color: crate::ui::colors::rgba_u32_to_f64(hc),
+                                            highlight_stroke_color:
+                                                crate::ui::colors::rgba_u32_to_f64(
+                                                    clip.subtitle_highlight_stroke_color,
+                                                ),
                                             highlight_flags: clip.subtitle_highlight_flags,
                                             outline_color: crate::ui::colors::rgba_u32_to_f64(oc),
                                             outline_width: clip.subtitle_outline_width,
@@ -21483,6 +21522,7 @@ fn handle_mcp_command(
             highlight_background,
             highlight_shadow,
             bg_highlight_color,
+            highlight_stroke_color,
             reply,
         } => {
             let mut proj = project.borrow_mut();
@@ -21560,6 +21600,9 @@ fn handle_mcp_command(
                 }
                 if let Some(c) = bg_highlight_color {
                     clip.subtitle_bg_highlight_color = c;
+                }
+                if let Some(c) = highlight_stroke_color {
+                    clip.subtitle_highlight_stroke_color = c;
                 }
                 proj.dirty = true;
                 drop(proj);

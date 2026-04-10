@@ -857,6 +857,7 @@ pub enum McpCommand {
         highlight_background: Option<bool>,
         highlight_shadow: Option<bool>,
         bg_highlight_color: Option<u32>,
+        highlight_stroke_color: Option<u32>,
         reply: SyncSender<Value>,
     },
     ExportSrt {

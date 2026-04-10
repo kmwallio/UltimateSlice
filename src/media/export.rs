@@ -3796,18 +3796,12 @@ fn build_subtitle_filter_composited(
     }
 
     let flags = &style_clip.subtitle_highlight_flags;
-    let has_words = style_clip
-        .subtitle_segments
-        .iter()
-        .any(|s| !s.words.is_empty());
-    let use_karaoke = !flags.is_none() && has_words;
 
     // Always use the ASS path for subtitle burn-in.  The SRT+force_style path
     // is unreliable: libass silently drops subtitles when certain force_style
     // parameters (e.g. MarginV at high values) interact with BorderStyle=3.
     // ASS embeds all styling inline, avoiding the issue entirely.
     {
-        let _ = use_karaoke;
         // Write a proper ASS file with embedded styles.
         let mut sub_file = match tempfile::Builder::new().suffix(".ass").tempfile() {
             Ok(f) => f,
@@ -3816,6 +3810,8 @@ fn build_subtitle_filter_composited(
 
         let (hr, hg, hb, _) =
             crate::ui::colors::rgba_u32_to_u8(style_clip.subtitle_highlight_color);
+        let (sr, sg, sb, _) =
+            crate::ui::colors::rgba_u32_to_u8(style_clip.subtitle_highlight_stroke_color);
         let group_size = (style_clip.subtitle_word_window_secs as usize).max(2);
 
         {
@@ -3879,89 +3875,168 @@ fn build_subtitle_filter_composited(
                 "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
             );
 
+            // Emit one Dialogue event per segment (non-karaoke) or per word
+            // in a fixed word-group window (karaoke). The ASS events across
+            // each segment are made **contiguous** so nothing flickers:
+            //   * No-karaoke / no-word-timing path: a single event spanning
+            //     the full segment duration, so the sentence stays up for
+            //     its entire spoken span.
+            //   * Karaoke path: each word's event starts where the previous
+            //     word's event ends, and extends until the next word's end
+            //     (or the group/segment boundary for the first/last word).
+            //     This closes the inter-word silence gaps that previously
+            //     left the screen blank between syllables.
             for seg in &style_clip.subtitle_segments {
-                if seg.words.is_empty() {
-                    let abs_start =
-                        style_clip.timeline_start + (seg.start_ns as f64 / style_clip.speed) as u64;
-                    let abs_end =
-                        style_clip.timeline_start + (seg.end_ns as f64 / style_clip.speed) as u64;
+                let seg_abs_start =
+                    style_clip.timeline_start + (seg.start_ns as f64 / style_clip.speed) as u64;
+                let seg_abs_end =
+                    style_clip.timeline_start + (seg.end_ns as f64 / style_clip.speed) as u64;
+
+                // Non-karaoke (or no per-word timestamps) → one event for the
+                // whole sentence. Matches the Program Monitor preview, which
+                // skips the per-word display list when `flags.is_none()`.
+                if seg.words.is_empty() || flags.is_none() {
                     let _ = writeln!(
                         sub_file,
                         "Dialogue: 0,{},{},Default,,0,0,0,,{}",
-                        ass_timecode(abs_start),
-                        ass_timecode(abs_end),
+                        ass_timecode(seg_abs_start),
+                        ass_timecode(seg_abs_end),
                         seg.text
                     );
                     continue;
                 }
 
-                // Fixed groups: divide words into groups of group_size.
-                // Each group gets one Dialogue event per word (for highlight),
-                // but the visible text is the same fixed set of words.
-                for (wi, word) in seg.words.iter().enumerate() {
-                    let w_abs_start = style_clip.timeline_start
-                        + (word.start_ns as f64 / style_clip.speed) as u64;
-                    let w_abs_end =
-                        style_clip.timeline_start + (word.end_ns as f64 / style_clip.speed) as u64;
+                // Karaoke path: fixed word groups of `group_size`, each
+                // group's events tiled contiguously across the group's
+                // time range so no gap ever appears on-screen.
+                let total_words = seg.words.len();
+                let mut group_start = 0usize;
+                while group_start < total_words {
+                    let group_end = (group_start + group_size).min(total_words);
+                    let group_slice = &seg.words[group_start..group_end];
 
-                    // Determine which fixed group this word belongs to.
-                    let group_start = (wi / group_size) * group_size;
-                    let group_end = (group_start + group_size).min(seg.words.len());
+                    // Group time range: the first group extends back to the
+                    // segment start, the last group forward to the segment
+                    // end, and intermediate groups hand off exactly at the
+                    // next group's first word start.
+                    let group_time_start = if group_start == 0 {
+                        seg.start_ns
+                    } else {
+                        group_slice[0]
+                            .start_ns
+                            .max(seg.start_ns)
+                            .min(seg.end_ns)
+                    };
+                    let group_time_end = if group_end == total_words {
+                        seg.end_ns
+                    } else {
+                        seg.words[group_end]
+                            .start_ns
+                            .max(group_time_start)
+                            .min(seg.end_ns)
+                    };
 
-                    let mut text = String::new();
-                    for (owi, ow) in seg.words[group_start..group_end].iter().enumerate() {
-                        if !text.is_empty() {
-                            text.push(' ');
-                        }
-                        if group_start + owi == wi {
-                            // Build combined ASS override tags from highlight flags.
-                            let mut overrides = String::new();
-                            if flags.bold {
-                                overrides.push_str("\\b1");
-                            }
-                            if flags.italic {
-                                overrides.push_str("\\i1");
-                            }
-                            if flags.underline {
-                                overrides.push_str("\\u1");
-                            }
-                            if flags.color {
-                                overrides.push_str(&format!("\\c&H{hb:02X}{hg:02X}{hr:02X}&"));
-                            }
-                            if flags.stroke {
-                                overrides
-                                    .push_str(&format!("\\bord4\\3c&H{hb:02X}{hg:02X}{hr:02X}&"));
-                            }
-                            if flags.background {
-                                let (bhr, bhg, bhb, _) = crate::ui::colors::rgba_u32_to_u8(
-                                    style_clip.subtitle_bg_highlight_color,
-                                );
-                                overrides.push_str(&format!(
-                                    "\\4c&H{bhb:02X}{bhg:02X}{bhr:02X}&\\shad2"
-                                ));
-                            }
-                            if flags.shadow {
-                                overrides.push_str("\\shad2");
-                            }
+                    for (wi_in_group, _word) in group_slice.iter().enumerate() {
+                        let wi = group_start + wi_in_group;
 
-                            if overrides.is_empty() {
-                                text.push_str(&ow.text);
-                            } else {
-                                text.push_str(&format!("{{{overrides}}}"));
-                                text.push_str(&ow.text);
-                                text.push_str("{\\r}");
-                            }
+                        // Contiguous event timing within the group:
+                        // * first word in group  → group_time_start
+                        // * otherwise             → previous word's end_ns
+                        //                           (clamped into group range)
+                        // * last word in group    → group_time_end
+                        // * otherwise             → next word's end_ns
+                        //                           (clamped into group range)
+                        let ev_local_start = if wi_in_group == 0 {
+                            group_time_start
                         } else {
-                            text.push_str(&ow.text);
+                            seg.words[wi - 1]
+                                .end_ns
+                                .max(group_time_start)
+                                .min(group_time_end)
+                        };
+                        let ev_local_end = if wi_in_group + 1 == group_slice.len() {
+                            group_time_end
+                        } else {
+                            seg.words[wi]
+                                .end_ns
+                                .max(ev_local_start)
+                                .min(group_time_end)
+                        };
+                        if ev_local_end <= ev_local_start {
+                            continue;
                         }
+
+                        let w_abs_start = style_clip.timeline_start
+                            + (ev_local_start as f64 / style_clip.speed) as u64;
+                        let w_abs_end = style_clip.timeline_start
+                            + (ev_local_end as f64 / style_clip.speed) as u64;
+
+                        let mut text = String::new();
+                        for (owi, ow) in group_slice.iter().enumerate() {
+                            if !text.is_empty() {
+                                text.push(' ');
+                            }
+                            if group_start + owi == wi {
+                                // Build combined ASS override tags from highlight flags.
+                                let mut overrides = String::new();
+                                if flags.bold {
+                                    overrides.push_str("\\b1");
+                                }
+                                if flags.italic {
+                                    overrides.push_str("\\i1");
+                                }
+                                if flags.underline {
+                                    overrides.push_str("\\u1");
+                                }
+                                if flags.color {
+                                    overrides
+                                        .push_str(&format!("\\c&H{hb:02X}{hg:02X}{hr:02X}&"));
+                                }
+                                if flags.stroke {
+                                    // Stroke colour is independent from
+                                    // the text-fill highlight colour so
+                                    // the karaoke stroke can differ
+                                    // (e.g. yellow text with black
+                                    // stroke). Defaults to the same
+                                    // colour as `flags.color` for legacy
+                                    // projects.
+                                    overrides.push_str(&format!(
+                                        "\\bord4\\3c&H{sb:02X}{sg:02X}{sr:02X}&"
+                                    ));
+                                }
+                                if flags.background {
+                                    let (bhr, bhg, bhb, _) = crate::ui::colors::rgba_u32_to_u8(
+                                        style_clip.subtitle_bg_highlight_color,
+                                    );
+                                    overrides.push_str(&format!(
+                                        "\\4c&H{bhb:02X}{bhg:02X}{bhr:02X}&\\shad2"
+                                    ));
+                                }
+                                if flags.shadow {
+                                    overrides.push_str("\\shad2");
+                                }
+
+                                if overrides.is_empty() {
+                                    text.push_str(&ow.text);
+                                } else {
+                                    text.push_str(&format!("{{{overrides}}}"));
+                                    text.push_str(&ow.text);
+                                    text.push_str("{\\r}");
+                                }
+                            } else {
+                                text.push_str(&ow.text);
+                            }
+                        }
+
+                        let _ = writeln!(
+                            sub_file,
+                            "Dialogue: 0,{},{},Default,,0,0,0,,{text}",
+                            ass_timecode(w_abs_start),
+                            ass_timecode(w_abs_end)
+                        );
                     }
 
-                    let _ = writeln!(
-                        sub_file,
-                        "Dialogue: 0,{},{},Default,,0,0,0,,{text}",
-                        ass_timecode(w_abs_start),
-                        ass_timecode(w_abs_end)
-                    );
+                    group_start = group_end;
                 }
             }
             let _ = sub_file.flush();

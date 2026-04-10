@@ -27,6 +27,11 @@ pub struct SubtitleLine {
     pub color: (f64, f64, f64, f64),
     /// Highlight color for the active word.
     pub highlight_color: (f64, f64, f64, f64),
+    /// Independent stroke colour for the active-word stroke highlight.
+    /// Defaults to `highlight_color` when the user hasn't picked one
+    /// explicitly, so legacy behaviour (single shared colour) is
+    /// preserved unless they go out of their way to set it.
+    pub highlight_stroke_color: (f64, f64, f64, f64),
     /// Highlight flags (multi-effect).
     pub highlight_flags: crate::model::clip::SubtitleHighlightFlags,
     /// Outline color.
@@ -72,6 +77,7 @@ impl Default for SubtitleLine {
             text: String::new(),
             color: (1.0, 1.0, 1.0, 1.0),
             highlight_color: (1.0, 1.0, 0.0, 1.0),
+            highlight_stroke_color: (1.0, 1.0, 0.0, 1.0),
             highlight_flags: crate::model::clip::SubtitleHighlightFlags::default(),
             outline_color: (0.0, 0.0, 0.0, 0.9),
             outline_width: 2.0,
@@ -678,9 +684,13 @@ pub fn build_program_monitor(
                                 cr.fill().ok();
                             }
 
-                            // Stroke highlight
+                            // Stroke highlight — uses its own colour so
+                            // the karaoke stroke can differ from the
+                            // karaoke text fill (e.g. yellow text with
+                            // black stroke). Falls back to the
+                            // highlight colour for legacy projects.
                             if flags.stroke {
-                                let (hr, hg, hb, ha) = line.highlight_color;
+                                let (hr, hg, hb, ha) = line.highlight_stroke_color;
                                 cr.set_source_rgba(hr, hg, hb, ha);
                                 cr.set_line_width(subtitle_preview_stroke_width(h));
                                 let _ = cr.move_to(word_x, ty);

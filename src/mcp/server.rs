@@ -2080,7 +2080,8 @@ fn tools_list() -> Value {
                     "bg_box": { "type": "boolean", "description": "Enable background box" },
                     "bg_box_color": { "type": "integer", "description": "Background box color as 0xRRGGBBAA" },
                     "highlight_mode": { "type": "string", "enum": ["none", "bold", "color", "underline", "stroke"], "description": "Legacy word highlight mode (prefer highlight flags)" },
-                    "highlight_color": { "type": "integer", "description": "Highlight color as 0xRRGGBBAA" },
+                    "highlight_color": { "type": "integer", "description": "Highlight (text-fill) color as 0xRRGGBBAA, applied when highlight_color flag is on" },
+                    "highlight_stroke_color": { "type": "integer", "description": "Highlight stroke color as 0xRRGGBBAA, applied when highlight_stroke flag is on. Independent from highlight_color so the karaoke stroke can differ from the karaoke text fill (e.g. yellow text + black stroke)." },
                     "bold": { "type": "boolean", "description": "Base style: bold for all subtitle text" },
                     "italic": { "type": "boolean", "description": "Base style: italic for all subtitle text" },
                     "underline": { "type": "boolean", "description": "Base style: underline for all subtitle text" },
@@ -3520,6 +3521,9 @@ fn dispatch_tool_payload(
             highlight_background: args["highlight_background"].as_bool(),
             highlight_shadow: args["highlight_shadow"].as_bool(),
             bg_highlight_color: args["bg_highlight_color"].as_u64().map(|v| v as u32),
+            highlight_stroke_color: args["highlight_stroke_color"]
+                .as_u64()
+                .map(|v| v as u32),
             reply: tx,
         },
         "export_srt" => McpCommand::ExportSrt {
