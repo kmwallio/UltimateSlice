@@ -800,6 +800,38 @@ pub enum McpCommand {
         muted: Option<bool>,
         reply: SyncSender<Value>,
     },
+    // ── Audition / clip-versions commands ─────────────────────────────
+    CreateAuditionClip {
+        clip_ids: Vec<String>,
+        active_index: usize,
+        reply: SyncSender<Value>,
+    },
+    AddAuditionTake {
+        audition_clip_id: String,
+        source_path: String,
+        source_in_ns: u64,
+        source_out_ns: u64,
+        label: Option<String>,
+        reply: SyncSender<Value>,
+    },
+    RemoveAuditionTake {
+        audition_clip_id: String,
+        take_index: usize,
+        reply: SyncSender<Value>,
+    },
+    SetActiveAuditionTake {
+        audition_clip_id: String,
+        take_index: usize,
+        reply: SyncSender<Value>,
+    },
+    ListAuditionTakes {
+        audition_clip_id: String,
+        reply: SyncSender<Value>,
+    },
+    FinalizeAudition {
+        audition_clip_id: String,
+        reply: SyncSender<Value>,
+    },
     // ── Subtitle / STT commands ────────────────────────────────────────
     GenerateSubtitles {
         clip_id: String,

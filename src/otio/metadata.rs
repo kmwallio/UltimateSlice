@@ -2,8 +2,8 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::model::clip::{
-    AngleSwitch, AudioChannelMode, BlendMode, ClipColorLabel, ClipMask, EqBand, Frei0rEffect,
-    LadspaEffect, MotionTracker, MulticamAngle, NumericKeyframe, SlowMotionInterp,
+    AngleSwitch, AudioChannelMode, AuditionTake, BlendMode, ClipColorLabel, ClipMask, EqBand,
+    Frei0rEffect, LadspaEffect, MotionTracker, MulticamAngle, NumericKeyframe, SlowMotionInterp,
     SubtitleHighlightFlags, SubtitleHighlightMode, SubtitleSegment, TrackingBinding,
     VoiceIsolationSource,
 };
@@ -117,6 +117,13 @@ pub(crate) struct UltimateSliceClipOtioMetadata {
     /// Angle switch points for multicam clips, sorted by `position_ns`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) multicam_switches: Option<Vec<AngleSwitch>>,
+    /// Alternate takes for audition clips.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) audition_takes: Option<Vec<AuditionTake>>,
+    /// Index of the active audition take. Only meaningful when
+    /// `audition_takes.is_some()`. Default 0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) audition_active_take_index: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) brightness: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -1959,6 +1959,7 @@ fn draw_non_file_placeholder(cr: &gtk::cairo::Context, w: i32, h: i32, kind: Opt
         Some(ClipKind::Adjustment) => (0.17, 0.18, 0.28, "ADJ"),
         Some(ClipKind::Compound) => (0.10, 0.22, 0.20, "CMP"),
         Some(ClipKind::Multicam) => (0.24, 0.12, 0.26, "MC"),
+        Some(ClipKind::Audition) => (0.28, 0.22, 0.06, "AUD"),
         Some(ClipKind::Video) => (0.18, 0.20, 0.28, "CLIP"),
         Some(ClipKind::Audio) => (0.14, 0.14, 0.22, "AUDIO"),
         Some(ClipKind::Image) => (0.18, 0.24, 0.18, "IMG"),

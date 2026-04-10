@@ -415,6 +415,12 @@ pub struct InspectorView {
     pub speed_section_box: GBox,
     pub transition_section: GBox,
     pub lut_section_box: GBox,
+    // Audition / clip versions
+    pub audition_section_box: GBox,
+    pub audition_takes_list: gtk4::ListBox,
+    pub audition_add_take_btn: Button,
+    pub audition_remove_take_btn: Button,
+    pub audition_finalize_btn: Button,
     // Chroma key
     pub chroma_key_section: GBox,
     pub chroma_key_enable: CheckButton,
@@ -566,6 +572,72 @@ pub struct InspectorView {
 }
 
 impl InspectorView {
+    /// Repopulate the audition takes ListBox from the given clip. Must be
+    /// called whenever the active clip is an audition clip OR when its
+    /// `audition_takes` / `audition_active_take_index` change. Each row
+    /// stores its take index in `widget-name` so click handlers can
+    /// recover the index without re-parsing labels.
+    pub fn refresh_audition_takes_list(&self, clip: &crate::model::clip::Clip) {
+        // Clear existing rows.
+        while let Some(row) = self.audition_takes_list.first_child() {
+            self.audition_takes_list.remove(&row);
+        }
+        let Some(takes) = clip.audition_takes.as_ref() else {
+            self.audition_remove_take_btn.set_sensitive(false);
+            return;
+        };
+        let active = clip.audition_active_take_index;
+        for (i, take) in takes.iter().enumerate() {
+            let row = gtk4::ListBoxRow::new();
+            row.set_widget_name(&format!("audition-take-{}", i));
+            let row_box = GBox::new(Orientation::Horizontal, 8);
+            row_box.set_margin_top(6);
+            row_box.set_margin_bottom(6);
+            row_box.set_margin_start(8);
+            row_box.set_margin_end(8);
+            let label_text = if take.label.is_empty() {
+                format!("Take {}", i + 1)
+            } else {
+                take.label.clone()
+            };
+            let label_box = GBox::new(Orientation::Vertical, 2);
+            let title_lbl = Label::new(Some(&label_text));
+            title_lbl.set_xalign(0.0);
+            if i == active {
+                title_lbl.add_css_class("heading");
+            }
+            label_box.append(&title_lbl);
+            let dur_secs = take
+                .source_out
+                .saturating_sub(take.source_in) as f64
+                / 1_000_000_000.0;
+            let stem = std::path::Path::new(&take.source_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            let sub_lbl = Label::new(Some(&format!("{}  ·  {:.2}s", stem, dur_secs)));
+            sub_lbl.set_xalign(0.0);
+            sub_lbl.add_css_class("dim-label");
+            sub_lbl.add_css_class("caption");
+            label_box.append(&sub_lbl);
+            label_box.set_hexpand(true);
+            row_box.append(&label_box);
+            if i == active {
+                let badge = Label::new(Some("Active"));
+                badge.add_css_class("accent");
+                badge.add_css_class("caption-heading");
+                row_box.append(&badge);
+            }
+            row.set_child(Some(&row_box));
+            self.audition_takes_list.append(&row);
+            if i == active {
+                self.audition_takes_list.select_row(Some(&row));
+            }
+        }
+        // Remove button enabled only when a non-active row is selected.
+        self.audition_remove_take_btn.set_sensitive(false);
+    }
+
     /// Get the currently selected interpolation mode from the dropdown.
     pub fn selected_interpolation(&self) -> KeyframeInterpolation {
         match self.interp_dropdown.selected() {
@@ -1767,20 +1839,27 @@ impl InspectorView {
                 let is_adjustment = c.kind == ClipKind::Adjustment;
                 let is_compound = c.kind == ClipKind::Compound;
                 let is_multicam = c.kind == ClipKind::Multicam;
+                let is_audition = c.kind == ClipKind::Audition;
                 let is_visual = is_video
                     || is_image
                     || is_title_clip
                     || is_adjustment
                     || is_compound
-                    || is_multicam;
+                    || is_multicam
+                    || is_audition;
                 self.color_section
-                    .set_visible(is_video || is_image || is_adjustment);
-                self.audio_section.set_visible(is_video || is_audio);
+                    .set_visible(is_video || is_image || is_adjustment || is_audition);
+                self.audio_section.set_visible(is_video || is_audio || is_audition);
                 self.transform_section.set_visible(is_visual);
                 self.title_section_box
-                    .set_visible(is_visual && !is_adjustment && !is_compound && !is_multicam);
+                    .set_visible(is_visual && !is_adjustment && !is_compound && !is_multicam && !is_audition);
                 self.speed_section_box
-                    .set_visible(!is_title_clip && !is_adjustment && !is_compound && !is_multicam);
+                    .set_visible(!is_title_clip && !is_adjustment && !is_compound && !is_multicam && !is_audition);
+                // Audition section is visible only for audition clips. Repopulate the takes list.
+                self.audition_section_box.set_visible(is_audition);
+                if is_audition {
+                    self.refresh_audition_takes_list(c);
+                }
                 self.lut_section_box
                     .set_visible(is_video || is_image || is_adjustment);
                 self.chroma_key_section.set_visible(is_video || is_image);
@@ -5278,6 +5357,51 @@ pub fn build_inspector(
     transform_inner.append(&flip_row);
 
     content_box.append(&transition_section);
+
+    // ── Audition / clip-versions section (Audition clips only) ────────────
+    let audition_section_box = GBox::new(Orientation::Vertical, 8);
+    content_box.append(&audition_section_box);
+    audition_section_box.append(&Separator::new(Orientation::Horizontal));
+    let audition_expander = Expander::new(Some("Audition"));
+    audition_expander.set_expanded(true);
+    audition_section_box.append(&audition_expander);
+    let audition_inner = GBox::new(Orientation::Vertical, 8);
+    audition_expander.set_child(Some(&audition_inner));
+
+    let audition_help = Label::new(Some(
+        "Click a take to make it active. The Program Monitor and export will use\nthe active take. Other takes are kept for nondestructive A/B comparison.",
+    ));
+    audition_help.set_xalign(0.0);
+    audition_help.set_wrap(true);
+    audition_help.add_css_class("dim-label");
+    audition_inner.append(&audition_help);
+
+    let audition_takes_list = gtk4::ListBox::new();
+    audition_takes_list.set_selection_mode(gtk4::SelectionMode::Single);
+    audition_takes_list.add_css_class("boxed-list");
+    audition_inner.append(&audition_takes_list);
+
+    let audition_btn_row = GBox::new(Orientation::Horizontal, 6);
+    audition_btn_row.set_homogeneous(true);
+    let audition_add_take_btn = Button::with_label("Add Take from Source");
+    audition_add_take_btn.set_tooltip_text(Some(
+        "Add a new alternate take from the Source Monitor's currently marked region.",
+    ));
+    audition_btn_row.append(&audition_add_take_btn);
+    let audition_remove_take_btn = Button::with_label("Remove Take");
+    audition_remove_take_btn.set_tooltip_text(Some(
+        "Remove the selected (non-active) take from the audition.",
+    ));
+    audition_remove_take_btn.set_sensitive(false);
+    audition_btn_row.append(&audition_remove_take_btn);
+    audition_inner.append(&audition_btn_row);
+
+    let audition_finalize_btn = Button::with_label("Finalize Audition");
+    audition_finalize_btn.set_tooltip_text(Some(
+        "Collapse this audition to a normal clip using only the active take. Discards alternate takes.",
+    ));
+    audition_finalize_btn.add_css_class("destructive-action");
+    audition_inner.append(&audition_finalize_btn);
 
     // ── Title Overlay section (Video + Image only) ───────────────────────────
     let title_section_box = GBox::new(Orientation::Vertical, 8);
@@ -10235,6 +10359,11 @@ pub fn build_inspector(
         speed_section_box,
         transition_section,
         lut_section_box,
+        audition_section_box,
+        audition_takes_list,
+        audition_add_take_btn,
+        audition_remove_take_btn,
+        audition_finalize_btn,
         chroma_key_section,
         chroma_key_enable,
         chroma_green_btn,
@@ -10363,6 +10492,176 @@ pub fn build_inspector(
         audio_keyframe_indicator_label,
         audio_animation_mode_btn,
     });
+
+    // ── Audition section wiring ───────────────────────────────────────────
+    // Click a take row → switch active take (undoable). Re-fetch the index
+    // from the row's widget-name set in `refresh_audition_takes_list`.
+    {
+        let view_weak = Rc::downgrade(&view);
+        view.audition_takes_list
+            .connect_row_activated(move |_list, row| {
+                let Some(view) = view_weak.upgrade() else { return };
+                let cid = view.selected_clip_id.borrow().clone();
+                let Some(cid) = cid else { return };
+                let name = row.widget_name();
+                let Some(idx_str) = name.strip_prefix("audition-take-") else {
+                    return;
+                };
+                let Ok(new_index) = idx_str.parse::<usize>() else {
+                    return;
+                };
+                // Snapshot the clip before mutation so undo restores any
+                // host-field tweaks the user made while the previous take
+                // was active.
+                let snapshot = view
+                    .project
+                    .borrow()
+                    .clip_ref(&cid)
+                    .cloned();
+                if snapshot.is_none() {
+                    return;
+                }
+                if snapshot.as_ref().unwrap().audition_active_take_index == new_index {
+                    // Already active; flip the remove-button sensitivity
+                    // for the user's selection feedback.
+                    view.audition_remove_take_btn.set_sensitive(false);
+                    return;
+                }
+                (view.on_execute_command)(Box::new(
+                    crate::undo::SetActiveAuditionTakeCommand {
+                        clip_id: cid,
+                        new_index,
+                        before_snapshot: snapshot,
+                    },
+                ));
+                (view.on_frei0r_changed)();
+            });
+    }
+    // Toggle Remove Take button sensitivity based on selection — only
+    // non-active rows can be removed.
+    {
+        let view_weak = Rc::downgrade(&view);
+        view.audition_takes_list
+            .connect_row_selected(move |_list, row| {
+                let Some(view) = view_weak.upgrade() else { return };
+                let Some(row) = row else {
+                    view.audition_remove_take_btn.set_sensitive(false);
+                    return;
+                };
+                let name = row.widget_name();
+                let Some(idx_str) = name.strip_prefix("audition-take-") else {
+                    view.audition_remove_take_btn.set_sensitive(false);
+                    return;
+                };
+                let Ok(idx) = idx_str.parse::<usize>() else {
+                    view.audition_remove_take_btn.set_sensitive(false);
+                    return;
+                };
+                let cid = view.selected_clip_id.borrow().clone();
+                let active = cid
+                    .as_ref()
+                    .and_then(|id| {
+                        view.project
+                            .borrow()
+                            .clip_ref(id)
+                            .map(|c| c.audition_active_take_index)
+                    })
+                    .unwrap_or(0);
+                view.audition_remove_take_btn.set_sensitive(idx != active);
+            });
+    }
+    // Remove the currently selected (non-active) take.
+    {
+        let view_weak = Rc::downgrade(&view);
+        view.audition_remove_take_btn
+            .connect_clicked(move |_| {
+                let Some(view) = view_weak.upgrade() else { return };
+                let cid = view.selected_clip_id.borrow().clone();
+                let Some(cid) = cid else { return };
+                let Some(row) = view.audition_takes_list.selected_row() else {
+                    return;
+                };
+                let name = row.widget_name();
+                let Some(idx_str) = name.strip_prefix("audition-take-") else {
+                    return;
+                };
+                let Ok(take_index) = idx_str.parse::<usize>() else {
+                    return;
+                };
+                (view.on_execute_command)(Box::new(crate::undo::RemoveAuditionTakeCommand {
+                    clip_id: cid,
+                    take_index,
+                    removed: std::cell::RefCell::new(None),
+                }));
+                (view.on_frei0r_changed)();
+            });
+    }
+    // Add Take From Source — pulls the source monitor's currently loaded
+    // clip + In/Out marks via the `selected_clip_id`'s source path. Without
+    // a source-monitor handle on the inspector, we synthesize the take from
+    // a duplicate of the audition's currently-active take so the user can
+    // immediately add another candidate by importing/loading a different
+    // file in the source monitor first; alternatively the timeline context
+    // menu's "Add Take from Source Monitor" entry handles the marked-region
+    // case.
+    {
+        let view_weak = Rc::downgrade(&view);
+        view.audition_add_take_btn.connect_clicked(move |_| {
+            let Some(view) = view_weak.upgrade() else { return };
+            let cid = view.selected_clip_id.borrow().clone();
+            let Some(cid) = cid else { return };
+            // Build a new take from the active take as a starting point.
+            let take = {
+                let proj = view.project.borrow();
+                let Some(clip) = proj.clip_ref(&cid) else { return };
+                let active = clip.audition_active_take_index;
+                let label_n = clip
+                    .audition_takes
+                    .as_ref()
+                    .map(|t| t.len() + 1)
+                    .unwrap_or(1);
+                let base = clip
+                    .audition_takes
+                    .as_ref()
+                    .and_then(|t| t.get(active))
+                    .cloned();
+                let Some(base) = base else { return };
+                crate::model::clip::AuditionTake {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    label: format!("Take {}", label_n),
+                    source_path: base.source_path.clone(),
+                    source_in: base.source_in,
+                    source_out: base.source_out,
+                    source_timecode_base_ns: base.source_timecode_base_ns,
+                    media_duration_ns: base.media_duration_ns,
+                }
+            };
+            (view.on_execute_command)(Box::new(crate::undo::AddAuditionTakeCommand {
+                clip_id: cid,
+                take,
+            }));
+            (view.on_frei0r_changed)();
+        });
+    }
+    // Finalize → collapse the audition to a plain clip referencing only the
+    // active take.
+    {
+        let view_weak = Rc::downgrade(&view);
+        view.audition_finalize_btn.connect_clicked(move |_| {
+            let Some(view) = view_weak.upgrade() else { return };
+            let cid = view.selected_clip_id.borrow().clone();
+            let Some(cid) = cid else { return };
+            let snapshot = view.project.borrow().clip_ref(&cid).cloned();
+            if snapshot.is_none() {
+                return;
+            }
+            (view.on_execute_command)(Box::new(crate::undo::FinalizeAuditionCommand {
+                clip_id: cid,
+                before_snapshot: snapshot,
+            }));
+            (view.on_frei0r_changed)();
+        });
+    }
 
     (vbox, view)
 }

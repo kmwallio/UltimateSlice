@@ -21,6 +21,21 @@ Select a clip in the timeline to populate the Inspector. All changes apply immed
 
 ---
 
+## Audition (alternate takes)
+
+Visible only when an **audition clip** is selected. Audition clips wrap multiple alternate takes around a single timeline slot — see [auditions.md](auditions.md) for the full guide.
+
+| Control | Description |
+|---|---|
+| **Takes list** | Every alternate take with its label, source filename, and duration. The currently active take is highlighted with an **Active** badge. Click any other row to switch — the Program Monitor and timeline update immediately, and the swap is undoable. |
+| **Add Take from Source** | Append a new take to the audition. Seeded from the currently active take's source path and in/out as a starting point; tweak afterwards. |
+| **Remove Take** | Remove the selected non-active take. Disabled when the active take is selected — switch active first if you want to delete what's currently playing. |
+| **Finalize Audition** | Collapse the audition to a normal clip referencing only the active take. Discards alternates. Undoable. |
+
+Color grade, transforms, transitions, masks, keyframes, and frei0r effects all live on the audition slot, not on individual takes. Switching the active take preserves your look — that's the point.
+
+---
+
 ## Transition
 
 The Inspector can edit the selected clip's **outgoing** transition when another clip follows it on the same track.

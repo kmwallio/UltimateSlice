@@ -279,6 +279,12 @@ fn write_otio_with_mode(
                 compound_tracks: clip.compound_tracks.clone(),
                 multicam_angles: clip.multicam_angles.clone(),
                 multicam_switches: clip.multicam_switches.clone(),
+                audition_takes: clip.audition_takes.clone(),
+                audition_active_take_index: if clip.audition_takes.is_some() {
+                    Some(clip.audition_active_take_index)
+                } else {
+                    None
+                },
                 brightness: Some(clip.brightness as f64),
                 contrast: Some(clip.contrast as f64),
                 saturation: Some(clip.saturation as f64),

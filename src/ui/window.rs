@@ -19008,6 +19008,7 @@ fn handle_mcp_command(
                     ClipKind::Adjustment => "adjustment",
                     ClipKind::Compound => "compound",
                     ClipKind::Multicam => "multicam",
+                    ClipKind::Audition => "audition",
                 }
             }
 
@@ -21309,6 +21310,310 @@ fn handle_mcp_command(
                     .send(json!({"error": format!("Clip not found: {clip_id}")}))
                     .ok();
             }
+        }
+        // ── Audition / clip-versions commands ─────────────────────────────
+        McpCommand::CreateAuditionClip {
+            clip_ids,
+            active_index,
+            reply,
+        } => {
+            if clip_ids.len() < 2 {
+                reply
+                    .send(json!({"error": "At least 2 clip IDs required"}))
+                    .ok();
+                return;
+            }
+            // Collect (clip, track_id) pairs.
+            let hits: Vec<(crate::model::clip::Clip, String)> = {
+                let proj = project.borrow();
+                clip_ids
+                    .iter()
+                    .filter_map(|id| {
+                        proj.tracks
+                            .iter()
+                            .flat_map(|t| t.clips.iter().map(move |c| (t.id.clone(), c)))
+                            .find(|(_, c)| &c.id == id)
+                            .map(|(tid, c)| (c.clone(), tid))
+                    })
+                    .collect()
+            };
+            if hits.len() < 2 {
+                reply
+                    .send(json!({"error": "Could not find 2+ clips with the provided IDs"}))
+                    .ok();
+                return;
+            }
+            // All clips must be on the same track.
+            let first_track = hits[0].1.clone();
+            if hits.iter().any(|(_, t)| t != &first_track) {
+                reply
+                    .send(json!({"error": "All audition takes must come from the same track"}))
+                    .ok();
+                return;
+            }
+            // Build takes from the original clips, in caller-provided order.
+            let active_index = active_index.min(hits.len() - 1);
+            let anchor_start = hits[active_index].0.timeline_start;
+            let takes: Vec<crate::model::clip::AuditionTake> = hits
+                .iter()
+                .map(|(c, _)| crate::model::clip::AuditionTake {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    label: c.label.clone(),
+                    source_path: c.source_path.clone(),
+                    source_in: c.source_in,
+                    source_out: c.source_out,
+                    source_timecode_base_ns: c.source_timecode_base_ns,
+                    media_duration_ns: c.media_duration_ns,
+                })
+                .collect();
+            let audition = crate::model::clip::Clip::new_audition(anchor_start, takes, active_index);
+            let audition_id = audition.id.clone();
+            let selected_ids: std::collections::HashSet<String> = hits
+                .iter()
+                .map(|(c, _)| c.id.clone())
+                .collect();
+            let mut proj = project.borrow_mut();
+            let mut changes = Vec::new();
+            for track in &proj.tracks {
+                if track.id != first_track {
+                    continue;
+                }
+                let old_clips = track.clips.clone();
+                let mut new_clips: Vec<crate::model::clip::Clip> = track
+                    .clips
+                    .iter()
+                    .filter(|c| !selected_ids.contains(&c.id))
+                    .cloned()
+                    .collect();
+                new_clips.push(audition.clone());
+                new_clips.sort_by_key(|c| c.timeline_start);
+                changes.push(crate::undo::TrackClipsChange {
+                    track_id: track.id.clone(),
+                    old_clips,
+                    new_clips,
+                });
+            }
+            let cmd = Box::new(crate::undo::SetMultipleTracksClipsCommand {
+                changes,
+                label: "Create Audition".to_string(),
+            });
+            {
+                let mut st = timeline_state.borrow_mut();
+                st.history.execute(cmd, &mut proj);
+            }
+            drop(proj);
+            on_project_changed();
+            reply
+                .send(json!({"success": true, "audition_clip_id": audition_id}))
+                .ok();
+        }
+        McpCommand::AddAuditionTake {
+            audition_clip_id,
+            source_path,
+            source_in_ns,
+            source_out_ns,
+            label,
+            reply,
+        } => {
+            let exists_and_is_audition = {
+                let proj = project.borrow();
+                proj.clip_ref(&audition_clip_id)
+                    .map(|c| c.is_audition())
+                    .unwrap_or(false)
+            };
+            if !exists_and_is_audition {
+                reply
+                    .send(json!({"error": "Clip is not an audition clip"}))
+                    .ok();
+                return;
+            }
+            let take = crate::model::clip::AuditionTake {
+                id: uuid::Uuid::new_v4().to_string(),
+                label: label.unwrap_or_else(|| {
+                    std::path::Path::new(&source_path)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("Take")
+                        .to_string()
+                }),
+                source_path,
+                source_in: source_in_ns,
+                source_out: source_out_ns,
+                source_timecode_base_ns: None,
+                media_duration_ns: None,
+            };
+            let take_id = take.id.clone();
+            let cmd = Box::new(crate::undo::AddAuditionTakeCommand {
+                clip_id: audition_clip_id,
+                take,
+            });
+            {
+                let mut proj = project.borrow_mut();
+                let mut st = timeline_state.borrow_mut();
+                st.history.execute(cmd, &mut proj);
+            }
+            on_project_changed();
+            reply
+                .send(json!({"success": true, "take_id": take_id}))
+                .ok();
+        }
+        McpCommand::RemoveAuditionTake {
+            audition_clip_id,
+            take_index,
+            reply,
+        } => {
+            let (is_audition, active_index, num_takes) = {
+                let proj = project.borrow();
+                proj.clip_ref(&audition_clip_id)
+                    .map(|c| {
+                        (
+                            c.is_audition(),
+                            c.audition_active_take_index,
+                            c.audition_takes.as_ref().map(|t| t.len()).unwrap_or(0),
+                        )
+                    })
+                    .unwrap_or((false, 0, 0))
+            };
+            if !is_audition {
+                reply
+                    .send(json!({"error": "Clip is not an audition clip"}))
+                    .ok();
+                return;
+            }
+            if take_index >= num_takes {
+                reply
+                    .send(json!({"error": format!("take_index {take_index} out of range (clip has {num_takes} takes)")}))
+                    .ok();
+                return;
+            }
+            if take_index == active_index {
+                reply
+                    .send(json!({"error": "Cannot remove the active take. Switch to a different take first."}))
+                    .ok();
+                return;
+            }
+            let cmd = Box::new(crate::undo::RemoveAuditionTakeCommand {
+                clip_id: audition_clip_id,
+                take_index,
+                removed: std::cell::RefCell::new(None),
+            });
+            {
+                let mut proj = project.borrow_mut();
+                let mut st = timeline_state.borrow_mut();
+                st.history.execute(cmd, &mut proj);
+            }
+            on_project_changed();
+            reply.send(json!({"success": true})).ok();
+        }
+        McpCommand::SetActiveAuditionTake {
+            audition_clip_id,
+            take_index,
+            reply,
+        } => {
+            let (snapshot, num_takes) = {
+                let proj = project.borrow();
+                let clip = proj.clip_ref(&audition_clip_id);
+                let snap = clip.cloned();
+                let n = snap
+                    .as_ref()
+                    .and_then(|c| c.audition_takes.as_ref().map(|t| t.len()))
+                    .unwrap_or(0);
+                (snap, n)
+            };
+            if !snapshot.as_ref().map(|c| c.is_audition()).unwrap_or(false) {
+                reply
+                    .send(json!({"error": "Clip is not an audition clip"}))
+                    .ok();
+                return;
+            }
+            if take_index >= num_takes {
+                reply
+                    .send(json!({"error": format!("take_index {take_index} out of range (clip has {num_takes} takes)")}))
+                    .ok();
+                return;
+            }
+            let cmd = Box::new(crate::undo::SetActiveAuditionTakeCommand {
+                clip_id: audition_clip_id,
+                new_index: take_index,
+                before_snapshot: snapshot,
+            });
+            {
+                let mut proj = project.borrow_mut();
+                let mut st = timeline_state.borrow_mut();
+                st.history.execute(cmd, &mut proj);
+            }
+            on_project_changed();
+            reply.send(json!({"success": true})).ok();
+        }
+        McpCommand::ListAuditionTakes {
+            audition_clip_id,
+            reply,
+        } => {
+            let proj = project.borrow();
+            let Some(clip) = proj.clip_ref(&audition_clip_id) else {
+                reply
+                    .send(json!({"error": format!("Clip not found: {audition_clip_id}")}))
+                    .ok();
+                return;
+            };
+            if !clip.is_audition() {
+                reply
+                    .send(json!({"error": "Clip is not an audition clip"}))
+                    .ok();
+                return;
+            }
+            let takes: Vec<serde_json::Value> = clip
+                .audition_takes
+                .as_ref()
+                .map(|takes| {
+                    takes
+                        .iter()
+                        .enumerate()
+                        .map(|(i, t)| {
+                            json!({
+                                "index": i,
+                                "id": t.id,
+                                "label": t.label,
+                                "source_path": t.source_path,
+                                "source_in_ns": t.source_in,
+                                "source_out_ns": t.source_out,
+                                "source_timecode_base_ns": t.source_timecode_base_ns,
+                                "media_duration_ns": t.media_duration_ns,
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            reply
+                .send(json!({
+                    "clip_id": audition_clip_id,
+                    "active_take_index": clip.audition_active_take_index,
+                    "takes": takes,
+                }))
+                .ok();
+        }
+        McpCommand::FinalizeAudition {
+            audition_clip_id,
+            reply,
+        } => {
+            let snapshot = project.borrow().clip_ref(&audition_clip_id).cloned();
+            if !snapshot.as_ref().map(|c| c.is_audition()).unwrap_or(false) {
+                reply
+                    .send(json!({"error": "Clip is not an audition clip"}))
+                    .ok();
+                return;
+            }
+            let cmd = Box::new(crate::undo::FinalizeAuditionCommand {
+                clip_id: audition_clip_id,
+                before_snapshot: snapshot,
+            });
+            {
+                let mut proj = project.borrow_mut();
+                let mut st = timeline_state.borrow_mut();
+                st.history.execute(cmd, &mut proj);
+            }
+            on_project_changed();
+            reply.send(json!({"success": true})).ok();
         }
         // ── Subtitle / STT commands ────────────────────────────────────────
         McpCommand::GenerateSubtitles {

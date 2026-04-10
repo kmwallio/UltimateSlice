@@ -634,7 +634,8 @@ Tracking docs:
 - [ ] Reverse Match Frame (Find all timeline instances of a library clip)
 - [x] Proxy Workflow: One-click toggle between original and proxy media
 - [x] Keyword ranges + favorite/reject ratings in browser
-- [ ] Auditions / clip versions (swap alternate takes nondestructively)
+- [x] Auditions / clip versions — Final Cut Pro–style nondestructive alternate-take swapping. New `ClipKind::Audition` with `AuditionTake` struct stored in `audition_takes`/`audition_active_take_index`; the host clip's `source_path`/`source_in`/`source_out`/`media_duration_ns`/`source_timecode_base_ns` always mirror the active take so playback, export, transitions, color grade, transforms, keyframes, and frei0r effects all just work without knowing auditions exist. Right-click **Create Audition from Selection** groups 2+ same-track clips into one audition; Inspector shows a takes list, click a row to switch active (undoable, snapshots host-field tweaks), Add/Remove/Finalize buttons; "AUD" badge + gold fill + "n/m" indicator on the timeline; FCPXML/`.uspxml` round-trip via `us:clip-kind=audition` + `us:audition-takes` JSON vendor attrs (strict-mode FCPXML safely degrades to a plain asset-clip referencing the active take); OTIO round-trip via `metadata.ultimateslice.audition_*`; six MCP tools (`create_audition_clip`, `add_audition_take`, `remove_audition_take`, `set_active_audition_take`, `list_audition_takes`, `finalize_audition`); five undo commands; 13 new unit + round-trip tests
+- [ ] Plugin architecture for third-party video effects (e.g. OFX/LV2 bridge)
 - [ ] Plugin architecture for third-party video effects (e.g. OFX/LV2 bridge)
 
 ### Advanced Audio

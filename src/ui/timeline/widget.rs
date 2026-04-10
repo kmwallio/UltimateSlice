@@ -2968,6 +2968,126 @@ impl TimelineState {
         true
     }
 
+    /// Build a single audition clip from the selected video/image clips on
+    /// the same track. The first selected clip's timeline_start anchors the
+    /// audition; the first selected clip becomes the active take. Returns
+    /// `true` when the operation runs.
+    pub fn create_audition_from_selection(&mut self) -> bool {
+        let ids = self.selected_ids_or_primary();
+        if ids.len() < 2 {
+            return false;
+        }
+        let proj = self.project.borrow();
+        let editing_tracks = self.resolve_editing_tracks(&proj);
+        let mut hits: Vec<(Clip, String)> = Vec::new();
+        for track in editing_tracks {
+            for clip in &track.clips {
+                if ids.contains(&clip.id) {
+                    hits.push((clip.clone(), track.id.clone()));
+                }
+            }
+        }
+        if hits.len() < 2 {
+            return false;
+        }
+        // All selected clips must be on the same track and the same kind
+        // (Video / Image / Audio). Refuse mixed selections.
+        let first_track = hits[0].1.clone();
+        if hits.iter().any(|(_, t)| t != &first_track) {
+            return false;
+        }
+        let first_kind = hits[0].0.kind.clone();
+        let homogeneous = hits.iter().all(|(c, _)| c.kind == first_kind);
+        if !homogeneous {
+            return false;
+        }
+        if !matches!(
+            first_kind,
+            crate::model::clip::ClipKind::Video
+                | crate::model::clip::ClipKind::Image
+                | crate::model::clip::ClipKind::Audio
+        ) {
+            return false;
+        }
+        // Sort by timeline_start so the earliest clip is the audition anchor
+        // and the active take.
+        hits.sort_by_key(|(c, _)| c.timeline_start);
+        let anchor_start = hits[0].0.timeline_start;
+        let takes: Vec<crate::model::clip::AuditionTake> = hits
+            .iter()
+            .map(|(c, _)| crate::model::clip::AuditionTake {
+                id: uuid::Uuid::new_v4().to_string(),
+                label: c.label.clone(),
+                source_path: c.source_path.clone(),
+                source_in: c.source_in,
+                source_out: c.source_out,
+                source_timecode_base_ns: c.source_timecode_base_ns,
+                media_duration_ns: c.media_duration_ns,
+            })
+            .collect();
+        let audition = Clip::new_audition(anchor_start, takes, 0);
+        // Build a SetMultipleTracksClipsCommand that drops the selected
+        // clips from their track and inserts the audition in the same slot.
+        let mut changes = Vec::new();
+        for track in self.resolve_editing_tracks(&proj) {
+            if track.id != first_track {
+                continue;
+            }
+            let old_clips = track.clips.clone();
+            let mut new_clips: Vec<Clip> = track
+                .clips
+                .iter()
+                .filter(|c| !ids.contains(&c.id))
+                .cloned()
+                .collect();
+            new_clips.push(audition.clone());
+            new_clips.sort_by_key(|c| c.timeline_start);
+            changes.push(TrackClipsChange {
+                track_id: track.id.clone(),
+                old_clips,
+                new_clips,
+            });
+        }
+        drop(proj);
+        let cmd = Box::new(SetMultipleTracksClipsCommand {
+            changes,
+            label: "Create Audition".to_string(),
+        });
+        {
+            let mut proj = self.project.borrow_mut();
+            self.history.execute(cmd, &mut proj);
+        }
+        // Select the new audition clip so the Inspector immediately shows
+        // the takes list.
+        self.selected_clip_id = Some(audition.id.clone());
+        self.selected_clip_ids.clear();
+        self.selected_clip_ids.insert(audition.id);
+        true
+    }
+
+    /// Finalize the currently selected audition clip — collapse it to a
+    /// normal clip referencing only the active take. Returns `true` on
+    /// success.
+    pub fn finalize_selected_audition(&mut self) -> bool {
+        let cid = self.selected_clip_id.clone();
+        let Some(cid) = cid else { return false };
+        let snapshot = self.project.borrow().clip_ref(&cid).cloned();
+        if !snapshot
+            .as_ref()
+            .map(|c| c.is_audition())
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        let cmd = Box::new(crate::undo::FinalizeAuditionCommand {
+            clip_id: cid,
+            before_snapshot: snapshot,
+        });
+        let mut proj = self.project.borrow_mut();
+        self.history.execute(cmd, &mut proj);
+        true
+    }
+
     fn expand_with_link_members(&self, ids: &HashSet<String>) -> HashSet<String> {
         if ids.is_empty() {
             return HashSet::new();
@@ -3547,7 +3667,8 @@ fn clip_kind_to_track_kind(kind: &ClipKind) -> TrackKind {
         | ClipKind::Title
         | ClipKind::Adjustment
         | ClipKind::Compound
-        | ClipKind::Multicam => TrackKind::Video,
+        | ClipKind::Multicam
+        | ClipKind::Audition => TrackKind::Video,
     }
 }
 
@@ -4312,6 +4433,18 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         "Sync selected clips by audio and create a multicam clip (Alt+M)",
     ));
     clip_context_box.append(&btn_create_multicam);
+    let btn_create_audition = gtk::Button::with_label("Create Audition from Selection");
+    btn_create_audition.add_css_class("flat");
+    btn_create_audition.set_tooltip_text(Some(
+        "Group selected clips into a single audition clip with one active take",
+    ));
+    clip_context_box.append(&btn_create_audition);
+    let btn_finalize_audition = gtk::Button::with_label("Finalize Audition");
+    btn_finalize_audition.add_css_class("flat");
+    btn_finalize_audition.set_tooltip_text(Some(
+        "Collapse this audition to a normal clip using only the active take",
+    ));
+    clip_context_box.append(&btn_finalize_audition);
     clip_context_pop.set_child(Some(&clip_context_box));
 
     let track_context_pop = gtk::Popover::new();
@@ -4632,6 +4765,50 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             let mut st = state.borrow_mut();
             let _ = st.request_create_multicam();
             drop(st);
+            if let Some(a) = area_weak.upgrade() {
+                a.queue_draw();
+            }
+        });
+    }
+
+    // ── Create Audition button ──
+    {
+        let state = state.clone();
+        let pop_weak = clip_context_pop.downgrade();
+        let area_weak = area.downgrade();
+        btn_create_audition.connect_clicked(move |_| {
+            if let Some(pop) = pop_weak.upgrade() {
+                pop.popdown();
+            }
+            let changed = {
+                let mut st = state.borrow_mut();
+                st.create_audition_from_selection()
+            };
+            if changed {
+                TimelineState::notify_project_changed(&state);
+            }
+            if let Some(a) = area_weak.upgrade() {
+                a.queue_draw();
+            }
+        });
+    }
+
+    // ── Finalize Audition button ──
+    {
+        let state = state.clone();
+        let pop_weak = clip_context_pop.downgrade();
+        let area_weak = area.downgrade();
+        btn_finalize_audition.connect_clicked(move |_| {
+            if let Some(pop) = pop_weak.upgrade() {
+                pop.popdown();
+            }
+            let changed = {
+                let mut st = state.borrow_mut();
+                st.finalize_selected_audition()
+            };
+            if changed {
+                TimelineState::notify_project_changed(&state);
+            }
             if let Some(a) = area_weak.upgrade() {
                 a.queue_draw();
             }
@@ -8266,12 +8443,84 @@ fn draw_clip(
         cr.restore().ok();
     }
 
+    // ── Audition clip visual ──────────────────────────────────────────────
+    if clip.kind == crate::model::clip::ClipKind::Audition && cw > 20.0 {
+        // "AUD" badge in the top-left.
+        cr.save().ok();
+        let badge_w = 22.0_f64.min(cw * 0.3);
+        let badge_h = 14.0_f64.min(ch * 0.4);
+        let bx = cx + 4.0;
+        let by = cy + 4.0;
+        cr.rectangle(bx, by, badge_w, badge_h);
+        cr.set_source_rgba(0.55, 0.40, 0.10, 0.9);
+        let _ = cr.fill();
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.95);
+        let fs = badge_h * 0.65;
+        cr.set_font_size(fs);
+        let _ = cr.move_to(bx + 2.0, by + badge_h - 3.0);
+        let _ = cr.show_text("AUD");
+        cr.restore().ok();
+
+        // "n / m" indicator on the right edge of the clip showing
+        // active-take index out of total takes.
+        if let Some(takes) = clip.audition_takes.as_ref() {
+            if !takes.is_empty() && cw > 60.0 {
+                cr.save().ok();
+                let indicator = format!(
+                    "{}/{}",
+                    clip.audition_active_take_index + 1,
+                    takes.len()
+                );
+                let fs2 = (ch * 0.32).clamp(8.0, 12.0);
+                cr.set_font_size(fs2);
+                cr.set_source_rgba(1.0, 1.0, 1.0, 0.85);
+                let te = cr
+                    .text_extents(&indicator)
+                    .unwrap_or_else(|_| cr.text_extents("?").unwrap());
+                let tx = cx + cw - te.width() - 6.0;
+                let ty = cy + 4.0 + te.height();
+                let _ = cr.move_to(tx, ty);
+                let _ = cr.show_text(&indicator);
+                cr.restore().ok();
+            }
+        }
+
+        // Centered label using the host clip's label (which mirrors the
+        // active take's title).
+        cr.save().ok();
+        let font_sz = (ch * 0.35).clamp(TRACK_LABEL_FONT_SIZE_MIN, TRACK_LABEL_FONT_SIZE_MAX);
+        cr.set_font_size(font_sz);
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.92);
+        let label_text = &clip.label;
+        let max_label_w = (cw - 56.0).max(0.0);
+        let mut truncated = label_text.clone();
+        loop {
+            let te = cr
+                .text_extents(&truncated)
+                .unwrap_or_else(|_| cr.text_extents("…").unwrap());
+            if te.width() <= max_label_w || truncated.len() <= 1 {
+                break;
+            }
+            truncated.pop();
+            truncated.push('…');
+        }
+        let te = cr
+            .text_extents(&truncated)
+            .unwrap_or_else(|_| cr.text_extents("…").unwrap());
+        let tx = cx + (cw - te.width()) / 2.0;
+        let ty = cy + (ch + te.height()) / 2.0;
+        let _ = cr.move_to(tx, ty);
+        let _ = cr.show_text(&truncated);
+        cr.restore().ok();
+    }
+
     // ── Thumbnail strip for video clips ──────────────────────────────────
     if track.is_video()
         && clip.kind != crate::model::clip::ClipKind::Title
         && clip.kind != crate::model::clip::ClipKind::Adjustment
         && clip.kind != crate::model::clip::ClipKind::Compound
         && clip.kind != crate::model::clip::ClipKind::Multicam
+        && clip.kind != crate::model::clip::ClipKind::Audition
         && cw > 20.0
     {
         const THUMB_ASPECT: f64 = 160.0 / 90.0;
@@ -8514,6 +8763,7 @@ fn draw_clip(
             && clip.kind != crate::model::clip::ClipKind::Adjustment
             && clip.kind != crate::model::clip::ClipKind::Compound
             && clip.kind != crate::model::clip::ClipKind::Multicam
+            && clip.kind != crate::model::clip::ClipKind::Audition
             && st.source_is_missing(&clip.source_path);
         let has_link_badge = clip
             .link_group_id
@@ -8889,6 +9139,9 @@ fn clip_fill_color(clip: &Clip, track_kind: TrackKind) -> (f64, f64, f64) {
             }
             if clip.kind == crate::model::clip::ClipKind::Multicam {
                 return (0.85, 0.50, 0.17); // orange for multicam clips
+            }
+            if clip.kind == crate::model::clip::ClipKind::Audition {
+                return (0.78, 0.62, 0.22); // gold for audition clips
             }
             match track_kind {
                 TrackKind::Video => (0.17, 0.47, 0.85),

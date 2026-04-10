@@ -1,4 +1,4 @@
-use crate::model::clip::{Clip, VoiceIsolationSource};
+use crate::model::clip::{AuditionTake, Clip, VoiceIsolationSource};
 use crate::model::project::Project;
 use crate::model::transition::OutgoingTransition;
 
@@ -2031,6 +2031,132 @@ fn find_clip_mut<'a>(
     _track_id: &str,
 ) -> Option<&'a mut Clip> {
     project.clip_mut(clip_id)
+}
+
+// ─── Audition / clip-versions commands ────────────────────────────────────
+//
+// Create/Finalize audition use the existing `SetMultipleTracksClipsCommand`
+// (whole-track snapshot) at the call site, since they replace clips in
+// place. The three commands below cover *in-place* mutations of an existing
+// audition clip — switching the active take, adding a take, removing a
+// take — using full-clip snapshots so undo restores any field tweaks made
+// while a different take was active.
+
+/// Switch the currently active audition take. Snapshots the entire clip
+/// before mutation so undo restores both the index and any tweaks the user
+/// made to the host fields while the previous take was active.
+pub struct SetActiveAuditionTakeCommand {
+    pub clip_id: String,
+    pub new_index: usize,
+    pub before_snapshot: Option<Clip>,
+}
+
+impl EditCommand for SetActiveAuditionTakeCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            clip.set_active_audition_take(self.new_index);
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let (Some(clip), Some(snap)) =
+            (project.clip_mut(&self.clip_id), self.before_snapshot.as_ref())
+        {
+            *clip = snap.clone();
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Switch audition take"
+    }
+}
+
+/// Append a new take to an audition clip.
+pub struct AddAuditionTakeCommand {
+    pub clip_id: String,
+    pub take: AuditionTake,
+}
+
+impl EditCommand for AddAuditionTakeCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            clip.add_audition_take(self.take.clone());
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            if let Some(takes) = clip.audition_takes.as_mut() {
+                takes.pop();
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Add audition take"
+    }
+}
+
+/// Remove a take from an audition clip. Refuses to remove the active take.
+/// Stores the removed take in the command so undo can reinsert it.
+pub struct RemoveAuditionTakeCommand {
+    pub clip_id: String,
+    pub take_index: usize,
+    pub removed: std::cell::RefCell<Option<AuditionTake>>,
+}
+
+impl EditCommand for RemoveAuditionTakeCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            *self.removed.borrow_mut() = clip.remove_audition_take(self.take_index);
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            if let Some(take) = self.removed.borrow_mut().take() {
+                if let Some(takes) = clip.audition_takes.as_mut() {
+                    let insert_at = self.take_index.min(takes.len());
+                    takes.insert(insert_at, take);
+                    if insert_at <= clip.audition_active_take_index {
+                        clip.audition_active_take_index += 1;
+                    }
+                }
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Remove audition take"
+    }
+}
+
+/// Collapse an audition clip back to a normal clip referencing only the
+/// currently active take. Snapshots the full clip so undo can restore the
+/// audition wrapper and all alternate takes.
+pub struct FinalizeAuditionCommand {
+    pub clip_id: String,
+    pub before_snapshot: Option<Clip>,
+}
+
+impl EditCommand for FinalizeAuditionCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            clip.finalize_audition();
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let (Some(clip), Some(snap)) =
+            (project.clip_mut(&self.clip_id), self.before_snapshot.as_ref())
+        {
+            *clip = snap.clone();
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Finalize audition"
+    }
 }
 
 #[cfg(test)]

@@ -225,6 +225,27 @@ pub enum ClipKind {
     Adjustment,
     Compound,
     Multicam,
+    /// A nondestructive container of alternate takes. The host clip's
+    /// `source_path`/`source_in`/`source_out`/`media_duration_ns`/
+    /// `source_timecode_base_ns` always reflect the **active** take, so
+    /// playback/export see a normal clip. Inactive takes live in
+    /// [`Clip::audition_takes`].
+    Audition,
+}
+
+/// A single alternate take inside an [`ClipKind::Audition`] clip.
+///
+/// Mirrors [`MulticamAngle`] but without the multicam-specific sync/audio
+/// fields, since auditions only present one take at a time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AuditionTake {
+    pub id: String,
+    pub label: String,
+    pub source_path: String,
+    pub source_in: u64,
+    pub source_out: u64,
+    pub source_timecode_base_ns: Option<u64>,
+    pub media_duration_ns: Option<u64>,
 }
 
 /// A single camera angle in a multicam clip.
@@ -1929,6 +1950,17 @@ pub struct Clip {
     /// Angle switch points for multicam clips, sorted by `position_ns`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multicam_switches: Option<Vec<AngleSwitch>>,
+    /// Alternate takes for [`ClipKind::Audition`] clips. The host clip's
+    /// `source_path`/`source_in`/`source_out`/`media_duration_ns`/
+    /// `source_timecode_base_ns` always reflect the active take, so this
+    /// vector stores **all** takes (including a snapshot of the currently
+    /// active one). `None` for all other clip kinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audition_takes: Option<Vec<AuditionTake>>,
+    /// Index into `audition_takes` of the currently active take. Only
+    /// meaningful when `kind == ClipKind::Audition`.
+    #[serde(default)]
+    pub audition_active_take_index: usize,
 }
 
 fn default_anamorphic_desqueeze() -> f64 {
@@ -2337,6 +2369,8 @@ impl Clip {
             compound_tracks: None,
             multicam_angles: None,
             multicam_switches: None,
+            audition_takes: None,
+            audition_active_take_index: 0,
         }
     }
 
@@ -2513,6 +2547,205 @@ impl Clip {
             }
         }
         segments
+    }
+
+    // ─── Audition / clip-versions helpers ────────────────────────────────
+
+    /// Returns `true` when this clip is an audition clip.
+    pub fn is_audition(&self) -> bool {
+        self.kind == ClipKind::Audition
+    }
+
+    /// Build a fresh `AuditionTake` snapshot from the current host clip
+    /// fields (used when we need to round-trip the active take back into
+    /// the takes vector before swapping in a new take).
+    fn audition_take_from_host(&self, id: String, label: String) -> AuditionTake {
+        AuditionTake {
+            id,
+            label,
+            source_path: self.source_path.clone(),
+            source_in: self.source_in,
+            source_out: self.source_out,
+            source_timecode_base_ns: self.source_timecode_base_ns,
+            media_duration_ns: self.media_duration_ns,
+        }
+    }
+
+    /// Apply a take's source fields to the host clip (no length adjustment).
+    fn audition_apply_take_to_host(&mut self, take: &AuditionTake) {
+        self.source_path = take.source_path.clone();
+        self.source_in = take.source_in;
+        self.source_out = take.source_out;
+        self.source_timecode_base_ns = take.source_timecode_base_ns;
+        self.media_duration_ns = take.media_duration_ns;
+    }
+
+    /// Create a new audition clip from a list of candidate takes. The
+    /// `active` index designates which take's fields populate the host
+    /// clip (and therefore drive playback/export). Duration follows the
+    /// active take's source range.
+    pub fn new_audition(
+        timeline_start: u64,
+        takes: Vec<AuditionTake>,
+        active: usize,
+    ) -> Self {
+        let active = active.min(takes.len().saturating_sub(1));
+        let active_take = takes
+            .get(active)
+            .cloned()
+            .unwrap_or_else(|| AuditionTake {
+                id: String::new(),
+                label: String::new(),
+                source_path: String::new(),
+                source_in: 0,
+                source_out: 0,
+                source_timecode_base_ns: None,
+                media_duration_ns: None,
+            });
+        let duration = active_take
+            .source_out
+            .saturating_sub(active_take.source_in);
+        let mut c = Self::new(
+            &active_take.source_path,
+            duration,
+            timeline_start,
+            ClipKind::Audition,
+        );
+        c.label = if active_take.label.is_empty() {
+            "Audition".to_string()
+        } else {
+            format!("Audition · {}", active_take.label)
+        };
+        c.source_in = active_take.source_in;
+        c.source_out = active_take.source_out;
+        c.source_timecode_base_ns = active_take.source_timecode_base_ns;
+        c.media_duration_ns = active_take.media_duration_ns;
+        c.audition_takes = Some(takes);
+        c.audition_active_take_index = active;
+        c
+    }
+
+    /// Switch the active audition take. Returns the previous active index
+    /// on success (so undo can restore it), or `None` if the clip is not
+    /// an audition or the index is out of range. The currently-active take
+    /// is snapshotted from the host fields back into the takes vector
+    /// before the new take is loaded, so any field tweaks the user made
+    /// while that take was active are preserved.
+    pub fn set_active_audition_take(&mut self, new_index: usize) -> Option<usize> {
+        if self.kind != ClipKind::Audition {
+            return None;
+        }
+        let prev_index = self.audition_active_take_index;
+        let takes = self.audition_takes.as_mut()?;
+        if new_index >= takes.len() {
+            return None;
+        }
+        if new_index == prev_index {
+            return Some(prev_index);
+        }
+        // Snapshot current host fields back into the previously active take.
+        if let Some(slot) = takes.get_mut(prev_index) {
+            slot.source_path = self.source_path.clone();
+            slot.source_in = self.source_in;
+            slot.source_out = self.source_out;
+            slot.source_timecode_base_ns = self.source_timecode_base_ns;
+            slot.media_duration_ns = self.media_duration_ns;
+        }
+        // Pull the new active take. The clip's `duration()` is derived from
+        // `source_out - source_in` (modulated by speed), so swapping the
+        // source range here naturally resizes the clip on the timeline.
+        let new_take = takes.get(new_index).cloned()?;
+        self.audition_apply_take_to_host(&new_take);
+        self.audition_active_take_index = new_index;
+        // Refresh display label.
+        let suffix = if new_take.label.is_empty() {
+            String::new()
+        } else {
+            format!(" · {}", new_take.label)
+        };
+        self.label = format!("Audition{}", suffix);
+        Some(prev_index)
+    }
+
+    /// Borrow the currently active audition take.
+    pub fn audition_active_take(&self) -> Option<&AuditionTake> {
+        self.audition_takes
+            .as_ref()
+            .and_then(|t| t.get(self.audition_active_take_index))
+    }
+
+    /// Append a new take to an audition clip. No-op if the clip is not an
+    /// audition.
+    pub fn add_audition_take(&mut self, take: AuditionTake) {
+        if self.kind != ClipKind::Audition {
+            return;
+        }
+        self.audition_takes
+            .get_or_insert_with(Vec::new)
+            .push(take);
+    }
+
+    /// Remove an audition take by index. Refuses to remove the currently
+    /// active take (returns `None` in that case). Returns the removed take
+    /// on success, so undo can reinsert it.
+    pub fn remove_audition_take(&mut self, index: usize) -> Option<AuditionTake> {
+        if self.kind != ClipKind::Audition {
+            return None;
+        }
+        if index == self.audition_active_take_index {
+            return None;
+        }
+        let takes = self.audition_takes.as_mut()?;
+        if index >= takes.len() {
+            return None;
+        }
+        let removed = takes.remove(index);
+        if index < self.audition_active_take_index {
+            self.audition_active_take_index -= 1;
+        }
+        Some(removed)
+    }
+
+    /// Collapse an audition clip to a plain clip of the active take. Drops
+    /// the takes vector. Picks an appropriate `ClipKind` for the new clip
+    /// based on the active take's file extension. No-op if the clip is not
+    /// an audition.
+    pub fn finalize_audition(&mut self) {
+        if self.kind != ClipKind::Audition {
+            return;
+        }
+        self.audition_takes = None;
+        self.audition_active_take_index = 0;
+        // Promote to the most appropriate concrete kind based on the
+        // already-mirrored host source path.
+        self.kind = Self::detect_kind_from_path(&self.source_path);
+        // Strip the "Audition · " label prefix if present so the finalized
+        // clip looks like a normal clip.
+        if let Some(rest) = self.label.strip_prefix("Audition · ") {
+            self.label = rest.to_string();
+        } else if self.label == "Audition" {
+            self.label = std::path::Path::new(&self.source_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "Clip".to_string());
+        }
+    }
+
+    /// Detect a sensible `ClipKind` from a file extension. Used by audition
+    /// finalization to pick the right concrete kind. Falls back to `Video`.
+    pub fn detect_kind_from_path(path: &str) -> ClipKind {
+        let ext = std::path::Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .unwrap_or_default();
+        match ext.as_str() {
+            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "tif" | "tiff" | "webp" | "heic"
+            | "svg" => ClipKind::Image,
+            "wav" | "mp3" | "aac" | "flac" | "ogg" | "m4a" | "opus" => ClipKind::Audio,
+            _ => ClipKind::Video,
+        }
     }
 
     /// Raw source material duration (source_out − source_in), unaffected by speed.
@@ -5236,5 +5469,177 @@ mod tests {
         assert_eq!(clip.source_out, 10_000_000_000);
         assert_eq!(clip.scale_keyframes.len(), 1);
         assert_eq!(clip.scale_keyframes[0].time_ns, 5_000_000_000);
+    }
+
+    // ─── Audition / clip-versions tests ──────────────────────────────────
+
+    fn make_take(label: &str, path: &str, in_ns: u64, out_ns: u64) -> AuditionTake {
+        AuditionTake {
+            id: format!("take-{}", label),
+            label: label.to_string(),
+            source_path: path.to_string(),
+            source_in: in_ns,
+            source_out: out_ns,
+            source_timecode_base_ns: None,
+            media_duration_ns: Some(out_ns + 1_000_000_000),
+        }
+    }
+
+    #[test]
+    fn test_new_audition_uses_active_take_fields() {
+        let takes = vec![
+            make_take("Wide", "/media/wide.mov", 0, 5_000_000_000),
+            make_take("Medium", "/media/medium.mov", 1_000_000_000, 9_000_000_000),
+            make_take("Close", "/media/close.mov", 0, 4_000_000_000),
+        ];
+        let aud = Clip::new_audition(2_000_000_000, takes.clone(), 1);
+        assert_eq!(aud.kind, ClipKind::Audition);
+        assert!(aud.is_audition());
+        assert_eq!(aud.timeline_start, 2_000_000_000);
+        assert_eq!(aud.audition_active_take_index, 1);
+        // Host fields mirror the active take (Medium).
+        assert_eq!(aud.source_path, "/media/medium.mov");
+        assert_eq!(aud.source_in, 1_000_000_000);
+        assert_eq!(aud.source_out, 9_000_000_000);
+        // duration() = source_out - source_in (no speed change)
+        assert_eq!(aud.duration(), 8_000_000_000);
+        assert_eq!(aud.audition_takes.as_ref().unwrap().len(), 3);
+        assert!(aud.label.contains("Medium"));
+    }
+
+    #[test]
+    fn test_new_audition_clamps_active_index_in_bounds() {
+        let takes = vec![make_take("Only", "/x.mov", 0, 1_000_000_000)];
+        // Active index 99 should be clamped to the last available take.
+        let aud = Clip::new_audition(0, takes, 99);
+        assert_eq!(aud.audition_active_take_index, 0);
+        assert_eq!(aud.source_path, "/x.mov");
+    }
+
+    #[test]
+    fn test_set_active_audition_take_swaps_host_fields_round_trip() {
+        let takes = vec![
+            make_take("Wide", "/wide.mov", 0, 5_000_000_000),
+            make_take("Close", "/close.mov", 500_000_000, 3_500_000_000),
+        ];
+        let mut aud = Clip::new_audition(0, takes, 0);
+        // Mutate host fields while take 0 is active (simulating a trim).
+        aud.source_in = 100_000_000;
+        aud.source_out = 4_900_000_000;
+        // Switch to take 1.
+        let prev = aud.set_active_audition_take(1);
+        assert_eq!(prev, Some(0));
+        assert_eq!(aud.audition_active_take_index, 1);
+        assert_eq!(aud.source_path, "/close.mov");
+        assert_eq!(aud.source_in, 500_000_000);
+        assert_eq!(aud.source_out, 3_500_000_000);
+        assert_eq!(aud.duration(), 3_000_000_000);
+        // The trim we made on take 0 should have been snapshotted into the
+        // takes vector — switching back recovers it.
+        let prev2 = aud.set_active_audition_take(0);
+        assert_eq!(prev2, Some(1));
+        assert_eq!(aud.source_path, "/wide.mov");
+        assert_eq!(aud.source_in, 100_000_000);
+        assert_eq!(aud.source_out, 4_900_000_000);
+    }
+
+    #[test]
+    fn test_set_active_audition_take_rejects_out_of_range() {
+        let takes = vec![make_take("A", "/a.mov", 0, 1_000_000_000)];
+        let mut aud = Clip::new_audition(0, takes, 0);
+        assert_eq!(aud.set_active_audition_take(99), None);
+        // Same index is a no-op success.
+        assert_eq!(aud.set_active_audition_take(0), Some(0));
+    }
+
+    #[test]
+    fn test_set_active_audition_take_noop_on_non_audition() {
+        let mut clip = make_test_clip(5_000_000_000, 0);
+        assert_eq!(clip.set_active_audition_take(0), None);
+    }
+
+    #[test]
+    fn test_audition_serde_round_trip() {
+        let takes = vec![
+            make_take("A", "/a.mov", 0, 2_000_000_000),
+            make_take("B", "/b.mov", 100_000_000, 3_100_000_000),
+        ];
+        let aud = Clip::new_audition(500_000_000, takes, 1);
+        let json = serde_json::to_string(&aud).unwrap();
+        let restored: Clip = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.kind, ClipKind::Audition);
+        assert_eq!(restored.audition_active_take_index, 1);
+        assert_eq!(restored.audition_takes.as_ref().unwrap().len(), 2);
+        assert_eq!(restored.source_path, "/b.mov");
+        assert_eq!(restored.source_in, 100_000_000);
+        assert_eq!(restored.source_out, 3_100_000_000);
+    }
+
+    #[test]
+    fn test_audition_fields_none_for_video_clip() {
+        let clip = make_test_clip(5_000_000_000, 0);
+        assert_eq!(clip.audition_active_take_index, 0);
+        assert!(clip.audition_takes.is_none());
+        assert!(!clip.is_audition());
+    }
+
+    #[test]
+    fn test_remove_audition_take_refused_for_active() {
+        let takes = vec![
+            make_take("A", "/a.mov", 0, 1_000_000_000),
+            make_take("B", "/b.mov", 0, 1_000_000_000),
+        ];
+        let mut aud = Clip::new_audition(0, takes, 1);
+        // Active index is 1; refuse to remove.
+        assert!(aud.remove_audition_take(1).is_none());
+        assert_eq!(aud.audition_takes.as_ref().unwrap().len(), 2);
+        // Removing index 0 succeeds and shifts active down to 0.
+        let removed = aud.remove_audition_take(0).expect("should remove");
+        assert_eq!(removed.label, "A");
+        assert_eq!(aud.audition_active_take_index, 0);
+        assert_eq!(aud.audition_takes.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_add_audition_take_appends() {
+        let takes = vec![make_take("A", "/a.mov", 0, 1_000_000_000)];
+        let mut aud = Clip::new_audition(0, takes, 0);
+        aud.add_audition_take(make_take("B", "/b.mov", 0, 2_000_000_000));
+        assert_eq!(aud.audition_takes.as_ref().unwrap().len(), 2);
+        assert_eq!(aud.audition_takes.as_ref().unwrap()[1].label, "B");
+        // Active is still A.
+        assert_eq!(aud.audition_active_take_index, 0);
+        assert_eq!(aud.source_path, "/a.mov");
+    }
+
+    #[test]
+    fn test_finalize_audition_drops_takes_and_picks_concrete_kind() {
+        let takes = vec![
+            make_take("A", "/a.mov", 0, 1_000_000_000),
+            make_take("B", "/b.mov", 0, 2_000_000_000),
+        ];
+        let mut aud = Clip::new_audition(0, takes, 1);
+        // Active take is B (mp4-ish video).
+        aud.finalize_audition();
+        assert_eq!(aud.kind, ClipKind::Video);
+        assert!(aud.audition_takes.is_none());
+        assert_eq!(aud.audition_active_take_index, 0);
+        assert_eq!(aud.source_path, "/b.mov");
+    }
+
+    #[test]
+    fn test_finalize_audition_picks_audio_for_wav_extension() {
+        let takes = vec![make_take("VO", "/vo.wav", 0, 1_000_000_000)];
+        let mut aud = Clip::new_audition(0, takes, 0);
+        aud.finalize_audition();
+        assert_eq!(aud.kind, ClipKind::Audio);
+    }
+
+    #[test]
+    fn test_finalize_audition_noop_on_video() {
+        let mut clip = make_test_clip(5_000_000_000, 0);
+        clip.finalize_audition();
+        // Unchanged.
+        assert_eq!(clip.kind, ClipKind::Video);
     }
 }

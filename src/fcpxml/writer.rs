@@ -1166,6 +1166,19 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                                     .push_attribute(("us:multicam-switches", escaped.as_str()));
                             }
                         }
+                    } else if clip.kind == crate::model::clip::ClipKind::Audition {
+                        asset_clip.push_attribute(("us:clip-kind", "audition"));
+                        if let Some(ref takes) = clip.audition_takes {
+                            if let Ok(json) = serde_json::to_string(takes) {
+                                let escaped = json.replace('"', "&quot;");
+                                asset_clip
+                                    .push_attribute(("us:audition-takes", escaped.as_str()));
+                            }
+                        }
+                        asset_clip.push_attribute((
+                            "us:audition-active-take-index",
+                            clip.audition_active_take_index.to_string().as_str(),
+                        ));
                     }
                     asset_clip.push_attribute(("us:speed", clip.speed.to_string().as_str()));
                     let speed_keyframes_json = if clip.speed_keyframes.is_empty() {
@@ -3003,6 +3016,7 @@ fn patch_asset_clip_block_transform(
                 crate::model::clip::ClipKind::Adjustment => Some("adjustment".to_string()),
                 crate::model::clip::ClipKind::Compound => Some("compound".to_string()),
                 crate::model::clip::ClipKind::Multicam => Some("multicam".to_string()),
+                crate::model::clip::ClipKind::Audition => Some("audition".to_string()),
                 _ => None,
             },
         ),
@@ -7433,5 +7447,72 @@ mod tests {
             (clip2.shadows_tint - 0.8).abs() < 1e-3,
             "shadows_tint round-trip"
         );
+    }
+
+    #[test]
+    fn test_write_fcpxml_audition_round_trip() {
+        use crate::model::clip::AuditionTake;
+        let mut project = Project::new("AuditionTest");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let takes = vec![
+            AuditionTake {
+                id: "take-1".into(),
+                label: "Wide".into(),
+                source_path: "/tmp/wide.mov".into(),
+                source_in: 0,
+                source_out: 5_000_000_000,
+                source_timecode_base_ns: None,
+                media_duration_ns: Some(10_000_000_000),
+            },
+            AuditionTake {
+                id: "take-2".into(),
+                label: "Close".into(),
+                source_path: "/tmp/close.mov".into(),
+                source_in: 1_000_000_000,
+                source_out: 4_000_000_000,
+                source_timecode_base_ns: None,
+                media_duration_ns: Some(8_000_000_000),
+            },
+        ];
+        let aud = Clip::new_audition(0, takes, 1);
+        let aud_id = aud.id.clone();
+        track.add_clip(aud);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(
+            xml.contains("us:clip-kind=\"audition\""),
+            "expected us:clip-kind=audition in writer output:\n{}",
+            xml
+        );
+        assert!(
+            xml.contains("us:audition-active-take-index=\"1\""),
+            "expected active-take-index=1"
+        );
+        assert!(xml.contains("us:audition-takes="));
+
+        let parsed = parse_fcpxml(&xml).expect("parse written xml");
+        let restored = parsed
+            .video_tracks()
+            .next()
+            .expect("video track")
+            .clips
+            .iter()
+            .find(|c| c.id == aud_id)
+            .expect("audition clip preserved");
+        assert_eq!(restored.kind, ClipKind::Audition);
+        assert_eq!(restored.audition_active_take_index, 1);
+        let takes = restored
+            .audition_takes
+            .as_ref()
+            .expect("takes preserved");
+        assert_eq!(takes.len(), 2);
+        assert_eq!(takes[0].label, "Wide");
+        assert_eq!(takes[1].label, "Close");
+        // Host fields should mirror the active take (Close).
+        assert_eq!(restored.source_path, "/tmp/close.mov");
+        assert_eq!(restored.source_in, 1_000_000_000);
+        assert_eq!(restored.source_out, 4_000_000_000);
     }
 }

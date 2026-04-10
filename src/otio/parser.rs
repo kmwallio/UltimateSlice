@@ -324,6 +324,12 @@ fn otio_clip_to_clip(
         if let Some(v) = us.multicam_switches.as_ref() {
             clip.multicam_switches = Some(v.clone());
         }
+        if let Some(v) = us.audition_takes.as_ref() {
+            clip.audition_takes = Some(v.clone());
+        }
+        if let Some(v) = us.audition_active_take_index {
+            clip.audition_active_take_index = v;
+        }
         if let Some(v) = us.brightness {
             clip.brightness = v as f32;
         }
@@ -745,6 +751,7 @@ fn parse_clip_kind(s: &str) -> Option<ClipKind> {
         "Adjustment" => Some(ClipKind::Adjustment),
         "Compound" => Some(ClipKind::Compound),
         "Multicam" => Some(ClipKind::Multicam),
+        "Audition" => Some(ClipKind::Audition),
         _ => None,
     }
 }
@@ -1708,6 +1715,63 @@ mod tests {
         assert_eq!(switches[1].position_ns, 3_000_000_000);
         assert_eq!(switches[1].angle_index, 1);
         assert_eq!(switches[2].position_ns, 6_000_000_000);
+    }
+
+    #[test]
+    fn test_roundtrip_audition_clip_preserves_takes_and_active_index() {
+        use crate::model::clip::AuditionTake;
+        use crate::model::track::Track;
+
+        let mut p = Project::new("Audition OTIO Roundtrip");
+        p.frame_rate = FrameRate {
+            numerator: 30,
+            denominator: 1,
+        };
+        p.tracks.clear();
+
+        let mut track = Track::new_video("V1");
+        let takes = vec![
+            AuditionTake {
+                id: "take-wide".into(),
+                label: "Wide".into(),
+                source_path: "/footage/wide.mov".into(),
+                source_in: 0,
+                source_out: 5_000_000_000,
+                source_timecode_base_ns: None,
+                media_duration_ns: Some(10_000_000_000),
+            },
+            AuditionTake {
+                id: "take-close".into(),
+                label: "Close".into(),
+                source_path: "/footage/close.mov".into(),
+                source_in: 250_000_000,
+                source_out: 3_750_000_000,
+                source_timecode_base_ns: Some(86_400_000_000_000),
+                media_duration_ns: Some(7_500_000_000),
+            },
+        ];
+        let aud = Clip::new_audition(0, takes, 1);
+        track.add_clip(aud);
+        p.tracks.push(track);
+
+        let json = crate::otio::writer::write_otio(&p).unwrap();
+        let p2 = parse_otio(&json).unwrap();
+        assert_eq!(p2.tracks[0].clips.len(), 1, "audition clip should round-trip");
+        let clip2 = &p2.tracks[0].clips[0];
+        assert_eq!(clip2.kind, ClipKind::Audition);
+        assert_eq!(clip2.audition_active_take_index, 1);
+        let takes = clip2
+            .audition_takes
+            .as_ref()
+            .expect("audition_takes should round-trip");
+        assert_eq!(takes.len(), 2);
+        assert_eq!(takes[0].label, "Wide");
+        assert_eq!(takes[1].label, "Close");
+        assert_eq!(takes[1].source_timecode_base_ns, Some(86_400_000_000_000));
+        // Host fields mirror the active (Close) take.
+        assert_eq!(clip2.source_path, "/footage/close.mov");
+        assert_eq!(clip2.source_in, 250_000_000);
+        assert_eq!(clip2.source_out, 3_750_000_000);
     }
 
     #[test]

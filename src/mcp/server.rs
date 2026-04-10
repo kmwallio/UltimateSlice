@@ -1991,6 +1991,80 @@ fn tools_list() -> Value {
                 "required": ["clip_id", "angle_index"]
             }
         },
+        // ── Audition / clip-versions tools ────────────────────────────────
+        {
+            "name": "create_audition_clip",
+            "description": "Group 2+ clips on the same track into a single audition clip. The clip at active_index becomes the active take that drives playback and export; the others are kept as nondestructive alternates.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_ids": { "type": "array", "items": { "type": "string" }, "description": "Array of clip IDs to combine into the audition (minimum 2)" },
+                    "active_index": { "type": "integer", "description": "0-based index into clip_ids of the take to make active. Default 0." }
+                },
+                "required": ["clip_ids"]
+            }
+        },
+        {
+            "name": "add_audition_take",
+            "description": "Append a new take to an existing audition clip. The new take is added at the end and is NOT made active.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "audition_clip_id": { "type": "string", "description": "ID of the audition clip" },
+                    "source_path": { "type": "string", "description": "Path to the source media file for the new take" },
+                    "source_in_ns": { "type": "integer", "description": "In point of the take in the source file (nanoseconds)" },
+                    "source_out_ns": { "type": "integer", "description": "Out point of the take in the source file (nanoseconds)" },
+                    "label": { "type": "string", "description": "Optional human-readable label for the take" }
+                },
+                "required": ["audition_clip_id", "source_path", "source_in_ns", "source_out_ns"]
+            }
+        },
+        {
+            "name": "remove_audition_take",
+            "description": "Remove a take from an audition clip by index. Refuses to remove the currently active take — switch active first if needed.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "audition_clip_id": { "type": "string", "description": "ID of the audition clip" },
+                    "take_index": { "type": "integer", "description": "0-based index of the take to remove" }
+                },
+                "required": ["audition_clip_id", "take_index"]
+            }
+        },
+        {
+            "name": "set_active_audition_take",
+            "description": "Switch the active take of an audition clip. The audition's host fields (source_path/source_in/source_out) are updated to the chosen take, so playback and export immediately reflect the new selection. Any field tweaks made while the previous take was active are snapshotted into the takes list before the swap.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "audition_clip_id": { "type": "string", "description": "ID of the audition clip" },
+                    "take_index": { "type": "integer", "description": "0-based index of the take to make active" }
+                },
+                "required": ["audition_clip_id", "take_index"]
+            }
+        },
+        {
+            "name": "list_audition_takes",
+            "description": "List all takes in an audition clip, with the active take index.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "audition_clip_id": { "type": "string", "description": "ID of the audition clip" }
+                },
+                "required": ["audition_clip_id"]
+            }
+        },
+        {
+            "name": "finalize_audition",
+            "description": "Collapse an audition clip to a normal clip referencing only its currently active take. Discards alternate takes. Undoable.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "audition_clip_id": { "type": "string", "description": "ID of the audition clip to finalize" }
+                },
+                "required": ["audition_clip_id"]
+            }
+        },
         // ── Subtitle / STT tools ──────────────────────────────────────────
         {
             "name": "generate_subtitles",
@@ -3464,6 +3538,48 @@ fn dispatch_tool_payload(
             angle_index: arg_u64!(args, "angle_index", 0) as usize,
             volume: args["volume"].as_f64().map(|v| v as f32),
             muted: args["muted"].as_bool(),
+            reply: tx,
+        },
+        // ── Audition / clip-versions tools ────────────────────────────────
+        "create_audition_clip" => {
+            let clip_ids: Vec<String> = args["clip_ids"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            McpCommand::CreateAuditionClip {
+                clip_ids,
+                active_index: arg_u64!(args, "active_index", 0) as usize,
+                reply: tx,
+            }
+        }
+        "add_audition_take" => McpCommand::AddAuditionTake {
+            audition_clip_id: arg_str!(args, "audition_clip_id"),
+            source_path: arg_str!(args, "source_path"),
+            source_in_ns: arg_u64!(args, "source_in_ns", 0),
+            source_out_ns: arg_u64!(args, "source_out_ns", 0),
+            label: args["label"].as_str().map(String::from),
+            reply: tx,
+        },
+        "remove_audition_take" => McpCommand::RemoveAuditionTake {
+            audition_clip_id: arg_str!(args, "audition_clip_id"),
+            take_index: arg_u64!(args, "take_index", 0) as usize,
+            reply: tx,
+        },
+        "set_active_audition_take" => McpCommand::SetActiveAuditionTake {
+            audition_clip_id: arg_str!(args, "audition_clip_id"),
+            take_index: arg_u64!(args, "take_index", 0) as usize,
+            reply: tx,
+        },
+        "list_audition_takes" => McpCommand::ListAuditionTakes {
+            audition_clip_id: arg_str!(args, "audition_clip_id"),
+            reply: tx,
+        },
+        "finalize_audition" => McpCommand::FinalizeAudition {
+            audition_clip_id: arg_str!(args, "audition_clip_id"),
             reply: tx,
         },
         // ── Subtitle / STT tools ──────────────────────────────────────────

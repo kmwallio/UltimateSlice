@@ -360,6 +360,48 @@ Remove an effect:
 python3 tools/mcp_call.py remove_clip_frei0r_effect '{"clip_id":"<clip-id>","effect_id":"<effect-id>"}'
 ```
 
+## Audition MCP examples
+
+Group two or more clips on the same track into one audition clip. The clip at `active_index` becomes the active take that drives playback and export; the rest are kept as nondestructive alternates.
+
+```bash
+python3 tools/mcp_call.py create_audition_clip '{"clip_ids":["<clip-1>","<clip-2>","<clip-3>"],"active_index":0}'
+```
+
+The response includes the new audition clip's id (`audition_clip_id`).
+
+List the takes on an existing audition (read-only):
+
+```bash
+python3 tools/mcp_call.py list_audition_takes '{"audition_clip_id":"<audition-id>"}'
+```
+
+Switch the active take. Any host-field tweaks made while the previous take was active are snapshotted into the takes list before the swap, so undo restores them exactly:
+
+```bash
+python3 tools/mcp_call.py set_active_audition_take '{"audition_clip_id":"<audition-id>","take_index":1}'
+```
+
+Append a new take from a source file:
+
+```bash
+python3 tools/mcp_call.py add_audition_take '{"audition_clip_id":"<audition-id>","source_path":"/footage/take_5.mov","source_in_ns":2000000000,"source_out_ns":7000000000,"label":"Take 5 — closer crop"}'
+```
+
+Remove a non-active take by index (the active take is protected — switch first if you want to delete it):
+
+```bash
+python3 tools/mcp_call.py remove_audition_take '{"audition_clip_id":"<audition-id>","take_index":2}'
+```
+
+Collapse the audition to a normal clip referencing only the active take. Discards alternates. Undoable.
+
+```bash
+python3 tools/mcp_call.py finalize_audition '{"audition_clip_id":"<audition-id>"}'
+```
+
+See [auditions.md](auditions.md) for the full feature guide.
+
 ## `.mcp.json` server entry
 
 This repository includes a Python socket entry:

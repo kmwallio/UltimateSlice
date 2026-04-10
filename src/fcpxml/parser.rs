@@ -904,7 +904,8 @@ fn parse_asset_clip(
             | ClipKind::Title
             | ClipKind::Adjustment
             | ClipKind::Compound
-            | ClipKind::Multicam => lane.filter(|l| *l > 0).map(|l| l as usize).unwrap_or(0),
+            | ClipKind::Multicam
+            | ClipKind::Audition => lane.filter(|l| *l > 0).map(|l| l as usize).unwrap_or(0),
         };
         let track_idx = explicit_track_idx.unwrap_or(inferred_track_idx);
         let track_name = attrs.get("us:track-name").cloned().unwrap_or_else(|| {
@@ -1366,6 +1367,16 @@ fn parse_asset_clip(
                     if let Some(switches_json) = attrs.get("us:multicam-switches") {
                         let json_str = switches_json.replace("&quot;", "\"");
                         clip.multicam_switches = serde_json::from_str(&json_str).ok();
+                    }
+                }
+                "audition" => {
+                    clip.kind = ClipKind::Audition;
+                    if let Some(takes_json) = attrs.get("us:audition-takes") {
+                        let json_str = takes_json.replace("&quot;", "\"");
+                        clip.audition_takes = serde_json::from_str(&json_str).ok();
+                    }
+                    if let Some(idx) = attrs.get("us:audition-active-take-index") {
+                        clip.audition_active_take_index = idx.parse().unwrap_or(0);
                     }
                 }
                 _ => {}
@@ -2818,6 +2829,8 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:compound-tracks"
             | "us:multicam-angles"
             | "us:multicam-switches"
+            | "us:audition-takes"
+            | "us:audition-active-take-index"
             | "us:eq-bands"
             | "us:eq-low-gain-keyframes"
             | "us:eq-mid-gain-keyframes"
