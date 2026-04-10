@@ -541,6 +541,8 @@ pub struct InspectorView {
     pub tracking_rotation_spin: gtk4::SpinButton,
     pub tracking_run_btn: Button,
     pub tracking_cancel_btn: Button,
+    pub tracking_auto_crop_btn: Button,
+    pub tracking_auto_crop_padding_slider: Scale,
     pub tracking_status_label: Label,
     pub tracking_target_dropdown: gtk4::DropDown,
     pub tracking_reference_dropdown: gtk4::DropDown,
@@ -749,6 +751,10 @@ impl InspectorView {
         self.tracking_rotation_spin
             .set_sensitive(can_analyze && selected_tracker.is_some());
         self.tracking_run_btn
+            .set_sensitive(can_analyze && selected_tracker.is_some());
+        self.tracking_auto_crop_btn
+            .set_sensitive(can_analyze && selected_tracker.is_some());
+        self.tracking_auto_crop_padding_slider
             .set_sensitive(can_analyze && selected_tracker.is_some());
         self.tracking_cancel_btn.set_sensitive(false);
         if !can_analyze || selected_tracker.is_none() {
@@ -4510,6 +4516,25 @@ pub fn build_inspector(
     tracking_cancel_btn.set_sensitive(false);
     tracking_job_row.append(&tracking_cancel_btn);
     tracking_inner.append(&tracking_job_row);
+
+    let tracking_auto_crop_btn = Button::with_label("Auto-Crop to Project Aspect");
+    tracking_auto_crop_btn.set_tooltip_text(Some(
+        "Run the tracker and reframe the clip so the tracked region fills the project frame at the project's aspect ratio (e.g. horizontal → vertical). Undoable — use Ctrl+Z to revert, or Clear Attachment to remove",
+    ));
+    tracking_auto_crop_btn.set_sensitive(false);
+    tracking_inner.append(&tracking_auto_crop_btn);
+
+    row_label(&tracking_inner, "Crop Padding");
+    let tracking_auto_crop_padding_slider =
+        Scale::with_range(Orientation::Horizontal, 0.0, 0.5, 0.05);
+    tracking_auto_crop_padding_slider.set_value(0.1);
+    tracking_auto_crop_padding_slider.set_draw_value(true);
+    tracking_auto_crop_padding_slider.set_digits(2);
+    tracking_auto_crop_padding_slider.set_tooltip_text(Some(
+        "Extra headroom around the tracked region (0 = tight crop, 0.5 = generous margin). Takes effect the next time you click Auto-Crop, or immediately if an auto-crop is already active",
+    ));
+    tracking_auto_crop_padding_slider.set_sensitive(false);
+    tracking_inner.append(&tracking_auto_crop_padding_slider);
 
     let tracking_status_label = Label::new(Some(
         "Select a visual clip to create or attach motion tracking.",
@@ -10709,6 +10734,8 @@ pub fn build_inspector(
         tracking_rotation_spin,
         tracking_run_btn,
         tracking_cancel_btn,
+        tracking_auto_crop_btn,
+        tracking_auto_crop_padding_slider,
         tracking_status_label,
         tracking_target_dropdown,
         tracking_reference_dropdown,

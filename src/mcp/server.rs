@@ -1705,6 +1705,22 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_clip_auto_crop_track",
+            "description": "Auto-crop and track: create a motion tracker for the given clip-local region, reframe the clip so the tracked region stays centered at the project's aspect ratio (including cross-aspect 16:9 -> 9:16 reframing), and enqueue a background tracking job that will keep the region centered over time. Reuses any existing motion tracker on the clip that matches the region; otherwise creates a new tracker.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip ID to auto-crop." },
+                    "center_x": { "type": "number", "description": "Region center X in normalized clip coordinates (0..1, where 0.5 = center)." },
+                    "center_y": { "type": "number", "description": "Region center Y in normalized clip coordinates (0..1, where 0.5 = center)." },
+                    "width": { "type": "number", "description": "Region HALF-width in normalized clip coordinates (0..0.5). Full region width = 2 * width." },
+                    "height": { "type": "number", "description": "Region HALF-height in normalized clip coordinates (0..0.5). Full region height = 2 * height." },
+                    "padding": { "type": "number", "description": "Optional extra headroom around the region as a fraction (e.g. 0.1 = 10% margin). Clamped to [0, 0.5]. Default 0.1." }
+                },
+                "required": ["clip_id", "center_x", "center_y", "width", "height"]
+            }
+        },
+        {
             "name": "batch_call_tools",
             "description": "Execute multiple MCP tool calls in-order within one request. Returns per-call success/error records.",
             "inputSchema": {
@@ -3412,6 +3428,27 @@ fn dispatch_tool_payload(
                 .get("smoothing")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.5),
+            reply: tx,
+        },
+        "set_clip_auto_crop_track" => McpCommand::SetClipAutoCropTrack {
+            clip_id: arg_str!(args, "clip_id"),
+            center_x: args
+                .get("center_x")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.5),
+            center_y: args
+                .get("center_y")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.5),
+            width: args
+                .get("width")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.25),
+            height: args
+                .get("height")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.25),
+            padding: args.get("padding").and_then(|v| v.as_f64()),
             reply: tx,
         },
         "sync_clips_by_audio" => McpCommand::SyncClipsByAudio {

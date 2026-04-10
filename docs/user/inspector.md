@@ -396,6 +396,7 @@ The **Motion Tracking** section is available on visual clips and covers both tra
 | **Region Rotation** | Rotation of the analysis rectangle |
 | **Track Region / Re-run Tracking** | Run motion analysis for the selected tracker on the current clip, or regenerate samples after changing the tracker region |
 | **Cancel** | Stop an in-progress tracking analysis job |
+| **Auto-Crop to Project Aspect** | One-click reframe: takes the currently-drawn tracker region and sets up the clip's transform so the region fills the project frame at the project's aspect ratio. Runs the tracker automatically. Great for turning a 16:9 source clip into a 9:16 vertical export without manually keyframing position — see [Auto-Crop & Track](#auto-crop--track) below |
 | **Attach To** | Choose whether a tracker drives the **Clip Transform** or the clip's **First Mask** |
 | **Follow Tracker** | Attach this clip or mask to a tracker created on another clip in the project |
 | **Clear Attachment** | Remove the current tracker attachment from the clip or mask |
@@ -405,9 +406,57 @@ The **Motion Tracking** section is available on visual clips and covers both tra
 - If you move or resize the tracker region after analysis, UltimateSlice keeps the attachment but clears the old samples; run **Re-run Tracking** on the source clip again before expecting preview/export motion.
 - The **Follow Tracker** picker labels trackers that have no samples yet, and attached clips/masks warn when their source tracker is empty or disabled.
 - The built-in tracker currently analyzes **translation** motion, so tracked overlays and masks follow position but do not yet infer scale or rotation automatically.
+- Tracking is a **color** template matcher that samples every source frame at 320×180 analysis resolution, matches across the Y, U, and V planes (so chroma-distinctive subjects like colored stickers lock on reliably), and keeps the template from the first frame throughout the shot (so it doesn't drift onto background texture). Best results come from drawing a tight region around a subject that has a distinctive color or luminance pattern relative to its surroundings — large uniform regions are inherently ambiguous under template matching.
 - Tracker attachments are resolved in both Program Monitor preview and export, and they persist through UltimateSlice project save/load (`.uspxml` vendor-attribute workflow).
 - Title clips and other tracker-followed clips now translate directly across the canvas in preview and export, so **Follow Tracker** still moves them at `Scale = 1.0` instead of appearing to stop at the frame edge. Normal still-image clips stay on the existing still-image preview path unless they are actually following a tracker.
 - Mask attachments currently target the **first rectangle or ellipse mask** on the clip. **Path masks** still need to be animated manually with their own controls/keyframes.
+
+### Auto-Crop & Track
+
+Auto-Crop & Track is a one-click preset on top of the existing motion tracker. It takes the **region you drew** on the clip and produces the scale + position + motion compensation needed to keep that region centered in the **project's aspect ratio** as the subject moves through the shot.
+
+**Typical workflow**
+
+1. Select a visual clip on the timeline.
+2. Open the **Motion Tracking** section of the Inspector.
+3. Click **+** to add a tracker, or select an existing one.
+4. Drag the region in the Program Monitor (or edit the Region Center/Width/Height sliders) so the rectangle hugs the subject you want to keep in frame.
+5. Click **Auto-Crop to Project Aspect**.
+6. Scrub the timeline — the clip is now zoomed and panned so the region stays centered, and as the tracker adds samples in the background the panning keeps following the subject.
+
+**Cross-aspect reframing (horizontal → vertical for social media)**
+
+The most common use case. With a 1920×1080 source clip inside a 1080×1920 vertical project:
+
+- At the project's default `scale = 1.0`, the source is letterboxed into the middle ~32% of the vertical frame and the top/bottom of the project is black.
+- Auto-Crop computes a scale high enough to **eliminate the letterbox bars** (roughly 3.16× for 16:9 → 9:16), then pans horizontally so your region's center ends up at the project center.
+- Because the region's aspect doesn't match the project's in cross-aspect cases, the *width* of the region may be wider than the project can show — Auto-Crop centers on the region and accepts that the side edges of a wide region will be cropped. Draw the region tightly around the part of the subject that must always be visible.
+
+**Tweaking after the fact**
+
+Auto-Crop writes its results into the clip's existing **tracking binding** — the same binding the manual **Follow Tracker** workflow uses. After clicking the button you can:
+
+- **Drag the Crop Padding slider** (0 = tight crop, 0.5 = generous margin) — while auto-crop is active, the slider live-updates the binding in place so the preview reflects the new framing immediately. The value you leave it at is the default for the next click.
+- **Drag the Region Center X/Y, Width, or Height sliders** — auto-crop automatically re-runs the crop math so the framing follows the region as you move it. No need to click Auto-Crop to Project Aspect again unless you want to refresh the motion samples.
+- **Press Ctrl+Z** to revert to the pre-click state. Auto-Crop is fully undoable: the `tracking_binding`, `motion_trackers`, and first-mask binding are all snapshotted.
+- **Clear Attachment** removes the binding and reverts the clip to its default framing — useful when you want to see the untransformed source to draw a new region.
+
+**MCP automation**
+
+`set_clip_auto_crop_track` drives the same flow programmatically. Pass the `clip_id` plus a region in normalized clip coordinates:
+
+```json
+{
+  "clip_id": "abc-123",
+  "center_x": 0.5,
+  "center_y": 0.45,
+  "width": 0.15,
+  "height": 0.2,
+  "padding": 0.1
+}
+```
+
+`width` / `height` are **half-widths** (0..0.5), matching the `TrackingRegion` convention — the full region width is `2 × width`. Returns the resolved `scale_multiplier` / `offset_x` / `offset_y` and a `status` of `"ready"` (cached samples applied immediately) or `"queued"` (background analysis in progress).
 
 ---
 

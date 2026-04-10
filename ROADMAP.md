@@ -96,6 +96,7 @@ Tracking docs:
 - [x] Fields: clip name, source path, source in/out, duration, timeline start
 - [x] Outgoing transition editor in the Inspector with editable type/duration/alignment, remove action, shared duration clamping across Inspector/timeline/MCP, alignment-aware preview/export/prerender timing, collapsed-below-Transform placement, preview-supported transition catalog (including fade-to-white, circle-open/close, and directional cover/reveal/slide live preview), plus a scrollable, resizable transitions pane whose split is saved with workspace layouts
 - [x] Motion Tracking inspector workflow: create/remove multiple trackers per clip, label them, edit the analysis region numerically or in Program Monitor, run/cancel tracking jobs, and attach a project tracker to the selected clip transform or first mask
+- [x] **Auto-Crop & Track**: one-click "keep this region in frame at project aspect ratio" preset that takes a user-drawn tracking region and generates the scale + position + motion compensation needed to reframe the clip — including cross-aspect cases (16:9 → 9:16 vertical social media). Exposed via an Inspector **Auto-Crop to Project Aspect** button and the `set_clip_auto_crop_track` MCP tool
 
 ### Toolbar / Header
 - [x] New / Open / Save / Export MP4 buttons

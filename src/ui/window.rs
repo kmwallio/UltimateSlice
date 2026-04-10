@@ -19,7 +19,7 @@ use crate::ui::{
     audio_effects_browser, effects_browser, inspector, keyframe_editor, media_browser, preferences,
     preview, program_monitor, title_templates, titles_browser, toolbar,
 };
-use crate::undo::{EditCommand, TrackClipsChange};
+use crate::undo::{EditCommand, SetClipAutoCropCommand, TrackClipsChange};
 use glib;
 use gtk4::prelude::*;
 use gtk4::{self as gtk, ApplicationWindow, Orientation, Paned, ScrolledWindow};
@@ -780,6 +780,329 @@ fn sync_transform_overlay_tracking_region(
     } else {
         transform_overlay.set_tracking_region(false, false, 0.5, 0.5, 0.25, 0.25, 0.0);
     }
+}
+
+/// Default extra headroom around a tracked region when auto-cropping.
+const AUTO_CROP_DEFAULT_PADDING: f64 = 0.1;
+
+/// Outcome of a single [`run_auto_crop_track_for_clip`] invocation. The
+/// string messages are meant to be surfaced through the tracking status
+/// bar in the inspector.
+#[derive(Debug, Clone)]
+enum AutoCropOutcome {
+    /// Cached tracker samples were applied immediately; the clip is
+    /// already reframed at the project aspect ratio.
+    Ok { message: String },
+    /// A new tracking job was enqueued in the background. The binding is
+    /// already set so as soon as samples arrive the compositor will pick
+    /// up the reframe.
+    Queued { message: String },
+    /// Setup failed (wrong clip kind, missing dimensions, no region). The
+    /// clip state is unchanged.
+    Err { message: String },
+}
+
+/// Install an auto-crop-and-track binding on `clip_id` that uses the
+/// existing motion tracker `tracker_id` as its motion source, then
+/// enqueue (or look up a cached) tracking job to populate the samples.
+///
+/// Returns `(outcome, Some(command))` — the command is an undoable
+/// [`SetClipAutoCropCommand`] snapshotting the old + new state. The
+/// command has **not** been executed yet; the caller must push it
+/// through `on_execute_command` / `history.execute` so the mutation
+/// lands in the undo stack.
+fn run_auto_crop_track_for_clip(
+    project: &Rc<RefCell<Project>>,
+    tracking_cache: &Rc<RefCell<crate::media::tracking::TrackingCache>>,
+    tracking_job_owner_by_key: &Rc<RefCell<HashMap<String, String>>>,
+    tracking_job_key_by_clip: &Rc<RefCell<HashMap<String, String>>>,
+    clip_id: &str,
+    tracker_id: &str,
+    padding: f64,
+) -> (AutoCropOutcome, Option<Box<dyn EditCommand>>) {
+    // Snapshot everything we need from the project under a short borrow.
+    let (
+        project_width,
+        project_height,
+        job,
+        source_path,
+        region,
+        old_tracking_binding,
+        old_motion_trackers,
+        old_first_mask_binding,
+    ) = {
+        let proj = project.borrow();
+        let project_width = proj.width;
+        let project_height = proj.height;
+        let Some(clip) = proj.clip_ref(clip_id) else {
+            return (
+                AutoCropOutcome::Err {
+                    message: "Selected clip no longer exists.".to_string(),
+                },
+                None,
+            );
+        };
+        if let Err(message) = clip_supports_tracking_analysis(clip) {
+            return (
+                AutoCropOutcome::Err {
+                    message: message.to_string(),
+                },
+                None,
+            );
+        }
+        let Some(tracker) = clip.motion_tracker_ref(tracker_id) else {
+            return (
+                AutoCropOutcome::Err {
+                    message: "Select a tracker before auto-cropping.".to_string(),
+                },
+                None,
+            );
+        };
+        let region = tracker.analysis_region;
+        let analysis_start_ns = tracker.analysis_start_ns.min(clip.source_duration() - 1);
+        let mut analysis_end_ns = tracker
+            .analysis_end_ns
+            .unwrap_or_else(|| clip.source_duration())
+            .min(clip.source_duration());
+        if analysis_end_ns <= analysis_start_ns {
+            analysis_end_ns = clip.source_duration();
+        }
+        if analysis_end_ns <= analysis_start_ns {
+            return (
+                AutoCropOutcome::Err {
+                    message: "Auto-crop needs a non-empty source range.".to_string(),
+                },
+                None,
+            );
+        }
+        let mut job = crate::media::tracking::TrackingJob::new(
+            tracker.id.clone(),
+            tracker.label.clone(),
+            clip.source_path.clone(),
+            clip.source_in,
+            analysis_start_ns,
+            analysis_end_ns,
+            region,
+        );
+        // Resolve "every source frame" into a concrete step (ns per
+        // frame) via the probe cache. Done now, before the job goes
+        // into the cache key, so repeat requests for the same source
+        // hit the same cache entry.
+        job.frame_step_ns =
+            crate::media::tracking::source_frame_step_ns(&clip.source_path);
+        let source_path = clip.source_path.clone();
+        let old_tracking_binding = clip.tracking_binding.clone();
+        let old_motion_trackers = clip.motion_trackers.clone();
+        let old_first_mask_binding = clip
+            .masks
+            .first()
+            .map(|mask| mask.tracking_binding.clone());
+        (
+            project_width,
+            project_height,
+            job,
+            source_path,
+            region,
+            old_tracking_binding,
+            old_motion_trackers,
+            old_first_mask_binding,
+        )
+    };
+
+    // Resolve source pixel dimensions. Blocking ffprobe/GStreamer call on
+    // first invocation; cached for subsequent probes.
+    let metadata = crate::media::probe_cache::probe_media_metadata(&source_path);
+    let source_width = metadata.video_width.unwrap_or(0);
+    let source_height = metadata.video_height.unwrap_or(0);
+    if source_width == 0 || source_height == 0 {
+        return (
+            AutoCropOutcome::Err {
+                message: "Could not determine source clip dimensions for auto-crop."
+                    .to_string(),
+            },
+            None,
+        );
+    }
+
+    // Compute the binding transform from the drawn region + aspects.
+    let binding = crate::media::tracking::compute_auto_crop_binding(
+        clip_id,
+        tracker_id,
+        &crate::media::tracking::AutoCropInputs {
+            region,
+            source_width,
+            source_height,
+            project_width,
+            project_height,
+            padding,
+        },
+    );
+
+    // Enqueue / look up the tracking job. Same flow as the Track Region
+    // button, but we *always* want an analysis pass for the auto-crop
+    // use case so motion samples keep the region centered over time.
+    // The cache lookup happens *before* we build the new motion_trackers
+    // snapshot so any cached samples get folded into the undo state.
+    let (cache_key, cached_tracker, pending) = {
+        let cache_key = tracking_cache.borrow_mut().request(job.clone());
+        let cached_tracker = tracking_cache.borrow().get_for_job(&job);
+        let pending = tracking_cache.borrow().job_progress(&cache_key).is_some();
+        (cache_key, cached_tracker, pending)
+    };
+
+    // Build the new motion_trackers vec: copy the old list, then upsert
+    // the cached tracker samples onto the matching tracker (if any).
+    let mut new_motion_trackers = old_motion_trackers.clone();
+    let mut sample_count = 0usize;
+    if let Some(tracker) = &cached_tracker {
+        sample_count = tracker.samples.len();
+        if let Some(existing) = new_motion_trackers
+            .iter_mut()
+            .find(|t| t.id == tracker.id)
+        {
+            *existing = tracker.clone();
+        } else {
+            new_motion_trackers.push(tracker.clone());
+        }
+    }
+
+    // First-mask binding is always cleared when auto-cropping (the clip's
+    // own transform owns the binding). `None` here means "no mask on the
+    // clip at all — no mask state to restore"; `Some(None)` means "mask
+    // exists, clear its binding".
+    let new_first_mask_binding = old_first_mask_binding.as_ref().map(|_| None);
+
+    let command = SetClipAutoCropCommand {
+        clip_id: clip_id.to_string(),
+        old_tracking_binding,
+        old_motion_trackers,
+        old_first_mask_binding,
+        new_tracking_binding: Some(binding),
+        new_motion_trackers,
+        new_first_mask_binding,
+    };
+
+    let outcome = if cached_tracker.is_some() {
+        AutoCropOutcome::Ok {
+            message: format!(
+                "Auto-crop active at project aspect ({sample_count} tracked samples)."
+            ),
+        }
+    } else if pending {
+        tracking_job_owner_by_key
+            .borrow_mut()
+            .insert(cache_key.clone(), clip_id.to_string());
+        tracking_job_key_by_clip
+            .borrow_mut()
+            .insert(clip_id.to_string(), cache_key);
+        AutoCropOutcome::Queued {
+            message: "Auto-crop framing applied. Tracking…".to_string(),
+        }
+    } else {
+        AutoCropOutcome::Err {
+            message: "Failed to queue auto-crop tracking analysis.".to_string(),
+        }
+    };
+
+    (outcome, Some(Box::new(command)))
+}
+
+/// Re-apply the auto-crop framing on a clip in-place (no undo step).
+///
+/// Called by the tracker-region / padding sliders so the crop stays
+/// locked onto the region as the user drags. Skips clips that don't
+/// currently have an auto-crop binding (i.e., where `tracking_binding`
+/// points at a tracker on a different clip — that's the manual
+/// "follow tracker" case, which should not get rewritten under the
+/// user's feet).
+///
+/// Returns `true` when the binding was recomputed, `false` when the
+/// clip wasn't in an auto-crop state or we couldn't resolve source
+/// dimensions.  No-op on failure.
+fn reapply_auto_crop_in_place(
+    project: &Rc<RefCell<Project>>,
+    library: &Rc<RefCell<MediaLibrary>>,
+    clip_id: &str,
+    padding: f64,
+) -> bool {
+    // Snapshot the data we need from the project under a short borrow.
+    let (project_width, project_height, source_path, region, tracker_id) = {
+        let proj = project.borrow();
+        let Some(clip) = proj.clip_ref(clip_id) else {
+            return false;
+        };
+        let Some(binding) = clip.tracking_binding.as_ref() else {
+            return false;
+        };
+        // Only auto-crop bindings point at a tracker on the clip itself.
+        if binding.source_clip_id != clip_id {
+            return false;
+        }
+        let tracker_id = binding.tracker_id.clone();
+        let Some(tracker) = clip.motion_tracker_ref(&tracker_id) else {
+            return false;
+        };
+        (
+            proj.width,
+            proj.height,
+            clip.source_path.clone(),
+            tracker.analysis_region,
+            tracker_id,
+        )
+    };
+
+    // Resolve source dims from the media library first (cheap cache
+    // hit), fall back to a synchronous ffprobe only if the item hasn't
+    // been probed yet.  The ffprobe path is ~100ms so we avoid it on
+    // slider drags when possible.
+    let (source_width, source_height) = {
+        let lib = library.borrow();
+        let item = lib.items.iter().find(|i| i.source_path == source_path);
+        match item {
+            Some(i) if i.video_width.is_some() && i.video_height.is_some() => {
+                (i.video_width.unwrap(), i.video_height.unwrap())
+            }
+            _ => {
+                drop(lib);
+                let metadata = crate::media::probe_cache::probe_media_metadata(&source_path);
+                (
+                    metadata.video_width.unwrap_or(0),
+                    metadata.video_height.unwrap_or(0),
+                )
+            }
+        }
+    };
+    if source_width == 0 || source_height == 0 {
+        return false;
+    }
+
+    let values = crate::media::tracking::compute_auto_crop_binding_values(
+        &crate::media::tracking::AutoCropInputs {
+            region,
+            source_width,
+            source_height,
+            project_width,
+            project_height,
+            padding,
+        },
+    );
+
+    // Update the binding in place.
+    let mut proj = project.borrow_mut();
+    let Some(clip) = proj.clip_mut(clip_id) else {
+        return false;
+    };
+    let Some(binding) = clip.tracking_binding.as_mut() else {
+        return false;
+    };
+    if binding.tracker_id != tracker_id || binding.source_clip_id != clip_id {
+        return false;
+    }
+    binding.scale_multiplier = values.scale_multiplier;
+    binding.offset_x = values.offset_x;
+    binding.offset_y = values.offset_y;
+    proj.dirty = true;
+    true
 }
 
 fn upsert_motion_tracker_on_clip(
@@ -6345,8 +6668,10 @@ pub fn build_window(
         ($widget:expr, $field:ident) => {{
             let inspector_view = inspector_view.clone();
             let project = project.clone();
+            let library = library.clone();
             let tracking_status_by_clip = tracking_status_by_clip.clone();
             let sync_tracking_controls = sync_tracking_controls.clone();
+            let on_project_changed = on_project_changed.clone();
             let window_weak = window_weak.clone();
             let widget = $widget.clone();
             widget.connect_value_changed(move |widget| {
@@ -6358,23 +6683,46 @@ pub fn build_window(
                 let (Some(clip_id), Some(tracker_id)) = (clip_id, tracker_id) else {
                     return;
                 };
-                let mut proj = project.borrow_mut();
-                if let Some(tracker) = proj
-                    .clip_mut(&clip_id)
-                    .and_then(|clip| clip.motion_tracker_mut(&tracker_id))
+                let mut auto_crop_active = false;
                 {
-                    tracker.analysis_region.$field = widget.value();
-                    tracker.samples.clear();
-                    proj.dirty = true;
+                    let mut proj = project.borrow_mut();
+                    if let Some(tracker) = proj
+                        .clip_mut(&clip_id)
+                        .and_then(|clip| clip.motion_tracker_mut(&tracker_id))
+                    {
+                        tracker.analysis_region.$field = widget.value();
+                        tracker.samples.clear();
+                        proj.dirty = true;
+                    }
+                    // Peek: does this clip currently have an auto-crop
+                    // binding we should keep in sync with the new region?
+                    auto_crop_active = proj
+                        .clip_ref(&clip_id)
+                        .and_then(|c| c.tracking_binding.as_ref())
+                        .map(|b| b.source_clip_id == clip_id)
+                        .unwrap_or(false);
+                    if let Some(win) = window_weak.upgrade() {
+                        win.set_title(Some(&format!("UltimateSlice — {} •", proj.title)));
+                    }
+                }
+                if auto_crop_active {
+                    let padding = inspector_view.tracking_auto_crop_padding_slider.value();
+                    reapply_auto_crop_in_place(&project, &library, &clip_id, padding);
+                    tracking_status_by_clip.borrow_mut().insert(
+                        clip_id.clone(),
+                        (
+                            "Auto-crop updated. Click Auto-Crop to Project Aspect to re-track motion."
+                                .to_string(),
+                            false,
+                        ),
+                    );
+                    on_project_changed();
+                } else {
                     tracking_status_by_clip.borrow_mut().insert(
                         clip_id.clone(),
                         ("Region changed. Run tracking again.".to_string(), false),
                     );
                 }
-                if let Some(win) = window_weak.upgrade() {
-                    win.set_title(Some(&format!("UltimateSlice — {} •", proj.title)));
-                }
-                drop(proj);
                 sync_tracking_controls();
             });
         }};
@@ -6383,6 +6731,38 @@ pub fn build_window(
     wire_tracking_region_slider!(inspector_view.tracking_center_y_slider, center_y);
     wire_tracking_region_slider!(inspector_view.tracking_width_slider, width);
     wire_tracking_region_slider!(inspector_view.tracking_height_slider, height);
+    {
+        // Crop Padding slider: when an auto-crop is already active on the
+        // selected clip, drag → live re-compute the binding in place so
+        // the user can dial in the headroom without re-running the full
+        // button flow. If no auto-crop is active, the slider value is
+        // simply stored (consumed on the next button click).
+        let inspector_view = inspector_view.clone();
+        let project = project.clone();
+        let library = library.clone();
+        let tracking_status_by_clip = tracking_status_by_clip.clone();
+        let on_project_changed = on_project_changed.clone();
+        let sync_tracking_controls = sync_tracking_controls.clone();
+        let padding_slider = inspector_view.tracking_auto_crop_padding_slider.clone();
+        padding_slider.connect_value_changed(move |slider| {
+            if *inspector_view.updating.borrow() {
+                return;
+            }
+            let clip_id = inspector_view.selected_clip_id.borrow().clone();
+            let Some(clip_id) = clip_id else {
+                return;
+            };
+            let padding = slider.value();
+            if reapply_auto_crop_in_place(&project, &library, &clip_id, padding) {
+                tracking_status_by_clip.borrow_mut().insert(
+                    clip_id.clone(),
+                    (format!("Auto-crop padding: {:.0}%", padding * 100.0), false),
+                );
+                on_project_changed();
+            }
+            sync_tracking_controls();
+        });
+    }
     {
         let inspector_view = inspector_view.clone();
         let project = project.clone();
@@ -6563,7 +6943,7 @@ pub fn build_window(
                     sync_tracking_controls();
                     return;
                 }
-                crate::media::tracking::TrackingJob::new(
+                let mut job = crate::media::tracking::TrackingJob::new(
                     tracker.id.clone(),
                     tracker.label.clone(),
                     clip.source_path.clone(),
@@ -6571,7 +6951,13 @@ pub fn build_window(
                     analysis_start_ns,
                     analysis_end_ns,
                     tracker.analysis_region,
-                )
+                );
+                // "Every source frame" step, resolved at enqueue time
+                // so the cache key is deterministic for the same
+                // source + region.
+                job.frame_step_ns =
+                    crate::media::tracking::source_frame_step_ns(&clip.source_path);
+                job
             };
 
             let request_and_apply = |job: &crate::media::tracking::TrackingJob| {
@@ -6621,6 +7007,55 @@ pub fn build_window(
                     ("Failed to queue tracking analysis.".to_string(), true),
                 );
             }
+            sync_tracking_controls();
+        });
+    }
+    {
+        let inspector_view = inspector_view.clone();
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let tracking_cache = tracking_cache.clone();
+        let tracking_job_owner_by_key = tracking_job_owner_by_key.clone();
+        let tracking_job_key_by_clip = tracking_job_key_by_clip.clone();
+        let tracking_status_by_clip = tracking_status_by_clip.clone();
+        let on_project_changed = on_project_changed.clone();
+        let sync_tracking_controls = sync_tracking_controls.clone();
+        let tracking_auto_crop_btn = inspector_view.tracking_auto_crop_btn.clone();
+        tracking_auto_crop_btn.connect_clicked(move |_| {
+            let clip_id = inspector_view.selected_clip_id.borrow().clone();
+            let tracker_id = inspector_view.current_motion_tracker_id();
+            let (Some(clip_id), Some(tracker_id)) = (clip_id, tracker_id) else {
+                return;
+            };
+            let padding = inspector_view.tracking_auto_crop_padding_slider.value();
+            let (outcome, command) = run_auto_crop_track_for_clip(
+                &project,
+                &tracking_cache,
+                &tracking_job_owner_by_key,
+                &tracking_job_key_by_clip,
+                &clip_id,
+                &tracker_id,
+                padding,
+            );
+            if let Some(cmd) = command {
+                let mut st = timeline_state.borrow_mut();
+                let mut proj = project.borrow_mut();
+                st.history.execute(cmd, &mut proj);
+            }
+            match outcome {
+                AutoCropOutcome::Ok { ref message, .. }
+                | AutoCropOutcome::Queued { ref message } => {
+                    tracking_status_by_clip
+                        .borrow_mut()
+                        .insert(clip_id.clone(), (message.clone(), false));
+                }
+                AutoCropOutcome::Err { ref message } => {
+                    tracking_status_by_clip
+                        .borrow_mut()
+                        .insert(clip_id.clone(), (message.clone(), true));
+                }
+            }
+            on_project_changed();
             sync_tracking_controls();
         });
     }
@@ -14947,6 +15382,9 @@ pub fn build_window(
         let proxy_cache = proxy_cache.clone();
         let bg_removal_cache = bg_removal_cache.clone();
         let frame_interp_cache = frame_interp_cache.clone();
+        let tracking_cache_for_mcp = tracking_cache.clone();
+        let tracking_job_owner_by_key_for_mcp = tracking_job_owner_by_key.clone();
+        let tracking_job_key_by_clip_for_mcp = tracking_job_key_by_clip.clone();
         let on_close_preview = on_close_preview.clone();
         let source_marks = source_marks.clone();
         let on_source_selected = on_source_selected.clone();
@@ -15012,6 +15450,9 @@ pub fn build_window(
                         &frame_interp_cache,
                         &stt_cache,
                         &music_gen_cache,
+                        &tracking_cache_for_mcp,
+                        &tracking_job_owner_by_key_for_mcp,
+                        &tracking_job_key_by_clip_for_mcp,
                         &on_close_preview,
                         &source_marks,
                         &on_source_selected,
@@ -15559,6 +16000,9 @@ fn handle_mcp_command(
     frame_interp_cache: &Rc<RefCell<crate::media::frame_interp_cache::FrameInterpCache>>,
     stt_cache: &Rc<RefCell<crate::media::stt_cache::SttCache>>,
     music_gen_cache: &Rc<RefCell<crate::media::music_gen::MusicGenCache>>,
+    tracking_cache: &Rc<RefCell<crate::media::tracking::TrackingCache>>,
+    tracking_job_owner_by_key: &Rc<RefCell<HashMap<String, String>>>,
+    tracking_job_key_by_clip: &Rc<RefCell<HashMap<String, String>>>,
     on_close_preview: &Rc<dyn Fn()>,
     source_marks: &Rc<RefCell<crate::model::media_library::SourceMarks>>,
     on_source_selected: &Rc<dyn Fn(String, u64)>,
@@ -20710,6 +21154,118 @@ fn handle_mcp_command(
                 reply
                     .send(json!({"ok": false, "error": format!("Clip not found: {clip_id}")}))
                     .ok();
+            }
+        }
+
+        McpCommand::SetClipAutoCropTrack {
+            clip_id,
+            center_x,
+            center_y,
+            width,
+            height,
+            padding,
+            reply,
+        } => {
+            // Ensure a motion tracker with the requested region exists on
+            // the clip. If no tracker matches the region, create one so
+            // the binding has somewhere to resolve its samples from.
+            let tracker_id = {
+                let mut proj = project.borrow_mut();
+                let Some(clip) = proj.clip_mut(&clip_id) else {
+                    reply
+                        .send(json!({
+                            "ok": false,
+                            "error": format!("Clip not found: {clip_id}")
+                        }))
+                        .ok();
+                    return;
+                };
+                if let Err(message) = clip_supports_tracking_analysis(clip) {
+                    reply
+                        .send(json!({"ok": false, "error": message}))
+                        .ok();
+                    return;
+                }
+                let new_region = crate::model::clip::TrackingRegion {
+                    center_x,
+                    center_y,
+                    width,
+                    height,
+                    rotation_deg: 0.0,
+                };
+                // Prefer the first existing tracker; update its region to
+                // match so the caller's region is authoritative.
+                let tracker_id = if let Some(tracker) = clip.motion_trackers.first_mut() {
+                    tracker.analysis_region = new_region;
+                    tracker.samples.clear();
+                    tracker.id.clone()
+                } else {
+                    let mut tracker =
+                        crate::model::clip::MotionTracker::new("Auto-crop tracker".to_string());
+                    tracker.analysis_region = new_region;
+                    let id = tracker.id.clone();
+                    clip.motion_trackers.push(tracker);
+                    id
+                };
+                proj.dirty = true;
+                tracker_id
+            };
+
+            let (outcome, command) = run_auto_crop_track_for_clip(
+                project,
+                tracking_cache,
+                tracking_job_owner_by_key,
+                tracking_job_key_by_clip,
+                &clip_id,
+                &tracker_id,
+                padding.unwrap_or(AUTO_CROP_DEFAULT_PADDING),
+            );
+            if let Some(cmd) = command {
+                let mut st = timeline_state.borrow_mut();
+                let mut proj = project.borrow_mut();
+                st.history.execute(cmd, &mut proj);
+            }
+            on_project_changed();
+            match outcome {
+                AutoCropOutcome::Ok { message } => {
+                    let proj = project.borrow();
+                    let binding = proj
+                        .clip_ref(&clip_id)
+                        .and_then(|c| c.tracking_binding.clone());
+                    reply
+                        .send(json!({
+                            "ok": true,
+                            "clip_id": clip_id,
+                            "tracker_id": tracker_id,
+                            "status": "ready",
+                            "message": message,
+                            "scale_multiplier": binding.as_ref().map(|b| b.scale_multiplier),
+                            "offset_x": binding.as_ref().map(|b| b.offset_x),
+                            "offset_y": binding.as_ref().map(|b| b.offset_y),
+                        }))
+                        .ok();
+                }
+                AutoCropOutcome::Queued { message } => {
+                    let proj = project.borrow();
+                    let binding = proj
+                        .clip_ref(&clip_id)
+                        .and_then(|c| c.tracking_binding.clone());
+                    reply
+                        .send(json!({
+                            "ok": true,
+                            "clip_id": clip_id,
+                            "tracker_id": tracker_id,
+                            "status": "queued",
+                            "message": message,
+                            "scale_multiplier": binding.as_ref().map(|b| b.scale_multiplier),
+                            "offset_x": binding.as_ref().map(|b| b.offset_x),
+                            "offset_y": binding.as_ref().map(|b| b.offset_y),
+                        }))
+                        .ok();
+                }
+                AutoCropOutcome::Err { message } => {
+                    reply.send(json!({"ok": false, "error": message})).ok();
+                }
             }
         }
 

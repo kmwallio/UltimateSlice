@@ -937,6 +937,59 @@ impl EditCommand for SetClipMotionBlurCommand {
     }
 }
 
+/// Undoable mutation for the Auto-Crop & Track feature.
+///
+/// Auto-crop touches three pieces of clip state at once:
+/// 1. `clip.tracking_binding` — the transform binding that pans/zooms
+///    the clip to center the tracked region.
+/// 2. `clip.motion_trackers` — may be updated in place (region changed)
+///    or gain a new tracker when the caller came in via MCP without
+///    first creating one.
+/// 3. `clip.masks[0].tracking_binding` — cleared so the clip transform
+///    owns the binding alone.
+///
+/// Snapshot them all so undo restores the exact state the user had
+/// before clicking the button.
+pub struct SetClipAutoCropCommand {
+    pub clip_id: String,
+    pub old_tracking_binding: Option<crate::model::clip::TrackingBinding>,
+    pub old_motion_trackers: Vec<crate::model::clip::MotionTracker>,
+    pub old_first_mask_binding: Option<Option<crate::model::clip::TrackingBinding>>,
+    pub new_tracking_binding: Option<crate::model::clip::TrackingBinding>,
+    pub new_motion_trackers: Vec<crate::model::clip::MotionTracker>,
+    pub new_first_mask_binding: Option<Option<crate::model::clip::TrackingBinding>>,
+}
+
+impl EditCommand for SetClipAutoCropCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            clip.tracking_binding = self.new_tracking_binding.clone();
+            clip.motion_trackers = self.new_motion_trackers.clone();
+            if let Some(first_mask_binding) = &self.new_first_mask_binding {
+                if let Some(mask) = clip.masks.first_mut() {
+                    mask.tracking_binding = first_mask_binding.clone();
+                }
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            clip.tracking_binding = self.old_tracking_binding.clone();
+            clip.motion_trackers = self.old_motion_trackers.clone();
+            if let Some(first_mask_binding) = &self.old_first_mask_binding {
+                if let Some(mask) = clip.masks.first_mut() {
+                    mask.tracking_binding = first_mask_binding.clone();
+                }
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Auto-crop & track"
+    }
+}
+
 pub struct SetClipVoiceIsolationCommand {
     pub clip_id: String,
     pub track_id: String,
@@ -2198,6 +2251,74 @@ mod tests {
     use crate::model::clip::{Clip, ClipKind};
     use crate::model::project::Project;
     use crate::model::track::Track;
+
+    #[test]
+    fn auto_crop_command_round_trip() {
+        use crate::model::clip::{MotionTracker, TrackingBinding, TrackingRegion};
+
+        let mut project = Project::new("Auto-Crop Test");
+        let mut track = Track::new_video("Video");
+        let mut clip = Clip::new("/tmp/a.mp4", 5_000_000_000, 0, ClipKind::Video);
+        clip.id = "clip-1".to_string();
+        // Start with one existing tracker and no binding.
+        let mut tracker = MotionTracker::new("Subject");
+        tracker.id = "tracker-1".to_string();
+        tracker.analysis_region = TrackingRegion {
+            center_x: 0.5,
+            center_y: 0.5,
+            width: 0.25,
+            height: 0.25,
+            rotation_deg: 0.0,
+        };
+        clip.motion_trackers.push(tracker.clone());
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let old_tracking_binding = None;
+        let old_motion_trackers = vec![tracker.clone()];
+        let old_first_mask_binding = None; // no mask on the clip
+
+        // New state: auto-crop binding installed + updated tracker (could
+        // have samples from a cache hit, but for test purposes just reuse).
+        let new_binding = TrackingBinding {
+            source_clip_id: "clip-1".to_string(),
+            tracker_id: "tracker-1".to_string(),
+            apply_translation: true,
+            apply_scale: true,
+            apply_rotation: false,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            scale_multiplier: 1.818,
+            rotation_offset_deg: 0.0,
+            strength: 1.0,
+            smoothing: 0.0,
+        };
+
+        let cmd = SetClipAutoCropCommand {
+            clip_id: "clip-1".to_string(),
+            old_tracking_binding,
+            old_motion_trackers,
+            old_first_mask_binding,
+            new_tracking_binding: Some(new_binding.clone()),
+            new_motion_trackers: vec![tracker.clone()],
+            new_first_mask_binding: None,
+        };
+
+        cmd.execute(&mut project);
+        let applied = project.clip_ref("clip-1").unwrap();
+        assert!(applied.tracking_binding.is_some());
+        assert!(
+            (applied.tracking_binding.as_ref().unwrap().scale_multiplier - 1.818).abs() < 1e-9
+        );
+        assert!(project.dirty);
+
+        project.dirty = false;
+        cmd.undo(&mut project);
+        let undone = project.clip_ref("clip-1").unwrap();
+        assert!(undone.tracking_binding.is_none());
+        assert_eq!(undone.motion_trackers.len(), 1);
+        assert!(project.dirty);
+    }
 
     #[test]
     fn master_gain_command_round_trip() {

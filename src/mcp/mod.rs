@@ -671,6 +671,22 @@ pub enum McpCommand {
         smoothing: f64,
         reply: SyncSender<Value>,
     },
+    SetClipAutoCropTrack {
+        clip_id: String,
+        /// Region center X in normalized clip coordinates (0..1).
+        center_x: f64,
+        /// Region center Y in normalized clip coordinates (0..1).
+        center_y: f64,
+        /// Region half-width in normalized clip coordinates (0..0.5).
+        width: f64,
+        /// Region half-height in normalized clip coordinates (0..0.5).
+        height: f64,
+        /// Optional extra headroom around the region as a fraction
+        /// (e.g. 0.1 = 10% margin). Clamped to [0, 0.5]. Defaults to 0.1
+        /// when omitted.
+        padding: Option<f64>,
+        reply: SyncSender<Value>,
+    },
     ListBackups {
         reply: SyncSender<Value>,
     },
