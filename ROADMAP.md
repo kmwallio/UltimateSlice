@@ -417,6 +417,8 @@ Tracking docs:
 ### Audio
 - [x] Voice Isolation (Smart Noise Gating) based on Whisper STT subtitle timestamps
   - [x] No-subtitle silence-detect mode (ffmpeg `silencedetect`) with auto-suggested threshold from astats noise-floor analysis
+- [x] **Voice Enhance — Phase 1**: per-clip one-knob "Enhance Voice" toggle (HPF + `afftdn` denoise + mud cut + presence boost + compressor) with 0..1 strength slider; applied before voice isolation; export uses `build_voice_enhance_filter` chain in `src/media/export.rs`; realtime preview goes through `VoiceEnhanceCache` (`src/media/voice_enhance_cache.rs`) — a background ffmpeg worker that produces a sidecar mp4 with `-c:v copy -af "<chain>"` and the player swaps it in via `resolve_source_path_for_clip`; preview and export are byte-identical. Includes status-bar progress indicator, trailing-edge debounced strength slider, 2 GiB LRU eviction with mtime touch on cache hits, source-mtime in cache key, and MCP `set_clip_voice_enhance`. Round-trips through OTIO.
+- [x] **Per-clip "Render subtitles" toggle**: visibility flag on each clip that hides subtitles from the Program Monitor overlay, export burn-in, and SRT sidecar without removing the underlying segment data — so the Transcript Editor and `Subtitles`-source Voice Isolation keep working. Defaults to on for backward compatibility. MCP `set_clip_subtitle_visible`. Round-trips through OTIO.
 - [x] Audio track clip display with waveform (see Timeline Improvements above)
 - [x] Volume / pan controls per clip in the inspector (volume slider now dB-based: `-100 dB` to `+12 dB`, mapped to linear gain for playback/export, persisted in FCPXML)
 - [x] Basic audio mixing (level meters)

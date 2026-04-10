@@ -544,6 +544,27 @@ pub fn show_preferences_dialog(
     timeline_box.append(&loudness_custom_spin);
     timeline_box.append(&loudness_hint);
 
+    // ── Voice enhance cache size cap ──
+    let voice_enhance_cap_label = Label::new(Some("Voice enhance cache cap (GiB)"));
+    voice_enhance_cap_label.set_halign(gtk::Align::Start);
+    voice_enhance_cap_label.set_margin_top(12);
+    let voice_enhance_cap_spin = gtk4::SpinButton::with_range(0.5, 50.0, 0.5);
+    voice_enhance_cap_spin.set_value(current.voice_enhance_cache_cap_gib);
+    voice_enhance_cap_spin.set_digits(1);
+    voice_enhance_cap_spin.set_halign(gtk::Align::Start);
+    let voice_enhance_cap_hint = Label::new(Some(
+        "Soft cap on the per-user voice-enhance prerender cache. \
+         When the cache exceeds this size, the least-recently-modified \
+         files are deleted to make room. Default 2 GiB.",
+    ));
+    voice_enhance_cap_hint.set_halign(gtk::Align::Start);
+    voice_enhance_cap_hint.add_css_class("dim-label");
+    voice_enhance_cap_hint.set_wrap(true);
+    voice_enhance_cap_hint.set_max_width_chars(60);
+    timeline_box.append(&voice_enhance_cap_label);
+    timeline_box.append(&voice_enhance_cap_spin);
+    timeline_box.append(&voice_enhance_cap_hint);
+
     stack.add_titled(&timeline_box, Some("timeline"), "Timeline");
 
     // ── Integration section ───────────────────────────────────────────────
@@ -1034,6 +1055,9 @@ pub fn show_preferences_dialog(
                     .map(|id| id.to_string())
                     .unwrap_or_else(|| "ebu_r128".to_string()),
                 loudness_target_lufs: loudness_custom_spin.value(),
+                voice_enhance_cache_cap_gib: voice_enhance_cap_spin
+                    .value()
+                    .clamp(0.5, 50.0),
             };
             new_state.set_proxy_mode(ProxyMode::from_str(
                 proxy_mode.active_id().as_deref().unwrap_or("off"),

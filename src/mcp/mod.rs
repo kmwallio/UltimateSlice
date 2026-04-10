@@ -442,6 +442,18 @@ pub enum McpCommand {
         voice_isolation: f64,
         reply: SyncSender<Value>,
     },
+    SetClipVoiceEnhance {
+        clip_id: String,
+        enabled: bool,
+        /// Optional 0.0..=1.0 strength. `None` keeps the existing value.
+        strength: Option<f64>,
+        reply: SyncSender<Value>,
+    },
+    SetClipSubtitleVisible {
+        clip_id: String,
+        visible: bool,
+        reply: SyncSender<Value>,
+    },
     SetVoiceIsolationSource {
         clip_id: String,
         /// `"subtitles"` or `"silence"`

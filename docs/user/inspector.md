@@ -167,8 +167,34 @@ Video stabilization compensates camera shake using ffmpeg's libvidstab (two-pass
 | Slider | Range | Default | Effect |
 |---|---|---|---|
 | **Volume** | −100 dB → +12 dB | 0 dB | Per-clip gain (`0 dB = 1.0x`, `-96 dB`/`-100 dB` ≈ mute) |
+| **Enhance Voice** | toggle + 0% → 100% strength | Off / 50% | One-knob speech cleanup chain. See **Enhance Voice** below. |
 | **Voice Isolation** | 0% → 100% | Off | Ducks volume between spoken words. See **Voice Isolation Source** below. |
 | **Pan** | −1.0 → 1.0 | 0.0 | Stereo position (−1 = full left, +1 = full right) |
+
+#### Enhance Voice
+
+Toggling **Enhance Voice** on a clip runs a fixed FFmpeg cleanup chain on its
+audio: a high-pass at 80 Hz, FFT noise reduction (`afftdn`), a small mud cut
+around 300 Hz, a presence boost around 4 kHz, and a gentle compressor. A single
+**Strength** slider (0–100%) scales every stage at once, so you don't have to
+dial individual EQ and compressor controls.
+
+The chain runs **before voice isolation** in the audio chain, so when you
+combine the two the ducking decision sees a cleaned-up signal — quieter
+backgrounds, less honk, more even speech levels.
+
+| Behaviour | Detail |
+|---|---|
+| **Export** | Always applies. The chain is the same FFmpeg filter the prerender cache uses, so the rendered file matches preview exactly. |
+| **Preview** | Goes through a background prerender. The first time you toggle on (or change strength), an ffmpeg job runs in the background and the bottom status bar shows **"Enhancing voice… X/Y"**. Until the cached file is ready, preview plays the original (un-enhanced) audio for that clip. |
+| **Strength slider** | Trailing-edge debounced 350 ms — dragging the slider only spawns one job for the value you released on, not one job per tick. |
+| **Cache hits** | Bouncing the strength back to a value you previously rendered is an instant cache hit (no new ffmpeg job). |
+| **Cache disk** | Cached files live under `$XDG_CACHE_HOME/ultimateslice/voice_enhance/` and the cache is capped at **2 GiB** with LRU eviction (least-recently-modified files are deleted to make room). |
+| **Cache invalidation** | The cache key folds in the source file's mtime, so re-encoding or replacing your source media triggers a fresh prerender automatically. |
+| **Voice isolation interaction** | Enhance runs first, then voice isolation ducks the cleaned signal. Combining both is the recommended setup for noisy dialogue clips. |
+
+MCP tool: `set_clip_voice_enhance` with `clip_id`, `enabled`, and optional
+`strength` (0.0–1.0).
 
 #### Voice Isolation Source
 
@@ -390,6 +416,7 @@ Clips with subtitle segments show subtitle style controls in the Inspector.
 
 | Field | Description |
 |---|---|
+| **Render subtitles** | When unchecked, this clip's subtitles are hidden from the Program Monitor overlay, the export burn-in, and the SRT sidecar export — but the underlying segment data is preserved. The **Transcript Editor** and **Voice Isolation** (`Subtitles` source) keep working normally. Use this when you want STT-derived word timings to drive voice isolation or transcript-based editing without burning subtitles into the final video. Defaults to on so existing projects render subtitles unchanged. MCP: `set_clip_subtitle_visible`. |
 | **Font** | Subtitle font description (Pango-style, e.g. `Sans Bold 24`) |
 | **Bold** | Always-on bold for all subtitle text (independent of font description) |
 | **Italic** | Always-on italic for all subtitle text |

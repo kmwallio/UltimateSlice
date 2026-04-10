@@ -81,6 +81,39 @@ Applies to AAC and Opus. Ignored for FLAC and PCM.
 - High fidelity: 256–320 kbps
 - Recommended for 5.1 surround AAC: **448 kbps**
 
+### Per-clip audio chain order
+
+For clips that have audio effects in the Inspector, the export filter graph
+runs them in this order:
+
+```
+source audio
+  → speed (atempo) / reverse
+  → Enhance Voice (HPF + afftdn + EQ + compressor)   ← if "Enhance Voice" is on
+  → Volume + Voice Isolation ducking                  ← if Voice Isolation > 0
+  → channel routing
+  → pitch shift
+  → LADSPA effects
+  → Match EQ (7-band, mic match)
+  → User EQ (3-band parametric)
+  → fades
+  → pan
+  → track delay
+  → audiomixer pad → master volume → output
+```
+
+The important thing for voice work is that **Enhance Voice runs before Voice
+Isolation**. The cleanup chain (high-pass, denoise, presence boost, compression)
+happens first, so when voice isolation makes its ducking decision it sees a
+cleaned-up signal — quieter background, more even speech levels — and the
+ducked floor sounds natural instead of crunchy. If you have a clip with both
+features on, this is the right order; nothing to configure.
+
+The Realtime preview goes through the **same** filter chain via a background
+prerender (cached under `$XDG_CACHE_HOME/ultimateslice/voice_enhance/`), so
+what you hear in the Program Monitor is byte-identical to what the export
+will produce. See [`docs/user/inspector.md` → Enhance Voice](inspector.md#enhance-voice).
+
 ### Audio Channels — Advanced Audio Mode (Surround)
 
 The **Audio Channels** dropdown selects the output channel layout. Default is

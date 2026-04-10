@@ -19,13 +19,16 @@ use std::process::Command;
 use std::sync::mpsc;
 use std::time::SystemTime;
 
-/// Soft cap on the total disk space used by the voice enhance cache.
-/// When `request()` finds the cache is over this limit it evicts the
-/// least-recently-modified files until the total drops back under.
-/// 2 GiB is enough for ~30 minutes of typical 4K H.264 source remuxed
-/// with new audio; raise it if your projects involve longer clips and
-/// you have headroom on disk.
-const MAX_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// Default soft cap on the total disk space used by the voice enhance
+/// cache when no preference is set. The cap is overrideable per-cache
+/// at runtime via [`VoiceEnhanceCache::set_cache_cap_bytes`], driven
+/// from `PreferencesState::voice_enhance_cache_cap_gib` in the
+/// preferences UI. When `request()` finds the cache is over the cap
+/// it evicts the least-recently-modified files until the total drops
+/// back under. 2 GiB is enough for ~30 minutes of typical 4K H.264
+/// source remuxed with new audio; raise it if your projects involve
+/// longer clips and you have headroom on disk.
+const DEFAULT_MAX_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 // ── Public types ───────────────────────────────────────────────────────────
 
@@ -52,6 +55,20 @@ pub struct VoiceEnhanceProgress {
     pub in_flight: bool,
 }
 
+/// Per-clip cache status returned by [`VoiceEnhanceCache::status`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VoiceEnhanceStatus {
+    /// Nothing has been requested for this `(source, strength)` yet.
+    Idle,
+    /// An ffmpeg job is currently running for this key.
+    Pending,
+    /// A cached file exists and the preview is using it.
+    Ready,
+    /// The most recent ffmpeg job failed; the user can retry via
+    /// [`VoiceEnhanceCache::retry`].
+    Failed,
+}
+
 // ── Cache ──────────────────────────────────────────────────────────────────
 
 pub struct VoiceEnhanceCache {
@@ -67,6 +84,11 @@ pub struct VoiceEnhanceCache {
     result_rx: mpsc::Receiver<WorkerUpdate>,
     work_tx: Option<mpsc::Sender<VoiceEnhanceJob>>,
     cache_root: PathBuf,
+    /// Runtime-overridable cache size cap. Defaults to
+    /// [`DEFAULT_MAX_CACHE_BYTES`]; the preferences UI sets it via
+    /// [`Self::set_cache_cap_bytes`] from
+    /// `PreferencesState::voice_enhance_cache_cap_gib`.
+    cache_cap_bytes: u64,
 }
 
 impl VoiceEnhanceCache {
@@ -112,6 +134,7 @@ impl VoiceEnhanceCache {
             result_rx,
             work_tx: Some(work_tx),
             cache_root,
+            cache_cap_bytes: DEFAULT_MAX_CACHE_BYTES,
         }
     }
 
@@ -166,12 +189,24 @@ impl VoiceEnhanceCache {
         }
     }
 
+    /// Update the in-memory cache size cap (in bytes) used by the
+    /// next `request()`'s LRU eviction pass. Driven from the
+    /// `PreferencesState::voice_enhance_cache_cap_gib` preference. A
+    /// new cap takes effect on the next request, so the user can
+    /// shrink the cap mid-session and the next prerender request will
+    /// honour it.
+    pub fn set_cache_cap_bytes(&mut self, bytes: u64) {
+        self.cache_cap_bytes = bytes.max(64 * 1024 * 1024); // floor at 64 MiB to avoid pathological caps
+    }
+
     /// Walk the cache directory and delete the least-recently-modified
-    /// files until total disk usage is back under [`MAX_CACHE_BYTES`].
-    /// Files currently held in `self.paths` are NOT exempt — if a file
-    /// gets evicted, the in-memory entry is removed too so the next
-    /// `request()` will treat it as missing and re-prerender.
+    /// files until total disk usage is back under the current
+    /// `cache_cap_bytes`. Files currently held in `self.paths` are
+    /// NOT exempt — if a file gets evicted, the in-memory entry is
+    /// removed too so the next `request()` will treat it as missing
+    /// and re-prerender.
     pub fn evict_if_oversized(&mut self) {
+        let cap = self.cache_cap_bytes;
         let entries = match std::fs::read_dir(&self.cache_root) {
             Ok(e) => e,
             Err(_) => return,
@@ -192,7 +227,7 @@ impl VoiceEnhanceCache {
             total += len;
             files.push((path, len, mtime));
         }
-        if total <= MAX_CACHE_BYTES {
+        if total <= cap {
             return;
         }
         // Oldest mtime first → evict first.
@@ -200,11 +235,11 @@ impl VoiceEnhanceCache {
         log::info!(
             "VoiceEnhanceCache: cache size {} > cap {}, evicting LRU files",
             total,
-            MAX_CACHE_BYTES
+            cap
         );
         let mut bytes_freed: u64 = 0;
         for (path, len, _mtime) in files {
-            if total.saturating_sub(bytes_freed) <= MAX_CACHE_BYTES {
+            if total.saturating_sub(bytes_freed) <= cap {
                 break;
             }
             // Drop any in-memory `paths` entry that points at this
@@ -278,6 +313,35 @@ impl VoiceEnhanceCache {
         self.paths.get(&cache_key(source_path, strength))
     }
 
+    /// Per-clip cache status used by the Inspector to render an inline
+    /// hint next to the strength slider. The four states map cleanly
+    /// onto a short status string:
+    ///
+    /// - `Ready` — sidecar exists, preview is using it.
+    /// - `Pending` — ffmpeg job is in flight.
+    /// - `Failed` — ffmpeg job failed (use `retry` to re-queue).
+    /// - `Idle` — nothing has been requested yet for this key.
+    pub fn status(&self, source_path: &str, strength: f32) -> VoiceEnhanceStatus {
+        let key = cache_key(source_path, strength);
+        if self.paths.contains_key(&key) {
+            VoiceEnhanceStatus::Ready
+        } else if self.pending.contains(&key) {
+            VoiceEnhanceStatus::Pending
+        } else if self.failed.contains(&key) {
+            VoiceEnhanceStatus::Failed
+        } else {
+            VoiceEnhanceStatus::Idle
+        }
+    }
+
+    /// Drop a key from the `failed` set so the next `request()` will
+    /// re-queue the job. Returns `true` if the key actually was failed.
+    /// Used by the Inspector "Retry" button.
+    pub fn retry(&mut self, source_path: &str, strength: f32) -> bool {
+        let key = cache_key(source_path, strength);
+        self.failed.remove(&key)
+    }
+
     fn output_path_for_key(&self, key: &str) -> String {
         // Use .mp4 — ffmpeg can stream-copy most video codecs into mp4
         // and AAC audio is universally decodable in GStreamer.
@@ -296,16 +360,38 @@ impl Drop for VoiceEnhanceCache {
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-/// Stable cache key for `(source_path, strength)`. Strength is rounded
-/// to two decimal places so tiny float wobble in the slider doesn't
-/// cause cache thrash.
+/// Stable cache key for `(source_path, source_mtime, strength)`.
+///
+/// Strength is rounded to 1% so tiny float wobble in the slider doesn't
+/// cause cache thrash. Source mtime (Unix seconds since epoch) is folded
+/// into the hash so re-encoding or replacing the source file in place
+/// invalidates the cache automatically — without that, the cached
+/// enhanced audio would silently come from a stale render of the old
+/// source. Stat failures fall back to mtime=0, which still produces a
+/// stable key for missing files (the prerender will then fail and the
+/// key will be marked as `failed`).
 pub fn cache_key(source_path: &str, strength: f32) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut hasher = DefaultHasher::new();
     source_path.hash(&mut hasher);
+    let mtime = source_mtime_secs(source_path);
+    mtime.hash(&mut hasher);
     let s = (strength.clamp(0.0, 1.0) * 100.0).round() as u32;
     format!("ve_{}_{:03}", hasher.finish(), s)
+}
+
+/// Read the source file's modification time as Unix seconds since the
+/// epoch. Returns 0 on any error (file missing, permission denied, OS
+/// without mtime, ...). The exact value isn't important — only that
+/// it changes when the file content changes.
+fn source_mtime_secs(source_path: &str) -> u64 {
+    std::fs::metadata(source_path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn dirs_cache_root() -> PathBuf {

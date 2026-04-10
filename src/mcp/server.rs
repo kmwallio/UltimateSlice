@@ -1165,6 +1165,31 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_clip_voice_enhance",
+            "description": "Toggle the per-clip 'Enhance Voice' chain (high-pass, FFT denoise, mud cut, presence boost, gentle compressor). Applied before voice isolation in the audio chain. When enabled, a background ffmpeg prerender produces a sidecar mp4 that the Program Monitor swaps in for byte-identical preview/export. Strength scales every stage from subtle (0.0) to broadcast (1.0).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id (from list_clips)." },
+                    "enabled": { "type": "boolean", "description": "Whether the voice enhance chain is on for this clip." },
+                    "strength": { "type": "number", "description": "Optional strength 0.0–1.0. Omit to keep the current value (defaults to 0.5 on first enable)." }
+                },
+                "required": ["clip_id", "enabled"]
+            }
+        },
+        {
+            "name": "set_clip_subtitle_visible",
+            "description": "Toggle whether a clip's subtitles are rendered. When false, the clip's subtitles are hidden from the Program Monitor overlay, the export burn-in (ASS filter), and the SRT sidecar export — but the underlying segment data is preserved so the transcript editor and voice isolation (Subtitles source) keep working. Defaults to true.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id (from list_clips)." },
+                    "visible": { "type": "boolean", "description": "Whether subtitles are rendered for this clip." }
+                },
+                "required": ["clip_id", "visible"]
+            }
+        },
+        {
             "name": "set_voice_isolation_source",
             "description": "Choose the source of voice-isolation gate intervals. 'subtitles' uses Whisper word timings (default, requires generated subtitles). 'silence' uses ffmpeg silencedetect intervals (requires analyze_voice_isolation_silence first).",
             "inputSchema": {
@@ -3079,6 +3104,23 @@ fn dispatch_tool_payload(
         "set_clip_voice_isolation" => McpCommand::SetClipVoiceIsolation {
             clip_id: arg_str!(args, "clip_id"),
             voice_isolation: arg_f64!(args, "voice_isolation", 0.0),
+            reply: tx,
+        },
+        "set_clip_voice_enhance" => McpCommand::SetClipVoiceEnhance {
+            clip_id: arg_str!(args, "clip_id"),
+            enabled: args
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            strength: args.get("strength").and_then(|v| v.as_f64()),
+            reply: tx,
+        },
+        "set_clip_subtitle_visible" => McpCommand::SetClipSubtitleVisible {
+            clip_id: arg_str!(args, "clip_id"),
+            visible: args
+                .get("visible")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
             reply: tx,
         },
         "set_voice_isolation_source" => McpCommand::SetVoiceIsolationSource {

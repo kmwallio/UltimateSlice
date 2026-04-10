@@ -4653,6 +4653,15 @@ pub fn build_window(
     let voice_enhance_cache = Rc::new(RefCell::new(
         crate::media::voice_enhance_cache::VoiceEnhanceCache::new(),
     ));
+    // Apply the persisted preference cap so the LRU eviction respects
+    // the user's chosen disk budget from the start of the session.
+    {
+        let cap_gib = preferences_state.borrow().voice_enhance_cache_cap_gib;
+        let cap_bytes = (cap_gib.max(0.5) * 1024.0 * 1024.0 * 1024.0) as u64;
+        voice_enhance_cache
+            .borrow_mut()
+            .set_cache_cap_bytes(cap_bytes);
+    }
     let frame_interp_cache = Rc::new(RefCell::new(
         crate::media::frame_interp_cache::FrameInterpCache::new(),
     ));
@@ -4708,6 +4717,7 @@ pub fn build_window(
         let player = player.clone();
         let prog_player = prog_player.clone();
         let proxy_cache = proxy_cache.clone();
+        let voice_enhance_cache_apply = voice_enhance_cache.clone();
         let project = project.clone();
         let timeline_state = timeline_state.clone();
         let mcp_sender = mcp_sender.clone();
@@ -4781,6 +4791,19 @@ pub fn build_window(
             prog_player
                 .borrow_mut()
                 .set_duck_settings(new_state.duck_enabled, new_state.duck_amount_db);
+            // Push the cache cap to the voice enhance cache so future
+            // request() calls evict against the new ceiling.
+            {
+                let cap_bytes = (new_state
+                    .voice_enhance_cache_cap_gib
+                    .max(0.5)
+                    * 1024.0
+                    * 1024.0
+                    * 1024.0) as u64;
+                voice_enhance_cache_apply
+                    .borrow_mut()
+                    .set_cache_cap_bytes(cap_bytes);
+            }
             if new_state.proxy_mode.is_enabled() {
                 // If the proxy scale changed, invalidate old entries so clips are
                 // re-transcoded at the new resolution.
@@ -6678,6 +6701,43 @@ pub fn build_window(
     {
         let cb = on_relink_media_gui.clone();
         inspector_view.relink_btn.connect_clicked(move |_| cb());
+    }
+
+    // Wire inspector "Retry" button (under the Voice Enhance status row)
+    // to clear the failed marker for the currently-selected clip's
+    // (source, strength) cache key and trigger a project-changed cycle.
+    // The next on_project_changed reload walks the clip list and
+    // re-requests the prerender; the cache will see the failed entry is
+    // gone and re-queue the ffmpeg job.
+    {
+        let project = project.clone();
+        let inspector_view_retry = inspector_view.clone();
+        let voice_enhance_cache_retry = voice_enhance_cache.clone();
+        let on_project_changed_retry = on_project_changed.clone();
+        inspector_view
+            .voice_enhance_retry_btn
+            .connect_clicked(move |_| {
+                let selected = inspector_view_retry.selected_clip_id.borrow().clone();
+                if let Some(clip_id) = selected {
+                    let snapshot = {
+                        let proj = project.borrow();
+                        proj.clip_ref(&clip_id)
+                            .map(|c| (c.source_path.clone(), c.voice_enhance_strength))
+                    };
+                    if let Some((src, strength)) = snapshot {
+                        let cleared = voice_enhance_cache_retry.borrow_mut().retry(&src, strength);
+                        if cleared {
+                            log::info!(
+                                "voice_enhance: retry requested for clip={} src={} strength={:.2}",
+                                clip_id,
+                                src,
+                                strength
+                            );
+                            on_project_changed_retry();
+                        }
+                    }
+                }
+            });
     }
 
     // Wire inspector "Generate Subtitles" button to STT cache.
@@ -14449,6 +14509,51 @@ pub fn build_window(
                         .set_visible(!text.is_empty());
                 }
             }
+            // Refresh the per-clip Voice Enhance status row from the
+            // currently selected clip's cache state. Mirrors the frame
+            // interp status pattern above. The Retry button is only
+            // visible when the cache reports `Failed` for the current
+            // (source_path, strength) pair.
+            {
+                use crate::media::voice_enhance_cache::VoiceEnhanceStatus;
+                let (text, show_retry) = {
+                    let proj = project_for_stt.borrow();
+                    let selected = inspector_view.selected_clip_id.borrow().clone();
+                    let clip = selected.and_then(|id| proj.clip_ref(&id).cloned());
+                    match clip {
+                        Some(c) if c.voice_enhance => {
+                            let status = voice_enhance_cache
+                                .borrow()
+                                .status(&c.source_path, c.voice_enhance_strength);
+                            match status {
+                                VoiceEnhanceStatus::Idle => ("".to_string(), false),
+                                VoiceEnhanceStatus::Pending => {
+                                    ("Generating enhanced audio…".to_string(), false)
+                                }
+                                VoiceEnhanceStatus::Ready => {
+                                    ("Enhanced audio ready".to_string(), false)
+                                }
+                                VoiceEnhanceStatus::Failed => (
+                                    "Voice enhance failed — click Retry".to_string(),
+                                    true,
+                                ),
+                            }
+                        }
+                        _ => ("".to_string(), false),
+                    }
+                };
+                if inspector_view.voice_enhance_status_label.text() != text.as_str() {
+                    inspector_view.voice_enhance_status_label.set_text(&text);
+                    inspector_view
+                        .voice_enhance_status_label
+                        .set_visible(!text.is_empty());
+                }
+                if inspector_view.voice_enhance_retry_btn.is_visible() != show_retry {
+                    inspector_view
+                        .voice_enhance_retry_btn
+                        .set_visible(show_retry);
+                }
+            }
             // Poll STT cache — apply generated subtitles via undo system.
             {
                 let stt_results = stt_cache.borrow_mut().poll();
@@ -17500,6 +17605,64 @@ fn handle_mcp_command(
             };
             drop(proj);
             reply.send(json!({"success": found})).ok();
+            if found {
+                on_project_changed();
+            }
+        }
+
+        McpCommand::SetClipVoiceEnhance {
+            clip_id,
+            enabled,
+            strength,
+            reply,
+        } => {
+            let mut proj = project.borrow_mut();
+            let result = if let Some(clip) = proj.clip_mut(&clip_id) {
+                clip.voice_enhance = enabled;
+                if let Some(s) = strength {
+                    clip.voice_enhance_strength = (s as f32).clamp(0.0, 1.0);
+                }
+                let snapshot = (clip.voice_enhance, clip.voice_enhance_strength);
+                proj.dirty = true;
+                Some(snapshot)
+            } else {
+                None
+            };
+            drop(proj);
+            match result {
+                Some((en, st)) => {
+                    reply
+                        .send(json!({
+                            "success": true,
+                            "enabled": en,
+                            "strength": st as f64,
+                        }))
+                        .ok();
+                    on_project_changed();
+                }
+                None => {
+                    reply.send(json!({"success": false})).ok();
+                }
+            }
+        }
+
+        McpCommand::SetClipSubtitleVisible {
+            clip_id,
+            visible,
+            reply,
+        } => {
+            let mut proj = project.borrow_mut();
+            let found = if let Some(clip) = proj.clip_mut(&clip_id) {
+                clip.subtitle_visible = visible;
+                proj.dirty = true;
+                true
+            } else {
+                false
+            };
+            drop(proj);
+            reply
+                .send(json!({"success": found, "visible": visible}))
+                .ok();
             if found {
                 on_project_changed();
             }

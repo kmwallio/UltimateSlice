@@ -1149,6 +1149,12 @@ pub struct PreferencesState {
     /// when a preset is selected; carries the custom value otherwise.
     #[serde(default = "default_loudness_target_lufs")]
     pub loudness_target_lufs: f64,
+    /// Soft cap on the per-user voice-enhance prerender cache disk
+    /// usage in GiB. The cache evicts least-recently-modified files
+    /// once this is exceeded. Default 2 GiB; raise it for projects
+    /// with many long enhanced clips, lower it on small disks.
+    #[serde(default = "default_voice_enhance_cache_cap_gib")]
+    pub voice_enhance_cache_cap_gib: f64,
 }
 
 impl Default for PreferencesState {
@@ -1185,6 +1191,7 @@ impl Default for PreferencesState {
             backup_max_versions: default_backup_max_versions(),
             loudness_target_preset: default_loudness_target_preset(),
             loudness_target_lufs: default_loudness_target_lufs(),
+            voice_enhance_cache_cap_gib: default_voice_enhance_cache_cap_gib(),
         }
     }
 }
@@ -1252,6 +1259,10 @@ fn default_crossfade_duration_ns() -> u64 {
 fn default_duck_amount_db() -> f64 {
     -6.0
 }
+fn default_voice_enhance_cache_cap_gib() -> f64 {
+    2.0
+}
+
 fn default_loudness_target_preset() -> String {
     "ebu_r128".to_string()
 }

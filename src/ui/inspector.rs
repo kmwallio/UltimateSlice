@@ -318,6 +318,8 @@ pub struct InspectorView {
     pub volume_slider: Scale,
     pub voice_enhance_check: CheckButton,
     pub voice_enhance_strength_slider: Scale,
+    pub voice_enhance_status_label: Label,
+    pub voice_enhance_retry_btn: Button,
     pub voice_isolation_slider: Scale,
     pub vi_pad_slider: Scale,
     pub vi_fade_slider: Scale,
@@ -4681,10 +4683,12 @@ pub fn build_inspector(
     // ── Enhance Voice (one-knob FFmpeg chain, applied before voice isolation) ──
     let voice_enhance_check = CheckButton::with_label("Enhance Voice");
     voice_enhance_check.set_tooltip_text(Some(
-        "Apply a fixed cleanup chain (high-pass, presence EQ, gentle \
-         compressor) to this clip's audio, before Voice Isolation. \
-         Realtime preview reflects the toggle live. Note: full FFT \
-         noise reduction only runs at export time.",
+        "Apply a one-knob cleanup chain (high-pass, FFT noise reduction, \
+         presence EQ, gentle compressor) to this clip's audio. Runs \
+         before Voice Isolation. Preview goes through a background \
+         prerender — the first time you toggle on or change strength, \
+         ffmpeg generates a sidecar file in the background and the \
+         status bar shows progress. Preview and export are byte-identical.",
     ));
     audio_inner.append(&voice_enhance_check);
 
@@ -4702,6 +4706,25 @@ pub fn build_inspector(
          0 = subtle clean-up, 100 = broadcast voice.",
     ));
     audio_inner.append(&voice_enhance_strength_slider);
+
+    // Per-clip cache status row: shows whether the prerender is ready,
+    // running, or failed for the current strength. Updated by the
+    // window.rs poll loop from `VoiceEnhanceCache::status()`. The
+    // **Retry** button is only visible when the cache reports `Failed`.
+    let voice_enhance_status_row = GBox::new(Orientation::Horizontal, 6);
+    voice_enhance_status_row.set_margin_top(2);
+    let voice_enhance_status_label = Label::new(None);
+    voice_enhance_status_label.set_halign(gtk::Align::Start);
+    voice_enhance_status_label.add_css_class("dim-label");
+    voice_enhance_status_label.set_visible(false);
+    let voice_enhance_retry_btn = Button::with_label("Retry");
+    voice_enhance_retry_btn.set_tooltip_text(Some(
+        "Re-queue the voice enhance ffmpeg job for this clip.",
+    ));
+    voice_enhance_retry_btn.set_visible(false);
+    voice_enhance_status_row.append(&voice_enhance_status_label);
+    voice_enhance_status_row.append(&voice_enhance_retry_btn);
+    audio_inner.append(&voice_enhance_status_row);
 
     row_label(&audio_inner, "Voice Isolation");
     let voice_isolation_slider = Scale::with_range(Orientation::Horizontal, 0.0, 100.0, 1.0);
@@ -10412,6 +10435,8 @@ pub fn build_inspector(
         volume_slider,
         voice_enhance_check,
         voice_enhance_strength_slider,
+        voice_enhance_status_label,
+        voice_enhance_retry_btn,
         voice_isolation_slider,
         vi_pad_slider,
         vi_fade_slider,
