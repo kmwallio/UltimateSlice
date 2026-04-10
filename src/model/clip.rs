@@ -754,6 +754,9 @@ fn default_vidstab_smoothing() -> f32 {
 fn default_voice_enhance_strength() -> f32 {
     0.5
 }
+fn default_motion_blur_shutter_angle() -> f64 {
+    180.0
+}
 fn default_speed() -> f64 {
     1.0
 }
@@ -1665,6 +1668,14 @@ pub struct Clip {
     pub flip_h: bool,
     #[serde(default)]
     pub flip_v: bool,
+    /// When true, render motion blur for keyframed-transform / fast-speed
+    /// motion at export and via background prerender. No effect in live
+    /// GStreamer preview (mirrors the vidstab pattern).
+    #[serde(default)]
+    pub motion_blur_enabled: bool,
+    /// Shutter angle in degrees, 0..=720. Default 180.0 (cinematic).
+    #[serde(default = "default_motion_blur_shutter_angle")]
+    pub motion_blur_shutter_angle: f64,
     // Title / text overlay
     #[serde(default)]
     pub title_text: String,
@@ -2302,6 +2313,8 @@ impl Clip {
             rotate: 0,
             flip_h: false,
             flip_v: false,
+            motion_blur_enabled: false,
+            motion_blur_shutter_angle: default_motion_blur_shutter_angle(),
             title_text: String::new(),
             title_font: default_title_font(),
             title_color: default_title_color(),
@@ -2425,6 +2438,30 @@ impl Clip {
     /// Returns `true` when this clip is a compound (nested timeline) clip.
     pub fn is_compound(&self) -> bool {
         self.kind == ClipKind::Compound
+    }
+
+    /// Returns `true` when this clip has any keyframe lane that affects
+    /// per-frame geometry (position, scale, rotation, or crop edges).
+    /// Used to gate motion-blur application and other animation-aware paths.
+    pub fn has_animated_transform(&self) -> bool {
+        !self.scale_keyframes.is_empty()
+            || !self.position_x_keyframes.is_empty()
+            || !self.position_y_keyframes.is_empty()
+            || !self.rotate_keyframes.is_empty()
+            || !self.crop_left_keyframes.is_empty()
+            || !self.crop_right_keyframes.is_empty()
+            || !self.crop_top_keyframes.is_empty()
+            || !self.crop_bottom_keyframes.is_empty()
+    }
+
+    /// Returns `true` when motion blur should actually be rendered for this
+    /// clip — the user enabled it, the shutter angle is non-trivial, and the
+    /// clip has per-frame motion (animated transform or speed > 1.0). Returns
+    /// `false` for static clips so the toggle is a free no-op.
+    pub fn motion_blur_active(&self) -> bool {
+        self.motion_blur_enabled
+            && self.motion_blur_shutter_angle > 0.5
+            && (self.has_animated_transform() || self.speed > 1.001)
     }
 
     /// Compute the duration of the compound clip's internal timeline.

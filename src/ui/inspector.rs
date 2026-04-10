@@ -366,6 +366,8 @@ pub struct InspectorView {
     pub opacity_slider: Scale,
     pub blend_mode_dropdown: gtk4::DropDown,
     pub anamorphic_desqueeze_dropdown: gtk4::DropDown,
+    pub motion_blur_check: CheckButton,
+    pub motion_blur_shutter_slider: Scale,
     pub position_x_slider: Scale,
     pub position_y_slider: Scale,
     // Title / text overlay
@@ -2465,6 +2467,11 @@ impl InspectorView {
                 self.blur_slider.set_value(c.blur as f64);
                 self.vidstab_check.set_active(c.vidstab_enabled);
                 self.vidstab_slider.set_value(c.vidstab_smoothing as f64);
+                self.motion_blur_check.set_active(c.motion_blur_enabled);
+                self.motion_blur_shutter_slider
+                    .set_value(c.motion_blur_shutter_angle);
+                self.motion_blur_shutter_slider
+                    .set_sensitive(c.motion_blur_enabled);
                 self.shadows_slider.set_value(c.shadows as f64);
                 self.midtones_slider.set_value(c.midtones as f64);
                 self.highlights_slider.set_value(c.highlights as f64);
@@ -2998,6 +3005,9 @@ impl InspectorView {
                 self.blur_slider.set_value(0.0);
                 self.vidstab_check.set_active(false);
                 self.vidstab_slider.set_value(0.5);
+                self.motion_blur_check.set_active(false);
+                self.motion_blur_shutter_slider.set_value(180.0);
+                self.motion_blur_shutter_slider.set_sensitive(false);
                 self.shadows_slider.set_value(0.0);
                 self.midtones_slider.set_value(0.0);
                 self.highlights_slider.set_value(0.0);
@@ -5215,6 +5225,32 @@ pub fn build_inspector(
     anamorphic_desqueeze_dropdown.set_tooltip_text(Some("Anamorphic lens desqueeze factor"));
     transform_inner.append(&anamorphic_desqueeze_dropdown);
 
+    // ── Motion Blur (export-only, gated on animated transform / fast speed) ──
+    let motion_blur_row = gtk4::Box::new(Orientation::Horizontal, 6);
+    let motion_blur_check = CheckButton::with_label("Motion Blur");
+    motion_blur_check.set_active(false);
+    motion_blur_check.set_tooltip_text(Some(
+        "Render motion blur for keyframed transforms and fast-speed clips. Always applied at export; live preview when Background Render is on. Auto-skipped on static clips.",
+    ));
+    motion_blur_row.append(&motion_blur_check);
+    let motion_blur_note = Label::new(Some("(export + background render)"));
+    motion_blur_note.add_css_class("dim-label");
+    motion_blur_row.append(&motion_blur_note);
+    transform_inner.append(&motion_blur_row);
+
+    row_label(&transform_inner, "Shutter Angle");
+    let motion_blur_shutter_slider =
+        Scale::with_range(Orientation::Horizontal, 0.0, 720.0, 1.0);
+    motion_blur_shutter_slider.set_value(180.0);
+    motion_blur_shutter_slider.set_draw_value(true);
+    motion_blur_shutter_slider.set_digits(0);
+    motion_blur_shutter_slider.add_mark(180.0, gtk4::PositionType::Bottom, Some("180°"));
+    motion_blur_shutter_slider.add_mark(360.0, gtk4::PositionType::Bottom, Some("360°"));
+    motion_blur_shutter_slider.set_hexpand(true);
+    motion_blur_shutter_slider
+        .set_tooltip_text(Some("Shutter angle in degrees: 180° = cinematic, 360° = full natural blur"));
+    transform_inner.append(&motion_blur_shutter_slider);
+
     row_label(&transform_inner, "Scale");
     let scale_slider = Scale::with_range(Orientation::Horizontal, SCALE_MIN, SCALE_MAX, 0.05);
     scale_slider.set_value(1.0);
@@ -5973,6 +6009,51 @@ pub fn build_inspector(
                     proj.dirty = true;
                 }
                 on_vidstab_changed();
+            }
+        });
+    }
+
+    // Wire motion-blur enable checkbox. Export-only feature, so we just
+    // mark dirty — no proxy rebuild, no preview pipeline rebuild.
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let shutter_slider = motion_blur_shutter_slider.clone();
+        motion_blur_check.connect_toggled(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let enabled = btn.is_active();
+            shutter_slider.set_sensitive(enabled);
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                let mut proj = project.borrow_mut();
+                if let Some(clip) = proj.clip_mut(clip_id) {
+                    clip.motion_blur_enabled = enabled;
+                }
+                proj.dirty = true;
+            }
+        });
+    }
+
+    // Wire motion-blur shutter-angle slider — export-only, no preview rebuild.
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        motion_blur_shutter_slider.connect_value_changed(move |slider| {
+            if *updating.borrow() {
+                return;
+            }
+            let v = slider.value();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                let mut proj = project.borrow_mut();
+                if let Some(clip) = proj.clip_mut(clip_id) {
+                    clip.motion_blur_shutter_angle = v;
+                }
+                proj.dirty = true;
             }
         });
     }
@@ -10477,6 +10558,8 @@ pub fn build_inspector(
         opacity_slider,
         blend_mode_dropdown,
         anamorphic_desqueeze_dropdown,
+        motion_blur_check,
+        motion_blur_shutter_slider,
         position_x_slider,
         position_y_slider,
         title_entry,

@@ -251,6 +251,8 @@ fn write_otio_with_mode(
                 freeze_frame_hold_duration_ns: clip.freeze_frame_hold_duration_ns,
                 vidstab_enabled: Some(clip.vidstab_enabled),
                 vidstab_smoothing: Some(clip.vidstab_smoothing as f64),
+                motion_blur_enabled: Some(clip.motion_blur_enabled),
+                motion_blur_shutter_angle: Some(clip.motion_blur_shutter_angle),
                 color_label: Some(clip.color_label),
                 anamorphic_desqueeze: Some(clip.anamorphic_desqueeze),
                 group_id: clip.group_id.clone(),

@@ -80,6 +80,11 @@ pub(crate) struct UltimateSliceClipOtioMetadata {
     pub(crate) vidstab_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) vidstab_smoothing: Option<f64>,
+    /// Motion blur for keyframed transforms / fast-speed clips (export-only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) motion_blur_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) motion_blur_shutter_angle: Option<f64>,
     /// Semantic clip color label for timeline tinting.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) color_label: Option<ClipColorLabel>,

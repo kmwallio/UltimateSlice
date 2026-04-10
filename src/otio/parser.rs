@@ -288,6 +288,12 @@ fn otio_clip_to_clip(
         if let Some(v) = us.vidstab_smoothing {
             clip.vidstab_smoothing = v as f32;
         }
+        if let Some(v) = us.motion_blur_enabled {
+            clip.motion_blur_enabled = v;
+        }
+        if let Some(v) = us.motion_blur_shutter_angle {
+            clip.motion_blur_shutter_angle = v;
+        }
         if let Some(v) = us.color_label {
             clip.color_label = v;
         }
@@ -1435,6 +1441,10 @@ mod tests {
         clip.vidstab_enabled = true;
         clip.vidstab_smoothing = 0.7;
 
+        // Motion blur (export-only, gated on motion at runtime)
+        clip.motion_blur_enabled = true;
+        clip.motion_blur_shutter_angle = 270.0;
+
         // Misc
         clip.color_label = ClipColorLabel::Teal;
         clip.anamorphic_desqueeze = 1.33;
@@ -1491,6 +1501,12 @@ mod tests {
         // Stabilization
         assert_eq!(clip2.vidstab_enabled, clip.vidstab_enabled);
         assert_eq!(clip2.vidstab_smoothing, clip.vidstab_smoothing);
+
+        // Motion blur
+        assert_eq!(clip2.motion_blur_enabled, clip.motion_blur_enabled);
+        assert!(
+            (clip2.motion_blur_shutter_angle - clip.motion_blur_shutter_angle).abs() < 1e-9
+        );
 
         // Misc
         assert_eq!(clip2.color_label, clip.color_label);

@@ -4344,6 +4344,8 @@ fn clip_to_program_clips(
         rotate_keyframes: c.rotate_keyframes.clone(),
         flip_h: c.flip_h,
         flip_v: c.flip_v,
+        motion_blur_enabled: c.motion_blur_enabled,
+        motion_blur_shutter_angle: c.motion_blur_shutter_angle,
         title_text: c.title_text.clone(),
         title_font: c.title_font.clone(),
         title_color: c.title_color,
@@ -17509,6 +17511,43 @@ fn handle_mcp_command(
             };
             drop(proj);
             reply.send(json!({"success": found})).ok();
+            if found {
+                on_project_changed();
+            }
+        }
+
+        McpCommand::SetClipMotionBlur {
+            clip_id,
+            enabled,
+            shutter_angle,
+            reply,
+        } => {
+            let mut proj = project.borrow_mut();
+            let result: Option<(bool, f64)> = if let Some(clip) = proj.clip_mut(&clip_id) {
+                if let Some(v) = enabled {
+                    clip.motion_blur_enabled = v;
+                }
+                if let Some(v) = shutter_angle {
+                    clip.motion_blur_shutter_angle = v.clamp(0.0, 720.0);
+                }
+                Some((clip.motion_blur_enabled, clip.motion_blur_shutter_angle))
+            } else {
+                None
+            };
+            if result.is_some() {
+                proj.dirty = true;
+            }
+            drop(proj);
+            let response = match result {
+                Some((en, sh)) => json!({
+                    "success": true,
+                    "motion_blur_enabled": en,
+                    "motion_blur_shutter_angle": sh,
+                }),
+                None => json!({"success": false}),
+            };
+            let found = result.is_some();
+            reply.send(response).ok();
             if found {
                 on_project_changed();
             }

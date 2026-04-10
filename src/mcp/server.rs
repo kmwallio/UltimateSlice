@@ -630,6 +630,19 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_clip_motion_blur",
+            "description": "Enable motion blur for a clip's keyframed transforms or fast-speed motion. Rendered at export only via FFmpeg minterpolate+tmix; auto-skipped on static (non-keyframed, speed≈1) clips.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id":       { "type": "string",  "description": "Clip id (from list_clips)." },
+                    "enabled":       { "type": "boolean", "description": "Enable/disable motion blur." },
+                    "shutter_angle": { "type": "number",  "description": "Shutter angle in degrees, 0..720. 180 = cinematic (default); 360 = full natural blur (cheap path)." }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
             "name": "set_clip_mask",
             "description": "Set shape mask on a clip (rectangle, ellipse, or bezier path) to restrict visible area. Creates mask if absent.",
             "inputSchema": {
@@ -2608,6 +2621,13 @@ fn dispatch_tool_payload(
             clip_id: arg_str!(args, "clip_id"),
             enabled: args.get("enabled").and_then(|v| v.as_bool()),
             threshold: args.get("threshold").and_then(|v| v.as_f64()),
+            reply: tx,
+        },
+
+        "set_clip_motion_blur" => McpCommand::SetClipMotionBlur {
+            clip_id: arg_str!(args, "clip_id"),
+            enabled: args.get("enabled").and_then(|v| v.as_bool()),
+            shutter_angle: args.get("shutter_angle").and_then(|v| v.as_f64()),
             reply: tx,
         },
 

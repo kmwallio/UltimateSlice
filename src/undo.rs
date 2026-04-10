@@ -904,6 +904,39 @@ impl EditCommand for SetClipVolumeCommand {
 }
 
 /// Set clip voice isolation amount.
+/// Set per-clip motion-blur enable + shutter angle as a single undoable
+/// operation. The fields are coupled (the slider only matters when the
+/// toggle is on) so changing either records both old/new pairs and the
+/// undo restores both.
+pub struct SetClipMotionBlurCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_enabled: bool,
+    pub old_shutter_angle: f64,
+    pub new_enabled: bool,
+    pub new_shutter_angle: f64,
+}
+
+impl EditCommand for SetClipMotionBlurCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.motion_blur_enabled = self.new_enabled;
+            clip.motion_blur_shutter_angle = self.new_shutter_angle;
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.motion_blur_enabled = self.old_enabled;
+            clip.motion_blur_shutter_angle = self.old_shutter_angle;
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set clip motion blur"
+    }
+}
+
 pub struct SetClipVoiceIsolationCommand {
     pub clip_id: String,
     pub track_id: String,

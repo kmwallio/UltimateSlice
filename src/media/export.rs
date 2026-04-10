@@ -540,6 +540,11 @@ pub fn export_project(
         let has_transform_keyframes = has_transform_keyframes(clip);
         let has_opacity_keyframes = !clip.opacity_keyframes.is_empty();
         let clip_has_mask = clip.has_mask();
+        let motion_blur_filter = build_motion_blur_filter(
+            clip,
+            project.frame_rate.numerator,
+            project.frame_rate.denominator,
+        );
         if has_transform_keyframes || has_opacity_keyframes || clip_has_mask {
             let scale_expr = build_keyframed_property_expression(
                 &clip.scale_keyframes,
@@ -599,7 +604,7 @@ pub fn export_project(
                  color=c=black:size={out_w}x{out_h}:r={}/{}:d={clip_duration_s:.6}[pv{i}bg];\
                  [pv{i}bg][pv{i}fg]overlay=x='{overlay_x_expr}':y='{overlay_y_expr}':eval=frame\
                   ,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({opacity_expr})*({mask_alpha_expr})'[pv{i}raw];\
-                 [pv{i}raw]format=yuv420p{transition_stop_pad_filter}[pv{i}];",
+                 [pv{i}raw]format=yuv420p{motion_blur_filter}{transition_stop_pad_filter}[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
                 , project.frame_rate.numerator, project.frame_rate.denominator
             ));
@@ -608,12 +613,12 @@ pub fn export_project(
                 let mask_path_str = mask_file.path().display().to_string();
                 _mask_temp_files.push(mask_file);
                 let old_tail = format!(
-                    "[pv{i}raw];[pv{i}raw]format=yuv420p{transition_stop_pad_filter}[pv{i}];",
+                    "[pv{i}raw];[pv{i}raw]format=yuv420p{motion_blur_filter}{transition_stop_pad_filter}[pv{i}];",
                     i = i
                 );
                 let new_tail = format!(
                     "[pv{i}raw];movie='{mask_path_str}',format=gray,scale={out_w}:{out_h}[pv{i}mask];\
-                     [pv{i}raw][pv{i}mask]alphamerge,format=yuv420p{transition_stop_pad_filter}[pv{i}];",
+                     [pv{i}raw][pv{i}mask]alphamerge,format=yuv420p{motion_blur_filter}{transition_stop_pad_filter}[pv{i}];",
                     i = i, out_w = out_w, out_h = out_h,
                 );
                 let current = filter.clone();
@@ -626,14 +631,14 @@ pub fn export_project(
             let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
             let anamorphic_filter = build_anamorphic_filter(clip);
             filter.push_str(&format!(
-                "[{i}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{speed_filter}[pv{i}raw];[pv{i}raw]format=yuv420p{transition_stop_pad_filter}[pv{i}];",
+                "[{i}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{speed_filter}[pv{i}raw];[pv{i}raw]format=yuv420p{motion_blur_filter}{transition_stop_pad_filter}[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
             ));
         } else {
             let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
             let anamorphic_filter = build_anamorphic_filter(clip);
             filter.push_str(&format!(
-                "[{i}:v]{lut_prefix}{anamorphic_filter}scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{},format=yuv420p{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{title_filter}{subtitle_filter}{speed_filter}{transition_stop_pad_filter}[pv{i}];",
+                "[{i}:v]{lut_prefix}{anamorphic_filter}scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{},format=yuv420p{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{title_filter}{subtitle_filter}{speed_filter}{motion_blur_filter}{transition_stop_pad_filter}[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
             ));
         }
@@ -712,6 +717,11 @@ pub fn export_project(
         let has_transform_keyframes = has_transform_keyframes(clip);
         let has_opacity_keyframes = !clip.opacity_keyframes.is_empty();
         let ov_has_mask = clip.has_mask();
+        let motion_blur_filter = build_motion_blur_filter(
+            clip,
+            project.frame_rate.numerator,
+            project.frame_rate.denominator,
+        );
         // Scale the overlay clip to output size (keeps aspect ratio, pads transparent)
         let ov_label = format!("ov{k}");
         let ov_mask_is_raster = clip
@@ -813,7 +823,7 @@ pub fn export_project(
         // seeking), then delay to the correct timeline position.
         let start_s = clip.timeline_start as f64 / 1_000_000_000.0;
         filter.push_str(&format!(
-            ";[{ov_raw_label}]setpts=PTS-STARTPTS+{start_s:.6}/TB[{ov_label}]"
+            ";[{ov_raw_label}]setpts=PTS-STARTPTS{motion_blur_filter},setpts=PTS+{start_s:.6}/TB[{ov_label}]"
         ));
         let next_label = format!("vcomp{k}");
         let end_s = (clip.timeline_start + clip.duration()) as f64 / 1_000_000_000.0;
@@ -4562,6 +4572,46 @@ fn build_timing_filter(
     }
 }
 
+/// Build a motion-blur filter chain for clips with keyframed transforms or
+/// fast-speed motion. Returns an empty string when motion blur is disabled or
+/// the clip has no per-frame motion (so unchanged clips stay byte-identical).
+///
+/// The chain works in two regimes:
+/// - **shutter_angle == 360°**: cheap path, just `tmix=frames=2` averages
+///   adjacent rendered frames at the project rate. No oversampling.
+/// - **shutter_angle < 360°**: oversample by `K = 4` via
+///   `minterpolate=fps=K*fps:mi_mode=blend`, then `tmix` the first
+///   `frames = max(1, round(K * shutter / 360))` of each output's K
+///   sub-frames, then decimate back to `fps` so downstream filters keep
+///   the project frame rate.
+pub(crate) fn build_motion_blur_filter(clip: &Clip, fps_num: u32, fps_den: u32) -> String {
+    if !clip.motion_blur_active() {
+        return String::new();
+    }
+    let fps = if fps_den > 0 {
+        format!("{fps_num}/{fps_den}")
+    } else {
+        format!("{fps_num}")
+    };
+    let shutter = clip.motion_blur_shutter_angle.clamp(0.0, 720.0);
+    if (shutter - 360.0).abs() < 0.5 {
+        return ",tmix=frames=2:weights='1 1'".to_string();
+    }
+    const K: u32 = 4;
+    let raw_frames = (K as f64 * shutter / 360.0).round() as i32;
+    let frames = raw_frames.max(1).min((K * 2) as i32) as u32;
+    let weights = std::iter::repeat("1")
+        .take(frames as usize)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let over_fps = if fps_den > 0 {
+        format!("{}/{}", fps_num.saturating_mul(K), fps_den)
+    } else {
+        format!("{}", fps_num.saturating_mul(K))
+    };
+    format!(",minterpolate=fps={over_fps}:mi_mode=blend,tmix=frames={frames}:weights='{weights}',fps={fps}")
+}
+
 /// Build the minterpolate filter suffix for slow-motion frame interpolation.
 /// Returns empty string if interpolation is Off or the clip isn't slow-motion.
 fn build_minterpolate_suffix(clip: &Clip, fps_num: u32, fps_den: u32) -> String {
@@ -7097,6 +7147,90 @@ mod tests {
         assert_eq!(timing.duration_ns, 1_000_000_000);
         assert_eq!(timing.before_cut_ns, 500_000_000);
         assert_eq!(timing.after_cut_ns, 500_000_000);
+    }
+
+    #[test]
+    fn motion_blur_filter_empty_when_disabled() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.position_x_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 0.0,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        clip.position_x_keyframes.push(NumericKeyframe {
+            time_ns: 1_000_000_000,
+            value: 0.5,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        clip.motion_blur_enabled = false;
+        assert_eq!(super::build_motion_blur_filter(&clip, 30, 1), "");
+    }
+
+    #[test]
+    fn motion_blur_filter_empty_when_no_motion() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.motion_blur_enabled = true;
+        clip.motion_blur_shutter_angle = 180.0;
+        // No keyframes, speed = 1.0 → static clip → motion blur is a no-op.
+        assert_eq!(super::build_motion_blur_filter(&clip, 30, 1), "");
+    }
+
+    #[test]
+    fn motion_blur_filter_active_with_position_keyframes() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.motion_blur_enabled = true;
+        clip.motion_blur_shutter_angle = 180.0;
+        clip.position_x_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 0.0,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        clip.position_x_keyframes.push(NumericKeyframe {
+            time_ns: 1_000_000_000,
+            value: 0.5,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        let f = super::build_motion_blur_filter(&clip, 30, 1);
+        assert!(f.contains("minterpolate=fps=120/1"), "got: {f}");
+        assert!(f.contains("tmix=frames=2"), "got: {f}");
+        assert!(f.ends_with(",fps=30/1"), "got: {f}");
+    }
+
+    #[test]
+    fn motion_blur_filter_at_360_skips_minterpolate_for_cheap_path() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.motion_blur_enabled = true;
+        clip.motion_blur_shutter_angle = 360.0;
+        clip.scale_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 1.0,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        clip.scale_keyframes.push(NumericKeyframe {
+            time_ns: 1_000_000_000,
+            value: 1.5,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        let f = super::build_motion_blur_filter(&clip, 30, 1);
+        assert!(!f.contains("minterpolate"), "got: {f}");
+        assert!(f.contains("tmix=frames=2"), "got: {f}");
+    }
+
+    #[test]
+    fn motion_blur_filter_active_with_fast_speed() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.motion_blur_enabled = true;
+        clip.motion_blur_shutter_angle = 180.0;
+        clip.speed = 2.0;
+        let f = super::build_motion_blur_filter(&clip, 30, 1);
+        assert!(!f.is_empty(), "fast speed should activate motion blur");
+        assert!(f.contains("tmix=frames=2"));
     }
 
     #[test]

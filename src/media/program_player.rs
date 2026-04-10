@@ -826,6 +826,11 @@ pub struct ProgramClip {
     pub rotate: i32,
     pub flip_h: bool,
     pub flip_v: bool,
+    /// Motion blur enabled (rendered in background prerender FFmpeg path
+    /// only — not in the live GStreamer preview slots).
+    pub motion_blur_enabled: bool,
+    /// Motion blur shutter angle in degrees (0..=720).
+    pub motion_blur_shutter_angle: f64,
     /// Title text overlay
     pub title_text: String,
     pub title_font: String,
@@ -6218,23 +6223,42 @@ impl ProgramPlayer {
     }
 
     fn clip_has_unsupported_background_prerender_keyframes(clip: &ProgramClip) -> bool {
-        !clip.scale_keyframes.is_empty()
-            || !clip.opacity_keyframes.is_empty()
-            || !clip.blur_keyframes.is_empty()
-            || !clip.position_x_keyframes.is_empty()
-            || !clip.position_y_keyframes.is_empty()
-            || !clip.volume_keyframes.is_empty()
+        // Audio-side keyframes are not honored by prerender (audio is baked
+        // at current levels at job time and not invalidated by audio edits).
+        let unsupported_audio = !clip.volume_keyframes.is_empty()
             || !clip.pan_keyframes.is_empty()
             || !clip.eq_low_gain_keyframes.is_empty()
             || !clip.eq_mid_gain_keyframes.is_empty()
-            || !clip.eq_high_gain_keyframes.is_empty()
-            || !clip.speed_keyframes.is_empty()
+            || !clip.eq_high_gain_keyframes.is_empty();
+        // Speed keyframes are not yet plumbed through the prerender pre-chain.
+        let unsupported_speed = !clip.speed_keyframes.is_empty();
+        // Creative blur lane (gaussian blur strength keyframes) is not yet
+        // emitted as a per-frame expression in prerender.
+        let unsupported_blur = !clip.blur_keyframes.is_empty();
+        // Animated masks are not yet supported in prerender.
+        let unsupported_mask_keyframes = Self::clip_has_keyframed_masks(clip);
+        // Transform keyframes (scale, position, rotate, crop, opacity) ARE
+        // supported by the new keyframed-overlay chain — except when the
+        // clip also has any non-animated mask, since the mask + per-frame
+        // overlay interaction is not yet handled. In that case the clip
+        // falls back to the live (non-prerendered) path.
+        let has_transform_keyframes = !clip.scale_keyframes.is_empty()
+            || !clip.opacity_keyframes.is_empty()
+            || !clip.position_x_keyframes.is_empty()
+            || !clip.position_y_keyframes.is_empty()
             || !clip.rotate_keyframes.is_empty()
             || !clip.crop_left_keyframes.is_empty()
             || !clip.crop_right_keyframes.is_empty()
             || !clip.crop_top_keyframes.is_empty()
-            || !clip.crop_bottom_keyframes.is_empty()
-            || Self::clip_has_keyframed_masks(clip)
+            || !clip.crop_bottom_keyframes.is_empty();
+        let transform_blocked_by_mask =
+            has_transform_keyframes && clip.masks.iter().any(|m| m.enabled);
+
+        unsupported_audio
+            || unsupported_speed
+            || unsupported_blur
+            || unsupported_mask_keyframes
+            || transform_blocked_by_mask
     }
 
     fn clip_has_unsupported_background_prerender_audio_effects(clip: &ProgramClip) -> bool {
@@ -7704,6 +7728,8 @@ impl ProgramPlayer {
             }
         }
         clip.slow_motion_interp.hash(hasher);
+        clip.motion_blur_enabled.hash(hasher);
+        clip.motion_blur_shutter_angle.to_bits().hash(hasher);
         clip.masks.len().hash(hasher);
         for mask in &clip.masks {
             mask.enabled.hash(hasher);
@@ -11766,6 +11792,7 @@ impl ProgramPlayer {
             let chroma_key_filter = Self::prerender_build_chroma_key_filter(clip);
             let title_filter = Self::prerender_build_title_filter(clip, out_h);
             let minterpolate_filter = Self::prerender_build_minterpolate_filter(clip, fps);
+            let motion_blur_filter = Self::prerender_build_motion_blur_filter(clip, fps);
             let flip_filter = Self::prerender_build_flip_filter(clip);
             if use_transition_xfade {
                 let crop_filter = Self::prerender_build_crop_filter(clip, out_w, out_h, false);
@@ -11777,11 +11804,31 @@ impl ProgramPlayer {
                     transition_offset_ns,
                     i,
                 );
-                if clip_has_mask {
+                let use_keyframed_overlay =
+                    !clip_has_mask && Self::prerender_clip_has_keyframed_overlay(clip);
+                if use_keyframed_overlay {
+                    let pre_label = format!("pv{i}kf");
+                    nodes.push(format!(
+                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{rotation_filter}{flip_filter}{transition_tpad_filter},fps={}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}[{pre_label}]",
+                        fps.max(1),
+                    ));
+                    nodes.push(Self::prerender_build_keyframed_overlay_tail(
+                        clip,
+                        &pre_label,
+                        &format!("pv{i}"),
+                        out_w,
+                        out_h,
+                        fps.max(1),
+                        1,
+                        false,
+                        true,
+                        &format!("{minterpolate_filter}{motion_blur_filter}"),
+                    ));
+                } else if clip_has_mask {
                     let pre_label = format!("pv{i}pre");
                     let masked_label = format!("pv{i}masked");
                     nodes.push(format!(
-                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter}{transition_tpad_filter},fps={}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}{minterpolate_filter}[{pre_label}]",
+                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter}{transition_tpad_filter},fps={}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}{minterpolate_filter}{motion_blur_filter}[{pre_label}]",
                         fps.max(1),
                     ));
                     let _ = Self::prerender_append_mask_filter(
@@ -11796,14 +11843,14 @@ impl ProgramPlayer {
                     nodes.push(format!("[{masked_label}]format=yuv420p[pv{i}]"));
                 } else if clip.chroma_key_enabled {
                     nodes.push(format!(
-                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter}{transition_tpad_filter},fps={}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}{minterpolate_filter},format=yuv420p[pv{i}]",
+                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter}{transition_tpad_filter},fps={}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}{minterpolate_filter}{motion_blur_filter},format=yuv420p[pv{i}]",
                         fps.max(1),
                     ));
                 } else {
                     // Apply LUT at source resolution (before downscale) so it
                     // processes the same pixel values as the export path.
                     nodes.push(format!(
-                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter}{transition_tpad_filter},fps={},format=yuv420p{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{title_filter}{minterpolate_filter}[pv{i}]",
+                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter}{transition_tpad_filter},fps={},format=yuv420p{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{title_filter}{minterpolate_filter}{motion_blur_filter}[pv{i}]",
                         fps.max(1),
                     ));
                 }
@@ -11812,10 +11859,30 @@ impl ProgramPlayer {
                 let scale_position_filter =
                     Self::prerender_build_scale_position_filter(clip, out_w, out_h, false);
                 let rotation_filter = Self::prerender_build_rotation_filter(clip, false);
-                if clip_has_mask {
+                let use_keyframed_overlay =
+                    !clip_has_mask && Self::prerender_clip_has_keyframed_overlay(clip);
+                if use_keyframed_overlay {
+                    let pre_label = format!("pv{i}kf");
+                    nodes.push(format!(
+                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{rotation_filter}{flip_filter},fps={}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}[{pre_label}]",
+                        fps.max(1),
+                    ));
+                    nodes.push(Self::prerender_build_keyframed_overlay_tail(
+                        clip,
+                        &pre_label,
+                        &format!("pv{i}"),
+                        out_w,
+                        out_h,
+                        fps.max(1),
+                        1,
+                        false,
+                        true,
+                        &format!("{minterpolate_filter}{motion_blur_filter}"),
+                    ));
+                } else if clip_has_mask {
                     let pre_label = format!("pv{i}pre");
                     nodes.push(format!(
-                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter},fps={}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}{minterpolate_filter}[{pre_label}]",
+                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter},fps={}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}{minterpolate_filter}{motion_blur_filter}[{pre_label}]",
                         fps.max(1),
                     ));
                     let _ = Self::prerender_append_mask_filter(
@@ -11831,13 +11898,13 @@ impl ProgramPlayer {
                     // Chroma key needs alpha: convert early so pad fills transparent.
                     // Apply LUT at source resolution before format/scale for parity.
                     nodes.push(format!(
-                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter},fps={}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}{minterpolate_filter}[pv{i}]",
+                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter},fps={}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}{minterpolate_filter}{motion_blur_filter}[pv{i}]",
                         fps.max(1),
                     ));
                 } else {
                     // Apply LUT at source resolution before downscale for parity.
                     nodes.push(format!(
-                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter},fps={},format=yuv420p{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{title_filter}{minterpolate_filter}[pv{i}]",
+                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter},fps={},format=yuv420p{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{title_filter}{minterpolate_filter}{motion_blur_filter}[pv{i}]",
                         fps.max(1),
                     ));
                 }
@@ -11846,11 +11913,30 @@ impl ProgramPlayer {
                 let scale_position_filter =
                     Self::prerender_build_scale_position_filter(clip, out_w, out_h, true);
                 let rotation_filter = Self::prerender_build_rotation_filter(clip, true);
-                if clip_has_mask {
+                let use_keyframed_overlay =
+                    !clip_has_mask && Self::prerender_clip_has_keyframed_overlay(clip);
+                if use_keyframed_overlay {
+                    let pre_label = format!("pv{i}kf");
+                    nodes.push(format!(
+                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{rotation_filter}{flip_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}[{pre_label}]",
+                    ));
+                    nodes.push(Self::prerender_build_keyframed_overlay_tail(
+                        clip,
+                        &pre_label,
+                        &format!("pv{i}"),
+                        out_w,
+                        out_h,
+                        fps.max(1),
+                        1,
+                        true,  // overlay tracks: transparent bg
+                        false, // overlay tracks: keep alpha (no format=yuv420p)
+                        &format!("{minterpolate_filter}{motion_blur_filter}"),
+                    ));
+                } else if clip_has_mask {
                     let pre_label = format!("pv{i}pre");
                     let masked_label = format!("pv{i}masked");
                     nodes.push(format!(
-                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}{minterpolate_filter}[{pre_label}]",
+                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}{minterpolate_filter}{motion_blur_filter}[{pre_label}]",
                     ));
                     let masked_input = if Self::prerender_append_mask_filter(
                         &mut nodes,
@@ -11873,7 +11959,7 @@ impl ProgramPlayer {
                     // Overlay tracks: convert to yuva420p early so pad fills transparent.
                     // Apply LUT at source resolution before format/scale for parity.
                     nodes.push(format!(
-                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}{minterpolate_filter},colorchannelmixer=aa={:.4}[pv{i}]",
+                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}{minterpolate_filter}{motion_blur_filter},colorchannelmixer=aa={:.4}[pv{i}]",
                         clip.opacity.clamp(0.0, 1.0),
                     ));
                 }
@@ -12393,6 +12479,19 @@ impl ProgramPlayer {
     }
 
     fn prerender_build_rotation_filter(clip: &ProgramClip, transparent_pad: bool) -> String {
+        // Keyframed rotation: emit per-frame ffmpeg expression mirroring
+        // export's `build_rotation_filter` keyframed branch.
+        if !clip.rotate_keyframes.is_empty() {
+            let fill = if transparent_pad { "black@0" } else { "black" };
+            let angle_expr = crate::media::export::build_keyframed_property_expression(
+                &clip.rotate_keyframes,
+                clip.rotate as f64,
+                -180.0,
+                180.0,
+                "t",
+            );
+            return format!(",rotate='-({angle_expr})*PI/180':fillcolor={fill}");
+        }
         if clip.rotate == 0 {
             return String::new();
         }
@@ -12400,6 +12499,120 @@ impl ProgramPlayer {
         format!(
             ",rotate={:.10}:fillcolor={fill}",
             -(clip.rotate as f64).to_radians()
+        )
+    }
+
+    /// Returns `true` when this prerender clip has any keyframe lane that
+    /// affects per-frame geometry (scale, position, or crop). Rotation is
+    /// handled inline by `prerender_build_rotation_filter`, so it's NOT in
+    /// this gate — it doesn't need the multi-stream overlay path.
+    ///
+    /// When this returns `true`, the prerender format string for this clip
+    /// uses the keyframed multi-stream overlay chain instead of the existing
+    /// static `prerender_build_scale_position_filter`.
+    fn prerender_clip_has_keyframed_overlay(clip: &ProgramClip) -> bool {
+        !clip.scale_keyframes.is_empty()
+            || !clip.position_x_keyframes.is_empty()
+            || !clip.position_y_keyframes.is_empty()
+            || !clip.crop_left_keyframes.is_empty()
+            || !clip.crop_right_keyframes.is_empty()
+            || !clip.crop_top_keyframes.is_empty()
+            || !clip.crop_bottom_keyframes.is_empty()
+            || !clip.opacity_keyframes.is_empty()
+    }
+
+    /// Build the multi-step keyframed transform tail for a prerender clip
+    /// chain. Mirrors the keyframed branch in `src/media/export.rs:543-605`:
+    ///
+    /// 1. `,scale=w='max(1,{out_w}*({scale_expr}))':h=...:eval=frame[fg]`
+    /// 2. `color=c={bg}:size={out_w}x{out_h}:r={fps}:d={dur}[bg]`
+    /// 3. `[bg][fg]overlay=x='...':y='...':eval=frame,geq=...alpha*({opacity_expr})[raw]`
+    /// 4. `[raw]format=yuv420p[output_label]` (or yuva420p for transparent)
+    ///
+    /// Returns a multi-step filter graph fragment with internal chains
+    /// separated by `;`, ending in `[{output_label}]`. The caller pushes
+    /// this as one entry into `nodes` (which is later joined by `;`),
+    /// AFTER pushing a separate node that produces the `[{pre_chain_label}]`
+    /// label containing all the static effects.
+    fn prerender_build_keyframed_overlay_tail(
+        clip: &ProgramClip,
+        pre_chain_label: &str,
+        output_label: &str,
+        out_w: u32,
+        out_h: u32,
+        fps_n: u32,
+        fps_d: u32,
+        transparent_bg: bool,
+        final_format_yuv420p: bool,
+        post_tail: &str,
+    ) -> String {
+        use crate::media::export::build_keyframed_property_expression;
+        use crate::model::transform_bounds::{
+            POSITION_MAX, POSITION_MIN, SCALE_MAX, SCALE_MIN,
+        };
+        let scale_expr = build_keyframed_property_expression(
+            &clip.scale_keyframes,
+            clip.scale,
+            SCALE_MIN,
+            SCALE_MAX,
+            "t",
+        );
+        let pos_x_expr = build_keyframed_property_expression(
+            &clip.position_x_keyframes,
+            clip.position_x,
+            POSITION_MIN,
+            POSITION_MAX,
+            "t",
+        );
+        let pos_y_expr = build_keyframed_property_expression(
+            &clip.position_y_keyframes,
+            clip.position_y,
+            POSITION_MIN,
+            POSITION_MAX,
+            "t",
+        );
+        let opacity_expr = build_keyframed_property_expression(
+            &clip.opacity_keyframes,
+            clip.opacity,
+            0.0,
+            1.0,
+            "T",
+        );
+        let clip_duration_s = clip.duration_ns() as f64 / 1_000_000_000.0;
+        let bg_color = if transparent_bg { "black@0" } else { "black" };
+        let (overlay_x_expr, overlay_y_expr) = if Self::clip_uses_direct_canvas_translation(clip) {
+            (
+                format!("(W*(1+({pos_x_expr}))-w)/2"),
+                format!("(H*(1+({pos_y_expr}))-h)/2"),
+            )
+        } else {
+            (
+                format!("(W-w)*(1+({pos_x_expr}))/2"),
+                format!("(H-h)*(1+({pos_y_expr}))/2"),
+            )
+        };
+        // Build the tail filter chain that consumes [raw] and produces
+        // [output_label]. ffmpeg syntax requires at least one filter
+        // between labels, and a leading comma after a `]` is invalid, so
+        // strip any leading comma from `post_tail` and fall back to a
+        // no-op `null` filter when nothing else is being applied.
+        let post_tail_clean = post_tail.strip_prefix(',').unwrap_or(post_tail);
+        let raw_to_output_chain = if final_format_yuv420p {
+            if post_tail_clean.is_empty() {
+                "format=yuv420p".to_string()
+            } else {
+                format!("format=yuv420p,{post_tail_clean}")
+            }
+        } else if post_tail_clean.is_empty() {
+            "null".to_string()
+        } else {
+            post_tail_clean.to_string()
+        };
+        let fg_label = format!("{output_label}fg");
+        let bg_label = format!("{output_label}bg");
+        let raw_label = format!("{output_label}raw");
+        format!(
+            "[{pre_chain_label}]scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[{fg_label}];color=c={bg_color}:size={out_w}x{out_h}:r={fps_n}/{fps_d}:d={clip_duration_s:.6}[{bg_label}];[{bg_label}][{fg_label}]overlay=x='{overlay_x_expr}':y='{overlay_y_expr}':eval=frame,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({opacity_expr})'[{raw_label}];[{raw_label}]{raw_to_output_chain}[{output_label}]"
         )
     }
 
@@ -12682,6 +12895,45 @@ impl ProgramPlayer {
             ));
         }
         filter
+    }
+
+    /// Background-prerender variant of `build_motion_blur_filter` (export.rs).
+    /// Uses the same math: `tmix=frames=2` at 360°, otherwise oversample by
+    /// 4× via `minterpolate`, average the appropriate sub-frame count, and
+    /// decimate back to project rate. Returns empty when motion blur is
+    /// disabled or the clip has no per-frame motion (animated transform or
+    /// speed > 1).
+    fn prerender_build_motion_blur_filter(clip: &ProgramClip, fps: u32) -> String {
+        if !clip.motion_blur_enabled || clip.motion_blur_shutter_angle <= 0.5 {
+            return String::new();
+        }
+        let has_animated_transform = !clip.scale_keyframes.is_empty()
+            || !clip.position_x_keyframes.is_empty()
+            || !clip.position_y_keyframes.is_empty()
+            || !clip.rotate_keyframes.is_empty()
+            || !clip.crop_left_keyframes.is_empty()
+            || !clip.crop_right_keyframes.is_empty()
+            || !clip.crop_top_keyframes.is_empty()
+            || !clip.crop_bottom_keyframes.is_empty();
+        let has_fast_speed = clip.speed > 1.001;
+        if !has_animated_transform && !has_fast_speed {
+            return String::new();
+        }
+        let shutter = clip.motion_blur_shutter_angle.clamp(0.0, 720.0);
+        if (shutter - 360.0).abs() < 0.5 {
+            return ",tmix=frames=2:weights='1 1'".to_string();
+        }
+        const K: u32 = 4;
+        let raw_frames = (K as f64 * shutter / 360.0).round() as i32;
+        let frames = raw_frames.max(1).min((K * 2) as i32) as u32;
+        let weights = std::iter::repeat("1")
+            .take(frames as usize)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let over_fps = fps.saturating_mul(K).max(1);
+        format!(
+            ",minterpolate=fps={over_fps}:mi_mode=blend,tmix=frames={frames}:weights='{weights}',fps={fps}"
+        )
     }
 
     fn prerender_build_minterpolate_filter(clip: &ProgramClip, fps: u32) -> String {
@@ -16604,6 +16856,8 @@ mod tests {
             rotate: 0,
             flip_h: false,
             flip_v: false,
+            motion_blur_enabled: false,
+            motion_blur_shutter_angle: 180.0,
             title_text: String::new(),
             title_font: String::new(),
             title_color: 0,
@@ -17164,7 +17418,11 @@ mod tests {
     }
 
     #[test]
-    fn clip_has_unsupported_background_prerender_features_rejects_transform_keyframes() {
+    fn clip_has_unsupported_background_prerender_features_allows_transform_keyframes() {
+        // Phase 2 of background prerender preview: keyframed transforms
+        // are now rendered via the multi-stream overlay chain in
+        // `prerender_build_keyframed_overlay_tail`, so they no longer
+        // disqualify a clip from prerender.
         let mut clip = make_clip();
         clip.position_x_keyframes.push(NumericKeyframe {
             time_ns: 0,
@@ -17172,8 +17430,211 @@ mod tests {
             interpolation: KeyframeInterpolation::Linear,
             bezier_controls: None,
         });
+        assert!(!ProgramPlayer::clip_has_unsupported_background_prerender_features(&clip));
+
+        clip.position_x_keyframes.clear();
+        clip.scale_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 1.5,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        assert!(!ProgramPlayer::clip_has_unsupported_background_prerender_features(&clip));
+
+        clip.scale_keyframes.clear();
+        clip.rotate_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 30.0,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        assert!(!ProgramPlayer::clip_has_unsupported_background_prerender_features(&clip));
+
+        clip.rotate_keyframes.clear();
+        clip.opacity_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 0.5,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        assert!(!ProgramPlayer::clip_has_unsupported_background_prerender_features(&clip));
+    }
+
+    #[test]
+    fn clip_has_unsupported_background_prerender_features_rejects_transform_keyframes_with_mask() {
+        // Phase 2 limitation: animated transforms combined with a shape
+        // mask are not yet handled by the keyframed-overlay chain, so
+        // these clips fall back to the live path.
+        let mut clip = make_clip();
+        clip.position_x_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 0.25,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        let mut mask =
+            crate::model::clip::ClipMask::new(crate::model::clip::MaskShape::Rectangle);
+        mask.enabled = true;
+        clip.masks.push(mask);
 
         assert!(ProgramPlayer::clip_has_unsupported_background_prerender_features(&clip));
+    }
+
+    #[test]
+    fn clip_has_unsupported_background_prerender_features_still_rejects_audio_keyframes() {
+        // Audio keyframes are still unsupported in prerender — audio is
+        // baked at current levels and audio-property changes do not
+        // invalidate cached segments, so animated audio properties have
+        // no place in the cache.
+        let mut clip = make_clip();
+        clip.volume_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 0.5,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        assert!(ProgramPlayer::clip_has_unsupported_background_prerender_features(&clip));
+    }
+
+    #[test]
+    fn prerender_clip_has_keyframed_overlay_detects_transform_lanes() {
+        let mut clip = make_clip();
+        assert!(!ProgramPlayer::prerender_clip_has_keyframed_overlay(&clip));
+
+        clip.scale_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 1.0,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        assert!(ProgramPlayer::prerender_clip_has_keyframed_overlay(&clip));
+
+        clip.scale_keyframes.clear();
+        clip.position_x_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 0.0,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        assert!(ProgramPlayer::prerender_clip_has_keyframed_overlay(&clip));
+
+        clip.position_x_keyframes.clear();
+        clip.opacity_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 1.0,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        assert!(ProgramPlayer::prerender_clip_has_keyframed_overlay(&clip));
+
+        clip.opacity_keyframes.clear();
+        // Rotate keyframes are handled by `prerender_build_rotation_filter`
+        // directly (inline expression), not by the multi-stream overlay
+        // chain, so they're NOT in the overlay-detection helper.
+        clip.rotate_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 10.0,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        assert!(!ProgramPlayer::prerender_clip_has_keyframed_overlay(&clip));
+    }
+
+    #[test]
+    fn prerender_build_keyframed_overlay_tail_emits_eval_frame_chain() {
+        let mut clip = make_clip();
+        clip.scale_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 1.0,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        clip.scale_keyframes.push(NumericKeyframe {
+            time_ns: 1_000_000_000,
+            value: 1.5,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        clip.position_x_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 0.0,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        clip.position_x_keyframes.push(NumericKeyframe {
+            time_ns: 1_000_000_000,
+            value: 0.5,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+
+        let tail = ProgramPlayer::prerender_build_keyframed_overlay_tail(
+            &clip, "pv0kf", "pv0", 1920, 1080, 30, 1, false, true, "",
+        );
+        assert!(tail.contains("[pv0kf]scale=w='max(1,1920*("), "got: {tail}");
+        // Intermediate fg/bg/raw labels are derived from the output label.
+        assert!(tail.contains(":eval=frame[pv0fg]"), "got: {tail}");
+        assert!(
+            tail.contains("color=c=black:size=1920x1080:r=30/1"),
+            "opaque bg expected for primary track: {tail}"
+        );
+        assert!(tail.contains("[pv0bg][pv0fg]overlay="));
+        assert!(tail.contains("eval=frame,geq="));
+        assert!(tail.contains("[pv0raw]"));
+        // Format conversion is applied via a `format=yuv420p` filter
+        // (not a leading comma after `]raw`, which would be invalid).
+        assert!(tail.contains("[pv0raw]format=yuv420p[pv0]"));
+        assert!(tail.ends_with("[pv0]"), "should end with output label: {tail}");
+    }
+
+    #[test]
+    fn prerender_build_keyframed_overlay_tail_strips_post_tail_leading_comma() {
+        // When post_tail starts with `,` (because motion_blur_filter or
+        // minterpolate_filter were spliced in), it must be stripped so the
+        // resulting chain doesn't have an invalid `[label],filter` sequence.
+        let mut clip = make_clip();
+        clip.scale_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 1.0,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        let tail = ProgramPlayer::prerender_build_keyframed_overlay_tail(
+            &clip,
+            "pv0kf",
+            "pv0",
+            1920,
+            1080,
+            30,
+            1,
+            false,
+            true,
+            ",tmix=frames=2:weights='1 1'",
+        );
+        assert!(
+            tail.contains("[pv0raw]format=yuv420p,tmix=frames=2:weights='1 1'[pv0]"),
+            "got: {tail}"
+        );
+        assert!(!tail.contains("[pv0raw],format"), "leading comma not stripped: {tail}");
+    }
+
+    #[test]
+    fn prerender_build_keyframed_overlay_tail_uses_transparent_bg_for_overlays() {
+        let mut clip = make_clip();
+        clip.position_y_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 0.0,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        let tail = ProgramPlayer::prerender_build_keyframed_overlay_tail(
+            &clip, "pv1kf", "pv1", 1920, 1080, 30, 1, true, false, "",
+        );
+        assert!(
+            tail.contains("color=c=black@0:size=1920x1080:r=30/1"),
+            "transparent bg expected for overlay track: {tail}"
+        );
+        assert!(!tail.contains("format=yuv420p"));
     }
 
     #[test]

@@ -547,7 +547,7 @@ Tracking docs:
 - [x] Keyboard nudge in transform overlay — arrow keys adjust position by 0.01 per press (0.1 with Shift); `+`/`-` adjust scale; activated when a clip is selected
 - [x] Transform overlay drag now pauses playback at interaction start, so the Program Monitor frame stays fixed while editing (no background timeline advancement)
 - [x] Support anamorphic desqueeze (1.33x, 1.5x, 1.8x, 2.0x desqueeze via Inspector and MCP; persists in FCPXML)
-- [ ] Motion Blur for Transforms (Shutter angle support for keyframed transforms)
+- [x] Motion Blur for Transforms — per-clip Inspector toggle + 0..720° shutter-angle slider in the Transform expander; FFmpeg `minterpolate` + `tmix` with a `tmix=frames=2` cheap path at 360°; auto-skipped on static clips so the toggle is a free no-op when nothing is moving; gated by animated-transform keyframes (`position_x`/`position_y`/`scale`/`rotate`/crop) **or** `speed > 1.0`; FCPXML/`.uspxml` round-trip via `us:motion-blur-enabled` / `us:motion-blur-shutter-angle` (omitted at defaults); OTIO round-trip; MCP `set_clip_motion_blur`; **live preview now works through background prerender** when Background Render is enabled (the prerender FFmpeg path bakes the motion-blurred segment into a sidecar mp4 the Program Monitor plays back); the live GStreamer slot path remains unaffected (no temporal-mix element); the fast-speed path remains export-only because variable-speed is not yet wired through prerender
 
 ### Monitoring
 - [x] Safe area overlays (title safe 80%, action safe 90%) — Program Monitor "Safe Areas" toggle with persisted state

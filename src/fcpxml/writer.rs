@@ -779,6 +779,15 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                             clip.vidstab_smoothing.to_string().as_str(),
                         ));
                     }
+                    if clip.motion_blur_enabled {
+                        asset_clip.push_attribute(("us:motion-blur-enabled", "true"));
+                    }
+                    if (clip.motion_blur_shutter_angle - 180.0).abs() > 0.001 {
+                        asset_clip.push_attribute((
+                            "us:motion-blur-shutter-angle",
+                            clip.motion_blur_shutter_angle.to_string().as_str(),
+                        ));
+                    }
                     if !clip.frei0r_effects.is_empty() {
                         if let Ok(json) = serde_json::to_string(&clip.frei0r_effects) {
                             asset_clip.push_attribute(("us:frei0r-effects", json.as_str()));
@@ -4370,6 +4379,8 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:rotate"
             | "us:flip-h"
             | "us:flip-v"
+            | "us:motion-blur-enabled"
+            | "us:motion-blur-shutter-angle"
             | "us:anamorphic-desqueeze"
             | "us:scale"
             | "us:scale-keyframes"
@@ -6205,6 +6216,54 @@ mod tests {
         assert_eq!(loaded_clip.opacity_keyframes.len(), 2);
         assert_eq!(loaded_clip.opacity_keyframes[0].time_ns, 0);
         assert_eq!(loaded_clip.opacity_keyframes[1].time_ns, 2_000_000_000);
+    }
+
+    #[test]
+    fn test_write_read_motion_blur_round_trip() {
+        let mut project = Project::new("Motion Blur RT");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+
+        let mut clip = Clip::new("/tmp/anim.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.id = "blurred-clip".to_string();
+        clip.motion_blur_enabled = true;
+        clip.motion_blur_shutter_angle = 270.0;
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(
+            xml.contains("us:motion-blur-enabled=\"true\""),
+            "expected motion-blur-enabled in xml: {xml}"
+        );
+        assert!(
+            xml.contains("us:motion-blur-shutter-angle=\"270\""),
+            "expected motion-blur-shutter-angle=270 in xml"
+        );
+
+        let loaded = parse_fcpxml(&xml).expect("parse written xml");
+        let loaded_clip = loaded
+            .clip_ref("blurred-clip")
+            .expect("clip id should persist");
+        assert!(loaded_clip.motion_blur_enabled);
+        assert!((loaded_clip.motion_blur_shutter_angle - 270.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_write_read_motion_blur_default_omits_attrs() {
+        // Default-shutter, disabled clip should not write motion-blur attrs
+        // (keeps backward-compatible XML when feature is unused).
+        let mut project = Project::new("MB Default");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut clip = Clip::new("/tmp/static.mp4", 1_000_000_000, 0, ClipKind::Video);
+        clip.id = "static-clip".to_string();
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(!xml.contains("us:motion-blur-enabled"));
+        assert!(!xml.contains("us:motion-blur-shutter-angle"));
     }
 
     #[test]

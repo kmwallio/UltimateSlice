@@ -211,6 +211,12 @@ pub enum McpCommand {
         threshold: Option<f64>,
         reply: SyncSender<Value>,
     },
+    SetClipMotionBlur {
+        clip_id: String,
+        enabled: Option<bool>,
+        shutter_angle: Option<f64>,
+        reply: SyncSender<Value>,
+    },
     SetClipMask {
         clip_id: String,
         enabled: Option<bool>,
