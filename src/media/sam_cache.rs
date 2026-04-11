@@ -907,6 +907,143 @@ pub fn segment_with_box(
     })
 }
 
+// ── Single-frame decoder ───────────────────────────────────────────────────
+
+/// Decode exactly one frame from a source media file at the given
+/// timestamp via ffmpeg, returning an HWC RGB byte buffer and its
+/// dimensions.
+///
+/// Shells out to ffmpeg to do the heavy lifting: seek to the
+/// requested time, pull one frame, convert to RGB24, and write raw
+/// pixels to a temp file we read back. This mirrors the pattern in
+/// [`crate::media::bg_removal_cache`] but extracts only a single
+/// frame instead of streaming the entire source, so it's suitable
+/// for on-demand MCP calls that target a specific timestamp.
+///
+/// The `time_ns` argument is **absolute in source-media time** —
+/// i.e. "the frame at 3.5 s into the original media file." Callers
+/// that want "the frame at clip-local time N" must add
+/// `clip.source_in` first. This matches the convention used by the
+/// rest of the codebase when talking to ffmpeg with `-ss`.
+pub fn decode_single_frame(
+    source_path: &Path,
+    time_ns: u64,
+) -> Result<(Vec<u8>, usize, usize), String> {
+    use std::process::{Command, Stdio};
+    use tempfile::NamedTempFile;
+
+    // First probe dimensions via ffprobe — we need to know the
+    // exact frame size before we can decide how many bytes to
+    // expect back from the raw-video pipe.
+    let (src_w, src_h) = probe_source_dimensions(source_path)?;
+
+    // Seconds.fractional string form for ffmpeg's -ss argument.
+    // Using a high-precision float formatter avoids rounding a
+    // user-supplied timestamp to the nearest second (which would
+    // pick the wrong frame).
+    let time_secs = (time_ns as f64) / 1e9;
+
+    // Temp file for the raw rgb24 frame output. We use a file
+    // rather than stdout because -f rawvideo on stdout sometimes
+    // runs into buffering races on short single-frame outputs,
+    // and the temp-file path is what the rest of the AI cache
+    // modules already use.
+    let temp = NamedTempFile::new().map_err(|e| {
+        format!("decode_single_frame: failed to create temp file: {e}")
+    })?;
+    let temp_path = temp.path().to_path_buf();
+
+    // `-accurate_seek` + `-ss` before `-i` does a fast keyframe
+    // seek; the `-ss` after `-i` (which we don't do here) would
+    // frame-accurate but slow. For single-frame extraction at a
+    // user-specified time, a keyframe-level seek is accurate
+    // enough — SAM's mask isn't sensitive to exact frame position.
+    let status = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-y",
+            "-ss",
+            &format!("{time_secs:.6}"),
+            "-i",
+            &source_path.to_string_lossy(),
+            "-frames:v",
+            "1",
+            "-vf",
+            "format=rgb24",
+            "-f",
+            "rawvideo",
+            &temp_path.to_string_lossy(),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| format!("decode_single_frame: ffmpeg spawn: {e}"))?;
+    if !status.success() {
+        return Err(format!(
+            "decode_single_frame: ffmpeg exited with status {status}"
+        ));
+    }
+
+    // Read the raw rgb24 bytes back.
+    let bytes = std::fs::read(&temp_path)
+        .map_err(|e| format!("decode_single_frame: read temp file: {e}"))?;
+    let expected = src_w * src_h * 3;
+    if bytes.len() < expected {
+        return Err(format!(
+            "decode_single_frame: expected {expected} rgb bytes, got {}",
+            bytes.len()
+        ));
+    }
+    // If ffmpeg wrote more than one frame (shouldn't happen with
+    // `-frames:v 1` but defend against it), take only the first.
+    let rgb = bytes[..expected].to_vec();
+    Ok((rgb, src_w, src_h))
+}
+
+/// Probe source-media dimensions via ffprobe. Returns
+/// (width, height) in pixels.
+fn probe_source_dimensions(source_path: &Path) -> Result<(usize, usize), String> {
+    use std::process::Command;
+
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=s=x:p=0",
+            &source_path.to_string_lossy(),
+        ])
+        .output()
+        .map_err(|e| format!("probe_source_dimensions: ffprobe spawn: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "probe_source_dimensions: ffprobe failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // Expected form: "1920x1080"
+    let mut parts = text.split('x');
+    let w: usize = parts
+        .next()
+        .ok_or_else(|| format!("probe_source_dimensions: empty output: {text:?}"))?
+        .parse()
+        .map_err(|e| format!("probe_source_dimensions: width parse: {e}"))?;
+    let h: usize = parts
+        .next()
+        .ok_or_else(|| format!("probe_source_dimensions: missing height: {text:?}"))?
+        .parse()
+        .map_err(|e| format!("probe_source_dimensions: height parse: {e}"))?;
+    Ok((w, h))
+}
+
 // ── Private helpers ────────────────────────────────────────────────────────
 
 fn extract_float_tensor(

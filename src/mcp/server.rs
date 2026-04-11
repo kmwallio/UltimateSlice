@@ -643,6 +643,25 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "generate_sam_mask",
+            "description": "Run Segment Anything 3 on a single frame of a clip and append the resulting bezier-polygon mask. Accepts either a box prompt (drag a rectangle) or a point prompt (click; emulated as a tiny synthetic box since SAM 3's decoder is box-prompt-only). Blocking inference — the MCP call returns when the mask has been added to the project.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id":     { "type": "string", "description": "Clip to add the mask to." },
+                    "frame_ns":    { "type": "integer", "description": "Absolute source-media time in nanoseconds for the frame to segment. Defaults to the clip's source_in." },
+                    "box_x1":      { "type": "number", "description": "Box prompt: top-left X in clip-local 0..1 coordinates. All four box_* fields must be provided together." },
+                    "box_y1":      { "type": "number", "description": "Box prompt: top-left Y in clip-local 0..1 coordinates." },
+                    "box_x2":      { "type": "number", "description": "Box prompt: bottom-right X in clip-local 0..1 coordinates." },
+                    "box_y2":      { "type": "number", "description": "Box prompt: bottom-right Y in clip-local 0..1 coordinates." },
+                    "point_x":     { "type": "number", "description": "Point prompt: X in clip-local 0..1 coordinates. Ignored if box_* fields are also set." },
+                    "point_y":     { "type": "number", "description": "Point prompt: Y in clip-local 0..1 coordinates." },
+                    "tolerance_px": { "type": "number", "description": "Douglas-Peucker polygon simplification tolerance in source-image pixels. Defaults to 2.0. Larger values produce coarser polygons with fewer control points." }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
             "name": "set_clip_mask",
             "description": "Set shape mask on a clip (rectangle, ellipse, or bezier path) to restrict visible area. Creates mask if absent.",
             "inputSchema": {
@@ -2644,6 +2663,19 @@ fn dispatch_tool_payload(
             clip_id: arg_str!(args, "clip_id"),
             enabled: args.get("enabled").and_then(|v| v.as_bool()),
             shutter_angle: args.get("shutter_angle").and_then(|v| v.as_f64()),
+            reply: tx,
+        },
+
+        "generate_sam_mask" => McpCommand::GenerateSamMask {
+            clip_id: arg_str!(args, "clip_id"),
+            frame_ns: args.get("frame_ns").and_then(|v| v.as_u64()),
+            box_x1: args.get("box_x1").and_then(|v| v.as_f64()),
+            box_y1: args.get("box_y1").and_then(|v| v.as_f64()),
+            box_x2: args.get("box_x2").and_then(|v| v.as_f64()),
+            box_y2: args.get("box_y2").and_then(|v| v.as_f64()),
+            point_x: args.get("point_x").and_then(|v| v.as_f64()),
+            point_y: args.get("point_y").and_then(|v| v.as_f64()),
+            tolerance_px: args.get("tolerance_px").and_then(|v| v.as_f64()),
             reply: tx,
         },
 

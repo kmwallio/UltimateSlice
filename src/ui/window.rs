@@ -17843,6 +17843,249 @@ fn handle_mcp_command(
             }
         }
 
+        #[cfg(feature = "ai-inference")]
+        McpCommand::GenerateSamMask {
+            clip_id,
+            frame_ns,
+            box_x1,
+            box_y1,
+            box_x2,
+            box_y2,
+            point_x,
+            point_y,
+            tolerance_px,
+            reply,
+        } => {
+            // Step 1 — resolve the clip in the project (brief borrow).
+            //
+            // We capture source_path + source_in + source_out here so
+            // we can drop the project borrow before the slow
+            // inference work starts. If the clip disappears during
+            // inference (project reload etc.) we'll detect that on
+            // step 6 when we try to re-borrow to append the mask.
+            let clip_info = {
+                let proj = project.borrow();
+                proj.tracks.iter().find_map(|t| {
+                    t.clips.iter().find(|c| c.id == clip_id).map(|c| {
+                        (
+                            c.source_path.clone(),
+                            c.source_in,
+                            c.source_out,
+                        )
+                    })
+                })
+            };
+            let Some((source_path, source_in, source_out)) = clip_info else {
+                reply
+                    .send(serde_json::json!({
+                        "success": false,
+                        "error": "Clip not found"
+                    }))
+                    .ok();
+                // Can't early-return from the dispatch match arm
+                // (we're inside a single big `match cmd { ... }`);
+                // falling through to end of the arm is fine.
+                return;
+            };
+
+            // Step 2 — locate the installed SAM model.
+            let sam_paths = match crate::media::sam_cache::find_sam_model_paths() {
+                Some(p) => p,
+                None => {
+                    reply.send(serde_json::json!({
+                        "success": false,
+                        "error": "SAM 3 model not installed. See Preferences → Models → Segment Anything 3.1 for install instructions."
+                    })).ok();
+                    return;
+                }
+            };
+
+            // Step 3 — decide which frame to segment. Default is the
+            // clip's source_in (first visible frame); callers can
+            // override via frame_ns, clamped into the clip's
+            // source-range window.
+            let target_frame_ns = frame_ns.unwrap_or(source_in).clamp(source_in, source_out);
+
+            let source_path_buf = std::path::PathBuf::from(&source_path);
+            let (rgb, src_w, src_h) =
+                match crate::media::sam_cache::decode_single_frame(
+                    &source_path_buf,
+                    target_frame_ns,
+                ) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        reply
+                            .send(serde_json::json!({
+                                "success": false,
+                                "error": format!("Frame decode failed: {e}")
+                            }))
+                            .ok();
+                        return;
+                    }
+                };
+
+            // Step 4 — build the prompt. Box prompt wins if all four
+            // box_* fields are set; otherwise fall back to the
+            // emulated-point path; otherwise error out.
+            use crate::media::sam_cache::BoxPrompt;
+            let prompt_result: Result<BoxPrompt, &'static str> =
+                match (box_x1, box_y1, box_x2, box_y2) {
+                    (Some(x1), Some(y1), Some(x2), Some(y2)) => {
+                        // Normalized clip-local → source-pixel.
+                        let sx1 = (x1 * src_w as f64) as f32;
+                        let sy1 = (y1 * src_h as f64) as f32;
+                        let sx2 = (x2 * src_w as f64) as f32;
+                        let sy2 = (y2 * src_h as f64) as f32;
+                        Ok(BoxPrompt::from_corners(sx1, sy1, sx2, sy2))
+                    }
+                    _ => match (point_x, point_y) {
+                        (Some(px), Some(py)) => {
+                            // Normalized click → source-pixel →
+                            // 8-px synthetic box. SAM 3's decoder
+                            // doesn't have a native point interface
+                            // so we approximate with a small
+                            // exemplar region.
+                            let cx = (px * src_w as f64) as f32;
+                            let cy = (py * src_h as f64) as f32;
+                            Ok(BoxPrompt::point_emulation(cx, cy, 4.0))
+                        }
+                        _ => Err(
+                            "Missing prompt: provide either all four box_{x1,y1,x2,y2} or both point_x/point_y",
+                        ),
+                    },
+                };
+            let prompt = match prompt_result {
+                Ok(p) => p,
+                Err(msg) => {
+                    reply
+                        .send(serde_json::json!({
+                            "success": false,
+                            "error": msg,
+                        }))
+                        .ok();
+                    return;
+                }
+            };
+
+            // Step 5 — load sessions and run inference. Blocks the
+            // main thread for the duration of SAM inference (seconds
+            // on GPU, tens of seconds on CPU). Phase 2b will move
+            // this to a background thread when there's a UI button
+            // that needs to stay responsive; the MCP path is
+            // synchronous automation traffic where blocking is
+            // acceptable.
+            let mut sessions = match crate::media::sam_cache::SamSessions::load(&sam_paths) {
+                Ok(s) => s,
+                Err(e) => {
+                    reply
+                        .send(serde_json::json!({
+                            "success": false,
+                            "error": format!("SAM session load failed: {e}")
+                        }))
+                        .ok();
+                    return;
+                }
+            };
+            let result = match crate::media::sam_cache::segment_with_box(
+                &mut sessions,
+                &rgb,
+                src_w,
+                src_h,
+                prompt,
+            ) {
+                Ok(r) => r,
+                Err(e) => {
+                    reply
+                        .send(serde_json::json!({
+                            "success": false,
+                            "error": format!("SAM inference failed: {e}")
+                        }))
+                        .ok();
+                    return;
+                }
+            };
+
+            // Step 6 — convert the binary mask into a bezier polygon
+            // and append it to the clip. The default tolerance of
+            // 2 px gives reasonably tight polygons with moderate
+            // point counts; callers can override.
+            let tolerance = tolerance_px.unwrap_or(2.0).max(0.0);
+            let bezier_points = match crate::media::mask_contour::mask_to_bezier_path(
+                &result.mask,
+                result.src_w,
+                result.src_h,
+                tolerance,
+            ) {
+                Some(p) if p.len() >= 3 => p,
+                _ => {
+                    reply
+                        .send(serde_json::json!({
+                            "success": false,
+                            "error": "SAM produced an empty or degenerate mask (no closed contour found)"
+                        }))
+                        .ok();
+                    return;
+                }
+            };
+
+            let point_count = bezier_points.len();
+            let score = result.score;
+
+            // Re-borrow the project to append the new mask. If the
+            // clip got deleted or the project got replaced during
+            // inference, we report that as a soft failure.
+            let appended: Option<String> = {
+                let mut proj = project.borrow_mut();
+                let mut out: Option<String> = None;
+                for track in proj.tracks.iter_mut() {
+                    if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
+                        let mask =
+                            crate::model::clip::ClipMask::new_path(bezier_points.clone());
+                        let mask_id = mask.id.clone();
+                        clip.masks.push(mask);
+                        out = Some(mask_id);
+                        break;
+                    }
+                }
+                if out.is_some() {
+                    proj.dirty = true;
+                }
+                out
+            };
+
+            match appended {
+                Some(mask_id) => {
+                    on_project_changed();
+                    reply
+                        .send(serde_json::json!({
+                            "success": true,
+                            "mask_id": mask_id,
+                            "score": score,
+                            "point_count": point_count,
+                        }))
+                        .ok();
+                }
+                None => {
+                    reply
+                        .send(serde_json::json!({
+                            "success": false,
+                            "error": "Clip disappeared during SAM inference"
+                        }))
+                        .ok();
+                }
+            }
+        }
+
+        #[cfg(not(feature = "ai-inference"))]
+        McpCommand::GenerateSamMask { reply, .. } => {
+            reply
+                .send(serde_json::json!({
+                    "success": false,
+                    "error": "generate_sam_mask requires the ai-inference Cargo feature"
+                }))
+                .ok();
+        }
+
         McpCommand::SetClipMask {
             clip_id,
             enabled,
