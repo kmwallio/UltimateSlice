@@ -405,13 +405,38 @@ pub const SAM_INPUT_SIZE: usize = 1008;
 /// Language embedding dimensions. The decoder requires
 /// `language_mask: [1, 32] bool` and `language_features: [32, 1, 256]
 /// float` as inputs regardless of whether text prompts are being
-/// used — for box-only workflows we feed zero/false tensors, which
-/// tells the decoder to fall back to pure box-prompt operation.
-/// Phase 2 intentionally doesn't invoke the language encoder at all,
-/// which sidesteps the missing-sidecar problem on the user's current
-/// install.
+/// used. Both are produced by running the SAM 3 language encoder on
+/// a 32-token CLIP BPE sequence; for box-only workflows we feed the
+/// fixed placeholder string `"visual"` exactly as the reference
+/// `wkentaro/sam3-onnx` `infer_onnx.py` does. Feeding zero/false
+/// tensors instead (the original Phase 2 shortcut) caused the
+/// decoder's internal confidence-threshold filter to drop every
+/// candidate and return an empty result.
 const LANG_TOKENS: usize = 32;
 const LANG_EMBED_DIM: usize = 256;
+
+/// Pre-tokenized CLIP BPE encoding of the placeholder string
+/// `"visual"` at `context_length=32`. Layout is
+/// `[BOS, token("visual"), EOS, 0, 0, …, 0]` where
+/// `BOS=49406`, `EOS=49407`, and `token("visual")=7195` — the same
+/// three tokens OpenAI CLIP's `simple_tokenizer.tokenize` produces.
+///
+/// `infer_onnx.py` in the reference repo uses this exact placeholder
+/// whenever the user supplies a box prompt without a text prompt:
+///
+/// ```python
+/// text_prompt = args.text_prompt if args.text_prompt else "visual"
+/// sess_language.run(None, {"tokens": tokenize([text_prompt], context_length=32)})
+/// ```
+///
+/// Hardcoding the 32 int64 values keeps the Rust side free of a
+/// runtime CLIP tokenizer dependency — the box-only prompt path only
+/// ever needs this fixed placeholder. A future text-prompt path
+/// (Phase 2b) will replace this with a real tokenizer invocation.
+const VISUAL_PLACEHOLDER_TOKENS: [i64; LANG_TOKENS] = [
+    49406, 7195, 49407, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0,
+];
 
 // ── Prompt + result types ──────────────────────────────────────────────────
 
@@ -586,20 +611,22 @@ fn preprocess_image_for_sam(rgb: &[u8], src_w: usize, src_h: usize) -> Preproces
 
 // ── Session loading ────────────────────────────────────────────────────────
 
-/// Loaded SAM 3 ONNX sessions. Holds the image encoder and decoder;
-/// the language encoder is intentionally *not* loaded in Phase 2
-/// because (1) it's not needed for box-prompt workflows, and (2)
-/// the `.onnx.data` sidecar for the language encoder is missing
-/// from the typical samexporter output so loading it would fail.
-/// Phase 3 (text prompts) re-enables it after the user runs a
-/// second export with `--include_external_data`.
+/// Loaded SAM 3 ONNX sessions. All three models are required even
+/// for box-only workflows: the decoder's text-attention path consumes
+/// `language_mask` / `language_features` unconditionally, and feeding
+/// zero-filled stand-ins causes the internal confidence filter to
+/// drop every candidate. See [`VISUAL_PLACEHOLDER_TOKENS`] for the
+/// fixed `"visual"` prompt the language encoder runs on in box-only
+/// mode.
 pub struct SamSessions {
     pub image_encoder: ort::session::Session,
     pub decoder: ort::session::Session,
+    pub language_encoder: ort::session::Session,
 }
 
 impl SamSessions {
-    /// Open both sessions, routing each through
+    /// Open all three sessions (image encoder, language encoder,
+    /// decoder), routing each through
     /// [`crate::media::ai_providers::configure_session_builder`] so
     /// CUDA / ROCm / OpenVINO acceleration from Phase 0 applies
     /// automatically. Returns `Err` with a human-readable string on
@@ -623,6 +650,16 @@ impl SamSessions {
             .map_err(|e| format!("Failed to load SAM image encoder: {e}"))?;
 
         log::info!(
+            "SamCache: loading language encoder from {}",
+            paths.language_encoder.display()
+        );
+        let language_encoder = Session::builder()
+            .and_then(|b| Ok(b.with_optimization_level(GraphOptimizationLevel::Level3)?))
+            .and_then(|b| ai_providers::configure_session_builder(b, backend))
+            .and_then(|mut b| b.commit_from_file(&paths.language_encoder))
+            .map_err(|e| format!("Failed to load SAM language encoder: {e}"))?;
+
+        log::info!(
             "SamCache: loading decoder from {}",
             paths.decoder.display()
         );
@@ -635,6 +672,7 @@ impl SamSessions {
         Ok(Self {
             image_encoder,
             decoder,
+            language_encoder,
         })
     }
 }
@@ -661,9 +699,12 @@ impl SamSessions {
 /// 2. Preprocess: aspect-preserving resize + pad to 1008×1008 uint8
 ///    CHW.
 /// 3. Run image encoder → 6 feature tensors at three FPN scales.
-/// 4. Construct zero-filled language tensors so the decoder's
-///    language-prompt path is effectively disabled.
-/// 5. Rescale box coordinates from source space into 1008-space.
+/// 4. Run language encoder on the fixed `"visual"` placeholder prompt
+///    → `text_attention_mask` + `text_memory`, which become the
+///    decoder's `language_mask` and `language_features`.
+/// 5. Normalize box coordinates to `[cx, cy, w, h]` in `[0, 1]` source
+///    space (NOT 1008-pixel space — the decoder handles its own
+///    rescale via the `original_height`/`original_width` inputs).
 /// 6. Run decoder → `boxes`, `scores`, `masks`.
 /// 7. Pick the highest-scoring mask slot.
 /// 8. Un-pad + nearest-neighbor rescale the mask back to source
@@ -731,39 +772,95 @@ pub fn segment_with_box(
     let fpn2_arr = reshape_to_array4(fpn2, &fpn2_shape, "backbone_fpn_2")?;
     let pe2_arr = reshape_to_array4(pe2, &pe2_shape, "vision_pos_enc_2")?;
 
-    // 3. Construct zero-filled language tensors. The decoder
-    //    requires these as inputs but we're not using text prompts,
-    //    so all-false mask + all-zero features effectively disables
-    //    the language-attention path.
-    let language_mask = Array2::<bool>::from_elem((1, LANG_TOKENS), false);
-    let language_features = Array3::<f32>::zeros((LANG_TOKENS, 1, LANG_EMBED_DIM));
+    // 3. Run the language encoder on the fixed `"visual"` placeholder
+    //    prompt. SAM 3's decoder consumes `language_mask` and
+    //    `language_features` unconditionally — feeding zero/false
+    //    stand-ins makes the decoder's internal confidence filter drop
+    //    every candidate and return an empty result. `infer_onnx.py`
+    //    in the reference repo runs the language encoder with
+    //    "visual" whenever the user supplies a box prompt without a
+    //    text prompt, and we mirror that here. See
+    //    [`VISUAL_PLACEHOLDER_TOKENS`].
+    let tokens_arr = Array2::<i64>::from_shape_vec(
+        (1, LANG_TOKENS),
+        VISUAL_PLACEHOLDER_TOKENS.to_vec(),
+    )
+    .map_err(|e| format!("segment_with_box: tokens shape: {e}"))?;
+    let tokens_input = TensorRef::from_array_view(&tokens_arr)
+        .map_err(|e| format!("segment_with_box: wrap tokens tensor: {e}"))?;
+    let lang_outputs = sessions
+        .language_encoder
+        .run(ort::inputs!["tokens" => tokens_input])
+        .map_err(|e| format!("segment_with_box: language encoder run failed: {e}"))?;
 
-    // 4. Rescale the box from source pixel space into the encoder's
-    //    1008×1008 space. The prompt was in source coordinates; the
-    //    decoder expects them in the same space the image encoder
-    //    saw, which is after the `scale` resize.
-    let bx1 = prompt.x1 * preprocessed.scale;
-    let by1 = prompt.y1 * preprocessed.scale;
-    let bx2 = prompt.x2 * preprocessed.scale;
-    let by2 = prompt.y2 * preprocessed.scale;
-    // box_coords shape: [1, 1, 4]. Single batch, single box, four
-    // corners (x1, y1, x2, y2). Different SAM exports sometimes use
-    // (cx, cy, w, h) instead; wkentaro/sam3-onnx uses xyxy which is
-    // what the exported decoder here was verified against during
-    // Phase 2a bring-up.
-    let box_coords =
-        Array3::<f32>::from_shape_vec((1, 1, 4), vec![bx1, by1, bx2, by2])
-            .map_err(|e| format!("segment_with_box: box_coords shape: {e}"))?;
-    // box_labels shape: [1, 1] — single positive-foreground label
-    // per the SAM 3 decoder convention. Label 1 is the "foreground
-    // box prompt" signal; label 0 would be background.
+    // Extract `text_attention_mask` ([1, 32] bool) → decoder's
+    // `language_mask`, and `text_memory` ([32, 1, 256] f32) →
+    // decoder's `language_features`. The third encoder output
+    // (`text_embeds`) is not a decoder input and is ignored.
+    let (lang_mask_shape, lang_mask_data) = match lang_outputs.get("text_attention_mask") {
+        Some(val) => val
+            .try_extract_tensor::<bool>()
+            .map(|(s, d)| (s.iter().copied().collect::<Vec<i64>>(), d.to_vec()))
+            .map_err(|e| format!("language text_attention_mask extract: {e}"))?,
+        None => {
+            return Err(
+                "language encoder output missing 'text_attention_mask'".to_string()
+            )
+        }
+    };
+    if lang_mask_shape.as_slice() != [1i64, LANG_TOKENS as i64] {
+        return Err(format!(
+            "language text_attention_mask has unexpected shape {lang_mask_shape:?}, expected [1, {LANG_TOKENS}]"
+        ));
+    }
+    let language_mask = Array2::<bool>::from_shape_vec((1, LANG_TOKENS), lang_mask_data)
+        .map_err(|e| format!("reshape text_attention_mask: {e}"))?;
+
+    let (lang_feat_data, lang_feat_shape) = extract_float_tensor(&lang_outputs, "text_memory")?;
+    if lang_feat_shape.as_slice() != [LANG_TOKENS as i64, 1i64, LANG_EMBED_DIM as i64] {
+        return Err(format!(
+            "language text_memory has unexpected shape {lang_feat_shape:?}, expected [{LANG_TOKENS}, 1, {LANG_EMBED_DIM}]"
+        ));
+    }
+    let language_features = Array3::<f32>::from_shape_vec(
+        (LANG_TOKENS, 1, LANG_EMBED_DIM),
+        lang_feat_data,
+    )
+    .map_err(|e| format!("reshape text_memory: {e}"))?;
+
+    // 4. Build the box prompt tensors. The SAM 3 decoder expects:
+    //
+    //    * `box_coords: [1, 1, 4] f32` in `[cx, cy, w, h]` normalized
+    //      to `[0, 1]` against the ORIGINAL source-image dimensions
+    //      (not the 1008-space encoder input). The decoder uses the
+    //      `original_height`/`original_width` inputs internally to
+    //      rescale its outputs back to source resolution, so raw
+    //      normalized coords are the right convention. An earlier
+    //      draft of this file fed xyxy in 1008-pixel space, which
+    //      made every box clamp to garbage inside the decoder.
+    //    * `box_labels: [1, 1] i64`, value `1` for "positive /
+    //      foreground".
+    //    * `box_masks: [1, 1] bool`, value `false` to indicate "this
+    //      box slot is present" — standard PyTorch attention-mask
+    //      convention where `true` means "masked out / ignored".
+    //      Setting this to `true` makes the decoder skip the box
+    //      slot and return zero detections.
+    //
+    //    Verified against `wkentaro/sam3-onnx`'s `infer_onnx.py` and
+    //    `export_onnx.py` (the latter's main() calls the decoder with
+    //    `box_coords=[[[0.162, 0.401, 0.064, 0.018]]]`, all values
+    //    `< 1`, confirming the normalized cxcywh format).
+    let src_w_f = src_w as f32;
+    let src_h_f = src_h as f32;
+    let cx = ((prompt.x1 + prompt.x2) * 0.5) / src_w_f;
+    let cy = ((prompt.y1 + prompt.y2) * 0.5) / src_h_f;
+    let bw = (prompt.x2 - prompt.x1) / src_w_f;
+    let bh = (prompt.y2 - prompt.y1) / src_h_f;
+    let box_coords = Array3::<f32>::from_shape_vec((1, 1, 4), vec![cx, cy, bw, bh])
+        .map_err(|e| format!("segment_with_box: box_coords shape: {e}"))?;
     let box_labels = Array2::<i64>::from_shape_vec((1, 1), vec![1])
         .map_err(|e| format!("segment_with_box: box_labels shape: {e}"))?;
-    // box_masks shape: [1, 1] — `true` means "this box slot is
-    // active." If false, the decoder ignores the slot entirely,
-    // which would give us a no-prompt segmentation (not useful
-    // here).
-    let box_masks = Array2::<bool>::from_shape_vec((1, 1), vec![true])
+    let box_masks = Array2::<bool>::from_shape_vec((1, 1), vec![false])
         .map_err(|e| format!("segment_with_box: box_masks shape: {e}"))?;
 
     let orig_h = Array1::<i64>::from_vec(vec![src_h as i64]);

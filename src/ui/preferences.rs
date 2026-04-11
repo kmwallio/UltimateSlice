@@ -151,6 +151,17 @@ pub fn show_preferences_dialog(
     sidebar.set_margin_bottom(8);
     sidebar.set_vexpand(true);
 
+    // Wrap each stack page in a ScrolledWindow so long tabs (Models, Integration)
+    // scroll in place instead of growing the dialog beyond the screen.
+    let wrap_scroll = |child: &GBox| -> gtk::ScrolledWindow {
+        let s = gtk::ScrolledWindow::new();
+        s.set_vexpand(true);
+        s.set_hexpand(true);
+        s.set_hscrollbar_policy(gtk::PolicyType::Never);
+        s.set_child(Some(child));
+        s
+    };
+
     let general_box = GBox::new(Orientation::Vertical, 8);
     general_box.set_margin_start(8);
     general_box.set_margin_end(8);
@@ -200,7 +211,7 @@ pub fn show_preferences_dialog(
     general_box.append(&max_versions_row);
 
     general_box.append(&about_btn);
-    stack.add_titled(&general_box, Some("general"), "General");
+    stack.add_titled(&wrap_scroll(&general_box), Some("general"), "General");
 
     let playback_box = GBox::new(Orientation::Vertical, 10);
     playback_box.set_margin_start(8);
@@ -302,7 +313,7 @@ pub fn show_preferences_dialog(
     playback_box.append(&realtime_check);
     playback_box.append(&realtime_hint);
 
-    stack.add_titled(&playback_box, Some("playback"), "Playback");
+    stack.add_titled(&wrap_scroll(&playback_box), Some("playback"), "Playback");
 
     let proxies_box = GBox::new(Orientation::Vertical, 10);
     proxies_box.set_margin_start(8);
@@ -434,7 +445,7 @@ pub fn show_preferences_dialog(
     proxies_box.append(&persist_prerenders_check);
     proxies_box.append(&persist_prerenders_hint);
 
-    stack.add_titled(&proxies_box, Some("proxies"), "Proxies");
+    stack.add_titled(&wrap_scroll(&proxies_box), Some("proxies"), "Proxies");
 
     // ── Timeline section ──────────────────────────────────────────────────
     let timeline_box = GBox::new(Orientation::Vertical, 10);
@@ -566,7 +577,7 @@ pub fn show_preferences_dialog(
     timeline_box.append(&voice_enhance_cap_spin);
     timeline_box.append(&voice_enhance_cap_hint);
 
-    stack.add_titled(&timeline_box, Some("timeline"), "Timeline");
+    stack.add_titled(&wrap_scroll(&timeline_box), Some("timeline"), "Timeline");
 
     // ── Integration section ───────────────────────────────────────────────
     let integration_box = GBox::new(Orientation::Vertical, 10);
@@ -590,7 +601,7 @@ pub fn show_preferences_dialog(
     integration_box.append(&integration_label);
     integration_box.append(&mcp_socket_check);
     integration_box.append(&mcp_socket_hint);
-    stack.add_titled(&integration_box, Some("integration"), "Integration");
+    stack.add_titled(&wrap_scroll(&integration_box), Some("integration"), "Integration");
 
     // Shared handle so the AI-backend dropdown (created inside the
     // Models page block below) can be read by the dialog response
@@ -657,6 +668,7 @@ pub fn show_preferences_dialog(
                     AiBackend::Cuda,
                     AiBackend::Rocm,
                     AiBackend::OpenVino,
+                    AiBackend::WebGpu,
                     AiBackend::Cpu,
                 ] {
                     if report.compiled_in.contains(&b) {
@@ -689,12 +701,15 @@ pub fn show_preferences_dialog(
 
             let accel_hint = Label::new(Some(
                 "Backend used for MODNet background removal, RIFE \
-                 frame interpolation, MusicGen, and (in upcoming \
-                 versions) SAM segmentation. Changing this takes \
-                 effect on the next inference job — no restart \
-                 required. ROCm and OpenVINO require a source-built \
-                 ONNX Runtime; see the project README for build \
-                 instructions.",
+                 frame interpolation, MusicGen, and SAM segmentation. \
+                 Changing this takes effect on the next inference job \
+                 — no restart required. WebGPU is the recommended \
+                 cross-vendor default (works on Intel Arc, AMD, and \
+                 NVIDIA via Vulkan, with prebuilt binaries). CUDA uses \
+                 prebuilts and needs only the CUDA toolkit. ROCm and \
+                 OpenVINO give the best performance on AMD and Intel \
+                 respectively but require a source-built ONNX Runtime \
+                 — see docs/gpu/README.md for build instructions.",
             ));
             accel_hint.set_halign(gtk::Align::Start);
             accel_hint.add_css_class("dim-label");
@@ -1227,7 +1242,7 @@ pub fn show_preferences_dialog(
 
         append_generated_files_section(&models_box);
 
-        stack.add_titled(&models_box, Some("models"), "Models");
+        stack.add_titled(&wrap_scroll(&models_box), Some("models"), "Models");
     }
 
     // When ai-inference is NOT enabled, still show a Models tab with STT info.
@@ -1344,7 +1359,7 @@ pub fn show_preferences_dialog(
 
         append_generated_files_section(&models_box);
 
-        stack.add_titled(&models_box, Some("models"), "Models");
+        stack.add_titled(&wrap_scroll(&models_box), Some("models"), "Models");
     }
 
     body.append(&sidebar);
