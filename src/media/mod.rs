@@ -15,6 +15,7 @@ pub mod hsl_qualifier;
 pub mod ladspa_registry;
 pub mod ltc;
 pub mod mask_alpha;
+pub mod mask_contour;
 pub mod music_gen;
 pub mod player;
 pub mod probe_cache;
