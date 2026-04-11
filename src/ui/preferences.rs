@@ -959,12 +959,31 @@ pub fn show_preferences_dialog(
 
         let rife_hint = Label::new(None);
         rife_hint.set_markup(
-            "RIFE synthesizes intermediate frames for high-quality slow-motion. \
-             Enable on a clip via Inspector → Speed → Slow-Motion Interpolation → \
-             AI Interpolation. Use a RIFE ONNX export with the standard \
-             6-channel input + timestep convention (see the upstream project at \
-             <a href=\"https://github.com/hzwer/Practical-RIFE\">github.com/hzwer/Practical-RIFE</a> \
-             for the model and export tooling) and place the file in:",
+            "RIFE synthesizes intermediate frames for high-quality \
+             slow-motion. Enable on a clip via Inspector → Speed → \
+             Slow-Motion Interpolation → AI Interpolation.\n\n\
+             Practical-RIFE's official distribution ships PyTorch \
+             <tt>flownet.pkl</tt> checkpoints, not ONNX — <tt>ort</tt> \
+             can't load <tt>.pkl</tt> directly, so a one-time export \
+             step is required. There's no official RIFE ONNX exporter; \
+             you have two options:\n\n\
+             • <b>Community pre-exported ONNX</b> (lowest friction): \
+             search HuggingFace for \"rife onnx\" and find a matching \
+             Practical-RIFE version (v4.14 / v4.18 / v4.22 etc. are \
+             commonly available). Different versions have slightly \
+             different architectures — use one that matches the \
+             <tt>.pkl</tt> version you have.\n\n\
+             • <b>Export from PyTorch yourself</b>: write a ~30-line \
+             Python script using <tt>torch.onnx.export</tt> with \
+             <tt>opset_version=17</tt> or higher (required for \
+             <tt>grid_sample</tt> support, which RIFE uses). The \
+             exporter must produce a 6-channel input (img0 RGB + \
+             img1 RGB concatenated) plus a scalar timestep — the \
+             existing UltimateSlice inference code expects this \
+             shape.\n\n\
+             See <a href=\"https://github.com/hzwer/Practical-RIFE\">github.com/hzwer/Practical-RIFE</a> \
+             for the upstream project. Place the exported ONNX \
+             file in:",
         );
         rife_hint.set_halign(gtk::Align::Start);
         rife_hint.add_css_class("dim-label");
@@ -1013,18 +1032,10 @@ pub fn show_preferences_dialog(
         sam_status.set_halign(gtk::Align::End);
 
         let initial_status = sam_cache::install_status();
-        sam_status.set_text(&initial_status.short_label());
-        match &initial_status {
-            sam_cache::SamInstallStatus::Installed => {
-                sam_status.add_css_class("success");
-            }
-            sam_cache::SamInstallStatus::Partial { .. } => {
-                sam_status.add_css_class("warning");
-            }
-            sam_cache::SamInstallStatus::NotInstalled => {
-                sam_status.add_css_class("dim-label");
-            }
-        }
+        // sam_status text / color class are set by the shared
+        // render_sam_status closure below, which handles all four
+        // SamInstallStatus variants consistently between the initial
+        // render and the Refresh button re-render.
         sam_row.append(&sam_name);
         sam_row.append(&sam_status);
         models_box.append(&sam_row);
@@ -1062,28 +1073,7 @@ pub fn show_preferences_dialog(
 
         // Required-files hint, annotated with per-file status so a
         // user mid-download can see exactly what's still missing.
-        let sam_files_text = {
-            let mut lines = Vec::new();
-            lines.push("Required files:".to_string());
-            for filename in sam_cache::REQUIRED_FILES {
-                let marker = if sam_dir.join(filename).is_file() {
-                    "✓"
-                } else {
-                    "✗"
-                };
-                lines.push(format!("  {marker} {filename}"));
-            }
-            if let sam_cache::SamInstallStatus::Partial { ref missing } = initial_status {
-                lines.push(format!(
-                    "\n{} of {} files present — still need: {}",
-                    sam_cache::REQUIRED_FILES.len() - missing.len(),
-                    sam_cache::REQUIRED_FILES.len(),
-                    missing.join(", ")
-                ));
-            }
-            lines.join("\n")
-        };
-        let sam_files_hint = Label::new(Some(&sam_files_text));
+        let sam_files_hint = Label::new(None);
         sam_files_hint.set_halign(gtk::Align::Start);
         sam_files_hint.add_css_class("dim-label");
         sam_files_hint.add_css_class("monospace");
@@ -1091,54 +1081,149 @@ pub fn show_preferences_dialog(
         sam_files_hint.set_max_width_chars(60);
         models_box.append(&sam_files_hint);
 
+        // ── Export step block (conditionally visible) ─────────────
+        // Shown when SAM detects a `.pt` checkpoint but no ONNX
+        // files yet. Surfaces the exact pip-install + export command
+        // the user needs to run, parameterized with the detected
+        // checkpoint path. Hidden otherwise so the UI doesn't clutter
+        // the clean "Installed" and "Not installed" states.
+        let export_block = GBox::new(Orientation::Vertical, 6);
+        export_block.set_margin_top(4);
+
+        let export_heading = Label::new(Some("ONNX export step"));
+        export_heading.set_halign(gtk::Align::Start);
+        export_heading.add_css_class("heading");
+        export_block.append(&export_heading);
+
+        let export_explain = Label::new(None);
+        export_explain.set_markup(&format!(
+            "You downloaded the raw PyTorch checkpoint. <tt>ort</tt> can't \
+             load <tt>.pt</tt> files directly, so you'll need to run a \
+             one-time export to produce the three ONNX files above. The \
+             recommended tool is \
+             <a href=\"{url}\"><tt>{pip}</tt></a>:",
+            url = sam_cache::EXPORTER_UPSTREAM_URL,
+            pip = sam_cache::EXPORTER_PIP_NAME,
+        ));
+        export_explain.set_halign(gtk::Align::Start);
+        export_explain.add_css_class("dim-label");
+        export_explain.set_wrap(true);
+        export_explain.set_max_width_chars(60);
+        export_block.append(&export_explain);
+
+        let export_command_label = Label::new(None);
+        export_command_label.set_halign(gtk::Align::Start);
+        export_command_label.add_css_class("monospace");
+        export_command_label.set_selectable(true);
+        export_command_label.set_wrap(true);
+        export_command_label.set_max_width_chars(80);
+        export_block.append(&export_command_label);
+
+        let export_after_note = Label::new(Some(
+            "Then click \"Refresh Status\" below — the ONNX files \
+             will be detected automatically and the row will flip \
+             to ✓ Installed. SAM 3.1's Object Multiplex variant is \
+             new (March 2026); if samexporter rejects the checkpoint, \
+             fall back to downloading the plain SAM 3 checkpoint and \
+             exporting that instead.",
+        ));
+        export_after_note.set_halign(gtk::Align::Start);
+        export_after_note.add_css_class("dim-label");
+        export_after_note.set_wrap(true);
+        export_after_note.set_max_width_chars(60);
+        export_block.append(&export_after_note);
+
+        models_box.append(&export_block);
+
         // Refresh button — users who install the model while the
         // Preferences dialog is open can re-probe without closing
         // and reopening.
         let sam_refresh_btn = gtk::Button::with_label("Refresh Status");
         sam_refresh_btn.set_halign(gtk::Align::Start);
-        let sam_status_c = sam_status.clone();
-        let sam_files_hint_c = sam_files_hint.clone();
+        models_box.append(&sam_refresh_btn);
+
+        // Shared status-rendering closure. Takes a `&SamInstallStatus`
+        // and updates every widget on the row: status label text +
+        // color class, per-file checklist, export-block visibility,
+        // and (if applicable) the export command text interpolated
+        // with the detected .pt path. Called once at init time and
+        // again from the Refresh button click handler.
+        let render_sam_status = {
+            let sam_status = sam_status.clone();
+            let sam_files_hint = sam_files_hint.clone();
+            let export_block = export_block.clone();
+            let export_command_label = export_command_label.clone();
+            let sam_dir = sam_cache::model_install_dir();
+            Rc::new(move |status: &sam_cache::SamInstallStatus| {
+                sam_status.set_text(&status.short_label());
+                sam_status.remove_css_class("success");
+                sam_status.remove_css_class("warning");
+                sam_status.remove_css_class("dim-label");
+                match status {
+                    sam_cache::SamInstallStatus::Installed => {
+                        sam_status.add_css_class("success");
+                    }
+                    sam_cache::SamInstallStatus::Partial { .. }
+                    | sam_cache::SamInstallStatus::PtCheckpointOnly { .. } => {
+                        sam_status.add_css_class("warning");
+                    }
+                    sam_cache::SamInstallStatus::NotInstalled => {
+                        sam_status.add_css_class("dim-label");
+                    }
+                }
+
+                // Per-file ONNX checklist, rebuilt against the current
+                // install dir so the Refresh button actually refreshes.
+                let mut lines: Vec<String> = Vec::new();
+                lines.push("Required files:".to_string());
+                for filename in sam_cache::REQUIRED_FILES {
+                    let marker = if sam_dir.join(filename).is_file() {
+                        "✓"
+                    } else {
+                        "✗"
+                    };
+                    lines.push(format!("  {marker} {filename}"));
+                }
+                if let sam_cache::SamInstallStatus::Partial { missing } = status {
+                    lines.push(format!(
+                        "\n{} of {} files present — still need: {}",
+                        sam_cache::REQUIRED_FILES.len() - missing.len(),
+                        sam_cache::REQUIRED_FILES.len(),
+                        missing.join(", ")
+                    ));
+                }
+                sam_files_hint.set_text(&lines.join("\n"));
+
+                // Export-block visibility + command interpolation.
+                if let sam_cache::SamInstallStatus::PtCheckpointOnly { pt_path } = status {
+                    export_block.set_visible(true);
+                    let pt_display = pt_path.to_string_lossy();
+                    let out_display = sam_dir.to_string_lossy();
+                    let command = format!(
+                        "pip install samexporter torch\n\
+                         python -m samexporter.export_sam3 \\\n    \
+                         --checkpoint {pt} \\\n    \
+                         --output_dir {out} \\\n    \
+                         --opset 18",
+                        pt = pt_display,
+                        out = out_display
+                    );
+                    export_command_label.set_text(&command);
+                } else {
+                    export_block.set_visible(false);
+                }
+            })
+        };
+
+        // Initial render.
+        (render_sam_status)(&initial_status);
+
+        // Wire up Refresh click → re-probe + re-render.
+        let render_sam_status_click = render_sam_status.clone();
         sam_refresh_btn.connect_clicked(move |_| {
             let new_status = sam_cache::install_status();
-            sam_status_c.set_text(&new_status.short_label());
-            sam_status_c.remove_css_class("success");
-            sam_status_c.remove_css_class("warning");
-            sam_status_c.remove_css_class("dim-label");
-            match &new_status {
-                sam_cache::SamInstallStatus::Installed => {
-                    sam_status_c.add_css_class("success");
-                }
-                sam_cache::SamInstallStatus::Partial { .. } => {
-                    sam_status_c.add_css_class("warning");
-                }
-                sam_cache::SamInstallStatus::NotInstalled => {
-                    sam_status_c.add_css_class("dim-label");
-                }
-            }
-            // Rebuild the per-file checklist against the current
-            // install dir.
-            let dir = sam_cache::model_install_dir();
-            let mut lines: Vec<String> = Vec::new();
-            lines.push("Required files:".to_string());
-            for filename in sam_cache::REQUIRED_FILES {
-                let marker = if dir.join(filename).is_file() {
-                    "✓"
-                } else {
-                    "✗"
-                };
-                lines.push(format!("  {marker} {filename}"));
-            }
-            if let sam_cache::SamInstallStatus::Partial { missing } = &new_status {
-                lines.push(format!(
-                    "\n{} of {} files present — still need: {}",
-                    sam_cache::REQUIRED_FILES.len() - missing.len(),
-                    sam_cache::REQUIRED_FILES.len(),
-                    missing.join(", ")
-                ));
-            }
-            sam_files_hint_c.set_text(&lines.join("\n"));
+            (render_sam_status_click)(&new_status);
         });
-        models_box.append(&sam_refresh_btn);
 
         append_generated_files_section(&models_box);
 
