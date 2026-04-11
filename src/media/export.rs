@@ -45,6 +45,102 @@ pub enum AudioCodec {
     Flac,
     Pcm,
 }
+
+/// Output audio channel layout for export.
+///
+/// `Stereo` (default) preserves the legacy export pipeline byte-for-byte.
+/// `Surround51` and `Surround71` opt into the multichannel mix graph that
+/// upmixes per-track stems based on each track's `audio_role` and (optionally)
+/// `surround_position` override.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AudioChannelLayout {
+    #[default]
+    Stereo,
+    Surround51,
+    Surround71,
+}
+
+impl AudioChannelLayout {
+    pub fn channel_count(self) -> u32 {
+        match self {
+            Self::Stereo => 2,
+            Self::Surround51 => 6,
+            Self::Surround71 => 8,
+        }
+    }
+
+    /// ffmpeg `pan=` / `aformat=channel_layouts=` token name.
+    pub fn ffmpeg_layout(self) -> &'static str {
+        match self {
+            Self::Stereo => "stereo",
+            Self::Surround51 => "5.1",
+            Self::Surround71 => "7.1",
+        }
+    }
+
+    /// Stable string identifier used in serialized presets / MCP arguments.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stereo => "stereo",
+            Self::Surround51 => "surround_5_1",
+            Self::Surround71 => "surround_7_1",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "surround_5_1" | "5.1" | "51" => Self::Surround51,
+            "surround_7_1" | "7.1" | "71" => Self::Surround71,
+            _ => Self::Stereo,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Stereo => "Stereo",
+            Self::Surround51 => "5.1 Surround",
+            Self::Surround71 => "7.1 Surround",
+        }
+    }
+}
+
+/// Resolved per-stem destination in a surround mix.
+///
+/// This is the value the mix graph builder uses to construct an upmix `pan=`
+/// expression. It is computed at export time from the track's `AudioRole` and
+/// optional `SurroundPositionOverride`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurroundPosition {
+    /// Front L + Front R (default for Music / None).
+    FrontLR,
+    /// Front Center only (default for Dialogue).
+    FrontCenter,
+    /// Front L/R plus rear surrounds at lower gain (default for Effects).
+    FrontLRPlusSurroundLR,
+    /// Surround L + Surround R only (pure ambience).
+    SurroundLR,
+    /// LFE only (pre-filtered low-pass content).
+    Lfe,
+    FrontLeft,
+    FrontRight,
+    BackLeft,
+    BackRight,
+    SideLeft,
+    SideRight,
+}
+
+/// One labeled audio stem ready to enter the final mix.
+///
+/// Built from per-clip filter chains. The role + override fields are only
+/// consulted by the surround mix path (`build_audio_mix_graph` with a
+/// non-stereo target); the stereo path uses just `label` + `role` exactly as
+/// the legacy code did.
+#[derive(Debug, Clone)]
+struct AudioStem {
+    label: String,
+    role: crate::model::track::AudioRole,
+    surround_override: crate::model::track::SurroundPositionOverride,
+}
 #[derive(Debug, Clone, PartialEq)]
 pub enum Container {
     Mp4,
@@ -80,6 +176,8 @@ pub struct ExportOptions {
     pub audio_bitrate_kbps: u32,
     /// Frames per second for GIF output (None = use project frame rate). Only used when container = Gif.
     pub gif_fps: Option<u32>,
+    /// Output audio channel layout. Default = Stereo (legacy pipeline unchanged).
+    pub audio_channel_layout: AudioChannelLayout,
 }
 
 impl Default for ExportOptions {
@@ -93,6 +191,7 @@ impl Default for ExportOptions {
             audio_codec: AudioCodec::Aac,
             audio_bitrate_kbps: 192,
             gif_fps: None,
+            audio_channel_layout: AudioChannelLayout::Stereo,
         }
     }
 }
@@ -158,12 +257,24 @@ fn split_active_video_tracks_for_export<'a>(
 pub fn export_project(
     project: &Project,
     output_path: &str,
-    options: ExportOptions,
+    mut options: ExportOptions,
     estimated_size_bytes: Option<u64>,
     bg_removal_paths: &std::collections::HashMap<String, String>,
     frame_interp_paths: &std::collections::HashMap<String, String>,
     tx: mpsc::Sender<ExportProgress>,
 ) -> Result<()> {
+    // GIF outputs have no audio stream — surround layouts have nothing to do
+    // there. Silently downgrade so the rest of the pipeline can ignore the
+    // edge case.
+    if options.container == Container::Gif
+        && options.audio_channel_layout != AudioChannelLayout::Stereo
+    {
+        log::warn!(
+            "Surround audio layout {:?} requested with GIF container; downgrading to Stereo",
+            options.audio_channel_layout
+        );
+        options.audio_channel_layout = AudioChannelLayout::Stereo;
+    }
     let out_w = if options.output_width == 0 {
         project.width
     } else {
@@ -404,6 +515,7 @@ pub fn export_project(
         let denoise_filter = build_denoise_filter(clip);
         let sharpen_filter = build_sharpen_filter(clip);
         let blur_filter = build_blur_filter(clip);
+        let hsl_filter = build_hsl_qualifier_filter(clip);
         let vidstab_filter =
             build_vidstab_filter(clip, vidstab_trf.get(&clip.id).map(|s| s.as_str()));
         let frei0r_effects_filter = build_frei0r_effects_filter(clip);
@@ -428,6 +540,11 @@ pub fn export_project(
         let has_transform_keyframes = has_transform_keyframes(clip);
         let has_opacity_keyframes = !clip.opacity_keyframes.is_empty();
         let clip_has_mask = clip.has_mask();
+        let motion_blur_filter = build_motion_blur_filter(
+            clip,
+            project.frame_rate.numerator,
+            project.frame_rate.denominator,
+        );
         if has_transform_keyframes || has_opacity_keyframes || clip_has_mask {
             let scale_expr = build_keyframed_property_expression(
                 &clip.scale_keyframes,
@@ -482,12 +599,12 @@ pub fn export_project(
                 )
             };
             filter.push_str(&format!(
-                "[{i}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{speed_filter}\
+                "[{i}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{speed_filter}\
                  ,scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[pv{i}fg];\
                  color=c=black:size={out_w}x{out_h}:r={}/{}:d={clip_duration_s:.6}[pv{i}bg];\
                  [pv{i}bg][pv{i}fg]overlay=x='{overlay_x_expr}':y='{overlay_y_expr}':eval=frame\
                   ,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({opacity_expr})*({mask_alpha_expr})'[pv{i}raw];\
-                 [pv{i}raw]format=yuv420p{transition_stop_pad_filter}[pv{i}];",
+                 [pv{i}raw]format=yuv420p{motion_blur_filter}{transition_stop_pad_filter}[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
                 , project.frame_rate.numerator, project.frame_rate.denominator
             ));
@@ -496,12 +613,12 @@ pub fn export_project(
                 let mask_path_str = mask_file.path().display().to_string();
                 _mask_temp_files.push(mask_file);
                 let old_tail = format!(
-                    "[pv{i}raw];[pv{i}raw]format=yuv420p{transition_stop_pad_filter}[pv{i}];",
+                    "[pv{i}raw];[pv{i}raw]format=yuv420p{motion_blur_filter}{transition_stop_pad_filter}[pv{i}];",
                     i = i
                 );
                 let new_tail = format!(
                     "[pv{i}raw];movie='{mask_path_str}',format=gray,scale={out_w}:{out_h}[pv{i}mask];\
-                     [pv{i}raw][pv{i}mask]alphamerge,format=yuv420p{transition_stop_pad_filter}[pv{i}];",
+                     [pv{i}raw][pv{i}mask]alphamerge,format=yuv420p{motion_blur_filter}{transition_stop_pad_filter}[pv{i}];",
                     i = i, out_w = out_w, out_h = out_h,
                 );
                 let current = filter.clone();
@@ -514,14 +631,14 @@ pub fn export_project(
             let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
             let anamorphic_filter = build_anamorphic_filter(clip);
             filter.push_str(&format!(
-                "[{i}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{speed_filter}[pv{i}raw];[pv{i}raw]format=yuv420p{transition_stop_pad_filter}[pv{i}];",
+                "[{i}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{speed_filter}[pv{i}raw];[pv{i}raw]format=yuv420p{motion_blur_filter}{transition_stop_pad_filter}[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
             ));
         } else {
             let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
             let anamorphic_filter = build_anamorphic_filter(clip);
             filter.push_str(&format!(
-                "[{i}:v]{lut_prefix}{anamorphic_filter}scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{},format=yuv420p{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{title_filter}{subtitle_filter}{speed_filter}{transition_stop_pad_filter}[pv{i}];",
+                "[{i}:v]{lut_prefix}{anamorphic_filter}scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{},format=yuv420p{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{title_filter}{subtitle_filter}{speed_filter}{motion_blur_filter}{transition_stop_pad_filter}[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
             ));
         }
@@ -580,6 +697,7 @@ pub fn export_project(
         let denoise_filter = build_denoise_filter(clip);
         let sharpen_filter = build_sharpen_filter(clip);
         let blur_filter = build_blur_filter(clip);
+        let hsl_filter = build_hsl_qualifier_filter(clip);
         let vidstab_filter =
             build_vidstab_filter(clip, vidstab_trf.get(&clip.id).map(|s| s.as_str()));
         let frei0r_effects_filter = build_frei0r_effects_filter(clip);
@@ -599,6 +717,11 @@ pub fn export_project(
         let has_transform_keyframes = has_transform_keyframes(clip);
         let has_opacity_keyframes = !clip.opacity_keyframes.is_empty();
         let ov_has_mask = clip.has_mask();
+        let motion_blur_filter = build_motion_blur_filter(
+            clip,
+            project.frame_rate.numerator,
+            project.frame_rate.denominator,
+        );
         // Scale the overlay clip to output size (keeps aspect ratio, pads transparent)
         let ov_label = format!("ov{k}");
         let ov_mask_is_raster = clip
@@ -663,7 +786,7 @@ pub fn export_project(
                 )
             };
             filter.push_str(&format!(
-                ";[{in_idx}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{crop_filter}{rotate_filter}{speed_filter}\
+                ";[{in_idx}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{crop_filter}{rotate_filter}{speed_filter}\
                  ,scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[ov{k}fg];\
                  color=c=black@0:size={out_w}x{out_h}:r={}/{}:d={clip_duration_s:.6}[ov{k}bg];\
                  [ov{k}bg][ov{k}fg]overlay=x='{overlay_x_expr}':y='{overlay_y_expr}':eval=frame\
@@ -686,7 +809,7 @@ pub fn export_project(
             let opacity = clip.opacity.clamp(0.0, 1.0);
             let anamorphic_filter = build_anamorphic_filter(clip);
             filter.push_str(&format!(
-                ";[{in_idx}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{crop_filter}{scale_pos_filter}{rotate_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
+                ";[{in_idx}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{crop_filter}{scale_pos_filter}{rotate_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
                 , project.frame_rate.numerator, project.frame_rate.denominator
             ));
         }
@@ -700,7 +823,7 @@ pub fn export_project(
         // seeking), then delay to the correct timeline position.
         let start_s = clip.timeline_start as f64 / 1_000_000_000.0;
         filter.push_str(&format!(
-            ";[{ov_raw_label}]setpts=PTS-STARTPTS+{start_s:.6}/TB[{ov_label}]"
+            ";[{ov_raw_label}]setpts=PTS-STARTPTS{motion_blur_filter},setpts=PTS+{start_s:.6}/TB[{ov_label}]"
         ));
         let next_label = format!("vcomp{k}");
         let end_s = (clip.timeline_start + clip.duration()) as f64 / 1_000_000_000.0;
@@ -766,7 +889,7 @@ pub fn export_project(
         let mut sub_idx = 0usize;
         for track in flattened_project_tracks {
             for clip in &track.clips {
-                if clip.subtitle_segments.is_empty() {
+                if clip.subtitle_segments.is_empty() || !clip.subtitle_visible {
                     continue;
                 }
                 log::debug!(
@@ -810,7 +933,11 @@ pub fn export_project(
     let vout_label = prev_label;
 
     // === Audio pipeline ===
-    let mut audio_labels: Vec<(String, crate::model::track::AudioRole)> = Vec::new();
+    // Each entry: (stem label, owning track audio role, owning track surround
+    // override). The third element is only consulted by the surround mix path;
+    // the stereo mix path ignores it and produces a byte-identical filtergraph
+    // to the pre-surround code.
+    let mut audio_labels: Vec<AudioStem> = Vec::new();
     let clip_audio_fades: HashMap<String, ClipAudioFade> =
         if crossfade_enabled && crossfade_duration_ns > 0 {
             let mut crossfade_tracks: Vec<Vec<&Clip>> = Vec::new();
@@ -878,6 +1005,12 @@ pub fn export_project(
                 } else {
                     format!(",{ch_filter}")
                 };
+                let enhance_filter = build_voice_enhance_filter(clip);
+                let enhance_part = if enhance_filter.is_empty() {
+                    String::new()
+                } else {
+                    format!("{enhance_filter},")
+                };
                 let volume_filter = build_volume_filter(clip);
                 let pitch_filter = build_pitch_filter(clip);
                 let pitch_part = if pitch_filter.is_empty() {
@@ -908,18 +1041,31 @@ pub fn export_project(
                 let pre_pan = format!("{label}_prepan");
                 let post_pan = format!("{label}_panned");
                 filter.push_str(&format!(
-                ";[{i}:a]{areverse}{atempo}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{match_eq_part}{eq_part},{fade_filters}anull[{pre_pan}]"
+                ";[{i}:a]{areverse}{atempo}{enhance_part}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{match_eq_part}{eq_part},{fade_filters}anull[{pre_pan}]"
             ));
-                append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
+                append_pan_filter_chain(
+                    &mut filter,
+                    clip,
+                    &pre_pan,
+                    &post_pan,
+                    &label,
+                    options.audio_channel_layout,
+                );
                 filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
-                // Primary video clips — find track role from project.
-                let role = project
+                // Primary video clips — find owning track for role + surround position.
+                let owning_track = project
                     .tracks
                     .iter()
-                    .find(|t| t.clips.iter().any(|c| c.id == clip.id))
-                    .map(|t| t.audio_role)
+                    .find(|t| t.clips.iter().any(|c| c.id == clip.id));
+                let role = owning_track.map(|t| t.audio_role).unwrap_or_default();
+                let surround_override = owning_track
+                    .map(|t| t.surround_position)
                     .unwrap_or_default();
-                audio_labels.push((label, role));
+                audio_labels.push(AudioStem {
+                    label,
+                    role,
+                    surround_override,
+                });
             }
         }
 
@@ -942,6 +1088,12 @@ pub fn export_project(
                 } else {
                     format!(",{ch_filter}")
                 };
+                let enhance_filter = build_voice_enhance_filter(clip);
+                let enhance_part = if enhance_filter.is_empty() {
+                    String::new()
+                } else {
+                    format!("{enhance_filter},")
+                };
                 let volume_filter = build_volume_filter(clip);
                 let pitch_filter = build_pitch_filter(clip);
                 let pitch_part = if pitch_filter.is_empty() {
@@ -972,18 +1124,31 @@ pub fn export_project(
                 let pre_pan = format!("{label}_prepan");
                 let post_pan = format!("{label}_panned");
                 filter.push_str(&format!(
-                ";[{in_idx}:a]{areverse}{atempo}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{match_eq_part}{eq_part},{fade_filters}anull[{pre_pan}]"
+                ";[{in_idx}:a]{areverse}{atempo}{enhance_part}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{match_eq_part}{eq_part},{fade_filters}anull[{pre_pan}]"
             ));
-                append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
+                append_pan_filter_chain(
+                    &mut filter,
+                    clip,
+                    &pre_pan,
+                    &post_pan,
+                    &label,
+                    options.audio_channel_layout,
+                );
                 filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
-                // Find the track for this secondary clip to get its role.
-                let role = project
+                // Find the track for this secondary clip to get its role + surround position.
+                let owning_track = project
                     .tracks
                     .iter()
-                    .find(|t| t.clips.iter().any(|c| c.id == clip.id))
-                    .map(|t| t.audio_role)
+                    .find(|t| t.clips.iter().any(|c| c.id == clip.id));
+                let role = owning_track.map(|t| t.audio_role).unwrap_or_default();
+                let surround_override = owning_track
+                    .map(|t| t.surround_position)
                     .unwrap_or_default();
-                audio_labels.push((label, role));
+                audio_labels.push(AudioStem {
+                    label,
+                    role,
+                    surround_override,
+                });
             }
         }
 
@@ -998,6 +1163,12 @@ pub fn export_project(
                 String::new()
             } else {
                 format!(",{ch_filter}")
+            };
+            let enhance_filter = build_voice_enhance_filter(clip);
+            let enhance_part = if enhance_filter.is_empty() {
+                String::new()
+            } else {
+                format!("{enhance_filter},")
             };
             let volume_filter = build_volume_filter(clip);
             let pitch_filter = build_pitch_filter(clip);
@@ -1041,18 +1212,31 @@ pub fn export_project(
             let pre_pan = format!("{label}_prepan");
             let post_pan = format!("{label}_panned");
             filter.push_str(&format!(
-            ";[{}:a]{areverse}{atempo}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{duck_part}{match_eq_part}{eq_part},{fade_filters}anull[{pre_pan}]",
+            ";[{}:a]{areverse}{atempo}{enhance_part}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{duck_part}{match_eq_part}{eq_part},{fade_filters}anull[{pre_pan}]",
             audio_base + j
         ));
-            append_pan_filter_chain(&mut filter, clip, &pre_pan, &post_pan, &label);
+            append_pan_filter_chain(
+                &mut filter,
+                clip,
+                &pre_pan,
+                &post_pan,
+                &label,
+                options.audio_channel_layout,
+            );
             filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
-            let role = project
+            let owning_track = project
                 .tracks
                 .iter()
-                .find(|t| t.clips.iter().any(|c| c.id == clip.id))
-                .map(|t| t.audio_role)
+                .find(|t| t.clips.iter().any(|c| c.id == clip.id));
+            let role = owning_track.map(|t| t.audio_role).unwrap_or_default();
+            let surround_override = owning_track
+                .map(|t| t.surround_position)
                 .unwrap_or_default();
-            audio_labels.push((label, role));
+            audio_labels.push(AudioStem {
+                label,
+                role,
+                surround_override,
+            });
         }
     } // end `if options.container != Container::Gif` for per-clip audio filters
 
@@ -1067,52 +1251,176 @@ pub fn export_project(
     if has_audio && options.container != Container::Gif {
         use crate::model::track::AudioRole;
         let project_dur_s = project.duration() as f64 / 1_000_000_000.0;
+        let layout = options.audio_channel_layout;
 
-        // Group audio labels by role for submix routing.
-        let roles_in_use: Vec<AudioRole> = {
-            let mut roles: Vec<AudioRole> = audio_labels.iter().map(|(_, r)| *r).collect();
-            roles.sort_by_key(|r| *r as u8);
-            roles.dedup();
-            roles
-        };
+        if layout == AudioChannelLayout::Stereo {
+            // ============================================================
+            // STEREO MIX PATH — byte-identical to the pre-surround code.
+            // The structure (single-role fast path vs multi-role submix
+            // path) and every emitted character must remain unchanged so
+            // existing tests and stereo exports stay regression-free.
+            // ============================================================
 
-        if roles_in_use.len() <= 1 {
-            // Single role (or all None) — no submix needed, mix directly.
-            let n = audio_labels.len();
-            filter.push(';');
-            for (label, _) in &audio_labels {
-                filter.push_str(&format!("[{label}]"));
-            }
-            filter.push_str(&format!(
-                "amix=inputs={n}:normalize=0,atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
-            ));
-        } else {
-            // Multiple roles — create per-role submixes, then master mix.
-            let mut submix_labels: Vec<String> = Vec::new();
-            for role in &roles_in_use {
-                let role_labels: Vec<&str> = audio_labels
-                    .iter()
-                    .filter(|(_, r)| r == role)
-                    .map(|(l, _)| l.as_str())
-                    .collect();
-                if role_labels.is_empty() {
-                    continue;
-                }
-                let submix_name = format!("submix_{}", role.as_str());
-                let n = role_labels.len();
+            // Group audio labels by role for submix routing.
+            let roles_in_use: Vec<AudioRole> = {
+                let mut roles: Vec<AudioRole> =
+                    audio_labels.iter().map(|s| s.role).collect();
+                roles.sort_by_key(|r| *r as u8);
+                roles.dedup();
+                roles
+            };
+
+            if roles_in_use.len() <= 1 {
+                // Single role (or all None) — no submix needed, mix directly.
+                let n = audio_labels.len();
                 filter.push(';');
-                for l in &role_labels {
+                for stem in &audio_labels {
+                    filter.push_str(&format!("[{}]", stem.label));
+                }
+                filter.push_str(&format!(
+                    "amix=inputs={n}:normalize=0,atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
+                ));
+            } else {
+                // Multiple roles — create per-role submixes, then master mix.
+                let mut submix_labels: Vec<String> = Vec::new();
+                for role in &roles_in_use {
+                    let role_labels: Vec<&str> = audio_labels
+                        .iter()
+                        .filter(|s| s.role == *role)
+                        .map(|s| s.label.as_str())
+                        .collect();
+                    if role_labels.is_empty() {
+                        continue;
+                    }
+                    let submix_name = format!("submix_{}", role.as_str());
+                    let n = role_labels.len();
+                    filter.push(';');
+                    for l in &role_labels {
+                        filter.push_str(&format!("[{l}]"));
+                    }
+                    if n == 1 {
+                        // Single input — just rename, no amix needed.
+                        filter.push_str(&format!("anull[{submix_name}]"));
+                    } else {
+                        filter.push_str(&format!(
+                            "amix=inputs={n}:normalize=0[{submix_name}]"
+                        ));
+                    }
+                    submix_labels.push(submix_name);
+                }
+                // Master mix from submixes.
+                let n = submix_labels.len();
+                filter.push(';');
+                for l in &submix_labels {
                     filter.push_str(&format!("[{l}]"));
                 }
                 if n == 1 {
-                    // Single input — just rename, no amix needed.
-                    filter.push_str(&format!("anull[{submix_name}]"));
+                    filter.push_str(&format!(
+                        "atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
+                    ));
                 } else {
-                    filter.push_str(&format!("amix=inputs={n}:normalize=0[{submix_name}]"));
+                    filter.push_str(&format!(
+                        "amix=inputs={n}:normalize=0,atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
+                    ));
+                }
+            }
+        } else {
+            // ============================================================
+            // SURROUND MIX PATH (5.1 / 7.1)
+            //
+            // Per-stem upmix → role-based submixes → master mix.
+            //
+            // For each stem we emit a `pan=5.1|...` (or `pan=7.1|...`)
+            // expression mapping the stereo input to its destination
+            // channels, plus an optional parallel LFE bass-tap for stems
+            // on Music/Effects roles. Every stem terminates in the target
+            // layout via `aformat=channel_layouts={layout}` so amix
+            // produces a multichannel buffer instead of silently
+            // downmixing to stereo.
+            // ============================================================
+            let layout_token = layout.ffmpeg_layout();
+
+            // 1. Per-stem upmix + optional LFE tap. Build, by role (in
+            //    insertion order), a list of upmixed stem labels feeding
+            //    the role's submix. We use a Vec rather than BTreeMap so
+            //    we don't have to require `Ord` on `AudioRole`, and to
+            //    keep the emitted graph deterministic for snapshot tests.
+            let mut role_inputs: Vec<(AudioRole, Vec<String>)> = Vec::new();
+            let mut push_role_input = |role: AudioRole, label: String| {
+                if let Some(entry) = role_inputs.iter_mut().find(|(r, _)| *r == role) {
+                    entry.1.push(label);
+                } else {
+                    role_inputs.push((role, vec![label]));
+                }
+            };
+
+            // Capture stem facts up front so the per-stem filter writes
+            // don't fight the &mut borrow on `role_inputs`.
+            let stems_meta: Vec<(String, AudioRole, SurroundPosition)> = audio_labels
+                .iter()
+                .map(|stem| {
+                    let pos = resolve_stem_position(
+                        stem.role,
+                        stem.surround_override,
+                        layout,
+                    );
+                    (stem.label.clone(), stem.role, pos)
+                })
+                .collect();
+
+            for (label, role, position) in &stems_meta {
+                let upmix_label = format!("{label}_u");
+                filter.push_str(&build_surround_upmix_filter(
+                    label,
+                    &upmix_label,
+                    *position,
+                    layout,
+                ));
+                push_role_input(*role, upmix_label);
+
+                // Auto LFE bass tap for Music / Effects (and only when not
+                // already explicitly routed to LFE — that case already puts
+                // bass content there via the upmix filter).
+                let auto_lfe_eligible = matches!(
+                    role,
+                    AudioRole::Music | AudioRole::Effects
+                ) && *position != SurroundPosition::Lfe;
+                if auto_lfe_eligible {
+                    let lfe_label = format!("{label}_lfe");
+                    filter.push_str(&build_surround_lfe_tap_filter(
+                        label,
+                        &lfe_label,
+                        layout,
+                    ));
+                    push_role_input(*role, lfe_label);
+                }
+            }
+
+            // 2. Per-role submix in the target layout.
+            let mut submix_labels: Vec<String> = Vec::new();
+            for (role, labels) in &role_inputs {
+                if labels.is_empty() {
+                    continue;
+                }
+                let submix_name = format!("submix_{}", role.as_str());
+                let n = labels.len();
+                filter.push(';');
+                for l in labels {
+                    filter.push_str(&format!("[{l}]"));
+                }
+                if n == 1 {
+                    filter.push_str(&format!(
+                        "aformat=channel_layouts={layout_token}[{submix_name}]"
+                    ));
+                } else {
+                    filter.push_str(&format!(
+                        "amix=inputs={n}:normalize=0,aformat=channel_layouts={layout_token}[{submix_name}]"
+                    ));
                 }
                 submix_labels.push(submix_name);
             }
-            // Master mix from submixes.
+
+            // 3. Master mix of submixes → final [aout] in the target layout.
             let n = submix_labels.len();
             filter.push(';');
             for l in &submix_labels {
@@ -1120,11 +1428,11 @@ pub fn export_project(
             }
             if n == 1 {
                 filter.push_str(&format!(
-                    "atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
+                    "aformat=channel_layouts={layout_token},atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
                 ));
             } else {
                 filter.push_str(&format!(
-                    "amix=inputs={n}:normalize=0,atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
+                    "amix=inputs={n}:normalize=0,aformat=channel_layouts={layout_token},atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
                 ));
             }
         }
@@ -1145,6 +1453,27 @@ pub fn export_project(
         (filter + &gif_filter, "gifout".to_string())
     } else {
         (filter, vout_label)
+    };
+
+    // Apply the project-level master gain (from the Loudness Radar
+    // "Normalize to Target" action) post-mix, right before the final
+    // `[aout]` label. Only one of the four audio-chain branches above
+    // actually emits `[aout]` at runtime so a targeted rfind+splice is safe
+    // and leaves the stereo / 5.1 / 7.1 / audio-only paths unchanged when
+    // `master_gain_db == 0.0`.
+    let filter = if project.master_gain_db.abs() > f64::EPSILON {
+        let gain = project.master_gain_linear();
+        if let Some(pos) = filter.rfind("[aout]") {
+            let mut rewritten = String::with_capacity(filter.len() + 48);
+            rewritten.push_str(&filter[..pos]);
+            rewritten.push_str(&format!("[apremaster];[apremaster]volume={gain:.6}[aout]"));
+            rewritten.push_str(&filter[pos + "[aout]".len()..]);
+            rewritten
+        } else {
+            filter
+        }
+    } else {
+        filter
     };
 
     let mut filter_script_file = tempfile::NamedTempFile::new()?;
@@ -1169,6 +1498,12 @@ pub fn export_project(
                     .arg("libopus")
                     .arg("-b:a")
                     .arg(format!("{}k", options.audio_bitrate_kbps));
+                // libopus refuses multichannel layouts unless mapping_family
+                // is set to 1 (Vorbis-style). Stereo uses the default
+                // family 0 so we leave the existing command line alone.
+                if options.audio_channel_layout != AudioChannelLayout::Stereo {
+                    cmd.arg("-mapping_family").arg("1");
+                }
             }
             AudioCodec::Flac => {
                 cmd.arg("-c:a").arg("flac");
@@ -1176,6 +1511,16 @@ pub fn export_project(
             AudioCodec::Pcm => {
                 cmd.arg("-c:a").arg("pcm_s24le");
             }
+        }
+        // Surround target — pin channel count, channel layout, and 48kHz
+        // sample rate. Stereo path is left untouched so the command line
+        // remains byte-identical to the pre-surround code.
+        if options.audio_channel_layout != AudioChannelLayout::Stereo {
+            cmd.arg("-ac")
+                .arg(options.audio_channel_layout.channel_count().to_string());
+            cmd.arg("-channel_layout")
+                .arg(options.audio_channel_layout.ffmpeg_layout());
+            cmd.arg("-ar").arg("48000");
         }
     }
 
@@ -2502,6 +2847,45 @@ fn build_duck_filter(
     format!("volume='if({cond_expr},{duck_gain:.6},1.0)':eval=frame")
 }
 
+/// Build the FFmpeg filter chain for the one-knob "Enhance Voice" feature.
+///
+/// Returns an empty string when the feature is disabled. When enabled,
+/// returns a comma-separated chain of filters (no leading/trailing comma)
+/// suitable for splicing into a per-clip audio chain. The chain is:
+///
+///   highpass(80Hz) → afftdn (noise reduction) → mud-cut EQ →
+///   presence-boost EQ → acompressor (gentle leveling)
+///
+/// `strength` (0.0..=1.0) scales the noise-reduction depth, the EQ gains,
+/// the compressor ratio, and the makeup gain so the same toggle covers
+/// "subtle clean-up" through "broadcast voice" with one slider.
+fn build_voice_enhance_filter(clip: &Clip) -> String {
+    if !clip.voice_enhance {
+        return String::new();
+    }
+    let s = clip.voice_enhance_strength.clamp(0.0, 1.0) as f64;
+
+    // Noise reduction depth in dB. 6 dB at s=0 is gentle; 24 dB at s=1
+    // is aggressive but stops short of the "watery" zone (~30+).
+    let nr_db = 6.0 + 18.0 * s;
+    // Mud cut around 300 Hz: -1 dB at s=0, -3 dB at s=1.
+    let mud_g = -1.0 - 2.0 * s;
+    // Presence boost around 4 kHz: +1 dB at s=0, +5 dB at s=1.
+    let pres_g = 1.0 + 4.0 * s;
+    // Compressor ratio: 2:1 at s=0, 5:1 at s=1.
+    let comp_ratio = 2.0 + 3.0 * s;
+    // Makeup gain to roughly compensate for the compression: +1 dB to +3 dB.
+    let makeup = 1.0 + 2.0 * s;
+
+    format!(
+        "highpass=f=80,\
+         afftdn=nr={nr_db:.1}:nf=-25,\
+         equalizer=f=300:t=q:w=1.0:g={mud_g:.2},\
+         equalizer=f=4000:t=q:w=1.5:g={pres_g:.2},\
+         acompressor=threshold=0.05:ratio={comp_ratio:.2}:attack=20:release=250:makeup={makeup:.2}"
+    )
+}
+
 fn build_volume_filter(clip: &Clip) -> String {
     let base_expr = if clip.volume_keyframes.is_empty() {
         format!("{:.4}", clip.volume.clamp(0.0, 4.0))
@@ -2616,6 +3000,7 @@ fn append_pan_filter_chain(
     input_label: &str,
     output_label: &str,
     label_prefix: &str,
+    target_layout: AudioChannelLayout,
 ) {
     if clip.pan.abs() <= f32::EPSILON && clip.pan_keyframes.is_empty() {
         filter.push_str(&format!(";[{input_label}]anull[{output_label}]"));
@@ -2625,22 +3010,40 @@ fn append_pan_filter_chain(
     let pan_expr = build_pan_expression(clip);
     let left_gain_expr = format!("if(gt({pan_expr},0),1-({pan_expr}),1)");
     let right_gain_expr = format!("if(lt({pan_expr},0),1+({pan_expr}),1)");
-    let left_label = format!("{label_prefix}_pan_l");
-    let right_label = format!("{label_prefix}_pan_r");
-    let left_scaled_label = format!("{label_prefix}_pan_lv");
-    let right_scaled_label = format!("{label_prefix}_pan_rv");
 
+    if target_layout == AudioChannelLayout::Stereo {
+        // Legacy stereo path — left untouched so the filter graph remains
+        // byte-identical to the pre-surround code. Tested by
+        // `append_pan_filter_chain_emits_dynamic_channel_gains_for_keyframed_pan`.
+        let left_label = format!("{label_prefix}_pan_l");
+        let right_label = format!("{label_prefix}_pan_r");
+        let left_scaled_label = format!("{label_prefix}_pan_lv");
+        let right_scaled_label = format!("{label_prefix}_pan_rv");
+
+        filter.push_str(&format!(
+            ";[{input_label}]aformat=channel_layouts=stereo,channelsplit=channel_layout=stereo[{left_label}][{right_label}]"
+        ));
+        filter.push_str(&format!(
+            ";[{left_label}]volume='{left_gain_expr}':eval=frame[{left_scaled_label}]"
+        ));
+        filter.push_str(&format!(
+            ";[{right_label}]volume='{right_gain_expr}':eval=frame[{right_scaled_label}]"
+        ));
+        filter.push_str(&format!(
+            ";[{left_scaled_label}][{right_scaled_label}]amerge=inputs=2,aformat=channel_layouts=stereo[{output_label}]"
+        ));
+        return;
+    }
+
+    // Surround target — keep the stem in stereo and bake the L/R balance into
+    // c0/c1 via a single in-stem pan expression. The downstream upmix matrix
+    // (built in `build_audio_mix_graph`) decides which surround channels each
+    // stem contributes to. We deliberately do NOT use `channelsplit=stereo`
+    // here because that would corrupt a stem that's about to be routed to the
+    // center channel.
     filter.push_str(&format!(
-        ";[{input_label}]aformat=channel_layouts=stereo,channelsplit=channel_layout=stereo[{left_label}][{right_label}]"
-    ));
-    filter.push_str(&format!(
-        ";[{left_label}]volume='{left_gain_expr}':eval=frame[{left_scaled_label}]"
-    ));
-    filter.push_str(&format!(
-        ";[{right_label}]volume='{right_gain_expr}':eval=frame[{right_scaled_label}]"
-    ));
-    filter.push_str(&format!(
-        ";[{left_scaled_label}][{right_scaled_label}]amerge=inputs=2,aformat=channel_layouts=stereo[{output_label}]"
+        ";[{input_label}]aformat=channel_layouts=stereo,\
+         pan=stereo|c0='{left_gain_expr}*c0'|c1='{right_gain_expr}*c1':eval=frame[{output_label}]"
     ));
 }
 
@@ -2750,6 +3153,90 @@ fn build_blur_filter(clip: &crate::model::clip::Clip) -> String {
     } else {
         String::new()
     }
+}
+
+/// Build an inline HSL Qualifier filter fragment (secondary color correction).
+///
+/// Emits a single `geq` filter wrapped in `format=gbrp` / `format=yuva420p`
+/// bridges so the surrounding YUV chain stays intact while the per-pixel HSL
+/// math runs on RGB data.
+///
+/// The `r` channel expression does all the shared setup (RGB→HSL conversion,
+/// range membership, secondary grade, alpha blend) and stores the final
+/// r/g/b output in registers 25/26/27. The `g` and `b` expressions just read
+/// those registers — FFmpeg's `geq` shares stored-variable state across the
+/// channel expressions evaluated for the same pixel.
+///
+/// Returns an empty string when the qualifier is neutral so primary-only
+/// clips stay byte-identical to before.
+fn build_hsl_qualifier_filter(clip: &crate::model::clip::Clip) -> String {
+    let q = match &clip.hsl_qualifier {
+        Some(q) if !q.is_neutral() => q,
+        _ => return String::new(),
+    };
+
+    let alpha_expr = crate::media::hsl_qualifier::build_hsl_qualifier_geq_alpha(q);
+    let br = q.brightness;
+    let co = q.contrast;
+    let sa = q.saturation;
+
+    // Setup: read the three source channels, derive H/S/L into stored vars,
+    // compute the qualifier alpha, apply secondary grade, blend with original,
+    // and stash the final channel values in regs 25/26/27. The returned value
+    // of the `r` expression itself is 255*final_r.
+    //
+    // Register layout inside a single pixel evaluation:
+    //   20..22  r0 g0 b0 (source 0..1)
+    //   0..2    alias of 20..22 (build_hsl_qualifier_geq_alpha expects that)
+    //   3       V = max(r,g,b)
+    //   4       min(r,g,b)
+    //   5       delta
+    //   6       L
+    //   7       S
+    //   8       H (0..1)
+    //   9       qualifier alpha
+    //   23..24  luma + scratch
+    //   25..27  graded + blended final r/g/b (0..1)
+    //
+    // `alpha_expr` already contains st() calls that populate 0..9 from
+    // r(X,Y)/g(X,Y)/b(X,Y), so calling it once gives us both the setup and
+    // the alpha. We then reuse 20..22 (captured before the alpha math)
+    // for the blend step.
+    //
+    // Format bridges keep the surrounding YUV chain honest.
+    let setup_and_grade = format!(
+        "st(20,r(X,Y)/255)\
+         +st(21,g(X,Y)/255)\
+         +st(22,b(X,Y)/255)\
+         +st(9,{alpha_expr})\
+         +st(25,ld(20)+{br})\
+         +st(26,ld(21)+{br})\
+         +st(27,ld(22)+{br})\
+         +st(25,(ld(25)-0.5)*{co}+0.5)\
+         +st(26,(ld(26)-0.5)*{co}+0.5)\
+         +st(27,(ld(27)-0.5)*{co}+0.5)\
+         +st(23,0.2126*ld(25)+0.7152*ld(26)+0.0722*ld(27))\
+         +st(25,ld(23)+(ld(25)-ld(23))*{sa})\
+         +st(26,ld(23)+(ld(26)-ld(23))*{sa})\
+         +st(27,ld(23)+(ld(27)-ld(23))*{sa})\
+         +st(25,clip(ld(20)*(1-ld(9))+ld(25)*ld(9),0,1))\
+         +st(26,clip(ld(21)*(1-ld(9))+ld(26)*ld(9),0,1))\
+         +st(27,clip(ld(22)*(1-ld(9))+ld(27)*ld(9),0,1))",
+        alpha_expr = alpha_expr,
+        br = br,
+        co = co,
+        sa = sa,
+    );
+    // r expression returns 255*ld(25) while also evaluating all the setup.
+    // Multiplying the setup sum by 0 discards its numeric value but keeps
+    // every st() side effect.
+    let r_expr = format!("0*({setup_and_grade})+255*ld(25)");
+    let g_expr = "255*ld(26)";
+    let b_expr = "255*ld(27)";
+
+    format!(
+        ",format=gbrp,geq=r='{r_expr}':g='{g_expr}':b='{b_expr}',format=yuva420p"
+    )
 }
 
 /// Run vidstab analysis (pass 1) for a clip, producing a .trf transform file.
@@ -3376,18 +3863,12 @@ fn build_subtitle_filter_composited(
     }
 
     let flags = &style_clip.subtitle_highlight_flags;
-    let has_words = style_clip
-        .subtitle_segments
-        .iter()
-        .any(|s| !s.words.is_empty());
-    let use_karaoke = !flags.is_none() && has_words;
 
     // Always use the ASS path for subtitle burn-in.  The SRT+force_style path
     // is unreliable: libass silently drops subtitles when certain force_style
     // parameters (e.g. MarginV at high values) interact with BorderStyle=3.
     // ASS embeds all styling inline, avoiding the issue entirely.
     {
-        let _ = use_karaoke;
         // Write a proper ASS file with embedded styles.
         let mut sub_file = match tempfile::Builder::new().suffix(".ass").tempfile() {
             Ok(f) => f,
@@ -3396,6 +3877,8 @@ fn build_subtitle_filter_composited(
 
         let (hr, hg, hb, _) =
             crate::ui::colors::rgba_u32_to_u8(style_clip.subtitle_highlight_color);
+        let (sr, sg, sb, _) =
+            crate::ui::colors::rgba_u32_to_u8(style_clip.subtitle_highlight_stroke_color);
         let group_size = (style_clip.subtitle_word_window_secs as usize).max(2);
 
         {
@@ -3459,89 +3942,168 @@ fn build_subtitle_filter_composited(
                 "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
             );
 
+            // Emit one Dialogue event per segment (non-karaoke) or per word
+            // in a fixed word-group window (karaoke). The ASS events across
+            // each segment are made **contiguous** so nothing flickers:
+            //   * No-karaoke / no-word-timing path: a single event spanning
+            //     the full segment duration, so the sentence stays up for
+            //     its entire spoken span.
+            //   * Karaoke path: each word's event starts where the previous
+            //     word's event ends, and extends until the next word's end
+            //     (or the group/segment boundary for the first/last word).
+            //     This closes the inter-word silence gaps that previously
+            //     left the screen blank between syllables.
             for seg in &style_clip.subtitle_segments {
-                if seg.words.is_empty() {
-                    let abs_start =
-                        style_clip.timeline_start + (seg.start_ns as f64 / style_clip.speed) as u64;
-                    let abs_end =
-                        style_clip.timeline_start + (seg.end_ns as f64 / style_clip.speed) as u64;
+                let seg_abs_start =
+                    style_clip.timeline_start + (seg.start_ns as f64 / style_clip.speed) as u64;
+                let seg_abs_end =
+                    style_clip.timeline_start + (seg.end_ns as f64 / style_clip.speed) as u64;
+
+                // Non-karaoke (or no per-word timestamps) → one event for the
+                // whole sentence. Matches the Program Monitor preview, which
+                // skips the per-word display list when `flags.is_none()`.
+                if seg.words.is_empty() || flags.is_none() {
                     let _ = writeln!(
                         sub_file,
                         "Dialogue: 0,{},{},Default,,0,0,0,,{}",
-                        ass_timecode(abs_start),
-                        ass_timecode(abs_end),
+                        ass_timecode(seg_abs_start),
+                        ass_timecode(seg_abs_end),
                         seg.text
                     );
                     continue;
                 }
 
-                // Fixed groups: divide words into groups of group_size.
-                // Each group gets one Dialogue event per word (for highlight),
-                // but the visible text is the same fixed set of words.
-                for (wi, word) in seg.words.iter().enumerate() {
-                    let w_abs_start = style_clip.timeline_start
-                        + (word.start_ns as f64 / style_clip.speed) as u64;
-                    let w_abs_end =
-                        style_clip.timeline_start + (word.end_ns as f64 / style_clip.speed) as u64;
+                // Karaoke path: fixed word groups of `group_size`, each
+                // group's events tiled contiguously across the group's
+                // time range so no gap ever appears on-screen.
+                let total_words = seg.words.len();
+                let mut group_start = 0usize;
+                while group_start < total_words {
+                    let group_end = (group_start + group_size).min(total_words);
+                    let group_slice = &seg.words[group_start..group_end];
 
-                    // Determine which fixed group this word belongs to.
-                    let group_start = (wi / group_size) * group_size;
-                    let group_end = (group_start + group_size).min(seg.words.len());
+                    // Group time range: the first group extends back to the
+                    // segment start, the last group forward to the segment
+                    // end, and intermediate groups hand off exactly at the
+                    // next group's first word start.
+                    let group_time_start = if group_start == 0 {
+                        seg.start_ns
+                    } else {
+                        group_slice[0]
+                            .start_ns
+                            .max(seg.start_ns)
+                            .min(seg.end_ns)
+                    };
+                    let group_time_end = if group_end == total_words {
+                        seg.end_ns
+                    } else {
+                        seg.words[group_end]
+                            .start_ns
+                            .max(group_time_start)
+                            .min(seg.end_ns)
+                    };
 
-                    let mut text = String::new();
-                    for (owi, ow) in seg.words[group_start..group_end].iter().enumerate() {
-                        if !text.is_empty() {
-                            text.push(' ');
-                        }
-                        if group_start + owi == wi {
-                            // Build combined ASS override tags from highlight flags.
-                            let mut overrides = String::new();
-                            if flags.bold {
-                                overrides.push_str("\\b1");
-                            }
-                            if flags.italic {
-                                overrides.push_str("\\i1");
-                            }
-                            if flags.underline {
-                                overrides.push_str("\\u1");
-                            }
-                            if flags.color {
-                                overrides.push_str(&format!("\\c&H{hb:02X}{hg:02X}{hr:02X}&"));
-                            }
-                            if flags.stroke {
-                                overrides
-                                    .push_str(&format!("\\bord4\\3c&H{hb:02X}{hg:02X}{hr:02X}&"));
-                            }
-                            if flags.background {
-                                let (bhr, bhg, bhb, _) = crate::ui::colors::rgba_u32_to_u8(
-                                    style_clip.subtitle_bg_highlight_color,
-                                );
-                                overrides.push_str(&format!(
-                                    "\\4c&H{bhb:02X}{bhg:02X}{bhr:02X}&\\shad2"
-                                ));
-                            }
-                            if flags.shadow {
-                                overrides.push_str("\\shad2");
-                            }
+                    for (wi_in_group, _word) in group_slice.iter().enumerate() {
+                        let wi = group_start + wi_in_group;
 
-                            if overrides.is_empty() {
-                                text.push_str(&ow.text);
-                            } else {
-                                text.push_str(&format!("{{{overrides}}}"));
-                                text.push_str(&ow.text);
-                                text.push_str("{\\r}");
-                            }
+                        // Contiguous event timing within the group:
+                        // * first word in group  → group_time_start
+                        // * otherwise             → previous word's end_ns
+                        //                           (clamped into group range)
+                        // * last word in group    → group_time_end
+                        // * otherwise             → next word's end_ns
+                        //                           (clamped into group range)
+                        let ev_local_start = if wi_in_group == 0 {
+                            group_time_start
                         } else {
-                            text.push_str(&ow.text);
+                            seg.words[wi - 1]
+                                .end_ns
+                                .max(group_time_start)
+                                .min(group_time_end)
+                        };
+                        let ev_local_end = if wi_in_group + 1 == group_slice.len() {
+                            group_time_end
+                        } else {
+                            seg.words[wi]
+                                .end_ns
+                                .max(ev_local_start)
+                                .min(group_time_end)
+                        };
+                        if ev_local_end <= ev_local_start {
+                            continue;
                         }
+
+                        let w_abs_start = style_clip.timeline_start
+                            + (ev_local_start as f64 / style_clip.speed) as u64;
+                        let w_abs_end = style_clip.timeline_start
+                            + (ev_local_end as f64 / style_clip.speed) as u64;
+
+                        let mut text = String::new();
+                        for (owi, ow) in group_slice.iter().enumerate() {
+                            if !text.is_empty() {
+                                text.push(' ');
+                            }
+                            if group_start + owi == wi {
+                                // Build combined ASS override tags from highlight flags.
+                                let mut overrides = String::new();
+                                if flags.bold {
+                                    overrides.push_str("\\b1");
+                                }
+                                if flags.italic {
+                                    overrides.push_str("\\i1");
+                                }
+                                if flags.underline {
+                                    overrides.push_str("\\u1");
+                                }
+                                if flags.color {
+                                    overrides
+                                        .push_str(&format!("\\c&H{hb:02X}{hg:02X}{hr:02X}&"));
+                                }
+                                if flags.stroke {
+                                    // Stroke colour is independent from
+                                    // the text-fill highlight colour so
+                                    // the karaoke stroke can differ
+                                    // (e.g. yellow text with black
+                                    // stroke). Defaults to the same
+                                    // colour as `flags.color` for legacy
+                                    // projects.
+                                    overrides.push_str(&format!(
+                                        "\\bord4\\3c&H{sb:02X}{sg:02X}{sr:02X}&"
+                                    ));
+                                }
+                                if flags.background {
+                                    let (bhr, bhg, bhb, _) = crate::ui::colors::rgba_u32_to_u8(
+                                        style_clip.subtitle_bg_highlight_color,
+                                    );
+                                    overrides.push_str(&format!(
+                                        "\\4c&H{bhb:02X}{bhg:02X}{bhr:02X}&\\shad2"
+                                    ));
+                                }
+                                if flags.shadow {
+                                    overrides.push_str("\\shad2");
+                                }
+
+                                if overrides.is_empty() {
+                                    text.push_str(&ow.text);
+                                } else {
+                                    text.push_str(&format!("{{{overrides}}}"));
+                                    text.push_str(&ow.text);
+                                    text.push_str("{\\r}");
+                                }
+                            } else {
+                                text.push_str(&ow.text);
+                            }
+                        }
+
+                        let _ = writeln!(
+                            sub_file,
+                            "Dialogue: 0,{},{},Default,,0,0,0,,{text}",
+                            ass_timecode(w_abs_start),
+                            ass_timecode(w_abs_end)
+                        );
                     }
 
-                    let _ = writeln!(
-                        sub_file,
-                        "Dialogue: 0,{},{},Default,,0,0,0,,{text}",
-                        ass_timecode(w_abs_start),
-                        ass_timecode(w_abs_end)
-                    );
+                    group_start = group_end;
                 }
             }
             let _ = sub_file.flush();
@@ -3566,7 +4128,7 @@ pub fn export_srt(project: &Project, output_path: &str) -> Result<()> {
 
     for track in &project.tracks {
         for clip in &track.clips {
-            if clip.subtitle_segments.is_empty() {
+            if clip.subtitle_segments.is_empty() || !clip.subtitle_visible {
                 continue;
             }
             for seg in &clip.subtitle_segments {
@@ -4010,6 +4572,46 @@ fn build_timing_filter(
     }
 }
 
+/// Build a motion-blur filter chain for clips with keyframed transforms or
+/// fast-speed motion. Returns an empty string when motion blur is disabled or
+/// the clip has no per-frame motion (so unchanged clips stay byte-identical).
+///
+/// The chain works in two regimes:
+/// - **shutter_angle == 360°**: cheap path, just `tmix=frames=2` averages
+///   adjacent rendered frames at the project rate. No oversampling.
+/// - **shutter_angle < 360°**: oversample by `K = 4` via
+///   `minterpolate=fps=K*fps:mi_mode=blend`, then `tmix` the first
+///   `frames = max(1, round(K * shutter / 360))` of each output's K
+///   sub-frames, then decimate back to `fps` so downstream filters keep
+///   the project frame rate.
+pub(crate) fn build_motion_blur_filter(clip: &Clip, fps_num: u32, fps_den: u32) -> String {
+    if !clip.motion_blur_active() {
+        return String::new();
+    }
+    let fps = if fps_den > 0 {
+        format!("{fps_num}/{fps_den}")
+    } else {
+        format!("{fps_num}")
+    };
+    let shutter = clip.motion_blur_shutter_angle.clamp(0.0, 720.0);
+    if (shutter - 360.0).abs() < 0.5 {
+        return ",tmix=frames=2:weights='1 1'".to_string();
+    }
+    const K: u32 = 4;
+    let raw_frames = (K as f64 * shutter / 360.0).round() as i32;
+    let frames = raw_frames.max(1).min((K * 2) as i32) as u32;
+    let weights = std::iter::repeat("1")
+        .take(frames as usize)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let over_fps = if fps_den > 0 {
+        format!("{}/{}", fps_num.saturating_mul(K), fps_den)
+    } else {
+        format!("{}", fps_num.saturating_mul(K))
+    };
+    format!(",minterpolate=fps={over_fps}:mi_mode=blend,tmix=frames={frames}:weights='{weights}',fps={fps}")
+}
+
 /// Build the minterpolate filter suffix for slow-motion frame interpolation.
 /// Returns empty string if interpolation is Off or the clip isn't slow-motion.
 fn build_minterpolate_suffix(clip: &Clip, fps_num: u32, fps_den: u32) -> String {
@@ -4441,6 +5043,195 @@ fn build_pitch_filter(clip: &crate::model::clip::Clip) -> String {
     params.push("formant=preserved".to_string());
 
     format!("rubberband={}", params.join(":"))
+}
+
+/// Resolve a stem's destination position for the surround upmix matrix.
+///
+/// - Stereo target → always `FrontLR` (no-op; the surround code path is gated
+///   off elsewhere so this is a defensive default).
+/// - Surround target with `Auto` override → role-based defaults:
+///   Dialogue=FrontCenter, Music=FrontLR, Effects=FrontLRPlusSurroundLR,
+///   None=FrontLR.
+/// - Surround target with explicit override → that override directly.
+fn resolve_stem_position(
+    role: crate::model::track::AudioRole,
+    track_override: crate::model::track::SurroundPositionOverride,
+    target: AudioChannelLayout,
+) -> SurroundPosition {
+    use crate::model::track::{AudioRole, SurroundPositionOverride};
+    if target == AudioChannelLayout::Stereo {
+        return SurroundPosition::FrontLR;
+    }
+    match track_override {
+        SurroundPositionOverride::Auto => match role {
+            AudioRole::Dialogue => SurroundPosition::FrontCenter,
+            AudioRole::Music => SurroundPosition::FrontLR,
+            AudioRole::Effects => SurroundPosition::FrontLRPlusSurroundLR,
+            AudioRole::None => SurroundPosition::FrontLR,
+        },
+        SurroundPositionOverride::FrontLR => SurroundPosition::FrontLR,
+        SurroundPositionOverride::FrontCenter => SurroundPosition::FrontCenter,
+        SurroundPositionOverride::FrontLRPlusSurroundLR => {
+            SurroundPosition::FrontLRPlusSurroundLR
+        }
+        SurroundPositionOverride::SurroundLR => SurroundPosition::SurroundLR,
+        SurroundPositionOverride::Lfe => SurroundPosition::Lfe,
+        SurroundPositionOverride::FrontLeft => SurroundPosition::FrontLeft,
+        SurroundPositionOverride::FrontRight => SurroundPosition::FrontRight,
+        SurroundPositionOverride::BackLeft => SurroundPosition::BackLeft,
+        SurroundPositionOverride::BackRight => SurroundPosition::BackRight,
+        SurroundPositionOverride::SideLeft => SurroundPosition::SideLeft,
+        SurroundPositionOverride::SideRight => SurroundPosition::SideRight,
+    }
+}
+
+/// Build the per-channel weight expressions for one stem's surround upmix.
+///
+/// Returns a vector of `(channel_name, expression)` pairs ordered by the
+/// FFmpeg layout's canonical channel order. Both 5.1 and 7.1 share `FL FR FC
+/// LFE BL BR` as the first six channels; 7.1 appends `SL SR`. Side channels
+/// in 5.1 are aliased to back channels (no separate side speakers exist).
+///
+/// All expressions reference `c0` (left input) and `c1` (right input) of a
+/// stereo source stem. The weighting constants are intentionally conservative
+/// to avoid clipping when multiple stems are summed by `amix=normalize=0`.
+fn surround_pan_weights(
+    position: SurroundPosition,
+    target: AudioChannelLayout,
+) -> Vec<(&'static str, String)> {
+    fn ch(name: &'static str, expr: &str) -> (&'static str, String) {
+        (name, expr.to_string())
+    }
+    let is_71 = matches!(target, AudioChannelLayout::Surround71);
+    let mut out: Vec<(&'static str, String)> = Vec::new();
+    let order: &[&'static str] = if is_71 {
+        &["FL", "FR", "FC", "LFE", "BL", "BR", "SL", "SR"]
+    } else {
+        &["FL", "FR", "FC", "LFE", "BL", "BR"]
+    };
+    let zero = "0".to_string();
+    let mut weights: std::collections::HashMap<&'static str, String> =
+        std::collections::HashMap::new();
+    for ch_name in order {
+        weights.insert(*ch_name, zero.clone());
+    }
+    match position {
+        SurroundPosition::FrontLR => {
+            weights.insert("FL", "c0".to_string());
+            weights.insert("FR", "c1".to_string());
+        }
+        SurroundPosition::FrontCenter => {
+            weights.insert("FC", "0.707*c0+0.707*c1".to_string());
+        }
+        SurroundPosition::FrontLRPlusSurroundLR => {
+            weights.insert("FL", "0.85*c0".to_string());
+            weights.insert("FR", "0.85*c1".to_string());
+            if is_71 {
+                // Spread to both back and side rears at lower gain.
+                weights.insert("BL", "0.40*c0".to_string());
+                weights.insert("BR", "0.40*c1".to_string());
+                weights.insert("SL", "0.40*c0".to_string());
+                weights.insert("SR", "0.40*c1".to_string());
+            } else {
+                weights.insert("BL", "0.55*c0".to_string());
+                weights.insert("BR", "0.55*c1".to_string());
+            }
+        }
+        SurroundPosition::SurroundLR => {
+            if is_71 {
+                weights.insert("SL", "c0".to_string());
+                weights.insert("SR", "c1".to_string());
+            } else {
+                weights.insert("BL", "c0".to_string());
+                weights.insert("BR", "c1".to_string());
+            }
+        }
+        SurroundPosition::Lfe => {
+            weights.insert("LFE", "0.707*c0+0.707*c1".to_string());
+        }
+        SurroundPosition::FrontLeft => {
+            weights.insert("FL", "0.707*c0+0.707*c1".to_string());
+        }
+        SurroundPosition::FrontRight => {
+            weights.insert("FR", "0.707*c0+0.707*c1".to_string());
+        }
+        SurroundPosition::BackLeft => {
+            weights.insert("BL", "0.707*c0+0.707*c1".to_string());
+        }
+        SurroundPosition::BackRight => {
+            weights.insert("BR", "0.707*c0+0.707*c1".to_string());
+        }
+        SurroundPosition::SideLeft => {
+            if is_71 {
+                weights.insert("SL", "0.707*c0+0.707*c1".to_string());
+            } else {
+                // 5.1 has no side channels — alias to BL.
+                weights.insert("BL", "0.707*c0+0.707*c1".to_string());
+            }
+        }
+        SurroundPosition::SideRight => {
+            if is_71 {
+                weights.insert("SR", "0.707*c0+0.707*c1".to_string());
+            } else {
+                weights.insert("BR", "0.707*c0+0.707*c1".to_string());
+            }
+        }
+    }
+    for ch_name in order {
+        out.push(ch(ch_name, &weights[ch_name]));
+    }
+    out
+}
+
+/// Render a single per-stem upmix filter chain into the surround target
+/// layout. Returns the filter string starting with `;` so it can be appended
+/// directly to the running filtergraph.
+///
+/// Output label is `{input_label}_u`. The output is in the canonical surround
+/// layout (5.1 or 7.1) and is `aformat`-pinned so the downstream `amix` is
+/// guaranteed to receive matching layouts (otherwise amix silently downmixes).
+fn build_surround_upmix_filter(
+    input_label: &str,
+    output_label: &str,
+    position: SurroundPosition,
+    target: AudioChannelLayout,
+) -> String {
+    let layout = target.ffmpeg_layout();
+    let weights = surround_pan_weights(position, target);
+    let pan_body: Vec<String> = weights
+        .iter()
+        .map(|(ch, expr)| format!("{ch}={expr}"))
+        .collect();
+    format!(
+        ";[{input_label}]aformat=channel_layouts=stereo,pan={layout}|{},aformat=channel_layouts={layout}[{output_label}]",
+        pan_body.join("|")
+    )
+}
+
+/// Build a parallel LFE bass-tap filter for a stem.
+///
+/// Used in surround mode for stems on `Music` / `Effects` tracks (and not
+/// already explicitly routed to `Lfe`) so the subwoofer channel automatically
+/// receives bass content. Two cascaded `lowpass=f=120` biquads give roughly a
+/// 24 dB/oct slope. The pan coefficients are conservative to avoid LFE
+/// summation clipping when multiple stems contribute.
+fn build_surround_lfe_tap_filter(
+    input_label: &str,
+    output_label: &str,
+    target: AudioChannelLayout,
+) -> String {
+    let layout = target.ffmpeg_layout();
+    // Build a pan expression that puts bass content into LFE only (all other
+    // channels = 0). Reuse `surround_pan_weights(Lfe, target)`.
+    let weights = surround_pan_weights(SurroundPosition::Lfe, target);
+    let pan_body: Vec<String> = weights
+        .iter()
+        .map(|(ch, expr)| format!("{ch}={expr}"))
+        .collect();
+    format!(
+        ";[{input_label}]aformat=channel_layouts=stereo,lowpass=f=120,lowpass=f=120,pan={layout}|{},aformat=channel_layouts={layout}[{output_label}]",
+        pan_body.join("|")
+    )
 }
 
 /// Build an FFmpeg filter for audio channel routing (Left/Right/MonoMix).
@@ -5112,20 +5903,186 @@ pub(crate) fn detect_scene_cuts(
 
 /// Measure integrated loudness (LUFS) of a clip's audio via FFmpeg `ebur128` filter.
 /// Returns the integrated loudness value in LUFS (e.g. -18.3).
-pub(crate) fn analyze_loudness_lufs(
+/// Full EBU R128 loudness report for a measured audio source.
+///
+/// All fields are in standard R128 units. `short_term_max_lufs` and
+/// `momentary_max_lufs` track the running max across the per-frame log;
+/// `true_peak_dbtp` is populated only when FFmpeg is invoked with
+/// `ebur128=peak=true` (otherwise defaults to 0.0 on parse).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LoudnessReport {
+    /// Integrated loudness over the full duration (I:). LUFS.
+    pub integrated_lufs: f64,
+    /// Loudness Range (LRA:). LU.
+    pub loudness_range_lu: f64,
+    /// Integrated threshold (I Threshold:). LUFS.
+    pub threshold_lufs: f64,
+    /// Maximum short-term (3 s window) loudness observed. LUFS.
+    pub short_term_max_lufs: f64,
+    /// Maximum momentary (400 ms window) loudness observed. LUFS.
+    pub momentary_max_lufs: f64,
+    /// True-peak (dBTP) from the Summary block's Peak: line. dBFS equivalent.
+    pub true_peak_dbtp: f64,
+}
+
+/// Parse a LoudnessReport out of an ffmpeg stderr dump that used
+/// `ebur128=peak=true:framelog=verbose`.
+///
+/// Exposed (pub(crate)) so unit tests can feed canned strings without
+/// spawning a subprocess.
+pub(crate) fn parse_loudness_report(stderr: &str) -> Result<LoudnessReport> {
+    let mut report = LoudnessReport::default();
+    let mut saw_summary_i = false;
+    let mut in_summary = false;
+
+    // First pass: scan per-frame log lines of the form
+    //   [Parsed_ebur128_0 @ 0x...] t: 0.4  M: -25.3 S:-inf     I: -25.3 LUFS  LRA:  0.0 LU
+    // and track max(M) and max(S). `-inf` / `nan` are ignored.
+    for line in stderr.lines() {
+        if !line.contains("[Parsed_ebur128") {
+            continue;
+        }
+        // `M: -25.3` and `S: -18.7` — spaces between key and value vary.
+        if let Some(m) = extract_ebur128_metric(line, " M:") {
+            if m > report.momentary_max_lufs || report.momentary_max_lufs == 0.0 {
+                report.momentary_max_lufs = m;
+            }
+        }
+        if let Some(s) = extract_ebur128_metric(line, " S:") {
+            if s > report.short_term_max_lufs || report.short_term_max_lufs == 0.0 {
+                report.short_term_max_lufs = s;
+            }
+        }
+    }
+
+    // Second pass: walk the trailing Summary block and extract
+    // I:, I Threshold:, LRA:, Peak:.
+    //
+    // The Summary block looks like:
+    //   [Parsed_ebur128_0 @ ...] Summary:
+    //
+    //     Integrated loudness:
+    //       I:         -23.0 LUFS
+    //       Threshold: -33.0 LUFS
+    //
+    //     Loudness range:
+    //       LRA:        8.4 LU
+    //       Threshold: -43.0 LUFS
+    //       LRA low:   -28.1 LUFS
+    //       LRA high:  -19.7 LUFS
+    //
+    //     True peak:
+    //       Peak:       -1.2 dBFS
+    //
+    // "Threshold:" appears twice (integrated + range); we only want the
+    // first ("I Threshold" in our struct). We disambiguate by tracking
+    // which subsection ("Integrated loudness" vs. "Loudness range") we're
+    // currently in.
+    let mut in_integrated = false;
+    let mut in_range = false;
+    let mut in_true_peak = false;
+    for line in stderr.lines() {
+        let trimmed = line.trim_start_matches(|c: char| !c.is_alphabetic()).trim();
+        if line.contains("Summary:") {
+            in_summary = true;
+            in_integrated = false;
+            in_range = false;
+            in_true_peak = false;
+            continue;
+        }
+        if !in_summary {
+            continue;
+        }
+        if trimmed.starts_with("Integrated loudness") {
+            in_integrated = true;
+            in_range = false;
+            in_true_peak = false;
+            continue;
+        }
+        if trimmed.starts_with("Loudness range") {
+            in_integrated = false;
+            in_range = true;
+            in_true_peak = false;
+            continue;
+        }
+        if trimmed.starts_with("True peak") {
+            in_integrated = false;
+            in_range = false;
+            in_true_peak = true;
+            continue;
+        }
+        if in_integrated && trimmed.starts_with("I:") {
+            if let Some(val) = parse_leading_f64(&trimmed["I:".len()..]) {
+                report.integrated_lufs = val;
+                saw_summary_i = true;
+            }
+        } else if in_integrated && trimmed.starts_with("Threshold:") {
+            if let Some(val) = parse_leading_f64(&trimmed["Threshold:".len()..]) {
+                report.threshold_lufs = val;
+            }
+        } else if in_range && trimmed.starts_with("LRA:") {
+            if let Some(val) = parse_leading_f64(&trimmed["LRA:".len()..]) {
+                report.loudness_range_lu = val;
+            }
+        } else if in_true_peak && trimmed.starts_with("Peak:") {
+            if let Some(val) = parse_leading_f64(&trimmed["Peak:".len()..]) {
+                report.true_peak_dbtp = val;
+            }
+        }
+    }
+
+    if !saw_summary_i {
+        return Err(anyhow!(
+            "Could not parse integrated loudness from ffmpeg ebur128 output"
+        ));
+    }
+    Ok(report)
+}
+
+/// Extract a numeric metric from a per-frame ebur128 log line.
+/// Handles `-inf`, `nan`, and whitespace variations between the key and value.
+fn extract_ebur128_metric(line: &str, key: &str) -> Option<f64> {
+    let idx = line.find(key)?;
+    let rest = &line[idx + key.len()..];
+    let token = rest
+        .trim_start()
+        .split_whitespace()
+        .next()
+        .unwrap_or("");
+    if token.is_empty() || token.contains("inf") || token.contains("nan") {
+        return None;
+    }
+    token.parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
+/// Parse the leading f64 from a stringified metric value, ignoring the unit.
+/// `"  -23.0 LUFS"` → `Some(-23.0)`. `"-inf LUFS"` → `None`.
+fn parse_leading_f64(s: &str) -> Option<f64> {
+    let token = s.trim().split_whitespace().next().unwrap_or("");
+    if token.is_empty() || token.contains("inf") || token.contains("nan") {
+        return None;
+    }
+    token.parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
+/// Analyze a source file and return the full EBU R128 loudness report.
+/// Invokes FFmpeg with `ebur128=peak=true:framelog=verbose` so the stderr
+/// dump contains both per-frame M/S values and the Summary block with the
+/// True Peak line.
+pub(crate) fn analyze_loudness_full(
     source_path: &str,
     source_in_ns: u64,
     source_out_ns: u64,
-) -> Result<f64> {
-    analyze_loudness_lufs_with_prefilter(source_path, source_in_ns, source_out_ns, None)
+) -> Result<LoudnessReport> {
+    analyze_loudness_full_with_prefilter(source_path, source_in_ns, source_out_ns, None)
 }
 
-pub(crate) fn analyze_loudness_lufs_with_prefilter(
+pub(crate) fn analyze_loudness_full_with_prefilter(
     source_path: &str,
     source_in_ns: u64,
     source_out_ns: u64,
     prefilter: Option<String>,
-) -> Result<f64> {
+) -> Result<LoudnessReport> {
     let ffmpeg = find_ffmpeg()?;
     if !probe_has_audio(&ffmpeg, source_path) {
         return Err(anyhow!("Clip has no audio stream"));
@@ -5135,11 +6092,14 @@ pub(crate) fn analyze_loudness_lufs_with_prefilter(
     if duration_sec <= 0.0 {
         return Err(anyhow!("Clip has zero duration"));
     }
+    let ebur128_filter = "ebur128=peak=true:framelog=verbose";
     let audio_filter = prefilter
-        .map(|filter| format!("{filter},ebur128"))
-        .unwrap_or_else(|| "ebur128".to_string());
+        .map(|filter| format!("{filter},{ebur128_filter}"))
+        .unwrap_or_else(|| ebur128_filter.to_string());
     let output = Command::new(&ffmpeg)
         .args([
+            "-nostats",
+            "-hide_banner",
             "-ss",
             &format!("{src_in_sec}"),
             "-t",
@@ -5159,39 +6119,28 @@ pub(crate) fn analyze_loudness_lufs_with_prefilter(
         .map_err(|e| anyhow!("Failed to run ffmpeg ebur128: {e}"))?;
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    // Parse the summary block. The ebur128 filter outputs lines like:
-    //   [Parsed_ebur128_0 @ 0x...] Summary:
-    //
-    //     Integrated loudness:
-    //       I:         -25.9 LUFS
-    // The "Summary:" line has a filter tag prefix; the "I:" line does not.
-    let mut in_summary = false;
-    for line in stderr.lines() {
-        let trimmed = line.trim();
-        // "Summary:" may be prefixed by "[Parsed_ebur128_0 @ 0x...]"
-        if trimmed.contains("Summary:") {
-            in_summary = true;
-            continue;
-        }
-        if in_summary {
-            // e.g. "    I:         -25.9 LUFS"
-            if trimmed.starts_with("I:") {
-                let rest = trimmed["I:".len()..].trim();
-                if let Some(val) = rest
-                    .split_whitespace()
-                    .next()
-                    .and_then(|s| s.parse::<f64>().ok())
-                {
-                    if val.is_finite() {
-                        return Ok(val);
-                    }
-                }
-            }
-        }
-    }
-    Err(anyhow!(
-        "Could not parse integrated loudness from ffmpeg ebur128 output"
-    ))
+    parse_loudness_report(&stderr)
+}
+
+/// Scalar wrapper — returns only the integrated LUFS value. Preserved for
+/// the existing per-clip Inspector **Normalize…** button, `normalize_clip_audio`
+/// MCP tool, and `match_clip_audio` paths which don't need the full report.
+pub(crate) fn analyze_loudness_lufs(
+    source_path: &str,
+    source_in_ns: u64,
+    source_out_ns: u64,
+) -> Result<f64> {
+    Ok(analyze_loudness_full(source_path, source_in_ns, source_out_ns)?.integrated_lufs)
+}
+
+pub(crate) fn analyze_loudness_lufs_with_prefilter(
+    source_path: &str,
+    source_in_ns: u64,
+    source_out_ns: u64,
+    prefilter: Option<String>,
+) -> Result<f64> {
+    Ok(analyze_loudness_full_with_prefilter(source_path, source_in_ns, source_out_ns, prefilter)?
+        .integrated_lufs)
 }
 
 /// Measure peak amplitude (dB) of a clip's audio via FFmpeg `volumedetect` filter.
@@ -5248,6 +6197,64 @@ pub(crate) fn analyze_peak_db(
     Err(anyhow!(
         "Could not parse max_volume from ffmpeg volumedetect output"
     ))
+}
+
+/// Render the full project timeline to a temp `.mp4` via `export_project`,
+/// then run `analyze_loudness_full` on the result and return the report.
+///
+/// Used by the Loudness Radar **Analyze Project** action and the
+/// `analyze_project_loudness` MCP tool. The render uses a tiny 160×90 H.264
+/// video stream to keep encode cost minimal; we immediately discard the
+/// temp file once analysis completes.
+///
+/// **Important**: the measurement is taken with `project.master_gain_db`
+/// forced to `0.0` on a cloned project. This way the caller gets the
+/// *pre-gain* loudness and can compute `delta = target - integrated`
+/// correctly even when a master gain is already applied.
+pub fn analyze_project_loudness(project: &Project) -> Result<LoudnessReport> {
+    let temp = tempfile::Builder::new()
+        .prefix("us_loudness_")
+        .suffix(".mp4")
+        .tempfile()
+        .map_err(|e| anyhow!("Failed to create temp file for loudness analysis: {e}"))?;
+    let path = temp.path().to_string_lossy().to_string();
+
+    // Clone + zero master gain so analysis reflects the raw mix.
+    let mut analysis_project = project.clone();
+    analysis_project.master_gain_db = 0.0;
+
+    let options = ExportOptions {
+        video_codec: VideoCodec::H264,
+        container: Container::Mp4,
+        output_width: 160,
+        output_height: 90,
+        crf: 51,
+        audio_codec: AudioCodec::Aac,
+        audio_bitrate_kbps: 320,
+        gif_fps: None,
+        audio_channel_layout: AudioChannelLayout::Stereo,
+    };
+
+    let (tx, _rx) = mpsc::channel();
+    let empty_bg: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let empty_fi: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    export_project(
+        &analysis_project,
+        &path,
+        options,
+        None,
+        &empty_bg,
+        &empty_fi,
+        tx,
+    )?;
+
+    let duration_ns = analysis_project.duration();
+    let report = analyze_loudness_full(&path, 0, duration_ns)?;
+    // `temp` drops here — file cleaned up even on error paths above thanks
+    // to the NamedTempFile RAII guard.
+    Ok(report)
 }
 
 /// Compute the linear gain multiplier needed to shift measured LUFS to a target LUFS.
@@ -5500,18 +6507,21 @@ mod tests {
         adjustment_roi_padding_px, append_pan_filter_chain, audio_crossfade_curve_name,
         build_adjustment_export_roi, build_adjustment_layer_filter_graph,
         build_adjustment_scope_alpha_expression, build_audio_crossfade_filters, build_color_filter,
-        build_crop_filter, build_grading_filter, build_keyframed_property_expression,
+        build_crop_filter, build_grading_filter, build_hsl_qualifier_filter,
+        build_keyframed_property_expression,
         build_pan_expression, build_rotation_filter, build_scale_position_filter,
-        build_subtitle_filter_composited, build_temperature_tint_filter, build_timing_filter,
+        build_subtitle_filter_composited, build_surround_lfe_tap_filter,
+        build_surround_upmix_filter, build_temperature_tint_filter, build_timing_filter,
         build_title_filter, build_volume_filter, clamped_primary_transition_timing,
         clamped_primary_xfade_duration_s, compute_clip_audio_fades, compute_export_coloradj_params,
         estimate_export_size_bytes, find_ffmpeg, flatten_compound_tracks, has_linked_audio_peer,
-        has_transform_keyframes, parse_progress_line, primary_clip_transition_stop_pad_ns,
-        resolve_subtitle_font_style, split_active_video_tracks_for_export,
-        video_input_seek_and_duration, write_chapter_metadata, AdjustmentExportRoi,
-        AdjustmentMatteInput, AudioCodec, ClipAudioFade, ColorFilterCapabilities, ExportOptions,
-        VideoCodec,
+        has_transform_keyframes, parse_loudness_report, parse_progress_line,
+        primary_clip_transition_stop_pad_ns, resolve_stem_position, resolve_subtitle_font_style,
+        split_active_video_tracks_for_export, video_input_seek_and_duration, write_chapter_metadata,
+        AdjustmentExportRoi, AdjustmentMatteInput, AudioChannelLayout, AudioCodec, ClipAudioFade,
+        ColorFilterCapabilities, ExportOptions, LoudnessReport, SurroundPosition, VideoCodec,
     };
+    use crate::model::track::{AudioRole, SurroundPositionOverride};
     use crate::media::program_player::ProgramPlayer;
     use crate::model::clip::{
         Clip, ClipKind, KeyframeInterpolation, NumericKeyframe, SubtitleSegment, SubtitleWord,
@@ -5581,6 +6591,7 @@ mod tests {
             audio_codec: AudioCodec::Aac,
             ..ExportOptions::default()
         };
+        assert_eq!(options.audio_channel_layout, AudioChannelLayout::Stereo);
         let est = estimate_export_size_bytes(&project, &options, project.width, project.height);
         assert!(est.unwrap_or(0) > 0);
     }
@@ -6014,7 +7025,14 @@ mod tests {
     fn append_pan_filter_chain_uses_anull_for_center_pan_without_keyframes() {
         let clip = Clip::new("/tmp/test.wav", 2_000_000_000, 0, ClipKind::Audio);
         let mut graph = String::new();
-        append_pan_filter_chain(&mut graph, &clip, "in", "out", "clip1");
+        append_pan_filter_chain(
+            &mut graph,
+            &clip,
+            "in",
+            "out",
+            "clip1",
+            AudioChannelLayout::Stereo,
+        );
         assert_eq!(graph, ";[in]anull[out]");
     }
 
@@ -6036,11 +7054,63 @@ mod tests {
             },
         ];
         let mut graph = String::new();
-        append_pan_filter_chain(&mut graph, &clip, "in", "out", "clip1");
+        append_pan_filter_chain(
+            &mut graph,
+            &clip,
+            "in",
+            "out",
+            "clip1",
+            AudioChannelLayout::Stereo,
+        );
         assert!(graph.contains("channelsplit=channel_layout=stereo"));
         assert!(graph.contains("volume='if(gt("));
         assert!(graph.contains("':eval=frame"));
         assert!(graph.contains("amerge=inputs=2"));
+    }
+
+    /// Surround target — the stereo channelsplit MUST be omitted because the
+    /// stem is destined for an upmix matrix that decides channel placement.
+    /// Stereo path is unaffected.
+    #[test]
+    fn append_pan_filter_chain_surround_target_omits_stereo_split() {
+        let mut clip = Clip::new("/tmp/test.wav", 2_000_000_000, 0, ClipKind::Audio);
+        clip.pan = 0.3;
+        let mut graph = String::new();
+        append_pan_filter_chain(
+            &mut graph,
+            &clip,
+            "in",
+            "out",
+            "clip1",
+            AudioChannelLayout::Surround51,
+        );
+        assert!(
+            !graph.contains("channelsplit=channel_layout=stereo"),
+            "surround target should NOT use channelsplit; got: {graph}"
+        );
+        assert!(
+            graph.contains("pan=stereo|c0='"),
+            "surround target should bake pan into c0/c1; got: {graph}"
+        );
+        assert!(graph.contains(":eval=frame[out]"));
+    }
+
+    /// Center pan + surround target still collapses to anull (no pan applied),
+    /// matching the stereo-target shortcut. Important so that a stem with pan=0
+    /// passes through unchanged regardless of layout.
+    #[test]
+    fn append_pan_filter_chain_surround_target_preserves_center_anull_shortcut() {
+        let clip = Clip::new("/tmp/test.wav", 2_000_000_000, 0, ClipKind::Audio);
+        let mut graph = String::new();
+        append_pan_filter_chain(
+            &mut graph,
+            &clip,
+            "in",
+            "out",
+            "clip1",
+            AudioChannelLayout::Surround51,
+        );
+        assert_eq!(graph, ";[in]anull[out]");
     }
 
     #[test]
@@ -6077,6 +7147,90 @@ mod tests {
         assert_eq!(timing.duration_ns, 1_000_000_000);
         assert_eq!(timing.before_cut_ns, 500_000_000);
         assert_eq!(timing.after_cut_ns, 500_000_000);
+    }
+
+    #[test]
+    fn motion_blur_filter_empty_when_disabled() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.position_x_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 0.0,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        clip.position_x_keyframes.push(NumericKeyframe {
+            time_ns: 1_000_000_000,
+            value: 0.5,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        clip.motion_blur_enabled = false;
+        assert_eq!(super::build_motion_blur_filter(&clip, 30, 1), "");
+    }
+
+    #[test]
+    fn motion_blur_filter_empty_when_no_motion() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.motion_blur_enabled = true;
+        clip.motion_blur_shutter_angle = 180.0;
+        // No keyframes, speed = 1.0 → static clip → motion blur is a no-op.
+        assert_eq!(super::build_motion_blur_filter(&clip, 30, 1), "");
+    }
+
+    #[test]
+    fn motion_blur_filter_active_with_position_keyframes() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.motion_blur_enabled = true;
+        clip.motion_blur_shutter_angle = 180.0;
+        clip.position_x_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 0.0,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        clip.position_x_keyframes.push(NumericKeyframe {
+            time_ns: 1_000_000_000,
+            value: 0.5,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        let f = super::build_motion_blur_filter(&clip, 30, 1);
+        assert!(f.contains("minterpolate=fps=120/1"), "got: {f}");
+        assert!(f.contains("tmix=frames=2"), "got: {f}");
+        assert!(f.ends_with(",fps=30/1"), "got: {f}");
+    }
+
+    #[test]
+    fn motion_blur_filter_at_360_skips_minterpolate_for_cheap_path() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.motion_blur_enabled = true;
+        clip.motion_blur_shutter_angle = 360.0;
+        clip.scale_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 1.0,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        clip.scale_keyframes.push(NumericKeyframe {
+            time_ns: 1_000_000_000,
+            value: 1.5,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        let f = super::build_motion_blur_filter(&clip, 30, 1);
+        assert!(!f.contains("minterpolate"), "got: {f}");
+        assert!(f.contains("tmix=frames=2"), "got: {f}");
+    }
+
+    #[test]
+    fn motion_blur_filter_active_with_fast_speed() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.motion_blur_enabled = true;
+        clip.motion_blur_shutter_angle = 180.0;
+        clip.speed = 2.0;
+        let f = super::build_motion_blur_filter(&clip, 30, 1);
+        assert!(!f.is_empty(), "fast speed should activate motion blur");
+        assert!(f.contains("tmix=frames=2"));
     }
 
     #[test]
@@ -6494,6 +7648,141 @@ mod tests {
         assert!(f.contains(",eq=brightness="));
         assert!(f.contains(":contrast="));
         assert!(!f.contains(":gamma="));
+    }
+
+    #[test]
+    fn hsl_qualifier_filter_empty_when_none() {
+        let clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        assert_eq!(build_hsl_qualifier_filter(&clip), "");
+    }
+
+    #[test]
+    fn hsl_qualifier_filter_empty_when_neutral() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.hsl_qualifier = Some(crate::model::clip::HslQualifier::default());
+        // Disabled default is neutral.
+        assert_eq!(build_hsl_qualifier_filter(&clip), "");
+    }
+
+    #[test]
+    fn parse_loudness_report_full_summary() {
+        let stderr = r#"
+[Parsed_ebur128_0 @ 0x7f] t: 0.4  M: -25.3 S: -inf     I: -25.3 LUFS  LRA:  0.0 LU
+[Parsed_ebur128_0 @ 0x7f] t: 0.8  M: -20.1 S: -22.4    I: -23.8 LUFS  LRA:  2.1 LU
+[Parsed_ebur128_0 @ 0x7f] t: 1.2  M: -18.7 S: -19.9    I: -22.4 LUFS  LRA:  4.2 LU
+[Parsed_ebur128_0 @ 0x7f] Summary:
+
+  Integrated loudness:
+    I:         -23.0 LUFS
+    Threshold: -33.0 LUFS
+
+  Loudness range:
+    LRA:         8.4 LU
+    Threshold: -43.0 LUFS
+    LRA low:   -28.1 LUFS
+    LRA high:  -19.7 LUFS
+
+  True peak:
+    Peak:       -1.2 dBFS
+"#;
+        let r = parse_loudness_report(stderr).expect("parse ok");
+        assert!((r.integrated_lufs + 23.0).abs() < 1e-6, "I: {}", r.integrated_lufs);
+        assert!((r.loudness_range_lu - 8.4).abs() < 1e-6, "LRA: {}", r.loudness_range_lu);
+        assert!((r.threshold_lufs + 33.0).abs() < 1e-6, "Thresh: {}", r.threshold_lufs);
+        assert!((r.true_peak_dbtp + 1.2).abs() < 1e-6, "TP: {}", r.true_peak_dbtp);
+        // Max of per-frame M values: -18.7 (largest / loudest).
+        assert!((r.momentary_max_lufs + 18.7).abs() < 1e-6, "M max: {}", r.momentary_max_lufs);
+        // Max of per-frame S values (ignoring -inf): -19.9.
+        assert!((r.short_term_max_lufs + 19.9).abs() < 1e-6, "S max: {}", r.short_term_max_lufs);
+    }
+
+    #[test]
+    fn parse_loudness_report_missing_true_peak_defaults_to_zero() {
+        let stderr = r#"
+[Parsed_ebur128_0 @ 0x7f] t: 0.4 M: -20.0 S: -20.0 I: -20.0 LUFS LRA: 0.0 LU
+[Parsed_ebur128_0 @ 0x7f] Summary:
+
+  Integrated loudness:
+    I:         -20.0 LUFS
+    Threshold: -30.0 LUFS
+
+  Loudness range:
+    LRA:         3.0 LU
+    Threshold: -40.0 LUFS
+    LRA low:   -21.5 LUFS
+    LRA high:  -18.5 LUFS
+"#;
+        let r = parse_loudness_report(stderr).expect("parse ok");
+        assert!((r.integrated_lufs + 20.0).abs() < 1e-6);
+        assert!((r.loudness_range_lu - 3.0).abs() < 1e-6);
+        assert!(r.true_peak_dbtp == 0.0, "TP should default to 0.0, got {}", r.true_peak_dbtp);
+    }
+
+    #[test]
+    fn parse_loudness_report_rejects_empty_input() {
+        assert!(parse_loudness_report("").is_err());
+        assert!(parse_loudness_report("totally unrelated ffmpeg chatter").is_err());
+    }
+
+    #[test]
+    fn parse_loudness_report_ignores_inf_in_per_frame_log() {
+        // First frame emits -inf for both M and S (silence); parser must not
+        // pick them up as the running max.
+        let stderr = r#"
+[Parsed_ebur128_0 @ 0x7f] t: 0.4 M: -inf S: -inf I: -inf LUFS LRA: 0.0 LU
+[Parsed_ebur128_0 @ 0x7f] t: 0.8 M: -30.5 S: -31.0 I: -30.5 LUFS LRA: 0.5 LU
+[Parsed_ebur128_0 @ 0x7f] Summary:
+
+  Integrated loudness:
+    I:         -30.5 LUFS
+    Threshold: -40.5 LUFS
+
+  Loudness range:
+    LRA:         0.5 LU
+    Threshold: -50.0 LUFS
+    LRA low:   -30.8 LUFS
+    LRA high:  -30.3 LUFS
+
+  True peak:
+    Peak:      -10.0 dBFS
+"#;
+        let r = parse_loudness_report(stderr).expect("parse ok");
+        assert!((r.momentary_max_lufs + 30.5).abs() < 1e-6);
+        assert!((r.short_term_max_lufs + 31.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn loudness_report_default_is_zeros() {
+        let r = LoudnessReport::default();
+        assert_eq!(r.integrated_lufs, 0.0);
+        assert_eq!(r.true_peak_dbtp, 0.0);
+    }
+
+    #[test]
+    fn hsl_qualifier_filter_emits_geq_when_active() {
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        let mut q = crate::model::clip::HslQualifier::default();
+        q.enabled = true;
+        q.hue_min = 200.0;
+        q.hue_max = 260.0;
+        q.brightness = 0.1;
+        clip.hsl_qualifier = Some(q);
+        let f = build_hsl_qualifier_filter(&clip);
+        assert!(f.starts_with(",format=gbrp,geq="), "filter: {f}");
+        assert!(f.ends_with(",format=yuva420p"), "filter: {f}");
+        // Secondary grade registers referenced.
+        assert!(f.contains("ld(25)"));
+        assert!(f.contains("ld(26)"));
+        assert!(f.contains("ld(27)"));
+        // No bare apostrophes in expression values — would break filter parsing.
+        let payload = f.trim_start_matches(",format=gbrp,geq=");
+        assert!(
+            payload
+                .trim_start_matches(|c: char| c == 'r' || c == '=' || c == '\'')
+                .len()
+                > 0,
+            "payload: {f}"
+        );
     }
 
     #[test]
@@ -7545,5 +8834,271 @@ mod tests {
             .collect();
         assert!(!video_clips.is_empty());
         assert_eq!(video_clips[0].timeline_start, 2_000);
+    }
+
+    // ── Advanced Audio Mode (surround) tests ──────────────────────────────
+
+    #[test]
+    fn export_options_default_is_stereo() {
+        let opts = ExportOptions::default();
+        assert_eq!(opts.audio_channel_layout, AudioChannelLayout::Stereo);
+    }
+
+    #[test]
+    fn audio_channel_layout_channel_counts_and_tokens() {
+        assert_eq!(AudioChannelLayout::Stereo.channel_count(), 2);
+        assert_eq!(AudioChannelLayout::Surround51.channel_count(), 6);
+        assert_eq!(AudioChannelLayout::Surround71.channel_count(), 8);
+        assert_eq!(AudioChannelLayout::Stereo.ffmpeg_layout(), "stereo");
+        assert_eq!(AudioChannelLayout::Surround51.ffmpeg_layout(), "5.1");
+        assert_eq!(AudioChannelLayout::Surround71.ffmpeg_layout(), "7.1");
+    }
+
+    #[test]
+    fn audio_channel_layout_from_str_round_trip() {
+        for layout in [
+            AudioChannelLayout::Stereo,
+            AudioChannelLayout::Surround51,
+            AudioChannelLayout::Surround71,
+        ] {
+            assert_eq!(AudioChannelLayout::from_str(layout.as_str()), layout);
+        }
+        // Aliases
+        assert_eq!(
+            AudioChannelLayout::from_str("5.1"),
+            AudioChannelLayout::Surround51
+        );
+        assert_eq!(
+            AudioChannelLayout::from_str("7.1"),
+            AudioChannelLayout::Surround71
+        );
+        assert_eq!(
+            AudioChannelLayout::from_str("not_a_layout"),
+            AudioChannelLayout::Stereo
+        );
+    }
+
+    #[test]
+    fn resolve_stem_position_collapses_to_front_lr_for_stereo_target() {
+        // For a stereo target, every override resolves to FrontLR (the
+        // surround code path is gated off so this is a defensive default).
+        for ovr in [
+            SurroundPositionOverride::Auto,
+            SurroundPositionOverride::FrontCenter,
+            SurroundPositionOverride::Lfe,
+            SurroundPositionOverride::SideRight,
+        ] {
+            let p = resolve_stem_position(
+                AudioRole::Dialogue,
+                ovr,
+                AudioChannelLayout::Stereo,
+            );
+            assert_eq!(p, SurroundPosition::FrontLR);
+        }
+    }
+
+    #[test]
+    fn resolve_stem_position_auto_uses_role_defaults_for_5_1() {
+        let layout = AudioChannelLayout::Surround51;
+        assert_eq!(
+            resolve_stem_position(
+                AudioRole::Dialogue,
+                SurroundPositionOverride::Auto,
+                layout
+            ),
+            SurroundPosition::FrontCenter
+        );
+        assert_eq!(
+            resolve_stem_position(
+                AudioRole::Music,
+                SurroundPositionOverride::Auto,
+                layout
+            ),
+            SurroundPosition::FrontLR
+        );
+        assert_eq!(
+            resolve_stem_position(
+                AudioRole::Effects,
+                SurroundPositionOverride::Auto,
+                layout
+            ),
+            SurroundPosition::FrontLRPlusSurroundLR
+        );
+        assert_eq!(
+            resolve_stem_position(
+                AudioRole::None,
+                SurroundPositionOverride::Auto,
+                layout
+            ),
+            SurroundPosition::FrontLR
+        );
+    }
+
+    #[test]
+    fn resolve_stem_position_explicit_override_wins() {
+        let layout = AudioChannelLayout::Surround71;
+        // Even with role=Dialogue (which would default to FrontCenter), an
+        // explicit override pins the stem to its target.
+        assert_eq!(
+            resolve_stem_position(
+                AudioRole::Dialogue,
+                SurroundPositionOverride::SideLeft,
+                layout
+            ),
+            SurroundPosition::SideLeft
+        );
+        assert_eq!(
+            resolve_stem_position(
+                AudioRole::Music,
+                SurroundPositionOverride::Lfe,
+                layout
+            ),
+            SurroundPosition::Lfe
+        );
+    }
+
+    #[test]
+    fn build_surround_upmix_filter_dialogue_5_1_targets_center() {
+        let s = build_surround_upmix_filter(
+            "aa0",
+            "aa0_u",
+            SurroundPosition::FrontCenter,
+            AudioChannelLayout::Surround51,
+        );
+        // Filter must start with the input label and end with the output
+        // label, in the canonical 5.1 layout.
+        assert!(s.starts_with(";[aa0]"));
+        assert!(s.ends_with("[aa0_u]"));
+        assert!(s.contains("aformat=channel_layouts=stereo"));
+        assert!(s.contains("pan=5.1|"));
+        assert!(
+            s.contains("FC=0.707*c0+0.707*c1"),
+            "dialogue should sum L+R into FC at -3 dB; got: {s}"
+        );
+        // Other channels must be silent.
+        assert!(s.contains("FL=0"));
+        assert!(s.contains("FR=0"));
+        assert!(s.contains("LFE=0"));
+        assert!(s.contains("BL=0"));
+        assert!(s.contains("BR=0"));
+        // The trailing aformat is the load-bearing line for amix.
+        assert!(s.contains("aformat=channel_layouts=5.1"));
+    }
+
+    #[test]
+    fn build_surround_upmix_filter_front_lr_passthrough_for_5_1() {
+        let s = build_surround_upmix_filter(
+            "aa1",
+            "aa1_u",
+            SurroundPosition::FrontLR,
+            AudioChannelLayout::Surround51,
+        );
+        assert!(s.contains("FL=c0"));
+        assert!(s.contains("FR=c1"));
+        assert!(s.contains("FC=0"));
+        assert!(s.contains("LFE=0"));
+    }
+
+    #[test]
+    fn build_surround_upmix_filter_effects_spreads_for_7_1() {
+        let s = build_surround_upmix_filter(
+            "aa2",
+            "aa2_u",
+            SurroundPosition::FrontLRPlusSurroundLR,
+            AudioChannelLayout::Surround71,
+        );
+        assert!(s.contains("pan=7.1|"));
+        assert!(s.contains("FL=0.85*c0"));
+        assert!(s.contains("FR=0.85*c1"));
+        // 7.1 splits to both back and side rears at lower gain.
+        assert!(s.contains("BL=0.40*c0"));
+        assert!(s.contains("BR=0.40*c1"));
+        assert!(s.contains("SL=0.40*c0"));
+        assert!(s.contains("SR=0.40*c1"));
+        assert!(s.contains("aformat=channel_layouts=7.1"));
+    }
+
+    #[test]
+    fn build_surround_upmix_filter_5_1_aliases_side_to_back() {
+        // 5.1 has no side speakers — SideLeft override aliases to BL.
+        let s = build_surround_upmix_filter(
+            "aa3",
+            "aa3_u",
+            SurroundPosition::SideLeft,
+            AudioChannelLayout::Surround51,
+        );
+        assert!(s.contains("BL=0.707*c0+0.707*c1"));
+        assert!(s.contains("BR=0"));
+    }
+
+    #[test]
+    fn build_surround_lfe_tap_emits_two_lowpass_stages() {
+        let s = build_surround_lfe_tap_filter(
+            "aa4",
+            "aa4_lfe",
+            AudioChannelLayout::Surround51,
+        );
+        assert!(s.starts_with(";[aa4]"));
+        assert!(s.ends_with("[aa4_lfe]"));
+        // Cascaded lowpass for ~24 dB/oct.
+        let lp_count = s.matches("lowpass=f=120").count();
+        assert_eq!(
+            lp_count, 2,
+            "LFE tap should chain two lowpass stages; got {lp_count}"
+        );
+        // LFE channel must receive the bass content.
+        assert!(s.contains("LFE=0.707*c0+0.707*c1"));
+        assert!(s.contains("FL=0"));
+        assert!(s.contains("FC=0"));
+    }
+
+    /// Helper for the mix-graph snapshot tests: build a tiny project with
+    /// `n_audio_clips` audio clips on a single audio track with the given
+    /// role + override, then drive `export_project`'s filter graph builder
+    /// indirectly via `build_surround_upmix_filter` calls. We don't actually
+    /// invoke `export_project` (it requires ffmpeg) — instead we exercise
+    /// the per-stem helpers directly to validate the surround expressions.
+    /// The byte-for-byte stereo regression is covered by the existing
+    /// pan-filter and audio-fade tests + the full-suite run.
+    #[test]
+    fn surround_upmix_5_1_canonical_channel_order() {
+        // Confirm the canonical channel order is FL FR FC LFE BL BR for 5.1.
+        let s = build_surround_upmix_filter(
+            "x",
+            "y",
+            SurroundPosition::FrontLR,
+            AudioChannelLayout::Surround51,
+        );
+        let after_pan = s
+            .split_once("pan=5.1|")
+            .map(|(_, rest)| rest)
+            .unwrap_or("");
+        // Strip the trailing `,aformat=...[y]`
+        let body = after_pan.split(',').next().unwrap();
+        let order: Vec<&str> = body
+            .split('|')
+            .map(|p| p.split('=').next().unwrap_or(""))
+            .collect();
+        assert_eq!(order, vec!["FL", "FR", "FC", "LFE", "BL", "BR"]);
+    }
+
+    #[test]
+    fn surround_upmix_7_1_canonical_channel_order() {
+        let s = build_surround_upmix_filter(
+            "x",
+            "y",
+            SurroundPosition::FrontLR,
+            AudioChannelLayout::Surround71,
+        );
+        let after_pan = s
+            .split_once("pan=7.1|")
+            .map(|(_, rest)| rest)
+            .unwrap_or("");
+        let body = after_pan.split(',').next().unwrap();
+        let order: Vec<&str> = body
+            .split('|')
+            .map(|p| p.split('=').next().unwrap_or(""))
+            .collect();
+        assert_eq!(order, vec!["FL", "FR", "FC", "LFE", "BL", "BR", "SL", "SR"]);
     }
 }

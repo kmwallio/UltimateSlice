@@ -79,6 +79,110 @@ Applies to AAC and Opus. Ignored for FLAC and PCM.
 - Default: **192 kbps** (high quality)
 - Acceptable web quality: 128 kbps
 - High fidelity: 256–320 kbps
+- Recommended for 5.1 surround AAC: **448 kbps**
+
+### Per-clip audio chain order
+
+For clips that have audio effects in the Inspector, the export filter graph
+runs them in this order:
+
+```
+source audio
+  → speed (atempo) / reverse
+  → Enhance Voice (HPF + afftdn + EQ + compressor)   ← if "Enhance Voice" is on
+  → Volume + Voice Isolation ducking                  ← if Voice Isolation > 0
+  → channel routing
+  → pitch shift
+  → LADSPA effects
+  → Match EQ (7-band, mic match)
+  → User EQ (3-band parametric)
+  → fades
+  → pan
+  → track delay
+  → audiomixer pad → master volume → output
+```
+
+The important thing for voice work is that **Enhance Voice runs before Voice
+Isolation**. The cleanup chain (high-pass, denoise, presence boost, compression)
+happens first, so when voice isolation makes its ducking decision it sees a
+cleaned-up signal — quieter background, more even speech levels — and the
+ducked floor sounds natural instead of crunchy. If you have a clip with both
+features on, this is the right order; nothing to configure.
+
+The Realtime preview goes through the **same** filter chain via a background
+prerender (cached under `$XDG_CACHE_HOME/ultimateslice/voice_enhance/`), so
+what you hear in the Program Monitor is byte-identical to what the export
+will produce. See [`docs/user/inspector.md` → Enhance Voice](inspector.md#enhance-voice).
+
+### Audio Channels — Advanced Audio Mode (Surround)
+
+The **Audio Channels** dropdown selects the output channel layout. Default is
+**Stereo**, which preserves the existing pipeline byte-for-byte. Two surround
+options opt into multichannel output:
+
+| Option | Channels | ffmpeg layout |
+|---|---|---|
+| **Stereo** (default) | 2 | `stereo` |
+| **5.1 Surround** | 6 | `5.1` (FL FR FC LFE BL BR) |
+| **7.1 Surround** | 8 | `7.1` (FL FR FC LFE BL BR SL SR) |
+
+Surround output is supported by **AAC**, **Opus**, **FLAC**, and **PCM**.
+GIF has no audio so the dropdown is hidden when **Animated GIF** is selected.
+
+#### Role-based auto-routing
+
+Each track's existing **Audio Role** drives a sensible default destination in
+the surround upmix:
+
+| Audio Role | 5.1 Destination | 7.1 Destination |
+|---|---|---|
+| Dialogue | Front Center (FC) | Front Center (FC) |
+| Music | Front L/R (FL+FR) | Front L/R (FL+FR) |
+| Effects | Front L/R + Surround L/R (FL+FR+BL+BR) | Front L/R + back **and** side rears (FL+FR+BL+BR+SL+SR at lower gain) |
+| None | Front L/R | Front L/R |
+
+This means a typical project with one Dialogue track, one Music track, and one effects track will produce a usable 5.1 mix the moment you switch the dropdown to **5.1 Surround** — no per-track configuration required.
+
+#### Per-track surround override (Inspector)
+
+For more control, the **Inspector → Audio → Surround Position** dropdown lets
+you pin a track to a specific destination, overriding the role-based default.
+Options:
+
+- **Auto (by role)** — default; uses the table above
+- **Front L/R**, **Front Center**, **Front L/R + Surround L/R**, **Surround L/R**
+- **LFE (bass only)** — pin a track to the subwoofer channel
+- Single-channel pins: **Front Left**, **Front Right**, **Back Left**, **Back Right**, **Side Left**, **Side Right**
+
+The override has no effect on stereo exports; it only kicks in when the export
+channel layout is 5.1 or 7.1.
+
+#### Automatic LFE bass tap
+
+Surround exports automatically derive subwoofer (LFE) content from **Music**
+and **Effects** tracks. A parallel filter chain runs each eligible stem through
+two cascaded 120 Hz lowpass filters (~24 dB/oct slope) and routes the result
+to LFE only. **Dialogue is excluded** so speech bleed never drives the
+subwoofer. A track that's been explicitly assigned the **LFE** override is not
+also tapped — it goes through the explicit pan path instead.
+
+#### Limitations (phase 1)
+
+- The upmix matrix is static for the duration of an export. Per-clip pan
+  keyframes still control L/R balance within each stem, but pan keyframes
+  cannot dynamically move a stem from FL → FC during playback. Dynamic
+  surround panning is a future roadmap item.
+- 7.1 has no canonical FCPXML X audio layout — when sidecar FCPXML is also
+  written for a 7.1 export, the strict-DTD writer falls back to declaring
+  `audioLayout="5.1"` and logs a warning so the file still imports cleanly
+  into Final Cut.
+
+#### Stereo regression safety
+
+The stereo path is gated and produces a byte-identical filter graph to the
+pre-surround code. Existing stereo exports, presets, and FCPXML round-trips
+behave exactly as they did before — switching the dropdown is the only way
+to opt into the new pipeline.
 
 ### Automatic Audio Crossfades
 

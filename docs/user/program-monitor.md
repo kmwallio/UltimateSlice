@@ -31,6 +31,85 @@ or outside the export frame.
 | Stop button | Stop and return to position 0 |
 | Safe Areas toggle | Shows/hides action-safe (90%) and title-safe (80%) guides |
 | Master VU meter | Stereo (L/R) output level meter in dBFS |
+| ▾ Scopes toggle | Show/hide the docked color scopes panel (waveform, histogram, vectorscope, RGB parade) |
+| Loudness button | Next to the Scopes toggle — opens the Loudness Radar popover for broadcast-standard EBU R128 analysis + normalize-to-target |
+
+## Loudness Radar (EBU R128)
+
+The **Loudness** button next to the **▾ Scopes** toggle (below the
+Program Monitor preview) opens a popover that measures the final timeline
+mixdown against broadcast-standard loudness targets. This is the workflow for delivering a master to spec (EBU R128,
+ATSC A/85, Netflix, Apple Podcasts, Spotify/YouTube).
+
+### Measure
+
+Click **Analyze Project**. A background thread renders the entire timeline
+audio (all tracks, effects, crossfades, ducking, per-role submixes) through
+the export filter graph into a small temporary file and runs FFmpeg
+`ebur128=peak=true:framelog=verbose` on it. The results grid fills in with
+six metrics:
+
+| Metric | Meaning |
+|---|---|
+| **Integrated** (LUFS) | Loudness over the full duration — the primary delivery target |
+| **Short-term max** (LUFS) | Loudest 3-second window |
+| **Momentary max** (LUFS) | Loudest 400-millisecond window |
+| **LRA** (LU) | Loudness Range — spread between quiet and loud sections |
+| **True Peak** (dBTP) | Highest inter-sample peak — keep below −1 dBTP for safe delivery |
+| **Current gain** (dB) | The project's current master gain (0 when untouched) |
+
+### Target
+
+Pick a target from the **Target** dropdown:
+
+| Preset | Integrated LUFS | Use case |
+|---|---|---|
+| EBU R128 | −23 | European broadcast |
+| ATSC A/85 | −24 | US broadcast |
+| Netflix | −27 | Netflix delivery spec |
+| Apple Podcasts | −16 | Apple Podcasts & Apple Music |
+| Streaming | −14 | Spotify, YouTube |
+| Custom | user-chosen | Any value between −30 and 0 LUFS |
+
+The default target is set in **Preferences → Timeline → Loudness target**.
+
+### Normalize
+
+Click **Normalize to Target**. The popover computes
+`delta = target − measured integrated LUFS`, adds it to the project's
+master gain (clamped to ±24 dB), and applies the result to **both** the
+Program Monitor preview (you hear the change immediately) and the FFmpeg
+export (the exported file will land at the target). The change is
+undoable with Ctrl+Z.
+
+If normalizing would push the true peak above −1 dBTP, the popover shows
+a yellow warning — you can still apply it, but consider adding a clip
+limiter first (Phase 2) to prevent clipping.
+
+**Reset Gain** snaps the master gain back to 0.0 dB.
+
+### Re-check
+
+After normalizing, click **Analyze Project** again. The new integrated
+LUFS should match your target within ±0.5 LU. The analysis is always
+taken at 0 dB master gain internally so the delta math stays honest
+across repeated normalizations.
+
+### Automation
+
+Two MCP tools back the Loudness Radar:
+
+- `analyze_project_loudness` — no arguments, returns a JSON report with
+  all six metrics, the current master gain, the configured target
+  preset/LUFS, and the delta that would be applied.
+- `set_project_master_gain_db { master_gain_db }` — sets the project
+  master gain (clamped ±24 dB, undoable). Use after calling
+  `analyze_project_loudness` to compute the delta yourself, or pass 0.0
+  to reset.
+
+The project master gain round-trips through both `.uspxml` (FCPXML
+`us:master-gain-db` on `<sequence>`) and OTIO (`metadata.ultimateslice.master_gain_db`)
+so the normalized mix survives save/load and cross-tool interchange.
 
 ## Docked Resize
 

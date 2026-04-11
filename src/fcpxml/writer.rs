@@ -14,6 +14,13 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Copy)]
 struct WriterOptions {
     strict_dtd: bool,
+    /// Optional audio channel layout to declare on the strict-DTD `<sequence>`
+    /// element. `None` keeps the legacy `audioLayout="stereo"` value, which
+    /// preserves byte-identical output for every existing caller and the
+    /// FCPXML round-trip test suite. When set, emits the matching FCPXML
+    /// layout token; 7.1 falls back to `"5.1"` because FCPXML X has no
+    /// canonical 7.1 enumeration.
+    audio_layout: Option<crate::media::export::AudioChannelLayout>,
 }
 
 /// Per-media-file export info probed at export time.
@@ -40,12 +47,43 @@ struct ExportContext {
 
 /// Serialize a `Project` to FCPXML format.
 pub fn write_fcpxml(project: &Project) -> Result<String> {
-    write_fcpxml_with_options(project, WriterOptions { strict_dtd: false })
+    write_fcpxml_with_options(
+        project,
+        WriterOptions {
+            strict_dtd: false,
+            audio_layout: None,
+        },
+    )
 }
 
 /// Serialize a `Project` to strict DTD-safe FCPXML for distribution workflows.
 pub fn write_fcpxml_strict(project: &Project) -> Result<String> {
-    write_fcpxml_with_options(project, WriterOptions { strict_dtd: true })
+    write_fcpxml_with_options(
+        project,
+        WriterOptions {
+            strict_dtd: true,
+            audio_layout: None,
+        },
+    )
+}
+
+/// Strict-DTD variant that also declares a non-stereo `audioLayout` on the
+/// `<sequence>` element. Used by callers that have just exported in 5.1 / 7.1
+/// surround and want the sidecar FCPXML to reflect the chosen layout.
+///
+/// 7.1 is not a standard FCPXML X audio layout; it falls back to `"5.1"` and
+/// emits a warning so the FCPXML still imports cleanly into Final Cut.
+pub fn write_fcpxml_strict_with_audio_layout(
+    project: &Project,
+    layout: crate::media::export::AudioChannelLayout,
+) -> Result<String> {
+    write_fcpxml_with_options(
+        project,
+        WriterOptions {
+            strict_dtd: true,
+            audio_layout: Some(layout),
+        },
+    )
 }
 
 pub fn use_strict_fcpxml_for_path(path: &Path) -> bool {
@@ -221,8 +259,30 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
     seq.push_attribute(("duration", duration_str.as_str()));
     seq.push_attribute(("format", format_ref));
     seq.push_attribute(("tcFormat", "NDF"));
+    // Project-level master audio gain (Loudness Radar "Normalize to Target").
+    // Only emitted when non-zero and only in non-strict mode — strict DTD
+    // doesn't allow arbitrary namespaced attrs on <sequence>.
+    if !options.strict_dtd && project.master_gain_db.abs() > 1e-9 {
+        let gain_str = format!("{:.6}", project.master_gain_db);
+        seq.push_attribute(("us:master-gain-db", gain_str.as_str()));
+    }
     if options.strict_dtd {
-        seq.push_attribute(("audioLayout", "stereo"));
+        // Resolve the FCPXML audioLayout token. Default behavior (no opt-in)
+        // is byte-identical to the pre-surround code: emit `"stereo"`. When a
+        // surround layout is requested, map to FCPXML X's allowed enumeration.
+        // 7.1 has no canonical FCPXML X equivalent — fall back to "5.1" with
+        // a warning so the file still imports cleanly into Final Cut.
+        let audio_layout_token = match options.audio_layout {
+            None | Some(crate::media::export::AudioChannelLayout::Stereo) => "stereo",
+            Some(crate::media::export::AudioChannelLayout::Surround51) => "5.1",
+            Some(crate::media::export::AudioChannelLayout::Surround71) => {
+                log::warn!(
+                    "FCPXML strict DTD has no 7.1 audioLayout — falling back to 5.1"
+                );
+                "5.1"
+            }
+        };
+        seq.push_attribute(("audioLayout", audio_layout_token));
         seq.push_attribute(("audioRate", "48k"));
     }
     if !strip_unknown_fields {
@@ -719,6 +779,15 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                             clip.vidstab_smoothing.to_string().as_str(),
                         ));
                     }
+                    if clip.motion_blur_enabled {
+                        asset_clip.push_attribute(("us:motion-blur-enabled", "true"));
+                    }
+                    if (clip.motion_blur_shutter_angle - 180.0).abs() > 0.001 {
+                        asset_clip.push_attribute((
+                            "us:motion-blur-shutter-angle",
+                            clip.motion_blur_shutter_angle.to_string().as_str(),
+                        ));
+                    }
                     if !clip.frei0r_effects.is_empty() {
                         if let Ok(json) = serde_json::to_string(&clip.frei0r_effects) {
                             asset_clip.push_attribute(("us:frei0r-effects", json.as_str()));
@@ -798,6 +867,12 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                         asset_clip.push_attribute((
                             "us:subtitle-highlight-color",
                             clip.subtitle_highlight_color.to_string().as_str(),
+                        ));
+                    }
+                    if clip.subtitle_highlight_stroke_color != 0xFFFF00FF {
+                        asset_clip.push_attribute((
+                            "us:subtitle-highlight-stroke-color",
+                            clip.subtitle_highlight_stroke_color.to_string().as_str(),
                         ));
                     }
                     if (clip.subtitle_word_window_secs - 2.0).abs() > 0.001 {
@@ -1100,6 +1175,19 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                                     .push_attribute(("us:multicam-switches", escaped.as_str()));
                             }
                         }
+                    } else if clip.kind == crate::model::clip::ClipKind::Audition {
+                        asset_clip.push_attribute(("us:clip-kind", "audition"));
+                        if let Some(ref takes) = clip.audition_takes {
+                            if let Ok(json) = serde_json::to_string(takes) {
+                                let escaped = json.replace('"', "&quot;");
+                                asset_clip
+                                    .push_attribute(("us:audition-takes", escaped.as_str()));
+                            }
+                        }
+                        asset_clip.push_attribute((
+                            "us:audition-active-take-index",
+                            clip.audition_active_take_index.to_string().as_str(),
+                        ));
                     }
                     asset_clip.push_attribute(("us:speed", clip.speed.to_string().as_str()));
                     let speed_keyframes_json = if clip.speed_keyframes.is_empty() {
@@ -1179,6 +1267,12 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                         "us:shadows-tint",
                         clip.shadows_tint.to_string().as_str(),
                     ));
+                    let hsl_json = clip.hsl_qualifier.as_ref().and_then(|q| {
+                        serde_json::to_string(q).ok()
+                    });
+                    if let Some(ref json) = hsl_json {
+                        asset_clip.push_attribute(("us:hsl-qualifier", json.as_str()));
+                    }
                     if clip.chroma_key_enabled {
                         asset_clip.push_attribute(("us:chroma-key-enabled", "true"));
                         asset_clip.push_attribute((
@@ -2931,6 +3025,7 @@ fn patch_asset_clip_block_transform(
                 crate::model::clip::ClipKind::Adjustment => Some("adjustment".to_string()),
                 crate::model::clip::ClipKind::Compound => Some("compound".to_string()),
                 crate::model::clip::ClipKind::Multicam => Some("multicam".to_string()),
+                crate::model::clip::ClipKind::Audition => Some("audition".to_string()),
                 _ => None,
             },
         ),
@@ -4210,7 +4305,12 @@ fn is_writer_managed_project_attr(key: &str) -> bool {
 fn is_writer_managed_sequence_attr(key: &str) -> bool {
     matches!(
         key,
-        "duration" | "format" | "tcFormat" | "audioLayout" | "audioRate"
+        "duration"
+            | "format"
+            | "tcFormat"
+            | "audioLayout"
+            | "audioRate"
+            | "us:master-gain-db"
     )
 }
 
@@ -4279,6 +4379,8 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:rotate"
             | "us:flip-h"
             | "us:flip-v"
+            | "us:motion-blur-enabled"
+            | "us:motion-blur-shutter-angle"
             | "us:anamorphic-desqueeze"
             | "us:scale"
             | "us:scale-keyframes"
@@ -4323,6 +4425,7 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:midtones-tint"
             | "us:shadows-warmth"
             | "us:shadows-tint"
+            | "us:hsl-qualifier"
             | "us:bg-removal-enabled"
             | "us:bg-removal-threshold"
             | "us:clip-id"
@@ -4362,6 +4465,7 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:subtitle-bg-box-color"
             | "us:subtitle-highlight-mode"
             | "us:subtitle-highlight-color"
+            | "us:subtitle-highlight-stroke-color"
             | "us:subtitle-word-window-secs"
             | "us:subtitle-position-y"
     )
@@ -6115,6 +6219,54 @@ mod tests {
     }
 
     #[test]
+    fn test_write_read_motion_blur_round_trip() {
+        let mut project = Project::new("Motion Blur RT");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+
+        let mut clip = Clip::new("/tmp/anim.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.id = "blurred-clip".to_string();
+        clip.motion_blur_enabled = true;
+        clip.motion_blur_shutter_angle = 270.0;
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(
+            xml.contains("us:motion-blur-enabled=\"true\""),
+            "expected motion-blur-enabled in xml: {xml}"
+        );
+        assert!(
+            xml.contains("us:motion-blur-shutter-angle=\"270\""),
+            "expected motion-blur-shutter-angle=270 in xml"
+        );
+
+        let loaded = parse_fcpxml(&xml).expect("parse written xml");
+        let loaded_clip = loaded
+            .clip_ref("blurred-clip")
+            .expect("clip id should persist");
+        assert!(loaded_clip.motion_blur_enabled);
+        assert!((loaded_clip.motion_blur_shutter_angle - 270.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_write_read_motion_blur_default_omits_attrs() {
+        // Default-shutter, disabled clip should not write motion-blur attrs
+        // (keeps backward-compatible XML when feature is unused).
+        let mut project = Project::new("MB Default");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut clip = Clip::new("/tmp/static.mp4", 1_000_000_000, 0, ClipKind::Video);
+        clip.id = "static-clip".to_string();
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(!xml.contains("us:motion-blur-enabled"));
+        assert!(!xml.contains("us:motion-blur-shutter-angle"));
+    }
+
+    #[test]
     fn test_write_read_motion_tracking_round_trip() {
         let mut project = Project::new("Tracking RT");
         project.tracks.clear();
@@ -7354,5 +7506,72 @@ mod tests {
             (clip2.shadows_tint - 0.8).abs() < 1e-3,
             "shadows_tint round-trip"
         );
+    }
+
+    #[test]
+    fn test_write_fcpxml_audition_round_trip() {
+        use crate::model::clip::AuditionTake;
+        let mut project = Project::new("AuditionTest");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let takes = vec![
+            AuditionTake {
+                id: "take-1".into(),
+                label: "Wide".into(),
+                source_path: "/tmp/wide.mov".into(),
+                source_in: 0,
+                source_out: 5_000_000_000,
+                source_timecode_base_ns: None,
+                media_duration_ns: Some(10_000_000_000),
+            },
+            AuditionTake {
+                id: "take-2".into(),
+                label: "Close".into(),
+                source_path: "/tmp/close.mov".into(),
+                source_in: 1_000_000_000,
+                source_out: 4_000_000_000,
+                source_timecode_base_ns: None,
+                media_duration_ns: Some(8_000_000_000),
+            },
+        ];
+        let aud = Clip::new_audition(0, takes, 1);
+        let aud_id = aud.id.clone();
+        track.add_clip(aud);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(
+            xml.contains("us:clip-kind=\"audition\""),
+            "expected us:clip-kind=audition in writer output:\n{}",
+            xml
+        );
+        assert!(
+            xml.contains("us:audition-active-take-index=\"1\""),
+            "expected active-take-index=1"
+        );
+        assert!(xml.contains("us:audition-takes="));
+
+        let parsed = parse_fcpxml(&xml).expect("parse written xml");
+        let restored = parsed
+            .video_tracks()
+            .next()
+            .expect("video track")
+            .clips
+            .iter()
+            .find(|c| c.id == aud_id)
+            .expect("audition clip preserved");
+        assert_eq!(restored.kind, ClipKind::Audition);
+        assert_eq!(restored.audition_active_take_index, 1);
+        let takes = restored
+            .audition_takes
+            .as_ref()
+            .expect("takes preserved");
+        assert_eq!(takes.len(), 2);
+        assert_eq!(takes[0].label, "Wide");
+        assert_eq!(takes[1].label, "Close");
+        // Host fields should mirror the active take (Close).
+        assert_eq!(restored.source_path, "/tmp/close.mov");
+        assert_eq!(restored.source_in, 1_000_000_000);
+        assert_eq!(restored.source_out, 4_000_000_000);
     }
 }

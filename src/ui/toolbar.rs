@@ -1,6 +1,7 @@
 use crate::fcpxml;
 use crate::media::export::{
-    export_project, AudioCodec, Container, ExportOptions, ExportProgress, VideoCodec,
+    export_project, AudioChannelLayout, AudioCodec, Container, ExportOptions, ExportProgress,
+    VideoCodec,
 };
 use crate::model::media_library::MediaLibrary;
 use crate::model::project::{FrameRate, Project};
@@ -683,6 +684,22 @@ fn selected_from_audio_codec(codec: &AudioCodec) -> u32 {
     }
 }
 
+fn audio_channel_layout_from_selected(selected: u32) -> AudioChannelLayout {
+    match selected {
+        1 => AudioChannelLayout::Surround51,
+        2 => AudioChannelLayout::Surround71,
+        _ => AudioChannelLayout::Stereo,
+    }
+}
+
+fn selected_from_audio_channel_layout(layout: &AudioChannelLayout) -> u32 {
+    match layout {
+        AudioChannelLayout::Stereo => 0,
+        AudioChannelLayout::Surround51 => 1,
+        AudioChannelLayout::Surround71 => 2,
+    }
+}
+
 fn collect_export_options(
     vc_combo: &gtk::DropDown,
     ct_combo: &gtk::DropDown,
@@ -691,6 +708,7 @@ fn collect_export_options(
     ac_combo: &gtk::DropDown,
     ab_entry: &gtk::Entry,
     gif_fps_spin: &gtk::SpinButton,
+    cl_combo: &gtk::DropDown,
 ) -> ExportOptions {
     let (output_width, output_height) = output_resolution_from_selected(or_combo.selected());
     let container = container_from_selected(ct_combo.selected());
@@ -708,6 +726,7 @@ fn collect_export_options(
         audio_codec: audio_codec_from_selected(ac_combo.selected()),
         audio_bitrate_kbps: ab_entry.text().parse::<u32>().unwrap_or(192),
         gif_fps,
+        audio_channel_layout: audio_channel_layout_from_selected(cl_combo.selected()),
     }
 }
 
@@ -720,6 +739,7 @@ fn apply_export_options(
     ac_combo: &gtk::DropDown,
     ab_entry: &gtk::Entry,
     gif_fps_spin: &gtk::SpinButton,
+    cl_combo: &gtk::DropDown,
 ) {
     vc_combo.set_selected(selected_from_video_codec(&options.video_codec));
     ct_combo.set_selected(selected_from_container(&options.container));
@@ -733,6 +753,9 @@ fn apply_export_options(
     if let Some(fps) = options.gif_fps {
         gif_fps_spin.set_value(fps as f64);
     }
+    cl_combo.set_selected(selected_from_audio_channel_layout(
+        &options.audio_channel_layout,
+    ));
 }
 
 fn refresh_preset_dropdown(
@@ -1649,6 +1672,25 @@ pub fn build_toolbar(
             grid.attach(&ab_label, 0, 7, 1, 1);
             grid.attach(&ab_entry, 1, 7, 1, 1);
 
+            // Audio channel layout — Stereo (default) / 5.1 / 7.1 surround.
+            // Hidden for GIF (no audio).
+            let cl_label = gtk::Label::new(Some("Audio Channels:"));
+            cl_label.set_halign(gtk::Align::End);
+            let cl_combo = gtk::DropDown::from_strings(&[
+                "Stereo",
+                "5.1 Surround",
+                "7.1 Surround",
+            ]);
+            cl_combo.set_selected(0);
+            cl_combo.set_tooltip_text(Some(
+                "Output audio channel layout. Surround uses role-based auto-routing \
+                 (Dialogue → Center, Music → Front L/R, Effects → Front+Surround) \
+                 with an automatic LFE bass tap. Per-track overrides live in the \
+                 Inspector. Supported by AAC / Opus / FLAC / PCM. Not used for GIF.",
+            ));
+            grid.attach(&cl_label, 0, 8, 1, 1);
+            grid.attach(&cl_combo, 1, 8, 1, 1);
+
             // Connect container selection to show/hide GIF-specific and audio rows
             {
                 let gif_fps_label = gif_fps_label.clone();
@@ -1659,6 +1701,8 @@ pub fn build_toolbar(
                 let ac_combo = ac_combo.clone();
                 let ab_label = ab_label.clone();
                 let ab_entry = ab_entry.clone();
+                let cl_label = cl_label.clone();
+                let cl_combo = cl_combo.clone();
                 let vc_label = vc_label.clone();
                 let vc_combo = vc_combo.clone();
                 ct_combo.connect_selected_notify(move |ct| {
@@ -1674,6 +1718,8 @@ pub fn build_toolbar(
                     ac_combo.set_visible(!is_gif);
                     ab_label.set_visible(!is_gif);
                     ab_entry.set_visible(!is_gif);
+                    cl_label.set_visible(!is_gif);
+                    cl_combo.set_visible(!is_gif);
                 });
             }
 
@@ -1695,6 +1741,7 @@ pub fn build_toolbar(
                             &ac_combo,
                             &ab_entry,
                             &gif_fps_spin,
+                            &cl_combo,
                         );
                     }
                 }
@@ -1712,6 +1759,7 @@ pub fn build_toolbar(
                 let ac_combo = ac_combo.clone();
                 let ab_entry = ab_entry.clone();
                 let gif_fps_spin = gif_fps_spin.clone();
+                let cl_combo = cl_combo.clone();
                 let btn_update_preset = btn_update_preset.clone();
                 let btn_delete_preset = btn_delete_preset.clone();
                 preset_dropdown.connect_selected_notify(move |dropdown| {
@@ -1739,6 +1787,7 @@ pub fn build_toolbar(
                         &ac_combo,
                         &ab_entry,
                         &gif_fps_spin,
+                        &cl_combo,
                     );
                 });
             }
@@ -1753,6 +1802,7 @@ pub fn build_toolbar(
                 let ac_combo = ac_combo.clone();
                 let ab_entry = ab_entry.clone();
                 let gif_fps_spin = gif_fps_spin.clone();
+                let cl_combo = cl_combo.clone();
                 btn_save_preset.connect_clicked(move |_| {
                     let dialog = gtk::Dialog::builder()
                         .title("Save Export Preset")
@@ -1774,6 +1824,7 @@ pub fn build_toolbar(
                         let ac_combo = ac_combo.clone();
                         let ab_entry = ab_entry.clone();
                         let gif_fps_spin = gif_fps_spin.clone();
+                        let cl_combo = cl_combo.clone();
                         move |d, resp| {
                             if resp == gtk::ResponseType::Accept {
                                 let name = entry.text().to_string();
@@ -1785,6 +1836,7 @@ pub fn build_toolbar(
                                     &ac_combo,
                                     &ab_entry,
                                     &gif_fps_spin,
+                                    &cl_combo,
                                 );
                                 let ok = {
                                     let mut state = presets_state.borrow_mut();
@@ -1824,6 +1876,7 @@ pub fn build_toolbar(
                 let ac_combo = ac_combo.clone();
                 let ab_entry = ab_entry.clone();
                 let gif_fps_spin = gif_fps_spin.clone();
+                let cl_combo = cl_combo.clone();
                 btn_update_preset.connect_clicked(move |_| {
                     let selected = preset_dropdown.selected();
                     if selected == 0 {
@@ -1846,6 +1899,7 @@ pub fn build_toolbar(
                             &ac_combo,
                             &ab_entry,
                             &gif_fps_spin,
+                            &cl_combo,
                         );
                         let ok = state
                             .upsert_preset(ExportPreset::from_export_options(
@@ -1921,6 +1975,7 @@ pub fn build_toolbar(
                     &ac_combo,
                     &ab_entry,
                     &gif_fps_spin,
+                    &cl_combo,
                 );
                 let mut state = presets_state.borrow_mut();
                 state.last_used_preset = if preset_dropdown.selected() > 0 {

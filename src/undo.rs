@@ -1,4 +1,4 @@
-use crate::model::clip::{Clip, VoiceIsolationSource};
+use crate::model::clip::{AuditionTake, Clip, VoiceIsolationSource};
 use crate::model::project::Project;
 use crate::model::transition::OutgoingTransition;
 
@@ -904,6 +904,92 @@ impl EditCommand for SetClipVolumeCommand {
 }
 
 /// Set clip voice isolation amount.
+/// Set per-clip motion-blur enable + shutter angle as a single undoable
+/// operation. The fields are coupled (the slider only matters when the
+/// toggle is on) so changing either records both old/new pairs and the
+/// undo restores both.
+pub struct SetClipMotionBlurCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old_enabled: bool,
+    pub old_shutter_angle: f64,
+    pub new_enabled: bool,
+    pub new_shutter_angle: f64,
+}
+
+impl EditCommand for SetClipMotionBlurCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.motion_blur_enabled = self.new_enabled;
+            clip.motion_blur_shutter_angle = self.new_shutter_angle;
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.motion_blur_enabled = self.old_enabled;
+            clip.motion_blur_shutter_angle = self.old_shutter_angle;
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set clip motion blur"
+    }
+}
+
+/// Undoable mutation for the Auto-Crop & Track feature.
+///
+/// Auto-crop touches three pieces of clip state at once:
+/// 1. `clip.tracking_binding` — the transform binding that pans/zooms
+///    the clip to center the tracked region.
+/// 2. `clip.motion_trackers` — may be updated in place (region changed)
+///    or gain a new tracker when the caller came in via MCP without
+///    first creating one.
+/// 3. `clip.masks[0].tracking_binding` — cleared so the clip transform
+///    owns the binding alone.
+///
+/// Snapshot them all so undo restores the exact state the user had
+/// before clicking the button.
+pub struct SetClipAutoCropCommand {
+    pub clip_id: String,
+    pub old_tracking_binding: Option<crate::model::clip::TrackingBinding>,
+    pub old_motion_trackers: Vec<crate::model::clip::MotionTracker>,
+    pub old_first_mask_binding: Option<Option<crate::model::clip::TrackingBinding>>,
+    pub new_tracking_binding: Option<crate::model::clip::TrackingBinding>,
+    pub new_motion_trackers: Vec<crate::model::clip::MotionTracker>,
+    pub new_first_mask_binding: Option<Option<crate::model::clip::TrackingBinding>>,
+}
+
+impl EditCommand for SetClipAutoCropCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            clip.tracking_binding = self.new_tracking_binding.clone();
+            clip.motion_trackers = self.new_motion_trackers.clone();
+            if let Some(first_mask_binding) = &self.new_first_mask_binding {
+                if let Some(mask) = clip.masks.first_mut() {
+                    mask.tracking_binding = first_mask_binding.clone();
+                }
+            }
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            clip.tracking_binding = self.old_tracking_binding.clone();
+            clip.motion_trackers = self.old_motion_trackers.clone();
+            if let Some(first_mask_binding) = &self.old_first_mask_binding {
+                if let Some(mask) = clip.masks.first_mut() {
+                    mask.tracking_binding = first_mask_binding.clone();
+                }
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Auto-crop & track"
+    }
+}
+
 pub struct SetClipVoiceIsolationCommand {
     pub clip_id: String,
     pub track_id: String,
@@ -1751,6 +1837,56 @@ impl EditCommand for SetClipMaskCommand {
     }
 }
 
+/// Replace a clip's HSL qualifier (secondary color correction) with a full
+/// snapshot. Undo restores the previous qualifier. `None` means the clip has
+/// no qualifier at all.
+pub struct SetClipHslQualifierCommand {
+    pub clip_id: String,
+    pub track_id: String,
+    pub old: Option<crate::model::clip::HslQualifier>,
+    pub new: Option<crate::model::clip::HslQualifier>,
+}
+
+impl EditCommand for SetClipHslQualifierCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.hsl_qualifier = self.new.clone();
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = find_clip_mut(project, &self.clip_id, &self.track_id) {
+            clip.hsl_qualifier = self.old.clone();
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set HSL qualifier"
+    }
+}
+
+/// Set the project's master audio gain (dB). Applied post-mixdown in both
+/// preview and export. Clamped to ±24 dB on execute. Used by the Loudness
+/// Radar "Normalize to Target" and "Reset Gain" actions.
+pub struct SetProjectMasterGainCommand {
+    pub old_db: f64,
+    pub new_db: f64,
+}
+
+impl EditCommand for SetProjectMasterGainCommand {
+    fn execute(&self, project: &mut Project) {
+        project.master_gain_db = self.new_db.clamp(-24.0, 24.0);
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        project.master_gain_db = self.old_db.clamp(-24.0, 24.0);
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set project master gain"
+    }
+}
+
 // ── Subtitle commands ─────────────────────────────────────────────────────
 
 /// Set (or replace) all subtitle segments on a clip (used after STT generation).
@@ -1983,12 +2119,246 @@ fn find_clip_mut<'a>(
     project.clip_mut(clip_id)
 }
 
+// ─── Audition / clip-versions commands ────────────────────────────────────
+//
+// Create/Finalize audition use the existing `SetMultipleTracksClipsCommand`
+// (whole-track snapshot) at the call site, since they replace clips in
+// place. The three commands below cover *in-place* mutations of an existing
+// audition clip — switching the active take, adding a take, removing a
+// take — using full-clip snapshots so undo restores any field tweaks made
+// while a different take was active.
+
+/// Switch the currently active audition take. Snapshots the entire clip
+/// before mutation so undo restores both the index and any tweaks the user
+/// made to the host fields while the previous take was active.
+pub struct SetActiveAuditionTakeCommand {
+    pub clip_id: String,
+    pub new_index: usize,
+    pub before_snapshot: Option<Clip>,
+}
+
+impl EditCommand for SetActiveAuditionTakeCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            clip.set_active_audition_take(self.new_index);
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let (Some(clip), Some(snap)) =
+            (project.clip_mut(&self.clip_id), self.before_snapshot.as_ref())
+        {
+            *clip = snap.clone();
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Switch audition take"
+    }
+}
+
+/// Append a new take to an audition clip.
+pub struct AddAuditionTakeCommand {
+    pub clip_id: String,
+    pub take: AuditionTake,
+}
+
+impl EditCommand for AddAuditionTakeCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            clip.add_audition_take(self.take.clone());
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            if let Some(takes) = clip.audition_takes.as_mut() {
+                takes.pop();
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Add audition take"
+    }
+}
+
+/// Remove a take from an audition clip. Refuses to remove the active take.
+/// Stores the removed take in the command so undo can reinsert it.
+pub struct RemoveAuditionTakeCommand {
+    pub clip_id: String,
+    pub take_index: usize,
+    pub removed: std::cell::RefCell<Option<AuditionTake>>,
+}
+
+impl EditCommand for RemoveAuditionTakeCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            *self.removed.borrow_mut() = clip.remove_audition_take(self.take_index);
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            if let Some(take) = self.removed.borrow_mut().take() {
+                if let Some(takes) = clip.audition_takes.as_mut() {
+                    let insert_at = self.take_index.min(takes.len());
+                    takes.insert(insert_at, take);
+                    if insert_at <= clip.audition_active_take_index {
+                        clip.audition_active_take_index += 1;
+                    }
+                }
+            }
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Remove audition take"
+    }
+}
+
+/// Collapse an audition clip back to a normal clip referencing only the
+/// currently active take. Snapshots the full clip so undo can restore the
+/// audition wrapper and all alternate takes.
+pub struct FinalizeAuditionCommand {
+    pub clip_id: String,
+    pub before_snapshot: Option<Clip>,
+}
+
+impl EditCommand for FinalizeAuditionCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            clip.finalize_audition();
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let (Some(clip), Some(snap)) =
+            (project.clip_mut(&self.clip_id), self.before_snapshot.as_ref())
+        {
+            *clip = snap.clone();
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Finalize audition"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::clip::{Clip, ClipKind};
     use crate::model::project::Project;
     use crate::model::track::Track;
+
+    #[test]
+    fn auto_crop_command_round_trip() {
+        use crate::model::clip::{MotionTracker, TrackingBinding, TrackingRegion};
+
+        let mut project = Project::new("Auto-Crop Test");
+        let mut track = Track::new_video("Video");
+        let mut clip = Clip::new("/tmp/a.mp4", 5_000_000_000, 0, ClipKind::Video);
+        clip.id = "clip-1".to_string();
+        // Start with one existing tracker and no binding.
+        let mut tracker = MotionTracker::new("Subject");
+        tracker.id = "tracker-1".to_string();
+        tracker.analysis_region = TrackingRegion {
+            center_x: 0.5,
+            center_y: 0.5,
+            width: 0.25,
+            height: 0.25,
+            rotation_deg: 0.0,
+        };
+        clip.motion_trackers.push(tracker.clone());
+        track.add_clip(clip);
+        project.tracks.push(track);
+
+        let old_tracking_binding = None;
+        let old_motion_trackers = vec![tracker.clone()];
+        let old_first_mask_binding = None; // no mask on the clip
+
+        // New state: auto-crop binding installed + updated tracker (could
+        // have samples from a cache hit, but for test purposes just reuse).
+        let new_binding = TrackingBinding {
+            source_clip_id: "clip-1".to_string(),
+            tracker_id: "tracker-1".to_string(),
+            apply_translation: true,
+            apply_scale: true,
+            apply_rotation: false,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            scale_multiplier: 1.818,
+            rotation_offset_deg: 0.0,
+            strength: 1.0,
+            smoothing: 0.0,
+        };
+
+        let cmd = SetClipAutoCropCommand {
+            clip_id: "clip-1".to_string(),
+            old_tracking_binding,
+            old_motion_trackers,
+            old_first_mask_binding,
+            new_tracking_binding: Some(new_binding.clone()),
+            new_motion_trackers: vec![tracker.clone()],
+            new_first_mask_binding: None,
+        };
+
+        cmd.execute(&mut project);
+        let applied = project.clip_ref("clip-1").unwrap();
+        assert!(applied.tracking_binding.is_some());
+        assert!(
+            (applied.tracking_binding.as_ref().unwrap().scale_multiplier - 1.818).abs() < 1e-9
+        );
+        assert!(project.dirty);
+
+        project.dirty = false;
+        cmd.undo(&mut project);
+        let undone = project.clip_ref("clip-1").unwrap();
+        assert!(undone.tracking_binding.is_none());
+        assert_eq!(undone.motion_trackers.len(), 1);
+        assert!(project.dirty);
+    }
+
+    #[test]
+    fn master_gain_command_round_trip() {
+        let mut project = Project::new("Loudness Test");
+        assert_eq!(project.master_gain_db, 0.0);
+
+        let cmd = SetProjectMasterGainCommand { old_db: 0.0, new_db: -3.5 };
+        cmd.execute(&mut project);
+        assert!((project.master_gain_db + 3.5).abs() < 1e-9);
+        assert!(project.dirty);
+
+        project.dirty = false;
+        cmd.undo(&mut project);
+        assert_eq!(project.master_gain_db, 0.0);
+        assert!(project.dirty);
+    }
+
+    #[test]
+    fn master_gain_command_clamps_to_plus_minus_24() {
+        let mut project = Project::new("Loudness Test");
+        let cmd = SetProjectMasterGainCommand { old_db: 0.0, new_db: 99.0 };
+        cmd.execute(&mut project);
+        assert_eq!(project.master_gain_db, 24.0, "upper clamp");
+
+        let cmd2 = SetProjectMasterGainCommand { old_db: 0.0, new_db: -99.0 };
+        cmd2.execute(&mut project);
+        assert_eq!(project.master_gain_db, -24.0, "lower clamp");
+    }
+
+    #[test]
+    fn master_gain_linear_matches_decibel_formula() {
+        let mut project = Project::new("Gain Test");
+        project.master_gain_db = 0.0;
+        assert!((project.master_gain_linear() - 1.0).abs() < 1e-9);
+        project.master_gain_db = 6.0;
+        // 10^(6/20) ≈ 1.9953
+        assert!((project.master_gain_linear() - 10.0_f64.powf(0.3)).abs() < 1e-9);
+        project.master_gain_db = -20.0;
+        assert!((project.master_gain_linear() - 0.1).abs() < 1e-9);
+    }
 
     #[test]
     fn test_ripple_trim_out() {

@@ -77,6 +77,102 @@ impl AudioRole {
     pub const ALL: [AudioRole; 4] = [Self::None, Self::Dialogue, Self::Effects, Self::Music];
 }
 
+/// Per-track override for the multichannel upmix in surround exports.
+///
+/// `Auto` (default) lets the export pipeline pick a reasonable channel
+/// destination based on the track's `audio_role` (e.g. Dialogue → Front
+/// Center, Music → Front L/R, Effects → Front L/R + Surround L/R). The
+/// remaining variants pin a track to a specific channel layout for power
+/// users that need precise control.
+///
+/// Stored on `Track` as `surround_position`. Has no effect when the export
+/// channel layout is Stereo (the override resolves to Front L/R in that case).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SurroundPositionOverride {
+    #[default]
+    Auto,
+    FrontLR,
+    FrontCenter,
+    FrontLRPlusSurroundLR,
+    SurroundLR,
+    Lfe,
+    FrontLeft,
+    FrontRight,
+    BackLeft,
+    BackRight,
+    SideLeft,
+    SideRight,
+}
+
+impl SurroundPositionOverride {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto (by role)",
+            Self::FrontLR => "Front L/R",
+            Self::FrontCenter => "Front Center",
+            Self::FrontLRPlusSurroundLR => "Front L/R + Surround L/R",
+            Self::SurroundLR => "Surround L/R",
+            Self::Lfe => "LFE (bass only)",
+            Self::FrontLeft => "Front Left",
+            Self::FrontRight => "Front Right",
+            Self::BackLeft => "Back Left",
+            Self::BackRight => "Back Right",
+            Self::SideLeft => "Side Left",
+            Self::SideRight => "Side Right",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::FrontLR => "front_lr",
+            Self::FrontCenter => "front_center",
+            Self::FrontLRPlusSurroundLR => "front_lr_plus_surround_lr",
+            Self::SurroundLR => "surround_lr",
+            Self::Lfe => "lfe",
+            Self::FrontLeft => "front_left",
+            Self::FrontRight => "front_right",
+            Self::BackLeft => "back_left",
+            Self::BackRight => "back_right",
+            Self::SideLeft => "side_left",
+            Self::SideRight => "side_right",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "front_lr" => Self::FrontLR,
+            "front_center" => Self::FrontCenter,
+            "front_lr_plus_surround_lr" => Self::FrontLRPlusSurroundLR,
+            "surround_lr" => Self::SurroundLR,
+            "lfe" => Self::Lfe,
+            "front_left" => Self::FrontLeft,
+            "front_right" => Self::FrontRight,
+            "back_left" => Self::BackLeft,
+            "back_right" => Self::BackRight,
+            "side_left" => Self::SideLeft,
+            "side_right" => Self::SideRight,
+            _ => Self::Auto,
+        }
+    }
+
+    pub const ALL: [SurroundPositionOverride; 12] = [
+        Self::Auto,
+        Self::FrontLR,
+        Self::FrontCenter,
+        Self::FrontLRPlusSurroundLR,
+        Self::SurroundLR,
+        Self::Lfe,
+        Self::FrontLeft,
+        Self::FrontRight,
+        Self::BackLeft,
+        Self::BackRight,
+        Self::SideLeft,
+        Self::SideRight,
+    ];
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrackHeightPreset {
@@ -116,6 +212,11 @@ pub struct Track {
     /// Only applied when `duck` is true.
     #[serde(default = "default_duck_amount_db")]
     pub duck_amount_db: f64,
+    /// Per-track surround channel routing override. Defaults to `Auto`, which
+    /// resolves to a sensible position based on `audio_role` during a surround
+    /// export. Has no effect when the export channel layout is Stereo.
+    #[serde(default)]
+    pub surround_position: SurroundPositionOverride,
 }
 
 impl Track {
@@ -132,6 +233,7 @@ impl Track {
             audio_role: AudioRole::default(),
             duck: false,
             duck_amount_db: default_duck_amount_db(),
+            surround_position: SurroundPositionOverride::default(),
         }
     }
 
@@ -148,6 +250,7 @@ impl Track {
             audio_role: AudioRole::default(),
             duck: false,
             duck_amount_db: default_duck_amount_db(),
+            surround_position: SurroundPositionOverride::default(),
         }
     }
 

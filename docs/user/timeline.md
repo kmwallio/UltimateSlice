@@ -253,6 +253,17 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC, SVG) can be placed on the t
 - MCP tools: `create_multicam_clip`, `add_angle_switch`, `list_multicam_angles`, `set_multicam_angle_audio`.
 - Full undo/redo support.
 
+### Auditions (Alternate Takes)
+
+- **Create Audition from Selection** — multi-select 2+ clips on the same track, then right-click → "Create Audition from Selection". The selection collapses to one gold "AUD" clip; the first selected clip becomes the active take and the others are stored as alternates.
+- Audition clips render with a **gold fill** and an "AUD" badge plus an "n / m" indicator showing which take is active.
+- **Switch active take** in the **Inspector → Audition** panel by clicking any take row. The Program Monitor and timeline update immediately. Color grade, transforms, transitions, masks, and effects attached to the slot stay in place across take swaps.
+- **Add Take from Source** / **Remove Take** / **Finalize Audition** — Inspector buttons handle the rest of the lifecycle. Right-click also offers **Finalize Audition** to collapse an audition to a normal clip referencing only the active take.
+- Auditions are saved/loaded via `.uspxml` (`us:clip-kind="audition"` + `us:audition-takes` JSON). Strict-mode `.fcpxml` export collapses to a plain asset-clip referencing the active take. OTIO round-trips through `metadata.ultimateslice.audition_*`.
+- MCP tools: `create_audition_clip`, `add_audition_take`, `remove_audition_take`, `set_active_audition_take`, `list_audition_takes`, `finalize_audition`.
+- Full undo/redo support.
+- See [auditions.md](auditions.md) for the complete guide.
+
 ### Sync Selected Clips by Audio (right-click menu)
 
 - Select 2 or more clips on the timeline, then right-click → **Sync Selected Clips by Audio**.

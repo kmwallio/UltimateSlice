@@ -219,6 +219,10 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                                     selected_sequence_format_applied = true;
                                 }
                             }
+                            // Project master audio gain from the Loudness Radar.
+                            if let Some(v) = attrs.get("us:master-gain-db") {
+                                project.master_gain_db = v.parse().unwrap_or(0.0);
+                            }
                             project.fcpxml_unknown_sequence.attrs =
                                 collect_unknown_attrs(&attrs, is_known_sequence_attr);
                         } else {
@@ -900,7 +904,8 @@ fn parse_asset_clip(
             | ClipKind::Title
             | ClipKind::Adjustment
             | ClipKind::Compound
-            | ClipKind::Multicam => lane.filter(|l| *l > 0).map(|l| l as usize).unwrap_or(0),
+            | ClipKind::Multicam
+            | ClipKind::Audition => lane.filter(|l| *l > 0).map(|l| l as usize).unwrap_or(0),
         };
         let track_idx = explicit_track_idx.unwrap_or(inferred_track_idx);
         let track_name = attrs.get("us:track-name").cloned().unwrap_or_else(|| {
@@ -1056,6 +1061,12 @@ fn parse_asset_clip(
         if let Some(v) = attrs.get("us:vidstab-smoothing") {
             clip.vidstab_smoothing = v.parse().unwrap_or(0.5);
         }
+        if let Some(v) = attrs.get("us:motion-blur-enabled") {
+            clip.motion_blur_enabled = v == "true";
+        }
+        if let Some(v) = attrs.get("us:motion-blur-shutter-angle") {
+            clip.motion_blur_shutter_angle = v.parse().unwrap_or(180.0);
+        }
         if let Some(v) = attrs.get("us:blur-keyframes") {
             let json_str = v.replace("&quot;", "\"");
             clip.blur_keyframes = serde_json::from_str(&json_str).unwrap_or_default();
@@ -1139,6 +1150,9 @@ fn parse_asset_clip(
         }
         if let Some(v) = attrs.get("us:subtitle-highlight-color") {
             clip.subtitle_highlight_color = v.parse().unwrap_or(0xFFFF00FF);
+        }
+        if let Some(v) = attrs.get("us:subtitle-highlight-stroke-color") {
+            clip.subtitle_highlight_stroke_color = v.parse().unwrap_or(0xFFFF00FF);
         }
         if let Some(v) = attrs.get("us:subtitle-word-window-secs") {
             clip.subtitle_word_window_secs = v.parse().unwrap_or(2.0);
@@ -1361,6 +1375,16 @@ fn parse_asset_clip(
                         clip.multicam_switches = serde_json::from_str(&json_str).ok();
                     }
                 }
+                "audition" => {
+                    clip.kind = ClipKind::Audition;
+                    if let Some(takes_json) = attrs.get("us:audition-takes") {
+                        let json_str = takes_json.replace("&quot;", "\"");
+                        clip.audition_takes = serde_json::from_str(&json_str).ok();
+                    }
+                    if let Some(idx) = attrs.get("us:audition-active-take-index") {
+                        clip.audition_active_take_index = idx.parse().unwrap_or(0);
+                    }
+                }
                 _ => {}
             }
         }
@@ -1431,6 +1455,11 @@ fn parse_asset_clip(
         }
         if let Some(v) = attrs.get("us:shadows-tint") {
             clip.shadows_tint = v.parse().unwrap_or(0.0);
+        }
+        if let Some(v) = attrs.get("us:hsl-qualifier") {
+            if let Ok(q) = serde_json::from_str::<crate::model::clip::HslQualifier>(v) {
+                clip.hsl_qualifier = Some(q);
+            }
         }
         if let Some(v) = attrs.get("us:chroma-key-enabled") {
             clip.chroma_key_enabled = v == "true" || v == "1";
@@ -2718,6 +2747,8 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:blur"
             | "us:vidstab-enabled"
             | "us:vidstab-smoothing"
+            | "us:motion-blur-enabled"
+            | "us:motion-blur-shutter-angle"
             | "us:blur-keyframes"
             | "us:frei0r-effects"
             | "us:motion-trackers"
@@ -2777,6 +2808,7 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:midtones-tint"
             | "us:shadows-warmth"
             | "us:shadows-tint"
+            | "us:hsl-qualifier"
             | "us:chroma-key-enabled"
             | "us:chroma-key-color"
             | "us:chroma-key-tolerance"
@@ -2805,6 +2837,8 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:compound-tracks"
             | "us:multicam-angles"
             | "us:multicam-switches"
+            | "us:audition-takes"
+            | "us:audition-active-take-index"
             | "us:eq-bands"
             | "us:eq-low-gain-keyframes"
             | "us:eq-mid-gain-keyframes"
@@ -2826,6 +2860,7 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:subtitle-bg-box-color"
             | "us:subtitle-highlight-mode"
             | "us:subtitle-highlight-color"
+            | "us:subtitle-highlight-stroke-color"
             | "us:subtitle-word-window-secs"
             | "us:subtitle-position-y"
     )
@@ -2877,7 +2912,7 @@ fn is_known_project_attr(key: &str) -> bool {
 }
 
 fn is_known_sequence_attr(key: &str) -> bool {
-    matches!(key, "duration" | "format")
+    matches!(key, "duration" | "format" | "us:master-gain-db")
 }
 
 fn is_known_spine_attr(_key: &str) -> bool {

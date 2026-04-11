@@ -228,6 +228,8 @@ fn write_otio_with_mode(
                 } else {
                     Some(clip.match_eq_bands.clone())
                 },
+                voice_enhance: Some(clip.voice_enhance),
+                voice_enhance_strength: Some(clip.voice_enhance_strength as f64),
                 voice_isolation: Some(clip.voice_isolation as f64),
                 voice_isolation_pad_ms: Some(clip.voice_isolation_pad_ms as f64),
                 voice_isolation_fade_ms: Some(clip.voice_isolation_fade_ms as f64),
@@ -249,6 +251,8 @@ fn write_otio_with_mode(
                 freeze_frame_hold_duration_ns: clip.freeze_frame_hold_duration_ns,
                 vidstab_enabled: Some(clip.vidstab_enabled),
                 vidstab_smoothing: Some(clip.vidstab_smoothing as f64),
+                motion_blur_enabled: Some(clip.motion_blur_enabled),
+                motion_blur_shutter_angle: Some(clip.motion_blur_shutter_angle),
                 color_label: Some(clip.color_label),
                 anamorphic_desqueeze: Some(clip.anamorphic_desqueeze),
                 group_id: clip.group_id.clone(),
@@ -279,6 +283,12 @@ fn write_otio_with_mode(
                 compound_tracks: clip.compound_tracks.clone(),
                 multicam_angles: clip.multicam_angles.clone(),
                 multicam_switches: clip.multicam_switches.clone(),
+                audition_takes: clip.audition_takes.clone(),
+                audition_active_take_index: if clip.audition_takes.is_some() {
+                    Some(clip.audition_active_take_index)
+                } else {
+                    None
+                },
                 brightness: Some(clip.brightness as f64),
                 contrast: Some(clip.contrast as f64),
                 saturation: Some(clip.saturation as f64),
@@ -298,6 +308,7 @@ fn write_otio_with_mode(
                 midtones_tint: Some(clip.midtones_tint as f64),
                 shadows_warmth: Some(clip.shadows_warmth as f64),
                 shadows_tint: Some(clip.shadows_tint as f64),
+                hsl_qualifier: clip.hsl_qualifier.clone(),
                 pitch_shift_semitones: Some(clip.pitch_shift_semitones),
                 pitch_preserve: Some(clip.pitch_preserve),
                 audio_channel_mode: Some(clip.audio_channel_mode),
@@ -428,6 +439,7 @@ fn write_otio_with_mode(
                 subtitle_italic: Some(clip.subtitle_italic),
                 subtitle_underline: Some(clip.subtitle_underline),
                 subtitle_shadow: Some(clip.subtitle_shadow),
+                subtitle_visible: Some(clip.subtitle_visible),
                 subtitle_shadow_color: Some(clip.subtitle_shadow_color),
                 subtitle_shadow_offset_x: Some(clip.subtitle_shadow_offset_x),
                 subtitle_shadow_offset_y: Some(clip.subtitle_shadow_offset_y),
@@ -444,6 +456,9 @@ fn write_otio_with_mode(
                 subtitle_bg_box_color: Some(clip.subtitle_bg_box_color),
                 subtitle_highlight_mode: Some(clip.subtitle_highlight_mode),
                 subtitle_highlight_color: Some(clip.subtitle_highlight_color),
+                subtitle_highlight_stroke_color: Some(
+                    clip.subtitle_highlight_stroke_color,
+                ),
                 subtitle_word_window_secs: Some(clip.subtitle_word_window_secs),
                 subtitle_position_y: Some(clip.subtitle_position_y),
             });
@@ -489,6 +504,15 @@ fn write_otio_with_mode(
             audio_role: Some(track.audio_role.as_str().to_string()),
             duck: Some(track.duck),
             duck_amount_db: Some(track.duck_amount_db),
+            // Only emit when non-default so legacy OTIO consumers don't see
+            // a noisy new key on every track.
+            surround_position: if track.surround_position
+                != crate::model::track::SurroundPositionOverride::Auto
+            {
+                Some(track.surround_position.as_str().to_string())
+            } else {
+                None
+            },
         });
 
         otio_tracks.push(OtioTrack {
@@ -544,6 +568,11 @@ fn write_otio_with_mode(
         metadata: wrap_project_metadata(&UltimateSliceProjectOtioMetadata {
             width: Some(project.width),
             height: Some(project.height),
+            master_gain_db: if project.master_gain_db.abs() > 1e-9 {
+                Some(project.master_gain_db)
+            } else {
+                None
+            },
         }),
     };
 

@@ -21,6 +21,21 @@ Select a clip in the timeline to populate the Inspector. All changes apply immed
 
 ---
 
+## Audition (alternate takes)
+
+Visible only when an **audition clip** is selected. Audition clips wrap multiple alternate takes around a single timeline slot — see [auditions.md](auditions.md) for the full guide.
+
+| Control | Description |
+|---|---|
+| **Takes list** | Every alternate take with its label, source filename, and duration. The currently active take is highlighted with an **Active** badge. Click any other row to switch — the Program Monitor and timeline update immediately, and the swap is undoable. |
+| **Add Take from Source** | Append a new take to the audition. Seeded from the currently active take's source path and in/out as a starting point; tweak afterwards. |
+| **Remove Take** | Remove the selected non-active take. Disabled when the active take is selected — switch active first if you want to delete what's currently playing. |
+| **Finalize Audition** | Collapse the audition to a normal clip referencing only the active take. Discards alternates. Undoable. |
+
+Color grade, transforms, transitions, masks, keyframes, and frei0r effects all live on the audition slot, not on individual takes. Switching the active take preserves your look — that's the point.
+
+---
+
 ## Transition
 
 The Inspector can edit the selected clip's **outgoing** transition when another clip follows it on the same track.
@@ -66,6 +81,61 @@ Adjustments are applied live via GStreamer `videobalance` and rendered through f
 
 ---
 
+## HSL Qualifier (Secondary Color Correction)
+
+Isolates pixels by **Hue**, **Saturation**, and **Luminance** range, then
+applies a follow-up brightness / contrast / saturation grade **only inside
+the matched region**. This is the DaVinci-style workflow for grading a
+specific color — punch the sky cyan without tinting skin, desaturate green
+foliage, boost magenta rim light, etc.
+
+Open the **HSL Qualifier** expander below Color & Denoise.
+
+| Control | Range | Default | Notes |
+|---|---|---|---|
+| **Enable** | toggle | off | Turns the qualifier on. |
+| **Invert** | toggle | off | Flip the matte — grade the pixels *outside* the range. |
+| **View Mask** | toggle | off | Debug overlay — Program Monitor shows the computed matte as grayscale so you can dial ranges. Not persisted; never applied at export. |
+| **Hue Min / Hue Max** | 0–360° | 0 / 360 | Range of matched hues. When `Min > Max` the range **wraps around 360°**, which is how you select reds that straddle 0° (e.g. `Min=340`, `Max=20`). |
+| **Hue Softness** | 0–60° | 0 | Smoothstep feather band on both edges of the hue range. |
+| **Sat Min / Sat Max** | 0.0–1.0 | 0.0 / 1.0 | Saturation range. Narrow to isolate pastels vs. vivid tones. |
+| **Sat Softness** | 0.0–0.5 | 0.0 | Feather band on saturation edges. |
+| **Lum Min / Lum Max** | 0.0–1.0 | 0.0 / 1.0 | Luminance range. Narrow to isolate shadows / midtones / highlights. |
+| **Lum Softness** | 0.0–0.5 | 0.0 | Feather band on luminance edges. |
+| **Secondary Brightness** | −1.0 → 1.0 | 0.0 | Brightness delta added to matched pixels. |
+| **Secondary Contrast** | 0.0 → 2.0 | 1.0 | Contrast multiplier (around 0.5 mid) on matched pixels. |
+| **Secondary Saturation** | 0.0 → 2.0 | 1.0 | Saturation multiplier on matched pixels — 0 = desaturate the range, 2 = pump it. |
+
+### Workflow
+
+1. Enable the qualifier.
+2. Toggle **View Mask** so the Program Monitor shows the matte in grayscale.
+3. Drag the **Hue Min / Max** sliders until only the region you want is white.
+4. Pinch **Sat Min / Max** and **Lum Min / Max** to drop any false hits.
+5. Nudge the **Softness** sliders to feather the edges.
+6. Toggle View Mask off and adjust **Secondary Brightness / Contrast /
+   Saturation** — you will see the secondary grade applied only to the
+   matched pixels.
+
+### Under the hood
+
+Program Monitor and FFmpeg export share the exact same HSL math. Preview
+runs a CPU pad probe on a dedicated `us-hsl-identity` element placed after
+the primary color chain (so the qualifier sees your primary grade, not the
+raw source). Export emits a single inline `geq` filter wrapped in
+`format=gbrp` / `format=yuva420p` bridges that encodes the RGB→HSL
+conversion, range membership, secondary grade, and alpha blend in one pass.
+Neutral or disabled qualifiers are skipped entirely so existing clips stay
+byte-identical.
+
+Automation: the **`set_clip_hsl_qualifier`** MCP tool accepts every field
+as an optional argument and supports `clear: true` to remove the qualifier.
+Persistence: `.uspxml` projects round-trip the qualifier via a
+`us:hsl-qualifier` attribute; OTIO exports round-trip via
+`metadata.ultimateslice.hsl_qualifier`.
+
+---
+
 ## Denoise / Sharpness / Blur
 
 Applied via GStreamer `gaussianblur` (preview) and ffmpeg `hqdn3d`/`unsharp`/`boxblur` (export).
@@ -97,8 +167,34 @@ Video stabilization compensates camera shake using ffmpeg's libvidstab (two-pass
 | Slider | Range | Default | Effect |
 |---|---|---|---|
 | **Volume** | −100 dB → +12 dB | 0 dB | Per-clip gain (`0 dB = 1.0x`, `-96 dB`/`-100 dB` ≈ mute) |
+| **Enhance Voice** | toggle + 0% → 100% strength | Off / 50% | One-knob speech cleanup chain. See **Enhance Voice** below. |
 | **Voice Isolation** | 0% → 100% | Off | Ducks volume between spoken words. See **Voice Isolation Source** below. |
 | **Pan** | −1.0 → 1.0 | 0.0 | Stereo position (−1 = full left, +1 = full right) |
+
+#### Enhance Voice
+
+Toggling **Enhance Voice** on a clip runs a fixed FFmpeg cleanup chain on its
+audio: a high-pass at 80 Hz, FFT noise reduction (`afftdn`), a small mud cut
+around 300 Hz, a presence boost around 4 kHz, and a gentle compressor. A single
+**Strength** slider (0–100%) scales every stage at once, so you don't have to
+dial individual EQ and compressor controls.
+
+The chain runs **before voice isolation** in the audio chain, so when you
+combine the two the ducking decision sees a cleaned-up signal — quieter
+backgrounds, less honk, more even speech levels.
+
+| Behaviour | Detail |
+|---|---|
+| **Export** | Always applies. The chain is the same FFmpeg filter the prerender cache uses, so the rendered file matches preview exactly. |
+| **Preview** | Goes through a background prerender. The first time you toggle on (or change strength), an ffmpeg job runs in the background and the bottom status bar shows **"Enhancing voice… X/Y"**. Until the cached file is ready, preview plays the original (un-enhanced) audio for that clip. |
+| **Strength slider** | Trailing-edge debounced 350 ms — dragging the slider only spawns one job for the value you released on, not one job per tick. |
+| **Cache hits** | Bouncing the strength back to a value you previously rendered is an instant cache hit (no new ffmpeg job). |
+| **Cache disk** | Cached files live under `$XDG_CACHE_HOME/ultimateslice/voice_enhance/` and the cache is capped at **2 GiB** with LRU eviction (least-recently-modified files are deleted to make room). |
+| **Cache invalidation** | The cache key folds in the source file's mtime, so re-encoding or replacing your source media triggers a fresh prerender automatically. |
+| **Voice isolation interaction** | Enhance runs first, then voice isolation ducks the cleaned signal. Combining both is the recommended setup for noisy dialogue clips. |
+
+MCP tool: `set_clip_voice_enhance` with `clip_id`, `enabled`, and optional
+`strength` (0.0–1.0).
 
 #### Voice Isolation Source
 
@@ -175,6 +271,32 @@ Collapsible section inside Audio with three bands: **Low**, **Mid**, **High**.
 - Gain per band supports keyframe animation via `eq_low_gain`, `eq_mid_gain`, `eq_high_gain` keyframe properties.
 - MCP tool: `set_clip_eq` with 9 optional parameters.
 
+### Track audio: Audio Role + Surround Position + Ducking
+
+The collapsible **Track Audio** sub-section inside Audio shows controls that
+apply to the *track* the selected clip lives on (not just the clip):
+
+| Control | Effect |
+|---|---|
+| **Audio Role** | Tags the track as `Dialogue` / `Effects` / `Music` / `None`. Drives the per-role submix bus during stereo export and the auto-routing destination during surround export. |
+| **Surround Position** | Per-track override for **Advanced Audio Mode** surround exports (5.1 / 7.1). `Auto (by role)` (default) uses the role-based mapping; explicit values pin the track to a specific channel. Has no effect on stereo exports. |
+| **Duck this track…** | When enabled, automatically lowers this track's volume whenever audio is present on any non-ducked track at the same timeline position (typical use: duck music under dialogue). |
+| **Duck Amount (dB)** | Negative dB applied while ducking is active. Default −6 dB. |
+
+**Surround Position** options:
+
+- **Auto (by role)** — recommended; uses Dialogue → Front Center, Music → Front L/R, Effects → Front L/R + Surround L/R
+- **Front L/R**, **Front Center**, **Front L/R + Surround L/R**, **Surround L/R**
+- **LFE (bass only)** — pin this track to the subwoofer channel
+- Single-channel pins: **Front Left**, **Front Right**, **Back Left**, **Back Right**, **Side Left**, **Side Right** (Side Left/Right alias to Back Left/Right in 5.1 since 5.1 has no side speakers)
+
+The override is stored on the track (not the clip) and round-trips through
+project save/load (`.uspxml`) as well as OTIO export. Switching the Inspector
+selection between clips on the same track shows the same value.
+
+For the full surround export pipeline (auto-routing table, automatic LFE bass
+tap, codec compatibility), see [`docs/user/export.md`](export.md#audio-channels--advanced-audio-mode-surround).
+
 ---
 
 ## Video Transform
@@ -193,6 +315,7 @@ Applied via GStreamer `videocrop`, `videoflip`, `videoscale`, and `videobox` (pr
 | **Rotate** | Dial/knob + numeric angle (−180° → 180°) | Arbitrary-angle rotation |
 | **Flip H** | Toggle | Mirror horizontally |
 | **Flip V** | Toggle | Mirror vertically |
+| **Motion Blur** | Toggle + 0..720° slider | Render shutter-angle motion blur for clips with **animated transforms** (any of `position_x`/`position_y`/`scale`/`rotate`/crop keyframes) **or fast speed** (`speed > 1.0`). Default shutter angle is **180°** (cinematic). On **static** clips (no transform keyframes, `speed == 1.0`) the toggle is a free no-op so leaving it on never costs anything when nothing is moving. **Always rendered at export.** Live preview shows motion blur **only when Background Render is enabled in the status bar** — the prerender path bakes the per-frame transform animation through FFmpeg `minterpolate` + `tmix` into a sidecar segment that the Program Monitor plays back; without Background Render, the live GStreamer path shows the un-blurred animation (no temporal-mix element on the live slots). The fast-speed (`speed > 1.0`) path remains export-only because variable-speed isn't yet wired through the prerender chain. At **360°** the export uses a cheap `tmix=frames=2` adjacent-frame average; below 360° it oversamples 4× via FFmpeg `minterpolate` and averages `round(4 × shutter / 360)` consecutive sub-frames before decimating back to project rate, so the resulting blur length tracks the chosen shutter angle. MCP: `set_clip_motion_blur` |
 
 > **Adjustment layers:** the same transform controls define the adjustment clip's scoped effect region in preview and export. **Scale, Position, Crop, Rotate, and Opacity** stay active; **Blend Mode**, **Anamorphic Desqueeze**, and **Flip H/V** are shown but disabled because adjustment clips do not create their own image layer. Adjustment clips now also expose the normal **Shape Mask** section, and that mask is intersected with the transform/crop scope instead of replacing it. On adjustment clips, **Position X/Y** move the scoped region itself, so tracked/full-frame masked adjustments still translate visibly at `Scale = 1.0`.
 
@@ -273,6 +396,7 @@ The **Motion Tracking** section is available on visual clips and covers both tra
 | **Region Rotation** | Rotation of the analysis rectangle |
 | **Track Region / Re-run Tracking** | Run motion analysis for the selected tracker on the current clip, or regenerate samples after changing the tracker region |
 | **Cancel** | Stop an in-progress tracking analysis job |
+| **Auto-Crop to Project Aspect** | One-click reframe: takes the currently-drawn tracker region and sets up the clip's transform so the region fills the project frame at the project's aspect ratio. Runs the tracker automatically. Great for turning a 16:9 source clip into a 9:16 vertical export without manually keyframing position — see [Auto-Crop & Track](#auto-crop--track) below |
 | **Attach To** | Choose whether a tracker drives the **Clip Transform** or the clip's **First Mask** |
 | **Follow Tracker** | Attach this clip or mask to a tracker created on another clip in the project |
 | **Clear Attachment** | Remove the current tracker attachment from the clip or mask |
@@ -282,9 +406,57 @@ The **Motion Tracking** section is available on visual clips and covers both tra
 - If you move or resize the tracker region after analysis, UltimateSlice keeps the attachment but clears the old samples; run **Re-run Tracking** on the source clip again before expecting preview/export motion.
 - The **Follow Tracker** picker labels trackers that have no samples yet, and attached clips/masks warn when their source tracker is empty or disabled.
 - The built-in tracker currently analyzes **translation** motion, so tracked overlays and masks follow position but do not yet infer scale or rotation automatically.
+- Tracking is a **color** template matcher that samples every source frame at 320×180 analysis resolution, matches across the Y, U, and V planes (so chroma-distinctive subjects like colored stickers lock on reliably), and keeps the template from the first frame throughout the shot (so it doesn't drift onto background texture). Best results come from drawing a tight region around a subject that has a distinctive color or luminance pattern relative to its surroundings — large uniform regions are inherently ambiguous under template matching.
 - Tracker attachments are resolved in both Program Monitor preview and export, and they persist through UltimateSlice project save/load (`.uspxml` vendor-attribute workflow).
 - Title clips and other tracker-followed clips now translate directly across the canvas in preview and export, so **Follow Tracker** still moves them at `Scale = 1.0` instead of appearing to stop at the frame edge. Normal still-image clips stay on the existing still-image preview path unless they are actually following a tracker.
 - Mask attachments currently target the **first rectangle or ellipse mask** on the clip. **Path masks** still need to be animated manually with their own controls/keyframes.
+
+### Auto-Crop & Track
+
+Auto-Crop & Track is a one-click preset on top of the existing motion tracker. It takes the **region you drew** on the clip and produces the scale + position + motion compensation needed to keep that region centered in the **project's aspect ratio** as the subject moves through the shot.
+
+**Typical workflow**
+
+1. Select a visual clip on the timeline.
+2. Open the **Motion Tracking** section of the Inspector.
+3. Click **+** to add a tracker, or select an existing one.
+4. Drag the region in the Program Monitor (or edit the Region Center/Width/Height sliders) so the rectangle hugs the subject you want to keep in frame.
+5. Click **Auto-Crop to Project Aspect**.
+6. Scrub the timeline — the clip is now zoomed and panned so the region stays centered, and as the tracker adds samples in the background the panning keeps following the subject.
+
+**Cross-aspect reframing (horizontal → vertical for social media)**
+
+The most common use case. With a 1920×1080 source clip inside a 1080×1920 vertical project:
+
+- At the project's default `scale = 1.0`, the source is letterboxed into the middle ~32% of the vertical frame and the top/bottom of the project is black.
+- Auto-Crop computes a scale high enough to **eliminate the letterbox bars** (roughly 3.16× for 16:9 → 9:16), then pans horizontally so your region's center ends up at the project center.
+- Because the region's aspect doesn't match the project's in cross-aspect cases, the *width* of the region may be wider than the project can show — Auto-Crop centers on the region and accepts that the side edges of a wide region will be cropped. Draw the region tightly around the part of the subject that must always be visible.
+
+**Tweaking after the fact**
+
+Auto-Crop writes its results into the clip's existing **tracking binding** — the same binding the manual **Follow Tracker** workflow uses. After clicking the button you can:
+
+- **Drag the Crop Padding slider** (0 = tight crop, 0.5 = generous margin) — while auto-crop is active, the slider live-updates the binding in place so the preview reflects the new framing immediately. The value you leave it at is the default for the next click.
+- **Drag the Region Center X/Y, Width, or Height sliders** — auto-crop automatically re-runs the crop math so the framing follows the region as you move it. No need to click Auto-Crop to Project Aspect again unless you want to refresh the motion samples.
+- **Press Ctrl+Z** to revert to the pre-click state. Auto-Crop is fully undoable: the `tracking_binding`, `motion_trackers`, and first-mask binding are all snapshotted.
+- **Clear Attachment** removes the binding and reverts the clip to its default framing — useful when you want to see the untransformed source to draw a new region.
+
+**MCP automation**
+
+`set_clip_auto_crop_track` drives the same flow programmatically. Pass the `clip_id` plus a region in normalized clip coordinates:
+
+```json
+{
+  "clip_id": "abc-123",
+  "center_x": 0.5,
+  "center_y": 0.45,
+  "width": 0.15,
+  "height": 0.2,
+  "padding": 0.1
+}
+```
+
+`width` / `height` are **half-widths** (0..0.5), matching the `TrackingRegion` convention — the full region width is `2 × width`. Returns the resolved `scale_multiplier` / `offset_x` / `offset_y` and a `status` of `"ready"` (cached samples applied immediately) or `"queued"` (background analysis in progress).
 
 ---
 
@@ -294,6 +466,7 @@ Clips with subtitle segments show subtitle style controls in the Inspector.
 
 | Field | Description |
 |---|---|
+| **Render subtitles** | When unchecked, this clip's subtitles are hidden from the Program Monitor overlay, the export burn-in, and the SRT sidecar export — but the underlying segment data is preserved. The **Transcript Editor** and **Voice Isolation** (`Subtitles` source) keep working normally. Use this when you want STT-derived word timings to drive voice isolation or transcript-based editing without burning subtitles into the final video. Defaults to on so existing projects render subtitles unchanged. MCP: `set_clip_subtitle_visible`. |
 | **Font** | Subtitle font description (Pango-style, e.g. `Sans Bold 24`) |
 | **Bold** | Always-on bold for all subtitle text (independent of font description) |
 | **Italic** | Always-on italic for all subtitle text |
@@ -316,6 +489,7 @@ Clips with subtitle segments show subtitle style controls in the Inspector.
 - Export burns subtitle styling above the composited video.
 - Subtitle font selection now uses the same normalized family/style/size parsing in preview and export, so descriptions like `Bold`, `Italic`, `Oblique`, and narrowed families stay closer between the Program Monitor and exported burn-in.
 - Preview and export still use different subtitle renderers, so very fine styling details can still vary slightly.
+- **See also: [Transcript panel](transcript.md)** — once you've generated subtitles, the bottom-of-window Transcript panel lets you click words to seek and select word ranges to ripple-delete the underlying clip in one undo entry.
 
 ---
 

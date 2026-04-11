@@ -190,6 +190,13 @@ pub enum McpCommand {
         color_label: String,
         reply: SyncSender<Value>,
     },
+    /// Set (or clear) the HSL Qualifier on a clip. Pass `qualifier: None`
+    /// to clear the qualifier entirely.
+    SetClipHslQualifier {
+        clip_id: String,
+        qualifier: Option<crate::model::clip::HslQualifier>,
+        reply: SyncSender<Value>,
+    },
     SetClipChromaKey {
         clip_id: String,
         enabled: Option<bool>,
@@ -202,6 +209,12 @@ pub enum McpCommand {
         clip_id: String,
         enabled: Option<bool>,
         threshold: Option<f64>,
+        reply: SyncSender<Value>,
+    },
+    SetClipMotionBlur {
+        clip_id: String,
+        enabled: Option<bool>,
+        shutter_angle: Option<f64>,
         reply: SyncSender<Value>,
     },
     SetClipMask {
@@ -256,6 +269,10 @@ pub enum McpCommand {
     },
     ExportMp4 {
         path: String,
+        /// Optional surround layout for advanced audio mode. Accepts
+        /// `"stereo"` (default), `"surround_5_1"` / `"5.1"`, or
+        /// `"surround_7_1"` / `"7.1"`. Unknown values fall back to stereo.
+        audio_channel_layout: String,
         reply: SyncSender<Value>,
     },
     ListExportPresets {
@@ -270,6 +287,8 @@ pub enum McpCommand {
         crf: u32,
         audio_codec: String,
         audio_bitrate_kbps: u32,
+        /// Advanced audio mode: see ExportMp4 for accepted values.
+        audio_channel_layout: String,
         reply: SyncSender<Value>,
     },
     DeleteExportPreset {
@@ -429,6 +448,18 @@ pub enum McpCommand {
         voice_isolation: f64,
         reply: SyncSender<Value>,
     },
+    SetClipVoiceEnhance {
+        clip_id: String,
+        enabled: bool,
+        /// Optional 0.0..=1.0 strength. `None` keeps the existing value.
+        strength: Option<f64>,
+        reply: SyncSender<Value>,
+    },
+    SetClipSubtitleVisible {
+        clip_id: String,
+        visible: bool,
+        reply: SyncSender<Value>,
+    },
     SetVoiceIsolationSource {
         clip_id: String,
         /// `"subtitles"` or `"silence"`
@@ -466,6 +497,18 @@ pub enum McpCommand {
         clip_id: String,
         mode: String,
         target_level: f64,
+        reply: SyncSender<Value>,
+    },
+    /// Render the full timeline mixdown to a temp file and return a
+    /// full EBU R128 loudness report (integrated, short-term max,
+    /// momentary max, LRA, true peak).
+    AnalyzeProjectLoudness {
+        reply: SyncSender<Value>,
+    },
+    /// Set (or clear with 0.0) the project-level master audio gain in dB.
+    /// Applied to both preview and export. Clamped to ±24 dB.
+    SetProjectMasterGainDb {
+        master_gain_db: f64,
         reply: SyncSender<Value>,
     },
     MatchClipAudio {
@@ -628,6 +671,22 @@ pub enum McpCommand {
         smoothing: f64,
         reply: SyncSender<Value>,
     },
+    SetClipAutoCropTrack {
+        clip_id: String,
+        /// Region center X in normalized clip coordinates (0..1).
+        center_x: f64,
+        /// Region center Y in normalized clip coordinates (0..1).
+        center_y: f64,
+        /// Region half-width in normalized clip coordinates (0..0.5).
+        width: f64,
+        /// Region half-height in normalized clip coordinates (0..0.5).
+        height: f64,
+        /// Optional extra headroom around the region as a fraction
+        /// (e.g. 0.1 = 10% margin). Clamped to [0, 0.5]. Defaults to 0.1
+        /// when omitted.
+        padding: Option<f64>,
+        reply: SyncSender<Value>,
+    },
     ListBackups {
         reply: SyncSender<Value>,
     },
@@ -775,6 +834,38 @@ pub enum McpCommand {
         muted: Option<bool>,
         reply: SyncSender<Value>,
     },
+    // ── Audition / clip-versions commands ─────────────────────────────
+    CreateAuditionClip {
+        clip_ids: Vec<String>,
+        active_index: usize,
+        reply: SyncSender<Value>,
+    },
+    AddAuditionTake {
+        audition_clip_id: String,
+        source_path: String,
+        source_in_ns: u64,
+        source_out_ns: u64,
+        label: Option<String>,
+        reply: SyncSender<Value>,
+    },
+    RemoveAuditionTake {
+        audition_clip_id: String,
+        take_index: usize,
+        reply: SyncSender<Value>,
+    },
+    SetActiveAuditionTake {
+        audition_clip_id: String,
+        take_index: usize,
+        reply: SyncSender<Value>,
+    },
+    ListAuditionTakes {
+        audition_clip_id: String,
+        reply: SyncSender<Value>,
+    },
+    FinalizeAudition {
+        audition_clip_id: String,
+        reply: SyncSender<Value>,
+    },
     // ── Subtitle / STT commands ────────────────────────────────────────
     GenerateSubtitles {
         clip_id: String,
@@ -802,6 +893,12 @@ pub enum McpCommand {
         clip_id: String,
         reply: SyncSender<Value>,
     },
+    DeleteTranscriptRange {
+        clip_id: String,
+        start_word_index: u32,
+        end_word_index: u32, // exclusive
+        reply: SyncSender<Value>,
+    },
     SetSubtitleStyle {
         clip_id: String,
         font: Option<String>,
@@ -826,6 +923,7 @@ pub enum McpCommand {
         highlight_background: Option<bool>,
         highlight_shadow: Option<bool>,
         bg_highlight_color: Option<u32>,
+        highlight_stroke_color: Option<u32>,
         reply: SyncSender<Value>,
     },
     ExportSrt {

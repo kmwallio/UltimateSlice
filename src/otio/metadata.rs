@@ -2,8 +2,8 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::model::clip::{
-    AngleSwitch, AudioChannelMode, BlendMode, ClipColorLabel, ClipMask, EqBand, Frei0rEffect,
-    LadspaEffect, MotionTracker, MulticamAngle, NumericKeyframe, SlowMotionInterp,
+    AngleSwitch, AudioChannelMode, AuditionTake, BlendMode, ClipColorLabel, ClipMask, EqBand,
+    Frei0rEffect, LadspaEffect, MotionTracker, MulticamAngle, NumericKeyframe, SlowMotionInterp,
     SubtitleHighlightFlags, SubtitleHighlightMode, SubtitleSegment, TrackingBinding,
     VoiceIsolationSource,
 };
@@ -29,6 +29,13 @@ pub(crate) struct UltimateSliceClipOtioMetadata {
     /// 7-band match EQ from audio matching (mic-match correction).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) match_eq_bands: Option<Vec<EqBand>>,
+    /// One-knob "Enhance Voice" toggle (FFmpeg HPF + denoise + EQ + compressor
+    /// chain, applied at export only). Defaults to false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) voice_enhance: Option<bool>,
+    /// Strength of the voice-enhance chain, 0.0..=1.0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) voice_enhance_strength: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) voice_isolation: Option<f64>,
     /// Voice isolation tunables.
@@ -73,6 +80,11 @@ pub(crate) struct UltimateSliceClipOtioMetadata {
     pub(crate) vidstab_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) vidstab_smoothing: Option<f64>,
+    /// Motion blur for keyframed transforms / fast-speed clips (export-only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) motion_blur_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) motion_blur_shutter_angle: Option<f64>,
     /// Semantic clip color label for timeline tinting.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) color_label: Option<ClipColorLabel>,
@@ -117,6 +129,13 @@ pub(crate) struct UltimateSliceClipOtioMetadata {
     /// Angle switch points for multicam clips, sorted by `position_ns`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) multicam_switches: Option<Vec<AngleSwitch>>,
+    /// Alternate takes for audition clips.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) audition_takes: Option<Vec<AuditionTake>>,
+    /// Index of the active audition take. Only meaningful when
+    /// `audition_takes.is_some()`. Default 0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) audition_active_take_index: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) brightness: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -159,6 +178,9 @@ pub(crate) struct UltimateSliceClipOtioMetadata {
     pub(crate) shadows_warmth: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) shadows_tint: Option<f64>,
+    /// HSL Qualifier (secondary color correction).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) hsl_qualifier: Option<crate::model::clip::HslQualifier>,
     /// Pitch shift in semitones (−12.0..+12.0) and pitch-preserve flag.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) pitch_shift_semitones: Option<f64>,
@@ -291,6 +313,12 @@ pub(crate) struct UltimateSliceClipOtioMetadata {
     pub(crate) subtitle_underline: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) subtitle_shadow: Option<bool>,
+    /// Whether subtitles are rendered/exported for this clip. When `false`,
+    /// the segment data is preserved (transcript editor and voice isolation
+    /// keep working) but the preview overlay, export burn-in, and SRT
+    /// sidecar all skip the clip.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) subtitle_visible: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) subtitle_shadow_color: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -318,6 +346,8 @@ pub(crate) struct UltimateSliceClipOtioMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) subtitle_highlight_color: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) subtitle_highlight_stroke_color: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) subtitle_word_window_secs: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) subtitle_position_y: Option<f64>,
@@ -337,6 +367,12 @@ pub(crate) struct UltimateSliceTrackOtioMetadata {
     pub(crate) duck: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) duck_amount_db: Option<f64>,
+    /// Per-track surround channel routing override for advanced audio mode
+    /// (5.1 / 7.1 surround exports). Stored as the snake_case `as_str()`
+    /// representation of `SurroundPositionOverride`. `None` (or missing on
+    /// older OTIO files) means `Auto`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) surround_position: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -345,6 +381,12 @@ pub(crate) struct UltimateSliceProjectOtioMetadata {
     pub(crate) width: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) height: Option<u32>,
+    /// Project master audio gain in dB (Loudness Radar normalize target).
+    /// `None` means "not authored" and reimport leaves the project default
+    /// (0.0). Serialized only when non-zero so pre-loudness projects don't
+    /// gain any new bytes on round-trip.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) master_gain_db: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

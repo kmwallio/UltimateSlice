@@ -92,6 +92,12 @@ pub struct Project {
     /// Timeline markers / chapter points
     #[serde(default)]
     pub markers: Vec<Marker>,
+    /// Project master audio gain applied post-mixdown in both preview and
+    /// export. Set by the Loudness Radar "Normalize to Target" action;
+    /// persisted in FCPXML (`us:master-gain-db` on `<sequence>`) and OTIO
+    /// project metadata. Default 0.0 = no-op. Clamped to ±24 dB on apply.
+    #[serde(default)]
+    pub master_gain_db: f64,
     /// Dirty flag — true if there are unsaved changes
     #[serde(skip)]
     pub dirty: bool,
@@ -161,6 +167,7 @@ impl Project {
             frame_rate: FrameRate::fps_24(),
             tracks: Vec::new(),
             markers: Vec::new(),
+            master_gain_db: 0.0,
             dirty: false,
             file_path: None,
             source_fcpxml: None,
@@ -206,6 +213,15 @@ impl Project {
     /// Total sequence duration across all tracks, in nanoseconds
     pub fn duration(&self) -> u64 {
         self.tracks.iter().map(|t| t.duration()).max().unwrap_or(0)
+    }
+
+    /// Convert `master_gain_db` to a linear volume multiplier.
+    ///
+    /// Used by both the Program Monitor preview audio path and the FFmpeg
+    /// export filter chain to apply the Loudness Radar's normalize-to-target
+    /// result uniformly.
+    pub fn master_gain_linear(&self) -> f64 {
+        10.0_f64.powf(self.master_gain_db / 20.0)
     }
 
     pub fn add_video_track(&mut self) {

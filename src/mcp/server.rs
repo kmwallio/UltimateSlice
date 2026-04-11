@@ -576,6 +576,32 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_clip_hsl_qualifier",
+            "description": "Set (or clear) an HSL Qualifier on a clip — secondary color correction that isolates pixels by hue/saturation/luminance range and applies a follow-up brightness/contrast/saturation grade only inside the matched region. Pass 'clear: true' to remove the qualifier entirely.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id":      { "type": "string",  "description": "Clip id (from list_clips)." },
+                    "clear":        { "type": "boolean", "description": "When true, clear the qualifier entirely. Default false." },
+                    "enabled":      { "type": "boolean", "description": "Whether the qualifier is active. Default true when first set." },
+                    "hue_min":      { "type": "number",  "description": "Hue range minimum in degrees (0..360). Default 0." },
+                    "hue_max":      { "type": "number",  "description": "Hue range maximum in degrees (0..360). When min > max, the range wraps around 360 (selects reds). Default 360." },
+                    "hue_softness": { "type": "number",  "description": "Hue feather band in degrees (0..60). Default 0." },
+                    "sat_min":      { "type": "number",  "description": "Saturation range minimum (0..1). Default 0." },
+                    "sat_max":      { "type": "number",  "description": "Saturation range maximum (0..1). Default 1." },
+                    "sat_softness": { "type": "number",  "description": "Saturation feather band (0..0.5). Default 0." },
+                    "lum_min":      { "type": "number",  "description": "Luminance range minimum (0..1). Default 0." },
+                    "lum_max":      { "type": "number",  "description": "Luminance range maximum (0..1). Default 1." },
+                    "lum_softness": { "type": "number",  "description": "Luminance feather band (0..0.5). Default 0." },
+                    "invert":       { "type": "boolean", "description": "Invert the matte. Default false." },
+                    "brightness":   { "type": "number",  "description": "Secondary brightness delta applied inside the matte (-1..1). Default 0." },
+                    "contrast":     { "type": "number",  "description": "Secondary contrast multiplier inside the matte (0..2). Default 1." },
+                    "saturation":   { "type": "number",  "description": "Secondary saturation multiplier inside the matte (0..2). Default 1." }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
             "name": "set_clip_chroma_key",
             "description": "Set chroma key (green/blue screen) settings for a clip by id. Makes the keyed color transparent so lower tracks show through.",
             "inputSchema": {
@@ -599,6 +625,19 @@ fn tools_list() -> Value {
                     "clip_id":   { "type": "string",  "description": "Clip id (from list_clips)." },
                     "enabled":   { "type": "boolean", "description": "Enable/disable background removal." },
                     "threshold": { "type": "number",  "description": "Alpha threshold: 0.0 (aggressive) to 1.0 (conservative). Default 0.5." }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "set_clip_motion_blur",
+            "description": "Enable motion blur for a clip's keyframed transforms or fast-speed motion. Rendered at export only via FFmpeg minterpolate+tmix; auto-skipped on static (non-keyframed, speed≈1) clips.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id":       { "type": "string",  "description": "Clip id (from list_clips)." },
+                    "enabled":       { "type": "boolean", "description": "Enable/disable motion blur." },
+                    "shutter_angle": { "type": "number",  "description": "Shutter angle in degrees, 0..720. 180 = cinematic (default); 360 = full natural blur (cheap path)." }
                 },
                 "required": ["clip_id"]
             }
@@ -729,11 +768,16 @@ fn tools_list() -> Value {
         },
         {
             "name": "export_mp4",
-            "description": "Export the current project to MP4/H.264 at the given absolute path.",
+            "description": "Export the current project to MP4/H.264 at the given absolute path. Optional advanced audio mode picks a surround channel layout.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Absolute path for the output .mp4 file." }
+                    "path": { "type": "string", "description": "Absolute path for the output .mp4 file." },
+                    "audio_channel_layout": {
+                        "type": "string",
+                        "enum": ["stereo", "surround_5_1", "surround_7_1"],
+                        "description": "Output audio channel layout. Defaults to stereo. Surround uses role-based auto-routing with an LFE bass tap."
+                    }
                 },
                 "required": ["path"]
             }
@@ -756,7 +800,12 @@ fn tools_list() -> Value {
                     "output_height": { "type": "integer", "description": "Output height, or 0 to use project height." },
                     "crf": { "type": "integer", "description": "CRF quality value (0-51)." },
                     "audio_codec": { "type": "string", "enum": ["aac", "opus", "flac", "pcm"] },
-                    "audio_bitrate_kbps": { "type": "integer", "description": "Audio bitrate in kbps." }
+                    "audio_bitrate_kbps": { "type": "integer", "description": "Audio bitrate in kbps." },
+                    "audio_channel_layout": {
+                        "type": "string",
+                        "enum": ["stereo", "surround_5_1", "surround_7_1"],
+                        "description": "Output audio channel layout. Optional; defaults to stereo."
+                    }
                 },
                 "required": ["name", "video_codec", "container", "output_width", "output_height", "crf", "audio_codec", "audio_bitrate_kbps"]
             }
@@ -1129,6 +1178,31 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_clip_voice_enhance",
+            "description": "Toggle the per-clip 'Enhance Voice' chain (high-pass, FFT denoise, mud cut, presence boost, gentle compressor). Applied before voice isolation in the audio chain. When enabled, a background ffmpeg prerender produces a sidecar mp4 that the Program Monitor swaps in for byte-identical preview/export. Strength scales every stage from subtle (0.0) to broadcast (1.0).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id (from list_clips)." },
+                    "enabled": { "type": "boolean", "description": "Whether the voice enhance chain is on for this clip." },
+                    "strength": { "type": "number", "description": "Optional strength 0.0–1.0. Omit to keep the current value (defaults to 0.5 on first enable)." }
+                },
+                "required": ["clip_id", "enabled"]
+            }
+        },
+        {
+            "name": "set_clip_subtitle_visible",
+            "description": "Toggle whether a clip's subtitles are rendered. When false, the clip's subtitles are hidden from the Program Monitor overlay, the export burn-in (ASS filter), and the SRT sidecar export — but the underlying segment data is preserved so the transcript editor and voice isolation (Subtitles source) keep working. Defaults to true.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id (from list_clips)." },
+                    "visible": { "type": "boolean", "description": "Whether subtitles are rendered for this clip." }
+                },
+                "required": ["clip_id", "visible"]
+            }
+        },
+        {
             "name": "set_voice_isolation_source",
             "description": "Choose the source of voice-isolation gate intervals. 'subtitles' uses Whisper word timings (default, requires generated subtitles). 'silence' uses ffmpeg silencedetect intervals (requires analyze_voice_isolation_silence first).",
             "inputSchema": {
@@ -1206,6 +1280,29 @@ fn tools_list() -> Value {
                     "target_level": { "type": "number", "description": "Target level in dB. For 'lufs': -14.0 (YouTube), -23.0 (broadcast). For 'peak': 0.0 or -1.0. Default -14.0." }
                 },
                 "required": ["clip_id"]
+            }
+        },
+        {
+            "name": "analyze_project_loudness",
+            "description": "Render the full timeline mixdown (all tracks, effects, crossfades, ducking, per-role submixes) to a temp file and run EBU R128 analysis on it. Returns the complete loudness report: integrated LUFS, short-term max, momentary max, LRA, true peak. Use this before `set_project_master_gain_db` to compute the delta for a broadcast-standard normalize. Blocks while ffmpeg renders + analyzes (typically 5–30 seconds depending on timeline length).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        },
+        {
+            "name": "set_project_master_gain_db",
+            "description": "Set the project-level master audio gain in dB. Applied post-mixdown in both the Program Monitor preview and the final export. Use this to normalize the entire timeline to a broadcast-standard loudness target (−23 LUFS EBU R128, −24 ATSC A/85, −27 Netflix, −16 Apple Podcasts, −14 Spotify/YouTube). Clamped to ±24 dB. Undoable. Pass 0.0 to reset.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "master_gain_db": {
+                        "type": "number",
+                        "description": "Gain in dB. Clamped to ±24 dB. Positive values boost, negative values attenuate. 0.0 = no-op (default)."
+                    }
+                },
+                "required": ["master_gain_db"]
             }
         },
         {
@@ -1608,6 +1705,22 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_clip_auto_crop_track",
+            "description": "Auto-crop and track: create a motion tracker for the given clip-local region, reframe the clip so the tracked region stays centered at the project's aspect ratio (including cross-aspect 16:9 -> 9:16 reframing), and enqueue a background tracking job that will keep the region centered over time. Reuses any existing motion tracker on the clip that matches the region; otherwise creates a new tracker.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip ID to auto-crop." },
+                    "center_x": { "type": "number", "description": "Region center X in normalized clip coordinates (0..1, where 0.5 = center)." },
+                    "center_y": { "type": "number", "description": "Region center Y in normalized clip coordinates (0..1, where 0.5 = center)." },
+                    "width": { "type": "number", "description": "Region HALF-width in normalized clip coordinates (0..0.5). Full region width = 2 * width." },
+                    "height": { "type": "number", "description": "Region HALF-height in normalized clip coordinates (0..0.5). Full region height = 2 * height." },
+                    "padding": { "type": "number", "description": "Optional extra headroom around the region as a fraction (e.g. 0.1 = 10% margin). Clamped to [0, 0.5]. Default 0.1." }
+                },
+                "required": ["clip_id", "center_x", "center_y", "width", "height"]
+            }
+        },
+        {
             "name": "batch_call_tools",
             "description": "Execute multiple MCP tool calls in-order within one request. Returns per-call success/error records.",
             "inputSchema": {
@@ -1932,6 +2045,80 @@ fn tools_list() -> Value {
                 "required": ["clip_id", "angle_index"]
             }
         },
+        // ── Audition / clip-versions tools ────────────────────────────────
+        {
+            "name": "create_audition_clip",
+            "description": "Group 2+ clips on the same track into a single audition clip. The clip at active_index becomes the active take that drives playback and export; the others are kept as nondestructive alternates.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_ids": { "type": "array", "items": { "type": "string" }, "description": "Array of clip IDs to combine into the audition (minimum 2)" },
+                    "active_index": { "type": "integer", "description": "0-based index into clip_ids of the take to make active. Default 0." }
+                },
+                "required": ["clip_ids"]
+            }
+        },
+        {
+            "name": "add_audition_take",
+            "description": "Append a new take to an existing audition clip. The new take is added at the end and is NOT made active.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "audition_clip_id": { "type": "string", "description": "ID of the audition clip" },
+                    "source_path": { "type": "string", "description": "Path to the source media file for the new take" },
+                    "source_in_ns": { "type": "integer", "description": "In point of the take in the source file (nanoseconds)" },
+                    "source_out_ns": { "type": "integer", "description": "Out point of the take in the source file (nanoseconds)" },
+                    "label": { "type": "string", "description": "Optional human-readable label for the take" }
+                },
+                "required": ["audition_clip_id", "source_path", "source_in_ns", "source_out_ns"]
+            }
+        },
+        {
+            "name": "remove_audition_take",
+            "description": "Remove a take from an audition clip by index. Refuses to remove the currently active take — switch active first if needed.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "audition_clip_id": { "type": "string", "description": "ID of the audition clip" },
+                    "take_index": { "type": "integer", "description": "0-based index of the take to remove" }
+                },
+                "required": ["audition_clip_id", "take_index"]
+            }
+        },
+        {
+            "name": "set_active_audition_take",
+            "description": "Switch the active take of an audition clip. The audition's host fields (source_path/source_in/source_out) are updated to the chosen take, so playback and export immediately reflect the new selection. Any field tweaks made while the previous take was active are snapshotted into the takes list before the swap.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "audition_clip_id": { "type": "string", "description": "ID of the audition clip" },
+                    "take_index": { "type": "integer", "description": "0-based index of the take to make active" }
+                },
+                "required": ["audition_clip_id", "take_index"]
+            }
+        },
+        {
+            "name": "list_audition_takes",
+            "description": "List all takes in an audition clip, with the active take index.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "audition_clip_id": { "type": "string", "description": "ID of the audition clip" }
+                },
+                "required": ["audition_clip_id"]
+            }
+        },
+        {
+            "name": "finalize_audition",
+            "description": "Collapse an audition clip to a normal clip referencing only its currently active take. Discards alternate takes. Undoable.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "audition_clip_id": { "type": "string", "description": "ID of the audition clip to finalize" }
+                },
+                "required": ["audition_clip_id"]
+            }
+        },
         // ── Subtitle / STT tools ──────────────────────────────────────────
         {
             "name": "generate_subtitles",
@@ -1995,6 +2182,19 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "delete_transcript_range",
+            "description": "Delete a contiguous range of words from a clip's transcript and ripple-shift downstream clips. Splits the clip at the selected word boundaries and removes the middle slice as a single undo entry. Word indices reference the clip's flattened word list (segment 0 word 0, segment 0 word 1, segment 1 word 0, ...). Use list_clips or get_clip_subtitles to discover available words.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "ID of the clip whose transcript range should be deleted" },
+                    "start_word_index": { "type": "integer", "minimum": 0, "description": "Index of the first word to delete (inclusive)" },
+                    "end_word_index": { "type": "integer", "minimum": 1, "description": "Index one past the last word to delete (exclusive)" }
+                },
+                "required": ["clip_id", "start_word_index", "end_word_index"]
+            }
+        },
+        {
             "name": "set_subtitle_style",
             "description": "Set subtitle display style for a clip (font, colors, base styles, highlight flags).",
             "inputSchema": {
@@ -2008,7 +2208,8 @@ fn tools_list() -> Value {
                     "bg_box": { "type": "boolean", "description": "Enable background box" },
                     "bg_box_color": { "type": "integer", "description": "Background box color as 0xRRGGBBAA" },
                     "highlight_mode": { "type": "string", "enum": ["none", "bold", "color", "underline", "stroke"], "description": "Legacy word highlight mode (prefer highlight flags)" },
-                    "highlight_color": { "type": "integer", "description": "Highlight color as 0xRRGGBBAA" },
+                    "highlight_color": { "type": "integer", "description": "Highlight (text-fill) color as 0xRRGGBBAA, applied when highlight_color flag is on" },
+                    "highlight_stroke_color": { "type": "integer", "description": "Highlight stroke color as 0xRRGGBBAA, applied when highlight_stroke flag is on. Independent from highlight_color so the karaoke stroke can differ from the karaoke text fill (e.g. yellow text + black stroke)." },
                     "bold": { "type": "boolean", "description": "Base style: bold for all subtitle text" },
                     "italic": { "type": "boolean", "description": "Base style: italic for all subtitle text" },
                     "underline": { "type": "boolean", "description": "Base style: underline for all subtitle text" },
@@ -2361,6 +2562,68 @@ fn dispatch_tool_payload(
             reply: tx,
         },
 
+        "set_clip_hsl_qualifier" => {
+            let clip_id = arg_str!(args, "clip_id");
+            let clear = args
+                .get("clear")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let qualifier = if clear {
+                None
+            } else {
+                let mut q = crate::model::clip::HslQualifier::default();
+                q.enabled = args
+                    .get("enabled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                if let Some(v) = args.get("hue_min").and_then(|v| v.as_f64()) {
+                    q.hue_min = v;
+                }
+                if let Some(v) = args.get("hue_max").and_then(|v| v.as_f64()) {
+                    q.hue_max = v;
+                }
+                if let Some(v) = args.get("hue_softness").and_then(|v| v.as_f64()) {
+                    q.hue_softness = v;
+                }
+                if let Some(v) = args.get("sat_min").and_then(|v| v.as_f64()) {
+                    q.sat_min = v;
+                }
+                if let Some(v) = args.get("sat_max").and_then(|v| v.as_f64()) {
+                    q.sat_max = v;
+                }
+                if let Some(v) = args.get("sat_softness").and_then(|v| v.as_f64()) {
+                    q.sat_softness = v;
+                }
+                if let Some(v) = args.get("lum_min").and_then(|v| v.as_f64()) {
+                    q.lum_min = v;
+                }
+                if let Some(v) = args.get("lum_max").and_then(|v| v.as_f64()) {
+                    q.lum_max = v;
+                }
+                if let Some(v) = args.get("lum_softness").and_then(|v| v.as_f64()) {
+                    q.lum_softness = v;
+                }
+                if let Some(v) = args.get("invert").and_then(|v| v.as_bool()) {
+                    q.invert = v;
+                }
+                if let Some(v) = args.get("brightness").and_then(|v| v.as_f64()) {
+                    q.brightness = v;
+                }
+                if let Some(v) = args.get("contrast").and_then(|v| v.as_f64()) {
+                    q.contrast = v;
+                }
+                if let Some(v) = args.get("saturation").and_then(|v| v.as_f64()) {
+                    q.saturation = v;
+                }
+                Some(q)
+            };
+            McpCommand::SetClipHslQualifier {
+                clip_id,
+                qualifier,
+                reply: tx,
+            }
+        }
+
         "set_clip_chroma_key" => McpCommand::SetClipChromaKey {
             clip_id: arg_str!(args, "clip_id"),
             enabled: args.get("enabled").and_then(|v| v.as_bool()),
@@ -2374,6 +2637,13 @@ fn dispatch_tool_payload(
             clip_id: arg_str!(args, "clip_id"),
             enabled: args.get("enabled").and_then(|v| v.as_bool()),
             threshold: args.get("threshold").and_then(|v| v.as_f64()),
+            reply: tx,
+        },
+
+        "set_clip_motion_blur" => McpCommand::SetClipMotionBlur {
+            clip_id: arg_str!(args, "clip_id"),
+            enabled: args.get("enabled").and_then(|v| v.as_bool()),
+            shutter_angle: args.get("shutter_angle").and_then(|v| v.as_f64()),
             reply: tx,
         },
 
@@ -2467,6 +2737,7 @@ fn dispatch_tool_payload(
 
         "export_mp4" => McpCommand::ExportMp4 {
             path: arg_str!(args, "path"),
+            audio_channel_layout: arg_str!(args, "audio_channel_layout", "stereo"),
             reply: tx,
         },
 
@@ -2481,6 +2752,7 @@ fn dispatch_tool_payload(
             crf: arg_u64!(args, "crf", 23) as u32,
             audio_codec: arg_str!(args, "audio_codec", "aac"),
             audio_bitrate_kbps: arg_u64!(args, "audio_bitrate_kbps", 192) as u32,
+            audio_channel_layout: arg_str!(args, "audio_channel_layout", "stereo"),
             reply: tx,
         },
 
@@ -2870,6 +3142,23 @@ fn dispatch_tool_payload(
             voice_isolation: arg_f64!(args, "voice_isolation", 0.0),
             reply: tx,
         },
+        "set_clip_voice_enhance" => McpCommand::SetClipVoiceEnhance {
+            clip_id: arg_str!(args, "clip_id"),
+            enabled: args
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            strength: args.get("strength").and_then(|v| v.as_f64()),
+            reply: tx,
+        },
+        "set_clip_subtitle_visible" => McpCommand::SetClipSubtitleVisible {
+            clip_id: arg_str!(args, "clip_id"),
+            visible: args
+                .get("visible")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            reply: tx,
+        },
         "set_voice_isolation_source" => McpCommand::SetVoiceIsolationSource {
             clip_id: arg_str!(args, "clip_id"),
             source: arg_str!(args, "source", "subtitles"),
@@ -2916,6 +3205,14 @@ fn dispatch_tool_payload(
                 .get("target_level")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(-14.0),
+            reply: tx,
+        },
+        "analyze_project_loudness" => McpCommand::AnalyzeProjectLoudness { reply: tx },
+        "set_project_master_gain_db" => McpCommand::SetProjectMasterGainDb {
+            master_gain_db: args
+                .get("master_gain_db")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0),
             reply: tx,
         },
         "match_clip_audio" => McpCommand::MatchClipAudio {
@@ -3133,6 +3430,27 @@ fn dispatch_tool_payload(
                 .unwrap_or(0.5),
             reply: tx,
         },
+        "set_clip_auto_crop_track" => McpCommand::SetClipAutoCropTrack {
+            clip_id: arg_str!(args, "clip_id"),
+            center_x: args
+                .get("center_x")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.5),
+            center_y: args
+                .get("center_y")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.5),
+            width: args
+                .get("width")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.25),
+            height: args
+                .get("height")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.25),
+            padding: args.get("padding").and_then(|v| v.as_f64()),
+            reply: tx,
+        },
         "sync_clips_by_audio" => McpCommand::SyncClipsByAudio {
             clip_ids: args["clip_ids"]
                 .as_array()
@@ -3321,6 +3639,48 @@ fn dispatch_tool_payload(
             muted: args["muted"].as_bool(),
             reply: tx,
         },
+        // ── Audition / clip-versions tools ────────────────────────────────
+        "create_audition_clip" => {
+            let clip_ids: Vec<String> = args["clip_ids"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            McpCommand::CreateAuditionClip {
+                clip_ids,
+                active_index: arg_u64!(args, "active_index", 0) as usize,
+                reply: tx,
+            }
+        }
+        "add_audition_take" => McpCommand::AddAuditionTake {
+            audition_clip_id: arg_str!(args, "audition_clip_id"),
+            source_path: arg_str!(args, "source_path"),
+            source_in_ns: arg_u64!(args, "source_in_ns", 0),
+            source_out_ns: arg_u64!(args, "source_out_ns", 0),
+            label: args["label"].as_str().map(String::from),
+            reply: tx,
+        },
+        "remove_audition_take" => McpCommand::RemoveAuditionTake {
+            audition_clip_id: arg_str!(args, "audition_clip_id"),
+            take_index: arg_u64!(args, "take_index", 0) as usize,
+            reply: tx,
+        },
+        "set_active_audition_take" => McpCommand::SetActiveAuditionTake {
+            audition_clip_id: arg_str!(args, "audition_clip_id"),
+            take_index: arg_u64!(args, "take_index", 0) as usize,
+            reply: tx,
+        },
+        "list_audition_takes" => McpCommand::ListAuditionTakes {
+            audition_clip_id: arg_str!(args, "audition_clip_id"),
+            reply: tx,
+        },
+        "finalize_audition" => McpCommand::FinalizeAudition {
+            audition_clip_id: arg_str!(args, "audition_clip_id"),
+            reply: tx,
+        },
         // ── Subtitle / STT tools ──────────────────────────────────────────
         "generate_subtitles" => McpCommand::GenerateSubtitles {
             clip_id: arg_str!(args, "clip_id"),
@@ -3348,6 +3708,12 @@ fn dispatch_tool_payload(
             clip_id: arg_str!(args, "clip_id"),
             reply: tx,
         },
+        "delete_transcript_range" => McpCommand::DeleteTranscriptRange {
+            clip_id: arg_str!(args, "clip_id"),
+            start_word_index: args["start_word_index"].as_u64().unwrap_or(0) as u32,
+            end_word_index: args["end_word_index"].as_u64().unwrap_or(0) as u32,
+            reply: tx,
+        },
         "set_subtitle_style" => McpCommand::SetSubtitleStyle {
             clip_id: arg_str!(args, "clip_id"),
             font: args["font"].as_str().map(String::from),
@@ -3370,6 +3736,9 @@ fn dispatch_tool_payload(
             highlight_background: args["highlight_background"].as_bool(),
             highlight_shadow: args["highlight_shadow"].as_bool(),
             bg_highlight_color: args["bg_highlight_color"].as_u64().map(|v| v as u32),
+            highlight_stroke_color: args["highlight_stroke_color"]
+                .as_u64()
+                .map(|v| v as u32),
             reply: tx,
         },
         "export_srt" => McpCommand::ExportSrt {

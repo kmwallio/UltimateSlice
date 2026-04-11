@@ -32,13 +32,17 @@ pub fn parse_otio_with_path(json: &str, otio_path: Option<&Path>) -> Result<Proj
         .unwrap_or(24.0);
     let frame_rate = rate_to_frame_rate(rate);
 
-    // -- Resolution from metadata -------------------------------------------
+    // -- Resolution + master gain from metadata -----------------------------
     let (width, height) = extract_resolution(&timeline.metadata);
+    let us_project = project_metadata_from_root(&timeline.metadata).unwrap_or_default();
 
     let mut project = Project::new(&timeline.name);
     project.width = width;
     project.height = height;
     project.frame_rate = frame_rate;
+    if let Some(gain) = us_project.master_gain_db {
+        project.master_gain_db = gain;
+    }
     // Clear default tracks that Project::new creates.
     project.tracks.clear();
 
@@ -76,6 +80,10 @@ pub fn parse_otio_with_path(json: &str, otio_path: Option<&Path>) -> Result<Proj
             }
             if let Some(db) = us.duck_amount_db {
                 track.duck_amount_db = db;
+            }
+            if let Some(pos) = us.surround_position.as_deref() {
+                track.surround_position =
+                    crate::model::track::SurroundPositionOverride::from_str(pos);
             }
         }
 
@@ -217,6 +225,12 @@ fn otio_clip_to_clip(
         if let Some(v) = us.match_eq_bands.clone() {
             clip.match_eq_bands = v;
         }
+        if let Some(v) = us.voice_enhance {
+            clip.voice_enhance = v;
+        }
+        if let Some(v) = us.voice_enhance_strength {
+            clip.voice_enhance_strength = v as f32;
+        }
         if let Some(v) = us.voice_isolation {
             clip.voice_isolation = v as f32;
         }
@@ -274,6 +288,12 @@ fn otio_clip_to_clip(
         if let Some(v) = us.vidstab_smoothing {
             clip.vidstab_smoothing = v as f32;
         }
+        if let Some(v) = us.motion_blur_enabled {
+            clip.motion_blur_enabled = v;
+        }
+        if let Some(v) = us.motion_blur_shutter_angle {
+            clip.motion_blur_shutter_angle = v;
+        }
         if let Some(v) = us.color_label {
             clip.color_label = v;
         }
@@ -315,6 +335,12 @@ fn otio_clip_to_clip(
         }
         if let Some(v) = us.multicam_switches.as_ref() {
             clip.multicam_switches = Some(v.clone());
+        }
+        if let Some(v) = us.audition_takes.as_ref() {
+            clip.audition_takes = Some(v.clone());
+        }
+        if let Some(v) = us.audition_active_take_index {
+            clip.audition_active_take_index = v;
         }
         if let Some(v) = us.brightness {
             clip.brightness = v as f32;
@@ -372,6 +398,9 @@ fn otio_clip_to_clip(
         }
         if let Some(v) = us.shadows_tint {
             clip.shadows_tint = v as f32;
+        }
+        if let Some(q) = us.hsl_qualifier.as_ref() {
+            clip.hsl_qualifier = Some(q.clone());
         }
         if let Some(v) = us.pitch_shift_semitones {
             clip.pitch_shift_semitones = v;
@@ -559,6 +588,9 @@ fn otio_clip_to_clip(
         if let Some(v) = us.subtitle_shadow {
             clip.subtitle_shadow = v;
         }
+        if let Some(v) = us.subtitle_visible {
+            clip.subtitle_visible = v;
+        }
         if let Some(v) = us.subtitle_shadow_color {
             clip.subtitle_shadow_color = v;
         }
@@ -594,6 +626,9 @@ fn otio_clip_to_clip(
         }
         if let Some(v) = us.subtitle_highlight_color {
             clip.subtitle_highlight_color = v;
+        }
+        if let Some(v) = us.subtitle_highlight_stroke_color {
+            clip.subtitle_highlight_stroke_color = v;
         }
         if let Some(v) = us.subtitle_word_window_secs {
             clip.subtitle_word_window_secs = v;
@@ -731,6 +766,7 @@ fn parse_clip_kind(s: &str) -> Option<ClipKind> {
         "Adjustment" => Some(ClipKind::Adjustment),
         "Compound" => Some(ClipKind::Compound),
         "Multicam" => Some(ClipKind::Multicam),
+        "Audition" => Some(ClipKind::Audition),
         _ => None,
     }
 }
@@ -1372,6 +1408,10 @@ mod tests {
             ClipKind::Video,
         );
 
+        // Voice enhance (one-knob FFmpeg chain)
+        clip.voice_enhance = true;
+        clip.voice_enhance_strength = 0.75;
+
         // Voice isolation (6 fields + base)
         clip.voice_isolation = 0.6;
         clip.voice_isolation_pad_ms = 120.0;
@@ -1401,6 +1441,10 @@ mod tests {
         clip.vidstab_enabled = true;
         clip.vidstab_smoothing = 0.7;
 
+        // Motion blur (export-only, gated on motion at runtime)
+        clip.motion_blur_enabled = true;
+        clip.motion_blur_shutter_angle = 270.0;
+
         // Misc
         clip.color_label = ClipColorLabel::Teal;
         clip.anamorphic_desqueeze = 1.33;
@@ -1415,6 +1459,10 @@ mod tests {
         let json = crate::otio::writer::write_otio(&p).unwrap();
         let p2 = parse_otio(&json).unwrap();
         let clip2 = &p2.tracks[0].clips[0];
+
+        // Voice enhance
+        assert_eq!(clip2.voice_enhance, clip.voice_enhance);
+        assert_eq!(clip2.voice_enhance_strength, clip.voice_enhance_strength);
 
         // Voice isolation
         assert_eq!(clip2.voice_isolation, clip.voice_isolation);
@@ -1454,6 +1502,12 @@ mod tests {
         assert_eq!(clip2.vidstab_enabled, clip.vidstab_enabled);
         assert_eq!(clip2.vidstab_smoothing, clip.vidstab_smoothing);
 
+        // Motion blur
+        assert_eq!(clip2.motion_blur_enabled, clip.motion_blur_enabled);
+        assert!(
+            (clip2.motion_blur_shutter_angle - clip.motion_blur_shutter_angle).abs() < 1e-9
+        );
+
         // Misc
         assert_eq!(clip2.color_label, clip.color_label);
         assert_eq!(clip2.anamorphic_desqueeze, clip.anamorphic_desqueeze);
@@ -1490,6 +1544,7 @@ mod tests {
         clip.subtitle_italic = true;
         clip.subtitle_underline = false;
         clip.subtitle_shadow = true;
+        clip.subtitle_visible = false;
         clip.subtitle_shadow_color = 0x000000CC;
         clip.subtitle_shadow_offset_x = 2.5;
         clip.subtitle_shadow_offset_y = 3.0;
@@ -1515,6 +1570,7 @@ mod tests {
         assert_eq!(clip2.subtitle_italic, clip.subtitle_italic);
         assert_eq!(clip2.subtitle_underline, clip.subtitle_underline);
         assert_eq!(clip2.subtitle_shadow, clip.subtitle_shadow);
+        assert_eq!(clip2.subtitle_visible, clip.subtitle_visible);
         assert_eq!(clip2.subtitle_shadow_color, clip.subtitle_shadow_color);
         assert_eq!(
             clip2.subtitle_shadow_offset_x,
@@ -1694,6 +1750,63 @@ mod tests {
         assert_eq!(switches[1].position_ns, 3_000_000_000);
         assert_eq!(switches[1].angle_index, 1);
         assert_eq!(switches[2].position_ns, 6_000_000_000);
+    }
+
+    #[test]
+    fn test_roundtrip_audition_clip_preserves_takes_and_active_index() {
+        use crate::model::clip::AuditionTake;
+        use crate::model::track::Track;
+
+        let mut p = Project::new("Audition OTIO Roundtrip");
+        p.frame_rate = FrameRate {
+            numerator: 30,
+            denominator: 1,
+        };
+        p.tracks.clear();
+
+        let mut track = Track::new_video("V1");
+        let takes = vec![
+            AuditionTake {
+                id: "take-wide".into(),
+                label: "Wide".into(),
+                source_path: "/footage/wide.mov".into(),
+                source_in: 0,
+                source_out: 5_000_000_000,
+                source_timecode_base_ns: None,
+                media_duration_ns: Some(10_000_000_000),
+            },
+            AuditionTake {
+                id: "take-close".into(),
+                label: "Close".into(),
+                source_path: "/footage/close.mov".into(),
+                source_in: 250_000_000,
+                source_out: 3_750_000_000,
+                source_timecode_base_ns: Some(86_400_000_000_000),
+                media_duration_ns: Some(7_500_000_000),
+            },
+        ];
+        let aud = Clip::new_audition(0, takes, 1);
+        track.add_clip(aud);
+        p.tracks.push(track);
+
+        let json = crate::otio::writer::write_otio(&p).unwrap();
+        let p2 = parse_otio(&json).unwrap();
+        assert_eq!(p2.tracks[0].clips.len(), 1, "audition clip should round-trip");
+        let clip2 = &p2.tracks[0].clips[0];
+        assert_eq!(clip2.kind, ClipKind::Audition);
+        assert_eq!(clip2.audition_active_take_index, 1);
+        let takes = clip2
+            .audition_takes
+            .as_ref()
+            .expect("audition_takes should round-trip");
+        assert_eq!(takes.len(), 2);
+        assert_eq!(takes[0].label, "Wide");
+        assert_eq!(takes[1].label, "Close");
+        assert_eq!(takes[1].source_timecode_base_ns, Some(86_400_000_000_000));
+        // Host fields mirror the active (Close) take.
+        assert_eq!(clip2.source_path, "/footage/close.mov");
+        assert_eq!(clip2.source_in, 250_000_000);
+        assert_eq!(clip2.source_out, 3_750_000_000);
     }
 
     #[test]

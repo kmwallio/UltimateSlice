@@ -334,6 +334,7 @@ pub fn non_file_clip_kind_text(kind: &ClipKind) -> &'static str {
         ClipKind::Adjustment => "Adjustment layer",
         ClipKind::Compound => "Compound clip",
         ClipKind::Multicam => "Multicam clip",
+        ClipKind::Audition => "Audition clip",
         ClipKind::Video => "Generated video clip",
         ClipKind::Audio => "Generated audio clip",
         ClipKind::Image => "Generated image clip",

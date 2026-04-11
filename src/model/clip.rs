@@ -225,6 +225,27 @@ pub enum ClipKind {
     Adjustment,
     Compound,
     Multicam,
+    /// A nondestructive container of alternate takes. The host clip's
+    /// `source_path`/`source_in`/`source_out`/`media_duration_ns`/
+    /// `source_timecode_base_ns` always reflect the **active** take, so
+    /// playback/export see a normal clip. Inactive takes live in
+    /// [`Clip::audition_takes`].
+    Audition,
+}
+
+/// A single alternate take inside an [`ClipKind::Audition`] clip.
+///
+/// Mirrors [`MulticamAngle`] but without the multicam-specific sync/audio
+/// fields, since auditions only present one take at a time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AuditionTake {
+    pub id: String,
+    pub label: String,
+    pub source_path: String,
+    pub source_in: u64,
+    pub source_out: u64,
+    pub source_timecode_base_ns: Option<u64>,
+    pub media_duration_ns: Option<u64>,
 }
 
 /// A single camera angle in a multicam clip.
@@ -730,6 +751,12 @@ fn default_vi_silence_min_ms() -> u32 {
 fn default_vidstab_smoothing() -> f32 {
     0.5
 }
+fn default_voice_enhance_strength() -> f32 {
+    0.5
+}
+fn default_motion_blur_shutter_angle() -> f64 {
+    180.0
+}
 fn default_speed() -> f64 {
     1.0
 }
@@ -1202,6 +1229,112 @@ impl ClipMask {
         self.tracking_binding.is_some()
     }
 }
+
+/// HSL Qualifier (Phase 1): secondary color correction that isolates a pixel
+/// range by Hue/Saturation/Luminance and applies a follow-up grade only inside
+/// the matched region. A single qualifier per clip for now — Phase 2 can promote
+/// to `Vec<HslQualifier>`.
+///
+/// * `hue_*` are in degrees (0..360). When `hue_min > hue_max`, the range wraps
+///   around 360 (useful for reds that straddle 0°).
+/// * `sat_*` and `lum_*` are normalized (0..1).
+/// * `*_softness` widens the smoothstep transition on both sides of each range
+///   edge (0..0.5 typical).
+/// * `view_mask` is a preview-only debug aid and is never persisted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HslQualifier {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    #[serde(default)]
+    pub hue_min: f64,
+    #[serde(default = "default_hue_max")]
+    pub hue_max: f64,
+    #[serde(default)]
+    pub hue_softness: f64,
+
+    #[serde(default)]
+    pub sat_min: f64,
+    #[serde(default = "one_f64")]
+    pub sat_max: f64,
+    #[serde(default)]
+    pub sat_softness: f64,
+
+    #[serde(default)]
+    pub lum_min: f64,
+    #[serde(default = "one_f64")]
+    pub lum_max: f64,
+    #[serde(default)]
+    pub lum_softness: f64,
+
+    #[serde(default)]
+    pub invert: bool,
+
+    /// Debug-only preview flag — never serialized.
+    #[serde(default, skip_serializing)]
+    pub view_mask: bool,
+
+    /// Brightness delta applied to matched pixels (-1.0..+1.0, 0 = neutral).
+    #[serde(default)]
+    pub brightness: f64,
+    /// Contrast multiplier applied to matched pixels (0.0..+2.0, 1 = neutral).
+    #[serde(default = "one_f64")]
+    pub contrast: f64,
+    /// Saturation multiplier applied to matched pixels (0.0..+2.0, 1 = neutral).
+    #[serde(default = "one_f64")]
+    pub saturation: f64,
+}
+
+fn default_hue_max() -> f64 {
+    360.0
+}
+fn one_f64() -> f64 {
+    1.0
+}
+
+impl Default for HslQualifier {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            hue_min: 0.0,
+            hue_max: 360.0,
+            hue_softness: 0.0,
+            sat_min: 0.0,
+            sat_max: 1.0,
+            sat_softness: 0.0,
+            lum_min: 0.0,
+            lum_max: 1.0,
+            lum_softness: 0.0,
+            invert: false,
+            view_mask: false,
+            brightness: 0.0,
+            contrast: 1.0,
+            saturation: 1.0,
+        }
+    }
+}
+
+impl HslQualifier {
+    /// Returns `true` when this qualifier has no observable effect and can be
+    /// skipped entirely (disabled, or full open range + neutral secondary grade
+    /// and not in view-mask debug mode).
+    pub fn is_neutral(&self) -> bool {
+        if !self.enabled {
+            return true;
+        }
+        if self.view_mask {
+            return false;
+        }
+        let grade_neutral = self.brightness.abs() < 1e-6
+            && (self.contrast - 1.0).abs() < 1e-6
+            && (self.saturation - 1.0).abs() < 1e-6;
+        let full_hue = self.hue_min <= 0.0 + 1e-6 && self.hue_max >= 360.0 - 1e-6;
+        let full_sat = self.sat_min <= 1e-6 && self.sat_max >= 1.0 - 1e-6;
+        let full_lum = self.lum_min <= 1e-6 && self.lum_max >= 1.0 - 1e-6;
+        grade_neutral && full_hue && full_sat && full_lum && !self.invert
+    }
+}
+
 fn default_bg_removal_threshold() -> f64 {
     0.5
 }
@@ -1413,6 +1546,18 @@ pub struct Clip {
     /// Audio volume multiplier: 0.0 (silent) to 2.0 (double), default 1.0
     #[serde(default = "default_volume")]
     pub volume: f32,
+    /// One-knob "Enhance Voice" toggle. When true, runs a fixed FFmpeg
+    /// chain (HPF + denoise + presence EQ + gentle compressor) on this
+    /// clip's audio at export time, applied BEFORE voice isolation so
+    /// the ducking decision sees a cleaner signal.
+    /// Realtime preview is not affected (Phase 1 is export-only).
+    #[serde(default)]
+    pub voice_enhance: bool,
+    /// Strength of the voice-enhance chain, 0.0..=1.0. Scales the
+    /// noise-reduction depth, presence boost gain, and compressor
+    /// ratio/makeup. 0.0 = subtle, 1.0 = aggressive. Default 0.5.
+    #[serde(default = "default_voice_enhance_strength")]
+    pub voice_enhance_strength: f32,
     /// Voice Isolation (Smart Noise Gating via Whisper timings): 0.0 (off) to 1.0 (full ducking)
     #[serde(default)]
     pub voice_isolation: f32,
@@ -1523,6 +1668,14 @@ pub struct Clip {
     pub flip_h: bool,
     #[serde(default)]
     pub flip_v: bool,
+    /// When true, render motion blur for keyframed-transform / fast-speed
+    /// motion at export and via background prerender. No effect in live
+    /// GStreamer preview (mirrors the vidstab pattern).
+    #[serde(default)]
+    pub motion_blur_enabled: bool,
+    /// Shutter angle in degrees, 0..=720. Default 180.0 (cinematic).
+    #[serde(default = "default_motion_blur_shutter_angle")]
+    pub motion_blur_shutter_angle: f64,
     // Title / text overlay
     #[serde(default)]
     pub title_text: String,
@@ -1709,6 +1862,9 @@ pub struct Clip {
     /// Shape masks applied to this clip (empty = no mask).
     #[serde(default)]
     pub masks: Vec<ClipMask>,
+    /// Optional HSL Qualifier (secondary color correction).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hsl_qualifier: Option<HslQualifier>,
     /// Motion trackers authored on this source clip.
     #[serde(default)]
     pub motion_trackers: Vec<MotionTracker>,
@@ -1737,6 +1893,14 @@ pub struct Clip {
     /// Base style: draw a shadow behind all subtitle text.
     #[serde(default)]
     pub subtitle_shadow: bool,
+    /// When false, subtitles for this clip are NOT rendered in the
+    /// Program Monitor overlay, NOT burned into exports, and NOT
+    /// included in sidecar SRT export. Segment data is preserved so
+    /// the transcript editor and voice isolation (when its source is
+    /// `Subtitles`) continue to work normally. Defaults to `true` for
+    /// backward compatibility with pre-existing projects.
+    #[serde(default = "default_true")]
+    pub subtitle_visible: bool,
     /// Shadow color (0xRRGGBBAA). Default: 0x000000AA (black, ~67% opaque).
     #[serde(default = "default_subtitle_shadow_color")]
     pub subtitle_shadow_color: u32,
@@ -1764,9 +1928,19 @@ pub struct Clip {
     /// Word-level highlight mode for karaoke-style rendering.
     #[serde(default)]
     pub subtitle_highlight_mode: SubtitleHighlightMode,
-    /// Highlight color for the active word (0xRRGGBBAA).
+    /// Highlight color for the active word (0xRRGGBBAA). Used by the
+    /// `color` flag and as the default for the stroke flag when
+    /// `subtitle_highlight_stroke_color` is left at its sentinel.
     #[serde(default = "default_subtitle_highlight_color")]
     pub subtitle_highlight_color: u32,
+    /// Independent stroke colour for the active-word stroke highlight
+    /// (0xRRGGBBAA). Defaults to `default_subtitle_highlight_color()` so
+    /// pre-existing projects keep behaving exactly as they did before
+    /// this field was introduced — both fill and stroke shared a single
+    /// colour. Set explicitly to give the karaoke stroke a different
+    /// colour from the karaoke text fill.
+    #[serde(default = "default_subtitle_highlight_color")]
+    pub subtitle_highlight_stroke_color: u32,
     /// Multi-effect highlight flags (replaces single-mode enum for new projects).
     #[serde(default)]
     pub subtitle_highlight_flags: SubtitleHighlightFlags,
@@ -1810,6 +1984,17 @@ pub struct Clip {
     /// Angle switch points for multicam clips, sorted by `position_ns`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multicam_switches: Option<Vec<AngleSwitch>>,
+    /// Alternate takes for [`ClipKind::Audition`] clips. The host clip's
+    /// `source_path`/`source_in`/`source_out`/`media_duration_ns`/
+    /// `source_timecode_base_ns` always reflect the active take, so this
+    /// vector stores **all** takes (including a snapshot of the currently
+    /// active one). `None` for all other clip kinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audition_takes: Option<Vec<AuditionTake>>,
+    /// Index into `audition_takes` of the currently active take. Only
+    /// meaningful when `kind == ClipKind::Audition`.
+    #[serde(default)]
+    pub audition_active_take_index: usize,
 }
 
 fn default_anamorphic_desqueeze() -> f64 {
@@ -2091,6 +2276,8 @@ impl Clip {
             vidstab_enabled: false,
             vidstab_smoothing: default_vidstab_smoothing(),
             volume: 1.0,
+            voice_enhance: false,
+            voice_enhance_strength: default_voice_enhance_strength(),
             voice_isolation: 0.0,
             voice_isolation_pad_ms: default_voice_iso_pad_ms(),
             voice_isolation_fade_ms: default_voice_iso_fade_ms(),
@@ -2126,6 +2313,8 @@ impl Clip {
             rotate: 0,
             flip_h: false,
             flip_v: false,
+            motion_blur_enabled: false,
+            motion_blur_shutter_angle: default_motion_blur_shutter_angle(),
             title_text: String::new(),
             title_font: default_title_font(),
             title_color: default_title_color(),
@@ -2183,6 +2372,7 @@ impl Clip {
             frei0r_effects: Vec::new(),
             ladspa_effects: Vec::new(),
             masks: Vec::new(),
+            hsl_qualifier: None,
             motion_trackers: Vec::new(),
             tracking_binding: None,
             subtitle_segments: Vec::new(),
@@ -2192,6 +2382,7 @@ impl Clip {
             subtitle_italic: false,
             subtitle_underline: false,
             subtitle_shadow: false,
+            subtitle_visible: true,
             subtitle_shadow_color: default_subtitle_shadow_color(),
             subtitle_shadow_offset_x: default_subtitle_shadow_offset(),
             subtitle_shadow_offset_y: default_subtitle_shadow_offset(),
@@ -2202,6 +2393,7 @@ impl Clip {
             subtitle_bg_box_color: default_subtitle_bg_box_color(),
             subtitle_highlight_mode: SubtitleHighlightMode::None,
             subtitle_highlight_color: default_subtitle_highlight_color(),
+            subtitle_highlight_stroke_color: default_subtitle_highlight_color(),
             subtitle_highlight_flags: SubtitleHighlightFlags::default(),
             subtitle_bg_highlight_color: default_subtitle_bg_highlight_color(),
             subtitle_word_window_secs: default_subtitle_word_window_secs(),
@@ -2216,6 +2408,8 @@ impl Clip {
             compound_tracks: None,
             multicam_angles: None,
             multicam_switches: None,
+            audition_takes: None,
+            audition_active_take_index: 0,
         }
     }
 
@@ -2244,6 +2438,30 @@ impl Clip {
     /// Returns `true` when this clip is a compound (nested timeline) clip.
     pub fn is_compound(&self) -> bool {
         self.kind == ClipKind::Compound
+    }
+
+    /// Returns `true` when this clip has any keyframe lane that affects
+    /// per-frame geometry (position, scale, rotation, or crop edges).
+    /// Used to gate motion-blur application and other animation-aware paths.
+    pub fn has_animated_transform(&self) -> bool {
+        !self.scale_keyframes.is_empty()
+            || !self.position_x_keyframes.is_empty()
+            || !self.position_y_keyframes.is_empty()
+            || !self.rotate_keyframes.is_empty()
+            || !self.crop_left_keyframes.is_empty()
+            || !self.crop_right_keyframes.is_empty()
+            || !self.crop_top_keyframes.is_empty()
+            || !self.crop_bottom_keyframes.is_empty()
+    }
+
+    /// Returns `true` when motion blur should actually be rendered for this
+    /// clip — the user enabled it, the shutter angle is non-trivial, and the
+    /// clip has per-frame motion (animated transform or speed > 1.0). Returns
+    /// `false` for static clips so the toggle is a free no-op.
+    pub fn motion_blur_active(&self) -> bool {
+        self.motion_blur_enabled
+            && self.motion_blur_shutter_angle > 0.5
+            && (self.has_animated_transform() || self.speed > 1.001)
     }
 
     /// Compute the duration of the compound clip's internal timeline.
@@ -2392,6 +2610,205 @@ impl Clip {
             }
         }
         segments
+    }
+
+    // ─── Audition / clip-versions helpers ────────────────────────────────
+
+    /// Returns `true` when this clip is an audition clip.
+    pub fn is_audition(&self) -> bool {
+        self.kind == ClipKind::Audition
+    }
+
+    /// Build a fresh `AuditionTake` snapshot from the current host clip
+    /// fields (used when we need to round-trip the active take back into
+    /// the takes vector before swapping in a new take).
+    fn audition_take_from_host(&self, id: String, label: String) -> AuditionTake {
+        AuditionTake {
+            id,
+            label,
+            source_path: self.source_path.clone(),
+            source_in: self.source_in,
+            source_out: self.source_out,
+            source_timecode_base_ns: self.source_timecode_base_ns,
+            media_duration_ns: self.media_duration_ns,
+        }
+    }
+
+    /// Apply a take's source fields to the host clip (no length adjustment).
+    fn audition_apply_take_to_host(&mut self, take: &AuditionTake) {
+        self.source_path = take.source_path.clone();
+        self.source_in = take.source_in;
+        self.source_out = take.source_out;
+        self.source_timecode_base_ns = take.source_timecode_base_ns;
+        self.media_duration_ns = take.media_duration_ns;
+    }
+
+    /// Create a new audition clip from a list of candidate takes. The
+    /// `active` index designates which take's fields populate the host
+    /// clip (and therefore drive playback/export). Duration follows the
+    /// active take's source range.
+    pub fn new_audition(
+        timeline_start: u64,
+        takes: Vec<AuditionTake>,
+        active: usize,
+    ) -> Self {
+        let active = active.min(takes.len().saturating_sub(1));
+        let active_take = takes
+            .get(active)
+            .cloned()
+            .unwrap_or_else(|| AuditionTake {
+                id: String::new(),
+                label: String::new(),
+                source_path: String::new(),
+                source_in: 0,
+                source_out: 0,
+                source_timecode_base_ns: None,
+                media_duration_ns: None,
+            });
+        let duration = active_take
+            .source_out
+            .saturating_sub(active_take.source_in);
+        let mut c = Self::new(
+            &active_take.source_path,
+            duration,
+            timeline_start,
+            ClipKind::Audition,
+        );
+        c.label = if active_take.label.is_empty() {
+            "Audition".to_string()
+        } else {
+            format!("Audition · {}", active_take.label)
+        };
+        c.source_in = active_take.source_in;
+        c.source_out = active_take.source_out;
+        c.source_timecode_base_ns = active_take.source_timecode_base_ns;
+        c.media_duration_ns = active_take.media_duration_ns;
+        c.audition_takes = Some(takes);
+        c.audition_active_take_index = active;
+        c
+    }
+
+    /// Switch the active audition take. Returns the previous active index
+    /// on success (so undo can restore it), or `None` if the clip is not
+    /// an audition or the index is out of range. The currently-active take
+    /// is snapshotted from the host fields back into the takes vector
+    /// before the new take is loaded, so any field tweaks the user made
+    /// while that take was active are preserved.
+    pub fn set_active_audition_take(&mut self, new_index: usize) -> Option<usize> {
+        if self.kind != ClipKind::Audition {
+            return None;
+        }
+        let prev_index = self.audition_active_take_index;
+        let takes = self.audition_takes.as_mut()?;
+        if new_index >= takes.len() {
+            return None;
+        }
+        if new_index == prev_index {
+            return Some(prev_index);
+        }
+        // Snapshot current host fields back into the previously active take.
+        if let Some(slot) = takes.get_mut(prev_index) {
+            slot.source_path = self.source_path.clone();
+            slot.source_in = self.source_in;
+            slot.source_out = self.source_out;
+            slot.source_timecode_base_ns = self.source_timecode_base_ns;
+            slot.media_duration_ns = self.media_duration_ns;
+        }
+        // Pull the new active take. The clip's `duration()` is derived from
+        // `source_out - source_in` (modulated by speed), so swapping the
+        // source range here naturally resizes the clip on the timeline.
+        let new_take = takes.get(new_index).cloned()?;
+        self.audition_apply_take_to_host(&new_take);
+        self.audition_active_take_index = new_index;
+        // Refresh display label.
+        let suffix = if new_take.label.is_empty() {
+            String::new()
+        } else {
+            format!(" · {}", new_take.label)
+        };
+        self.label = format!("Audition{}", suffix);
+        Some(prev_index)
+    }
+
+    /// Borrow the currently active audition take.
+    pub fn audition_active_take(&self) -> Option<&AuditionTake> {
+        self.audition_takes
+            .as_ref()
+            .and_then(|t| t.get(self.audition_active_take_index))
+    }
+
+    /// Append a new take to an audition clip. No-op if the clip is not an
+    /// audition.
+    pub fn add_audition_take(&mut self, take: AuditionTake) {
+        if self.kind != ClipKind::Audition {
+            return;
+        }
+        self.audition_takes
+            .get_or_insert_with(Vec::new)
+            .push(take);
+    }
+
+    /// Remove an audition take by index. Refuses to remove the currently
+    /// active take (returns `None` in that case). Returns the removed take
+    /// on success, so undo can reinsert it.
+    pub fn remove_audition_take(&mut self, index: usize) -> Option<AuditionTake> {
+        if self.kind != ClipKind::Audition {
+            return None;
+        }
+        if index == self.audition_active_take_index {
+            return None;
+        }
+        let takes = self.audition_takes.as_mut()?;
+        if index >= takes.len() {
+            return None;
+        }
+        let removed = takes.remove(index);
+        if index < self.audition_active_take_index {
+            self.audition_active_take_index -= 1;
+        }
+        Some(removed)
+    }
+
+    /// Collapse an audition clip to a plain clip of the active take. Drops
+    /// the takes vector. Picks an appropriate `ClipKind` for the new clip
+    /// based on the active take's file extension. No-op if the clip is not
+    /// an audition.
+    pub fn finalize_audition(&mut self) {
+        if self.kind != ClipKind::Audition {
+            return;
+        }
+        self.audition_takes = None;
+        self.audition_active_take_index = 0;
+        // Promote to the most appropriate concrete kind based on the
+        // already-mirrored host source path.
+        self.kind = Self::detect_kind_from_path(&self.source_path);
+        // Strip the "Audition · " label prefix if present so the finalized
+        // clip looks like a normal clip.
+        if let Some(rest) = self.label.strip_prefix("Audition · ") {
+            self.label = rest.to_string();
+        } else if self.label == "Audition" {
+            self.label = std::path::Path::new(&self.source_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "Clip".to_string());
+        }
+    }
+
+    /// Detect a sensible `ClipKind` from a file extension. Used by audition
+    /// finalization to pick the right concrete kind. Falls back to `Video`.
+    pub fn detect_kind_from_path(path: &str) -> ClipKind {
+        let ext = std::path::Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .unwrap_or_default();
+        match ext.as_str() {
+            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "tif" | "tiff" | "webp" | "heic"
+            | "svg" => ClipKind::Image,
+            "wav" | "mp3" | "aac" | "flac" | "ogg" | "m4a" | "opus" => ClipKind::Audio,
+            _ => ClipKind::Video,
+        }
     }
 
     /// Raw source material duration (source_out − source_in), unaffected by speed.
@@ -5115,5 +5532,177 @@ mod tests {
         assert_eq!(clip.source_out, 10_000_000_000);
         assert_eq!(clip.scale_keyframes.len(), 1);
         assert_eq!(clip.scale_keyframes[0].time_ns, 5_000_000_000);
+    }
+
+    // ─── Audition / clip-versions tests ──────────────────────────────────
+
+    fn make_take(label: &str, path: &str, in_ns: u64, out_ns: u64) -> AuditionTake {
+        AuditionTake {
+            id: format!("take-{}", label),
+            label: label.to_string(),
+            source_path: path.to_string(),
+            source_in: in_ns,
+            source_out: out_ns,
+            source_timecode_base_ns: None,
+            media_duration_ns: Some(out_ns + 1_000_000_000),
+        }
+    }
+
+    #[test]
+    fn test_new_audition_uses_active_take_fields() {
+        let takes = vec![
+            make_take("Wide", "/media/wide.mov", 0, 5_000_000_000),
+            make_take("Medium", "/media/medium.mov", 1_000_000_000, 9_000_000_000),
+            make_take("Close", "/media/close.mov", 0, 4_000_000_000),
+        ];
+        let aud = Clip::new_audition(2_000_000_000, takes.clone(), 1);
+        assert_eq!(aud.kind, ClipKind::Audition);
+        assert!(aud.is_audition());
+        assert_eq!(aud.timeline_start, 2_000_000_000);
+        assert_eq!(aud.audition_active_take_index, 1);
+        // Host fields mirror the active take (Medium).
+        assert_eq!(aud.source_path, "/media/medium.mov");
+        assert_eq!(aud.source_in, 1_000_000_000);
+        assert_eq!(aud.source_out, 9_000_000_000);
+        // duration() = source_out - source_in (no speed change)
+        assert_eq!(aud.duration(), 8_000_000_000);
+        assert_eq!(aud.audition_takes.as_ref().unwrap().len(), 3);
+        assert!(aud.label.contains("Medium"));
+    }
+
+    #[test]
+    fn test_new_audition_clamps_active_index_in_bounds() {
+        let takes = vec![make_take("Only", "/x.mov", 0, 1_000_000_000)];
+        // Active index 99 should be clamped to the last available take.
+        let aud = Clip::new_audition(0, takes, 99);
+        assert_eq!(aud.audition_active_take_index, 0);
+        assert_eq!(aud.source_path, "/x.mov");
+    }
+
+    #[test]
+    fn test_set_active_audition_take_swaps_host_fields_round_trip() {
+        let takes = vec![
+            make_take("Wide", "/wide.mov", 0, 5_000_000_000),
+            make_take("Close", "/close.mov", 500_000_000, 3_500_000_000),
+        ];
+        let mut aud = Clip::new_audition(0, takes, 0);
+        // Mutate host fields while take 0 is active (simulating a trim).
+        aud.source_in = 100_000_000;
+        aud.source_out = 4_900_000_000;
+        // Switch to take 1.
+        let prev = aud.set_active_audition_take(1);
+        assert_eq!(prev, Some(0));
+        assert_eq!(aud.audition_active_take_index, 1);
+        assert_eq!(aud.source_path, "/close.mov");
+        assert_eq!(aud.source_in, 500_000_000);
+        assert_eq!(aud.source_out, 3_500_000_000);
+        assert_eq!(aud.duration(), 3_000_000_000);
+        // The trim we made on take 0 should have been snapshotted into the
+        // takes vector — switching back recovers it.
+        let prev2 = aud.set_active_audition_take(0);
+        assert_eq!(prev2, Some(1));
+        assert_eq!(aud.source_path, "/wide.mov");
+        assert_eq!(aud.source_in, 100_000_000);
+        assert_eq!(aud.source_out, 4_900_000_000);
+    }
+
+    #[test]
+    fn test_set_active_audition_take_rejects_out_of_range() {
+        let takes = vec![make_take("A", "/a.mov", 0, 1_000_000_000)];
+        let mut aud = Clip::new_audition(0, takes, 0);
+        assert_eq!(aud.set_active_audition_take(99), None);
+        // Same index is a no-op success.
+        assert_eq!(aud.set_active_audition_take(0), Some(0));
+    }
+
+    #[test]
+    fn test_set_active_audition_take_noop_on_non_audition() {
+        let mut clip = make_test_clip(5_000_000_000, 0);
+        assert_eq!(clip.set_active_audition_take(0), None);
+    }
+
+    #[test]
+    fn test_audition_serde_round_trip() {
+        let takes = vec![
+            make_take("A", "/a.mov", 0, 2_000_000_000),
+            make_take("B", "/b.mov", 100_000_000, 3_100_000_000),
+        ];
+        let aud = Clip::new_audition(500_000_000, takes, 1);
+        let json = serde_json::to_string(&aud).unwrap();
+        let restored: Clip = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.kind, ClipKind::Audition);
+        assert_eq!(restored.audition_active_take_index, 1);
+        assert_eq!(restored.audition_takes.as_ref().unwrap().len(), 2);
+        assert_eq!(restored.source_path, "/b.mov");
+        assert_eq!(restored.source_in, 100_000_000);
+        assert_eq!(restored.source_out, 3_100_000_000);
+    }
+
+    #[test]
+    fn test_audition_fields_none_for_video_clip() {
+        let clip = make_test_clip(5_000_000_000, 0);
+        assert_eq!(clip.audition_active_take_index, 0);
+        assert!(clip.audition_takes.is_none());
+        assert!(!clip.is_audition());
+    }
+
+    #[test]
+    fn test_remove_audition_take_refused_for_active() {
+        let takes = vec![
+            make_take("A", "/a.mov", 0, 1_000_000_000),
+            make_take("B", "/b.mov", 0, 1_000_000_000),
+        ];
+        let mut aud = Clip::new_audition(0, takes, 1);
+        // Active index is 1; refuse to remove.
+        assert!(aud.remove_audition_take(1).is_none());
+        assert_eq!(aud.audition_takes.as_ref().unwrap().len(), 2);
+        // Removing index 0 succeeds and shifts active down to 0.
+        let removed = aud.remove_audition_take(0).expect("should remove");
+        assert_eq!(removed.label, "A");
+        assert_eq!(aud.audition_active_take_index, 0);
+        assert_eq!(aud.audition_takes.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_add_audition_take_appends() {
+        let takes = vec![make_take("A", "/a.mov", 0, 1_000_000_000)];
+        let mut aud = Clip::new_audition(0, takes, 0);
+        aud.add_audition_take(make_take("B", "/b.mov", 0, 2_000_000_000));
+        assert_eq!(aud.audition_takes.as_ref().unwrap().len(), 2);
+        assert_eq!(aud.audition_takes.as_ref().unwrap()[1].label, "B");
+        // Active is still A.
+        assert_eq!(aud.audition_active_take_index, 0);
+        assert_eq!(aud.source_path, "/a.mov");
+    }
+
+    #[test]
+    fn test_finalize_audition_drops_takes_and_picks_concrete_kind() {
+        let takes = vec![
+            make_take("A", "/a.mov", 0, 1_000_000_000),
+            make_take("B", "/b.mov", 0, 2_000_000_000),
+        ];
+        let mut aud = Clip::new_audition(0, takes, 1);
+        // Active take is B (mp4-ish video).
+        aud.finalize_audition();
+        assert_eq!(aud.kind, ClipKind::Video);
+        assert!(aud.audition_takes.is_none());
+        assert_eq!(aud.audition_active_take_index, 0);
+        assert_eq!(aud.source_path, "/b.mov");
+    }
+
+    #[test]
+    fn test_finalize_audition_picks_audio_for_wav_extension() {
+        let takes = vec![make_take("VO", "/vo.wav", 0, 1_000_000_000)];
+        let mut aud = Clip::new_audition(0, takes, 0);
+        aud.finalize_audition();
+        assert_eq!(aud.kind, ClipKind::Audio);
+    }
+
+    #[test]
+    fn test_finalize_audition_noop_on_video() {
+        let mut clip = make_test_clip(5_000_000_000, 0);
+        clip.finalize_audition();
+        // Unchanged.
+        assert_eq!(clip.kind, ClipKind::Video);
     }
 }

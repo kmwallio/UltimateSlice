@@ -73,6 +73,7 @@ pub struct SubtitleStyleClipboard {
     pub subtitle_shadow_offset_y: f64,
     pub highlight_flags: crate::model::clip::SubtitleHighlightFlags,
     pub bg_highlight_color: u32,
+    pub highlight_stroke_color: u32,
 }
 use crate::model::project::{FrameRate, MotionTrackerReference, Project};
 use gdk4;
@@ -315,6 +316,10 @@ pub struct InspectorView {
     pub shadows_tint_slider: Scale,
     // Audio sliders
     pub volume_slider: Scale,
+    pub voice_enhance_check: CheckButton,
+    pub voice_enhance_strength_slider: Scale,
+    pub voice_enhance_status_label: Label,
+    pub voice_enhance_retry_btn: Button,
     pub voice_isolation_slider: Scale,
     pub vi_pad_slider: Scale,
     pub vi_fade_slider: Scale,
@@ -342,6 +347,7 @@ pub struct InspectorView {
     pub pitch_preserve_check: gtk4::CheckButton,
     // Track audio controls
     pub role_dropdown: gtk4::ComboBoxText,
+    pub surround_position_dropdown: gtk4::ComboBoxText,
     pub duck_check: gtk4::CheckButton,
     pub duck_amount_slider: Scale,
     // EQ sliders (3 bands × 3 params)
@@ -360,6 +366,8 @@ pub struct InspectorView {
     pub opacity_slider: Scale,
     pub blend_mode_dropdown: gtk4::DropDown,
     pub anamorphic_desqueeze_dropdown: gtk4::DropDown,
+    pub motion_blur_check: CheckButton,
+    pub motion_blur_shutter_slider: Scale,
     pub position_x_slider: Scale,
     pub position_y_slider: Scale,
     // Title / text overlay
@@ -413,6 +421,12 @@ pub struct InspectorView {
     pub speed_section_box: GBox,
     pub transition_section: GBox,
     pub lut_section_box: GBox,
+    // Audition / clip versions
+    pub audition_section_box: GBox,
+    pub audition_takes_list: gtk4::ListBox,
+    pub audition_add_take_btn: Button,
+    pub audition_remove_take_btn: Button,
+    pub audition_finalize_btn: Button,
     // Chroma key
     pub chroma_key_section: GBox,
     pub chroma_key_enable: CheckButton,
@@ -453,6 +467,7 @@ pub struct InspectorView {
     pub sub_italic_btn: gtk4::ToggleButton,
     pub sub_underline_btn: gtk4::ToggleButton,
     pub sub_shadow_btn: gtk4::ToggleButton,
+    pub sub_visible_check: CheckButton,
     pub hl_bold_check: CheckButton,
     pub hl_color_check: CheckButton,
     pub hl_underline_check: CheckButton,
@@ -461,6 +476,8 @@ pub struct InspectorView {
     pub hl_bg_check: CheckButton,
     pub hl_shadow_check: CheckButton,
     pub subtitle_bg_highlight_color_btn: gtk4::ColorDialogButton,
+    pub subtitle_highlight_stroke_color_btn: gtk4::ColorDialogButton,
+    pub subtitle_highlight_stroke_color_row: GBox,
     pub subtitle_bg_highlight_color_row: GBox,
     pub subtitle_highlight_color_btn: gtk4::ColorDialogButton,
     pub subtitle_highlight_color_row: GBox,
@@ -493,6 +510,23 @@ pub struct InspectorView {
     pub mask_invert_check: CheckButton,
     pub mask_path_editor_box: GBox,
     pub mask_rect_ellipse_controls: GBox,
+    // HSL Qualifier (secondary color correction)
+    pub hsl_section: GBox,
+    pub hsl_enable: CheckButton,
+    pub hsl_invert: CheckButton,
+    pub hsl_view_mask: CheckButton,
+    pub hsl_hue_min: Scale,
+    pub hsl_hue_max: Scale,
+    pub hsl_hue_softness: Scale,
+    pub hsl_sat_min: Scale,
+    pub hsl_sat_max: Scale,
+    pub hsl_sat_softness: Scale,
+    pub hsl_lum_min: Scale,
+    pub hsl_lum_max: Scale,
+    pub hsl_lum_softness: Scale,
+    pub hsl_brightness: Scale,
+    pub hsl_contrast: Scale,
+    pub hsl_saturation: Scale,
     // Motion tracking
     pub tracking_section: GBox,
     pub tracking_tracker_dropdown: gtk4::DropDown,
@@ -507,6 +541,8 @@ pub struct InspectorView {
     pub tracking_rotation_spin: gtk4::SpinButton,
     pub tracking_run_btn: Button,
     pub tracking_cancel_btn: Button,
+    pub tracking_auto_crop_btn: Button,
+    pub tracking_auto_crop_padding_slider: Scale,
     pub tracking_status_label: Label,
     pub tracking_target_dropdown: gtk4::DropDown,
     pub tracking_reference_dropdown: gtk4::DropDown,
@@ -545,6 +581,72 @@ pub struct InspectorView {
 }
 
 impl InspectorView {
+    /// Repopulate the audition takes ListBox from the given clip. Must be
+    /// called whenever the active clip is an audition clip OR when its
+    /// `audition_takes` / `audition_active_take_index` change. Each row
+    /// stores its take index in `widget-name` so click handlers can
+    /// recover the index without re-parsing labels.
+    pub fn refresh_audition_takes_list(&self, clip: &crate::model::clip::Clip) {
+        // Clear existing rows.
+        while let Some(row) = self.audition_takes_list.first_child() {
+            self.audition_takes_list.remove(&row);
+        }
+        let Some(takes) = clip.audition_takes.as_ref() else {
+            self.audition_remove_take_btn.set_sensitive(false);
+            return;
+        };
+        let active = clip.audition_active_take_index;
+        for (i, take) in takes.iter().enumerate() {
+            let row = gtk4::ListBoxRow::new();
+            row.set_widget_name(&format!("audition-take-{}", i));
+            let row_box = GBox::new(Orientation::Horizontal, 8);
+            row_box.set_margin_top(6);
+            row_box.set_margin_bottom(6);
+            row_box.set_margin_start(8);
+            row_box.set_margin_end(8);
+            let label_text = if take.label.is_empty() {
+                format!("Take {}", i + 1)
+            } else {
+                take.label.clone()
+            };
+            let label_box = GBox::new(Orientation::Vertical, 2);
+            let title_lbl = Label::new(Some(&label_text));
+            title_lbl.set_xalign(0.0);
+            if i == active {
+                title_lbl.add_css_class("heading");
+            }
+            label_box.append(&title_lbl);
+            let dur_secs = take
+                .source_out
+                .saturating_sub(take.source_in) as f64
+                / 1_000_000_000.0;
+            let stem = std::path::Path::new(&take.source_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            let sub_lbl = Label::new(Some(&format!("{}  ·  {:.2}s", stem, dur_secs)));
+            sub_lbl.set_xalign(0.0);
+            sub_lbl.add_css_class("dim-label");
+            sub_lbl.add_css_class("caption");
+            label_box.append(&sub_lbl);
+            label_box.set_hexpand(true);
+            row_box.append(&label_box);
+            if i == active {
+                let badge = Label::new(Some("Active"));
+                badge.add_css_class("accent");
+                badge.add_css_class("caption-heading");
+                row_box.append(&badge);
+            }
+            row.set_child(Some(&row_box));
+            self.audition_takes_list.append(&row);
+            if i == active {
+                self.audition_takes_list.select_row(Some(&row));
+            }
+        }
+        // Remove button enabled only when a non-active row is selected.
+        self.audition_remove_take_btn.set_sensitive(false);
+    }
+
     /// Get the currently selected interpolation mode from the dropdown.
     pub fn selected_interpolation(&self) -> KeyframeInterpolation {
         match self.interp_dropdown.selected() {
@@ -649,6 +751,10 @@ impl InspectorView {
         self.tracking_rotation_spin
             .set_sensitive(can_analyze && selected_tracker.is_some());
         self.tracking_run_btn
+            .set_sensitive(can_analyze && selected_tracker.is_some());
+        self.tracking_auto_crop_btn
+            .set_sensitive(can_analyze && selected_tracker.is_some());
+        self.tracking_auto_crop_padding_slider
             .set_sensitive(can_analyze && selected_tracker.is_some());
         self.tracking_cancel_btn.set_sensitive(false);
         if !can_analyze || selected_tracker.is_none() {
@@ -1746,20 +1852,27 @@ impl InspectorView {
                 let is_adjustment = c.kind == ClipKind::Adjustment;
                 let is_compound = c.kind == ClipKind::Compound;
                 let is_multicam = c.kind == ClipKind::Multicam;
+                let is_audition = c.kind == ClipKind::Audition;
                 let is_visual = is_video
                     || is_image
                     || is_title_clip
                     || is_adjustment
                     || is_compound
-                    || is_multicam;
+                    || is_multicam
+                    || is_audition;
                 self.color_section
-                    .set_visible(is_video || is_image || is_adjustment);
-                self.audio_section.set_visible(is_video || is_audio);
+                    .set_visible(is_video || is_image || is_adjustment || is_audition);
+                self.audio_section.set_visible(is_video || is_audio || is_audition);
                 self.transform_section.set_visible(is_visual);
                 self.title_section_box
-                    .set_visible(is_visual && !is_adjustment && !is_compound && !is_multicam);
+                    .set_visible(is_visual && !is_adjustment && !is_compound && !is_multicam && !is_audition);
                 self.speed_section_box
-                    .set_visible(!is_title_clip && !is_adjustment && !is_compound && !is_multicam);
+                    .set_visible(!is_title_clip && !is_adjustment && !is_compound && !is_multicam && !is_audition);
+                // Audition section is visible only for audition clips. Repopulate the takes list.
+                self.audition_section_box.set_visible(is_audition);
+                if is_audition {
+                    self.refresh_audition_takes_list(c);
+                }
                 self.lut_section_box
                     .set_visible(is_video || is_image || is_adjustment);
                 self.chroma_key_section.set_visible(is_video || is_image);
@@ -2045,6 +2158,7 @@ impl InspectorView {
                 self.sub_italic_btn.set_active(c.subtitle_italic);
                 self.sub_underline_btn.set_active(c.subtitle_underline);
                 self.sub_shadow_btn.set_active(c.subtitle_shadow);
+                self.sub_visible_check.set_active(c.subtitle_visible);
 
                 // Sync highlight flags checkboxes
                 let flags = &c.subtitle_highlight_flags;
@@ -2059,6 +2173,11 @@ impl InspectorView {
                 // Show highlight color row when color or stroke is checked
                 self.subtitle_highlight_color_row
                     .set_visible(flags.color || flags.stroke);
+                // Show stroke color row only when stroke is checked, so the
+                // user can pick a different colour for the karaoke stroke
+                // than for the karaoke text fill.
+                self.subtitle_highlight_stroke_color_row
+                    .set_visible(flags.stroke);
                 // Show bg highlight color row when background is checked
                 self.subtitle_bg_highlight_color_row
                     .set_visible(flags.background);
@@ -2086,6 +2205,13 @@ impl InspectorView {
                         crate::ui::colors::rgba_u32_to_f32(c.subtitle_highlight_color);
                     self.subtitle_highlight_color_btn
                         .set_rgba(&gdk4::RGBA::new(hr, hg, hb, ha));
+                }
+                if flags.stroke {
+                    let (sr, sg, sb, sa) = crate::ui::colors::rgba_u32_to_f32(
+                        c.subtitle_highlight_stroke_color,
+                    );
+                    self.subtitle_highlight_stroke_color_btn
+                        .set_rgba(&gdk4::RGBA::new(sr, sg, sb, sa));
                 }
                 if flags.background {
                     let (bhr, bhg, bhb, bha) =
@@ -2130,6 +2256,43 @@ impl InspectorView {
                     self.mask_feather_slider.set_value(0.0);
                     self.mask_expansion_slider.set_value(0.0);
                     self.mask_invert_check.set_active(false);
+                }
+
+                // HSL Qualifier section visibility — same eligible kinds as
+                // the primary Color panel (visual clips only).
+                self.hsl_section.set_visible(is_visual && !is_compound);
+                if let Some(q) = c.hsl_qualifier.as_ref() {
+                    self.hsl_enable.set_active(q.enabled);
+                    self.hsl_invert.set_active(q.invert);
+                    self.hsl_view_mask.set_active(q.view_mask);
+                    self.hsl_hue_min.set_value(q.hue_min);
+                    self.hsl_hue_max.set_value(q.hue_max);
+                    self.hsl_hue_softness.set_value(q.hue_softness);
+                    self.hsl_sat_min.set_value(q.sat_min);
+                    self.hsl_sat_max.set_value(q.sat_max);
+                    self.hsl_sat_softness.set_value(q.sat_softness);
+                    self.hsl_lum_min.set_value(q.lum_min);
+                    self.hsl_lum_max.set_value(q.lum_max);
+                    self.hsl_lum_softness.set_value(q.lum_softness);
+                    self.hsl_brightness.set_value(q.brightness);
+                    self.hsl_contrast.set_value(q.contrast);
+                    self.hsl_saturation.set_value(q.saturation);
+                } else {
+                    self.hsl_enable.set_active(false);
+                    self.hsl_invert.set_active(false);
+                    self.hsl_view_mask.set_active(false);
+                    self.hsl_hue_min.set_value(0.0);
+                    self.hsl_hue_max.set_value(360.0);
+                    self.hsl_hue_softness.set_value(0.0);
+                    self.hsl_sat_min.set_value(0.0);
+                    self.hsl_sat_max.set_value(1.0);
+                    self.hsl_sat_softness.set_value(0.0);
+                    self.hsl_lum_min.set_value(0.0);
+                    self.hsl_lum_max.set_value(1.0);
+                    self.hsl_lum_softness.set_value(0.0);
+                    self.hsl_brightness.set_value(0.0);
+                    self.hsl_contrast.set_value(1.0);
+                    self.hsl_saturation.set_value(1.0);
                 }
 
                 self.sync_tracking_tracker_controls(c);
@@ -2310,6 +2473,11 @@ impl InspectorView {
                 self.blur_slider.set_value(c.blur as f64);
                 self.vidstab_check.set_active(c.vidstab_enabled);
                 self.vidstab_slider.set_value(c.vidstab_smoothing as f64);
+                self.motion_blur_check.set_active(c.motion_blur_enabled);
+                self.motion_blur_shutter_slider
+                    .set_value(c.motion_blur_shutter_angle);
+                self.motion_blur_shutter_slider
+                    .set_sensitive(c.motion_blur_enabled);
                 self.shadows_slider.set_value(c.shadows as f64);
                 self.midtones_slider.set_value(c.midtones as f64);
                 self.highlights_slider.set_value(c.highlights as f64);
@@ -2331,6 +2499,11 @@ impl InspectorView {
                     playhead_ns,
                 );
                 self.volume_slider.set_value(linear_to_db_volume(vol_val));
+                self.voice_enhance_check.set_active(c.voice_enhance);
+                self.voice_enhance_strength_slider
+                    .set_value((c.voice_enhance_strength * 100.0) as f64);
+                self.voice_enhance_strength_slider
+                    .set_sensitive(c.voice_enhance);
                 self.voice_isolation_slider
                     .set_value((c.voice_isolation * 100.0) as f64);
                 self.voice_isolation_slider.set_sensitive(true);
@@ -2608,6 +2781,9 @@ impl InspectorView {
                     #[allow(deprecated)]
                     self.role_dropdown
                         .set_active_id(Some(track.audio_role.as_str()));
+                    #[allow(deprecated)]
+                    self.surround_position_dropdown
+                        .set_active_id(Some(track.surround_position.as_str()));
                     self.duck_check.set_active(track.duck);
                     self.duck_amount_slider.set_value(track.duck_amount_db);
                 }
@@ -2835,10 +3011,16 @@ impl InspectorView {
                 self.blur_slider.set_value(0.0);
                 self.vidstab_check.set_active(false);
                 self.vidstab_slider.set_value(0.5);
+                self.motion_blur_check.set_active(false);
+                self.motion_blur_shutter_slider.set_value(180.0);
+                self.motion_blur_shutter_slider.set_sensitive(false);
                 self.shadows_slider.set_value(0.0);
                 self.midtones_slider.set_value(0.0);
                 self.highlights_slider.set_value(0.0);
                 self.volume_slider.set_value(0.0);
+                self.voice_enhance_check.set_active(false);
+                self.voice_enhance_strength_slider.set_value(50.0);
+                self.voice_enhance_strength_slider.set_sensitive(false);
                 self.voice_isolation_slider.set_value(0.0);
                 self.vi_source_dropdown.set_visible(false);
                 self.vi_silence_threshold_slider.set_visible(false);
@@ -3161,6 +3343,7 @@ pub fn build_inspector(
         ) + 'static,
     on_duck_changed: impl Fn(&str, bool, f64) + 'static,
     on_role_changed: impl Fn(&str, &str) + 'static,
+    on_surround_position_changed: impl Fn(&str, &str) + 'static,
     on_execute_command: impl Fn(Box<dyn crate::undo::EditCommand>) + 'static,
     on_clear_match_eq: impl Fn(&str) + 'static,
 ) -> (GBox, Rc<InspectorView>) {
@@ -3190,6 +3373,8 @@ pub fn build_inspector(
     > = Rc::new(on_match_audio);
     let on_duck_changed: Rc<dyn Fn(&str, bool, f64)> = Rc::new(on_duck_changed);
     let on_role_changed: Rc<dyn Fn(&str, &str)> = Rc::new(on_role_changed);
+    let on_surround_position_changed: Rc<dyn Fn(&str, &str)> =
+        Rc::new(on_surround_position_changed);
     let on_clear_match_eq: Rc<dyn Fn(&str)> = Rc::new(on_clear_match_eq);
     let on_execute_command: Rc<dyn Fn(Box<dyn crate::undo::EditCommand>)> =
         Rc::new(on_execute_command);
@@ -3811,6 +3996,19 @@ pub fn build_inspector(
     let subtitle_style_box = GBox::new(Orientation::Vertical, 6);
     subtitle_controls_box.append(&subtitle_style_box);
 
+    // Render-subtitles toggle: hides this clip's subtitles from the
+    // preview overlay, export burn-in, and SRT sidecar without
+    // touching the underlying segment data. The transcript editor and
+    // voice isolation (Subtitles source) keep working when off.
+    let sub_visible_check = CheckButton::with_label("Render subtitles");
+    sub_visible_check.set_tooltip_text(Some(
+        "When off, subtitles are hidden from the preview, export burn-in, \
+         and SRT sidecar. The transcript editor and voice isolation still \
+         use the segment data.",
+    ));
+    sub_visible_check.set_active(true);
+    subtitle_style_box.append(&sub_visible_check);
+
     subtitle_style_box.append(&Separator::new(Orientation::Horizontal));
     let style_label = Label::new(Some("Style"));
     style_label.set_halign(gtk::Align::Start);
@@ -3882,6 +4080,20 @@ pub fn build_inspector(
     subtitle_highlight_color_btn.set_rgba(&gdk4::RGBA::new(1.0, 1.0, 0.0, 1.0));
     subtitle_highlight_color_row.append(&subtitle_highlight_color_btn);
     subtitle_style_box.append(&subtitle_highlight_color_row);
+
+    // Independent stroke colour for the karaoke stroke effect — only
+    // visible when the Stroke highlight flag is enabled. Defaults to the
+    // same value as the highlight colour for legacy projects.
+    let subtitle_highlight_stroke_color_row = GBox::new(Orientation::Vertical, 4);
+    row_label(&subtitle_highlight_stroke_color_row, "Highlight Stroke Color");
+    let sub_hl_stroke_color_dialog = gtk4::ColorDialog::new();
+    sub_hl_stroke_color_dialog.set_with_alpha(true);
+    let subtitle_highlight_stroke_color_btn =
+        gtk4::ColorDialogButton::new(Some(sub_hl_stroke_color_dialog));
+    subtitle_highlight_stroke_color_btn.set_rgba(&gdk4::RGBA::new(0.0, 0.0, 0.0, 1.0));
+    subtitle_highlight_stroke_color_row.append(&subtitle_highlight_stroke_color_btn);
+    subtitle_highlight_stroke_color_row.set_visible(false);
+    subtitle_style_box.append(&subtitle_highlight_stroke_color_row);
 
     let subtitle_bg_highlight_color_row = GBox::new(Orientation::Vertical, 4);
     row_label(&subtitle_bg_highlight_color_row, "BG Highlight Color");
@@ -4083,6 +4295,125 @@ pub fn build_inspector(
     let add_point_btn = Button::with_label("Add Point");
     mask_path_editor_box.append(&add_point_btn);
 
+    // ── HSL Qualifier section (secondary color correction) ────────────
+    let hsl_section = GBox::new(Orientation::Vertical, 8);
+    content_box.append(&hsl_section);
+    hsl_section.append(&Separator::new(Orientation::Horizontal));
+    let hsl_expander = Expander::new(Some("HSL Qualifier"));
+    hsl_expander.set_expanded(false);
+    hsl_section.append(&hsl_expander);
+    let hsl_inner = GBox::new(Orientation::Vertical, 8);
+    hsl_expander.set_child(Some(&hsl_inner));
+
+    // Enable / invert / view-mask toggles.
+    let hsl_toggles_row = GBox::new(Orientation::Horizontal, 8);
+    let hsl_enable = CheckButton::with_label("Enable");
+    let hsl_invert = CheckButton::with_label("Invert");
+    let hsl_view_mask = CheckButton::with_label("View Mask");
+    hsl_toggles_row.append(&hsl_enable);
+    hsl_toggles_row.append(&hsl_invert);
+    hsl_toggles_row.append(&hsl_view_mask);
+    hsl_inner.append(&hsl_toggles_row);
+
+    // Range subgroup.
+    let hsl_range_label = Label::new(Some("Range"));
+    hsl_range_label.set_halign(gtk::Align::Start);
+    hsl_range_label.add_css_class("browser-header");
+    hsl_inner.append(&hsl_range_label);
+
+    row_label(&hsl_inner, "Hue Min");
+    let hsl_hue_min = Scale::with_range(Orientation::Horizontal, 0.0, 360.0, 1.0);
+    hsl_hue_min.set_value(0.0);
+    hsl_hue_min.set_draw_value(true);
+    hsl_hue_min.set_digits(0);
+    hsl_inner.append(&hsl_hue_min);
+
+    row_label(&hsl_inner, "Hue Max");
+    let hsl_hue_max = Scale::with_range(Orientation::Horizontal, 0.0, 360.0, 1.0);
+    hsl_hue_max.set_value(360.0);
+    hsl_hue_max.set_draw_value(true);
+    hsl_hue_max.set_digits(0);
+    hsl_inner.append(&hsl_hue_max);
+
+    row_label(&hsl_inner, "Hue Softness");
+    let hsl_hue_softness = Scale::with_range(Orientation::Horizontal, 0.0, 60.0, 1.0);
+    hsl_hue_softness.set_value(0.0);
+    hsl_hue_softness.set_draw_value(true);
+    hsl_hue_softness.set_digits(0);
+    hsl_inner.append(&hsl_hue_softness);
+
+    row_label(&hsl_inner, "Sat Min");
+    let hsl_sat_min = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    hsl_sat_min.set_value(0.0);
+    hsl_sat_min.set_draw_value(true);
+    hsl_sat_min.set_digits(2);
+    hsl_inner.append(&hsl_sat_min);
+
+    row_label(&hsl_inner, "Sat Max");
+    let hsl_sat_max = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    hsl_sat_max.set_value(1.0);
+    hsl_sat_max.set_draw_value(true);
+    hsl_sat_max.set_digits(2);
+    hsl_inner.append(&hsl_sat_max);
+
+    row_label(&hsl_inner, "Sat Softness");
+    let hsl_sat_softness = Scale::with_range(Orientation::Horizontal, 0.0, 0.5, 0.01);
+    hsl_sat_softness.set_value(0.0);
+    hsl_sat_softness.set_draw_value(true);
+    hsl_sat_softness.set_digits(2);
+    hsl_inner.append(&hsl_sat_softness);
+
+    row_label(&hsl_inner, "Lum Min");
+    let hsl_lum_min = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    hsl_lum_min.set_value(0.0);
+    hsl_lum_min.set_draw_value(true);
+    hsl_lum_min.set_digits(2);
+    hsl_inner.append(&hsl_lum_min);
+
+    row_label(&hsl_inner, "Lum Max");
+    let hsl_lum_max = Scale::with_range(Orientation::Horizontal, 0.0, 1.0, 0.01);
+    hsl_lum_max.set_value(1.0);
+    hsl_lum_max.set_draw_value(true);
+    hsl_lum_max.set_digits(2);
+    hsl_inner.append(&hsl_lum_max);
+
+    row_label(&hsl_inner, "Lum Softness");
+    let hsl_lum_softness = Scale::with_range(Orientation::Horizontal, 0.0, 0.5, 0.01);
+    hsl_lum_softness.set_value(0.0);
+    hsl_lum_softness.set_draw_value(true);
+    hsl_lum_softness.set_digits(2);
+    hsl_inner.append(&hsl_lum_softness);
+
+    // Secondary grade subgroup.
+    let hsl_grade_label = Label::new(Some("Secondary Grade"));
+    hsl_grade_label.set_halign(gtk::Align::Start);
+    hsl_grade_label.add_css_class("browser-header");
+    hsl_inner.append(&hsl_grade_label);
+
+    row_label(&hsl_inner, "Brightness");
+    let hsl_brightness = Scale::with_range(Orientation::Horizontal, -1.0, 1.0, 0.01);
+    hsl_brightness.set_value(0.0);
+    hsl_brightness.set_draw_value(true);
+    hsl_brightness.set_digits(2);
+    hsl_brightness.add_mark(0.0, gtk4::PositionType::Bottom, None);
+    hsl_inner.append(&hsl_brightness);
+
+    row_label(&hsl_inner, "Contrast");
+    let hsl_contrast = Scale::with_range(Orientation::Horizontal, 0.0, 2.0, 0.01);
+    hsl_contrast.set_value(1.0);
+    hsl_contrast.set_draw_value(true);
+    hsl_contrast.set_digits(2);
+    hsl_contrast.add_mark(1.0, gtk4::PositionType::Bottom, None);
+    hsl_inner.append(&hsl_contrast);
+
+    row_label(&hsl_inner, "Saturation");
+    let hsl_saturation = Scale::with_range(Orientation::Horizontal, 0.0, 2.0, 0.01);
+    hsl_saturation.set_value(1.0);
+    hsl_saturation.set_draw_value(true);
+    hsl_saturation.set_digits(2);
+    hsl_saturation.add_mark(1.0, gtk4::PositionType::Bottom, None);
+    hsl_inner.append(&hsl_saturation);
+
     // Create shared state needed by effects and later sections.
     let selected_clip_id: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let selected_motion_tracker_id: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
@@ -4185,6 +4516,25 @@ pub fn build_inspector(
     tracking_cancel_btn.set_sensitive(false);
     tracking_job_row.append(&tracking_cancel_btn);
     tracking_inner.append(&tracking_job_row);
+
+    let tracking_auto_crop_btn = Button::with_label("Auto-Crop to Project Aspect");
+    tracking_auto_crop_btn.set_tooltip_text(Some(
+        "Run the tracker and reframe the clip so the tracked region fills the project frame at the project's aspect ratio (e.g. horizontal → vertical). Undoable — use Ctrl+Z to revert, or Clear Attachment to remove",
+    ));
+    tracking_auto_crop_btn.set_sensitive(false);
+    tracking_inner.append(&tracking_auto_crop_btn);
+
+    row_label(&tracking_inner, "Crop Padding");
+    let tracking_auto_crop_padding_slider =
+        Scale::with_range(Orientation::Horizontal, 0.0, 0.5, 0.05);
+    tracking_auto_crop_padding_slider.set_value(0.1);
+    tracking_auto_crop_padding_slider.set_draw_value(true);
+    tracking_auto_crop_padding_slider.set_digits(2);
+    tracking_auto_crop_padding_slider.set_tooltip_text(Some(
+        "Extra headroom around the tracked region (0 = tight crop, 0.5 = generous margin). Takes effect the next time you click Auto-Crop, or immediately if an auto-crop is already active",
+    ));
+    tracking_auto_crop_padding_slider.set_sensitive(false);
+    tracking_inner.append(&tracking_auto_crop_padding_slider);
 
     let tracking_status_label = Label::new(Some(
         "Select a visual clip to create or attach motion tracking.",
@@ -4364,6 +4714,52 @@ pub fn build_inspector(
     volume_keyframe_row.append(&volume_set_keyframe_btn);
     volume_keyframe_row.append(&volume_remove_keyframe_btn);
     audio_inner.append(&volume_keyframe_row);
+
+    // ── Enhance Voice (one-knob FFmpeg chain, applied before voice isolation) ──
+    let voice_enhance_check = CheckButton::with_label("Enhance Voice");
+    voice_enhance_check.set_tooltip_text(Some(
+        "Apply a one-knob cleanup chain (high-pass, FFT noise reduction, \
+         presence EQ, gentle compressor) to this clip's audio. Runs \
+         before Voice Isolation. Preview goes through a background \
+         prerender — the first time you toggle on or change strength, \
+         ffmpeg generates a sidecar file in the background and the \
+         status bar shows progress. Preview and export are byte-identical.",
+    ));
+    audio_inner.append(&voice_enhance_check);
+
+    row_label(&audio_inner, "  Strength");
+    let voice_enhance_strength_slider =
+        Scale::with_range(Orientation::Horizontal, 0.0, 100.0, 1.0);
+    voice_enhance_strength_slider.set_value(50.0);
+    voice_enhance_strength_slider.set_draw_value(true);
+    voice_enhance_strength_slider.set_digits(0);
+    voice_enhance_strength_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("Subtle"));
+    voice_enhance_strength_slider.add_mark(100.0, gtk4::PositionType::Bottom, Some("Strong"));
+    voice_enhance_strength_slider.set_sensitive(false);
+    voice_enhance_strength_slider.set_tooltip_text(Some(
+        "Scales noise-reduction depth, presence boost, and compression. \
+         0 = subtle clean-up, 100 = broadcast voice.",
+    ));
+    audio_inner.append(&voice_enhance_strength_slider);
+
+    // Per-clip cache status row: shows whether the prerender is ready,
+    // running, or failed for the current strength. Updated by the
+    // window.rs poll loop from `VoiceEnhanceCache::status()`. The
+    // **Retry** button is only visible when the cache reports `Failed`.
+    let voice_enhance_status_row = GBox::new(Orientation::Horizontal, 6);
+    voice_enhance_status_row.set_margin_top(2);
+    let voice_enhance_status_label = Label::new(None);
+    voice_enhance_status_label.set_halign(gtk::Align::Start);
+    voice_enhance_status_label.add_css_class("dim-label");
+    voice_enhance_status_label.set_visible(false);
+    let voice_enhance_retry_btn = Button::with_label("Retry");
+    voice_enhance_retry_btn.set_tooltip_text(Some(
+        "Re-queue the voice enhance ffmpeg job for this clip.",
+    ));
+    voice_enhance_retry_btn.set_visible(false);
+    voice_enhance_status_row.append(&voice_enhance_status_label);
+    voice_enhance_status_row.append(&voice_enhance_retry_btn);
+    audio_inner.append(&voice_enhance_status_row);
 
     row_label(&audio_inner, "Voice Isolation");
     let voice_isolation_slider = Scale::with_range(Orientation::Horizontal, 0.0, 100.0, 1.0);
@@ -4744,6 +5140,25 @@ pub fn build_inspector(
     role_dropdown.set_active_id(Some("none"));
     duck_inner.append(&role_dropdown);
 
+    // Surround Position dropdown — controls per-track channel routing in
+    // surround (5.1 / 7.1) exports. `Auto` resolves the destination from
+    // `audio_role` (Dialogue → Center, Music → Front L/R, etc.). Has no
+    // effect on stereo exports.
+    row_label(&duck_inner, "Surround Position");
+    #[allow(deprecated)]
+    let surround_position_dropdown = gtk4::ComboBoxText::new();
+    for pos in crate::model::track::SurroundPositionOverride::ALL {
+        #[allow(deprecated)]
+        surround_position_dropdown.append(Some(pos.as_str()), pos.label());
+    }
+    #[allow(deprecated)]
+    surround_position_dropdown.set_active_id(Some("auto"));
+    surround_position_dropdown.set_tooltip_text(Some(
+        "Per-track destination for the multichannel upmix when exporting in 5.1 / 7.1 surround. \
+         Auto picks a sensible default based on Audio Role. Ignored for stereo exports.",
+    ));
+    duck_inner.append(&surround_position_dropdown);
+
     let duck_check = gtk4::CheckButton::with_label("Duck this track when dialogue is present");
     duck_check.set_active(false);
     duck_inner.append(&duck_check);
@@ -4834,6 +5249,32 @@ pub fn build_inspector(
     anamorphic_desqueeze_dropdown.set_hexpand(true);
     anamorphic_desqueeze_dropdown.set_tooltip_text(Some("Anamorphic lens desqueeze factor"));
     transform_inner.append(&anamorphic_desqueeze_dropdown);
+
+    // ── Motion Blur (export-only, gated on animated transform / fast speed) ──
+    let motion_blur_row = gtk4::Box::new(Orientation::Horizontal, 6);
+    let motion_blur_check = CheckButton::with_label("Motion Blur");
+    motion_blur_check.set_active(false);
+    motion_blur_check.set_tooltip_text(Some(
+        "Render motion blur for keyframed transforms and fast-speed clips. Always applied at export; live preview when Background Render is on. Auto-skipped on static clips.",
+    ));
+    motion_blur_row.append(&motion_blur_check);
+    let motion_blur_note = Label::new(Some("(export + background render)"));
+    motion_blur_note.add_css_class("dim-label");
+    motion_blur_row.append(&motion_blur_note);
+    transform_inner.append(&motion_blur_row);
+
+    row_label(&transform_inner, "Shutter Angle");
+    let motion_blur_shutter_slider =
+        Scale::with_range(Orientation::Horizontal, 0.0, 720.0, 1.0);
+    motion_blur_shutter_slider.set_value(180.0);
+    motion_blur_shutter_slider.set_draw_value(true);
+    motion_blur_shutter_slider.set_digits(0);
+    motion_blur_shutter_slider.add_mark(180.0, gtk4::PositionType::Bottom, Some("180°"));
+    motion_blur_shutter_slider.add_mark(360.0, gtk4::PositionType::Bottom, Some("360°"));
+    motion_blur_shutter_slider.set_hexpand(true);
+    motion_blur_shutter_slider
+        .set_tooltip_text(Some("Shutter angle in degrees: 180° = cinematic, 360° = full natural blur"));
+    transform_inner.append(&motion_blur_shutter_slider);
 
     row_label(&transform_inner, "Scale");
     let scale_slider = Scale::with_range(Orientation::Horizontal, SCALE_MIN, SCALE_MAX, 0.05);
@@ -5050,6 +5491,51 @@ pub fn build_inspector(
     transform_inner.append(&flip_row);
 
     content_box.append(&transition_section);
+
+    // ── Audition / clip-versions section (Audition clips only) ────────────
+    let audition_section_box = GBox::new(Orientation::Vertical, 8);
+    content_box.append(&audition_section_box);
+    audition_section_box.append(&Separator::new(Orientation::Horizontal));
+    let audition_expander = Expander::new(Some("Audition"));
+    audition_expander.set_expanded(true);
+    audition_section_box.append(&audition_expander);
+    let audition_inner = GBox::new(Orientation::Vertical, 8);
+    audition_expander.set_child(Some(&audition_inner));
+
+    let audition_help = Label::new(Some(
+        "Click a take to make it active. The Program Monitor and export will use\nthe active take. Other takes are kept for nondestructive A/B comparison.",
+    ));
+    audition_help.set_xalign(0.0);
+    audition_help.set_wrap(true);
+    audition_help.add_css_class("dim-label");
+    audition_inner.append(&audition_help);
+
+    let audition_takes_list = gtk4::ListBox::new();
+    audition_takes_list.set_selection_mode(gtk4::SelectionMode::Single);
+    audition_takes_list.add_css_class("boxed-list");
+    audition_inner.append(&audition_takes_list);
+
+    let audition_btn_row = GBox::new(Orientation::Horizontal, 6);
+    audition_btn_row.set_homogeneous(true);
+    let audition_add_take_btn = Button::with_label("Add Take from Source");
+    audition_add_take_btn.set_tooltip_text(Some(
+        "Add a new alternate take from the Source Monitor's currently marked region.",
+    ));
+    audition_btn_row.append(&audition_add_take_btn);
+    let audition_remove_take_btn = Button::with_label("Remove Take");
+    audition_remove_take_btn.set_tooltip_text(Some(
+        "Remove the selected (non-active) take from the audition.",
+    ));
+    audition_remove_take_btn.set_sensitive(false);
+    audition_btn_row.append(&audition_remove_take_btn);
+    audition_inner.append(&audition_btn_row);
+
+    let audition_finalize_btn = Button::with_label("Finalize Audition");
+    audition_finalize_btn.set_tooltip_text(Some(
+        "Collapse this audition to a normal clip using only the active take. Discards alternate takes.",
+    ));
+    audition_finalize_btn.add_css_class("destructive-action");
+    audition_inner.append(&audition_finalize_btn);
 
     // ── Title Overlay section (Video + Image only) ───────────────────────────
     let title_section_box = GBox::new(Orientation::Vertical, 8);
@@ -5548,6 +6034,132 @@ pub fn build_inspector(
                     proj.dirty = true;
                 }
                 on_vidstab_changed();
+            }
+        });
+    }
+
+    // Wire motion-blur enable checkbox. Export-only feature, so we just
+    // mark dirty — no proxy rebuild, no preview pipeline rebuild.
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let shutter_slider = motion_blur_shutter_slider.clone();
+        motion_blur_check.connect_toggled(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let enabled = btn.is_active();
+            shutter_slider.set_sensitive(enabled);
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                let mut proj = project.borrow_mut();
+                if let Some(clip) = proj.clip_mut(clip_id) {
+                    clip.motion_blur_enabled = enabled;
+                }
+                proj.dirty = true;
+            }
+        });
+    }
+
+    // Wire motion-blur shutter-angle slider — export-only, no preview rebuild.
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        motion_blur_shutter_slider.connect_value_changed(move |slider| {
+            if *updating.borrow() {
+                return;
+            }
+            let v = slider.value();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                let mut proj = project.borrow_mut();
+                if let Some(clip) = proj.clip_mut(clip_id) {
+                    clip.motion_blur_shutter_angle = v;
+                }
+                proj.dirty = true;
+            }
+        });
+    }
+
+    // Wire "Enhance Voice" toggle. The toggle changes the SHAPE of the
+    // GStreamer chain (elements added/removed), so it triggers a slot
+    // rebuild via `on_clip_changed`. The strength slider below stays
+    // on the live-update path because it only changes property values
+    // on already-existing elements.
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_clip_changed = on_clip_changed.clone();
+        let strength_slider = voice_enhance_strength_slider.clone();
+        voice_enhance_check.connect_toggled(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let enabled = btn.is_active();
+            strength_slider.set_sensitive(enabled);
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.voice_enhance = enabled;
+                    }
+                    proj.dirty = true;
+                }
+                on_clip_changed();
+            }
+        });
+    }
+    // Strength slider — writes the model immediately, but debounces the
+    // `on_clip_changed` call by ~350 ms so dragging the slider doesn't
+    // spawn a new ffmpeg prerender job per tick. The cache key includes
+    // the strength rounded to 1%, so the trailing-edge value the user
+    // releases on is the one that gets a job — and bouncing back to a
+    // previously-rendered strength is an instant cache hit.
+    {
+        use glib::translate::FromGlib;
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_clip_changed = on_clip_changed.clone();
+        // Raw glib SourceId of the pending debounce timer (0 = none).
+        // Stored as u32 inside a Cell so the slider closure can read,
+        // cancel, and replace it without inner mutability gymnastics.
+        let debounce_timer: Rc<Cell<u32>> = Rc::new(Cell::new(0));
+        voice_enhance_strength_slider.connect_value_changed(move |s| {
+            if *updating.borrow() {
+                return;
+            }
+            let val = (s.value() / 100.0).clamp(0.0, 1.0) as f32;
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.voice_enhance_strength = val;
+                    }
+                    proj.dirty = true;
+                }
+                // Cancel any in-flight debounce timer so we always
+                // fire after the user has been still for ~350 ms.
+                let prev = debounce_timer.get();
+                if prev != 0 {
+                    unsafe { glib::SourceId::from_glib(prev) }.remove();
+                    debounce_timer.set(0);
+                }
+                let timer = debounce_timer.clone();
+                let cb = on_clip_changed.clone();
+                let new_id = glib::timeout_add_local_once(
+                    std::time::Duration::from_millis(350),
+                    move || {
+                        timer.set(0);
+                        cb();
+                    },
+                );
+                debounce_timer.set(new_id.as_raw());
             }
         });
     }
@@ -6814,6 +7426,24 @@ pub fn build_inspector(
             #[allow(deprecated)]
             if let (Some(ref clip_id), Some(role_id)) = (id, combo.active_id()) {
                 on_role_changed(clip_id, &role_id);
+            }
+        });
+    }
+
+    // Wire Surround Position dropdown
+    {
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_surround_position_changed = on_surround_position_changed.clone();
+        #[allow(deprecated)]
+        surround_position_dropdown.connect_changed(move |combo| {
+            if *updating.borrow() {
+                return;
+            }
+            let id = selected_clip_id.borrow().clone();
+            #[allow(deprecated)]
+            if let (Some(ref clip_id), Some(pos_id)) = (id, combo.active_id()) {
+                on_surround_position_changed(clip_id, &pos_id);
             }
         });
     }
@@ -9748,6 +10378,134 @@ pub fn build_inspector(
         });
     }
 
+    // ── HSL Qualifier wiring ──────────────────────────────────────────
+    // The HSL pad probe is always present in the effects chain; it reads
+    // the clip's Option<HslQualifier> from the shared slot state. Live
+    // updates do not require a pipeline rebuild.
+    {
+        let project = project.clone();
+        let updating = updating.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let on_hsl_changed = on_frei0r_params_changed.clone();
+        hsl_enable.connect_toggled(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let enabled = btn.is_active();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        if clip.hsl_qualifier.is_none() {
+                            clip.hsl_qualifier =
+                                Some(crate::model::clip::HslQualifier::default());
+                        }
+                        if let Some(ref mut q) = clip.hsl_qualifier {
+                            q.enabled = enabled;
+                        }
+                    }
+                    proj.dirty = true;
+                }
+                on_hsl_changed();
+            }
+        });
+    }
+    {
+        let project = project.clone();
+        let updating = updating.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let on_hsl_changed = on_frei0r_params_changed.clone();
+        hsl_invert.connect_toggled(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let v = btn.is_active();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        if let Some(ref mut q) = clip.hsl_qualifier {
+                            q.invert = v;
+                        }
+                    }
+                    proj.dirty = true;
+                }
+                on_hsl_changed();
+            }
+        });
+    }
+    {
+        let project = project.clone();
+        let updating = updating.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let on_hsl_changed = on_frei0r_params_changed.clone();
+        hsl_view_mask.connect_toggled(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let v = btn.is_active();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        if let Some(ref mut q) = clip.hsl_qualifier {
+                            q.view_mask = v;
+                        }
+                    }
+                    // view_mask is a preview-only debug flag, not a
+                    // persistent project mutation.
+                }
+                on_hsl_changed();
+            }
+        });
+    }
+    macro_rules! wire_hsl_slider {
+        ($slider:expr, $field:ident) => {{
+            let project = project.clone();
+            let updating = updating.clone();
+            let selected_clip_id = selected_clip_id.clone();
+            let on_hsl_live = on_frei0r_params_changed.clone();
+            $slider.connect_value_changed(move |s| {
+                if *updating.borrow() {
+                    return;
+                }
+                let val = s.value();
+                let id = selected_clip_id.borrow().clone();
+                if let Some(ref clip_id) = id {
+                    {
+                        let mut proj = project.borrow_mut();
+                        if let Some(clip) = proj.clip_mut(clip_id) {
+                            if clip.hsl_qualifier.is_none() {
+                                clip.hsl_qualifier =
+                                    Some(crate::model::clip::HslQualifier::default());
+                            }
+                            if let Some(ref mut q) = clip.hsl_qualifier {
+                                q.$field = val;
+                            }
+                        }
+                        proj.dirty = true;
+                    }
+                    on_hsl_live();
+                }
+            });
+        }};
+    }
+    wire_hsl_slider!(hsl_hue_min, hue_min);
+    wire_hsl_slider!(hsl_hue_max, hue_max);
+    wire_hsl_slider!(hsl_hue_softness, hue_softness);
+    wire_hsl_slider!(hsl_sat_min, sat_min);
+    wire_hsl_slider!(hsl_sat_max, sat_max);
+    wire_hsl_slider!(hsl_sat_softness, sat_softness);
+    wire_hsl_slider!(hsl_lum_min, lum_min);
+    wire_hsl_slider!(hsl_lum_max, lum_max);
+    wire_hsl_slider!(hsl_lum_softness, lum_softness);
+    wire_hsl_slider!(hsl_brightness, brightness);
+    wire_hsl_slider!(hsl_contrast, contrast);
+    wire_hsl_slider!(hsl_saturation, saturation);
+
     let view = Rc::new(InspectorView {
         name_entry,
         path_value,
@@ -9781,6 +10539,10 @@ pub fn build_inspector(
         shadows_warmth_slider,
         shadows_tint_slider,
         volume_slider,
+        voice_enhance_check,
+        voice_enhance_strength_slider,
+        voice_enhance_status_label,
+        voice_enhance_retry_btn,
         voice_isolation_slider,
         vi_pad_slider,
         vi_fade_slider,
@@ -9804,6 +10566,7 @@ pub fn build_inspector(
         pitch_shift_slider,
         pitch_preserve_check,
         role_dropdown,
+        surround_position_dropdown,
         duck_check,
         duck_amount_slider,
         eq_freq_sliders,
@@ -9820,6 +10583,8 @@ pub fn build_inspector(
         opacity_slider,
         blend_mode_dropdown,
         anamorphic_desqueeze_dropdown,
+        motion_blur_check,
+        motion_blur_shutter_slider,
         position_x_slider,
         position_y_slider,
         title_entry,
@@ -9860,6 +10625,11 @@ pub fn build_inspector(
         speed_section_box,
         transition_section,
         lut_section_box,
+        audition_section_box,
+        audition_takes_list,
+        audition_add_take_btn,
+        audition_remove_take_btn,
+        audition_finalize_btn,
         chroma_key_section,
         chroma_key_enable,
         chroma_green_btn,
@@ -9895,6 +10665,7 @@ pub fn build_inspector(
         sub_italic_btn,
         sub_underline_btn,
         sub_shadow_btn,
+        sub_visible_check,
         hl_bold_check,
         hl_color_check,
         hl_underline_check,
@@ -9903,6 +10674,8 @@ pub fn build_inspector(
         hl_bg_check,
         hl_shadow_check,
         subtitle_bg_highlight_color_btn,
+        subtitle_highlight_stroke_color_btn,
+        subtitle_highlight_stroke_color_row,
         subtitle_bg_highlight_color_row,
         subtitle_highlight_color_btn,
         subtitle_highlight_color_row,
@@ -9932,6 +10705,22 @@ pub fn build_inspector(
         mask_invert_check,
         mask_path_editor_box,
         mask_rect_ellipse_controls,
+        hsl_section,
+        hsl_enable,
+        hsl_invert,
+        hsl_view_mask,
+        hsl_hue_min,
+        hsl_hue_max,
+        hsl_hue_softness,
+        hsl_sat_min,
+        hsl_sat_max,
+        hsl_sat_softness,
+        hsl_lum_min,
+        hsl_lum_max,
+        hsl_lum_softness,
+        hsl_brightness,
+        hsl_contrast,
+        hsl_saturation,
         tracking_section,
         tracking_tracker_dropdown,
         tracking_add_btn,
@@ -9945,6 +10734,8 @@ pub fn build_inspector(
         tracking_rotation_spin,
         tracking_run_btn,
         tracking_cancel_btn,
+        tracking_auto_crop_btn,
+        tracking_auto_crop_padding_slider,
         tracking_status_label,
         tracking_target_dropdown,
         tracking_reference_dropdown,
@@ -9970,6 +10761,176 @@ pub fn build_inspector(
         audio_keyframe_indicator_label,
         audio_animation_mode_btn,
     });
+
+    // ── Audition section wiring ───────────────────────────────────────────
+    // Click a take row → switch active take (undoable). Re-fetch the index
+    // from the row's widget-name set in `refresh_audition_takes_list`.
+    {
+        let view_weak = Rc::downgrade(&view);
+        view.audition_takes_list
+            .connect_row_activated(move |_list, row| {
+                let Some(view) = view_weak.upgrade() else { return };
+                let cid = view.selected_clip_id.borrow().clone();
+                let Some(cid) = cid else { return };
+                let name = row.widget_name();
+                let Some(idx_str) = name.strip_prefix("audition-take-") else {
+                    return;
+                };
+                let Ok(new_index) = idx_str.parse::<usize>() else {
+                    return;
+                };
+                // Snapshot the clip before mutation so undo restores any
+                // host-field tweaks the user made while the previous take
+                // was active.
+                let snapshot = view
+                    .project
+                    .borrow()
+                    .clip_ref(&cid)
+                    .cloned();
+                if snapshot.is_none() {
+                    return;
+                }
+                if snapshot.as_ref().unwrap().audition_active_take_index == new_index {
+                    // Already active; flip the remove-button sensitivity
+                    // for the user's selection feedback.
+                    view.audition_remove_take_btn.set_sensitive(false);
+                    return;
+                }
+                (view.on_execute_command)(Box::new(
+                    crate::undo::SetActiveAuditionTakeCommand {
+                        clip_id: cid,
+                        new_index,
+                        before_snapshot: snapshot,
+                    },
+                ));
+                (view.on_frei0r_changed)();
+            });
+    }
+    // Toggle Remove Take button sensitivity based on selection — only
+    // non-active rows can be removed.
+    {
+        let view_weak = Rc::downgrade(&view);
+        view.audition_takes_list
+            .connect_row_selected(move |_list, row| {
+                let Some(view) = view_weak.upgrade() else { return };
+                let Some(row) = row else {
+                    view.audition_remove_take_btn.set_sensitive(false);
+                    return;
+                };
+                let name = row.widget_name();
+                let Some(idx_str) = name.strip_prefix("audition-take-") else {
+                    view.audition_remove_take_btn.set_sensitive(false);
+                    return;
+                };
+                let Ok(idx) = idx_str.parse::<usize>() else {
+                    view.audition_remove_take_btn.set_sensitive(false);
+                    return;
+                };
+                let cid = view.selected_clip_id.borrow().clone();
+                let active = cid
+                    .as_ref()
+                    .and_then(|id| {
+                        view.project
+                            .borrow()
+                            .clip_ref(id)
+                            .map(|c| c.audition_active_take_index)
+                    })
+                    .unwrap_or(0);
+                view.audition_remove_take_btn.set_sensitive(idx != active);
+            });
+    }
+    // Remove the currently selected (non-active) take.
+    {
+        let view_weak = Rc::downgrade(&view);
+        view.audition_remove_take_btn
+            .connect_clicked(move |_| {
+                let Some(view) = view_weak.upgrade() else { return };
+                let cid = view.selected_clip_id.borrow().clone();
+                let Some(cid) = cid else { return };
+                let Some(row) = view.audition_takes_list.selected_row() else {
+                    return;
+                };
+                let name = row.widget_name();
+                let Some(idx_str) = name.strip_prefix("audition-take-") else {
+                    return;
+                };
+                let Ok(take_index) = idx_str.parse::<usize>() else {
+                    return;
+                };
+                (view.on_execute_command)(Box::new(crate::undo::RemoveAuditionTakeCommand {
+                    clip_id: cid,
+                    take_index,
+                    removed: std::cell::RefCell::new(None),
+                }));
+                (view.on_frei0r_changed)();
+            });
+    }
+    // Add Take From Source — pulls the source monitor's currently loaded
+    // clip + In/Out marks via the `selected_clip_id`'s source path. Without
+    // a source-monitor handle on the inspector, we synthesize the take from
+    // a duplicate of the audition's currently-active take so the user can
+    // immediately add another candidate by importing/loading a different
+    // file in the source monitor first; alternatively the timeline context
+    // menu's "Add Take from Source Monitor" entry handles the marked-region
+    // case.
+    {
+        let view_weak = Rc::downgrade(&view);
+        view.audition_add_take_btn.connect_clicked(move |_| {
+            let Some(view) = view_weak.upgrade() else { return };
+            let cid = view.selected_clip_id.borrow().clone();
+            let Some(cid) = cid else { return };
+            // Build a new take from the active take as a starting point.
+            let take = {
+                let proj = view.project.borrow();
+                let Some(clip) = proj.clip_ref(&cid) else { return };
+                let active = clip.audition_active_take_index;
+                let label_n = clip
+                    .audition_takes
+                    .as_ref()
+                    .map(|t| t.len() + 1)
+                    .unwrap_or(1);
+                let base = clip
+                    .audition_takes
+                    .as_ref()
+                    .and_then(|t| t.get(active))
+                    .cloned();
+                let Some(base) = base else { return };
+                crate::model::clip::AuditionTake {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    label: format!("Take {}", label_n),
+                    source_path: base.source_path.clone(),
+                    source_in: base.source_in,
+                    source_out: base.source_out,
+                    source_timecode_base_ns: base.source_timecode_base_ns,
+                    media_duration_ns: base.media_duration_ns,
+                }
+            };
+            (view.on_execute_command)(Box::new(crate::undo::AddAuditionTakeCommand {
+                clip_id: cid,
+                take,
+            }));
+            (view.on_frei0r_changed)();
+        });
+    }
+    // Finalize → collapse the audition to a plain clip referencing only the
+    // active take.
+    {
+        let view_weak = Rc::downgrade(&view);
+        view.audition_finalize_btn.connect_clicked(move |_| {
+            let Some(view) = view_weak.upgrade() else { return };
+            let cid = view.selected_clip_id.borrow().clone();
+            let Some(cid) = cid else { return };
+            let snapshot = view.project.borrow().clip_ref(&cid).cloned();
+            if snapshot.is_none() {
+                return;
+            }
+            (view.on_execute_command)(Box::new(crate::undo::FinalizeAuditionCommand {
+                clip_id: cid,
+                before_snapshot: snapshot,
+            }));
+            (view.on_frei0r_changed)();
+        });
+    }
 
     (vbox, view)
 }

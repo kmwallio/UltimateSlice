@@ -501,6 +501,70 @@ pub fn show_preferences_dialog(
     timeline_box.append(&Label::new(Some("Crossfade duration (ms)")));
     timeline_box.append(&crossfade_duration_ms);
     timeline_box.append(&crossfade_hint);
+
+    // ── Loudness Radar target ─────────────────────────────────────────
+    let loudness_header = Label::new(Some("Loudness target"));
+    loudness_header.set_halign(gtk::Align::Start);
+    loudness_header.add_css_class("title-5");
+    timeline_box.append(&loudness_header);
+    let loudness_preset_combo = gtk4::ComboBoxText::new();
+    loudness_preset_combo.append(Some("ebu_r128"), "EBU R128 (−23 LUFS)");
+    loudness_preset_combo.append(Some("atsc_a85"), "ATSC A/85 (−24 LUFS)");
+    loudness_preset_combo.append(Some("netflix"), "Netflix (−27 LUFS)");
+    loudness_preset_combo.append(Some("apple_pod"), "Apple Podcasts (−16 LUFS)");
+    loudness_preset_combo.append(Some("streaming"), "Streaming (−14 LUFS)");
+    loudness_preset_combo.append(Some("custom"), "Custom");
+    loudness_preset_combo.set_active_id(Some(&current.loudness_target_preset));
+    loudness_preset_combo.set_halign(gtk::Align::Start);
+    let loudness_custom_spin = gtk4::SpinButton::with_range(-30.0, 0.0, 0.1);
+    loudness_custom_spin.set_value(current.loudness_target_lufs);
+    loudness_custom_spin.set_digits(1);
+    loudness_custom_spin.set_halign(gtk::Align::Start);
+    loudness_custom_spin.set_sensitive(current.loudness_target_preset == "custom");
+    {
+        let spin = loudness_custom_spin.clone();
+        loudness_preset_combo.connect_changed(move |combo| {
+            let id = combo.active_id().unwrap_or_else(|| "ebu_r128".into()).to_string();
+            spin.set_sensitive(id == "custom");
+            if let Some(lufs) = crate::ui_state::loudness_target_preset_to_lufs(&id) {
+                spin.set_value(lufs);
+            }
+        });
+    }
+    let loudness_hint = Label::new(Some(
+        "Target for the Loudness Radar (Program Monitor → Loudness button). The matching LUFS value is applied when the user clicks Normalize to Target.",
+    ));
+    loudness_hint.set_halign(gtk::Align::Start);
+    loudness_hint.add_css_class("dim-label");
+    loudness_hint.set_wrap(true);
+    loudness_hint.set_max_width_chars(60);
+    timeline_box.append(&Label::new(Some("Target preset")));
+    timeline_box.append(&loudness_preset_combo);
+    timeline_box.append(&Label::new(Some("Custom target (LUFS)")));
+    timeline_box.append(&loudness_custom_spin);
+    timeline_box.append(&loudness_hint);
+
+    // ── Voice enhance cache size cap ──
+    let voice_enhance_cap_label = Label::new(Some("Voice enhance cache cap (GiB)"));
+    voice_enhance_cap_label.set_halign(gtk::Align::Start);
+    voice_enhance_cap_label.set_margin_top(12);
+    let voice_enhance_cap_spin = gtk4::SpinButton::with_range(0.5, 50.0, 0.5);
+    voice_enhance_cap_spin.set_value(current.voice_enhance_cache_cap_gib);
+    voice_enhance_cap_spin.set_digits(1);
+    voice_enhance_cap_spin.set_halign(gtk::Align::Start);
+    let voice_enhance_cap_hint = Label::new(Some(
+        "Soft cap on the per-user voice-enhance prerender cache. \
+         When the cache exceeds this size, the least-recently-modified \
+         files are deleted to make room. Default 2 GiB.",
+    ));
+    voice_enhance_cap_hint.set_halign(gtk::Align::Start);
+    voice_enhance_cap_hint.add_css_class("dim-label");
+    voice_enhance_cap_hint.set_wrap(true);
+    voice_enhance_cap_hint.set_max_width_chars(60);
+    timeline_box.append(&voice_enhance_cap_label);
+    timeline_box.append(&voice_enhance_cap_spin);
+    timeline_box.append(&voice_enhance_cap_hint);
+
     stack.add_titled(&timeline_box, Some("timeline"), "Timeline");
 
     // ── Integration section ───────────────────────────────────────────────
@@ -986,6 +1050,14 @@ pub fn show_preferences_dialog(
                 duck_amount_db: current.duck_amount_db,
                 backup_enabled: backup_enabled_check.is_active(),
                 backup_max_versions: backup_max_versions_spin.value() as usize,
+                loudness_target_preset: loudness_preset_combo
+                    .active_id()
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| "ebu_r128".to_string()),
+                loudness_target_lufs: loudness_custom_spin.value(),
+                voice_enhance_cache_cap_gib: voice_enhance_cap_spin
+                    .value()
+                    .clamp(0.5, 50.0),
             };
             new_state.set_proxy_mode(ProxyMode::from_str(
                 proxy_mode.active_id().as_deref().unwrap_or("off"),

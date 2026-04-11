@@ -66,9 +66,13 @@ src/
     preview.rs              Source Monitor — video display, scrubber, in/out marks, transport
     inspector.rs            Right-side clip inspector — shows/edits selected clip properties
     preferences.rs          Preferences dialog — categorized app-level settings UI
+    transcript_panel.rs     Transcript-Based Editing panel — flat-word TextView, click-to-seek,
+                            range-select + Delete to ripple-cut the underlying clip in one undo
     timeline/
       mod.rs                Re-exports TimelineState and build_timeline()
       widget.rs             Full timeline: Cairo drawing + all gesture/key controllers
+                            (also owns delete_transcript_word_range, the helper that backs
+                            both the Transcript panel and the delete_transcript_range MCP tool)
 
   mcp/
     mod.rs                  McpCommand enum; start_mcp_server() → mpsc::Receiver<McpCommand>
@@ -84,6 +88,7 @@ docs/
     source-monitor.md       Source preview, In/Out points, shuttle controls
     timeline.md             Clip arrangement, trimming, tools, markers
     inspector.md            Per-clip color, effects, audio, transform, titles, speed
+    transcript.md           Transcript-Based Editing panel walkthrough
     preferences.md          Application-level settings and performance preferences
     program-monitor.md      Assembled timeline playback
     export.md               Advanced export: codecs, resolution, audio
@@ -333,6 +338,194 @@ fire `on_project_changed`, **don't call it from inside the method**. Instead:
 - **Duration probe**: `gstreamer_pbutils::Discoverer` — run synchronously during import
   (acceptable; import is user-triggered, not in a tight loop).
 - **API note**: In gstreamer-rs 0.25, `get_state(timeout)` became `state(Some(timeout))`.
+
+### Realtime audio chain (per slot)
+
+`ProgramPlayer` builds one audio sub-pipeline per active slot inside
+`build_slot_for_clip` and `build_audio_only_slot_for_clip` (both in
+`src/media/program_player.rs`). The chain order is:
+
+```
+audioconvert → audioresample → capsfilter(48 kHz stereo)
+  → [match-equalizer-nbands (7-band)]
+  → [equalizer-nbands (3-band user EQ)]
+  → [audiopanorama]
+  → [level]
+  → audiomixer pad
+```
+
+Each `[bracketed]` element is `Option<gst::Element>` on `VideoSlot` and
+may be `None` if the factory wasn't available or its link failed — the
+chain degrades gracefully one stage at a time. No additional audio
+filters are added by `voice_enhance` — that feature runs through the
+prerender cache instead (see below).
+
+**Voice isolation is NOT a filter in this graph.** It's implemented as
+per-frame volume sampling on the audiomixer pad (see
+`ProgramClip::volume_at_timeline_ns`, `apply_main_audio_slot_volumes`).
+
+### Live property updates vs. slot rebuilds vs. prerender swap
+
+There are three ways to make a per-clip processing change visible in
+the preview pipeline. Pick the right one for the kind of change:
+
+1. **Live property update** — for changes that map to a single
+   property (or small set) on an already-existing GStreamer element.
+   No relink, no glitch, no playhead jump. Examples:
+   `update_audio_for_clip` (volume / pan / voice isolation),
+   `update_eq_for_clip` (parametric EQ band gains).
+2. **Rebuild slot** — for changes that alter the **shape** of the
+   GStreamer chain (elements added or removed). Triggered via
+   `on_clip_changed → on_project_changed → ProgramPlayer::load_clips`.
+   Causes a visible playhead jump. Examples: vidstab toggle,
+   chroma key toggle, blend mode change.
+3. **Source-path swap via background prerender** — for changes that
+   are too expensive or unstable to do live, but can be precomputed
+   into a sidecar media file. The sidecar is registered with
+   `ProgramPlayer` via a `update_*_paths` method, and
+   `resolve_source_path_for_clip` returns it instead of the original
+   `clip.source_path` next time a slot is built. The slot pipeline
+   itself never knows the difference. Examples:
+   - `proxy_cache` (lower-resolution video for preview)
+   - `bg_removal_cache` (alpha-matted video)
+   - `frame_interp_cache` (AI slow-motion sidecars)
+   - `voice_enhance_cache` (audio cleaned up via FFmpeg)
+
+**When picking between (2) and (3) for a new feature**: if you can run
+the operation as a one-shot ffmpeg/ML job and store the result in a
+file, prefer (3). It avoids the realtime GStreamer surface area and
+gives byte-identical preview/export parity. The slot pipeline stays
+small and stable. Reach for (2) only when the change is pure GStreamer
+element shape (no per-clip data to precompute).
+
+**Voice enhance specifically chose (3)** after two failed attempts at
+GStreamer-side audio processing (always-on filter chain caused crackling
+across all clips; per-clip gated chain still produced pops). The
+prerender path uses the same FFmpeg filter chain that the export side
+uses, so once the cached file is ready, preview and export are
+byte-identical for the audio.
+
+### Voice enhance prerender cache
+
+Module: `src/media/voice_enhance_cache.rs`. Modeled directly after
+`bg_removal_cache.rs`:
+
+- One worker thread shells out to `ffmpeg -i src -c:v copy -af
+  "<voice_enhance_filter>" -c:a aac out.mp4`. Video is **stream-copied**,
+  so generation is dominated by audio re-encode time (typically a few
+  seconds for short clips, scales linearly with duration).
+- Cache key: `ve_<source_path_hash>_<strength*100 as u32>`. Strength is
+  rounded to 1% so slider micro-wobbles don't thrash the cache, and
+  bouncing the strength back to a previous value is an instant hit.
+- Cache root: `$XDG_CACHE_HOME/ultimateslice/voice_enhance/<key>.mp4`.
+  Files persist across sessions.
+- **Disk cost**: bounded by `MAX_CACHE_BYTES` (currently 2 GiB). Each
+  `request()` calls `evict_if_oversized()`, which scans the cache
+  directory and deletes the least-recently-modified files until total
+  usage drops back under the cap. Cache hits call `touch_mtime()` so
+  recently-used files stay at the head of the eviction queue.
+
+Wiring is in `src/ui/window.rs`:
+- Cache instance is created next to `bg_removal_cache` (~line 4650).
+- The on-project-changed reload block walks all clips, calls
+  `cache.request(source_path, strength)` for each clip with
+  `voice_enhance == true`, and pushes `cache.paths` to the player.
+- The 500ms poll loop polls `voice_enhance_cache`, updates
+  `prog_player.update_voice_enhance_paths(...)`, and (when **new**
+  files just became ready) triggers `on_project_changed_voice_enhance()`
+  to force a slot rebuild — without that, the user wouldn't hear the
+  result until they scrubbed.
+- The same poll loop reads `voice_enhance_cache.progress()` and adds
+  `"Enhancing voice… X/Y"` to the status bar parts list when
+  `in_flight`, mirroring how `bg_removal_cache` and `proxy_cache`
+  surface their progress.
+
+The strength slider in the inspector uses a **trailing-edge debounce**
+(`Rc<Cell<u32>>` holding the raw glib `SourceId`, mirroring
+`schedule_title_flush` in window.rs at line 4126). Each value-changed
+event writes the model immediately and then resets a 350 ms timer; the
+real `on_clip_changed` only fires after the user has been still for the
+full timer period. This means a slider drag spawns at most one ffmpeg
+job — for the value the user actually released on — instead of one job
+per tick.
+
+`ProgramPlayer::resolve_source_path_for_clip` checks
+`voice_enhance_paths.get(&cache_key(source, strength))` **before** the
+proxy/lut branches and returns the cached file if it exists and has a
+non-zero size. The slot builder is unchanged.
+
+### Voice enhance: preview ↔ export parity
+
+The strength curve lives in two places:
+- `build_voice_enhance_filter` in `src/media/export.rs` — the canonical
+  curve, used for the final render.
+- `build_voice_enhance_filter_string` in
+  `src/media/voice_enhance_cache.rs` — the preview prerender curve.
+
+**Both must match.** Since the prerender uses the same filter chain
+the export uses, they trivially produce identical audio — but if you
+ever fork them (e.g. to drop `afftdn` from the preview for speed),
+write a test that compares generated files for a fixed input.
+
+The chain is:
+```
+highpass=80 →
+afftdn=nr={6+18s}:nf=-25 →
+equalizer=f=300:t=q:w=1.0:g={-1-2s} →    # mud cut
+equalizer=f=4000:t=q:w=1.5:g={1+4s} →     # presence
+acompressor=threshold=0.05:ratio={2+3s}:attack=20:release=250:makeup={1+2s}
+```
+
+Where `s` = `voice_enhance_strength` clamped to `[0, 1]`.
+
+### Failed approaches for voice enhance preview (don't repeat)
+
+Two earlier attempts at realtime GStreamer-side processing did not
+work and were reverted. They are recorded here so future contributors
+don't burn the same hours:
+
+1. **Always-on element chain with property no-op when off.**
+   Idea: keep `audiowsinclimit` + `equalizer-nbands` + `audiodynamic`
+   in every video slot at all times, configure neutral parameters
+   when `voice_enhance == false`, push live property updates when on.
+   Result: every active timeline clip ran 3 extra audio elements
+   end-to-end. Even with no-op parameters, the cumulative cost
+   audibly broke the audio path with crackling on plain clips.
+2. **Conditionally-built element chain.** Idea: only create the
+   elements when `clip.voice_enhance == true`. Result: better than
+   #1 for plain clips, but the enhanced clips still produced
+   pops/crackles. The exact root cause was never narrowed down — most
+   likely a combination of `audiowsinclimit` filter latency, ad-hoc
+   `set_state` ordering during slot construction, and audiomixer
+   buffer alignment. The fix-it-all solution was to stop processing
+   audio in GStreamer entirely and route through the FFmpeg
+   prerender cache. Don't reintroduce a GStreamer voice-enhance
+   chain unless you have a specific reason and a way to validate
+   per-buffer continuity.
+
+### Future work / known caveats
+
+- **Cache disk cap is hard-coded.** `MAX_CACHE_BYTES` in
+  `voice_enhance_cache.rs` is 2 GiB. There's no UI to change it. Move
+  it to preferences if users need to tune it for very long projects.
+- **Source-file mutation.** The cache key is
+  `hash(source_path) + strength`. If the user replaces the file at
+  `source_path` with different content, the cached enhanced version
+  becomes silently wrong (the old audio plays under the new video).
+  No mtime/content check yet — matches `bg_removal_cache`'s behavior.
+  Fix would be to fold source mtime into the cache key.
+- **Compound clips.** The walker in the on-project-changed handler
+  recurses into `clip.compound_tracks`, but the
+  `resolve_source_path_for_clip` lookup is keyed on the leaf clip's
+  `source_path` (which is empty for the compound itself). Inner
+  clips inside a compound therefore work, but the compound clip as a
+  whole does not get its own enhanced audio. This is fine because
+  voice_enhance is a leaf-clip property.
+- **Failed jobs aren't retried.** A failed key goes into
+  `VoiceEnhanceCache::failed` and stays there for the rest of the
+  session. Restart the app to retry. Acceptable because failures
+  generally indicate a real source file problem (format / corrupt /
+  missing), not a transient one.
 
 ---
 

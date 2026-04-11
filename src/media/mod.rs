@@ -9,6 +9,7 @@ pub mod cube_lut;
 pub mod export;
 pub mod frame_interp_cache;
 pub mod frei0r_registry;
+pub mod hsl_qualifier;
 pub mod ladspa_registry;
 pub mod ltc;
 pub mod mask_alpha;
@@ -22,6 +23,7 @@ pub mod thumb_cache;
 pub mod thumbnail;
 pub mod title_font;
 pub mod tracking;
+pub mod voice_enhance_cache;
 pub mod voiceover;
 pub mod waveform_cache;
 

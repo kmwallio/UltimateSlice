@@ -19,7 +19,7 @@ use crate::ui::{
     audio_effects_browser, effects_browser, inspector, keyframe_editor, media_browser, preferences,
     preview, program_monitor, title_templates, titles_browser, toolbar,
 };
-use crate::undo::{EditCommand, TrackClipsChange};
+use crate::undo::{EditCommand, SetClipAutoCropCommand, TrackClipsChange};
 use glib;
 use gtk4::prelude::*;
 use gtk4::{self as gtk, ApplicationWindow, Orientation, Paned, ScrolledWindow};
@@ -780,6 +780,329 @@ fn sync_transform_overlay_tracking_region(
     } else {
         transform_overlay.set_tracking_region(false, false, 0.5, 0.5, 0.25, 0.25, 0.0);
     }
+}
+
+/// Default extra headroom around a tracked region when auto-cropping.
+const AUTO_CROP_DEFAULT_PADDING: f64 = 0.1;
+
+/// Outcome of a single [`run_auto_crop_track_for_clip`] invocation. The
+/// string messages are meant to be surfaced through the tracking status
+/// bar in the inspector.
+#[derive(Debug, Clone)]
+enum AutoCropOutcome {
+    /// Cached tracker samples were applied immediately; the clip is
+    /// already reframed at the project aspect ratio.
+    Ok { message: String },
+    /// A new tracking job was enqueued in the background. The binding is
+    /// already set so as soon as samples arrive the compositor will pick
+    /// up the reframe.
+    Queued { message: String },
+    /// Setup failed (wrong clip kind, missing dimensions, no region). The
+    /// clip state is unchanged.
+    Err { message: String },
+}
+
+/// Install an auto-crop-and-track binding on `clip_id` that uses the
+/// existing motion tracker `tracker_id` as its motion source, then
+/// enqueue (or look up a cached) tracking job to populate the samples.
+///
+/// Returns `(outcome, Some(command))` — the command is an undoable
+/// [`SetClipAutoCropCommand`] snapshotting the old + new state. The
+/// command has **not** been executed yet; the caller must push it
+/// through `on_execute_command` / `history.execute` so the mutation
+/// lands in the undo stack.
+fn run_auto_crop_track_for_clip(
+    project: &Rc<RefCell<Project>>,
+    tracking_cache: &Rc<RefCell<crate::media::tracking::TrackingCache>>,
+    tracking_job_owner_by_key: &Rc<RefCell<HashMap<String, String>>>,
+    tracking_job_key_by_clip: &Rc<RefCell<HashMap<String, String>>>,
+    clip_id: &str,
+    tracker_id: &str,
+    padding: f64,
+) -> (AutoCropOutcome, Option<Box<dyn EditCommand>>) {
+    // Snapshot everything we need from the project under a short borrow.
+    let (
+        project_width,
+        project_height,
+        job,
+        source_path,
+        region,
+        old_tracking_binding,
+        old_motion_trackers,
+        old_first_mask_binding,
+    ) = {
+        let proj = project.borrow();
+        let project_width = proj.width;
+        let project_height = proj.height;
+        let Some(clip) = proj.clip_ref(clip_id) else {
+            return (
+                AutoCropOutcome::Err {
+                    message: "Selected clip no longer exists.".to_string(),
+                },
+                None,
+            );
+        };
+        if let Err(message) = clip_supports_tracking_analysis(clip) {
+            return (
+                AutoCropOutcome::Err {
+                    message: message.to_string(),
+                },
+                None,
+            );
+        }
+        let Some(tracker) = clip.motion_tracker_ref(tracker_id) else {
+            return (
+                AutoCropOutcome::Err {
+                    message: "Select a tracker before auto-cropping.".to_string(),
+                },
+                None,
+            );
+        };
+        let region = tracker.analysis_region;
+        let analysis_start_ns = tracker.analysis_start_ns.min(clip.source_duration() - 1);
+        let mut analysis_end_ns = tracker
+            .analysis_end_ns
+            .unwrap_or_else(|| clip.source_duration())
+            .min(clip.source_duration());
+        if analysis_end_ns <= analysis_start_ns {
+            analysis_end_ns = clip.source_duration();
+        }
+        if analysis_end_ns <= analysis_start_ns {
+            return (
+                AutoCropOutcome::Err {
+                    message: "Auto-crop needs a non-empty source range.".to_string(),
+                },
+                None,
+            );
+        }
+        let mut job = crate::media::tracking::TrackingJob::new(
+            tracker.id.clone(),
+            tracker.label.clone(),
+            clip.source_path.clone(),
+            clip.source_in,
+            analysis_start_ns,
+            analysis_end_ns,
+            region,
+        );
+        // Resolve "every source frame" into a concrete step (ns per
+        // frame) via the probe cache. Done now, before the job goes
+        // into the cache key, so repeat requests for the same source
+        // hit the same cache entry.
+        job.frame_step_ns =
+            crate::media::tracking::source_frame_step_ns(&clip.source_path);
+        let source_path = clip.source_path.clone();
+        let old_tracking_binding = clip.tracking_binding.clone();
+        let old_motion_trackers = clip.motion_trackers.clone();
+        let old_first_mask_binding = clip
+            .masks
+            .first()
+            .map(|mask| mask.tracking_binding.clone());
+        (
+            project_width,
+            project_height,
+            job,
+            source_path,
+            region,
+            old_tracking_binding,
+            old_motion_trackers,
+            old_first_mask_binding,
+        )
+    };
+
+    // Resolve source pixel dimensions. Blocking ffprobe/GStreamer call on
+    // first invocation; cached for subsequent probes.
+    let metadata = crate::media::probe_cache::probe_media_metadata(&source_path);
+    let source_width = metadata.video_width.unwrap_or(0);
+    let source_height = metadata.video_height.unwrap_or(0);
+    if source_width == 0 || source_height == 0 {
+        return (
+            AutoCropOutcome::Err {
+                message: "Could not determine source clip dimensions for auto-crop."
+                    .to_string(),
+            },
+            None,
+        );
+    }
+
+    // Compute the binding transform from the drawn region + aspects.
+    let binding = crate::media::tracking::compute_auto_crop_binding(
+        clip_id,
+        tracker_id,
+        &crate::media::tracking::AutoCropInputs {
+            region,
+            source_width,
+            source_height,
+            project_width,
+            project_height,
+            padding,
+        },
+    );
+
+    // Enqueue / look up the tracking job. Same flow as the Track Region
+    // button, but we *always* want an analysis pass for the auto-crop
+    // use case so motion samples keep the region centered over time.
+    // The cache lookup happens *before* we build the new motion_trackers
+    // snapshot so any cached samples get folded into the undo state.
+    let (cache_key, cached_tracker, pending) = {
+        let cache_key = tracking_cache.borrow_mut().request(job.clone());
+        let cached_tracker = tracking_cache.borrow().get_for_job(&job);
+        let pending = tracking_cache.borrow().job_progress(&cache_key).is_some();
+        (cache_key, cached_tracker, pending)
+    };
+
+    // Build the new motion_trackers vec: copy the old list, then upsert
+    // the cached tracker samples onto the matching tracker (if any).
+    let mut new_motion_trackers = old_motion_trackers.clone();
+    let mut sample_count = 0usize;
+    if let Some(tracker) = &cached_tracker {
+        sample_count = tracker.samples.len();
+        if let Some(existing) = new_motion_trackers
+            .iter_mut()
+            .find(|t| t.id == tracker.id)
+        {
+            *existing = tracker.clone();
+        } else {
+            new_motion_trackers.push(tracker.clone());
+        }
+    }
+
+    // First-mask binding is always cleared when auto-cropping (the clip's
+    // own transform owns the binding). `None` here means "no mask on the
+    // clip at all — no mask state to restore"; `Some(None)` means "mask
+    // exists, clear its binding".
+    let new_first_mask_binding = old_first_mask_binding.as_ref().map(|_| None);
+
+    let command = SetClipAutoCropCommand {
+        clip_id: clip_id.to_string(),
+        old_tracking_binding,
+        old_motion_trackers,
+        old_first_mask_binding,
+        new_tracking_binding: Some(binding),
+        new_motion_trackers,
+        new_first_mask_binding,
+    };
+
+    let outcome = if cached_tracker.is_some() {
+        AutoCropOutcome::Ok {
+            message: format!(
+                "Auto-crop active at project aspect ({sample_count} tracked samples)."
+            ),
+        }
+    } else if pending {
+        tracking_job_owner_by_key
+            .borrow_mut()
+            .insert(cache_key.clone(), clip_id.to_string());
+        tracking_job_key_by_clip
+            .borrow_mut()
+            .insert(clip_id.to_string(), cache_key);
+        AutoCropOutcome::Queued {
+            message: "Auto-crop framing applied. Tracking…".to_string(),
+        }
+    } else {
+        AutoCropOutcome::Err {
+            message: "Failed to queue auto-crop tracking analysis.".to_string(),
+        }
+    };
+
+    (outcome, Some(Box::new(command)))
+}
+
+/// Re-apply the auto-crop framing on a clip in-place (no undo step).
+///
+/// Called by the tracker-region / padding sliders so the crop stays
+/// locked onto the region as the user drags. Skips clips that don't
+/// currently have an auto-crop binding (i.e., where `tracking_binding`
+/// points at a tracker on a different clip — that's the manual
+/// "follow tracker" case, which should not get rewritten under the
+/// user's feet).
+///
+/// Returns `true` when the binding was recomputed, `false` when the
+/// clip wasn't in an auto-crop state or we couldn't resolve source
+/// dimensions.  No-op on failure.
+fn reapply_auto_crop_in_place(
+    project: &Rc<RefCell<Project>>,
+    library: &Rc<RefCell<MediaLibrary>>,
+    clip_id: &str,
+    padding: f64,
+) -> bool {
+    // Snapshot the data we need from the project under a short borrow.
+    let (project_width, project_height, source_path, region, tracker_id) = {
+        let proj = project.borrow();
+        let Some(clip) = proj.clip_ref(clip_id) else {
+            return false;
+        };
+        let Some(binding) = clip.tracking_binding.as_ref() else {
+            return false;
+        };
+        // Only auto-crop bindings point at a tracker on the clip itself.
+        if binding.source_clip_id != clip_id {
+            return false;
+        }
+        let tracker_id = binding.tracker_id.clone();
+        let Some(tracker) = clip.motion_tracker_ref(&tracker_id) else {
+            return false;
+        };
+        (
+            proj.width,
+            proj.height,
+            clip.source_path.clone(),
+            tracker.analysis_region,
+            tracker_id,
+        )
+    };
+
+    // Resolve source dims from the media library first (cheap cache
+    // hit), fall back to a synchronous ffprobe only if the item hasn't
+    // been probed yet.  The ffprobe path is ~100ms so we avoid it on
+    // slider drags when possible.
+    let (source_width, source_height) = {
+        let lib = library.borrow();
+        let item = lib.items.iter().find(|i| i.source_path == source_path);
+        match item {
+            Some(i) if i.video_width.is_some() && i.video_height.is_some() => {
+                (i.video_width.unwrap(), i.video_height.unwrap())
+            }
+            _ => {
+                drop(lib);
+                let metadata = crate::media::probe_cache::probe_media_metadata(&source_path);
+                (
+                    metadata.video_width.unwrap_or(0),
+                    metadata.video_height.unwrap_or(0),
+                )
+            }
+        }
+    };
+    if source_width == 0 || source_height == 0 {
+        return false;
+    }
+
+    let values = crate::media::tracking::compute_auto_crop_binding_values(
+        &crate::media::tracking::AutoCropInputs {
+            region,
+            source_width,
+            source_height,
+            project_width,
+            project_height,
+            padding,
+        },
+    );
+
+    // Update the binding in place.
+    let mut proj = project.borrow_mut();
+    let Some(clip) = proj.clip_mut(clip_id) else {
+        return false;
+    };
+    let Some(binding) = clip.tracking_binding.as_mut() else {
+        return false;
+    };
+    if binding.tracker_id != tracker_id || binding.source_clip_id != clip_id {
+        return false;
+    }
+    binding.scale_multiplier = values.scale_multiplier;
+    binding.offset_x = values.offset_x;
+    binding.offset_y = values.offset_y;
+    proj.dirty = true;
+    true
 }
 
 fn upsert_motion_tracker_on_clip(
@@ -4315,6 +4638,8 @@ fn clip_to_program_clips(
         vidstab_smoothing: c.vidstab_smoothing,
         volume: c.volume as f64,
         voice_isolation: c.voice_isolation as f64,
+        voice_enhance: c.voice_enhance,
+        voice_enhance_strength: c.voice_enhance_strength,
         voice_isolation_pad_ns: (c.voice_isolation_pad_ms as f64 * 1_000_000.0) as u64,
         voice_isolation_fade_ns: (c.voice_isolation_fade_ms as f64 * 1_000_000.0) as u64,
         voice_isolation_floor: c.voice_isolation_floor as f64,
@@ -4342,6 +4667,8 @@ fn clip_to_program_clips(
         rotate_keyframes: c.rotate_keyframes.clone(),
         flip_h: c.flip_h,
         flip_v: c.flip_v,
+        motion_blur_enabled: c.motion_blur_enabled,
+        motion_blur_shutter_angle: c.motion_blur_shutter_angle,
         title_text: c.title_text.clone(),
         title_font: c.title_font.clone(),
         title_color: c.title_color,
@@ -4438,6 +4765,7 @@ fn clip_to_program_clips(
         frei0r_effects: c.frei0r_effects.clone(),
         tracking_binding: c.tracking_binding.clone(),
         masks: c.masks.clone(),
+        hsl_qualifier: c.hsl_qualifier.clone(),
     }]
 }
 
@@ -4647,6 +4975,18 @@ pub fn build_window(
     let bg_removal_cache = Rc::new(RefCell::new(
         crate::media::bg_removal_cache::BgRemovalCache::new(),
     ));
+    let voice_enhance_cache = Rc::new(RefCell::new(
+        crate::media::voice_enhance_cache::VoiceEnhanceCache::new(),
+    ));
+    // Apply the persisted preference cap so the LRU eviction respects
+    // the user's chosen disk budget from the start of the session.
+    {
+        let cap_gib = preferences_state.borrow().voice_enhance_cache_cap_gib;
+        let cap_bytes = (cap_gib.max(0.5) * 1024.0 * 1024.0 * 1024.0) as u64;
+        voice_enhance_cache
+            .borrow_mut()
+            .set_cache_cap_bytes(cap_bytes);
+    }
     let frame_interp_cache = Rc::new(RefCell::new(
         crate::media::frame_interp_cache::FrameInterpCache::new(),
     ));
@@ -4702,6 +5042,7 @@ pub fn build_window(
         let player = player.clone();
         let prog_player = prog_player.clone();
         let proxy_cache = proxy_cache.clone();
+        let voice_enhance_cache_apply = voice_enhance_cache.clone();
         let project = project.clone();
         let timeline_state = timeline_state.clone();
         let mcp_sender = mcp_sender.clone();
@@ -4775,6 +5116,19 @@ pub fn build_window(
             prog_player
                 .borrow_mut()
                 .set_duck_settings(new_state.duck_enabled, new_state.duck_amount_db);
+            // Push the cache cap to the voice enhance cache so future
+            // request() calls evict against the new ceiling.
+            {
+                let cap_bytes = (new_state
+                    .voice_enhance_cache_cap_gib
+                    .max(0.5)
+                    * 1024.0
+                    * 1024.0
+                    * 1024.0) as u64;
+                voice_enhance_cache_apply
+                    .borrow_mut()
+                    .set_cache_cap_bytes(cap_bytes);
+            }
             if new_state.proxy_mode.is_enabled() {
                 // If the proxy scale changed, invalidate old entries so clips are
                 // re-transcoded at the new resolution.
@@ -4900,6 +5254,8 @@ pub fn build_window(
     let norm_in_progress: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
     let match_audio_in_progress: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
     let keyframe_editor_cell: Rc<RefCell<Option<Rc<keyframe_editor::KeyframeEditorView>>>> =
+        Rc::new(RefCell::new(None));
+    let transcript_panel_cell: Rc<RefCell<Option<Rc<crate::ui::transcript_panel::TranscriptPanelView>>>> =
         Rc::new(RefCell::new(None));
     // transform_overlay_cell holds the TransformOverlay after the program monitor is built.
     let transform_overlay_cell: Rc<
@@ -5421,6 +5777,21 @@ pub fn build_window(
                         }
                     }
                 }
+                // Also update HSL qualifier shared state for live slider feedback.
+                // Uses recursive `clip_ref` so clips inside compound tracks work.
+                {
+                    let proj = project.borrow();
+                    let selected = timeline_state.borrow().selected_clip_id.clone();
+                    if let Some(clip_id) = selected {
+                        let qualifier = proj
+                            .clip_ref(&clip_id)
+                            .and_then(|c| c.hsl_qualifier.clone());
+                        drop(proj);
+                        prog_player
+                            .borrow_mut()
+                            .update_hsl_qualifier_for_clip(&clip_id, qualifier);
+                    }
+                }
                 if let Some(effects) = effects {
                     let needs_reseek = prog_player.borrow_mut().update_frei0r_effects(&effects);
                     if needs_reseek {
@@ -5921,6 +6292,29 @@ pub fn build_window(
                 on_project_changed();
             }
         },
+        // on_surround_position_changed: update track surround position override
+        // from inspector. Affects only surround exports — the value is read by
+        // `resolve_stem_position` in `media/export.rs` when the export channel
+        // layout is 5.1 or 7.1. Stereo exports ignore the field.
+        {
+            let project = project.clone();
+            let on_project_changed = on_project_changed.clone();
+            move |clip_id: &str, position_str: &str| {
+                let mut proj = project.borrow_mut();
+                for track in &mut proj.tracks {
+                    if track.clips.iter().any(|c| c.id == clip_id) {
+                        track.surround_position =
+                            crate::model::track::SurroundPositionOverride::from_str(
+                                position_str,
+                            );
+                        proj.dirty = true;
+                        break;
+                    }
+                }
+                drop(proj);
+                on_project_changed();
+            }
+        },
         // on_execute_command: inspector pushes undo-tracked commands through here
         {
             let timeline_state = timeline_state.clone();
@@ -6274,8 +6668,10 @@ pub fn build_window(
         ($widget:expr, $field:ident) => {{
             let inspector_view = inspector_view.clone();
             let project = project.clone();
+            let library = library.clone();
             let tracking_status_by_clip = tracking_status_by_clip.clone();
             let sync_tracking_controls = sync_tracking_controls.clone();
+            let on_project_changed = on_project_changed.clone();
             let window_weak = window_weak.clone();
             let widget = $widget.clone();
             widget.connect_value_changed(move |widget| {
@@ -6287,23 +6683,46 @@ pub fn build_window(
                 let (Some(clip_id), Some(tracker_id)) = (clip_id, tracker_id) else {
                     return;
                 };
-                let mut proj = project.borrow_mut();
-                if let Some(tracker) = proj
-                    .clip_mut(&clip_id)
-                    .and_then(|clip| clip.motion_tracker_mut(&tracker_id))
+                let mut auto_crop_active = false;
                 {
-                    tracker.analysis_region.$field = widget.value();
-                    tracker.samples.clear();
-                    proj.dirty = true;
+                    let mut proj = project.borrow_mut();
+                    if let Some(tracker) = proj
+                        .clip_mut(&clip_id)
+                        .and_then(|clip| clip.motion_tracker_mut(&tracker_id))
+                    {
+                        tracker.analysis_region.$field = widget.value();
+                        tracker.samples.clear();
+                        proj.dirty = true;
+                    }
+                    // Peek: does this clip currently have an auto-crop
+                    // binding we should keep in sync with the new region?
+                    auto_crop_active = proj
+                        .clip_ref(&clip_id)
+                        .and_then(|c| c.tracking_binding.as_ref())
+                        .map(|b| b.source_clip_id == clip_id)
+                        .unwrap_or(false);
+                    if let Some(win) = window_weak.upgrade() {
+                        win.set_title(Some(&format!("UltimateSlice — {} •", proj.title)));
+                    }
+                }
+                if auto_crop_active {
+                    let padding = inspector_view.tracking_auto_crop_padding_slider.value();
+                    reapply_auto_crop_in_place(&project, &library, &clip_id, padding);
+                    tracking_status_by_clip.borrow_mut().insert(
+                        clip_id.clone(),
+                        (
+                            "Auto-crop updated. Click Auto-Crop to Project Aspect to re-track motion."
+                                .to_string(),
+                            false,
+                        ),
+                    );
+                    on_project_changed();
+                } else {
                     tracking_status_by_clip.borrow_mut().insert(
                         clip_id.clone(),
                         ("Region changed. Run tracking again.".to_string(), false),
                     );
                 }
-                if let Some(win) = window_weak.upgrade() {
-                    win.set_title(Some(&format!("UltimateSlice — {} •", proj.title)));
-                }
-                drop(proj);
                 sync_tracking_controls();
             });
         }};
@@ -6312,6 +6731,38 @@ pub fn build_window(
     wire_tracking_region_slider!(inspector_view.tracking_center_y_slider, center_y);
     wire_tracking_region_slider!(inspector_view.tracking_width_slider, width);
     wire_tracking_region_slider!(inspector_view.tracking_height_slider, height);
+    {
+        // Crop Padding slider: when an auto-crop is already active on the
+        // selected clip, drag → live re-compute the binding in place so
+        // the user can dial in the headroom without re-running the full
+        // button flow. If no auto-crop is active, the slider value is
+        // simply stored (consumed on the next button click).
+        let inspector_view = inspector_view.clone();
+        let project = project.clone();
+        let library = library.clone();
+        let tracking_status_by_clip = tracking_status_by_clip.clone();
+        let on_project_changed = on_project_changed.clone();
+        let sync_tracking_controls = sync_tracking_controls.clone();
+        let padding_slider = inspector_view.tracking_auto_crop_padding_slider.clone();
+        padding_slider.connect_value_changed(move |slider| {
+            if *inspector_view.updating.borrow() {
+                return;
+            }
+            let clip_id = inspector_view.selected_clip_id.borrow().clone();
+            let Some(clip_id) = clip_id else {
+                return;
+            };
+            let padding = slider.value();
+            if reapply_auto_crop_in_place(&project, &library, &clip_id, padding) {
+                tracking_status_by_clip.borrow_mut().insert(
+                    clip_id.clone(),
+                    (format!("Auto-crop padding: {:.0}%", padding * 100.0), false),
+                );
+                on_project_changed();
+            }
+            sync_tracking_controls();
+        });
+    }
     {
         let inspector_view = inspector_view.clone();
         let project = project.clone();
@@ -6492,7 +6943,7 @@ pub fn build_window(
                     sync_tracking_controls();
                     return;
                 }
-                crate::media::tracking::TrackingJob::new(
+                let mut job = crate::media::tracking::TrackingJob::new(
                     tracker.id.clone(),
                     tracker.label.clone(),
                     clip.source_path.clone(),
@@ -6500,7 +6951,13 @@ pub fn build_window(
                     analysis_start_ns,
                     analysis_end_ns,
                     tracker.analysis_region,
-                )
+                );
+                // "Every source frame" step, resolved at enqueue time
+                // so the cache key is deterministic for the same
+                // source + region.
+                job.frame_step_ns =
+                    crate::media::tracking::source_frame_step_ns(&clip.source_path);
+                job
             };
 
             let request_and_apply = |job: &crate::media::tracking::TrackingJob| {
@@ -6550,6 +7007,55 @@ pub fn build_window(
                     ("Failed to queue tracking analysis.".to_string(), true),
                 );
             }
+            sync_tracking_controls();
+        });
+    }
+    {
+        let inspector_view = inspector_view.clone();
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let tracking_cache = tracking_cache.clone();
+        let tracking_job_owner_by_key = tracking_job_owner_by_key.clone();
+        let tracking_job_key_by_clip = tracking_job_key_by_clip.clone();
+        let tracking_status_by_clip = tracking_status_by_clip.clone();
+        let on_project_changed = on_project_changed.clone();
+        let sync_tracking_controls = sync_tracking_controls.clone();
+        let tracking_auto_crop_btn = inspector_view.tracking_auto_crop_btn.clone();
+        tracking_auto_crop_btn.connect_clicked(move |_| {
+            let clip_id = inspector_view.selected_clip_id.borrow().clone();
+            let tracker_id = inspector_view.current_motion_tracker_id();
+            let (Some(clip_id), Some(tracker_id)) = (clip_id, tracker_id) else {
+                return;
+            };
+            let padding = inspector_view.tracking_auto_crop_padding_slider.value();
+            let (outcome, command) = run_auto_crop_track_for_clip(
+                &project,
+                &tracking_cache,
+                &tracking_job_owner_by_key,
+                &tracking_job_key_by_clip,
+                &clip_id,
+                &tracker_id,
+                padding,
+            );
+            if let Some(cmd) = command {
+                let mut st = timeline_state.borrow_mut();
+                let mut proj = project.borrow_mut();
+                st.history.execute(cmd, &mut proj);
+            }
+            match outcome {
+                AutoCropOutcome::Ok { ref message, .. }
+                | AutoCropOutcome::Queued { ref message } => {
+                    tracking_status_by_clip
+                        .borrow_mut()
+                        .insert(clip_id.clone(), (message.clone(), false));
+                }
+                AutoCropOutcome::Err { ref message } => {
+                    tracking_status_by_clip
+                        .borrow_mut()
+                        .insert(clip_id.clone(), (message.clone(), true));
+                }
+            }
+            on_project_changed();
             sync_tracking_controls();
         });
     }
@@ -6632,6 +7138,43 @@ pub fn build_window(
     {
         let cb = on_relink_media_gui.clone();
         inspector_view.relink_btn.connect_clicked(move |_| cb());
+    }
+
+    // Wire inspector "Retry" button (under the Voice Enhance status row)
+    // to clear the failed marker for the currently-selected clip's
+    // (source, strength) cache key and trigger a project-changed cycle.
+    // The next on_project_changed reload walks the clip list and
+    // re-requests the prerender; the cache will see the failed entry is
+    // gone and re-queue the ffmpeg job.
+    {
+        let project = project.clone();
+        let inspector_view_retry = inspector_view.clone();
+        let voice_enhance_cache_retry = voice_enhance_cache.clone();
+        let on_project_changed_retry = on_project_changed.clone();
+        inspector_view
+            .voice_enhance_retry_btn
+            .connect_clicked(move |_| {
+                let selected = inspector_view_retry.selected_clip_id.borrow().clone();
+                if let Some(clip_id) = selected {
+                    let snapshot = {
+                        let proj = project.borrow();
+                        proj.clip_ref(&clip_id)
+                            .map(|c| (c.source_path.clone(), c.voice_enhance_strength))
+                    };
+                    if let Some((src, strength)) = snapshot {
+                        let cleared = voice_enhance_cache_retry.borrow_mut().retry(&src, strength);
+                        if cleared {
+                            log::info!(
+                                "voice_enhance: retry requested for clip={} src={} strength={:.2}",
+                                clip_id,
+                                src,
+                                strength
+                            );
+                            on_project_changed_retry();
+                        }
+                    }
+                }
+            });
     }
 
     // Wire inspector "Generate Subtitles" button to STT cache.
@@ -6830,6 +7373,39 @@ pub fn build_window(
             });
     }
 
+    // Wire subtitle highlight stroke color button (independent from the
+    // text-fill highlight colour so users can pick e.g. yellow text + black
+    // stroke).
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let updating = inspector_view.updating.clone();
+        inspector_view
+            .subtitle_highlight_stroke_color_btn
+            .connect_notify_local(Some("rgba"), move |btn, _| {
+                if *updating.borrow() {
+                    return;
+                }
+                let rgba = btn.rgba();
+                let r = (rgba.red() * 255.0) as u32;
+                let g = (rgba.green() * 255.0) as u32;
+                let b = (rgba.blue() * 255.0) as u32;
+                let a = (rgba.alpha() * 255.0) as u32;
+                let color = (r << 24) | (g << 16) | (b << 8) | a;
+                let selected = timeline_state.borrow().selected_clip_id.clone();
+                if let Some(ref clip_id) = selected {
+                    let mut proj = project.borrow_mut();
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.subtitle_highlight_stroke_color = color;
+                    }
+                    proj.dirty = true;
+                    drop(proj);
+                    on_project_changed();
+                }
+            });
+    }
+
     // Wire subtitle base style toggle buttons.
     {
         let project = project.clone();
@@ -6852,6 +7428,34 @@ pub fn build_window(
                 on_project_changed();
             }
         });
+    }
+    // Wire "Render subtitles" visibility toggle. Hides this clip's
+    // subtitles from the preview overlay, export burn-in, and SRT
+    // sidecar without removing the segment data, so the transcript
+    // editor and voice isolation continue to work.
+    {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let updating = inspector_view.updating.clone();
+        inspector_view
+            .sub_visible_check
+            .connect_toggled(move |btn| {
+                if *updating.borrow() {
+                    return;
+                }
+                let active = btn.is_active();
+                let selected = timeline_state.borrow().selected_clip_id.clone();
+                if let Some(ref clip_id) = selected {
+                    let mut proj = project.borrow_mut();
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.subtitle_visible = active;
+                    }
+                    proj.dirty = true;
+                    drop(proj);
+                    on_project_changed();
+                }
+            });
     }
     {
         let project = project.clone();
@@ -7399,6 +8003,7 @@ pub fn build_window(
                                 subtitle_shadow_offset_y: clip.subtitle_shadow_offset_y,
                                 highlight_flags: clip.subtitle_highlight_flags,
                                 bg_highlight_color: clip.subtitle_bg_highlight_color,
+                                highlight_stroke_color: clip.subtitle_highlight_stroke_color,
                             });
                         paste_btn.set_sensitive(true);
                     }
@@ -7439,6 +8044,7 @@ pub fn build_window(
                         clip.subtitle_shadow_offset_y = style.subtitle_shadow_offset_y;
                         clip.subtitle_highlight_flags = style.highlight_flags;
                         clip.subtitle_bg_highlight_color = style.bg_highlight_color;
+                        clip.subtitle_highlight_stroke_color = style.highlight_stroke_color;
                     }
                     proj.dirty = true;
                     drop(proj);
@@ -9586,6 +10192,13 @@ pub fn build_window(
     let monitor_state = Rc::new(RefCell::new(crate::ui_state::load_program_monitor_state()));
     let popout_window_cell: Rc<RefCell<Option<ApplicationWindow>>> = Rc::new(RefCell::new(None));
     let monitor_popped = Rc::new(Cell::new(false));
+    // Loudness Radar popover is built inside the build_program_monitor
+    // call (so its button can be passed as `extra_header_button`) but the
+    // view is cached here so poll-timer drains + callback wiring can
+    // reach it later in this function.
+    let loudness_popover_view_cell: Rc<
+        RefCell<Option<Rc<crate::ui::loudness_popover::LoudnessPopoverView>>>,
+    > = Rc::new(RefCell::new(None));
     let on_toggle_popout_impl: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
     let on_toggle_popout: Rc<dyn Fn()> = {
         let cb = on_toggle_popout_impl.clone();
@@ -10105,6 +10718,10 @@ pub fn build_window(
                     }
                 }
             },
+            // The Loudness Radar popover button is placed next to the
+            // Scopes toggle below `prog_monitor_host`, not in the
+            // Program Monitor header, so we pass None here.
+            None,
         )
     };
 
@@ -10155,6 +10772,174 @@ pub fn build_window(
     let prog_monitor_overlay = gtk4::Overlay::new();
     prog_monitor_overlay.set_child(Some(&prog_monitor_widget));
     prog_monitor_overlay.add_overlay(&countdown_overlay_da);
+
+    // ── Loudness Radar popover callbacks ──────────────────────────────
+    //
+    // The popover view was constructed inside the build_program_monitor
+    // call so its button could be passed as `extra_header_button`. Now
+    // that the project + preferences + prog_player refs are all stable,
+    // we can wire up the three actions.
+    //
+    // `on_analyze` spawns a background thread that renders the project
+    // audio to a temp file and runs ebur128; the result is drained on a
+    // 100 ms poll timer (mirrors the `on_normalize_audio` pattern).
+    // `on_normalize` and `on_reset_gain` push a
+    // `SetProjectMasterGainCommand` through the undo history and update
+    // the preview in place via `prog_player.set_master_gain_db`.
+    if let Some(view) = loudness_popover_view_cell.borrow().clone() {
+        // Channel for background-thread analysis results.
+        let (loudness_tx, loudness_rx) =
+            std::sync::mpsc::channel::<Result<crate::media::export::LoudnessReport, String>>();
+        let loudness_tx = Rc::new(RefCell::new(Some(loudness_tx)));
+        let loudness_rx = Rc::new(RefCell::new(Some(loudness_rx)));
+
+        // Poll the channel every 100 ms and push results into the popover.
+        // When a result arrives we also restore the window title to its
+        // idle form so the "Analyzing project loudness…" flash goes away.
+        {
+            let view_poll = view.clone();
+            let rx = loudness_rx.clone();
+            let project_poll = project.clone();
+            let window_weak = window_weak.clone();
+            glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+                if let Some(ref r) = *rx.borrow() {
+                    while let Ok(result) = r.try_recv() {
+                        match result {
+                            Ok(report) => {
+                                let current_gain = project_poll.borrow().master_gain_db;
+                                view_poll.set_report(report, current_gain);
+                            }
+                            Err(msg) => view_poll.set_analyze_error(&msg),
+                        }
+                        if let Some(win) = window_weak.upgrade() {
+                            let proj = project_poll.borrow();
+                            win.set_title(Some(&format!(
+                                "UltimateSlice \u{2014} {} \u{2022}",
+                                proj.title
+                            )));
+                        }
+                    }
+                }
+                glib::ControlFlow::Continue
+            });
+        }
+
+        // Analyze button: set UI state, flash window title, spawn
+        // background thread. The title is restored by the poll-drain
+        // above when the result (or error) comes back.
+        {
+            let project = project.clone();
+            let view_click = view.clone();
+            let tx_rc = loudness_tx.clone();
+            let window_weak = window_weak.clone();
+            view.analyze_btn.connect_clicked(move |_btn| {
+                if view_click.analyzing.get() {
+                    return;
+                }
+                view_click.set_analyzing();
+                if let Some(win) = window_weak.upgrade() {
+                    let proj = project.borrow();
+                    win.set_title(Some(&format!(
+                        "UltimateSlice \u{2014} {} (Analyzing project loudness\u{2026})",
+                        proj.title
+                    )));
+                }
+                // Clone the project snapshot so the background thread
+                // doesn't need to cross the Rc boundary.
+                let project_snapshot = project.borrow().clone();
+                let tx_clone = tx_rc.borrow().as_ref().cloned();
+                if let Some(tx_send) = tx_clone {
+                    std::thread::spawn(move || {
+                        let result = crate::media::export::analyze_project_loudness(
+                            &project_snapshot,
+                        )
+                        .map_err(|e| e.to_string());
+                        let _ = tx_send.send(result);
+                    });
+                }
+            });
+        }
+
+        // Normalize button: compute delta from last report + current
+        // target, apply as SetProjectMasterGainCommand via timeline_state
+        // history. The action is effectively instant so we confirm
+        // success with a terse status message in the popover header
+        // (cleared on next Analyze).
+        {
+            let project = project.clone();
+            let timeline_state_c = timeline_state.clone();
+            let prog_player = prog_player.clone();
+            let view_click = view.clone();
+            let on_project_changed = on_project_changed.clone();
+            view.normalize_btn.connect_clicked(move |_btn| {
+                let Some(report) = view_click.last_report.borrow().clone() else {
+                    return;
+                };
+                let target = view_click.current_target_lufs();
+                let old_db = project.borrow().master_gain_db;
+                let delta = target - report.integrated_lufs;
+                let new_db = (old_db + delta).clamp(-24.0, 24.0);
+                if (new_db - old_db).abs() < 1e-6 {
+                    view_click
+                        .status_label
+                        .set_text("Already at target — nothing to apply");
+                    return;
+                }
+                let applied_db = new_db - old_db;
+                let cmd: Box<dyn crate::undo::EditCommand> =
+                    Box::new(crate::undo::SetProjectMasterGainCommand { old_db, new_db });
+                {
+                    let mut proj = project.borrow_mut();
+                    timeline_state_c
+                        .borrow_mut()
+                        .history
+                        .execute(cmd, &mut proj);
+                }
+                prog_player.borrow_mut().set_master_gain_db(new_db);
+                view_click.set_current_gain(new_db);
+                view_click.status_label.set_text(&format!(
+                    "Normalized ({:+.2} dB applied)",
+                    applied_db
+                ));
+                on_project_changed();
+            });
+        }
+
+        // Reset Gain button: snap back to 0.0.
+        {
+            let project = project.clone();
+            let timeline_state_c = timeline_state.clone();
+            let prog_player = prog_player.clone();
+            let view_click = view.clone();
+            let on_project_changed = on_project_changed.clone();
+            view.reset_gain_btn.connect_clicked(move |_btn| {
+                let old_db = project.borrow().master_gain_db;
+                if old_db.abs() < 1e-6 {
+                    view_click.status_label.set_text("Gain already 0 dB");
+                    return;
+                }
+                let cmd: Box<dyn crate::undo::EditCommand> = Box::new(
+                    crate::undo::SetProjectMasterGainCommand {
+                        old_db,
+                        new_db: 0.0,
+                    },
+                );
+                {
+                    let mut proj = project.borrow_mut();
+                    timeline_state_c
+                        .borrow_mut()
+                        .history
+                        .execute(cmd, &mut proj);
+                }
+                prog_player.borrow_mut().set_master_gain_db(0.0);
+                view_click.set_current_gain(0.0);
+                view_click
+                    .status_label
+                    .set_text(&format!("Gain reset ({:+.2} dB → 0.00 dB)", old_db));
+                on_project_changed();
+            });
+        }
+    }
     // Poll to redraw the countdown overlay when active.
     {
         let cv = voiceover_countdown.clone();
@@ -10251,6 +11036,7 @@ pub fn build_window(
         let picture_b_poll = picture_b.clone();
         let transform_overlay_poll = transform_overlay_cell.clone();
         let keyframe_editor_poll = keyframe_editor_cell.clone();
+        let transcript_panel_poll = transcript_panel_cell.clone();
         let timeline_state_poll = timeline_state.clone();
         let inspector_view_poll = inspector_view.clone();
         let prog_frame_updater_poll = prog_frame_updater.clone();
@@ -10455,6 +11241,10 @@ pub fn build_window(
                 if let Some(ref editor) = *keyframe_editor_poll.borrow() {
                     editor.queue_redraw();
                 }
+                if let Some(ref tp) = *transcript_panel_poll.borrow() {
+                    let proj = project.borrow();
+                    tp.update_playhead(&proj, pos_ns);
+                }
                 last_pos_ns_c.set(pos_ns);
             }
             // Update subtitle overlay text for the current playhead position.
@@ -10483,7 +11273,7 @@ pub fn build_window(
                                 }
                                 continue;
                             }
-                            if clip.subtitle_segments.is_empty() {
+                            if clip.subtitle_segments.is_empty() || !clip.subtitle_visible {
                                 continue;
                             }
                             let clip_end = clip.timeline_start + clip.duration();
@@ -10541,6 +11331,10 @@ pub fn build_window(
                                             text: seg.text.clone(),
                                             color: crate::ui::colors::rgba_u32_to_f64(c),
                                             highlight_color: crate::ui::colors::rgba_u32_to_f64(hc),
+                                            highlight_stroke_color:
+                                                crate::ui::colors::rgba_u32_to_f64(
+                                                    clip.subtitle_highlight_stroke_color,
+                                                ),
                                             highlight_flags: clip.subtitle_highlight_flags,
                                             outline_color: crate::ui::colors::rgba_u32_to_f64(oc),
                                             outline_width: clip.subtitle_outline_width,
@@ -10640,7 +11434,23 @@ pub fn build_window(
             }
         });
     }
-    prog_monitor_host.append(&scopes_btn);
+    // Build the Loudness Radar popover next to the Scopes toggle. The
+    // popover view is cached in `loudness_popover_view_cell` so later
+    // wiring (analyze/normalize/reset callbacks + MCP + poll-timer
+    // drain) can reach it.
+    let loudness_row = gtk::Box::new(Orientation::Horizontal, 4);
+    loudness_row.set_halign(gtk::Align::Start);
+    loudness_row.set_margin_start(4);
+    loudness_row.append(&scopes_btn);
+    {
+        let view = crate::ui::loudness_popover::build_loudness_popover(
+            &preferences_state.borrow(),
+            project.borrow().master_gain_db,
+        );
+        loudness_row.append(&view.button);
+        *loudness_popover_view_cell.borrow_mut() = Some(view);
+    }
+    prog_monitor_host.append(&loudness_row);
     let program_empty_hint = gtk::Label::new(Some(
         "Import media, then append or insert a clip to preview your timeline here.",
     ));
@@ -10690,11 +11500,23 @@ pub fn build_window(
                 let workspace_layouts_applying_c = workspace_layouts_applying.clone();
                 let sync_workspace_layout_state_c = sync_workspace_layout_state.clone();
                 pop_win.connect_close_request(move |w| {
-                    let mut state = monitor_state_c.borrow_mut();
-                    state.width = w.width().max(320);
-                    state.height = w.height().max(180);
-                    state.popped = false;
-                    crate::ui_state::save_program_monitor_state(&state);
+                    // Release the `monitor_state` borrow before touching
+                    // any widget that can fire signals which themselves
+                    // re-borrow `monitor_state` — notably
+                    // `docked_paned_c.set_start_child()` (via position-
+                    // notify) and `sync_workspace_layout_state_c()`
+                    // (which reads the monitor snapshot). A double-
+                    // borrow inside a GTK4 C trampoline aborts the
+                    // process without unwinding — see
+                    // docs/ARCHITECTURE.md "GTK4 C trampolines cannot
+                    // unwind".
+                    {
+                        let mut state = monitor_state_c.borrow_mut();
+                        state.width = w.width().max(320);
+                        state.height = w.height().max(180);
+                        state.popped = false;
+                        crate::ui_state::save_program_monitor_state(&state);
+                    }
                     w.set_child(Option::<&gtk::Widget>::None);
                     if monitor_c.parent().is_none() {
                         docked_paned_c.set_start_child(Some(&monitor_c));
@@ -12144,11 +12966,13 @@ pub fn build_window(
         let prog_player = prog_player.clone();
         let proxy_cache = proxy_cache.clone();
         let bg_removal_cache = bg_removal_cache.clone();
+        let voice_enhance_cache = voice_enhance_cache.clone();
         let frame_interp_cache = frame_interp_cache.clone();
         let preferences_state = preferences_state.clone();
         let panel_weak = timeline_area.downgrade();
         let transform_overlay_cell = transform_overlay_cell.clone();
         let keyframe_editor_cell = keyframe_editor_cell.clone();
+        let transcript_panel_cell = transcript_panel_cell.clone();
         let prog_canvas_frame = prog_canvas_frame.clone();
         let program_empty_hint = program_empty_hint.clone();
         let picture_a = picture_a.clone();
@@ -12207,6 +13031,9 @@ pub fn build_window(
                 let playhead_ns = timeline_state.borrow().playhead_ns;
                 if let Some(ref editor) = *keyframe_editor_cell.borrow() {
                     editor.queue_redraw();
+                }
+                if let Some(ref tp) = *transcript_panel_cell.borrow() {
+                    tp.rebuild_from_project(&proj);
                 }
 
                 // Sync transform overlay: show handles when a clip is selected,
@@ -12370,6 +13197,7 @@ pub fn build_window(
             let project_reload = project.clone();
             let proxy_cache_reload = proxy_cache.clone();
             let bg_removal_cache_reload = bg_removal_cache.clone();
+            let voice_enhance_cache_reload = voice_enhance_cache.clone();
             let frame_interp_cache_reload = frame_interp_cache.clone();
             let reload_ticket = pending_reload_ticket.get().wrapping_add(1);
             pending_reload_ticket.set(reload_ticket);
@@ -12436,6 +13264,40 @@ pub fn build_window(
                         prog_player_reload
                             .borrow_mut()
                             .update_bg_removal_paths(paths);
+                    }
+
+                    // Request voice-enhance prerender for clips that
+                    // have it enabled. The cache is keyed by
+                    // (source_path, strength) so changing the strength
+                    // slider produces a new request, and toggling
+                    // voice_enhance off doesn't invalidate previously
+                    // generated files.
+                    {
+                        let proj = project_reload.borrow();
+                        let mut cache = voice_enhance_cache_reload.borrow_mut();
+                        fn walk_voice_enhance_request(
+                            cache: &mut crate::media::voice_enhance_cache::VoiceEnhanceCache,
+                            tracks: &[crate::model::track::Track],
+                        ) {
+                            for track in tracks {
+                                for clip in &track.clips {
+                                    if clip.voice_enhance {
+                                        cache.request(
+                                            &clip.source_path,
+                                            clip.voice_enhance_strength,
+                                        );
+                                    }
+                                    if let Some(ref ctracks) = clip.compound_tracks {
+                                        walk_voice_enhance_request(cache, ctracks);
+                                    }
+                                }
+                            }
+                        }
+                        walk_voice_enhance_request(&mut cache, &proj.tracks);
+                        let paths = cache.paths.clone();
+                        prog_player_reload
+                            .borrow_mut()
+                            .update_voice_enhance_paths(paths);
                     }
 
                     // Request AI frame interpolation for slow-motion clips
@@ -12512,6 +13374,7 @@ pub fn build_window(
                     .update_animated_svg_paths(animated_svg_paths);
 
                 let project_file_path = { project_reload.borrow().file_path.clone() };
+                let master_gain_db = { project_reload.borrow().master_gain_db };
                 {
                     let mut pp = prog_player_reload.borrow_mut();
                     pp.set_prerender_project_path(
@@ -12523,6 +13386,9 @@ pub fn build_window(
                     pp.set_project_dimensions(proj_w, proj_h);
                     pp.set_frame_rate(fr_num, fr_den);
                     pp.load_clips(clips);
+                    // Apply the project's Loudness Radar master gain so
+                    // playback reflects the normalized mix.
+                    pp.set_master_gain_db(master_gain_db);
                 }
                 log::debug!(
                     "window:on_project_changed phase1_load ticket={} elapsed_ms={}",
@@ -12699,7 +13565,7 @@ pub fn build_window(
         project.clone(),
         timeline_state.clone(),
         on_project_changed.clone(),
-        dopesheet_on_seek,
+        dopesheet_on_seek.clone(),
     );
     keyframe_editor_widget.set_size_request(-1, 120);
     // Wrap in a vertical-only ScrolledWindow so the dopesheet is usable on
@@ -12709,8 +13575,29 @@ pub fn build_window(
     let keyframe_scroller = ScrolledWindow::new();
     keyframe_scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     keyframe_scroller.set_child(Some(&keyframe_editor_widget));
-    keyframe_scroller.set_visible(false);
-    timeline_paned.set_end_child(Some(&keyframe_scroller));
+
+    // Transcript panel — peer of the dopesheet, sharing the same vertical
+    // slot in `timeline_paned` via a `gtk::Stack`. The Stack lets the user
+    // toggle between Keyframes and Transcript without ever showing both at
+    // once (cleaner on laptops than a 3-way vertical split).
+    let (transcript_widget, transcript_view) = crate::ui::transcript_panel::build_transcript_panel(
+        project.clone(),
+        timeline_state.clone(),
+        on_project_changed.clone(),
+        dopesheet_on_seek,
+    );
+    transcript_widget.set_size_request(-1, 120);
+    let transcript_scroller = ScrolledWindow::new();
+    transcript_scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    transcript_scroller.set_child(Some(&transcript_widget));
+
+    let bottom_panel_stack = gtk::Stack::new();
+    bottom_panel_stack.set_transition_type(gtk::StackTransitionType::None);
+    bottom_panel_stack.add_named(&keyframe_scroller, Some("keyframes"));
+    bottom_panel_stack.add_named(&transcript_scroller, Some("transcript"));
+    bottom_panel_stack.set_visible_child_name("keyframes");
+    bottom_panel_stack.set_visible(false);
+    timeline_paned.set_end_child(Some(&bottom_panel_stack));
     // Default split: allocate ~70% to timeline, ~30% to dopesheet.
     // We'll set a reasonable initial position after the first allocation.
     {
@@ -12723,16 +13610,23 @@ pub fn build_window(
         });
     }
     *keyframe_editor_cell.borrow_mut() = Some(keyframe_editor_view);
+    *transcript_panel_cell.borrow_mut() = Some(transcript_view);
 
-    // Add spacer + toggle button to the track-management bar.
+    // Add spacer + toggle buttons to the track-management bar. Both toggles
+    // share the same `bottom_panel_stack`: clicking one switches the visible
+    // child to that panel (and ensures the stack is showing); clicking the
+    // active panel's toggle hides the stack entirely.
     let keyframes_toggle = gtk::Button::with_label("Show Keyframes");
     keyframes_toggle.add_css_class("small-btn");
+    let transcript_toggle = gtk::Button::with_label("Show Transcript");
+    transcript_toggle.add_css_class("small-btn");
     if let Some(ref bar_widget) = timeline_bar_widget {
         if let Ok(bar) = bar_widget.clone().downcast::<gtk::Box>() {
             let spacer = gtk::Box::new(Orientation::Horizontal, 0);
             spacer.set_hexpand(true);
             bar.append(&spacer);
             bar.append(&keyframes_toggle);
+            bar.append(&transcript_toggle);
         }
     }
 
@@ -12769,24 +13663,82 @@ pub fn build_window(
             });
         });
     }
+    // Shared toggle handlers for the two bottom panels (Keyframes /
+    // Transcript). Each toggle either:
+    //   * activates its panel (and shows the stack if it was hidden), or
+    //   * hides the stack entirely (clicking the active panel's toggle).
+    // After mutating the stack, both buttons' labels are refreshed to match
+    // the new visibility state.
+    let refresh_bottom_toggle_labels: Rc<dyn Fn()> = {
+        let stack = bottom_panel_stack.clone();
+        let kf = keyframes_toggle.clone();
+        let tr = transcript_toggle.clone();
+        Rc::new(move || {
+            let visible = stack.is_visible();
+            let active = stack.visible_child_name();
+            let kf_active =
+                visible && active.as_deref() == Some("keyframes");
+            let tr_active =
+                visible && active.as_deref() == Some("transcript");
+            kf.set_label(if kf_active {
+                "Hide Keyframes"
+            } else {
+                "Show Keyframes"
+            });
+            tr.set_label(if tr_active {
+                "Hide Transcript"
+            } else {
+                "Show Transcript"
+            });
+        })
+    };
     {
-        let scroller = keyframe_scroller.clone();
+        let stack = bottom_panel_stack.clone();
         let paned = timeline_paned.clone();
         let workspace_layouts_applying = workspace_layouts_applying.clone();
         let sync_workspace_layout_state = sync_workspace_layout_state.clone();
-        keyframes_toggle.connect_clicked(move |btn| {
-            let visible = scroller.is_visible();
-            scroller.set_visible(!visible);
-            if !visible {
-                // Restoring: set a sensible split.
-                let total = paned.allocation().height();
-                if total > 0 {
-                    paned.set_position((total as f64 * 0.7) as i32);
-                }
-                btn.set_label("Hide Keyframes");
+        let refresh_labels = refresh_bottom_toggle_labels.clone();
+        keyframes_toggle.connect_clicked(move |_| {
+            let active = stack.visible_child_name();
+            if stack.is_visible() && active.as_deref() == Some("keyframes") {
+                stack.set_visible(false);
             } else {
-                btn.set_label("Show Keyframes");
+                stack.set_visible_child_name("keyframes");
+                if !stack.is_visible() {
+                    stack.set_visible(true);
+                    let total = paned.allocation().height();
+                    if total > 0 {
+                        paned.set_position((total as f64 * 0.7) as i32);
+                    }
+                }
             }
+            refresh_labels();
+            if !workspace_layouts_applying.get() {
+                sync_workspace_layout_state();
+            }
+        });
+    }
+    {
+        let stack = bottom_panel_stack.clone();
+        let paned = timeline_paned.clone();
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
+        let refresh_labels = refresh_bottom_toggle_labels.clone();
+        transcript_toggle.connect_clicked(move |_| {
+            let active = stack.visible_child_name();
+            if stack.is_visible() && active.as_deref() == Some("transcript") {
+                stack.set_visible(false);
+            } else {
+                stack.set_visible_child_name("transcript");
+                if !stack.is_visible() {
+                    stack.set_visible(true);
+                    let total = paned.allocation().height();
+                    if total > 0 {
+                        paned.set_position((total as f64 * 0.7) as i32);
+                    }
+                }
+            }
+            refresh_labels();
             if !workspace_layouts_applying.get() {
                 sync_workspace_layout_state();
             }
@@ -13834,6 +14786,8 @@ pub fn build_window(
     {
         let proxy_cache = proxy_cache.clone();
         let bg_removal_cache = bg_removal_cache.clone();
+        let voice_enhance_cache = voice_enhance_cache.clone();
+        let on_project_changed_voice_enhance = on_project_changed.clone();
         let frame_interp_cache = frame_interp_cache.clone();
         let stt_cache = stt_cache.clone();
         let tracking_cache = tracking_cache.clone();
@@ -13907,6 +14861,22 @@ pub fn build_window(
                     .stt_model_available
                     .set(stt_cache.borrow().is_available());
             }
+            // Poll voice-enhance prerender cache. When a new file becomes
+            // ready we push the updated path map AND trigger a project-
+            // changed cycle so the slot rebuild swaps in the cached file
+            // immediately — otherwise the user has to scrub or replay
+            // before they hear the effect.
+            {
+                let ve_resolved = voice_enhance_cache.borrow_mut().poll();
+                let any_paths = !voice_enhance_cache.borrow().paths.is_empty();
+                if !ve_resolved.is_empty() || any_paths {
+                    let paths = voice_enhance_cache.borrow().paths.clone();
+                    prog_player.borrow_mut().update_voice_enhance_paths(paths);
+                }
+                if !ve_resolved.is_empty() {
+                    on_project_changed_voice_enhance();
+                }
+            }
             // Poll AI frame-interpolation cache. New sidecars are pushed to
             // the Program Monitor as a clip-id-keyed snapshot so the next
             // decoder rebuild will swap them in.
@@ -13974,6 +14944,51 @@ pub fn build_window(
                     inspector_view
                         .frame_interp_status
                         .set_visible(!text.is_empty());
+                }
+            }
+            // Refresh the per-clip Voice Enhance status row from the
+            // currently selected clip's cache state. Mirrors the frame
+            // interp status pattern above. The Retry button is only
+            // visible when the cache reports `Failed` for the current
+            // (source_path, strength) pair.
+            {
+                use crate::media::voice_enhance_cache::VoiceEnhanceStatus;
+                let (text, show_retry) = {
+                    let proj = project_for_stt.borrow();
+                    let selected = inspector_view.selected_clip_id.borrow().clone();
+                    let clip = selected.and_then(|id| proj.clip_ref(&id).cloned());
+                    match clip {
+                        Some(c) if c.voice_enhance => {
+                            let status = voice_enhance_cache
+                                .borrow()
+                                .status(&c.source_path, c.voice_enhance_strength);
+                            match status {
+                                VoiceEnhanceStatus::Idle => ("".to_string(), false),
+                                VoiceEnhanceStatus::Pending => {
+                                    ("Generating enhanced audio…".to_string(), false)
+                                }
+                                VoiceEnhanceStatus::Ready => {
+                                    ("Enhanced audio ready".to_string(), false)
+                                }
+                                VoiceEnhanceStatus::Failed => (
+                                    "Voice enhance failed — click Retry".to_string(),
+                                    true,
+                                ),
+                            }
+                        }
+                        _ => ("".to_string(), false),
+                    }
+                };
+                if inspector_view.voice_enhance_status_label.text() != text.as_str() {
+                    inspector_view.voice_enhance_status_label.set_text(&text);
+                    inspector_view
+                        .voice_enhance_status_label
+                        .set_visible(!text.is_empty());
+                }
+                if inspector_view.voice_enhance_retry_btn.is_visible() != show_retry {
+                    inspector_view
+                        .voice_enhance_retry_btn
+                        .set_visible(show_retry);
                 }
             }
             // Poll STT cache — apply generated subtitles via undo system.
@@ -14139,11 +15154,13 @@ pub fn build_window(
             let bg_progress = bg_removal_cache.borrow().progress();
             let stt_progress = stt_cache.borrow().progress();
             let tracking_progress = tracking_cache.borrow().progress();
+            let voice_enhance_progress = voice_enhance_cache.borrow().progress();
             let proxy_active = proxy_progress.in_flight;
             let prerender_active = prerender_progress.in_flight;
             let bg_active = bg_progress.in_flight;
             let stt_active = stt_progress.in_flight;
             let tracking_active = tracking_progress.in_flight;
+            let voice_enhance_active = voice_enhance_progress.in_flight;
             let syncing_audio = audio_sync_in_progress.get();
             let detecting_silence = silence_detect_in_progress.get();
             let detecting_scene_cuts = scene_detect_in_progress.get();
@@ -14232,6 +15249,7 @@ pub fn build_window(
                 || bg_active
                 || tracking_active
                 || stt_active
+                || voice_enhance_active
             {
                 status_label.set_visible(true);
                 let mut parts = Vec::new();
@@ -14273,6 +15291,12 @@ pub fn build_window(
                 }
                 if stt_active {
                     parts.push("Generating subtitles…".to_string());
+                }
+                if voice_enhance_active {
+                    parts.push(format!(
+                        "Enhancing voice… {}/{}",
+                        voice_enhance_progress.completed, voice_enhance_progress.total
+                    ));
                 }
                 status_label.set_text(&parts.join(" | "));
                 if proxy_active {
@@ -14358,6 +15382,9 @@ pub fn build_window(
         let proxy_cache = proxy_cache.clone();
         let bg_removal_cache = bg_removal_cache.clone();
         let frame_interp_cache = frame_interp_cache.clone();
+        let tracking_cache_for_mcp = tracking_cache.clone();
+        let tracking_job_owner_by_key_for_mcp = tracking_job_owner_by_key.clone();
+        let tracking_job_key_by_clip_for_mcp = tracking_job_key_by_clip.clone();
         let on_close_preview = on_close_preview.clone();
         let source_marks = source_marks.clone();
         let on_source_selected = on_source_selected.clone();
@@ -14423,6 +15450,9 @@ pub fn build_window(
                         &frame_interp_cache,
                         &stt_cache,
                         &music_gen_cache,
+                        &tracking_cache_for_mcp,
+                        &tracking_job_owner_by_key_for_mcp,
+                        &tracking_job_key_by_clip_for_mcp,
                         &on_close_preview,
                         &source_marks,
                         &on_source_selected,
@@ -14970,6 +16000,9 @@ fn handle_mcp_command(
     frame_interp_cache: &Rc<RefCell<crate::media::frame_interp_cache::FrameInterpCache>>,
     stt_cache: &Rc<RefCell<crate::media::stt_cache::SttCache>>,
     music_gen_cache: &Rc<RefCell<crate::media::music_gen::MusicGenCache>>,
+    tracking_cache: &Rc<RefCell<crate::media::tracking::TrackingCache>>,
+    tracking_job_owner_by_key: &Rc<RefCell<HashMap<String, String>>>,
+    tracking_job_key_by_clip: &Rc<RefCell<HashMap<String, String>>>,
     on_close_preview: &Rc<dyn Fn()>,
     source_marks: &Rc<RefCell<crate::model::media_library::SourceMarks>>,
     on_source_selected: &Rc<dyn Fn(String, u64)>,
@@ -16907,6 +17940,63 @@ fn handle_mcp_command(
             }
         }
 
+        McpCommand::SetClipHslQualifier {
+            clip_id,
+            qualifier,
+            reply,
+        } => {
+            let mut proj = project.borrow_mut();
+            let found = if let Some(clip) = proj.clip_mut(&clip_id) {
+                clip.hsl_qualifier = qualifier.clone();
+                proj.dirty = true;
+                true
+            } else {
+                false
+            };
+            drop(proj);
+            reply.send(json!({"success": found})).ok();
+            if found {
+                on_project_changed();
+            }
+        }
+
+        McpCommand::SetClipMotionBlur {
+            clip_id,
+            enabled,
+            shutter_angle,
+            reply,
+        } => {
+            let mut proj = project.borrow_mut();
+            let result: Option<(bool, f64)> = if let Some(clip) = proj.clip_mut(&clip_id) {
+                if let Some(v) = enabled {
+                    clip.motion_blur_enabled = v;
+                }
+                if let Some(v) = shutter_angle {
+                    clip.motion_blur_shutter_angle = v.clamp(0.0, 720.0);
+                }
+                Some((clip.motion_blur_enabled, clip.motion_blur_shutter_angle))
+            } else {
+                None
+            };
+            if result.is_some() {
+                proj.dirty = true;
+            }
+            drop(proj);
+            let response = match result {
+                Some((en, sh)) => json!({
+                    "success": true,
+                    "motion_blur_enabled": en,
+                    "motion_blur_shutter_angle": sh,
+                }),
+                None => json!({"success": false}),
+            };
+            let found = result.is_some();
+            reply.send(response).ok();
+            if found {
+                on_project_changed();
+            }
+        }
+
         McpCommand::SetClipLut {
             clip_id,
             lut_paths,
@@ -16998,6 +18088,64 @@ fn handle_mcp_command(
             };
             drop(proj);
             reply.send(json!({"success": found})).ok();
+            if found {
+                on_project_changed();
+            }
+        }
+
+        McpCommand::SetClipVoiceEnhance {
+            clip_id,
+            enabled,
+            strength,
+            reply,
+        } => {
+            let mut proj = project.borrow_mut();
+            let result = if let Some(clip) = proj.clip_mut(&clip_id) {
+                clip.voice_enhance = enabled;
+                if let Some(s) = strength {
+                    clip.voice_enhance_strength = (s as f32).clamp(0.0, 1.0);
+                }
+                let snapshot = (clip.voice_enhance, clip.voice_enhance_strength);
+                proj.dirty = true;
+                Some(snapshot)
+            } else {
+                None
+            };
+            drop(proj);
+            match result {
+                Some((en, st)) => {
+                    reply
+                        .send(json!({
+                            "success": true,
+                            "enabled": en,
+                            "strength": st as f64,
+                        }))
+                        .ok();
+                    on_project_changed();
+                }
+                None => {
+                    reply.send(json!({"success": false})).ok();
+                }
+            }
+        }
+
+        McpCommand::SetClipSubtitleVisible {
+            clip_id,
+            visible,
+            reply,
+        } => {
+            let mut proj = project.borrow_mut();
+            let found = if let Some(clip) = proj.clip_mut(&clip_id) {
+                clip.subtitle_visible = visible;
+                proj.dirty = true;
+                true
+            } else {
+                false
+            };
+            drop(proj);
+            reply
+                .send(json!({"success": found, "visible": visible}))
+                .ok();
             if found {
                 on_project_changed();
             }
@@ -17232,6 +18380,80 @@ fn handle_mcp_command(
             if found {
                 on_project_changed();
             }
+        }
+
+        McpCommand::AnalyzeProjectLoudness { reply } => {
+            // Snapshot the project so the render/analyze can run on the
+            // main thread without holding a borrow across the ffmpeg
+            // subprocess (MCP dispatch already runs on the GTK loop,
+            // which is acceptable for a blocking tool call — matches
+            // export_mp4 and normalize_clip_audio patterns).
+            let project_snapshot = project.borrow().clone();
+            let current_gain = project_snapshot.master_gain_db;
+            let result = crate::media::export::analyze_project_loudness(&project_snapshot);
+            let (pref_preset, pref_target) = {
+                let p = preferences_state.borrow();
+                (p.loudness_target_preset.clone(), p.loudness_target_lufs)
+            };
+            match result {
+                Ok(report) => {
+                    let target_lufs = crate::ui_state::loudness_target_preset_to_lufs(
+                        &pref_preset,
+                    )
+                    .unwrap_or(pref_target);
+                    let delta = target_lufs - report.integrated_lufs;
+                    reply
+                        .send(json!({
+                            "success": true,
+                            "integrated_lufs": report.integrated_lufs,
+                            "short_term_max_lufs": report.short_term_max_lufs,
+                            "momentary_max_lufs": report.momentary_max_lufs,
+                            "loudness_range_lu": report.loudness_range_lu,
+                            "true_peak_dbtp": report.true_peak_dbtp,
+                            "threshold_lufs": report.threshold_lufs,
+                            "current_master_gain_db": current_gain,
+                            "target_preset": pref_preset,
+                            "target_lufs": target_lufs,
+                            "delta_db": delta,
+                        }))
+                        .ok();
+                }
+                Err(e) => {
+                    reply
+                        .send(json!({"success": false, "error": e.to_string()}))
+                        .ok();
+                }
+            }
+        }
+
+        McpCommand::SetProjectMasterGainDb {
+            master_gain_db,
+            reply,
+        } => {
+            let clamped = master_gain_db.clamp(-24.0, 24.0);
+            let old_db = project.borrow().master_gain_db;
+            if (clamped - old_db).abs() > 1e-9 {
+                let cmd: Box<dyn crate::undo::EditCommand> = Box::new(
+                    crate::undo::SetProjectMasterGainCommand {
+                        old_db,
+                        new_db: clamped,
+                    },
+                );
+                {
+                    let mut proj = project.borrow_mut();
+                    timeline_state.borrow_mut().history.execute(cmd, &mut proj);
+                }
+                prog_player.borrow_mut().set_master_gain_db(clamped);
+                // Note: the Loudness popover's current-gain label is
+                // refreshed on next analyze / open. We can't reach the
+                // popover view from the MCP dispatch scope without
+                // lifting the cell further up, which Phase 1 doesn't
+                // warrant.
+                on_project_changed();
+            }
+            reply
+                .send(json!({"success": true, "master_gain_db": clamped}))
+                .ok();
         }
 
         McpCommand::NormalizeClipAudio {
@@ -18171,20 +19393,31 @@ fn handle_mcp_command(
             });
         }
 
-        McpCommand::ExportMp4 { path, reply } => {
+        McpCommand::ExportMp4 {
+            path,
+            audio_channel_layout,
+            reply,
+        } => {
             let proj = project.borrow().clone();
             let bg_paths = bg_removal_cache.borrow().paths.clone();
             let interp_paths = frame_interp_cache.borrow().snapshot_paths_by_clip_id(&proj);
+            let layout = crate::media::export::AudioChannelLayout::from_str(
+                &audio_channel_layout,
+            );
             std::thread::spawn(move || {
                 let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
                 let proj_worker = proj.clone();
                 let path_worker = path.clone();
                 std::thread::spawn(move || {
                     let (tx, _rx) = std::sync::mpsc::channel();
+                    let options = crate::media::export::ExportOptions {
+                        audio_channel_layout: layout,
+                        ..crate::media::export::ExportOptions::default()
+                    };
                     let result = crate::media::export::export_project(
                         &proj_worker,
                         &path_worker,
-                        crate::media::export::ExportOptions::default(),
+                        options,
                         None,
                         &bg_paths,
                         &interp_paths,
@@ -18244,7 +19477,8 @@ fn handle_mcp_command(
                             crate::media::export::AudioCodec::Flac => "flac",
                             crate::media::export::AudioCodec::Pcm => "pcm",
                         },
-                        "audio_bitrate_kbps": options.audio_bitrate_kbps
+                        "audio_bitrate_kbps": options.audio_bitrate_kbps,
+                        "audio_channel_layout": options.audio_channel_layout.as_str(),
                     })
                 })
                 .collect();
@@ -18262,6 +19496,7 @@ fn handle_mcp_command(
             crf,
             audio_codec,
             audio_bitrate_kbps,
+            audio_channel_layout,
             reply,
         } => {
             let video_codec = match video_codec.as_str() {
@@ -18308,6 +19543,9 @@ fn handle_mcp_command(
                     .ok();
                 return;
             }
+            let layout = crate::media::export::AudioChannelLayout::from_str(
+                &audio_channel_layout,
+            );
             let options = crate::media::export::ExportOptions {
                 video_codec,
                 container,
@@ -18317,6 +19555,7 @@ fn handle_mcp_command(
                 audio_codec,
                 audio_bitrate_kbps,
                 gif_fps: None,
+                audio_channel_layout: layout,
             };
             let mut state = crate::ui_state::load_export_presets_state();
             match state.upsert_preset(crate::ui_state::ExportPreset::from_export_options(
@@ -18511,6 +19750,7 @@ fn handle_mcp_command(
                     ClipKind::Adjustment => "adjustment",
                     ClipKind::Compound => "compound",
                     ClipKind::Multicam => "multicam",
+                    ClipKind::Audition => "audition",
                 }
             }
 
@@ -19917,6 +21157,118 @@ fn handle_mcp_command(
             }
         }
 
+        McpCommand::SetClipAutoCropTrack {
+            clip_id,
+            center_x,
+            center_y,
+            width,
+            height,
+            padding,
+            reply,
+        } => {
+            // Ensure a motion tracker with the requested region exists on
+            // the clip. If no tracker matches the region, create one so
+            // the binding has somewhere to resolve its samples from.
+            let tracker_id = {
+                let mut proj = project.borrow_mut();
+                let Some(clip) = proj.clip_mut(&clip_id) else {
+                    reply
+                        .send(json!({
+                            "ok": false,
+                            "error": format!("Clip not found: {clip_id}")
+                        }))
+                        .ok();
+                    return;
+                };
+                if let Err(message) = clip_supports_tracking_analysis(clip) {
+                    reply
+                        .send(json!({"ok": false, "error": message}))
+                        .ok();
+                    return;
+                }
+                let new_region = crate::model::clip::TrackingRegion {
+                    center_x,
+                    center_y,
+                    width,
+                    height,
+                    rotation_deg: 0.0,
+                };
+                // Prefer the first existing tracker; update its region to
+                // match so the caller's region is authoritative.
+                let tracker_id = if let Some(tracker) = clip.motion_trackers.first_mut() {
+                    tracker.analysis_region = new_region;
+                    tracker.samples.clear();
+                    tracker.id.clone()
+                } else {
+                    let mut tracker =
+                        crate::model::clip::MotionTracker::new("Auto-crop tracker".to_string());
+                    tracker.analysis_region = new_region;
+                    let id = tracker.id.clone();
+                    clip.motion_trackers.push(tracker);
+                    id
+                };
+                proj.dirty = true;
+                tracker_id
+            };
+
+            let (outcome, command) = run_auto_crop_track_for_clip(
+                project,
+                tracking_cache,
+                tracking_job_owner_by_key,
+                tracking_job_key_by_clip,
+                &clip_id,
+                &tracker_id,
+                padding.unwrap_or(AUTO_CROP_DEFAULT_PADDING),
+            );
+            if let Some(cmd) = command {
+                let mut st = timeline_state.borrow_mut();
+                let mut proj = project.borrow_mut();
+                st.history.execute(cmd, &mut proj);
+            }
+            on_project_changed();
+            match outcome {
+                AutoCropOutcome::Ok { message } => {
+                    let proj = project.borrow();
+                    let binding = proj
+                        .clip_ref(&clip_id)
+                        .and_then(|c| c.tracking_binding.clone());
+                    reply
+                        .send(json!({
+                            "ok": true,
+                            "clip_id": clip_id,
+                            "tracker_id": tracker_id,
+                            "status": "ready",
+                            "message": message,
+                            "scale_multiplier": binding.as_ref().map(|b| b.scale_multiplier),
+                            "offset_x": binding.as_ref().map(|b| b.offset_x),
+                            "offset_y": binding.as_ref().map(|b| b.offset_y),
+                        }))
+                        .ok();
+                }
+                AutoCropOutcome::Queued { message } => {
+                    let proj = project.borrow();
+                    let binding = proj
+                        .clip_ref(&clip_id)
+                        .and_then(|c| c.tracking_binding.clone());
+                    reply
+                        .send(json!({
+                            "ok": true,
+                            "clip_id": clip_id,
+                            "tracker_id": tracker_id,
+                            "status": "queued",
+                            "message": message,
+                            "scale_multiplier": binding.as_ref().map(|b| b.scale_multiplier),
+                            "offset_x": binding.as_ref().map(|b| b.offset_x),
+                            "offset_y": binding.as_ref().map(|b| b.offset_y),
+                        }))
+                        .ok();
+                }
+                AutoCropOutcome::Err { message } => {
+                    reply.send(json!({"ok": false, "error": message})).ok();
+                }
+            }
+        }
+
         McpCommand::ListFrei0rPlugins { reply } => {
             let registry = crate::media::frei0r_registry::Frei0rRegistry::get_or_discover();
             let plugins: Vec<Value> = registry
@@ -20376,6 +21728,8 @@ fn handle_mcp_command(
                         audio_codec: crate::ui_state::ExportAudioCodec::Aac,
                         audio_bitrate_kbps: 192,
                         gif_fps: None,
+                        audio_channel_layout:
+                            crate::ui_state::ExportAudioChannelLayout::Stereo,
                     })
             };
             let job = crate::ui_state::ExportQueueJob::new(&output_path, preset);
@@ -20811,6 +22165,310 @@ fn handle_mcp_command(
                     .ok();
             }
         }
+        // ── Audition / clip-versions commands ─────────────────────────────
+        McpCommand::CreateAuditionClip {
+            clip_ids,
+            active_index,
+            reply,
+        } => {
+            if clip_ids.len() < 2 {
+                reply
+                    .send(json!({"error": "At least 2 clip IDs required"}))
+                    .ok();
+                return;
+            }
+            // Collect (clip, track_id) pairs.
+            let hits: Vec<(crate::model::clip::Clip, String)> = {
+                let proj = project.borrow();
+                clip_ids
+                    .iter()
+                    .filter_map(|id| {
+                        proj.tracks
+                            .iter()
+                            .flat_map(|t| t.clips.iter().map(move |c| (t.id.clone(), c)))
+                            .find(|(_, c)| &c.id == id)
+                            .map(|(tid, c)| (c.clone(), tid))
+                    })
+                    .collect()
+            };
+            if hits.len() < 2 {
+                reply
+                    .send(json!({"error": "Could not find 2+ clips with the provided IDs"}))
+                    .ok();
+                return;
+            }
+            // All clips must be on the same track.
+            let first_track = hits[0].1.clone();
+            if hits.iter().any(|(_, t)| t != &first_track) {
+                reply
+                    .send(json!({"error": "All audition takes must come from the same track"}))
+                    .ok();
+                return;
+            }
+            // Build takes from the original clips, in caller-provided order.
+            let active_index = active_index.min(hits.len() - 1);
+            let anchor_start = hits[active_index].0.timeline_start;
+            let takes: Vec<crate::model::clip::AuditionTake> = hits
+                .iter()
+                .map(|(c, _)| crate::model::clip::AuditionTake {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    label: c.label.clone(),
+                    source_path: c.source_path.clone(),
+                    source_in: c.source_in,
+                    source_out: c.source_out,
+                    source_timecode_base_ns: c.source_timecode_base_ns,
+                    media_duration_ns: c.media_duration_ns,
+                })
+                .collect();
+            let audition = crate::model::clip::Clip::new_audition(anchor_start, takes, active_index);
+            let audition_id = audition.id.clone();
+            let selected_ids: std::collections::HashSet<String> = hits
+                .iter()
+                .map(|(c, _)| c.id.clone())
+                .collect();
+            let mut proj = project.borrow_mut();
+            let mut changes = Vec::new();
+            for track in &proj.tracks {
+                if track.id != first_track {
+                    continue;
+                }
+                let old_clips = track.clips.clone();
+                let mut new_clips: Vec<crate::model::clip::Clip> = track
+                    .clips
+                    .iter()
+                    .filter(|c| !selected_ids.contains(&c.id))
+                    .cloned()
+                    .collect();
+                new_clips.push(audition.clone());
+                new_clips.sort_by_key(|c| c.timeline_start);
+                changes.push(crate::undo::TrackClipsChange {
+                    track_id: track.id.clone(),
+                    old_clips,
+                    new_clips,
+                });
+            }
+            let cmd = Box::new(crate::undo::SetMultipleTracksClipsCommand {
+                changes,
+                label: "Create Audition".to_string(),
+            });
+            {
+                let mut st = timeline_state.borrow_mut();
+                st.history.execute(cmd, &mut proj);
+            }
+            drop(proj);
+            on_project_changed();
+            reply
+                .send(json!({"success": true, "audition_clip_id": audition_id}))
+                .ok();
+        }
+        McpCommand::AddAuditionTake {
+            audition_clip_id,
+            source_path,
+            source_in_ns,
+            source_out_ns,
+            label,
+            reply,
+        } => {
+            let exists_and_is_audition = {
+                let proj = project.borrow();
+                proj.clip_ref(&audition_clip_id)
+                    .map(|c| c.is_audition())
+                    .unwrap_or(false)
+            };
+            if !exists_and_is_audition {
+                reply
+                    .send(json!({"error": "Clip is not an audition clip"}))
+                    .ok();
+                return;
+            }
+            let take = crate::model::clip::AuditionTake {
+                id: uuid::Uuid::new_v4().to_string(),
+                label: label.unwrap_or_else(|| {
+                    std::path::Path::new(&source_path)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("Take")
+                        .to_string()
+                }),
+                source_path,
+                source_in: source_in_ns,
+                source_out: source_out_ns,
+                source_timecode_base_ns: None,
+                media_duration_ns: None,
+            };
+            let take_id = take.id.clone();
+            let cmd = Box::new(crate::undo::AddAuditionTakeCommand {
+                clip_id: audition_clip_id,
+                take,
+            });
+            {
+                let mut proj = project.borrow_mut();
+                let mut st = timeline_state.borrow_mut();
+                st.history.execute(cmd, &mut proj);
+            }
+            on_project_changed();
+            reply
+                .send(json!({"success": true, "take_id": take_id}))
+                .ok();
+        }
+        McpCommand::RemoveAuditionTake {
+            audition_clip_id,
+            take_index,
+            reply,
+        } => {
+            let (is_audition, active_index, num_takes) = {
+                let proj = project.borrow();
+                proj.clip_ref(&audition_clip_id)
+                    .map(|c| {
+                        (
+                            c.is_audition(),
+                            c.audition_active_take_index,
+                            c.audition_takes.as_ref().map(|t| t.len()).unwrap_or(0),
+                        )
+                    })
+                    .unwrap_or((false, 0, 0))
+            };
+            if !is_audition {
+                reply
+                    .send(json!({"error": "Clip is not an audition clip"}))
+                    .ok();
+                return;
+            }
+            if take_index >= num_takes {
+                reply
+                    .send(json!({"error": format!("take_index {take_index} out of range (clip has {num_takes} takes)")}))
+                    .ok();
+                return;
+            }
+            if take_index == active_index {
+                reply
+                    .send(json!({"error": "Cannot remove the active take. Switch to a different take first."}))
+                    .ok();
+                return;
+            }
+            let cmd = Box::new(crate::undo::RemoveAuditionTakeCommand {
+                clip_id: audition_clip_id,
+                take_index,
+                removed: std::cell::RefCell::new(None),
+            });
+            {
+                let mut proj = project.borrow_mut();
+                let mut st = timeline_state.borrow_mut();
+                st.history.execute(cmd, &mut proj);
+            }
+            on_project_changed();
+            reply.send(json!({"success": true})).ok();
+        }
+        McpCommand::SetActiveAuditionTake {
+            audition_clip_id,
+            take_index,
+            reply,
+        } => {
+            let (snapshot, num_takes) = {
+                let proj = project.borrow();
+                let clip = proj.clip_ref(&audition_clip_id);
+                let snap = clip.cloned();
+                let n = snap
+                    .as_ref()
+                    .and_then(|c| c.audition_takes.as_ref().map(|t| t.len()))
+                    .unwrap_or(0);
+                (snap, n)
+            };
+            if !snapshot.as_ref().map(|c| c.is_audition()).unwrap_or(false) {
+                reply
+                    .send(json!({"error": "Clip is not an audition clip"}))
+                    .ok();
+                return;
+            }
+            if take_index >= num_takes {
+                reply
+                    .send(json!({"error": format!("take_index {take_index} out of range (clip has {num_takes} takes)")}))
+                    .ok();
+                return;
+            }
+            let cmd = Box::new(crate::undo::SetActiveAuditionTakeCommand {
+                clip_id: audition_clip_id,
+                new_index: take_index,
+                before_snapshot: snapshot,
+            });
+            {
+                let mut proj = project.borrow_mut();
+                let mut st = timeline_state.borrow_mut();
+                st.history.execute(cmd, &mut proj);
+            }
+            on_project_changed();
+            reply.send(json!({"success": true})).ok();
+        }
+        McpCommand::ListAuditionTakes {
+            audition_clip_id,
+            reply,
+        } => {
+            let proj = project.borrow();
+            let Some(clip) = proj.clip_ref(&audition_clip_id) else {
+                reply
+                    .send(json!({"error": format!("Clip not found: {audition_clip_id}")}))
+                    .ok();
+                return;
+            };
+            if !clip.is_audition() {
+                reply
+                    .send(json!({"error": "Clip is not an audition clip"}))
+                    .ok();
+                return;
+            }
+            let takes: Vec<serde_json::Value> = clip
+                .audition_takes
+                .as_ref()
+                .map(|takes| {
+                    takes
+                        .iter()
+                        .enumerate()
+                        .map(|(i, t)| {
+                            json!({
+                                "index": i,
+                                "id": t.id,
+                                "label": t.label,
+                                "source_path": t.source_path,
+                                "source_in_ns": t.source_in,
+                                "source_out_ns": t.source_out,
+                                "source_timecode_base_ns": t.source_timecode_base_ns,
+                                "media_duration_ns": t.media_duration_ns,
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            reply
+                .send(json!({
+                    "clip_id": audition_clip_id,
+                    "active_take_index": clip.audition_active_take_index,
+                    "takes": takes,
+                }))
+                .ok();
+        }
+        McpCommand::FinalizeAudition {
+            audition_clip_id,
+            reply,
+        } => {
+            let snapshot = project.borrow().clip_ref(&audition_clip_id).cloned();
+            if !snapshot.as_ref().map(|c| c.is_audition()).unwrap_or(false) {
+                reply
+                    .send(json!({"error": "Clip is not an audition clip"}))
+                    .ok();
+                return;
+            }
+            let cmd = Box::new(crate::undo::FinalizeAuditionCommand {
+                clip_id: audition_clip_id,
+                before_snapshot: snapshot,
+            });
+            {
+                let mut proj = project.borrow_mut();
+                let mut st = timeline_state.borrow_mut();
+                st.history.execute(cmd, &mut proj);
+            }
+            on_project_changed();
+            reply.send(json!({"success": true})).ok();
+        }
         // ── Subtitle / STT commands ────────────────────────────────────────
         McpCommand::GenerateSubtitles {
             clip_id,
@@ -20935,6 +22593,72 @@ fn handle_mcp_command(
                     .ok();
             }
         }
+        McpCommand::DeleteTranscriptRange {
+            clip_id,
+            start_word_index,
+            end_word_index,
+            reply,
+        } => {
+            // Resolve word indices to clip-local time bounds inside a scoped
+            // borrow of the project, then call the same TimelineState helper
+            // the UI uses so the edit is one undo entry and walks compound
+            // tracks correctly.
+            let resolved: Result<(u64, u64), String> = {
+                let proj = project.borrow();
+                if let Some(clip) = proj.clip_ref(&clip_id) {
+                    if end_word_index <= start_word_index {
+                        Err(format!(
+                            "end_word_index ({end_word_index}) must be > start_word_index ({start_word_index})"
+                        ))
+                    } else {
+                        // Flatten clip words in segment-then-word order.
+                        let mut flat: Vec<(u64, u64)> = Vec::new();
+                        for seg in &clip.subtitle_segments {
+                            for w in &seg.words {
+                                flat.push((w.start_ns, w.end_ns));
+                            }
+                        }
+                        let last_idx = end_word_index.saturating_sub(1) as usize;
+                        if (start_word_index as usize) >= flat.len() || last_idx >= flat.len() {
+                            Err(format!(
+                                "Word index out of range: clip has {} word(s)",
+                                flat.len()
+                            ))
+                        } else {
+                            let start_ns = flat[start_word_index as usize].0;
+                            let end_ns = flat[last_idx].1;
+                            Ok((start_ns, end_ns))
+                        }
+                    }
+                } else {
+                    Err(format!("Clip not found: {clip_id}"))
+                }
+            };
+
+            match resolved {
+                Ok((word_start_ns, word_end_ns)) => {
+                    let changed = timeline_state
+                        .borrow_mut()
+                        .delete_transcript_word_range(&clip_id, word_start_ns, word_end_ns);
+                    if changed {
+                        on_project_changed();
+                        reply
+                            .send(json!({
+                                "success": true,
+                                "deleted_word_count": end_word_index - start_word_index,
+                            }))
+                            .ok();
+                    } else {
+                        reply
+                            .send(json!({"error": "No change applied (zero-length range or clip not found)"}))
+                            .ok();
+                    }
+                }
+                Err(msg) => {
+                    reply.send(json!({"error": msg})).ok();
+                }
+            }
+        }
         McpCommand::SetSubtitleStyle {
             clip_id,
             font,
@@ -20957,6 +22681,7 @@ fn handle_mcp_command(
             highlight_background,
             highlight_shadow,
             bg_highlight_color,
+            highlight_stroke_color,
             reply,
         } => {
             let mut proj = project.borrow_mut();
@@ -21034,6 +22759,9 @@ fn handle_mcp_command(
                 }
                 if let Some(c) = bg_highlight_color {
                     clip.subtitle_bg_highlight_color = c;
+                }
+                if let Some(c) = highlight_stroke_color {
+                    clip.subtitle_highlight_stroke_color = c;
                 }
                 proj.dirty = true;
                 drop(proj);

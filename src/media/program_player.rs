@@ -786,6 +786,13 @@ pub struct ProgramClip {
     pub voice_isolation_pad_ns: u64,
     pub voice_isolation_fade_ns: u64,
     pub voice_isolation_floor: f64,
+    /// One-knob "Enhance Voice" toggle. When true, the realtime audio
+    /// chain runs HPF + presence/mud EQ + gentle compression. Noise
+    /// reduction is export-only (no GStreamer equivalent of `afftdn`).
+    pub voice_enhance: bool,
+    /// Strength of the realtime enhance chain, 0.0..=1.0. Mirrors the
+    /// export-side scaling so the slider feels consistent across both.
+    pub voice_enhance_strength: f32,
     pub volume_keyframes: Vec<NumericKeyframe>,
     /// Pre-merged speech intervals (clip-local source-time ns), padded by
     /// `voice_isolation_pad_ns`. Computed from either subtitle word timings
@@ -819,6 +826,11 @@ pub struct ProgramClip {
     pub rotate: i32,
     pub flip_h: bool,
     pub flip_v: bool,
+    /// Motion blur enabled (rendered in background prerender FFmpeg path
+    /// only — not in the live GStreamer preview slots).
+    pub motion_blur_enabled: bool,
+    /// Motion blur shutter angle in degrees (0..=720).
+    pub motion_blur_shutter_angle: f64,
     /// Title text overlay
     pub title_text: String,
     pub title_font: String,
@@ -941,6 +953,8 @@ pub struct ProgramClip {
     pub tracking_binding: Option<crate::model::clip::TrackingBinding>,
     /// Shape masks applied to this clip.
     pub masks: Vec<crate::model::clip::ClipMask>,
+    /// Optional HSL Qualifier (secondary color correction).
+    pub hsl_qualifier: Option<crate::model::clip::HslQualifier>,
 }
 
 impl ProgramClip {
@@ -1465,6 +1479,9 @@ struct VideoSlot {
     /// Shared mask data read by the mask pad probe.  Updated live from
     /// inspector slider changes without requiring a pipeline rebuild.
     mask_data: Arc<Mutex<Vec<crate::model::clip::ClipMask>>>,
+    /// Shared HSL qualifier read by the HSL pad probe.  Updated live from
+    /// inspector slider changes without requiring a pipeline rebuild.
+    hsl_data: Arc<Mutex<Option<crate::model::clip::HslQualifier>>>,
 }
 
 /// Result of `compute_reuse_plan()`: whether all current decoder slots can be
@@ -1800,6 +1817,14 @@ pub struct ProgramPlayer {
     animated_svg_paths: HashMap<String, String>,
     /// Bg-removed file paths: source_path → bg_removed file path.
     bg_removal_paths: HashMap<String, String>,
+    /// Voice-enhance prerendered file paths, keyed by
+    /// `voice_enhance_cache::cache_key(source_path, strength)`.
+    /// Populated by [`Self::update_voice_enhance_paths`] from
+    /// `VoiceEnhanceCache::paths`. The video stream of the cached
+    /// file is a copy of the source; the audio has been re-encoded
+    /// through the same FFmpeg chain that the export side uses, so
+    /// preview and export are byte-identical.
+    voice_enhance_paths: HashMap<String, String>,
     /// AI frame-interpolation sidecar paths: clip_id → sidecar file path.
     /// Populated by [`Self::update_frame_interp_paths`] from
     /// `FrameInterpCache::snapshot_paths_by_clip_id`.
@@ -1808,6 +1833,10 @@ pub struct ProgramPlayer {
     audio_stream_probe_cache: HashMap<String, bool>,
     /// GStreamer `level` element on audiomixer output for metering.
     level_element: Option<gst::Element>,
+    /// GStreamer `volume` element applied to the post-mix master bus.
+    /// Set by `set_master_gain_db()` to implement the Loudness Radar
+    /// project-level master gain without a pipeline rebuild.
+    master_volume_element: Option<gst::Element>,
     /// GStreamer `level` element on the audio-only pipeline for metering.
     #[allow(dead_code)]
     level_element_audio: Option<gst::Element>,
@@ -2222,6 +2251,15 @@ impl ProgramPlayer {
             .build()?;
 
         let audio_conv_out = gst::ElementFactory::make("audioconvert").build()?;
+        // Project-level master gain element for the Loudness Radar
+        // "Normalize to Target" workflow. Applied AFTER audiomixer so the
+        // existing per-track meters see the pre-gain signal and the master
+        // VU meter (via `level_element` below) sees the post-gain signal
+        // — i.e. what the user will actually hear / export.
+        let master_volume_element = gst::ElementFactory::make("volume").build().ok();
+        if let Some(ref vol) = master_volume_element {
+            vol.set_property("volume", 1.0_f64);
+        }
         let level_element = gst::ElementFactory::make("level")
             .property("post-messages", true)
             .property("interval", 50_000_000u64)
@@ -2251,6 +2289,9 @@ impl ProgramPlayer {
             &audio_conv_out,
             &audio_sink,
         ])?;
+        if let Some(ref mv) = master_volume_element {
+            pipeline.add(mv)?;
+        }
         if let Some(ref lv) = level_element {
             pipeline.add(lv)?;
         }
@@ -2453,23 +2494,28 @@ impl ProgramPlayer {
         amix_bg_pad.set_property("volume", 1.0_f64);
         silence_caps.static_pad("src").unwrap().link(&amix_bg_pad)?;
 
-        // Link audiomixer → [scaletempo] → audioconvert → [level →] autoaudiosink
+        // Link audiomixer → [scaletempo] → audioconvert → [master_volume →] [level →] autoaudiosink
         // scaletempo preserves pitch during rate-based seeks (J/K/L shuttle).
+        // master_volume applies the project-level Loudness Radar gain *before*
+        // the level tap so the master VU meter reflects the post-gain mix.
         let scaletempo = gst::ElementFactory::make("scaletempo").build().ok();
-        if let Some(ref st) = scaletempo {
-            pipeline.add(st)?;
-            if let Some(ref lv) = level_element {
-                gst::Element::link_many([&audiomixer, st, &audio_conv_out, lv, &audio_sink])?;
+        {
+            let mut chain: Vec<&gst::Element> = vec![&audiomixer];
+            if let Some(ref st) = scaletempo {
+                pipeline.add(st)?;
+                chain.push(st);
             } else {
-                gst::Element::link_many([&audiomixer, st, &audio_conv_out, &audio_sink])?;
+                log::warn!("scaletempo element not available — J/K/L shuttle will shift pitch");
             }
-        } else {
-            log::warn!("scaletempo element not available — J/K/L shuttle will shift pitch");
+            chain.push(&audio_conv_out);
+            if let Some(ref mv) = master_volume_element {
+                chain.push(mv);
+            }
             if let Some(ref lv) = level_element {
-                gst::Element::link_many([&audiomixer, &audio_conv_out, lv, &audio_sink])?;
-            } else {
-                gst::Element::link_many([&audiomixer, &audio_conv_out, &audio_sink])?;
+                chain.push(lv);
             }
+            chain.push(&audio_sink);
+            gst::Element::link_many(&chain)?;
         }
 
         // -- Audio-only pipeline (playbin, unchanged) --------------------------
@@ -2599,9 +2645,11 @@ impl ProgramPlayer {
                 proxy_fallback_warned_keys: HashSet::new(),
                 animated_svg_paths: HashMap::new(),
                 bg_removal_paths: HashMap::new(),
+                voice_enhance_paths: HashMap::new(),
                 frame_interp_paths: HashMap::new(),
                 audio_stream_probe_cache: HashMap::new(),
                 level_element,
+                master_volume_element,
                 level_element_audio,
                 audio_volume_element,
                 audio_eq_element,
@@ -2957,6 +3005,18 @@ impl ProgramPlayer {
             self.bg_removal_paths = paths;
             self.prewarmed_boundary_ns = None;
             self.invalidate_short_frame_cache("bg-removal-paths-updated");
+        }
+    }
+
+    /// Hand off a freshly snapshotted voice-enhance cache key → output
+    /// path map. The Program Monitor swaps in the prerendered file at
+    /// `resolve_source_path_for_clip` time for any clip whose
+    /// `(source_path, voice_enhance_strength)` matches a ready entry.
+    pub fn update_voice_enhance_paths(&mut self, paths: HashMap<String, String>) {
+        if self.voice_enhance_paths != paths {
+            self.voice_enhance_paths = paths;
+            self.prewarmed_boundary_ns = None;
+            self.invalidate_short_frame_cache("voice-enhance-paths-updated");
         }
     }
 
@@ -5137,6 +5197,45 @@ impl ProgramPlayer {
         }
     }
 
+    /// Push a new HSL qualifier into the matching slot's shared state so the
+    /// pad probe picks it up on the next frame without a pipeline rebuild.
+    /// Accepts `None` to clear the qualifier entirely.
+    pub fn update_hsl_qualifier_for_clip(
+        &mut self,
+        clip_id: &str,
+        qualifier: Option<crate::model::clip::HslQualifier>,
+    ) {
+        let Some(clip_idx) = self.clips.iter().position(|clip| clip.id == clip_id) else {
+            return;
+        };
+        if let Some(clip) = self.clips.get_mut(clip_idx) {
+            clip.hsl_qualifier = qualifier.clone();
+        }
+        if let Some(slot) = self.slot_for_clip(clip_idx) {
+            if let Ok(mut guard) = slot.hsl_data.lock() {
+                *guard = qualifier;
+            }
+            if self.state != PlayerState::Playing {
+                self.reseek_slot_by_clip_idx(clip_idx);
+            }
+        }
+    }
+
+    /// Apply the project-level master audio gain (from the Loudness Radar
+    /// "Normalize to Target" workflow) to the post-mix bus. Values are
+    /// clamped to ±24 dB and applied as a linear `volume` property on the
+    /// dedicated master volume element — no pipeline rebuild required.
+    ///
+    /// Call this from `window.rs` whenever `project.master_gain_db` changes
+    /// (load, normalize, undo/redo, reset).
+    pub fn set_master_gain_db(&mut self, db: f64) {
+        let clamped = db.clamp(-24.0, 24.0);
+        let linear = 10.0_f64.powf(clamped / 20.0);
+        if let Some(ref vol) = self.master_volume_element {
+            vol.set_property("volume", linear);
+        }
+    }
+
     pub fn update_current_chroma_key(
         &mut self,
         enabled: bool,
@@ -6124,23 +6223,42 @@ impl ProgramPlayer {
     }
 
     fn clip_has_unsupported_background_prerender_keyframes(clip: &ProgramClip) -> bool {
-        !clip.scale_keyframes.is_empty()
-            || !clip.opacity_keyframes.is_empty()
-            || !clip.blur_keyframes.is_empty()
-            || !clip.position_x_keyframes.is_empty()
-            || !clip.position_y_keyframes.is_empty()
-            || !clip.volume_keyframes.is_empty()
+        // Audio-side keyframes are not honored by prerender (audio is baked
+        // at current levels at job time and not invalidated by audio edits).
+        let unsupported_audio = !clip.volume_keyframes.is_empty()
             || !clip.pan_keyframes.is_empty()
             || !clip.eq_low_gain_keyframes.is_empty()
             || !clip.eq_mid_gain_keyframes.is_empty()
-            || !clip.eq_high_gain_keyframes.is_empty()
-            || !clip.speed_keyframes.is_empty()
+            || !clip.eq_high_gain_keyframes.is_empty();
+        // Speed keyframes are not yet plumbed through the prerender pre-chain.
+        let unsupported_speed = !clip.speed_keyframes.is_empty();
+        // Creative blur lane (gaussian blur strength keyframes) is not yet
+        // emitted as a per-frame expression in prerender.
+        let unsupported_blur = !clip.blur_keyframes.is_empty();
+        // Animated masks are not yet supported in prerender.
+        let unsupported_mask_keyframes = Self::clip_has_keyframed_masks(clip);
+        // Transform keyframes (scale, position, rotate, crop, opacity) ARE
+        // supported by the new keyframed-overlay chain — except when the
+        // clip also has any non-animated mask, since the mask + per-frame
+        // overlay interaction is not yet handled. In that case the clip
+        // falls back to the live (non-prerendered) path.
+        let has_transform_keyframes = !clip.scale_keyframes.is_empty()
+            || !clip.opacity_keyframes.is_empty()
+            || !clip.position_x_keyframes.is_empty()
+            || !clip.position_y_keyframes.is_empty()
             || !clip.rotate_keyframes.is_empty()
             || !clip.crop_left_keyframes.is_empty()
             || !clip.crop_right_keyframes.is_empty()
             || !clip.crop_top_keyframes.is_empty()
-            || !clip.crop_bottom_keyframes.is_empty()
-            || Self::clip_has_keyframed_masks(clip)
+            || !clip.crop_bottom_keyframes.is_empty();
+        let transform_blocked_by_mask =
+            has_transform_keyframes && clip.masks.iter().any(|m| m.enabled);
+
+        unsupported_audio
+            || unsupported_speed
+            || unsupported_blur
+            || unsupported_mask_keyframes
+            || transform_blocked_by_mask
     }
 
     fn clip_has_unsupported_background_prerender_audio_effects(clip: &ProgramClip) -> bool {
@@ -6618,6 +6736,33 @@ impl ProgramPlayer {
                     .is_some()
                 {
                     return (interp_path.clone(), false, String::new(), false);
+                }
+            }
+        }
+
+        // Voice-enhance prerender: when the toggle is on, the cache
+        // produces a media file with the original video stream-copied
+        // and the audio re-encoded through the same chain that the
+        // export side uses. Swapping the source path here is what
+        // makes preview audio match export — without trying to do
+        // any GStreamer-side audio processing.
+        //
+        // The cache is keyed by `(source_path, strength)`, so different
+        // strengths for the same source map to different files and
+        // dropping the strength back to a previously-rendered value is
+        // an instant cache hit.
+        if clip.voice_enhance && !self.voice_enhance_paths.is_empty() {
+            let key = crate::media::voice_enhance_cache::cache_key(
+                &clip.source_path,
+                clip.voice_enhance_strength,
+            );
+            if let Some(ve_path) = self.voice_enhance_paths.get(&key) {
+                if std::fs::metadata(ve_path)
+                    .ok()
+                    .filter(|m| m.len() > 0)
+                    .is_some()
+                {
+                    return (ve_path.clone(), false, String::new(), false);
                 }
             }
         }
@@ -7349,6 +7494,7 @@ impl ProgramPlayer {
             self.project_height,
             None,
             Arc::new(Mutex::new(Vec::new())),
+            Arc::new(Mutex::new(None)),
         );
         let _ = effects_bin.set_state(gst::State::Null);
         const MAX_PREPREROLL_SIDECARS: usize = 8;
@@ -7582,6 +7728,8 @@ impl ProgramPlayer {
             }
         }
         clip.slow_motion_interp.hash(hasher);
+        clip.motion_blur_enabled.hash(hasher);
+        clip.motion_blur_shutter_angle.to_bits().hash(hasher);
         clip.masks.len().hash(hasher);
         for mask in &clip.masks {
             mask.enabled.hash(hasher);
@@ -9922,6 +10070,7 @@ impl ProgramPlayer {
         project_height: u32,
         lut: Option<Arc<CubeLut>>,
         mask_shared: Arc<Mutex<Vec<crate::model::clip::ClipMask>>>,
+        hsl_shared: Arc<Mutex<Option<crate::model::clip::HslQualifier>>>,
     ) -> (
         gst::Bin,
         Option<gst::Element>,                                 // videobalance
@@ -10617,6 +10766,76 @@ impl ProgramPlayer {
         if let Some(ref e) = colorbalance_3pt {
             chain.push(e.clone());
         }
+        // 3a'. HSL Qualifier pad probe — secondary color correction that
+        // isolates pixels by hue/saturation/luminance and applies a follow-up
+        // grade only to the matched region. Placed HERE — after the primary
+        // color chain (videobalance / coloradj_RGB / 3-point balance) and
+        // BEFORE denoise/sharpen/blur — because:
+        //   1. videobalance + both frei0r color elements preserve RGBA, so
+        //      the buffer format is guaranteed RGBA at this point (required
+        //      for the pad probe's byte-addressing). `gaussianblur` runs on
+        //      AYUV downstream, which would break the probe.
+        //   2. Secondary color correction should not see blurred/denoised
+        //      pixels or the HSL matte edges would bleed.
+        *hsl_shared.lock().unwrap() = clip.hsl_qualifier.clone();
+        if let Some(hsl_identity) = gst::ElementFactory::make("identity")
+            .property("name", "us-hsl-identity")
+            .build()
+            .ok()
+        {
+            let hsl_ref = hsl_shared.clone();
+            hsl_identity.static_pad("src").unwrap().add_probe(
+                gst::PadProbeType::BUFFER,
+                move |_pad, info| {
+                    if let Some(gst::PadProbeData::Buffer(ref mut buffer)) = info.data {
+                        let q_opt = hsl_ref.lock().unwrap().clone();
+                        if let Some(q) = q_opt {
+                            if !q.is_neutral() {
+                                // Read format + dimensions from live caps.
+                                // Bail unless the format is a 4-byte RGBA-like
+                                // layout so we never scribble over AYUV/YUV
+                                // buffers (safety: `gaussianblur` is AYUV but
+                                // we're placed before it, so this is a belt
+                                // and suspenders check).
+                                let caps = _pad.current_caps();
+                                let (width, height, is_rgba) = if let Some(caps) = caps {
+                                    if let Some(s) = caps.structure(0) {
+                                        let format = s
+                                            .get::<&str>("format")
+                                            .unwrap_or("")
+                                            .to_string();
+                                        let w = s.get::<i32>("width").unwrap_or(0) as usize;
+                                        let h = s.get::<i32>("height").unwrap_or(0) as usize;
+                                        let is_rgba = matches!(
+                                            format.as_str(),
+                                            "RGBA" | "BGRA" | "ARGB" | "ABGR"
+                                        );
+                                        (w, h, is_rgba)
+                                    } else {
+                                        (0, 0, false)
+                                    }
+                                } else {
+                                    (0, 0, false)
+                                };
+                                if is_rgba && width > 0 && height > 0 {
+                                    let buf = buffer.make_mut();
+                                    if let Ok(mut map) = buf.map_writable() {
+                                        let data = map.as_mut_slice();
+                                        if width * height * 4 <= data.len() {
+                                            crate::media::hsl_qualifier::apply_hsl_qualifier_to_rgba_buffer(
+                                                &q, data, width, height,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    gst::PadProbeReturn::Ok
+                },
+            );
+            chain.push(hsl_identity);
+        }
         if let Some(ref e) = conv2 {
             chain.push(e.clone());
         }
@@ -10626,7 +10845,7 @@ impl ProgramPlayer {
         if let Some(ref e) = squareblur {
             chain.push(e.clone());
         }
-        // 3a. User-applied frei0r filter effects (after built-in color/blur).
+        // 3b. User-applied frei0r filter effects (after built-in color/blur and HSL).
         for e in &frei0r_user_effects {
             chain.push(e.clone());
         }
@@ -10893,6 +11112,7 @@ impl ProgramPlayer {
         // Skip level metering for audio-only track clips to reduce CPU — the per-track
         // meters will use the main pipeline's level elements for video-embedded audio.
         let needs_level = !clip.is_audio_only;
+        // Voice enhance is built whenever the clip has the toggle on, so the
         let (
             audio_conv,
             audio_resample,
@@ -11189,6 +11409,7 @@ impl ProgramPlayer {
             is_blend_mode: false,
             blend_alpha: Arc::new(Mutex::new(1.0)),
             mask_data: Arc::new(Mutex::new(Vec::new())),
+            hsl_data: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -11498,6 +11719,7 @@ impl ProgramPlayer {
             is_blend_mode: false,
             blend_alpha: Arc::new(Mutex::new(1.0)),
             mask_data: Arc::new(Mutex::new(Vec::new())),
+            hsl_data: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -11570,6 +11792,7 @@ impl ProgramPlayer {
             let chroma_key_filter = Self::prerender_build_chroma_key_filter(clip);
             let title_filter = Self::prerender_build_title_filter(clip, out_h);
             let minterpolate_filter = Self::prerender_build_minterpolate_filter(clip, fps);
+            let motion_blur_filter = Self::prerender_build_motion_blur_filter(clip, fps);
             let flip_filter = Self::prerender_build_flip_filter(clip);
             if use_transition_xfade {
                 let crop_filter = Self::prerender_build_crop_filter(clip, out_w, out_h, false);
@@ -11581,11 +11804,31 @@ impl ProgramPlayer {
                     transition_offset_ns,
                     i,
                 );
-                if clip_has_mask {
+                let use_keyframed_overlay =
+                    !clip_has_mask && Self::prerender_clip_has_keyframed_overlay(clip);
+                if use_keyframed_overlay {
+                    let pre_label = format!("pv{i}kf");
+                    nodes.push(format!(
+                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{rotation_filter}{flip_filter}{transition_tpad_filter},fps={}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}[{pre_label}]",
+                        fps.max(1),
+                    ));
+                    nodes.push(Self::prerender_build_keyframed_overlay_tail(
+                        clip,
+                        &pre_label,
+                        &format!("pv{i}"),
+                        out_w,
+                        out_h,
+                        fps.max(1),
+                        1,
+                        false,
+                        true,
+                        &format!("{minterpolate_filter}{motion_blur_filter}"),
+                    ));
+                } else if clip_has_mask {
                     let pre_label = format!("pv{i}pre");
                     let masked_label = format!("pv{i}masked");
                     nodes.push(format!(
-                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter}{transition_tpad_filter},fps={}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}{minterpolate_filter}[{pre_label}]",
+                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter}{transition_tpad_filter},fps={}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}{minterpolate_filter}{motion_blur_filter}[{pre_label}]",
                         fps.max(1),
                     ));
                     let _ = Self::prerender_append_mask_filter(
@@ -11600,14 +11843,14 @@ impl ProgramPlayer {
                     nodes.push(format!("[{masked_label}]format=yuv420p[pv{i}]"));
                 } else if clip.chroma_key_enabled {
                     nodes.push(format!(
-                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter}{transition_tpad_filter},fps={}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}{minterpolate_filter},format=yuv420p[pv{i}]",
+                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter}{transition_tpad_filter},fps={}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}{minterpolate_filter}{motion_blur_filter},format=yuv420p[pv{i}]",
                         fps.max(1),
                     ));
                 } else {
                     // Apply LUT at source resolution (before downscale) so it
                     // processes the same pixel values as the export path.
                     nodes.push(format!(
-                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter}{transition_tpad_filter},fps={},format=yuv420p{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{title_filter}{minterpolate_filter}[pv{i}]",
+                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter}{transition_tpad_filter},fps={},format=yuv420p{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{title_filter}{minterpolate_filter}{motion_blur_filter}[pv{i}]",
                         fps.max(1),
                     ));
                 }
@@ -11616,10 +11859,30 @@ impl ProgramPlayer {
                 let scale_position_filter =
                     Self::prerender_build_scale_position_filter(clip, out_w, out_h, false);
                 let rotation_filter = Self::prerender_build_rotation_filter(clip, false);
-                if clip_has_mask {
+                let use_keyframed_overlay =
+                    !clip_has_mask && Self::prerender_clip_has_keyframed_overlay(clip);
+                if use_keyframed_overlay {
+                    let pre_label = format!("pv{i}kf");
+                    nodes.push(format!(
+                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{rotation_filter}{flip_filter},fps={}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}[{pre_label}]",
+                        fps.max(1),
+                    ));
+                    nodes.push(Self::prerender_build_keyframed_overlay_tail(
+                        clip,
+                        &pre_label,
+                        &format!("pv{i}"),
+                        out_w,
+                        out_h,
+                        fps.max(1),
+                        1,
+                        false,
+                        true,
+                        &format!("{minterpolate_filter}{motion_blur_filter}"),
+                    ));
+                } else if clip_has_mask {
                     let pre_label = format!("pv{i}pre");
                     nodes.push(format!(
-                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter},fps={}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}{minterpolate_filter}[{pre_label}]",
+                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter},fps={}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}{minterpolate_filter}{motion_blur_filter}[{pre_label}]",
                         fps.max(1),
                     ));
                     let _ = Self::prerender_append_mask_filter(
@@ -11635,13 +11898,13 @@ impl ProgramPlayer {
                     // Chroma key needs alpha: convert early so pad fills transparent.
                     // Apply LUT at source resolution before format/scale for parity.
                     nodes.push(format!(
-                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter},fps={}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}{minterpolate_filter}[pv{i}]",
+                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter},fps={}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}{minterpolate_filter}{motion_blur_filter}[pv{i}]",
                         fps.max(1),
                     ));
                 } else {
                     // Apply LUT at source resolution before downscale for parity.
                     nodes.push(format!(
-                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter},fps={},format=yuv420p{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{title_filter}{minterpolate_filter}[pv{i}]",
+                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter},fps={},format=yuv420p{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{title_filter}{minterpolate_filter}{motion_blur_filter}[pv{i}]",
                         fps.max(1),
                     ));
                 }
@@ -11650,11 +11913,30 @@ impl ProgramPlayer {
                 let scale_position_filter =
                     Self::prerender_build_scale_position_filter(clip, out_w, out_h, true);
                 let rotation_filter = Self::prerender_build_rotation_filter(clip, true);
-                if clip_has_mask {
+                let use_keyframed_overlay =
+                    !clip_has_mask && Self::prerender_clip_has_keyframed_overlay(clip);
+                if use_keyframed_overlay {
+                    let pre_label = format!("pv{i}kf");
+                    nodes.push(format!(
+                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{rotation_filter}{flip_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}[{pre_label}]",
+                    ));
+                    nodes.push(Self::prerender_build_keyframed_overlay_tail(
+                        clip,
+                        &pre_label,
+                        &format!("pv{i}"),
+                        out_w,
+                        out_h,
+                        fps.max(1),
+                        1,
+                        true,  // overlay tracks: transparent bg
+                        false, // overlay tracks: keep alpha (no format=yuv420p)
+                        &format!("{minterpolate_filter}{motion_blur_filter}"),
+                    ));
+                } else if clip_has_mask {
                     let pre_label = format!("pv{i}pre");
                     let masked_label = format!("pv{i}masked");
                     nodes.push(format!(
-                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}{minterpolate_filter}[{pre_label}]",
+                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}{minterpolate_filter}{motion_blur_filter}[{pre_label}]",
                     ));
                     let masked_input = if Self::prerender_append_mask_filter(
                         &mut nodes,
@@ -11677,7 +11959,7 @@ impl ProgramPlayer {
                     // Overlay tracks: convert to yuva420p early so pad fills transparent.
                     // Apply LUT at source resolution before format/scale for parity.
                     nodes.push(format!(
-                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}{minterpolate_filter},colorchannelmixer=aa={:.4}[pv{i}]",
+                        "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}{minterpolate_filter}{motion_blur_filter},colorchannelmixer=aa={:.4}[pv{i}]",
                         clip.opacity.clamp(0.0, 1.0),
                     ));
                 }
@@ -12197,6 +12479,19 @@ impl ProgramPlayer {
     }
 
     fn prerender_build_rotation_filter(clip: &ProgramClip, transparent_pad: bool) -> String {
+        // Keyframed rotation: emit per-frame ffmpeg expression mirroring
+        // export's `build_rotation_filter` keyframed branch.
+        if !clip.rotate_keyframes.is_empty() {
+            let fill = if transparent_pad { "black@0" } else { "black" };
+            let angle_expr = crate::media::export::build_keyframed_property_expression(
+                &clip.rotate_keyframes,
+                clip.rotate as f64,
+                -180.0,
+                180.0,
+                "t",
+            );
+            return format!(",rotate='-({angle_expr})*PI/180':fillcolor={fill}");
+        }
         if clip.rotate == 0 {
             return String::new();
         }
@@ -12204,6 +12499,120 @@ impl ProgramPlayer {
         format!(
             ",rotate={:.10}:fillcolor={fill}",
             -(clip.rotate as f64).to_radians()
+        )
+    }
+
+    /// Returns `true` when this prerender clip has any keyframe lane that
+    /// affects per-frame geometry (scale, position, or crop). Rotation is
+    /// handled inline by `prerender_build_rotation_filter`, so it's NOT in
+    /// this gate — it doesn't need the multi-stream overlay path.
+    ///
+    /// When this returns `true`, the prerender format string for this clip
+    /// uses the keyframed multi-stream overlay chain instead of the existing
+    /// static `prerender_build_scale_position_filter`.
+    fn prerender_clip_has_keyframed_overlay(clip: &ProgramClip) -> bool {
+        !clip.scale_keyframes.is_empty()
+            || !clip.position_x_keyframes.is_empty()
+            || !clip.position_y_keyframes.is_empty()
+            || !clip.crop_left_keyframes.is_empty()
+            || !clip.crop_right_keyframes.is_empty()
+            || !clip.crop_top_keyframes.is_empty()
+            || !clip.crop_bottom_keyframes.is_empty()
+            || !clip.opacity_keyframes.is_empty()
+    }
+
+    /// Build the multi-step keyframed transform tail for a prerender clip
+    /// chain. Mirrors the keyframed branch in `src/media/export.rs:543-605`:
+    ///
+    /// 1. `,scale=w='max(1,{out_w}*({scale_expr}))':h=...:eval=frame[fg]`
+    /// 2. `color=c={bg}:size={out_w}x{out_h}:r={fps}:d={dur}[bg]`
+    /// 3. `[bg][fg]overlay=x='...':y='...':eval=frame,geq=...alpha*({opacity_expr})[raw]`
+    /// 4. `[raw]format=yuv420p[output_label]` (or yuva420p for transparent)
+    ///
+    /// Returns a multi-step filter graph fragment with internal chains
+    /// separated by `;`, ending in `[{output_label}]`. The caller pushes
+    /// this as one entry into `nodes` (which is later joined by `;`),
+    /// AFTER pushing a separate node that produces the `[{pre_chain_label}]`
+    /// label containing all the static effects.
+    fn prerender_build_keyframed_overlay_tail(
+        clip: &ProgramClip,
+        pre_chain_label: &str,
+        output_label: &str,
+        out_w: u32,
+        out_h: u32,
+        fps_n: u32,
+        fps_d: u32,
+        transparent_bg: bool,
+        final_format_yuv420p: bool,
+        post_tail: &str,
+    ) -> String {
+        use crate::media::export::build_keyframed_property_expression;
+        use crate::model::transform_bounds::{
+            POSITION_MAX, POSITION_MIN, SCALE_MAX, SCALE_MIN,
+        };
+        let scale_expr = build_keyframed_property_expression(
+            &clip.scale_keyframes,
+            clip.scale,
+            SCALE_MIN,
+            SCALE_MAX,
+            "t",
+        );
+        let pos_x_expr = build_keyframed_property_expression(
+            &clip.position_x_keyframes,
+            clip.position_x,
+            POSITION_MIN,
+            POSITION_MAX,
+            "t",
+        );
+        let pos_y_expr = build_keyframed_property_expression(
+            &clip.position_y_keyframes,
+            clip.position_y,
+            POSITION_MIN,
+            POSITION_MAX,
+            "t",
+        );
+        let opacity_expr = build_keyframed_property_expression(
+            &clip.opacity_keyframes,
+            clip.opacity,
+            0.0,
+            1.0,
+            "T",
+        );
+        let clip_duration_s = clip.duration_ns() as f64 / 1_000_000_000.0;
+        let bg_color = if transparent_bg { "black@0" } else { "black" };
+        let (overlay_x_expr, overlay_y_expr) = if Self::clip_uses_direct_canvas_translation(clip) {
+            (
+                format!("(W*(1+({pos_x_expr}))-w)/2"),
+                format!("(H*(1+({pos_y_expr}))-h)/2"),
+            )
+        } else {
+            (
+                format!("(W-w)*(1+({pos_x_expr}))/2"),
+                format!("(H-h)*(1+({pos_y_expr}))/2"),
+            )
+        };
+        // Build the tail filter chain that consumes [raw] and produces
+        // [output_label]. ffmpeg syntax requires at least one filter
+        // between labels, and a leading comma after a `]` is invalid, so
+        // strip any leading comma from `post_tail` and fall back to a
+        // no-op `null` filter when nothing else is being applied.
+        let post_tail_clean = post_tail.strip_prefix(',').unwrap_or(post_tail);
+        let raw_to_output_chain = if final_format_yuv420p {
+            if post_tail_clean.is_empty() {
+                "format=yuv420p".to_string()
+            } else {
+                format!("format=yuv420p,{post_tail_clean}")
+            }
+        } else if post_tail_clean.is_empty() {
+            "null".to_string()
+        } else {
+            post_tail_clean.to_string()
+        };
+        let fg_label = format!("{output_label}fg");
+        let bg_label = format!("{output_label}bg");
+        let raw_label = format!("{output_label}raw");
+        format!(
+            "[{pre_chain_label}]scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[{fg_label}];color=c={bg_color}:size={out_w}x{out_h}:r={fps_n}/{fps_d}:d={clip_duration_s:.6}[{bg_label}];[{bg_label}][{fg_label}]overlay=x='{overlay_x_expr}':y='{overlay_y_expr}':eval=frame,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({opacity_expr})'[{raw_label}];[{raw_label}]{raw_to_output_chain}[{output_label}]"
         )
     }
 
@@ -12488,6 +12897,45 @@ impl ProgramPlayer {
         filter
     }
 
+    /// Background-prerender variant of `build_motion_blur_filter` (export.rs).
+    /// Uses the same math: `tmix=frames=2` at 360°, otherwise oversample by
+    /// 4× via `minterpolate`, average the appropriate sub-frame count, and
+    /// decimate back to project rate. Returns empty when motion blur is
+    /// disabled or the clip has no per-frame motion (animated transform or
+    /// speed > 1).
+    fn prerender_build_motion_blur_filter(clip: &ProgramClip, fps: u32) -> String {
+        if !clip.motion_blur_enabled || clip.motion_blur_shutter_angle <= 0.5 {
+            return String::new();
+        }
+        let has_animated_transform = !clip.scale_keyframes.is_empty()
+            || !clip.position_x_keyframes.is_empty()
+            || !clip.position_y_keyframes.is_empty()
+            || !clip.rotate_keyframes.is_empty()
+            || !clip.crop_left_keyframes.is_empty()
+            || !clip.crop_right_keyframes.is_empty()
+            || !clip.crop_top_keyframes.is_empty()
+            || !clip.crop_bottom_keyframes.is_empty();
+        let has_fast_speed = clip.speed > 1.001;
+        if !has_animated_transform && !has_fast_speed {
+            return String::new();
+        }
+        let shutter = clip.motion_blur_shutter_angle.clamp(0.0, 720.0);
+        if (shutter - 360.0).abs() < 0.5 {
+            return ",tmix=frames=2:weights='1 1'".to_string();
+        }
+        const K: u32 = 4;
+        let raw_frames = (K as f64 * shutter / 360.0).round() as i32;
+        let frames = raw_frames.max(1).min((K * 2) as i32) as u32;
+        let weights = std::iter::repeat("1")
+            .take(frames as usize)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let over_fps = fps.saturating_mul(K).max(1);
+        format!(
+            ",minterpolate=fps={over_fps}:mi_mode=blend,tmix=frames={frames}:weights='{weights}',fps={fps}"
+        )
+    }
+
     fn prerender_build_minterpolate_filter(clip: &ProgramClip, fps: u32) -> String {
         use crate::model::clip::SlowMotionInterp;
         if clip.slow_motion_interp == SlowMotionInterp::Off {
@@ -12587,6 +13035,8 @@ impl ProgramPlayer {
         // Build per-slot effects bin.
         let slot_mask_data: Arc<Mutex<Vec<crate::model::clip::ClipMask>>> =
             Arc::new(Mutex::new(Vec::new()));
+        let slot_hsl_data: Arc<Mutex<Option<crate::model::clip::HslQualifier>>> =
+            Arc::new(Mutex::new(None));
         let (
             effects_bin,
             videobalance,
@@ -12615,6 +13065,7 @@ impl ProgramPlayer {
             self.project_height,
             realtime_lut,
             slot_mask_data.clone(),
+            slot_hsl_data.clone(),
         );
 
         // Title clips use videotestsrc (solid color) instead of uridecodebin.
@@ -12772,6 +13223,7 @@ impl ProgramPlayer {
                 is_blend_mode,
                 blend_alpha: blend_alpha.clone(),
                 mask_data: slot_mask_data.clone(),
+                hsl_data: slot_hsl_data.clone(),
             };
             Self::apply_transform_to_slot(
                 &slot_ref_for_transform,
@@ -12854,6 +13306,7 @@ impl ProgramPlayer {
                 is_blend_mode,
                 blend_alpha,
                 mask_data: slot_mask_data.clone(),
+                hsl_data: slot_hsl_data.clone(),
             });
         }
 
@@ -12989,7 +13442,11 @@ impl ProgramPlayer {
         }
 
         // Create audio path: audioconvert → audioresample → capsfilter(48 kHz stereo)
-        // → [match-equalizer-nbands] → [equalizer-nbands] → [audiopanorama] → [level] → audiomixer pad.
+        // → [match-equalizer-nbands] → [equalizer-nbands] → [audiopanorama]
+        // → [level] → audiomixer pad. (Voice enhance is applied via the
+        // prerender cache that swaps `clip.source_path` for an
+        // ffmpeg-processed file in `resolve_source_path_for_clip`, so the
+        // realtime audio path needs no special handling.)
         let (
             audio_conv,
             audio_resample,
@@ -13198,7 +13655,9 @@ impl ProgramPlayer {
                 "ProgramPlayer: skipping audio path for clip {} (no audio)",
                 clip.id
             );
-            (None, None, None, None, None, None, None, None)
+            (
+                None, None, None, None, None, None, None, None,
+            )
         };
 
         // Connect uridecodebin pad-added for dynamic linking.
@@ -13345,6 +13804,7 @@ impl ProgramPlayer {
             is_blend_mode,
             blend_alpha: blend_alpha.clone(),
             mask_data: slot_mask_data.clone(),
+            hsl_data: slot_hsl_data.clone(),
         };
         Self::apply_transform_to_slot(
             &slot_ref_for_transform,
@@ -13422,6 +13882,7 @@ impl ProgramPlayer {
             is_blend_mode,
             blend_alpha,
             mask_data: slot_mask_data,
+            hsl_data: slot_hsl_data,
         })
     }
 
@@ -16368,6 +16829,8 @@ mod tests {
             vidstab_smoothing: 0.5,
             volume: 1.0,
             voice_isolation: 0.0,
+            voice_enhance: false,
+            voice_enhance_strength: 0.5,
             voice_isolation_pad_ns: 80_000_000,
             voice_isolation_fade_ns: 25_000_000,
             voice_isolation_floor: 0.0,
@@ -16393,6 +16856,8 @@ mod tests {
             rotate: 0,
             flip_h: false,
             flip_v: false,
+            motion_blur_enabled: false,
+            motion_blur_shutter_angle: 180.0,
             title_text: String::new(),
             title_font: String::new(),
             title_color: 0,
@@ -16463,6 +16928,7 @@ mod tests {
             is_title: false,
             anamorphic_desqueeze: 1.0,
             masks: Vec::new(),
+            hsl_qualifier: None,
         }
     }
 
@@ -16952,7 +17418,11 @@ mod tests {
     }
 
     #[test]
-    fn clip_has_unsupported_background_prerender_features_rejects_transform_keyframes() {
+    fn clip_has_unsupported_background_prerender_features_allows_transform_keyframes() {
+        // Phase 2 of background prerender preview: keyframed transforms
+        // are now rendered via the multi-stream overlay chain in
+        // `prerender_build_keyframed_overlay_tail`, so they no longer
+        // disqualify a clip from prerender.
         let mut clip = make_clip();
         clip.position_x_keyframes.push(NumericKeyframe {
             time_ns: 0,
@@ -16960,8 +17430,211 @@ mod tests {
             interpolation: KeyframeInterpolation::Linear,
             bezier_controls: None,
         });
+        assert!(!ProgramPlayer::clip_has_unsupported_background_prerender_features(&clip));
+
+        clip.position_x_keyframes.clear();
+        clip.scale_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 1.5,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        assert!(!ProgramPlayer::clip_has_unsupported_background_prerender_features(&clip));
+
+        clip.scale_keyframes.clear();
+        clip.rotate_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 30.0,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        assert!(!ProgramPlayer::clip_has_unsupported_background_prerender_features(&clip));
+
+        clip.rotate_keyframes.clear();
+        clip.opacity_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 0.5,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        assert!(!ProgramPlayer::clip_has_unsupported_background_prerender_features(&clip));
+    }
+
+    #[test]
+    fn clip_has_unsupported_background_prerender_features_rejects_transform_keyframes_with_mask() {
+        // Phase 2 limitation: animated transforms combined with a shape
+        // mask are not yet handled by the keyframed-overlay chain, so
+        // these clips fall back to the live path.
+        let mut clip = make_clip();
+        clip.position_x_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 0.25,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        let mut mask =
+            crate::model::clip::ClipMask::new(crate::model::clip::MaskShape::Rectangle);
+        mask.enabled = true;
+        clip.masks.push(mask);
 
         assert!(ProgramPlayer::clip_has_unsupported_background_prerender_features(&clip));
+    }
+
+    #[test]
+    fn clip_has_unsupported_background_prerender_features_still_rejects_audio_keyframes() {
+        // Audio keyframes are still unsupported in prerender — audio is
+        // baked at current levels and audio-property changes do not
+        // invalidate cached segments, so animated audio properties have
+        // no place in the cache.
+        let mut clip = make_clip();
+        clip.volume_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 0.5,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        assert!(ProgramPlayer::clip_has_unsupported_background_prerender_features(&clip));
+    }
+
+    #[test]
+    fn prerender_clip_has_keyframed_overlay_detects_transform_lanes() {
+        let mut clip = make_clip();
+        assert!(!ProgramPlayer::prerender_clip_has_keyframed_overlay(&clip));
+
+        clip.scale_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 1.0,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        assert!(ProgramPlayer::prerender_clip_has_keyframed_overlay(&clip));
+
+        clip.scale_keyframes.clear();
+        clip.position_x_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 0.0,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        assert!(ProgramPlayer::prerender_clip_has_keyframed_overlay(&clip));
+
+        clip.position_x_keyframes.clear();
+        clip.opacity_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 1.0,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        assert!(ProgramPlayer::prerender_clip_has_keyframed_overlay(&clip));
+
+        clip.opacity_keyframes.clear();
+        // Rotate keyframes are handled by `prerender_build_rotation_filter`
+        // directly (inline expression), not by the multi-stream overlay
+        // chain, so they're NOT in the overlay-detection helper.
+        clip.rotate_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 10.0,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        assert!(!ProgramPlayer::prerender_clip_has_keyframed_overlay(&clip));
+    }
+
+    #[test]
+    fn prerender_build_keyframed_overlay_tail_emits_eval_frame_chain() {
+        let mut clip = make_clip();
+        clip.scale_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 1.0,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        clip.scale_keyframes.push(NumericKeyframe {
+            time_ns: 1_000_000_000,
+            value: 1.5,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        clip.position_x_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 0.0,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        clip.position_x_keyframes.push(NumericKeyframe {
+            time_ns: 1_000_000_000,
+            value: 0.5,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+
+        let tail = ProgramPlayer::prerender_build_keyframed_overlay_tail(
+            &clip, "pv0kf", "pv0", 1920, 1080, 30, 1, false, true, "",
+        );
+        assert!(tail.contains("[pv0kf]scale=w='max(1,1920*("), "got: {tail}");
+        // Intermediate fg/bg/raw labels are derived from the output label.
+        assert!(tail.contains(":eval=frame[pv0fg]"), "got: {tail}");
+        assert!(
+            tail.contains("color=c=black:size=1920x1080:r=30/1"),
+            "opaque bg expected for primary track: {tail}"
+        );
+        assert!(tail.contains("[pv0bg][pv0fg]overlay="));
+        assert!(tail.contains("eval=frame,geq="));
+        assert!(tail.contains("[pv0raw]"));
+        // Format conversion is applied via a `format=yuv420p` filter
+        // (not a leading comma after `]raw`, which would be invalid).
+        assert!(tail.contains("[pv0raw]format=yuv420p[pv0]"));
+        assert!(tail.ends_with("[pv0]"), "should end with output label: {tail}");
+    }
+
+    #[test]
+    fn prerender_build_keyframed_overlay_tail_strips_post_tail_leading_comma() {
+        // When post_tail starts with `,` (because motion_blur_filter or
+        // minterpolate_filter were spliced in), it must be stripped so the
+        // resulting chain doesn't have an invalid `[label],filter` sequence.
+        let mut clip = make_clip();
+        clip.scale_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 1.0,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        let tail = ProgramPlayer::prerender_build_keyframed_overlay_tail(
+            &clip,
+            "pv0kf",
+            "pv0",
+            1920,
+            1080,
+            30,
+            1,
+            false,
+            true,
+            ",tmix=frames=2:weights='1 1'",
+        );
+        assert!(
+            tail.contains("[pv0raw]format=yuv420p,tmix=frames=2:weights='1 1'[pv0]"),
+            "got: {tail}"
+        );
+        assert!(!tail.contains("[pv0raw],format"), "leading comma not stripped: {tail}");
+    }
+
+    #[test]
+    fn prerender_build_keyframed_overlay_tail_uses_transparent_bg_for_overlays() {
+        let mut clip = make_clip();
+        clip.position_y_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 0.0,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        });
+        let tail = ProgramPlayer::prerender_build_keyframed_overlay_tail(
+            &clip, "pv1kf", "pv1", 1920, 1080, 30, 1, true, false, "",
+        );
+        assert!(
+            tail.contains("color=c=black@0:size=1920x1080:r=30/1"),
+            "transparent bg expected for overlay track: {tail}"
+        );
+        assert!(!tail.contains("format=yuv420p"));
     }
 
     #[test]
@@ -17110,8 +17783,10 @@ mod tests {
         let _ = gst::init();
         let clip = make_clip();
         let mask_shared = Arc::new(Mutex::new(Vec::new()));
-        let (effects_bin, ..) =
-            ProgramPlayer::build_effects_bin(&clip, false, 640, 360, 640, 360, None, mask_shared);
+        let hsl_shared = Arc::new(Mutex::new(None));
+        let (effects_bin, ..) = ProgramPlayer::build_effects_bin(
+            &clip, false, 640, 360, 640, 360, None, mask_shared, hsl_shared,
+        );
         assert!(
             effects_bin.by_name("us-mask-identity").is_some(),
             "effects bin should keep the live mask stage even when clip.masks is empty"
@@ -17742,6 +18417,7 @@ mod tests {
             is_blend_mode: false,
             blend_alpha: Arc::new(Mutex::new(1.0)),
             mask_data: Arc::new(Mutex::new(Vec::new())),
+            hsl_data: Arc::new(Mutex::new(None)),
         }
     }
 
