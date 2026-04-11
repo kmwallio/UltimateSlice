@@ -35,6 +35,15 @@ resvg = "0.47.0"
 [features]
 default = ["speech-to-text", "ai-inference"]
 ai-inference = ["ort", "ndarray", "tokenizers", "hound"]
+# GPU execution-provider features. Layer on top of `ai-inference` and
+# enable the corresponding ort EP. Default build is CPU-only
+# (ai-inference with no EP features); NVIDIA users can opt in to
+# `ai-cuda` which works with prebuilt ort binaries. `ai-rocm` and
+# `ai-openvino` require a source-built ONNX Runtime — see
+# scripts/build_onnxruntime_openvino.sh and the Phase 0 docs.
+ai-cuda = ["ai-inference", "ort/cuda"]
+ai-rocm = ["ai-inference", "ort/rocm"]
+ai-openvino = ["ai-inference", "ort/openvino"]
 speech-to-text = ["whisper-rs"]
 
 [profile.dev]

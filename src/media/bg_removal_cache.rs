@@ -351,10 +351,18 @@ fn run_bg_removal(source_path: &str, output_path: &str, model_path: &str, thresh
 
     let temp_path = format!("{output_path}.partial");
 
-    // 1. Load ONNX model.
+    // 1. Load ONNX model. Routes the SessionBuilder through
+    //    `ai_providers::configure_session_builder` so the currently-
+    //    selected execution backend (CUDA / ROCm / OpenVINO / CPU)
+    //    is applied before the model is loaded. On CPU-only builds
+    //    this is a no-op and MODNet runs exactly as it did before.
+    use super::ai_providers;
     let mut session: Session = match Session::builder()
         .and_then(|b| {
             Ok(b.with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)?)
+        })
+        .and_then(|b: ort::session::builder::SessionBuilder| {
+            ai_providers::configure_session_builder(b, ai_providers::current_backend())
         })
         .and_then(|mut b: ort::session::builder::SessionBuilder| b.commit_from_file(model_path))
     {

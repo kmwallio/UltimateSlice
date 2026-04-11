@@ -1,4 +1,6 @@
 pub mod adjustment_scope;
+#[cfg(feature = "ai-inference")]
+pub mod ai_providers;
 pub mod animated_svg;
 pub mod audio_features;
 pub mod audio_match;

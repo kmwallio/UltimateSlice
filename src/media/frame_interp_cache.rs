@@ -442,10 +442,16 @@ fn run_frame_interp(
 
     let temp_path = format!("{output_path}.partial");
 
-    // 1. Load ONNX model.
+    // 1. Load ONNX model. Routes the SessionBuilder through
+    //    `ai_providers::configure_session_builder` so RIFE picks up
+    //    the currently-selected execution backend automatically.
+    use super::ai_providers;
     let mut session: Session = match Session::builder()
         .and_then(|b| {
             Ok(b.with_optimization_level(ort::session::builder::GraphOptimizationLevel::Level3)?)
+        })
+        .and_then(|b: ort::session::builder::SessionBuilder| {
+            ai_providers::configure_session_builder(b, ai_providers::current_backend())
         })
         .and_then(|mut b: ort::session::builder::SessionBuilder| b.commit_from_file(model_path))
     {

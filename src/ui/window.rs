@@ -4790,6 +4790,26 @@ pub fn build_window(
     let workspace_layouts_state =
         Rc::new(RefCell::new(crate::ui_state::load_workspace_layouts_state()));
 
+    // Apply the persisted AI backend preference to the process-wide
+    // ai_providers singleton so every ONNX cache worker (bg removal,
+    // frame interpolation, music gen, SAM in later phases) picks it
+    // up on the next job without plumbing the preference through
+    // every job struct. Feature-gated: when `ai-inference` is off
+    // the module isn't compiled in and this block is skipped.
+    #[cfg(feature = "ai-inference")]
+    {
+        let backend_id = preferences_state.borrow().ai_backend.clone();
+        let backend = crate::media::ai_providers::AiBackend::from_id(&backend_id);
+        crate::media::ai_providers::set_current_backend(backend);
+        let report = crate::media::ai_providers::detect_backends();
+        log::info!(
+            "AI backend: preferred={} ({}) — {}",
+            backend.label(),
+            backend.as_id(),
+            report.describe()
+        );
+    }
+
     // MCP command channel — created unconditionally so the socket transport can
     // be toggled at runtime via Preferences without restarting.
     let (mcp_sender, mcp_receiver) = std::sync::mpsc::channel::<crate::mcp::McpCommand>();

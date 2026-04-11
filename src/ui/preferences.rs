@@ -7,6 +7,7 @@ use gtk4::{
     self as gtk, Box as GBox, CheckButton, Label, Orientation, ResponseType, Separator, Stack,
     StackSidebar,
 };
+use std::cell::RefCell;
 use std::rc::Rc;
 
 const THIRD_PARTY_COMPONENTS: &str = "\
@@ -591,6 +592,18 @@ pub fn show_preferences_dialog(
     integration_box.append(&mcp_socket_hint);
     stack.add_titled(&integration_box, Some("integration"), "Integration");
 
+    // Shared handle so the AI-backend dropdown (created inside the
+    // Models page block below) can be read by the dialog response
+    // handler further down when building the new PreferencesState.
+    // Kept out here, outside the `#[cfg]` block, because the
+    // response handler is always compiled and needs *something* to
+    // reference — when `ai-inference` is off the handle just stays
+    // `None` and the response handler falls back to the existing
+    // value.
+    #[allow(deprecated)]
+    let ai_backend_combo_handle: Rc<RefCell<Option<gtk::ComboBoxText>>> =
+        Rc::new(RefCell::new(None));
+
     // ── Models section (only when ai-inference feature is enabled) ─────────
     #[cfg(feature = "ai-inference")]
     {
@@ -606,6 +619,111 @@ pub fn show_preferences_dialog(
         models_label.set_halign(gtk::Align::Start);
         models_label.add_css_class("title-4");
         models_box.append(&models_label);
+
+        // ── AI Acceleration ──────────────────────────────────────────────
+        // User picks the ONNX Runtime execution backend used by every
+        // AI-inference code path (MODNet, RIFE, MusicGen, SAM). Only
+        // backends actually compiled into this binary are selectable;
+        // the others are shown as disabled so the user can see what
+        // the current build supports. "Auto" lets ort fall back to
+        // whichever compiled-in backend loads at runtime.
+        {
+            use crate::media::ai_providers::{
+                detect_backends, set_current_backend, AiBackend,
+            };
+            let accel_label = Label::new(Some("AI Acceleration"));
+            accel_label.set_halign(gtk::Align::Start);
+            accel_label.add_css_class("heading");
+            models_box.append(&accel_label);
+
+            let report = detect_backends();
+
+            let accel_row = GBox::new(Orientation::Horizontal, 8);
+            let accel_name = Label::new(Some("Backend"));
+            accel_name.set_halign(gtk::Align::Start);
+            accel_name.set_hexpand(true);
+            accel_row.append(&accel_name);
+
+            // We use plain gtk::ComboBoxText here (matching the rest
+            // of this Preferences dialog — DropDown would be nicer
+            // but would require a different idiom). Populate with
+            // only the compiled-in backends plus a leading Auto row.
+            #[allow(deprecated)]
+            let backend_combo = gtk::ComboBoxText::new();
+            #[allow(deprecated)]
+            {
+                backend_combo.append(Some(AiBackend::Auto.as_id()), AiBackend::Auto.label());
+                for b in [
+                    AiBackend::Cuda,
+                    AiBackend::Rocm,
+                    AiBackend::OpenVino,
+                    AiBackend::Cpu,
+                ] {
+                    if report.compiled_in.contains(&b) {
+                        let label = if report.runtime_available.contains(&b) {
+                            b.label().to_string()
+                        } else {
+                            // Backend was compiled in but the
+                            // runtime library isn't currently loadable
+                            // (e.g. ai-cuda build running on a
+                            // machine with no NVIDIA driver).
+                            format!("{} (unavailable)", b.label())
+                        };
+                        backend_combo.append(Some(b.as_id()), &label);
+                    }
+                }
+                let current_id = current.ai_backend.clone();
+                backend_combo.set_active_id(Some(&current_id));
+            }
+            accel_row.append(&backend_combo);
+            models_box.append(&accel_row);
+
+            // Status line showing what was actually detected on this
+            // machine, e.g. "Available: NVIDIA CUDA, CPU".
+            let accel_status = Label::new(Some(&report.describe()));
+            accel_status.set_halign(gtk::Align::Start);
+            accel_status.add_css_class("dim-label");
+            accel_status.set_wrap(true);
+            accel_status.set_max_width_chars(60);
+            models_box.append(&accel_status);
+
+            let accel_hint = Label::new(Some(
+                "Backend used for MODNet background removal, RIFE \
+                 frame interpolation, MusicGen, and (in upcoming \
+                 versions) SAM segmentation. Changing this takes \
+                 effect on the next inference job — no restart \
+                 required. ROCm and OpenVINO require a source-built \
+                 ONNX Runtime; see the project README for build \
+                 instructions.",
+            ));
+            accel_hint.set_halign(gtk::Align::Start);
+            accel_hint.add_css_class("dim-label");
+            accel_hint.set_wrap(true);
+            accel_hint.set_max_width_chars(60);
+            models_box.append(&accel_hint);
+
+            // Changing the dropdown takes effect on the process-wide
+            // `ai_providers` singleton immediately — next inference
+            // job picks it up without waiting for Save. The Save
+            // handler below additionally reads the current selection
+            // and persists it into PreferencesState so it survives
+            // restart. (Cancel leaves the live singleton changed
+            // but the persisted state untouched, which matches how
+            // other "live preview" preference widgets behave.)
+            #[allow(deprecated)]
+            backend_combo.connect_changed(move |combo| {
+                if let Some(id) = combo.active_id() {
+                    let backend = AiBackend::from_id(id.as_str());
+                    set_current_backend(backend);
+                }
+            });
+
+            // Expose the combo to the dialog response handler via a
+            // shared handle so Save can read the current selection.
+            ai_backend_combo_handle.replace(Some(backend_combo));
+
+            models_box.append(&Separator::new(Orientation::Horizontal));
+        }
 
         // MODNet status row.
         let modnet_row = GBox::new(Orientation::Horizontal, 8);
@@ -1058,6 +1176,20 @@ pub fn show_preferences_dialog(
                 voice_enhance_cache_cap_gib: voice_enhance_cap_spin
                     .value()
                     .clamp(0.5, 50.0),
+                // AI backend is edited via its own dropdown on the
+                // Models page. If that dropdown exists (i.e. the
+                // `ai-inference` feature is enabled *and* the Models
+                // page constructed it), read its current selection;
+                // otherwise fall back to whatever was in `current`
+                // so we don't clobber a valid value.
+                ai_backend: {
+                    #[allow(deprecated)]
+                    let combo_ref = ai_backend_combo_handle.borrow();
+                    match combo_ref.as_ref().and_then(|c| c.active_id()) {
+                        Some(id) => id.to_string(),
+                        None => current.ai_backend.clone(),
+                    }
+                },
             };
             new_state.set_proxy_mode(ProxyMode::from_str(
                 proxy_mode.active_id().as_deref().unwrap_or("off"),
