@@ -58,14 +58,44 @@ fn track_row_height(track: &crate::model::track::Track) -> f64 {
     }
 }
 
+/// Returns logical track indices in top-to-bottom visual order.
+///
+/// The professional NLE convention: video tracks stack upward (higher-numbered
+/// video tracks visually above lower-numbered), and audio tracks stack downward
+/// (higher-numbered audio tracks visually below). The boundary between video
+/// and audio sits in the middle of the timeline.
+///
+/// Concretely: video tracks are emitted in *reverse* of their logical order,
+/// then audio tracks in their normal logical order. Relative order within
+/// each kind is preserved, even when the underlying vector is interleaved.
+fn visual_order(tracks: &[crate::model::track::Track]) -> Vec<usize> {
+    let mut video: Vec<usize> = tracks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.is_video())
+        .map(|(i, _)| i)
+        .collect();
+    video.reverse();
+    let audio: Vec<usize> = tracks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.is_audio())
+        .map(|(i, _)| i)
+        .collect();
+    let mut out = Vec::with_capacity(tracks.len());
+    out.extend(video);
+    out.extend(audio);
+    out
+}
+
+/// Position of `logical_idx` in the visual (top-to-bottom) stack, or `None`
+/// if `logical_idx` is out of bounds.
+fn logical_to_visual(tracks: &[crate::model::track::Track], logical_idx: usize) -> Option<usize> {
+    visual_order(tracks).iter().position(|&i| i == logical_idx)
+}
+
 fn track_row_top(project: &crate::model::project::Project, track_idx: usize) -> f64 {
-    RULER_HEIGHT
-        + project
-            .tracks
-            .iter()
-            .take(track_idx)
-            .map(track_row_height)
-            .sum::<f64>()
+    track_row_top_in_tracks(&project.tracks, track_idx)
 }
 
 fn timeline_content_height(project: &crate::model::project::Project) -> f64 {
@@ -77,12 +107,15 @@ fn timeline_content_height_for_tracks(tracks: &[crate::model::track::Track]) -> 
 }
 
 fn track_row_top_in_tracks(tracks: &[crate::model::track::Track], track_idx: usize) -> f64 {
-    RULER_HEIGHT
-        + tracks
-            .iter()
-            .take(track_idx)
-            .map(track_row_height)
-            .sum::<f64>()
+    let order = visual_order(tracks);
+    let visual_pos = order.iter().position(|&i| i == track_idx);
+    let mut y = RULER_HEIGHT;
+    if let Some(vp) = visual_pos {
+        for &i in order.iter().take(vp) {
+            y += track_row_height(&tracks[i]);
+        }
+    }
+    y
 }
 
 fn track_index_at_y_in_tracks(tracks: &[crate::model::track::Track], y: f64) -> Option<usize> {
@@ -90,10 +123,10 @@ fn track_index_at_y_in_tracks(tracks: &[crate::model::track::Track], y: f64) -> 
         return None;
     }
     let mut row_top = RULER_HEIGHT;
-    for (idx, track) in tracks.iter().enumerate() {
-        let h = track_row_height(track);
+    for &logical_idx in &visual_order(tracks) {
+        let h = track_row_height(&tracks[logical_idx]);
         if y >= row_top && y < row_top + h {
-            return Some(idx);
+            return Some(logical_idx);
         }
         row_top += h;
     }
@@ -101,18 +134,7 @@ fn track_index_at_y_in_tracks(tracks: &[crate::model::track::Track], y: f64) -> 
 }
 
 fn track_index_at_y_in_project(project: &crate::model::project::Project, y: f64) -> Option<usize> {
-    if y <= RULER_HEIGHT {
-        return None;
-    }
-    let mut row_top = RULER_HEIGHT;
-    for (idx, track) in project.tracks.iter().enumerate() {
-        let row_bottom = row_top + track_row_height(track);
-        if y < row_bottom {
-            return Some(idx);
-        }
-        row_top = row_bottom;
-    }
-    None
+    track_index_at_y_in_tracks(&project.tracks, y)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -782,6 +804,37 @@ impl TimelineState {
         self.history.execute(
             Box::new(crate::undo::set_track_solo_cmd(
                 track_id, old_solo, !old_solo,
+            )),
+            &mut proj,
+        );
+        true
+    }
+
+    /// Rename a track by ID. Returns true if the label actually changed
+    /// (after trimming whitespace). Pushed through the undo history so
+    /// Ctrl+Z reverts the rename.
+    fn rename_track(&mut self, track_id: &str, new_label: String) -> bool {
+        let new_label = new_label.trim().to_string();
+        if new_label.is_empty() {
+            return false;
+        }
+        let old_label = {
+            let proj = self.project.borrow();
+            let Some(track) = proj.track_ref(track_id) else {
+                return false;
+            };
+            track.label.clone()
+        };
+        if old_label == new_label {
+            return false;
+        }
+        self.selected_track_id = Some(track_id.to_string());
+        let mut proj = self.project.borrow_mut();
+        self.history.execute(
+            Box::new(crate::undo::set_track_label_cmd(
+                track_id.to_string(),
+                old_label,
+                new_label,
             )),
             &mut proj,
         );
@@ -4467,6 +4520,9 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         btn.add_css_class("flat");
         track_context_box.append(btn);
     }
+    let btn_rename_track = gtk::Button::with_label("Rename\u{2026}");
+    btn_rename_track.add_css_class("flat");
+    track_context_box.append(&btn_rename_track);
     btn_add_adjustment_layer.add_css_class("flat");
     track_context_box.append(&btn_add_adjustment_layer);
     let btn_generate_music = gtk::Button::with_label("Generate Music\u{2026}");
@@ -4483,6 +4539,107 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
     track_context_box.append(&btn_generate_music_region);
     track_context_pop.set_child(Some(&track_context_box));
     let track_context_track_idx: Rc<RefCell<Option<usize>>> = Rc::new(RefCell::new(None));
+
+    // Track rename popover (text Entry + Done button). Opened from the
+    // "Rename…" item in the track context menu, or from a double-click on
+    // the track label area. The track ID is held in `rename_target_track_id`
+    // for the duration the popover is open.
+    let rename_pop = gtk::Popover::new();
+    rename_pop.set_parent(&area);
+    rename_pop.set_autohide(true);
+    let rename_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    rename_box.set_margin_start(4);
+    rename_box.set_margin_end(4);
+    rename_box.set_margin_top(4);
+    rename_box.set_margin_bottom(4);
+    let rename_entry = gtk::Entry::new();
+    rename_entry.set_width_chars(16);
+    rename_entry.set_activates_default(true);
+    let rename_done_btn = gtk::Button::with_label("Done");
+    rename_done_btn.add_css_class("suggested-action");
+    rename_done_btn.set_receives_default(true);
+    rename_box.append(&rename_entry);
+    rename_box.append(&rename_done_btn);
+    rename_pop.set_child(Some(&rename_box));
+    rename_pop.set_default_widget(Some(&rename_done_btn));
+    let rename_target_track_id: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+
+    // Clear pending state if the popover is dismissed without committing.
+    {
+        let rename_target_track_id = rename_target_track_id.clone();
+        rename_pop.connect_closed(move |_| {
+            rename_target_track_id.borrow_mut().take();
+        });
+    }
+
+    // Commit handler — used by both the Done button and Entry activation.
+    let commit_rename: Rc<dyn Fn()> = {
+        let state = state.clone();
+        let area_weak = area.downgrade();
+        let rename_pop_weak = rename_pop.downgrade();
+        let rename_entry = rename_entry.clone();
+        let rename_target_track_id = rename_target_track_id.clone();
+        Rc::new(move || {
+            let new_label = rename_entry.text().to_string();
+            let track_id = rename_target_track_id.borrow_mut().take();
+            if let Some(track_id) = track_id {
+                let mut st = state.borrow_mut();
+                let changed = st.rename_track(&track_id, new_label);
+                drop(st);
+                if changed {
+                    TimelineState::notify_project_changed(&state);
+                    if let Some(a) = area_weak.upgrade() {
+                        a.queue_draw();
+                    }
+                }
+            }
+            if let Some(pop) = rename_pop_weak.upgrade() {
+                pop.popdown();
+            }
+        })
+    };
+
+    {
+        let commit_rename = commit_rename.clone();
+        rename_done_btn.connect_clicked(move |_| commit_rename());
+    }
+    {
+        let commit_rename = commit_rename.clone();
+        rename_entry.connect_activate(move |_| commit_rename());
+    }
+
+    // Helper closure: open the rename popover for a given track id, anchored
+    // at a screen-space rectangle on the timeline drawing area.
+    let open_rename_popover: Rc<dyn Fn(String, gtk::gdk::Rectangle)> = {
+        let state = state.clone();
+        let rename_pop = rename_pop.clone();
+        let rename_entry = rename_entry.clone();
+        let rename_target_track_id = rename_target_track_id.clone();
+        Rc::new(move |track_id: String, anchor: gtk::gdk::Rectangle| {
+            let current_label = {
+                let st = state.borrow();
+                let proj = st.project.borrow();
+                proj.track_ref(&track_id).map(|t| t.label.clone())
+            };
+            let Some(current_label) = current_label else {
+                return;
+            };
+            *rename_target_track_id.borrow_mut() = Some(track_id);
+            rename_entry.set_text(&current_label);
+            rename_entry.select_region(0, -1);
+            rename_pop.set_pointing_to(Some(&anchor));
+            rename_pop.popup();
+            // Defer focus until the popover is realized so the entry actually
+            // receives the cursor.
+            let entry_weak = rename_entry.downgrade();
+            glib::idle_add_local_once(move || {
+                if let Some(entry) = entry_weak.upgrade() {
+                    entry.grab_focus();
+                    entry.select_region(0, -1);
+                }
+            });
+        })
+    };
 
     {
         let state = state.clone();
@@ -4852,6 +5009,46 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         });
     }
 
+    // Rename Track button handler — closes the context menu and opens the
+    // rename popover, anchored at the track's left-side label area.
+    {
+        let state = state.clone();
+        let pop_weak = track_context_pop.downgrade();
+        let track_context_track_idx = track_context_track_idx.clone();
+        let open_rename_popover = open_rename_popover.clone();
+        btn_rename_track.connect_clicked(move |_| {
+            let track_idx = *track_context_track_idx.borrow();
+            if let Some(pop) = pop_weak.upgrade() {
+                pop.popdown();
+            }
+            let Some(idx) = track_idx else {
+                return;
+            };
+            let anchor = {
+                let st = state.borrow();
+                let proj = st.project.borrow();
+                let editing_tracks = st.resolve_editing_tracks(&proj);
+                let Some(track) = editing_tracks.get(idx) else {
+                    return;
+                };
+                let track_id = track.id.clone();
+                let row_top = track_row_top_in_tracks(editing_tracks, idx)
+                    + st.breadcrumb_bar_height();
+                let row_height = track_row_height(track);
+                let rect = gtk::gdk::Rectangle::new(
+                    0,
+                    row_top as i32,
+                    TRACK_LABEL_WIDTH as i32,
+                    row_height as i32,
+                );
+                Some((track_id, rect))
+            };
+            if let Some((track_id, rect)) = anchor {
+                open_rename_popover(track_id, rect);
+            }
+        });
+    }
+
     // Add Adjustment Layer button handler
     {
         let state = state.clone();
@@ -5029,6 +5226,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         let btn_track_height_large = btn_track_height_large.clone();
         let btn_add_adjustment_layer = btn_add_adjustment_layer.clone();
         let btn_generate_music = btn_generate_music.clone();
+        let open_rename_popover = open_rename_popover.clone();
         click.connect_pressed(move |gesture, n_press, x, y| {
             // Grab keyboard focus so Delete/Backspace etc. work immediately
             if let Some(a) = area_weak.upgrade() {
@@ -5072,6 +5270,38 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     }
                 }
             } else if button == 1 {
+                // Double-click on the track label area → open rename popover.
+                // Must run before any other left-click handling so it doesn't
+                // also seek/scrub or trigger compound drill-down.
+                if n_press == 2
+                    && x < TRACK_LABEL_WIDTH
+                    && st.solo_badge_hit_track_index(x, y).is_none()
+                    && st.duck_badge_hit_track_index(x, y).is_none()
+                {
+                    let resolved = st.track_index_at_y(y).and_then(|track_idx| {
+                        let proj = st.project.borrow();
+                        let editing_tracks = st.resolve_editing_tracks(&proj);
+                        editing_tracks.get(track_idx).map(|track| {
+                            let row_top = track_row_top_in_tracks(editing_tracks, track_idx)
+                                + st.breadcrumb_bar_height();
+                            let row_height = track_row_height(track);
+                            (
+                                track.id.clone(),
+                                gtk::gdk::Rectangle::new(
+                                    0,
+                                    row_top as i32,
+                                    TRACK_LABEL_WIDTH as i32,
+                                    row_height as i32,
+                                ),
+                            )
+                        })
+                    });
+                    if let Some((track_id, anchor)) = resolved {
+                        drop(st);
+                        open_rename_popover(track_id, anchor);
+                        return;
+                    }
+                }
                 match st.active_tool.clone() {
                     ActiveTool::Razor => {
                         // Razor cut at click position on the clicked track
@@ -7502,14 +7732,15 @@ fn draw_timeline(
     let proj = st.project.borrow();
     let editing_tracks = st.resolve_editing_tracks(&proj);
     let mut y = RULER_HEIGHT + breadcrumb_height;
-    for (i, track) in editing_tracks.iter().enumerate() {
+    for &logical_idx in &visual_order(editing_tracks) {
+        let track = &editing_tracks[logical_idx];
         let track_height = track_row_height(track);
         draw_track_row(
             cr,
             w,
             y,
             track_height,
-            i,
+            logical_idx,
             track,
             st,
             &grouped_peer_highlight_ids,
@@ -7574,15 +7805,8 @@ fn draw_timeline(
         );
     }
 
-    let track_row_y = |track_idx: usize| {
-        RULER_HEIGHT
-            + breadcrumb_height
-            + editing_tracks
-                .iter()
-                .take(track_idx)
-                .map(track_row_height)
-                .sum::<f64>()
-    };
+    let track_row_y =
+        |track_idx: usize| track_row_top_in_tracks(editing_tracks, track_idx) + breadcrumb_height;
     if let Some(armed_track_id) = &st.music_generation_armed_track_id {
         if let Some((track_idx, track)) = editing_tracks
             .iter()
@@ -7697,8 +7921,16 @@ fn draw_timeline(
                 .get(*target_idx)
                 .map(track_row_height)
                 .unwrap_or(0.0);
+            // Decide above/below based on *visual* position, not logical index,
+            // since video tracks are visually reversed.
+            let source_visual = logical_to_visual(editing_tracks, *track_idx);
+            let target_visual = logical_to_visual(editing_tracks, *target_idx);
+            let target_below_source = match (source_visual, target_visual) {
+                (Some(s), Some(t)) => t > s,
+                _ => target_idx > track_idx,
+            };
             let indicator_y = target_top
-                + if target_idx > track_idx {
+                + if target_below_source {
                     target_height
                 } else {
                     0.0
