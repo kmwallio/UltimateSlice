@@ -4808,6 +4808,15 @@ pub fn build_window(
             backend.as_id(),
             report.describe()
         );
+
+        // If WebGPU is compiled in and the user's selected backend
+        // is WebGpu or Auto, pre-trigger Dawn device creation with
+        // stderr silenced so Dawn's "limits artificially reduced"
+        // warnings don't interleave with user output during the
+        // first real MusicGen / SAM / MODNet / RIFE inference call.
+        // See `ai_providers::prewarm_webgpu_if_needed` for the full
+        // rationale and mechanism.
+        crate::media::ai_providers::prewarm_webgpu_if_needed();
     }
 
     // MCP command channel — created unconditionally so the socket transport can

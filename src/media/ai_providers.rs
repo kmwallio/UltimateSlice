@@ -388,6 +388,148 @@ fn push_cpu(providers: &mut Vec<ort::execution_providers::ExecutionProviderDispa
     providers.push(CPUExecutionProvider::default().build());
 }
 
+// ── WebGPU pre-warm (suppress Dawn's startup warnings) ─────────────────────
+//
+// ORT's WebGPU EP asks Dawn for a device with
+// `max*PerPipelineLayout = 500000` (a sentinel for "as many as
+// possible"). Dawn's Vulkan backend can only supply 16 per layout —
+// both the WebGPU spec minimum and the actual hardware limit on
+// every driver tested — so it silently clamps the request and
+// prints two warnings to stderr directly from C++:
+//
+//   Warning: maxDynamicUniformBuffersPerPipelineLayout artificially
+//     reduced from 500000 to 16 to fit dynamic offset allocation limit.
+//   Warning: maxDynamicStorageBuffersPerPipelineLayout artificially
+//     reduced from 500000 to 16 to fit dynamic offset allocation limit.
+//
+// These are cosmetic (MusicGen, SAM, MODNet, RIFE all work fine
+// with 16 dynamic buffers — none of their graphs need more) and
+// fire exactly once at first Dawn device creation; ORT caches the
+// device in its environment singleton across sessions.
+//
+// Dawn has no documented env var, toggle, or log callback to
+// suppress these — we checked the Dawn debugging docs + toggle
+// list. The messages are printed directly from
+// `native/Device.cpp::AdjustLimitsForRequiredLimits` and bypass
+// every log/tracing framework we can configure from Rust.
+//
+// So we do the next best thing: pre-trigger Dawn device creation
+// at app startup with stderr temporarily redirected to /dev/null,
+// so the warnings get emitted during the silent splash instead of
+// interleaving with user output during the first real inference.
+// Subsequent real session creation inherits the already-warmed
+// device and prints nothing.
+
+/// RAII guard that temporarily redirects stderr (fd 2) to
+/// `/dev/null` for the lifetime of the guard, then restores the
+/// original fd on drop. Used to swallow Dawn's device-creation
+/// warnings without affecting any other stderr output.
+///
+/// Unix-only. On non-Unix platforms the guard is a no-op and the
+/// pre-warm proceeds without redirection.
+#[cfg(all(feature = "ai-webgpu", unix))]
+struct StderrSilencer {
+    saved_fd: libc::c_int,
+}
+
+#[cfg(all(feature = "ai-webgpu", unix))]
+impl StderrSilencer {
+    fn new() -> Option<Self> {
+        unsafe {
+            // 1. Save the current stderr fd so we can restore it on drop.
+            let saved_fd = libc::dup(libc::STDERR_FILENO);
+            if saved_fd < 0 {
+                return None;
+            }
+            // 2. Open /dev/null for writing.
+            let devnull_path = b"/dev/null\0".as_ptr() as *const libc::c_char;
+            let devnull = libc::open(devnull_path, libc::O_WRONLY);
+            if devnull < 0 {
+                libc::close(saved_fd);
+                return None;
+            }
+            // 3. Point fd 2 at /dev/null. `dup2` closes the existing
+            //    fd 2 for us before reassigning.
+            let r = libc::dup2(devnull, libc::STDERR_FILENO);
+            libc::close(devnull);
+            if r < 0 {
+                libc::close(saved_fd);
+                return None;
+            }
+            Some(StderrSilencer { saved_fd })
+        }
+    }
+}
+
+#[cfg(all(feature = "ai-webgpu", unix))]
+impl Drop for StderrSilencer {
+    fn drop(&mut self) {
+        unsafe {
+            // Restore original stderr. If this fails there's no
+            // meaningful recovery from a Drop impl — just don't
+            // panic.
+            libc::dup2(self.saved_fd, libc::STDERR_FILENO);
+            libc::close(self.saved_fd);
+        }
+    }
+}
+
+/// Pre-trigger Dawn device creation with stderr silenced, so the
+/// two "limits artificially reduced" warnings fire during app
+/// startup (where we can swallow them) instead of interleaving
+/// with user output during the first user-triggered inference job.
+///
+/// Verified empirically that registering the WebGPU EP via
+/// `SessionBuilder::with_execution_providers` — even without ever
+/// committing a model — is enough to trigger Dawn device creation.
+/// See `configure_session_builder_auto_succeeds` (the test is
+/// `#[cfg_attr(feature = "ai-webgpu", ignore)]` because rapid
+/// test-process exit right after Dawn init races with Dawn's
+/// destructors and segfaults; long-lived GTK sessions don't hit
+/// this because Dawn settles during normal use).
+///
+/// No-op on:
+/// * builds without the `ai-webgpu` feature
+/// * non-Unix platforms (the fd-redirect trick is Unix-specific)
+/// * sessions where the current backend isn't `WebGpu` or `Auto`
+///   (if the user picked CPU / CUDA / ROCm / OpenVINO, they won't
+///   trigger Dawn and there's nothing to warm)
+///
+/// Safe to call from any thread; should be called once at app
+/// startup after `set_current_backend` has loaded the user's
+/// preference.
+pub fn prewarm_webgpu_if_needed() {
+    #[cfg(all(feature = "ai-webgpu", unix))]
+    {
+        let backend = current_backend();
+        if !matches!(backend, AiBackend::WebGpu | AiBackend::Auto) {
+            return;
+        }
+
+        // Redirect stderr *before* touching ort so Dawn's C++
+        // warnings go to /dev/null. Scope the silencer tightly so
+        // we don't accidentally swallow unrelated stderr output.
+        let _silencer = match StderrSilencer::new() {
+            Some(s) => s,
+            // If the fd juggling failed (e.g. sandbox restricts
+            // dup2), fall back to emitting the warnings normally
+            // later — the feature is cosmetic, not critical.
+            None => return,
+        };
+
+        let builder = match ort::session::Session::builder() {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+        // Register the WebGPU EP. This triggers Dawn device
+        // creation. We don't need a model — just the EP
+        // registration is enough to initialize the device, and
+        // dropping the builder afterwards leaves the device alive
+        // in ort's environment singleton for later sessions.
+        let _ = configure_session_builder(builder, AiBackend::WebGpu);
+    }
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

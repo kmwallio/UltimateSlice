@@ -162,6 +162,70 @@ script against `microsoft/onnxruntime` at `v1.24.2`, optionally with
 build. This is harder than just fetching the prebuilt but works in
 fully-offline environments.
 
+## "error while loading shared libraries: libwebgpu_dawn.so"
+
+Direct execution of the binary (e.g. `./target/debug/ultimate-slice`
+from a shell, or a systemd unit, or an MCP agent launch) fails with:
+
+```
+./target/debug/ultimate-slice: error while loading shared libraries:
+libwebgpu_dawn.so: cannot open shared object file: No such file or directory
+```
+
+but `cargo run --features ai-webgpu` works fine.
+
+**Cause**: the prebuilt `wgpu` tarball statically links ONNX Runtime
+(`libonnxruntime.a` is baked into the binary) but ships Dawn as a
+dynamic library (`libwebgpu_dawn.so`) because Dawn's global C++
+state makes it hard to static-link. `ort-sys` drops a symlink at
+`target/<profile>/libwebgpu_dawn.so` → `~/.cache/ort.pyke.io/...`,
+but the dynamic loader doesn't know to look there without help.
+`cargo run` / `cargo test` prepend `target/<profile>` to
+`LD_LIBRARY_PATH` automatically; direct execution doesn't inherit
+that.
+
+**Fix (project-level, already applied)**: `.cargo/config.toml` in
+the repo root sets:
+
+```toml
+[target.'cfg(target_os = "linux")']
+rustflags = ["-C", "link-arg=-Wl,-rpath,$ORIGIN"]
+```
+
+This embeds `$ORIGIN` in the binary's ELF `DT_RUNPATH`. The literal
+string `$ORIGIN` is expanded by the dynamic loader to the binary's
+own directory at launch, so `./target/debug/ultimate-slice` finds
+`./target/debug/libwebgpu_dawn.so` without any environment setup.
+
+**Verify** the rpath is in place:
+
+```bash
+readelf -d target/debug/ultimate-slice | grep -iE "rpath|runpath"
+# expected: 0x000000000000001d (RUNPATH)  Library runpath: [$ORIGIN]
+
+ldd target/debug/ultimate-slice | grep dawn
+# expected: libwebgpu_dawn.so => /.../target/debug/libwebgpu_dawn.so
+```
+
+**Workarounds if the rpath is missing** (e.g. you disabled
+`.cargo/config.toml` or are on a platform other than Linux):
+
+```bash
+# Option A: set LD_LIBRARY_PATH manually
+LD_LIBRARY_PATH=$(pwd)/target/debug ./target/debug/ultimate-slice
+
+# Option B: just use cargo
+cargo run --features ai-webgpu
+
+# Option C: one-time system install for the Dawn .so
+sudo cp ~/.cache/ort.pyke.io/dfbin/x86_64-unknown-linux-gnu/*/libwebgpu_dawn.so /usr/local/lib/
+sudo ldconfig
+```
+
+The rpath approach is preferred because it makes the binary
+self-contained for the typical dev workflow without touching system
+directories.
+
 ## "First run takes forever"
 
 ### WebGPU

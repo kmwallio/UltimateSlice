@@ -91,6 +91,67 @@ a few seconds (vs ~13 s on CPU).
   harness-only issue — long-lived GTK sessions do not hit it. See
   `src/media/ai_providers.rs` for the `#[cfg_attr]` marker and
   explanation.
+- **"limits artificially reduced" warnings from Dawn** (fixed by
+  startup pre-warm): ORT's WebGPU EP requests
+  `max*PerPipelineLayout = 500000` (a sentinel for "unlimited") but
+  Dawn's Vulkan backend can only supply 16 — the WebGPU spec
+  minimum and the actual hardware max. Dawn clamps the limit and
+  prints two lines to stderr directly from C++:
+
+  ```
+  Warning: maxDynamicUniformBuffersPerPipelineLayout artificially
+    reduced from 500000 to 16 to fit dynamic offset allocation limit.
+  Warning: maxDynamicStorageBuffersPerPipelineLayout artificially
+    reduced from 500000 to 16 to fit dynamic offset allocation limit.
+  ```
+
+  These are cosmetic — no AI model in this project needs more than
+  16 dynamic buffers per pipeline layout, so the clamp is
+  essentially free — but the messages bypass `env_logger` /
+  `tracing` (they're direct C++ stderr writes, not log-crate
+  output) and Dawn has no documented toggle or callback to
+  silence them (we checked the [Dawn debugging docs][dawn-debug]
+  and toggle list).
+
+  **Fix applied**: `src/media/ai_providers.rs` now has a
+  `prewarm_webgpu_if_needed()` function wired into startup at
+  `src/ui/window.rs:4800-4820`. It uses a `libc::dup2`-based
+  `StderrSilencer` RAII guard to temporarily redirect fd 2 to
+  `/dev/null`, then calls `configure_session_builder(…, WebGpu)`
+  to trigger Dawn device creation (verified empirically that
+  `with_execution_providers` alone is enough to initialize Dawn —
+  no `commit_from_file` required), then drops the builder. The
+  two warnings are emitted to the silenced stderr during the
+  silent splash; the Dawn device stays alive in ort's environment
+  singleton; subsequent real MusicGen / SAM / MODNet / RIFE
+  inference inherits it without new warnings. No-op on non-Unix
+  platforms, non-ai-webgpu builds, or when the selected backend is
+  CPU/CUDA/ROCm/OpenVINO (nothing to warm).
+
+  [dawn-debug]: https://dawn.googlesource.com/dawn/+/refs/heads/main/docs/dawn/debugging.md
+- **`libwebgpu_dawn.so: cannot open shared object file`**: the
+  prebuilt `wgpu` tarball statically links `libonnxruntime.a` but
+  ships Dawn as a **dynamic** library (`libwebgpu_dawn.so`) that
+  `ort-sys` drops into `target/<profile>/` as a symlink to
+  `~/.cache/ort.pyke.io/dfbin/...`. `cargo run` and `cargo test`
+  automatically prepend that directory to `LD_LIBRARY_PATH`, but
+  direct execution (`./target/debug/ultimate-slice`, systemd units,
+  MCP agent launches) does not.
+  
+  **Fix**: the project's `.cargo/config.toml` sets
+  `rustflags = ["-C", "link-arg=-Wl,-rpath,$ORIGIN"]` on Linux so
+  the binary's ELF `DT_RUNPATH` tells the dynamic loader to also
+  search its own directory — `target/debug/` in dev, or alongside
+  the installed binary in production. If you forked the repo and
+  don't have `.cargo/config.toml`, direct execution will fail; the
+  workaround is `LD_LIBRARY_PATH=$(pwd)/target/debug
+  ./target/debug/ultimate-slice` or just use `cargo run
+  --features ai-webgpu`.
+  
+  Verify with `readelf -d target/debug/ultimate-slice | grep
+  -iE "rpath|runpath"` — you should see `$ORIGIN` as a literal
+  string. The loader expands it at run time to the binary's own
+  directory.
 - **First run is slow**: Dawn does initial shader compilation on the
   first inference and caches the results under
   `$XDG_CACHE_HOME/dawn/`. Subsequent runs hit the cache and are
