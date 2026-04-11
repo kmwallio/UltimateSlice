@@ -271,6 +271,9 @@ Tracking docs:
 - [ ] Source-Record Track Patching (UI to control source channel to timeline track mapping)
 - [ ] Dynamic Trim Mode / Precision Editor (Interface for side-by-side fine-tuning of cuts)
 
+### Motion Tracking Improvements
+- [ ] **Multi-scale (Gaussian pyramid) search** in `src/media/tracking.rs`. Build a 2- or 3-level pyramid (full resolution + half + quarter), run the NCC matcher at the coarsest level with a generously wide search radius (catches large whip-pan motion cheaply), then refine at each finer level with a small local radius. This complements the existing motion-prediction + jump-cap path: prediction handles constant-velocity motion, the pyramid handles sudden direction changes that exceed the single-level search radius. Expected win: eliminate the "tracker falls behind during a hand whip and never recovers" failure mode that prompted the second-pass overhaul, without widening the normal search radius (which would quadruple per-frame compute). Cost: ~2× memory for the extra pyramid levels, ~1.3× compute for the cascaded refine. Touches `FrameSequence` (needs to hold multiple levels), `extract_template` (needs a template per level), and `find_best_match` (coarse-to-fine loop). Leave CACHE_VERSION bumping until this lands so we don't churn cached tracking data twice.
+
 ### Speed Ramps (per clip)
 - [x] Constant speed change per clip (e.g. 0.5× slow-mo, 2× fast-forward) via GStreamer rate seek + ffmpeg `setpts`/`atempo` on export
 - [x] Speed indicator badge on clip in timeline (yellow "2×" badge)
