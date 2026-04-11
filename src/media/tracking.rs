@@ -24,9 +24,11 @@ use std::sync::{mpsc, Arc};
 use std::time::Duration;
 use tempfile::NamedTempFile;
 
-// CACHE_VERSION = 2 invalidates any pre-color cache: grayscale 160×90
-// results from the old tracker can't feed the new color matcher.
-const CACHE_VERSION: u32 = 2;
+// CACHE_VERSION bumps:
+//   2: gray 160×90 → YUV444 320×180 (color matching, no template drift)
+//   3: + motion prediction, confidence recovery, anchor-on-loss
+//   4: SAD → normalized cross-correlation (different sample confidences)
+const CACHE_VERSION: u32 = 4;
 const ANALYSIS_WIDTH: usize = 320;
 const ANALYSIS_HEIGHT: usize = 180;
 /// Sentinel step meaning "use the source clip's native frame rate".
@@ -36,12 +38,15 @@ const DEFAULT_FRAME_STEP_NS: u64 = 0;
 /// probed. Picked conservatively (i.e. low) so the search radius still
 /// catches motion if we miscount frames.
 const FALLBACK_SOURCE_FPS: f64 = 24.0;
-/// Search radius at ANALYSIS_WIDTH=320 — 16 px = 5% of frame width per
-/// sample step, which covers fast hand motion at the source frame
-/// rate. The old tracker used 18 px at 160 width (~11% per step) to
-/// compensate for 10 fps sub-sampling; now that we sample every source
-/// frame we can afford a proportionally smaller radius.
-const DEFAULT_SEARCH_RADIUS_PX: u32 = 16;
+/// Search radius at ANALYSIS_WIDTH=320 — 24 px ≈ 7.5% of frame width
+/// per sample step. Motion prediction effectively extends this by the
+/// current velocity so the *reachable* per-frame motion is
+/// `radius + |velocity|`; the radius itself only has to cover
+/// acceleration (change in velocity) between consecutive frames. 24
+/// is a balance: big enough that the prediction doesn't have to be
+/// perfect to catch the subject, small enough that the candidate loop
+/// stays fast (49² ≈ 2400 candidates per frame).
+const DEFAULT_SEARCH_RADIUS_PX: u32 = 24;
 const MIN_TEMPLATE_HALF_SIZE_PX: i32 = 4;
 /// Cap to keep memory + compute bounded. 1200 frames × 320×180 YUV444
 /// ≈ 207 MB peak RAM for the decoded sequence, and the SAD matcher
@@ -49,6 +54,40 @@ const MIN_TEMPLATE_HALF_SIZE_PX: i32 = 4;
 /// `MAX_TRACKING_FRAMES / source_fps` seconds get proportionally
 /// decimated.
 const MAX_TRACKING_FRAMES: usize = 1200;
+
+/// Confidence at-or-below this triggers a recovery pass with a wider
+/// search radius centered on the last known-good position.  The NCC
+/// confidence distribution on real footage is surprisingly wide —
+/// "typical good" matches hover around 0.4–0.6, "uncertain" matches
+/// sit around 0.25–0.4, and "clearly lost" dips to 0.25 or below. We
+/// fire recovery on any uncertain-or-worse frame so the common path
+/// stays on the recovered result when the normal search drifts onto
+/// background texture.
+const RECOVERY_CONFIDENCE_THRESHOLD: f64 = 0.30;
+/// Hard cap on how far the matched rect is allowed to move from the
+/// *previous* matched rect in a single frame. At 320 analysis width,
+/// 32 px = 10% of frame per frame, which is already past what real
+/// subjects move at frame rate. Jumps larger than this are almost
+/// always the matcher teleporting to a distant local minimum — we
+/// clamp them to preserve trajectory continuity even if the score
+/// wanted otherwise.
+const MAX_SINGLE_FRAME_JUMP_PX: i32 = 32;
+/// Recovery search radius, applied when a frame's normal match drops
+/// below the confidence threshold.  At ANALYSIS_WIDTH=320 this is an
+/// 80 px half-width = 25% of frame width, enough to catch a hand whip
+/// that briefly leaves the normal search window during a full 1/24 s
+/// frame.  Cost: 161² ≈ 26k candidates per recovery call, about 11×
+/// the normal search, so the recovery threshold is tuned to keep this
+/// out of the common path.
+const RECOVERY_SEARCH_RADIUS_PX: i32 = 80;
+/// How many consecutive low-confidence frames we'll tolerate while
+/// still chasing motion before anchoring the search at the last
+/// known-good position.  Set high because on handheld footage the
+/// confidence can dip for ~1 s (24 frames) during a fast whip-pan and
+/// then recover — we'd rather keep chasing than freeze during that
+/// window.  Once we do anchor, the subject has to come back into the
+/// last good window for the tracker to re-engage.
+const MAX_CONSECUTIVE_LOW_CONFIDENCE_FRAMES: u32 = 48;
 
 #[derive(Debug, Clone)]
 pub struct TrackingJob {
@@ -1117,25 +1156,26 @@ struct YuvFrame {
 }
 
 /// Template patch captured from the first analysis frame — kept as a
-/// copy of the Y/U/V bytes inside the tracker region, plus the
-/// per-channel mean used by mean-centered SAD. The template is **not**
-/// updated between frames (unlike the pre-color tracker) to prevent
-/// drift.
+/// copy of the Y/U/V bytes inside the tracker region, plus per-channel
+/// mean and mean-centered L2 energy `sqrt(sum((pixel - mean)²))`. The
+/// energy is precomputed once because it's the denominator of every
+/// NCC evaluation; without caching it we'd pay N² work per candidate.
+///
+/// The template is **not** updated between frames (unlike the
+/// pre-color tracker) to prevent drift.
 #[derive(Debug, Clone)]
 struct TemplatePatch {
     y_pixels: Vec<u8>,
     y_mean: f64,
+    y_energy: f64,
     u_pixels: Vec<u8>,
     u_mean: f64,
+    u_energy: f64,
     v_pixels: Vec<u8>,
     v_mean: f64,
+    v_energy: f64,
 }
 
-impl TemplatePatch {
-    fn len(&self) -> usize {
-        self.y_pixels.len()
-    }
-}
 
 #[derive(Debug, Clone)]
 struct FrameSequence {
@@ -1261,18 +1301,149 @@ where
     samples.push(TrackingSample::identity(job.analysis_start_ns));
     report_progress(1, total_frames);
 
+    // Motion-prediction state: per-frame velocity in analysis pixels.
+    // Seeded to zero; updated after each match from the delta between
+    // the matched rect and the previous `current_rect`. Predicting the
+    // next search center from this velocity effectively doubles the
+    // tracker's tolerance to constant-velocity motion without doubling
+    // the search radius (which would quadruple the compute).
+    let mut velocity_x: i32 = 0;
+    let mut velocity_y: i32 = 0;
+    // Last rect whose match came back with high confidence. Recovery
+    // searches center on this (not on a low-confidence drift) so a
+    // brief bad match can't pull the tracker off-subject permanently.
+    let mut last_good_rect = current_rect;
+    let mut consecutive_low_confidence = 0u32;
+    let normal_radius = job.effective_search_radius_px() as i32;
+
     for (frame_index, frame) in sequence.frames.iter().enumerate().skip(1) {
         if cancel_flag.load(Ordering::Relaxed) {
             return Err((TrackingFailure::Cancelled, "Tracking canceled".to_string()));
         }
-        let (matched_rect, confidence) = find_best_match(
+        // 1. Predicted search center = current_rect + velocity,
+        //    clamped to frame bounds so the candidate loop doesn't
+        //    spend most of its iterations on invalid positions.
+        let predicted_rect = translate_rect_clamped(
+            current_rect,
+            velocity_x,
+            velocity_y,
+            sequence.width as i32,
+            sequence.height as i32,
+        );
+
+        // 2. Normal search around the prediction.
+        let (mut matched_rect, mut confidence) = find_best_match(
             frame,
             sequence.width,
             sequence.height,
             &template,
-            current_rect,
-            job.effective_search_radius_px() as i32,
+            predicted_rect,
+            normal_radius,
         )?;
+
+        // 3. If the match is suspicious, run a wider recovery search
+        //    centered on the LAST GOOD position (not the current, not
+        //    the prediction — those may already be off-subject).
+        //    Trigger is <= so a match sitting exactly on the
+        //    threshold still gets a second chance at recovery.
+        if confidence <= RECOVERY_CONFIDENCE_THRESHOLD
+            && consecutive_low_confidence < MAX_CONSECUTIVE_LOW_CONFIDENCE_FRAMES
+        {
+            let (recovery_rect, recovery_confidence) = find_best_match(
+                frame,
+                sequence.width,
+                sequence.height,
+                &template,
+                last_good_rect,
+                RECOVERY_SEARCH_RADIUS_PX,
+            )?;
+            if recovery_confidence > confidence {
+                matched_rect = recovery_rect;
+                confidence = recovery_confidence;
+            }
+        }
+
+        // 3b. Hard trajectory-continuity cap: clamp the per-frame
+        //     delta to MAX_SINGLE_FRAME_JUMP_PX. At 320 analysis
+        //     width this is 32 px = 10% of frame, which is faster
+        //     than virtually any real subject moves at source frame
+        //     rate. Anything bigger is the matcher teleporting to a
+        //     distant local minimum — we preserve the direction but
+        //     cap the magnitude. Recovery is still free to find a
+        //     distant subject *over multiple frames* because the
+        //     prediction accumulates; it just can't do it in one.
+        let dx = matched_rect.x - current_rect.x;
+        let dy = matched_rect.y - current_rect.y;
+        if dx.abs() > MAX_SINGLE_FRAME_JUMP_PX || dy.abs() > MAX_SINGLE_FRAME_JUMP_PX {
+            matched_rect = PixelRect {
+                x: current_rect.x
+                    + dx.clamp(-MAX_SINGLE_FRAME_JUMP_PX, MAX_SINGLE_FRAME_JUMP_PX),
+                y: current_rect.y
+                    + dy.clamp(-MAX_SINGLE_FRAME_JUMP_PX, MAX_SINGLE_FRAME_JUMP_PX),
+                width: matched_rect.width,
+                height: matched_rect.height,
+            };
+            // Don't promote this to a "good" frame — the clamp means
+            // the actual best-score position was rejected, so the
+            // confidence here is misleading.
+            confidence = confidence.min(RECOVERY_CONFIDENCE_THRESHOLD);
+        }
+
+        // 4. Velocity update and anchoring logic. Three regimes:
+        //    - "trustworthy" (confidence ≥ GOOD): update velocity via
+        //      EMA, update last_good_rect, reset lost counter.
+        //    - "uncertain" (GOOD > confidence ≥ RECOVERY): use the
+        //      match but don't update last_good_rect. Still update
+        //      velocity — on real footage the tracker often dips
+        //      into this range during fast pans, and freezing the
+        //      velocity there breaks prediction exactly when it's
+        //      needed most.
+        //    - "clearly lost" (confidence < RECOVERY): decay velocity
+        //      so we don't march off-subject, increment the lost
+        //      counter, and anchor after too many consecutive losses.
+        //
+        // Crucially, the anchor decision runs BEFORE the sample is
+        // pushed so the sample reflects the anchor position, not the
+        // bad pre-anchor match. Otherwise sample[i] would hold the
+        // bad position and sample[i+1] (searched around the anchor)
+        // would look like a giant teleport.
+        const GOOD_CONFIDENCE: f64 = 0.4;
+        let new_vx = matched_rect.x - current_rect.x;
+        let new_vy = matched_rect.y - current_rect.y;
+        if confidence >= GOOD_CONFIDENCE {
+            velocity_x = (velocity_x + new_vx) / 2;
+            velocity_y = (velocity_y + new_vy) / 2;
+            last_good_rect = matched_rect;
+            consecutive_low_confidence = 0;
+        } else if confidence >= RECOVERY_CONFIDENCE_THRESHOLD {
+            velocity_x = (velocity_x + new_vx) / 2;
+            velocity_y = (velocity_y + new_vy) / 2;
+            consecutive_low_confidence = consecutive_low_confidence.saturating_add(1);
+        } else {
+            velocity_x /= 2;
+            velocity_y /= 2;
+            consecutive_low_confidence = consecutive_low_confidence.saturating_add(1);
+            if consecutive_low_confidence >= MAX_CONSECUTIVE_LOW_CONFIDENCE_FRAMES {
+                // Anchor: freeze the search center at the last good
+                // position for THIS sample onward. Also clamp the
+                // per-frame delta so the anchor itself doesn't
+                // produce a teleport — it moves toward last_good
+                // but no faster than the jump budget allows.
+                let adx = (last_good_rect.x - current_rect.x)
+                    .clamp(-MAX_SINGLE_FRAME_JUMP_PX, MAX_SINGLE_FRAME_JUMP_PX);
+                let ady = (last_good_rect.y - current_rect.y)
+                    .clamp(-MAX_SINGLE_FRAME_JUMP_PX, MAX_SINGLE_FRAME_JUMP_PX);
+                matched_rect = PixelRect {
+                    x: current_rect.x + adx,
+                    y: current_rect.y + ady,
+                    width: matched_rect.width,
+                    height: matched_rect.height,
+                };
+                velocity_x = 0;
+                velocity_y = 0;
+            }
+        }
+
         let sample_time = job
             .analysis_start_ns
             .saturating_add((frame_index as u64).saturating_mul(effective_step_ns))
@@ -1285,9 +1456,7 @@ where
             rotation_deg: 0.0,
             confidence,
         });
-        // Keep `current_rect` moving with the match so the next
-        // frame's search window is centered on the last known
-        // position. The template itself never changes.
+
         current_rect = matched_rect;
         report_progress(frame_index + 1, total_frames);
     }
@@ -1298,6 +1467,26 @@ where
         analysis_end_ns: Some(job.analysis_end_ns),
         samples,
     })
+}
+
+/// Translate a rect by `(dx, dy)` and clamp it to the frame bounds so
+/// the search loop doesn't iterate on candidates that are mostly
+/// out-of-bounds.
+fn translate_rect_clamped(
+    rect: PixelRect,
+    dx: i32,
+    dy: i32,
+    image_width: i32,
+    image_height: i32,
+) -> PixelRect {
+    let max_x = (image_width - rect.width).max(0);
+    let max_y = (image_height - rect.height).max(0);
+    PixelRect {
+        x: (rect.x + dx).clamp(0, max_x),
+        y: (rect.y + dy).clamp(0, max_y),
+        width: rect.width,
+        height: rect.height,
+    }
 }
 
 fn extract_yuv_frames(
@@ -1471,14 +1660,31 @@ fn extract_template(
     let y_mean = patch_mean(&y_pixels);
     let u_mean = patch_mean(&u_pixels);
     let v_mean = patch_mean(&v_pixels);
+    let y_energy = plane_mean_centered_energy(&y_pixels, y_mean);
+    let u_energy = plane_mean_centered_energy(&u_pixels, u_mean);
+    let v_energy = plane_mean_centered_energy(&v_pixels, v_mean);
     Ok(TemplatePatch {
         y_pixels,
         y_mean,
+        y_energy,
         u_pixels,
         u_mean,
+        u_energy,
         v_pixels,
         v_mean,
+        v_energy,
     })
+}
+
+/// L2 norm of the mean-centered template: `sqrt(Σ (p - mean)²)`.
+/// Precomputed so every NCC evaluation is O(patch_len), not O(2*patch_len).
+fn plane_mean_centered_energy(pixels: &[u8], mean: f64) -> f64 {
+    let mut sum_sq = 0.0f64;
+    for p in pixels {
+        let d = *p as f64 - mean;
+        sum_sq += d * d;
+    }
+    sum_sq.sqrt()
 }
 
 fn find_best_match(
@@ -1490,8 +1696,11 @@ fn find_best_match(
     search_radius_px: i32,
 ) -> Result<(PixelRect, f64), (TrackingFailure, String)> {
     let mut best_rect = current_rect;
-    let mut best_score = u64::MAX;
-    let mut second_best = u64::MAX;
+    // Scores are NCC in [-1, 1] summed across three planes, so the
+    // total is in [-3, 3]. Start below the minimum so any valid
+    // candidate replaces it.
+    let mut best_score = f64::NEG_INFINITY;
+    let mut second_best = f64::NEG_INFINITY;
     for dy in -search_radius_px..=search_radius_px {
         for dx in -search_radius_px..=search_radius_px {
             let candidate = PixelRect {
@@ -1507,46 +1716,48 @@ fn find_best_match(
             {
                 continue;
             }
-            let score = yuv_centered_sad(frame, image_width, template, candidate);
-            if score < best_score {
+            let score = yuv_ncc(frame, image_width, template, candidate);
+            if score > best_score {
                 second_best = best_score;
                 best_score = score;
                 best_rect = candidate;
-            } else if score < second_best {
+            } else if score > second_best {
                 second_best = score;
             }
         }
     }
-    if best_score == u64::MAX {
+    if best_score.is_infinite() {
         return Err((
             TrackingFailure::Failed,
             "Tracking search failed to find a valid candidate window".to_string(),
         ));
     }
-    // Three channels contribute to the score, so the confidence
-    // normalization needs to see 3× the patch length to keep the
-    // error_component math (score / max_possible_score) in the right
-    // range.
-    Ok((
-        best_rect,
-        tracking_confidence(best_score, second_best, template.len() * 3),
-    ))
+    Ok((best_rect, tracking_confidence_ncc(best_score, second_best)))
 }
 
-/// Mean-centered SAD over a single plane (Y, U, or V). Extracted so
-/// the matcher can call it three times per candidate without
-/// duplicating the hot loop.
-fn plane_centered_sad(
+/// Normalized cross-correlation for a single plane. Returns a value in
+/// `[-1, 1]` where 1 is a perfect match, 0 is uncorrelated, -1 is
+/// inverted. Unlike mean-centered SAD, NCC is invariant to both
+/// additive brightness offsets AND multiplicative contrast changes,
+/// so mild exposure / lighting shifts between the first frame and
+/// later frames don't tank the score. Most importantly for our case,
+/// the score curve is much steeper around the true match — a 1 px
+/// drift from the correct position drops NCC visibly, where SAD would
+/// have looked similar — so the confidence signal actually
+/// discriminates "on-subject" from "close but wrong."
+fn plane_ncc(
     plane: &[u8],
     image_width: usize,
     template_pixels: &[u8],
     template_mean: f64,
+    template_energy: f64,
     candidate: PixelRect,
-) -> u64 {
+) -> f64 {
     let patch_len = (candidate.width * candidate.height) as usize;
     if patch_len == 0 || template_pixels.len() != patch_len {
-        return u64::MAX;
+        return -1.0;
     }
+    // First pass: candidate mean.
     let mut candidate_sum = 0u64;
     for y in candidate.y..candidate.y + candidate.height {
         let start = y as usize * image_width + candidate.x as usize;
@@ -1558,66 +1769,85 @@ fn plane_centered_sad(
     }
     let candidate_mean = candidate_sum as f64 / patch_len as f64;
 
-    let mut score = 0u64;
+    // Second pass: numerator Σ(T_centered * C_centered) and candidate energy.
+    let mut num = 0.0f64;
+    let mut cand_sum_sq = 0.0f64;
     let mut template_index = 0usize;
     for y in candidate.y..candidate.y + candidate.height {
         let start = y as usize * image_width + candidate.x as usize;
         let end = start + candidate.width as usize;
         for pixel in &plane[start..end] {
-            let template_centered = template_pixels[template_index] as f64 - template_mean;
-            let candidate_centered = *pixel as f64 - candidate_mean;
-            score += (template_centered - candidate_centered).abs() as u64;
+            let t_centered = template_pixels[template_index] as f64 - template_mean;
+            let c_centered = *pixel as f64 - candidate_mean;
+            num += t_centered * c_centered;
+            cand_sum_sq += c_centered * c_centered;
             template_index += 1;
         }
     }
-    score
+    let candidate_energy = cand_sum_sq.sqrt();
+    let denom = template_energy * candidate_energy;
+    if denom < 1e-9 {
+        // Degenerate case: either the template is flat (zero energy)
+        // or the candidate is flat. We can't compute a meaningful
+        // correlation, so score it as "weakly uncorrelated" rather
+        // than lying with a +1 / -1 extreme.
+        return 0.0;
+    }
+    (num / denom).clamp(-1.0, 1.0)
 }
 
-/// Sum the per-plane mean-centered SAD scores across Y, U, and V.
-/// Chroma (U, V) carries the color signal that grayscale-only matching
-/// throws away — a red sticker on a wooden table has a completely
-/// different U/V signature from the background, which is exactly what
-/// lets the tracker lock onto it.
-fn yuv_centered_sad(
+/// Sum the per-plane NCC scores across Y, U, and V. Range is `[-3, 3]`.
+fn yuv_ncc(
     frame: &YuvFrame,
     image_width: usize,
     template: &TemplatePatch,
     candidate: PixelRect,
-) -> u64 {
-    let y_score = plane_centered_sad(
+) -> f64 {
+    let y = plane_ncc(
         &frame.y,
         image_width,
         &template.y_pixels,
         template.y_mean,
+        template.y_energy,
         candidate,
     );
-    let u_score = plane_centered_sad(
+    let u = plane_ncc(
         &frame.u,
         image_width,
         &template.u_pixels,
         template.u_mean,
+        template.u_energy,
         candidate,
     );
-    let v_score = plane_centered_sad(
+    let v = plane_ncc(
         &frame.v,
         image_width,
         &template.v_pixels,
         template.v_mean,
+        template.v_energy,
         candidate,
     );
-    y_score.saturating_add(u_score).saturating_add(v_score)
+    y + u + v
 }
 
-fn tracking_confidence(best_score: u64, second_best: u64, patch_len: usize) -> f64 {
-    let max_score = (patch_len as f64 * 255.0).max(1.0);
-    let error_component = 1.0 - (best_score as f64 / max_score).clamp(0.0, 1.0);
-    let margin_component = if second_best == u64::MAX {
+/// Translate the summed NCC score (`[-3, 3]`) into a `[0, 1]`
+/// confidence. We:
+///   1. Normalize the best score to `[0, 1]` by clamping the negative
+///      range away (a "match" that correlates negatively is nonsense
+///      for our purpose — we only care about positive correlation).
+///   2. Weight in a margin component: the gap between the best and
+///      second-best score. Wide gaps mean the matcher is confident in
+///      one specific position; narrow gaps mean multiple candidates
+///      look alike and the match is ambiguous.
+fn tracking_confidence_ncc(best_score: f64, second_best: f64) -> f64 {
+    // Best NCC sum is in [-3, 3]. Map positive range to [0, 1].
+    let best_norm = (best_score / 3.0).clamp(0.0, 1.0);
+    let margin = if second_best.is_infinite() {
         1.0
     } else {
-        ((second_best.saturating_sub(best_score)) as f64 / second_best.max(1) as f64)
-            .clamp(0.0, 1.0)
+        ((best_score - second_best) / 3.0).clamp(0.0, 1.0)
     };
-    (error_component * 0.7 + margin_component * 0.3).clamp(0.0, 1.0)
+    (best_norm * 0.7 + margin * 0.3).clamp(0.0, 1.0)
 }
 
 fn patch_mean(pixels: &[u8]) -> f64 {
@@ -1772,8 +2002,12 @@ mod tests {
     fn track_motion_sequence_detects_translation() {
         let width = 64;
         let height = 40;
+        // Patterned target so NCC has real signal to lock onto —
+        // uniform targets produce zero-energy templates that NCC
+        // can't discriminate (division by zero → 0.0 for every
+        // candidate, regardless of position).
         let frames = (0..5)
-            .map(|idx| make_synthetic_yuv(width, height, 18 + idx * 2, 10 + idx))
+            .map(|idx| make_patterned_yuv(width, height, 18 + idx * 2, 10 + idx))
             .collect::<Vec<_>>();
         let sequence = FrameSequence {
             width,
@@ -1862,6 +2096,94 @@ mod tests {
             (analysis.samples[2].offset_y - 4.0 / height as f64).abs() < 0.03,
             "offset_y sample[2] = {}",
             analysis.samples[2].offset_y
+        );
+    }
+
+    /// Build a frame where the tracked "object" is a patterned 8×8
+    /// square (checker) instead of a uniform block — keeps the
+    /// mean-centered SAD non-degenerate so tests actually exercise
+    /// the matcher's signal path.
+    fn make_patterned_yuv(width: usize, height: usize, x: usize, y: usize) -> YuvFrame {
+        // Textured background so background candidates don't score 0
+        // under mean-centered matching.
+        let mut y_plane = vec![0u8; width * height];
+        let mut u_plane = vec![0u8; width * height];
+        let mut v_plane = vec![0u8; width * height];
+        for row in 0..height {
+            for col in 0..width {
+                let idx = row * width + col;
+                let noise = (((row * 11 + col * 7) % 7) as u8).saturating_sub(3);
+                y_plane[idx] = 80u8.saturating_add(noise);
+                u_plane[idx] = 128u8.saturating_add(noise);
+                v_plane[idx] = 128u8.saturating_add(noise);
+            }
+        }
+        // Patterned object: alternating bright/dark + colored
+        // checker so the template has rich structure that the
+        // matcher can lock on to even when pixels are only partially
+        // overlapped.
+        for row in y..(y + 8).min(height) {
+            for col in x..(x + 8).min(width) {
+                let idx = row * width + col;
+                let on = ((row + col) & 1) == 0;
+                y_plane[idx] = if on { 220 } else { 30 };
+                u_plane[idx] = if on { 210 } else { 60 };
+                v_plane[idx] = if on { 60 } else { 210 };
+            }
+        }
+        YuvFrame {
+            y: y_plane,
+            u: u_plane,
+            v: v_plane,
+        }
+    }
+
+    #[test]
+    fn track_motion_sequence_follows_fast_motion_via_prediction() {
+        // Subject moves 10 px per frame in x — faster than a 6-px
+        // search radius allows without motion prediction. The
+        // prediction heuristic (velocity estimate + predicted center)
+        // should still keep the matcher locked on.
+        let width = 128;
+        let height = 40;
+        let frames = (0..6)
+            .map(|idx| make_patterned_yuv(width, height, 18 + idx * 10, 14))
+            .collect::<Vec<_>>();
+        let sequence = FrameSequence {
+            width,
+            height,
+            frames,
+        };
+        let mut job = TrackingJob::new(
+            "tracker-fast",
+            "Fast",
+            "/tmp/source.mp4",
+            0,
+            0,
+            500_000_000,
+            TrackingRegion {
+                center_x: 22.0 / width as f64,
+                center_y: 18.0 / height as f64,
+                width: 4.0 / width as f64,
+                height: 4.0 / height as f64,
+                rotation_deg: 0.0,
+            },
+        );
+        job.frame_step_ns = 100_000_000;
+        // Deliberately small — without motion prediction the matcher
+        // could only shift 6 px per frame, losing a 10-px/frame
+        // subject after the first step.
+        job.search_radius_px = 6;
+        let cancel_flag = AtomicBool::new(false);
+        let analysis = track_motion_in_frames(&sequence, &job, &cancel_flag, |_, _| {})
+            .expect("fast-motion tracking should succeed");
+        assert_eq!(analysis.samples.len(), 6);
+        // Frame 5 moved 50 px — the tracker should still report ~50/width.
+        let expected = 50.0 / width as f64;
+        let actual = analysis.samples[5].offset_x;
+        assert!(
+            (actual - expected).abs() < 0.05,
+            "offset_x sample[5] = {actual}, expected ~{expected}"
         );
     }
 
