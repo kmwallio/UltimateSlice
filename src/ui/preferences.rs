@@ -995,6 +995,151 @@ pub fn show_preferences_dialog(
         rife_files_hint.set_max_width_chars(60);
         models_box.append(&rife_files_hint);
 
+        // ── Segment Anything 3.1 (Meta) model status ──────────────────
+        // Phase 1 ships install detection + install instructions. The
+        // "Generate with SAM" button in the Inspector that actually
+        // consumes the model lands in Phase 2. This row gives users a
+        // place to start downloading the model today so it's ready
+        // when the button arrives.
+        models_box.append(&Separator::new(Orientation::Horizontal));
+
+        use crate::media::sam_cache;
+
+        let sam_row = GBox::new(Orientation::Horizontal, 8);
+        let sam_name = Label::new(Some(sam_cache::DISPLAY_NAME));
+        sam_name.set_halign(gtk::Align::Start);
+        sam_name.set_hexpand(true);
+        let sam_status = Label::new(None);
+        sam_status.set_halign(gtk::Align::End);
+
+        let initial_status = sam_cache::install_status();
+        sam_status.set_text(&initial_status.short_label());
+        match &initial_status {
+            sam_cache::SamInstallStatus::Installed => {
+                sam_status.add_css_class("success");
+            }
+            sam_cache::SamInstallStatus::Partial { .. } => {
+                sam_status.add_css_class("warning");
+            }
+            sam_cache::SamInstallStatus::NotInstalled => {
+                sam_status.add_css_class("dim-label");
+            }
+        }
+        sam_row.append(&sam_name);
+        sam_row.append(&sam_status);
+        models_box.append(&sam_row);
+
+        let sam_hint = Label::new(None);
+        sam_hint.set_markup(&format!(
+            "Segment Anything 3.1 is Meta's unified detection + \
+             segmentation + tracking model, used by the upcoming \
+             interactive masking and object-tracking features. \
+             {license}. See the upstream project at \
+             <a href=\"{url}\">{url_display}</a> for checkpoint \
+             downloads and ONNX export instructions. Place the \
+             exported ONNX files in:",
+            license = sam_cache::LICENSE_SUMMARY,
+            url = sam_cache::UPSTREAM_URL,
+            url_display = glib::markup_escape_text(sam_cache::UPSTREAM_URL),
+        ));
+        sam_hint.set_halign(gtk::Align::Start);
+        sam_hint.add_css_class("dim-label");
+        sam_hint.set_wrap(true);
+        sam_hint.set_max_width_chars(60);
+        models_box.append(&sam_hint);
+
+        let sam_dir = sam_cache::model_install_dir();
+        let sam_dir_str = sam_dir.to_string_lossy();
+        let sam_path_label = Label::new(None);
+        sam_path_label.set_markup(&format!(
+            "<a href=\"file://{}\">{}</a>",
+            glib::markup_escape_text(&sam_dir_str),
+            glib::markup_escape_text(&sam_dir_str),
+        ));
+        sam_path_label.set_halign(gtk::Align::Start);
+        sam_path_label.add_css_class("monospace");
+        models_box.append(&sam_path_label);
+
+        // Required-files hint, annotated with per-file status so a
+        // user mid-download can see exactly what's still missing.
+        let sam_files_text = {
+            let mut lines = Vec::new();
+            lines.push("Required files:".to_string());
+            for filename in sam_cache::REQUIRED_FILES {
+                let marker = if sam_dir.join(filename).is_file() {
+                    "✓"
+                } else {
+                    "✗"
+                };
+                lines.push(format!("  {marker} {filename}"));
+            }
+            if let sam_cache::SamInstallStatus::Partial { ref missing } = initial_status {
+                lines.push(format!(
+                    "\n{} of {} files present — still need: {}",
+                    sam_cache::REQUIRED_FILES.len() - missing.len(),
+                    sam_cache::REQUIRED_FILES.len(),
+                    missing.join(", ")
+                ));
+            }
+            lines.join("\n")
+        };
+        let sam_files_hint = Label::new(Some(&sam_files_text));
+        sam_files_hint.set_halign(gtk::Align::Start);
+        sam_files_hint.add_css_class("dim-label");
+        sam_files_hint.add_css_class("monospace");
+        sam_files_hint.set_wrap(true);
+        sam_files_hint.set_max_width_chars(60);
+        models_box.append(&sam_files_hint);
+
+        // Refresh button — users who install the model while the
+        // Preferences dialog is open can re-probe without closing
+        // and reopening.
+        let sam_refresh_btn = gtk::Button::with_label("Refresh Status");
+        sam_refresh_btn.set_halign(gtk::Align::Start);
+        let sam_status_c = sam_status.clone();
+        let sam_files_hint_c = sam_files_hint.clone();
+        sam_refresh_btn.connect_clicked(move |_| {
+            let new_status = sam_cache::install_status();
+            sam_status_c.set_text(&new_status.short_label());
+            sam_status_c.remove_css_class("success");
+            sam_status_c.remove_css_class("warning");
+            sam_status_c.remove_css_class("dim-label");
+            match &new_status {
+                sam_cache::SamInstallStatus::Installed => {
+                    sam_status_c.add_css_class("success");
+                }
+                sam_cache::SamInstallStatus::Partial { .. } => {
+                    sam_status_c.add_css_class("warning");
+                }
+                sam_cache::SamInstallStatus::NotInstalled => {
+                    sam_status_c.add_css_class("dim-label");
+                }
+            }
+            // Rebuild the per-file checklist against the current
+            // install dir.
+            let dir = sam_cache::model_install_dir();
+            let mut lines: Vec<String> = Vec::new();
+            lines.push("Required files:".to_string());
+            for filename in sam_cache::REQUIRED_FILES {
+                let marker = if dir.join(filename).is_file() {
+                    "✓"
+                } else {
+                    "✗"
+                };
+                lines.push(format!("  {marker} {filename}"));
+            }
+            if let sam_cache::SamInstallStatus::Partial { missing } = &new_status {
+                lines.push(format!(
+                    "\n{} of {} files present — still need: {}",
+                    sam_cache::REQUIRED_FILES.len() - missing.len(),
+                    sam_cache::REQUIRED_FILES.len(),
+                    missing.join(", ")
+                ));
+            }
+            sam_files_hint_c.set_text(&lines.join("\n"));
+        });
+        models_box.append(&sam_refresh_btn);
+
         append_generated_files_section(&models_box);
 
         stack.add_titled(&models_box, Some("models"), "Models");
