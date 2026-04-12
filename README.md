@@ -47,9 +47,23 @@ UltimateSlice can also use the following AI models, **installed by the user** at
 (not bundled with the binary):
 
 - **MODNet** — photographic portrait matting (background removal). Apache-2.0.
+- **SAM 3** — Segment Anything Model v3 (Meta AI) for mask generation from box prompts. Apache-2.0 (model weights from [wkentaro/sam3-onnx](https://github.com/wkentaro/sam3-onnx) ONNX exports).
 - **Whisper (GGML)** — speech-to-text for subtitle generation. MIT.
 - **MusicGen-small** — text-to-music generation (Meta AI). CC-BY-NC-4.0 (research/non-commercial use; check the model card before commercial use).
 - **RIFE** — Real-time Intermediate Flow Estimation for AI slow-motion frame interpolation. MIT (model weights from third-party ONNX exports of the upstream RIFE project).
+
+### GPU acceleration
+
+AI inference (SAM, MODNet, RIFE, MusicGen, and optionally Whisper STT) can
+run on GPU via ONNX Runtime execution providers. The default build is
+CPU-only; opt in to GPU with one of the `ai-webgpu` / `ai-cuda` / `ai-rocm` /
+`ai-openvino` Cargo features. Cross-vendor WebGPU is the recommended
+starting point (one feature flag, prebuilt binaries, works on Intel Arc /
+AMD / NVIDIA). Native EPs (CUDA / ROCm / OpenVINO) deliver higher peak
+throughput but CUDA needs the NVIDIA toolkit and ROCm/OpenVINO require
+source-building ONNX Runtime 1.24.2 via `scripts/build_onnxruntime.sh`.
+See [`docs/gpu/README.md`](docs/gpu/README.md) for the decision tree and
+per-vendor setup guides.
 
 For exact versions and full dependency tree, see `Cargo.toml`, `Cargo.lock`,
 `io.github.kmwallio.ultimateslice.yml`, `cargo-sources.json`, and

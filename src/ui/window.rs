@@ -4954,6 +4954,35 @@ pub fn build_window(
     let workspace_layouts_state =
         Rc::new(RefCell::new(crate::ui_state::load_workspace_layouts_state()));
 
+    // Apply the persisted AI backend preference to the process-wide
+    // ai_providers singleton so every ONNX cache worker (bg removal,
+    // frame interpolation, music gen, SAM in later phases) picks it
+    // up on the next job without plumbing the preference through
+    // every job struct. Feature-gated: when `ai-inference` is off
+    // the module isn't compiled in and this block is skipped.
+    #[cfg(feature = "ai-inference")]
+    {
+        let backend_id = preferences_state.borrow().ai_backend.clone();
+        let backend = crate::media::ai_providers::AiBackend::from_id(&backend_id);
+        crate::media::ai_providers::set_current_backend(backend);
+        let report = crate::media::ai_providers::detect_backends();
+        log::info!(
+            "AI backend: preferred={} ({}) — {}",
+            backend.label(),
+            backend.as_id(),
+            report.describe()
+        );
+
+        // If WebGPU is compiled in and the user's selected backend
+        // is WebGpu or Auto, pre-trigger Dawn device creation with
+        // stderr silenced so Dawn's "limits artificially reduced"
+        // warnings don't interleave with user output during the
+        // first real MusicGen / SAM / MODNet / RIFE inference call.
+        // See `ai_providers::prewarm_webgpu_if_needed` for the full
+        // rationale and mechanism.
+        crate::media::ai_providers::prewarm_webgpu_if_needed();
+    }
+
     // MCP command channel — created unconditionally so the socket transport can
     // be toggled at runtime via Preferences without restarting.
     let (mcp_sender, mcp_receiver) = std::sync::mpsc::channel::<crate::mcp::McpCommand>();
@@ -6524,6 +6553,22 @@ pub fn build_window(
                     pp.update_match_eq_for_clip(clip_id, Vec::new());
                 }
                 on_project_changed();
+            }
+        },
+        // on_request_sam_prompt: Inspector triggers SAM box-prompt mode on
+        // the Program Monitor's TransformOverlay. The closure captures
+        // the overlay cell and defers the `enter_sam_prompt_mode` call
+        // to when the cell is populated (which happens after the
+        // program monitor is built, later in this same function).
+        {
+            let transform_overlay_cell = transform_overlay_cell.clone();
+            move |on_captured: Box<dyn Fn(f64, f64, f64, f64) + 'static>| {
+                let borrow = transform_overlay_cell.borrow();
+                if let Some(ref overlay) = *borrow {
+                    overlay.enter_sam_prompt_mode(move |x1, y1, x2, y2| {
+                        on_captured(x1, y1, x2, y2);
+                    });
+                }
             }
         },
     );
@@ -18175,6 +18220,138 @@ fn handle_mcp_command(
             if found {
                 on_project_changed();
             }
+        }
+
+        #[cfg(feature = "ai-inference")]
+        McpCommand::GenerateSamMask {
+            clip_id,
+            frame_ns,
+            box_x1,
+            box_y1,
+            box_x2,
+            box_y2,
+            point_x,
+            point_y,
+            tolerance_px,
+            reply,
+        } => {
+            // Step 1 — resolve the clip.
+            let clip_info = {
+                let proj = project.borrow();
+                proj.tracks.iter().find_map(|t| {
+                    t.clips.iter().find(|c| c.id == clip_id).map(|c| {
+                        (c.source_path.clone(), c.source_in, c.source_out)
+                    })
+                })
+            };
+            let Some((source_path, source_in, source_out)) = clip_info else {
+                reply.send(serde_json::json!({"success": false, "error": "Clip not found"})).ok();
+                return;
+            };
+
+            // Step 2 — build prompt in normalized coords.
+            let target_frame_ns =
+                frame_ns.unwrap_or(source_in).clamp(source_in, source_out);
+            use crate::media::sam_cache::BoxPrompt;
+            let placeholder = BoxPrompt::from_corners(0.0, 0.0, 1.0, 1.0);
+            let normalized_box: Result<Option<(f32, f32, f32, f32)>, &'static str> =
+                match (box_x1, box_y1, box_x2, box_y2) {
+                    (Some(x1), Some(y1), Some(x2), Some(y2)) => {
+                        Ok(Some((x1 as f32, y1 as f32, x2 as f32, y2 as f32)))
+                    }
+                    _ => match (point_x, point_y) {
+                        (Some(px), Some(py)) => {
+                            // Point prompt → small normalized box
+                            // (~8 px at 1000 px source resolution).
+                            let h = 0.004;
+                            Ok(Some((
+                                (px - h).max(0.0) as f32,
+                                (py - h).max(0.0) as f32,
+                                (px + h).min(1.0) as f32,
+                                (py + h).min(1.0) as f32,
+                            )))
+                        }
+                        _ => Err("Missing prompt: provide either all four box_{x1,y1,x2,y2} or both point_x/point_y"),
+                    },
+                };
+            let normalized_box = match normalized_box {
+                Ok(b) => b,
+                Err(msg) => {
+                    reply.send(serde_json::json!({"success": false, "error": msg})).ok();
+                    return;
+                }
+            };
+
+            // Step 3 — run the full pipeline synchronously (MCP is
+            // automation traffic — blocking the main thread is OK).
+            let input = crate::media::sam_job::SamJobInput {
+                source_path: std::path::PathBuf::from(&source_path),
+                frame_ns: target_frame_ns,
+                prompt: placeholder,
+                normalized_box,
+                tolerance_px: tolerance_px.unwrap_or(2.0).max(0.0),
+            };
+            let result = crate::media::sam_job::run_sam_pipeline(input);
+
+            // Step 4 — on success, append the mask to the clip.
+            match result {
+                crate::media::sam_job::SamJobResult::Success {
+                    mask_points,
+                    score,
+                } => {
+                    let point_count = mask_points.len();
+                    let appended: Option<String> = {
+                        let mut proj = project.borrow_mut();
+                        let mut out: Option<String> = None;
+                        for track in proj.tracks.iter_mut() {
+                            if let Some(clip) =
+                                track.clips.iter_mut().find(|c| c.id == clip_id)
+                            {
+                                let mask =
+                                    crate::model::clip::ClipMask::new_path(mask_points.clone());
+                                let mask_id = mask.id.clone();
+                                clip.masks.push(mask);
+                                out = Some(mask_id);
+                                break;
+                            }
+                        }
+                        if out.is_some() {
+                            proj.dirty = true;
+                        }
+                        out
+                    };
+                    match appended {
+                        Some(mask_id) => {
+                            on_project_changed();
+                            reply.send(serde_json::json!({
+                                "success": true,
+                                "mask_id": mask_id,
+                                "score": score,
+                                "point_count": point_count,
+                            })).ok();
+                        }
+                        None => {
+                            reply.send(serde_json::json!({
+                                "success": false,
+                                "error": "Clip disappeared during SAM inference"
+                            })).ok();
+                        }
+                    }
+                }
+                crate::media::sam_job::SamJobResult::Error(msg) => {
+                    reply.send(serde_json::json!({"success": false, "error": msg})).ok();
+                }
+            }
+        }
+
+        #[cfg(not(feature = "ai-inference"))]
+        McpCommand::GenerateSamMask { reply, .. } => {
+            reply
+                .send(serde_json::json!({
+                    "success": false,
+                    "error": "generate_sam_mask requires the ai-inference Cargo feature"
+                }))
+                .ok();
         }
 
         McpCommand::SetClipMask {

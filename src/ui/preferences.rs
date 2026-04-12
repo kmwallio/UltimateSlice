@@ -7,6 +7,7 @@ use gtk4::{
     self as gtk, Box as GBox, CheckButton, Label, Orientation, ResponseType, Separator, Stack,
     StackSidebar,
 };
+use std::cell::RefCell;
 use std::rc::Rc;
 
 const THIRD_PARTY_COMPONENTS: &str = "\
@@ -150,6 +151,17 @@ pub fn show_preferences_dialog(
     sidebar.set_margin_bottom(8);
     sidebar.set_vexpand(true);
 
+    // Wrap each stack page in a ScrolledWindow so long tabs (Models, Integration)
+    // scroll in place instead of growing the dialog beyond the screen.
+    let wrap_scroll = |child: &GBox| -> gtk::ScrolledWindow {
+        let s = gtk::ScrolledWindow::new();
+        s.set_vexpand(true);
+        s.set_hexpand(true);
+        s.set_hscrollbar_policy(gtk::PolicyType::Never);
+        s.set_child(Some(child));
+        s
+    };
+
     let general_box = GBox::new(Orientation::Vertical, 8);
     general_box.set_margin_start(8);
     general_box.set_margin_end(8);
@@ -199,7 +211,7 @@ pub fn show_preferences_dialog(
     general_box.append(&max_versions_row);
 
     general_box.append(&about_btn);
-    stack.add_titled(&general_box, Some("general"), "General");
+    stack.add_titled(&wrap_scroll(&general_box), Some("general"), "General");
 
     let playback_box = GBox::new(Orientation::Vertical, 10);
     playback_box.set_margin_start(8);
@@ -301,7 +313,7 @@ pub fn show_preferences_dialog(
     playback_box.append(&realtime_check);
     playback_box.append(&realtime_hint);
 
-    stack.add_titled(&playback_box, Some("playback"), "Playback");
+    stack.add_titled(&wrap_scroll(&playback_box), Some("playback"), "Playback");
 
     let proxies_box = GBox::new(Orientation::Vertical, 10);
     proxies_box.set_margin_start(8);
@@ -433,7 +445,7 @@ pub fn show_preferences_dialog(
     proxies_box.append(&persist_prerenders_check);
     proxies_box.append(&persist_prerenders_hint);
 
-    stack.add_titled(&proxies_box, Some("proxies"), "Proxies");
+    stack.add_titled(&wrap_scroll(&proxies_box), Some("proxies"), "Proxies");
 
     // ── Timeline section ──────────────────────────────────────────────────
     let timeline_box = GBox::new(Orientation::Vertical, 10);
@@ -565,7 +577,7 @@ pub fn show_preferences_dialog(
     timeline_box.append(&voice_enhance_cap_spin);
     timeline_box.append(&voice_enhance_cap_hint);
 
-    stack.add_titled(&timeline_box, Some("timeline"), "Timeline");
+    stack.add_titled(&wrap_scroll(&timeline_box), Some("timeline"), "Timeline");
 
     // ── Integration section ───────────────────────────────────────────────
     let integration_box = GBox::new(Orientation::Vertical, 10);
@@ -589,7 +601,19 @@ pub fn show_preferences_dialog(
     integration_box.append(&integration_label);
     integration_box.append(&mcp_socket_check);
     integration_box.append(&mcp_socket_hint);
-    stack.add_titled(&integration_box, Some("integration"), "Integration");
+    stack.add_titled(&wrap_scroll(&integration_box), Some("integration"), "Integration");
+
+    // Shared handle so the AI-backend dropdown (created inside the
+    // Models page block below) can be read by the dialog response
+    // handler further down when building the new PreferencesState.
+    // Kept out here, outside the `#[cfg]` block, because the
+    // response handler is always compiled and needs *something* to
+    // reference — when `ai-inference` is off the handle just stays
+    // `None` and the response handler falls back to the existing
+    // value.
+    #[allow(deprecated)]
+    let ai_backend_combo_handle: Rc<RefCell<Option<gtk::ComboBoxText>>> =
+        Rc::new(RefCell::new(None));
 
     // ── Models section (only when ai-inference feature is enabled) ─────────
     #[cfg(feature = "ai-inference")]
@@ -606,6 +630,115 @@ pub fn show_preferences_dialog(
         models_label.set_halign(gtk::Align::Start);
         models_label.add_css_class("title-4");
         models_box.append(&models_label);
+
+        // ── AI Acceleration ──────────────────────────────────────────────
+        // User picks the ONNX Runtime execution backend used by every
+        // AI-inference code path (MODNet, RIFE, MusicGen, SAM). Only
+        // backends actually compiled into this binary are selectable;
+        // the others are shown as disabled so the user can see what
+        // the current build supports. "Auto" lets ort fall back to
+        // whichever compiled-in backend loads at runtime.
+        {
+            use crate::media::ai_providers::{
+                detect_backends, set_current_backend, AiBackend,
+            };
+            let accel_label = Label::new(Some("AI Acceleration"));
+            accel_label.set_halign(gtk::Align::Start);
+            accel_label.add_css_class("heading");
+            models_box.append(&accel_label);
+
+            let report = detect_backends();
+
+            let accel_row = GBox::new(Orientation::Horizontal, 8);
+            let accel_name = Label::new(Some("Backend"));
+            accel_name.set_halign(gtk::Align::Start);
+            accel_name.set_hexpand(true);
+            accel_row.append(&accel_name);
+
+            // We use plain gtk::ComboBoxText here (matching the rest
+            // of this Preferences dialog — DropDown would be nicer
+            // but would require a different idiom). Populate with
+            // only the compiled-in backends plus a leading Auto row.
+            #[allow(deprecated)]
+            let backend_combo = gtk::ComboBoxText::new();
+            #[allow(deprecated)]
+            {
+                backend_combo.append(Some(AiBackend::Auto.as_id()), AiBackend::Auto.label());
+                for b in [
+                    AiBackend::Cuda,
+                    AiBackend::Rocm,
+                    AiBackend::OpenVino,
+                    AiBackend::WebGpu,
+                    AiBackend::Cpu,
+                ] {
+                    if report.compiled_in.contains(&b) {
+                        let label = if report.runtime_available.contains(&b) {
+                            b.label().to_string()
+                        } else {
+                            // Backend was compiled in but the
+                            // runtime library isn't currently loadable
+                            // (e.g. ai-cuda build running on a
+                            // machine with no NVIDIA driver).
+                            format!("{} (unavailable)", b.label())
+                        };
+                        backend_combo.append(Some(b.as_id()), &label);
+                    }
+                }
+                let current_id = current.ai_backend.clone();
+                backend_combo.set_active_id(Some(&current_id));
+            }
+            accel_row.append(&backend_combo);
+            models_box.append(&accel_row);
+
+            // Status line showing what was actually detected on this
+            // machine, e.g. "Available: NVIDIA CUDA, CPU".
+            let accel_status = Label::new(Some(&report.describe()));
+            accel_status.set_halign(gtk::Align::Start);
+            accel_status.add_css_class("dim-label");
+            accel_status.set_wrap(true);
+            accel_status.set_max_width_chars(60);
+            models_box.append(&accel_status);
+
+            let accel_hint = Label::new(Some(
+                "Backend used for MODNet background removal, RIFE \
+                 frame interpolation, MusicGen, and SAM segmentation. \
+                 Changing this takes effect on the next inference job \
+                 — no restart required. WebGPU is the recommended \
+                 cross-vendor default (works on Intel Arc, AMD, and \
+                 NVIDIA via Vulkan, with prebuilt binaries). CUDA uses \
+                 prebuilts and needs only the CUDA toolkit. ROCm and \
+                 OpenVINO give the best performance on AMD and Intel \
+                 respectively but require a source-built ONNX Runtime \
+                 — see docs/gpu/README.md for build instructions.",
+            ));
+            accel_hint.set_halign(gtk::Align::Start);
+            accel_hint.add_css_class("dim-label");
+            accel_hint.set_wrap(true);
+            accel_hint.set_max_width_chars(60);
+            models_box.append(&accel_hint);
+
+            // Changing the dropdown takes effect on the process-wide
+            // `ai_providers` singleton immediately — next inference
+            // job picks it up without waiting for Save. The Save
+            // handler below additionally reads the current selection
+            // and persists it into PreferencesState so it survives
+            // restart. (Cancel leaves the live singleton changed
+            // but the persisted state untouched, which matches how
+            // other "live preview" preference widgets behave.)
+            #[allow(deprecated)]
+            backend_combo.connect_changed(move |combo| {
+                if let Some(id) = combo.active_id() {
+                    let backend = AiBackend::from_id(id.as_str());
+                    set_current_backend(backend);
+                }
+            });
+
+            // Expose the combo to the dialog response handler via a
+            // shared handle so Save can read the current selection.
+            ai_backend_combo_handle.replace(Some(backend_combo));
+
+            models_box.append(&Separator::new(Orientation::Horizontal));
+        }
 
         // MODNet status row.
         let modnet_row = GBox::new(Orientation::Horizontal, 8);
@@ -841,12 +974,31 @@ pub fn show_preferences_dialog(
 
         let rife_hint = Label::new(None);
         rife_hint.set_markup(
-            "RIFE synthesizes intermediate frames for high-quality slow-motion. \
-             Enable on a clip via Inspector → Speed → Slow-Motion Interpolation → \
-             AI Interpolation. Use a RIFE ONNX export with the standard \
-             6-channel input + timestep convention (see the upstream project at \
-             <a href=\"https://github.com/hzwer/Practical-RIFE\">github.com/hzwer/Practical-RIFE</a> \
-             for the model and export tooling) and place the file in:",
+            "RIFE synthesizes intermediate frames for high-quality \
+             slow-motion. Enable on a clip via Inspector → Speed → \
+             Slow-Motion Interpolation → AI Interpolation.\n\n\
+             Practical-RIFE's official distribution ships PyTorch \
+             <tt>flownet.pkl</tt> checkpoints, not ONNX — <tt>ort</tt> \
+             can't load <tt>.pkl</tt> directly, so a one-time export \
+             step is required. There's no official RIFE ONNX exporter; \
+             you have two options:\n\n\
+             • <b>Community pre-exported ONNX</b> (lowest friction): \
+             search HuggingFace for \"rife onnx\" and find a matching \
+             Practical-RIFE version (v4.14 / v4.18 / v4.22 etc. are \
+             commonly available). Different versions have slightly \
+             different architectures — use one that matches the \
+             <tt>.pkl</tt> version you have.\n\n\
+             • <b>Export from PyTorch yourself</b>: write a ~30-line \
+             Python script using <tt>torch.onnx.export</tt> with \
+             <tt>opset_version=17</tt> or higher (required for \
+             <tt>grid_sample</tt> support, which RIFE uses). The \
+             exporter must produce a 6-channel input (img0 RGB + \
+             img1 RGB concatenated) plus a scalar timestep — the \
+             existing UltimateSlice inference code expects this \
+             shape.\n\n\
+             See <a href=\"https://github.com/hzwer/Practical-RIFE\">github.com/hzwer/Practical-RIFE</a> \
+             for the upstream project. Place the exported ONNX \
+             file in:",
         );
         rife_hint.set_halign(gtk::Align::Start);
         rife_hint.add_css_class("dim-label");
@@ -877,9 +1029,220 @@ pub fn show_preferences_dialog(
         rife_files_hint.set_max_width_chars(60);
         models_box.append(&rife_files_hint);
 
+        // ── Segment Anything 3.1 (Meta) model status ──────────────────
+        // Phase 1 ships install detection + install instructions. The
+        // "Generate with SAM" button in the Inspector that actually
+        // consumes the model lands in Phase 2. This row gives users a
+        // place to start downloading the model today so it's ready
+        // when the button arrives.
+        models_box.append(&Separator::new(Orientation::Horizontal));
+
+        use crate::media::sam_cache;
+
+        let sam_row = GBox::new(Orientation::Horizontal, 8);
+        let sam_name = Label::new(Some(sam_cache::DISPLAY_NAME));
+        sam_name.set_halign(gtk::Align::Start);
+        sam_name.set_hexpand(true);
+        let sam_status = Label::new(None);
+        sam_status.set_halign(gtk::Align::End);
+
+        let initial_status = sam_cache::install_status();
+        // sam_status text / color class are set by the shared
+        // render_sam_status closure below, which handles all four
+        // SamInstallStatus variants consistently between the initial
+        // render and the Refresh button re-render.
+        sam_row.append(&sam_name);
+        sam_row.append(&sam_status);
+        models_box.append(&sam_row);
+
+        let sam_hint = Label::new(None);
+        sam_hint.set_markup(&format!(
+            "Segment Anything 3.1 is Meta's unified detection + \
+             segmentation + tracking model, used by the upcoming \
+             interactive masking and object-tracking features. \
+             {license}. See the upstream project at \
+             <a href=\"{url}\">{url_display}</a> for checkpoint \
+             downloads and ONNX export instructions. Place the \
+             exported ONNX files in:",
+            license = sam_cache::LICENSE_SUMMARY,
+            url = sam_cache::UPSTREAM_URL,
+            url_display = glib::markup_escape_text(sam_cache::UPSTREAM_URL),
+        ));
+        sam_hint.set_halign(gtk::Align::Start);
+        sam_hint.add_css_class("dim-label");
+        sam_hint.set_wrap(true);
+        sam_hint.set_max_width_chars(60);
+        models_box.append(&sam_hint);
+
+        let sam_dir = sam_cache::model_install_dir();
+        let sam_dir_str = sam_dir.to_string_lossy();
+        let sam_path_label = Label::new(None);
+        sam_path_label.set_markup(&format!(
+            "<a href=\"file://{}\">{}</a>",
+            glib::markup_escape_text(&sam_dir_str),
+            glib::markup_escape_text(&sam_dir_str),
+        ));
+        sam_path_label.set_halign(gtk::Align::Start);
+        sam_path_label.add_css_class("monospace");
+        models_box.append(&sam_path_label);
+
+        // Required-files hint, annotated with per-file status so a
+        // user mid-download can see exactly what's still missing.
+        let sam_files_hint = Label::new(None);
+        sam_files_hint.set_halign(gtk::Align::Start);
+        sam_files_hint.add_css_class("dim-label");
+        sam_files_hint.add_css_class("monospace");
+        sam_files_hint.set_wrap(true);
+        sam_files_hint.set_max_width_chars(60);
+        models_box.append(&sam_files_hint);
+
+        // ── Export step block (conditionally visible) ─────────────
+        // Shown when SAM detects a `.pt` checkpoint but no ONNX
+        // files yet. Surfaces the exact pip-install + export command
+        // the user needs to run, parameterized with the detected
+        // checkpoint path. Hidden otherwise so the UI doesn't clutter
+        // the clean "Installed" and "Not installed" states.
+        let export_block = GBox::new(Orientation::Vertical, 6);
+        export_block.set_margin_top(4);
+
+        let export_heading = Label::new(Some("ONNX export step"));
+        export_heading.set_halign(gtk::Align::Start);
+        export_heading.add_css_class("heading");
+        export_block.append(&export_heading);
+
+        let export_explain = Label::new(None);
+        export_explain.set_markup(&format!(
+            "You downloaded the raw PyTorch checkpoint. <tt>ort</tt> can't \
+             load <tt>.pt</tt> files directly, so you'll need to run a \
+             one-time export to produce the three ONNX files above. The \
+             recommended tool is \
+             <a href=\"{url}\"><tt>{pip}</tt></a>:",
+            url = sam_cache::EXPORTER_UPSTREAM_URL,
+            pip = sam_cache::EXPORTER_PIP_NAME,
+        ));
+        export_explain.set_halign(gtk::Align::Start);
+        export_explain.add_css_class("dim-label");
+        export_explain.set_wrap(true);
+        export_explain.set_max_width_chars(60);
+        export_block.append(&export_explain);
+
+        let export_command_label = Label::new(None);
+        export_command_label.set_halign(gtk::Align::Start);
+        export_command_label.add_css_class("monospace");
+        export_command_label.set_selectable(true);
+        export_command_label.set_wrap(true);
+        export_command_label.set_max_width_chars(80);
+        export_block.append(&export_command_label);
+
+        let export_after_note = Label::new(Some(
+            "Then click \"Refresh Status\" below — the ONNX files \
+             will be detected automatically and the row will flip \
+             to ✓ Installed. SAM 3.1's Object Multiplex variant is \
+             new (March 2026); if samexporter rejects the checkpoint, \
+             fall back to downloading the plain SAM 3 checkpoint and \
+             exporting that instead.",
+        ));
+        export_after_note.set_halign(gtk::Align::Start);
+        export_after_note.add_css_class("dim-label");
+        export_after_note.set_wrap(true);
+        export_after_note.set_max_width_chars(60);
+        export_block.append(&export_after_note);
+
+        models_box.append(&export_block);
+
+        // Refresh button — users who install the model while the
+        // Preferences dialog is open can re-probe without closing
+        // and reopening.
+        let sam_refresh_btn = gtk::Button::with_label("Refresh Status");
+        sam_refresh_btn.set_halign(gtk::Align::Start);
+        models_box.append(&sam_refresh_btn);
+
+        // Shared status-rendering closure. Takes a `&SamInstallStatus`
+        // and updates every widget on the row: status label text +
+        // color class, per-file checklist, export-block visibility,
+        // and (if applicable) the export command text interpolated
+        // with the detected .pt path. Called once at init time and
+        // again from the Refresh button click handler.
+        let render_sam_status = {
+            let sam_status = sam_status.clone();
+            let sam_files_hint = sam_files_hint.clone();
+            let export_block = export_block.clone();
+            let export_command_label = export_command_label.clone();
+            let sam_dir = sam_cache::model_install_dir();
+            Rc::new(move |status: &sam_cache::SamInstallStatus| {
+                sam_status.set_text(&status.short_label());
+                sam_status.remove_css_class("success");
+                sam_status.remove_css_class("warning");
+                sam_status.remove_css_class("dim-label");
+                match status {
+                    sam_cache::SamInstallStatus::Installed => {
+                        sam_status.add_css_class("success");
+                    }
+                    sam_cache::SamInstallStatus::Partial { .. }
+                    | sam_cache::SamInstallStatus::PtCheckpointOnly { .. } => {
+                        sam_status.add_css_class("warning");
+                    }
+                    sam_cache::SamInstallStatus::NotInstalled => {
+                        sam_status.add_css_class("dim-label");
+                    }
+                }
+
+                // Per-file ONNX checklist, rebuilt against the current
+                // install dir so the Refresh button actually refreshes.
+                let mut lines: Vec<String> = Vec::new();
+                lines.push("Required files:".to_string());
+                for filename in sam_cache::REQUIRED_FILES {
+                    let marker = if sam_dir.join(filename).is_file() {
+                        "✓"
+                    } else {
+                        "✗"
+                    };
+                    lines.push(format!("  {marker} {filename}"));
+                }
+                if let sam_cache::SamInstallStatus::Partial { missing } = status {
+                    lines.push(format!(
+                        "\n{} of {} files present — still need: {}",
+                        sam_cache::REQUIRED_FILES.len() - missing.len(),
+                        sam_cache::REQUIRED_FILES.len(),
+                        missing.join(", ")
+                    ));
+                }
+                sam_files_hint.set_text(&lines.join("\n"));
+
+                // Export-block visibility + command interpolation.
+                if let sam_cache::SamInstallStatus::PtCheckpointOnly { pt_path } = status {
+                    export_block.set_visible(true);
+                    let pt_display = pt_path.to_string_lossy();
+                    let out_display = sam_dir.to_string_lossy();
+                    let command = format!(
+                        "pip install samexporter torch\n\
+                         python -m samexporter.export_sam3 \\\n    \
+                         --checkpoint {pt} \\\n    \
+                         --output_dir {out} \\\n    \
+                         --opset 18",
+                        pt = pt_display,
+                        out = out_display
+                    );
+                    export_command_label.set_text(&command);
+                } else {
+                    export_block.set_visible(false);
+                }
+            })
+        };
+
+        // Initial render.
+        (render_sam_status)(&initial_status);
+
+        // Wire up Refresh click → re-probe + re-render.
+        let render_sam_status_click = render_sam_status.clone();
+        sam_refresh_btn.connect_clicked(move |_| {
+            let new_status = sam_cache::install_status();
+            (render_sam_status_click)(&new_status);
+        });
+
         append_generated_files_section(&models_box);
 
-        stack.add_titled(&models_box, Some("models"), "Models");
+        stack.add_titled(&wrap_scroll(&models_box), Some("models"), "Models");
     }
 
     // When ai-inference is NOT enabled, still show a Models tab with STT info.
@@ -996,7 +1359,7 @@ pub fn show_preferences_dialog(
 
         append_generated_files_section(&models_box);
 
-        stack.add_titled(&models_box, Some("models"), "Models");
+        stack.add_titled(&wrap_scroll(&models_box), Some("models"), "Models");
     }
 
     body.append(&sidebar);
@@ -1058,6 +1421,20 @@ pub fn show_preferences_dialog(
                 voice_enhance_cache_cap_gib: voice_enhance_cap_spin
                     .value()
                     .clamp(0.5, 50.0),
+                // AI backend is edited via its own dropdown on the
+                // Models page. If that dropdown exists (i.e. the
+                // `ai-inference` feature is enabled *and* the Models
+                // page constructed it), read its current selection;
+                // otherwise fall back to whatever was in `current`
+                // so we don't clobber a valid value.
+                ai_backend: {
+                    #[allow(deprecated)]
+                    let combo_ref = ai_backend_combo_handle.borrow();
+                    match combo_ref.as_ref().and_then(|c| c.active_id()) {
+                        Some(id) => id.to_string(),
+                        None => current.ai_backend.clone(),
+                    }
+                },
             };
             new_state.set_proxy_mode(ProxyMode::from_str(
                 proxy_mode.active_id().as_deref().unwrap_or("off"),

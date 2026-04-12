@@ -1216,6 +1216,23 @@ pub fn set_track_duck_cmd(
     }
 }
 
+/// Rename a track. Construct via `set_track_label_cmd()`.
+pub fn set_track_label_cmd(
+    track_id: String,
+    old_label: String,
+    new_label: String,
+) -> TrackMutateCommand<String> {
+    TrackMutateCommand {
+        track_id,
+        old_state: old_label,
+        new_state: new_label,
+        apply: |track, v| {
+            track.label = v;
+        },
+        label: "Rename track",
+    }
+}
+
 /// Match one clip's color to another — stores all color parameters before/after.
 pub struct MatchColorCommand {
     pub clip_id: String,

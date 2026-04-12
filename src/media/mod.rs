@@ -1,4 +1,6 @@
 pub mod adjustment_scope;
+#[cfg(feature = "ai-inference")]
+pub mod ai_providers;
 pub mod animated_svg;
 pub mod audio_features;
 pub mod audio_match;
@@ -13,11 +15,16 @@ pub mod hsl_qualifier;
 pub mod ladspa_registry;
 pub mod ltc;
 pub mod mask_alpha;
+pub mod mask_contour;
 pub mod music_gen;
 pub mod player;
 pub mod probe_cache;
 pub mod program_player;
 pub mod proxy_cache;
+#[cfg(feature = "ai-inference")]
+pub mod sam_cache;
+#[cfg(feature = "ai-inference")]
+pub mod sam_job;
 pub mod stt_cache;
 pub mod thumb_cache;
 pub mod thumbnail;

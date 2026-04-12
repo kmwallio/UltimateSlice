@@ -58,6 +58,11 @@ enum Handle {
     TrackingTopRight,
     TrackingBottomLeft,
     TrackingBottomRight,
+    /// Drag to capture a SAM box prompt. Used when the overlay is in
+    /// "SAM prompt mode" (Phase 2b/3). On drag_end the captured
+    /// widget-space rectangle is converted to normalized clip-local
+    /// coordinates and forwarded to the installed `sam_prompt_callback`.
+    SamPromptBox,
 }
 
 struct DragState {
@@ -126,6 +131,22 @@ pub struct TransformOverlay {
     tracking_width: Rc<Cell<f64>>,
     tracking_height: Rc<Cell<f64>>,
     tracking_rotation: Rc<Cell<f64>>,
+    // ── SAM box prompt capture (Phase 2b/3) ──────────────────────────
+    /// When `true` the overlay's gesture suppresses all normal
+    /// hit-testing and instead captures a box prompt drag for SAM.
+    /// Toggled by `enter_sam_prompt_mode` / `exit_sam_prompt_mode`.
+    sam_prompt_mode: Rc<Cell<bool>>,
+    /// Widget-space `(x, y)` where the user pressed the mouse button
+    /// to begin the prompt drag. `None` when not currently dragging.
+    sam_prompt_start: Rc<Cell<Option<(f64, f64)>>>,
+    /// Widget-space `(x, y)` of the current drag position — updated
+    /// continuously by drag_update so the draw function can render
+    /// a live preview rectangle.
+    sam_prompt_current: Rc<Cell<Option<(f64, f64)>>>,
+    /// Callback to invoke with the captured normalized clip-local
+    /// box `(x1, y1, x2, y2)` on drag_end. Cleared after firing or
+    /// on `exit_sam_prompt_mode`. Installed by `enter_sam_prompt_mode`.
+    sam_prompt_callback: Rc<RefCell<Option<Box<dyn Fn(f64, f64, f64, f64)>>>>,
 }
 
 impl TransformOverlay {
@@ -175,6 +196,13 @@ impl TransformOverlay {
         let tracking_width = Rc::new(Cell::new(0.25f64));
         let tracking_height = Rc::new(Cell::new(0.25f64));
         let tracking_rotation = Rc::new(Cell::new(0.0f64));
+        // SAM box-prompt capture state (Phase 2b/3).
+        let sam_prompt_mode = Rc::new(Cell::new(false));
+        let sam_prompt_start: Rc<Cell<Option<(f64, f64)>>> = Rc::new(Cell::new(None));
+        let sam_prompt_current: Rc<Cell<Option<(f64, f64)>>> = Rc::new(Cell::new(None));
+        let sam_prompt_callback: Rc<
+            RefCell<Option<Box<dyn Fn(f64, f64, f64, f64)>>>,
+        > = Rc::new(RefCell::new(None));
 
         let da = DrawingArea::new();
         da.set_hexpand(true);
@@ -215,6 +243,9 @@ impl TransformOverlay {
             let tracking_width = tracking_width.clone();
             let tracking_height = tracking_height.clone();
             let tracking_rotation_d = tracking_rotation.clone();
+            let sam_prompt_mode_draw = sam_prompt_mode.clone();
+            let sam_prompt_start_draw = sam_prompt_start.clone();
+            let sam_prompt_current_draw = sam_prompt_current.clone();
 
             da.set_draw_func(move |da, cr, ww, wh| {
                 if !selected.get() {
@@ -293,6 +324,30 @@ impl TransformOverlay {
                         tracking_region_editing.get(),
                     );
                 }
+                // ── SAM prompt box live preview ─────────────────
+                // Draw a semi-transparent blue rectangle between
+                // the drag start and the current cursor position
+                // while the user is drawing a SAM prompt box.
+                if sam_prompt_mode_draw.get() {
+                    if let (Some((sx, sy)), Some((cx, cy))) = (
+                        sam_prompt_start_draw.get(),
+                        sam_prompt_current_draw.get(),
+                    ) {
+                        let rx = sx.min(cx);
+                        let ry = sy.min(cy);
+                        let rw = (cx - sx).abs();
+                        let rh = (cy - sy).abs();
+                        // Semi-transparent blue fill.
+                        cr.set_source_rgba(0.2, 0.5, 1.0, 0.25);
+                        cr.rectangle(rx, ry, rw, rh);
+                        let _ = cr.fill();
+                        // Blue outline.
+                        cr.set_source_rgba(0.2, 0.5, 1.0, 0.85);
+                        cr.set_line_width(1.5);
+                        cr.rectangle(rx, ry, rw, rh);
+                        let _ = cr.stroke();
+                    }
+                }
             });
         }
 
@@ -339,12 +394,77 @@ impl TransformOverlay {
             let tracking_width_d = tracking_width.clone();
             let tracking_height_d = tracking_height.clone();
             let tracking_rotation_d = tracking_rotation.clone();
+            let sam_prompt_mode_d = sam_prompt_mode.clone();
+            let sam_prompt_start_d = sam_prompt_start.clone();
+            let sam_prompt_current_d = sam_prompt_current.clone();
 
             gesture.connect_drag_begin(move |_g, sx, sy| {
                 if !selected.get() {
                     return;
                 }
                 da_ref.grab_focus();
+
+                // SAM prompt mode short-circuits the whole hit-test
+                // chain. The user wants to draw a rectangle anywhere
+                // over the clip — we don't care about existing
+                // handles. Capture (sx, sy) as the drag start, seed
+                // the current drag position, and install a minimal
+                // DragState with `Handle::SamPromptBox` so
+                // drag_update/drag_end can dispatch on it.
+                if sam_prompt_mode_d.get() {
+                    sam_prompt_start_d.set(Some((sx, sy)));
+                    sam_prompt_current_d.set(Some((sx, sy)));
+                    on_drag_begin();
+                    *drag_state.borrow_mut() = Some(DragState {
+                        handle: Handle::SamPromptBox,
+                        start_wx: sx,
+                        start_wy: sy,
+                        start_scale: scale.get(),
+                        start_px: position_x.get(),
+                        start_py: position_y.get(),
+                        start_crop_left: crop_left.get(),
+                        start_crop_right: crop_right.get(),
+                        start_crop_top: crop_top.get(),
+                        start_crop_bottom: crop_bottom.get(),
+                        proj_w: proj_w.get(),
+                        proj_h: proj_h.get(),
+                        // Video-rect is needed in drag_end for the
+                        // widget → normalized coord conversion, so
+                        // cache it here the same way the normal
+                        // path below does.
+                        vx: 0.0,
+                        vy: 0.0,
+                        vw: 0.0,
+                        vh: 0.0,
+                        start_path_point: None,
+                        start_tracking_cx: 0.0,
+                        start_tracking_cy: 0.0,
+                        start_tracking_width: 0.0,
+                        start_tracking_height: 0.0,
+                    });
+                    // Fill in the cached video rect now — it'll be
+                    // read by drag_end to build the normalized box.
+                    let ww = da_ref.width();
+                    let wh = da_ref.height();
+                    let (vx_full, vy_full, vw_full, vh_full) = canvas_video_rect(
+                        &da_ref,
+                        &canvas_widget,
+                        ww,
+                        wh,
+                        proj_w.get(),
+                        proj_h.get(),
+                    );
+                    let ix = content_inset_x.get();
+                    let iy = content_inset_y.get();
+                    if let Some(ds) = drag_state.borrow_mut().as_mut() {
+                        ds.vx = vx_full + vw_full * ix;
+                        ds.vy = vy_full + vh_full * iy;
+                        ds.vw = vw_full * (1.0 - 2.0 * ix);
+                        ds.vh = vh_full * (1.0 - 2.0 * iy);
+                    }
+                    da_ref.queue_draw();
+                    return;
+                }
                 let ww = da_ref.width();
                 let wh = da_ref.height();
                 let _ = &picture; // kept for potential future use
@@ -685,6 +805,7 @@ impl TransformOverlay {
             let adjustment_mode = adjustment_mode.clone();
             let tracking_region_enabled_drag = tracking_region_enabled.clone();
             let tracking_region_editing_drag = tracking_region_editing.clone();
+            let sam_prompt_current_drag = sam_prompt_current.clone();
             let tracking_center_x_drag = tracking_center_x.clone();
             let tracking_center_y_drag = tracking_center_y.clone();
             let tracking_width_drag = tracking_width.clone();
@@ -958,6 +1079,15 @@ impl TransformOverlay {
                             }
                         }
                     }
+                    Handle::SamPromptBox => {
+                        // Track the current drag position so the draw
+                        // function can render a live preview rectangle.
+                        // The actual conversion to a normalized box
+                        // and the callback invocation happen in
+                        // drag_end.
+                        sam_prompt_current_drag
+                            .set(Some((ds.start_wx + off_x, ds.start_wy + off_y)));
+                    }
                     Handle::None => {}
                 }
                 drop(ds_borrow);
@@ -969,8 +1099,122 @@ impl TransformOverlay {
         {
             let drag_state = drag_state.clone();
             let on_drag_end = Rc::new(on_drag_end);
+            let sam_prompt_mode_end = sam_prompt_mode.clone();
+            let sam_prompt_start_end = sam_prompt_start.clone();
+            let sam_prompt_current_end = sam_prompt_current.clone();
+            let sam_prompt_callback_end = sam_prompt_callback.clone();
+            let scale_end = scale.clone();
+            let position_x_end = position_x.clone();
+            let position_y_end = position_y.clone();
+            let rotation_end = rotation.clone();
+            let adjustment_mode_end = adjustment_mode.clone();
+            let da_end = da.clone();
             gesture.connect_drag_end(move |_g, _ox, _oy| {
-                *drag_state.borrow_mut() = None;
+                // Capture the completed handle BEFORE clearing
+                // drag_state so the SAM branch below can read the
+                // cached video rect out of it.
+                let completed = drag_state.borrow_mut().take();
+
+                if let Some(ds) = completed.as_ref() {
+                    if ds.handle == Handle::SamPromptBox {
+                        // Widget-space start and end positions for
+                        // the captured prompt. `start` comes from the
+                        // cached sam_prompt_start cell, and `end` is
+                        // computed from start + gesture offset (the
+                        // drag_update path kept sam_prompt_current in
+                        // sync, but we also have _ox/_oy from GTK
+                        // here — prefer sam_prompt_current since it's
+                        // what's on screen).
+                        let start = sam_prompt_start_end.get();
+                        let end = sam_prompt_current_end.get();
+                        if let (Some((sx, sy)), Some((ex, ey))) = (start, end) {
+                            // Click-vs-drag threshold. A tiny drag
+                            // becomes a point prompt — emulated as a
+                            // small tight box around the click point,
+                            // since SAM 3's decoder prefers tight
+                            // exemplars (see Phase 2a constraint #1).
+                            let dx = ex - sx;
+                            let dy = ey - sy;
+                            let click_threshold_px = 4.0;
+                            let (wx1, wy1, wx2, wy2) =
+                                if (dx * dx + dy * dy).sqrt() < click_threshold_px {
+                                    // Point click → small 8 px
+                                    // square centred on (sx, sy). At
+                                    // source scale this is the
+                                    // equivalent of a point prompt.
+                                    (sx - 4.0, sy - 4.0, sx + 4.0, sy + 4.0)
+                                } else {
+                                    // Normalize corners so x1 < x2
+                                    // and y1 < y2.
+                                    (
+                                        sx.min(ex),
+                                        sy.min(ey),
+                                        sx.max(ex),
+                                        sy.max(ey),
+                                    )
+                                };
+
+                            // Widget-space → normalized clip-local
+                            // coordinates using the cached video
+                            // rect + current clip transform.
+                            let (clip_cx_w, clip_cy_w, clip_w, clip_h, clip_left_w, clip_top_w) =
+                                clip_canvas_geometry(
+                                    ds.vx,
+                                    ds.vy,
+                                    ds.vw,
+                                    ds.vh,
+                                    scale_end.get(),
+                                    position_x_end.get(),
+                                    position_y_end.get(),
+                                    adjustment_mode_end.get(),
+                                );
+                            let clip_rot = (-rotation_end.get()).to_radians();
+                            let to_norm = |wx: f64, wy: f64| -> (f64, f64) {
+                                let (ux, uy) = unrotate_point_about(
+                                    wx, wy, clip_cx_w, clip_cy_w, clip_rot,
+                                );
+                                let nx = if clip_w > 0.5 { (ux - clip_left_w) / clip_w } else { 0.5 };
+                                let ny = if clip_h > 0.5 { (uy - clip_top_w) / clip_h } else { 0.5 };
+                                (nx.clamp(0.0, 1.0), ny.clamp(0.0, 1.0))
+                            };
+                            // Unrotating the corners individually can
+                            // produce a box that's not axis-aligned
+                            // in normalized space if the clip is
+                            // rotated — compute all four corners,
+                            // then take the axis-aligned bounding
+                            // box of them.
+                            let (n_tl_x, n_tl_y) = to_norm(wx1, wy1);
+                            let (n_tr_x, n_tr_y) = to_norm(wx2, wy1);
+                            let (n_bl_x, n_bl_y) = to_norm(wx1, wy2);
+                            let (n_br_x, n_br_y) = to_norm(wx2, wy2);
+                            let nx1 = n_tl_x.min(n_tr_x).min(n_bl_x).min(n_br_x);
+                            let ny1 = n_tl_y.min(n_tr_y).min(n_bl_y).min(n_br_y);
+                            let nx2 = n_tl_x.max(n_tr_x).max(n_bl_x).max(n_br_x);
+                            let ny2 = n_tl_y.max(n_tr_y).max(n_bl_y).max(n_br_y);
+
+                            // Fire the one-shot callback. Take it
+                            // out so the same callback can't run
+                            // twice. The Inspector's closure handles
+                            // the rest (job spawn, button state).
+                            let cb = sam_prompt_callback_end.borrow_mut().take();
+                            if let Some(cb) = cb {
+                                cb(nx1, ny1, nx2, ny2);
+                            }
+                        }
+                        // Always exit prompt mode on drag_end, even
+                        // if the callback never fired (e.g. zero-area
+                        // box). The Inspector re-enters it on the
+                        // next button click.
+                        sam_prompt_mode_end.set(false);
+                        sam_prompt_start_end.set(None);
+                        sam_prompt_current_end.set(None);
+                        da_end.set_cursor_from_name(None);
+                        da_end.queue_draw();
+                        on_drag_end();
+                        return;
+                    }
+                }
+
                 on_drag_end();
             });
         }
@@ -1128,9 +1372,27 @@ impl TransformOverlay {
             let selected = selected.clone();
             let on_change = on_change.clone();
             let da_ref = da.clone();
+            let sam_prompt_mode_key = sam_prompt_mode.clone();
+            let sam_prompt_start_key = sam_prompt_start.clone();
+            let sam_prompt_current_key = sam_prompt_current.clone();
+            let sam_prompt_callback_key = sam_prompt_callback.clone();
             let key_ctrl = gtk::EventControllerKey::new();
             key_ctrl.connect_key_pressed(move |_, key, _, mods| {
                 use gtk::gdk::{Key, ModifierType};
+
+                // Escape cancels SAM prompt mode regardless of clip
+                // selection state — the user may press Escape before
+                // selecting anything.
+                if key == Key::Escape && sam_prompt_mode_key.get() {
+                    sam_prompt_mode_key.set(false);
+                    sam_prompt_start_key.set(None);
+                    sam_prompt_current_key.set(None);
+                    sam_prompt_callback_key.borrow_mut().take();
+                    da_ref.set_cursor_from_name(None);
+                    da_ref.queue_draw();
+                    return glib::Propagation::Stop;
+                }
+
                 if !selected.get() {
                     return glib::Propagation::Proceed;
                 }
@@ -1228,6 +1490,10 @@ impl TransformOverlay {
             tracking_width,
             tracking_height,
             tracking_rotation,
+            sam_prompt_mode,
+            sam_prompt_start,
+            sam_prompt_current,
+            sam_prompt_callback,
         }
     }
 
@@ -1344,6 +1610,48 @@ impl TransformOverlay {
 
     pub fn is_tracking_editing(&self) -> bool {
         self.tracking_region_editing.get()
+    }
+
+    // ── SAM box-prompt mode (Phase 2b/3) ────────────────────────
+
+    /// Enter SAM box-prompt capture mode. All normal handle
+    /// interactions are suspended; the next drag gesture captures a
+    /// rectangle that is converted to normalized clip-local
+    /// coordinates and passed to `on_captured(x1, y1, x2, y2)`.
+    ///
+    /// The mode auto-clears after one completed drag or on Escape.
+    /// Single clicks (< 4 px drag) produce a small point-emulated
+    /// box (see Phase 2a constraint #3 in sam-work.md).
+    pub fn enter_sam_prompt_mode(
+        &self,
+        on_captured: impl Fn(f64, f64, f64, f64) + 'static,
+    ) {
+        self.sam_prompt_mode.set(true);
+        self.sam_prompt_start.set(None);
+        self.sam_prompt_current.set(None);
+        *self.sam_prompt_callback.borrow_mut() = Some(Box::new(on_captured));
+        self.drawing_area
+            .set_cursor_from_name(Some("crosshair"));
+        self.drawing_area.queue_draw();
+    }
+
+    /// Cancel SAM prompt mode without firing the callback. Used by
+    /// the Inspector to restore the button when the user navigates
+    /// away or the clip selection changes mid-prompt.
+    pub fn exit_sam_prompt_mode(&self) {
+        self.sam_prompt_mode.set(false);
+        self.sam_prompt_start.set(None);
+        self.sam_prompt_current.set(None);
+        self.sam_prompt_callback.borrow_mut().take();
+        self.drawing_area
+            .set_cursor_from_name(None);
+        self.drawing_area.queue_draw();
+    }
+
+    /// Returns `true` if the overlay is currently in SAM prompt
+    /// capture mode (waiting for a drag or Escape).
+    pub fn is_sam_prompt_active(&self) -> bool {
+        self.sam_prompt_mode.get()
     }
 }
 

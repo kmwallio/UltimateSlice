@@ -1155,6 +1155,21 @@ pub struct PreferencesState {
     /// with many long enhanced clips, lower it on small disks.
     #[serde(default = "default_voice_enhance_cache_cap_gib")]
     pub voice_enhance_cache_cap_gib: f64,
+    /// ONNX Runtime execution provider used for all AI inference
+    /// (background removal, frame interpolation, music generation,
+    /// and — when enabled — SAM segmentation). Stored as a stable
+    /// string id: `"auto"` | `"cuda"` | `"rocm"` | `"openvino"` |
+    /// `"cpu"`. Unknown values load as `"auto"`. This is kept as a
+    /// plain string rather than a typed enum so that `ui_state`
+    /// remains independent of the `ai-inference` feature gate and
+    /// older preference files load cleanly on newer builds without
+    /// type-migration churn.
+    #[serde(default = "default_ai_backend")]
+    pub ai_backend: String,
+}
+
+fn default_ai_backend() -> String {
+    "auto".to_string()
 }
 
 impl Default for PreferencesState {
@@ -1192,6 +1207,7 @@ impl Default for PreferencesState {
             loudness_target_preset: default_loudness_target_preset(),
             loudness_target_lufs: default_loudness_target_lufs(),
             voice_enhance_cache_cap_gib: default_voice_enhance_cache_cap_gib(),
+            ai_backend: default_ai_backend(),
         }
     }
 }
