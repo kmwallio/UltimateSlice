@@ -6391,6 +6391,22 @@ pub fn build_window(
                 on_project_changed();
             }
         },
+        // on_request_sam_prompt: Inspector triggers SAM box-prompt mode on
+        // the Program Monitor's TransformOverlay. The closure captures
+        // the overlay cell and defers the `enter_sam_prompt_mode` call
+        // to when the cell is populated (which happens after the
+        // program monitor is built, later in this same function).
+        {
+            let transform_overlay_cell = transform_overlay_cell.clone();
+            move |on_captured: Box<dyn Fn(f64, f64, f64, f64) + 'static>| {
+                let borrow = transform_overlay_cell.borrow();
+                if let Some(ref overlay) = *borrow {
+                    overlay.enter_sam_prompt_mode(move |x1, y1, x2, y2| {
+                        on_captured(x1, y1, x2, y2);
+                    });
+                }
+            }
+        },
     );
 
     let sync_tracking_controls: Rc<dyn Fn()> = {

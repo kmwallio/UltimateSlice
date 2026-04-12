@@ -69,7 +69,17 @@ pub struct SamJobInput {
     /// Absolute source-media time in ns for the frame to segment.
     pub frame_ns: u64,
     /// Box or emulated-point prompt in source-pixel coordinates.
+    /// Ignored if [`SamJobInput::normalized_box`] is `Some` — in that
+    /// case the pipeline rebuilds `prompt` after decoding the frame,
+    /// once `src_w` / `src_h` are known.
     pub prompt: BoxPrompt,
+    /// Optional `(x1, y1, x2, y2)` box in normalized clip-local
+    /// coordinates, 0..1. If `Some`, the pipeline multiplies each
+    /// coordinate by the decoded frame's `src_w` / `src_h` and
+    /// overrides `prompt` with the resulting pixel box. Used by the
+    /// Inspector button which doesn't know source dimensions at
+    /// click time. Set to `None` when passing a pixel-space prompt.
+    pub normalized_box: Option<(f32, f32, f32, f32)>,
     /// Douglas-Peucker tolerance in source pixels. 2.0 is the
     /// default used by the MCP tool; smaller = finer polygon,
     /// larger = coarser.
@@ -154,6 +164,20 @@ pub fn run_sam_pipeline(input: SamJobInput) -> SamJobResult {
             Err(e) => return SamJobResult::Error(format!("Frame decode failed: {e}")),
         };
 
+    // Step 2b — if the caller passed a normalized override, convert
+    // it to pixel coordinates now that we know the source dimensions
+    // and replace `input.prompt`. Used by the Inspector button which
+    // doesn't know `src_w` / `src_h` at click time.
+    let prompt = if let Some((nx1, ny1, nx2, ny2)) = input.normalized_box {
+        let sx1 = nx1 * src_w as f32;
+        let sy1 = ny1 * src_h as f32;
+        let sx2 = nx2 * src_w as f32;
+        let sy2 = ny2 * src_h as f32;
+        BoxPrompt::from_corners(sx1, sy1, sx2, sy2)
+    } else {
+        input.prompt
+    };
+
     // Step 3 — load SAM sessions. Takes ~2 s the first time on a
     // warm ONNX Runtime; subsequent calls re-pay the load cost
     // because we don't cache sessions yet.
@@ -164,7 +188,7 @@ pub fn run_sam_pipeline(input: SamJobInput) -> SamJobResult {
 
     // Step 4 — run inference.
     let result =
-        match sam_cache::segment_with_box(&mut sessions, &rgb, src_w, src_h, input.prompt) {
+        match sam_cache::segment_with_box(&mut sessions, &rgb, src_w, src_h, prompt) {
             Ok(r) => r,
             Err(e) => return SamJobResult::Error(format!("SAM inference failed: {e}")),
         };
@@ -305,6 +329,7 @@ mod tests {
             source_path: PathBuf::from("/nonexistent/path/to/bogus.mp4"),
             frame_ns: 0,
             prompt: BoxPrompt::from_corners(100.0, 100.0, 200.0, 200.0),
+            normalized_box: None,
             tolerance_px: 2.0,
         };
         let handle = spawn_sam_job(input);
@@ -345,6 +370,7 @@ mod tests {
             source_path: PathBuf::from("/nonexistent/path.mp4"),
             frame_ns: 0,
             prompt: BoxPrompt::from_corners(0.0, 0.0, 10.0, 10.0),
+            normalized_box: None,
             tolerance_px: 2.0,
         };
         let handle = spawn_sam_job(input);
@@ -370,6 +396,7 @@ mod tests {
             source_path: PathBuf::from("/nonexistent/path.mp4"),
             frame_ns: 0,
             prompt: BoxPrompt::from_corners(0.0, 0.0, 10.0, 10.0),
+            normalized_box: None,
             tolerance_px: 2.0,
         };
         let _handle = spawn_sam_job(input);
