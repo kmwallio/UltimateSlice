@@ -48,11 +48,24 @@
 #![cfg(feature = "ai-inference")]
 
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{mpsc, Mutex};
 
 use crate::media::mask_contour;
-use crate::media::sam_cache::{self, BoxPrompt};
+use crate::media::sam_cache::{self, BoxPrompt, SamSessions};
 use crate::model::clip::BezierPoint;
+
+// ── Session cache (Phase 2d) ─────���───────────────────────────────────────
+//
+// A single global cache for the SAM ONNX sessions. Loading sessions
+// costs ~2 s (model files are ~2 GB total); caching eliminates that
+// cost on the 2nd+ click. The cache holds at most one set of sessions
+// at a time — the worker thread takes them out, uses them, and puts
+// them back on completion (success or failure).
+//
+// Thread safety: `SamSessions` is `Send` (ort::Session is Send). The
+// `Mutex` ensures only one thread accesses the sessions at a time,
+// which matches the single-job-at-a-time design of `spawn_sam_job`.
+static SESSION_CACHE: Mutex<Option<SamSessions>> = Mutex::new(None);
 
 // ── Input / output types ──────────────────────────────────────────────────
 
@@ -178,20 +191,48 @@ pub fn run_sam_pipeline(input: SamJobInput) -> SamJobResult {
         input.prompt
     };
 
-    // Step 3 — load SAM sessions. Takes ~2 s the first time on a
-    // warm ONNX Runtime; subsequent calls re-pay the load cost
-    // because we don't cache sessions yet.
-    let mut sessions = match sam_cache::SamSessions::load(&sam_paths) {
-        Ok(s) => s,
-        Err(e) => return SamJobResult::Error(format!("SAM session load failed: {e}")),
+    // Step 3 — acquire SAM sessions from the cache, or load fresh
+    // if this is the first call (or the cache was poisoned by a
+    // previous panic — unlikely but defended against).
+    let mut sessions = {
+        let cached = SESSION_CACHE
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take());
+        match cached {
+            Some(s) => {
+                log::debug!("SAM: reusing cached sessions");
+                s
+            }
+            None => match sam_cache::SamSessions::load(&sam_paths) {
+                Ok(s) => s,
+                Err(e) => {
+                    return SamJobResult::Error(format!(
+                        "SAM session load failed: {e}"
+                    ))
+                }
+            },
+        }
     };
 
     // Step 4 — run inference.
     let result =
         match sam_cache::segment_with_box(&mut sessions, &rgb, src_w, src_h, prompt) {
             Ok(r) => r,
-            Err(e) => return SamJobResult::Error(format!("SAM inference failed: {e}")),
+            Err(e) => {
+                // Return sessions to the cache even on inference
+                // failure — the sessions themselves are still valid.
+                if let Ok(mut guard) = SESSION_CACHE.lock() {
+                    *guard = Some(sessions);
+                }
+                return SamJobResult::Error(format!("SAM inference failed: {e}"));
+            }
         };
+
+    // Return sessions to the cache for the next job.
+    if let Ok(mut guard) = SESSION_CACHE.lock() {
+        *guard = Some(sessions);
+    }
 
     // Step 5 — extract contour.
     let mask_points = match mask_contour::mask_to_bezier_path(

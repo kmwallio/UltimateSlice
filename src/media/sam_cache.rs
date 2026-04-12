@@ -1000,7 +1000,7 @@ pub fn segment_with_box(
     let pad_frac_h = preprocessed.padded_h as f64 / SAM_INPUT_SIZE as f64;
     let content_mask_w = ((mask_w as f64 * pad_frac_w).round() as usize).max(1);
     let content_mask_h = ((mask_h as f64 * pad_frac_h).round() as usize).max(1);
-    log::info!(
+    log::debug!(
         "segment_with_box: decoder mask = {mask_w}x{mask_h}, \
          padded content in encoder = {}x{} / {SAM_INPUT_SIZE}, \
          decoder content region = {content_mask_w}x{content_mask_h}, \

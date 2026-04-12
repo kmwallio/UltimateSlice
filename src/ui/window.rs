@@ -17881,222 +17881,111 @@ fn handle_mcp_command(
             tolerance_px,
             reply,
         } => {
-            // Step 1 — resolve the clip in the project (brief borrow).
-            //
-            // We capture source_path + source_in + source_out here so
-            // we can drop the project borrow before the slow
-            // inference work starts. If the clip disappears during
-            // inference (project reload etc.) we'll detect that on
-            // step 6 when we try to re-borrow to append the mask.
+            // Step 1 — resolve the clip.
             let clip_info = {
                 let proj = project.borrow();
                 proj.tracks.iter().find_map(|t| {
                     t.clips.iter().find(|c| c.id == clip_id).map(|c| {
-                        (
-                            c.source_path.clone(),
-                            c.source_in,
-                            c.source_out,
-                        )
+                        (c.source_path.clone(), c.source_in, c.source_out)
                     })
                 })
             };
             let Some((source_path, source_in, source_out)) = clip_info else {
-                reply
-                    .send(serde_json::json!({
-                        "success": false,
-                        "error": "Clip not found"
-                    }))
-                    .ok();
-                // Can't early-return from the dispatch match arm
-                // (we're inside a single big `match cmd { ... }`);
-                // falling through to end of the arm is fine.
+                reply.send(serde_json::json!({"success": false, "error": "Clip not found"})).ok();
                 return;
             };
 
-            // Step 2 — locate the installed SAM model.
-            let sam_paths = match crate::media::sam_cache::find_sam_model_paths() {
-                Some(p) => p,
-                None => {
-                    reply.send(serde_json::json!({
-                        "success": false,
-                        "error": "SAM 3 model not installed. See Preferences → Models → Segment Anything 3.1 for install instructions."
-                    })).ok();
-                    return;
-                }
-            };
-
-            // Step 3 — decide which frame to segment. Default is the
-            // clip's source_in (first visible frame); callers can
-            // override via frame_ns, clamped into the clip's
-            // source-range window.
-            let target_frame_ns = frame_ns.unwrap_or(source_in).clamp(source_in, source_out);
-
-            let source_path_buf = std::path::PathBuf::from(&source_path);
-            let (rgb, src_w, src_h) =
-                match crate::media::sam_cache::decode_single_frame(
-                    &source_path_buf,
-                    target_frame_ns,
-                ) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        reply
-                            .send(serde_json::json!({
-                                "success": false,
-                                "error": format!("Frame decode failed: {e}")
-                            }))
-                            .ok();
-                        return;
-                    }
-                };
-
-            // Step 4 — build the prompt. Box prompt wins if all four
-            // box_* fields are set; otherwise fall back to the
-            // emulated-point path; otherwise error out.
+            // Step 2 — build prompt in normalized coords.
+            let target_frame_ns =
+                frame_ns.unwrap_or(source_in).clamp(source_in, source_out);
             use crate::media::sam_cache::BoxPrompt;
-            let prompt_result: Result<BoxPrompt, &'static str> =
+            let placeholder = BoxPrompt::from_corners(0.0, 0.0, 1.0, 1.0);
+            let normalized_box: Result<Option<(f32, f32, f32, f32)>, &'static str> =
                 match (box_x1, box_y1, box_x2, box_y2) {
                     (Some(x1), Some(y1), Some(x2), Some(y2)) => {
-                        // Normalized clip-local → source-pixel.
-                        let sx1 = (x1 * src_w as f64) as f32;
-                        let sy1 = (y1 * src_h as f64) as f32;
-                        let sx2 = (x2 * src_w as f64) as f32;
-                        let sy2 = (y2 * src_h as f64) as f32;
-                        Ok(BoxPrompt::from_corners(sx1, sy1, sx2, sy2))
+                        Ok(Some((x1 as f32, y1 as f32, x2 as f32, y2 as f32)))
                     }
                     _ => match (point_x, point_y) {
                         (Some(px), Some(py)) => {
-                            // Normalized click → source-pixel →
-                            // 8-px synthetic box. SAM 3's decoder
-                            // doesn't have a native point interface
-                            // so we approximate with a small
-                            // exemplar region.
-                            let cx = (px * src_w as f64) as f32;
-                            let cy = (py * src_h as f64) as f32;
-                            Ok(BoxPrompt::point_emulation(cx, cy, 4.0))
+                            // Point prompt → small normalized box
+                            // (~8 px at 1000 px source resolution).
+                            let h = 0.004;
+                            Ok(Some((
+                                (px - h).max(0.0) as f32,
+                                (py - h).max(0.0) as f32,
+                                (px + h).min(1.0) as f32,
+                                (py + h).min(1.0) as f32,
+                            )))
                         }
-                        _ => Err(
-                            "Missing prompt: provide either all four box_{x1,y1,x2,y2} or both point_x/point_y",
-                        ),
+                        _ => Err("Missing prompt: provide either all four box_{x1,y1,x2,y2} or both point_x/point_y"),
                     },
                 };
-            let prompt = match prompt_result {
-                Ok(p) => p,
+            let normalized_box = match normalized_box {
+                Ok(b) => b,
                 Err(msg) => {
-                    reply
-                        .send(serde_json::json!({
-                            "success": false,
-                            "error": msg,
-                        }))
-                        .ok();
+                    reply.send(serde_json::json!({"success": false, "error": msg})).ok();
                     return;
                 }
             };
 
-            // Step 5 — load sessions and run inference. Blocks the
-            // main thread for the duration of SAM inference (seconds
-            // on GPU, tens of seconds on CPU). Phase 2b will move
-            // this to a background thread when there's a UI button
-            // that needs to stay responsive; the MCP path is
-            // synchronous automation traffic where blocking is
-            // acceptable.
-            let mut sessions = match crate::media::sam_cache::SamSessions::load(&sam_paths) {
-                Ok(s) => s,
-                Err(e) => {
-                    reply
-                        .send(serde_json::json!({
-                            "success": false,
-                            "error": format!("SAM session load failed: {e}")
-                        }))
-                        .ok();
-                    return;
-                }
+            // Step 3 — run the full pipeline synchronously (MCP is
+            // automation traffic — blocking the main thread is OK).
+            let input = crate::media::sam_job::SamJobInput {
+                source_path: std::path::PathBuf::from(&source_path),
+                frame_ns: target_frame_ns,
+                prompt: placeholder,
+                normalized_box,
+                tolerance_px: tolerance_px.unwrap_or(2.0).max(0.0),
             };
-            let result = match crate::media::sam_cache::segment_with_box(
-                &mut sessions,
-                &rgb,
-                src_w,
-                src_h,
-                prompt,
-            ) {
-                Ok(r) => r,
-                Err(e) => {
-                    reply
-                        .send(serde_json::json!({
-                            "success": false,
-                            "error": format!("SAM inference failed: {e}")
-                        }))
-                        .ok();
-                    return;
-                }
-            };
+            let result = crate::media::sam_job::run_sam_pipeline(input);
 
-            // Step 6 — convert the binary mask into a bezier polygon
-            // and append it to the clip. The default tolerance of
-            // 2 px gives reasonably tight polygons with moderate
-            // point counts; callers can override.
-            let tolerance = tolerance_px.unwrap_or(2.0).max(0.0);
-            let bezier_points = match crate::media::mask_contour::mask_to_bezier_path(
-                &result.mask,
-                result.src_w,
-                result.src_h,
-                tolerance,
-            ) {
-                Some(p) if p.len() >= 3 => p,
-                _ => {
-                    reply
-                        .send(serde_json::json!({
-                            "success": false,
-                            "error": "SAM produced an empty or degenerate mask (no closed contour found)"
-                        }))
-                        .ok();
-                    return;
-                }
-            };
-
-            let point_count = bezier_points.len();
-            let score = result.score;
-
-            // Re-borrow the project to append the new mask. If the
-            // clip got deleted or the project got replaced during
-            // inference, we report that as a soft failure.
-            let appended: Option<String> = {
-                let mut proj = project.borrow_mut();
-                let mut out: Option<String> = None;
-                for track in proj.tracks.iter_mut() {
-                    if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                        let mask =
-                            crate::model::clip::ClipMask::new_path(bezier_points.clone());
-                        let mask_id = mask.id.clone();
-                        clip.masks.push(mask);
-                        out = Some(mask_id);
-                        break;
+            // Step 4 — on success, append the mask to the clip.
+            match result {
+                crate::media::sam_job::SamJobResult::Success {
+                    mask_points,
+                    score,
+                } => {
+                    let point_count = mask_points.len();
+                    let appended: Option<String> = {
+                        let mut proj = project.borrow_mut();
+                        let mut out: Option<String> = None;
+                        for track in proj.tracks.iter_mut() {
+                            if let Some(clip) =
+                                track.clips.iter_mut().find(|c| c.id == clip_id)
+                            {
+                                let mask =
+                                    crate::model::clip::ClipMask::new_path(mask_points.clone());
+                                let mask_id = mask.id.clone();
+                                clip.masks.push(mask);
+                                out = Some(mask_id);
+                                break;
+                            }
+                        }
+                        if out.is_some() {
+                            proj.dirty = true;
+                        }
+                        out
+                    };
+                    match appended {
+                        Some(mask_id) => {
+                            on_project_changed();
+                            reply.send(serde_json::json!({
+                                "success": true,
+                                "mask_id": mask_id,
+                                "score": score,
+                                "point_count": point_count,
+                            })).ok();
+                        }
+                        None => {
+                            reply.send(serde_json::json!({
+                                "success": false,
+                                "error": "Clip disappeared during SAM inference"
+                            })).ok();
+                        }
                     }
                 }
-                if out.is_some() {
-                    proj.dirty = true;
-                }
-                out
-            };
-
-            match appended {
-                Some(mask_id) => {
-                    on_project_changed();
-                    reply
-                        .send(serde_json::json!({
-                            "success": true,
-                            "mask_id": mask_id,
-                            "score": score,
-                            "point_count": point_count,
-                        }))
-                        .ok();
-                }
-                None => {
-                    reply
-                        .send(serde_json::json!({
-                            "success": false,
-                            "error": "Clip disappeared during SAM inference"
-                        }))
-                        .ok();
+                crate::media::sam_job::SamJobResult::Error(msg) => {
+                    reply.send(serde_json::json!({"success": false, "error": msg})).ok();
                 }
             }
         }
