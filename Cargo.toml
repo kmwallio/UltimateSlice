@@ -31,6 +31,7 @@ hound = { version = "3", optional = true }
 whisper-rs = { version = "0.12", optional = true }
 tempfile = "3.27.0"
 resvg = "0.47.0"
+png = "0.17"
 
 [features]
 default = ["speech-to-text", "ai-inference"]

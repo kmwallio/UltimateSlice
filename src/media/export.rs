@@ -297,7 +297,11 @@ pub fn export_project(
     // recursively expanded into its constituent leaf clips with rebased
     // timeline positions. The rest of the export pipeline operates on this
     // flat representation unchanged.
-    let mut flattened_tracks = flatten_compound_tracks(&project.tracks);
+    let mut flattened_tracks = flatten_compound_tracks_with_fps(
+        &project.tracks,
+        project.frame_rate.numerator,
+        project.frame_rate.denominator,
+    );
     crate::media::tracking::apply_tracking_bindings_to_tracks(&mut flattened_tracks);
     let flattened_project_tracks = &flattened_tracks;
 
@@ -3707,50 +3711,98 @@ fn build_title_filter(clip: &crate::model::clip::Clip, out_h: u32) -> String {
     let (r, g, b, a) = crate::ui::colors::rgba_u32_to_u8(clip.title_color);
     let alpha = (a as f64 / 255.0).clamp(0.0, 1.0);
 
-    // Base drawtext filter
-    let mut filter = format!(
-        ",drawtext={font_option}:text='{text}':fontsize={scaled_size:.2}:fontcolor={r:02x}{g:02x}{b:02x}@{alpha:.4}:x='({rel_x:.6})*w-text_w/2':y='({rel_y:.6})*h-text_h/2'"
-    );
-
-    // Outline (border)
+    // Build the shared drawtext style suffix (everything after text=, x=, y=).
+    let mut style = String::new();
     if clip.title_outline_width > 0.0 {
         let bw = (clip.title_outline_width * scale_factor).max(0.5);
         let (or, og, ob, oa) = crate::ui::colors::rgba_u32_to_u8(clip.title_outline_color);
         let o_alpha = (oa as f64 / 255.0).clamp(0.0, 1.0);
-        filter.push_str(&format!(
+        style.push_str(&format!(
             ":borderw={bw:.1}:bordercolor={or:02x}{og:02x}{ob:02x}@{o_alpha:.4}"
         ));
     }
-
-    // Shadow
     if clip.title_shadow {
         let sx = (clip.title_shadow_offset_x * scale_factor).round() as i32;
         let sy = (clip.title_shadow_offset_y * scale_factor).round() as i32;
         let (sr, sg, sb, sa) = crate::ui::colors::rgba_u32_to_u8(clip.title_shadow_color);
         let s_alpha = (sa as f64 / 255.0).clamp(0.0, 1.0);
-        filter.push_str(&format!(
+        style.push_str(&format!(
             ":shadowx={sx}:shadowy={sy}:shadowcolor={sr:02x}{sg:02x}{sb:02x}@{s_alpha:.4}"
         ));
     }
-
-    // Background box
     if clip.title_bg_box {
         let pad = (clip.title_bg_box_padding * scale_factor).round() as i32;
         let (br, bg, bb, ba) = crate::ui::colors::rgba_u32_to_u8(clip.title_bg_box_color);
         let b_alpha = (ba as f64 / 255.0).clamp(0.0, 1.0);
-        filter.push_str(&format!(
+        style.push_str(&format!(
             ":box=1:boxcolor={br:02x}{bg:02x}{bb:02x}@{b_alpha:.4}:boxborderw={pad}"
         ));
     }
 
-    // Secondary text (second drawtext filter below primary)
+    // Procedural title animations. Input-time `t` is zero at the clip's
+    // start (each clip is fed with `-ss … -t …` + `setpts=PTS-STARTPTS`).
+    let dur_s = (clip.title_animation_duration_ns as f64 / 1_000_000_000.0).max(1e-6);
+    let pos_x = format!("({rel_x:.6})*w-text_w/2");
+    let pos_y = format!("({rel_y:.6})*h-text_h/2");
+    let base_color = format!("{r:02x}{g:02x}{b:02x}@{alpha:.4}");
+
+    let mut filter = String::new();
+    match clip.title_animation {
+        crate::model::clip::TitleAnimation::None | crate::model::clip::TitleAnimation::Pop => {
+            // Pop (font-size grow) isn't expressible in drawtext because
+            // `fontsize` is evaluated once at init. Fall back to static
+            // rendering; preview gets the full animation via the
+            // compositor pad.
+            filter.push_str(&format!(
+                ",drawtext={font_option}:text='{text}':fontsize={scaled_size:.2}:fontcolor={base_color}:x='{pos_x}':y='{pos_y}'{style}"
+            ));
+        }
+        crate::model::clip::TitleAnimation::Fade => {
+            // `alpha` accepts a time expression in drawtext.
+            let alpha_expr = format!("min(1,max(0,t/{dur_s:.4}))*{alpha:.4}");
+            filter.push_str(&format!(
+                ",drawtext={font_option}:text='{text}':fontsize={scaled_size:.2}:fontcolor={r:02x}{g:02x}{b:02x}:x='{pos_x}':y='{pos_y}':alpha='{alpha_expr}'{style}"
+            ));
+        }
+        crate::model::clip::TitleAnimation::Typewriter => {
+            // Emit one drawtext per visible-char threshold, each active
+            // in an exclusive time window so only one layer renders at a
+            // time. The final drawtext stays on for the remaining clip.
+            let char_count = clip.title_text.chars().count();
+            if char_count == 0 {
+                filter.push_str(&format!(
+                    ",drawtext={font_option}:text='{text}':fontsize={scaled_size:.2}:fontcolor={base_color}:x='{pos_x}':y='{pos_y}'{style}"
+                ));
+            } else {
+                let step = dur_s / char_count as f64;
+                for i in 0..char_count {
+                    let prefix: String = clip.title_text.chars().take(i + 1).collect();
+                    let prefix_esc = crate::media::title_font::escape_drawtext_value(&prefix)
+                        .replace('\n', "\\n");
+                    let t0 = i as f64 * step;
+                    let enable = if i + 1 == char_count {
+                        format!("gte(t\\,{t0:.4})")
+                    } else {
+                        let t1 = (i + 1) as f64 * step;
+                        format!("between(t\\,{t0:.4}\\,{t1:.4})")
+                    };
+                    filter.push_str(&format!(
+                        ",drawtext={font_option}:text='{prefix_esc}':fontsize={scaled_size:.2}:fontcolor={base_color}:x='{pos_x}':y='{pos_y}':enable='{enable}'{style}"
+                    ));
+                }
+            }
+        }
+    }
+
+    // Secondary text (second drawtext filter below primary). Not
+    // animated — follows the primary's static style.
     if !clip.title_secondary_text.trim().is_empty() {
         let sec_text = crate::media::title_font::escape_drawtext_value(&clip.title_secondary_text)
             .replace('\n', "\\n");
-        let sec_size = scaled_size * 0.7; // secondary text is 70% of primary
-        let sec_y_offset = scaled_size * 1.5; // offset below primary
+        let sec_size = scaled_size * 0.7;
+        let sec_y_offset = scaled_size * 1.5;
         filter.push_str(&format!(
-            ",drawtext={font_option}:text='{sec_text}':fontsize={sec_size:.2}:fontcolor={r:02x}{g:02x}{b:02x}@{alpha:.4}:x='({rel_x:.6})*w-text_w/2':y='({rel_y:.6})*h-text_h/2+{sec_y_offset:.0}'"
+            ",drawtext={font_option}:text='{sec_text}':fontsize={sec_size:.2}:fontcolor={base_color}:x='({rel_x:.6})*w-text_w/2':y='({rel_y:.6})*h-text_h/2+{sec_y_offset:.0}'"
         ));
     }
 
@@ -6344,13 +6396,21 @@ fn write_chapter_metadata(
 pub(crate) fn flatten_compound_tracks(
     tracks: &[crate::model::track::Track],
 ) -> Vec<crate::model::track::Track> {
+    flatten_compound_tracks_with_fps(tracks, 30, 1)
+}
+
+pub(crate) fn flatten_compound_tracks_with_fps(
+    tracks: &[crate::model::track::Track],
+    project_fps_num: u32,
+    project_fps_den: u32,
+) -> Vec<crate::model::track::Track> {
     let mut result: Vec<crate::model::track::Track> = Vec::new();
     // Collect audio clips extracted from compound/multicam clips on video tracks.
     // These need to go on audio tracks so the export pipeline picks them up.
     let mut extracted_audio_clips: Vec<Clip> = Vec::new();
 
     for track in tracks {
-        let flat = flatten_clips(&track.clips, 0, 0);
+        let flat = flatten_clips(&track.clips, 0, 0, project_fps_num, project_fps_den);
         // Separate audio clips that landed on a video track (from compound/multicam expansion)
         if track.is_video() {
             let mut video_clips = Vec::new();
@@ -6389,7 +6449,13 @@ pub(crate) fn flatten_compound_tracks(
     result
 }
 
-fn flatten_clips(clips: &[Clip], timeline_offset: u64, depth: usize) -> Vec<Clip> {
+fn flatten_clips(
+    clips: &[Clip],
+    timeline_offset: u64,
+    depth: usize,
+    project_fps_num: u32,
+    project_fps_den: u32,
+) -> Vec<Clip> {
     if depth > 16 {
         return Vec::new();
     }
@@ -6420,7 +6486,13 @@ fn flatten_clips(clips: &[Clip], timeline_offset: u64, depth: usize) -> Vec<Clip
                             .saturating_add(rebased.timeline_start.saturating_sub(window_start));
                         if rebased.kind == ClipKind::Compound || rebased.kind == ClipKind::Multicam
                         {
-                            result.extend(flatten_clips(&[rebased], 0, depth + 1));
+                            result.extend(flatten_clips(
+                                &[rebased],
+                                0,
+                                depth + 1,
+                                project_fps_num,
+                                project_fps_den,
+                            ));
                         } else {
                             result.push(rebased);
                         }
@@ -6536,6 +6608,72 @@ fn flatten_clips(clips: &[Clip], timeline_offset: u64, depth: usize) -> Vec<Clip
                     audio_clip.volume = angle.volume;
                     audio_clip.id = uuid::Uuid::new_v4().to_string();
                     result.push(audio_clip);
+                }
+            }
+        } else if clip.kind == ClipKind::Drawing {
+            // Rasterize vector items to a PNG and feed the export pipeline
+            // an image-backed clip. Mirrors the preview path in
+            // window.rs::clip_to_program_clips.
+            const DRAW_W: i32 = 1920;
+            const DRAW_H: i32 = 1080;
+            // Animated drawings are baked to WebM (VP9 / alpha) so the
+            // export filter graph can consume them as a normal video
+            // source with the existing overlay path. Static drawings
+            // keep using the PNG cache.
+            let mut handled = false;
+            if clip.drawing_animation_reveal_ns > 0 {
+                let clip_duration_ns = clip.duration();
+                match crate::media::drawing_render::ensure_drawing_animation_webm(
+                    &clip.id,
+                    &clip.drawing_items,
+                    DRAW_W,
+                    DRAW_H,
+                    project_fps_num.max(1),
+                    project_fps_den.max(1),
+                    clip_duration_ns,
+                    clip.drawing_animation_reveal_ns,
+                ) {
+                    Ok(webm_path) => {
+                        let mut c = clip.clone();
+                        c.source_path = webm_path.to_string_lossy().into_owned();
+                        // Keep `kind = Drawing` so `has_audio` stays
+                        // false — the WebM has no audio track, and
+                        // spawning an audio branch triggers
+                        // "not-linked" inside matroskademux.
+                        c.source_in = 0;
+                        c.source_out = clip_duration_ns;
+                        c.timeline_start = timeline_offset.saturating_add(c.timeline_start);
+                        result.push(c);
+                        handled = true;
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "export: animated drawing render failed, falling back to static PNG: {e}"
+                        );
+                    }
+                }
+            }
+            if handled {
+                continue;
+            }
+            match crate::media::drawing_render::ensure_drawing_png(
+                &clip.id,
+                &clip.drawing_items,
+                DRAW_W,
+                DRAW_H,
+            ) {
+                Ok(png_path) => {
+                    let mut c = clip.clone();
+                    c.source_path = png_path.to_string_lossy().into_owned();
+                    c.kind = ClipKind::Image;
+                    c.timeline_start = timeline_offset.saturating_add(c.timeline_start);
+                    result.push(c);
+                }
+                Err(e) => {
+                    log::warn!(
+                        "export: failed to rasterize drawing clip {}: {e}",
+                        clip.id
+                    );
                 }
             }
         } else {
@@ -8104,6 +8242,37 @@ mod tests {
         assert!(f.contains("fontcolor=ff3366@0.8000"));
         assert!(f.contains("x='(0.250000)*w-text_w/2'"));
         assert!(f.contains("y='(0.750000)*h-text_h/2'"));
+    }
+
+    #[test]
+    fn build_title_filter_fade_emits_time_alpha_expression() {
+        let mut clip = Clip::new("/tmp/test.mp4", 5_000_000_000, 0, ClipKind::Video);
+        clip.title_text = "Hi".to_string();
+        clip.title_animation = crate::model::clip::TitleAnimation::Fade;
+        clip.title_animation_duration_ns = 1_500_000_000; // 1.5 s
+        let f = build_title_filter(&clip, 1080);
+        assert!(f.contains(":alpha='min(1,max(0,t/1.5000))"), "filter: {f}");
+        // Only one drawtext for the primary title (no cascade).
+        assert_eq!(f.matches(",drawtext=").count(), 1, "filter: {f}");
+    }
+
+    #[test]
+    fn build_title_filter_typewriter_emits_cascade_with_enable_windows() {
+        let mut clip = Clip::new("/tmp/test.mp4", 5_000_000_000, 0, ClipKind::Video);
+        clip.title_text = "abc".to_string();
+        clip.title_animation = crate::model::clip::TitleAnimation::Typewriter;
+        clip.title_animation_duration_ns = 600_000_000; // 0.6 s total, 0.2 s/char
+        let f = build_title_filter(&clip, 1080);
+        // One drawtext per character.
+        assert_eq!(f.matches(",drawtext=").count(), 3, "filter: {f}");
+        assert!(f.contains("text='a'"), "filter: {f}");
+        assert!(f.contains("text='ab'"), "filter: {f}");
+        assert!(f.contains("text='abc'"), "filter: {f}");
+        // Exclusive windows for all but the last.
+        assert!(f.contains("between(t\\,0.0000\\,0.2000)"), "filter: {f}");
+        assert!(f.contains("between(t\\,0.2000\\,0.4000)"), "filter: {f}");
+        // Final char stays on until the end of the clip.
+        assert!(f.contains("gte(t\\,0.4000)"), "filter: {f}");
     }
 
     #[test]

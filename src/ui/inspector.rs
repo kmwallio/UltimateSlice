@@ -398,7 +398,10 @@ pub struct InspectorView {
     pub title_bg_box_check: CheckButton,
     pub title_bg_box_color_btn: gtk4::ColorDialogButton,
     pub title_bg_box_padding_slider: Scale,
-    // Speed
+    pub title_animation_dropdown: gtk4::DropDown,
+    pub title_animation_duration_slider: Scale,
+    // Transitions
+
     pub speed_slider: Scale,
     pub reverse_check: CheckButton,
     pub slow_motion_dropdown: DropDown,
@@ -2918,6 +2921,16 @@ impl InspectorView {
                 }
                 self.title_bg_box_padding_slider
                     .set_value(c.title_bg_box_padding);
+                self.title_animation_dropdown.set_selected(
+                    match c.title_animation {
+                        crate::model::clip::TitleAnimation::None => 0,
+                        crate::model::clip::TitleAnimation::Typewriter => 1,
+                        crate::model::clip::TitleAnimation::Fade => 2,
+                        crate::model::clip::TitleAnimation::Pop => 3,
+                    },
+                );
+                self.title_animation_duration_slider
+                    .set_value(c.title_animation_duration_ns as f64 / 1_000_000_000.0);
                 // When speed keyframes are present, don't auto-update the slider —
                 // the user sets it to the desired value before clicking
                 // "Set Speed Keyframe". Auto-resetting would clobber their input.
@@ -3115,6 +3128,8 @@ impl InspectorView {
                 self.title_bg_box_color_btn
                     .set_rgba(&gdk4::RGBA::new(0.0, 0.0, 0.0, 0.53));
                 self.title_bg_box_padding_slider.set_value(8.0);
+                self.title_animation_dropdown.set_selected(0);
+                self.title_animation_duration_slider.set_value(1.0);
                 self.speed_slider.set_value(1.0);
                 self.reverse_check.set_active(false);
                 self.slow_motion_dropdown.set_selected(0);
@@ -5712,6 +5727,20 @@ pub fn build_inspector(
     title_bg_box_padding_slider.set_digits(0);
     title_bg_box_padding_slider.set_hexpand(true);
     title_inner.append(&title_bg_box_padding_slider);
+
+    title_inner.append(&Separator::new(Orientation::Horizontal));
+    row_label(&title_inner, "Animation");
+    let title_animation_dropdown =
+        gtk4::DropDown::from_strings(&["None", "Typewriter", "Fade", "Pop"]);
+    title_inner.append(&title_animation_dropdown);
+
+    row_label(&title_inner, "  Duration (s)");
+    let title_animation_duration_slider =
+        Scale::with_range(Orientation::Horizontal, 0.1, 5.0, 0.1);
+    title_animation_duration_slider.set_value(1.0);
+    title_animation_duration_slider.set_draw_value(true);
+    title_animation_duration_slider.set_hexpand(true);
+    title_inner.append(&title_animation_duration_slider);
 
     // ── Speed section (all clip types) ───────────────────────────────────────
     let speed_section_box = GBox::new(Orientation::Vertical, 8);
@@ -9131,6 +9160,61 @@ pub fn build_inspector(
         });
     }
 
+    // Title animation dropdown
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_title_style_changed = on_title_style_changed.clone();
+        title_animation_dropdown.connect_selected_notify(move |dd| {
+            if *updating.borrow() {
+                return;
+            }
+            let anim = match dd.selected() {
+                1 => crate::model::clip::TitleAnimation::Typewriter,
+                2 => crate::model::clip::TitleAnimation::Fade,
+                3 => crate::model::clip::TitleAnimation::Pop,
+                _ => crate::model::clip::TitleAnimation::None,
+            };
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.title_animation = anim;
+                    }
+                    proj.dirty = true;
+                }
+                on_title_style_changed();
+            }
+        });
+    }
+
+    // Title animation duration slider
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_title_style_changed = on_title_style_changed.clone();
+        title_animation_duration_slider.connect_value_changed(move |sl| {
+            if *updating.borrow() {
+                return;
+            }
+            let duration_ns = (sl.value() * 1_000_000_000.0) as u64;
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.title_animation_duration_ns = duration_ns;
+                    }
+                    proj.dirty = true;
+                }
+                on_title_style_changed();
+            }
+        });
+    }
+
     // Title outline color button
     {
         let project = project.clone();
@@ -10969,6 +11053,8 @@ pub fn build_inspector(
         title_bg_box_check,
         title_bg_box_color_btn,
         title_bg_box_padding_slider,
+        title_animation_dropdown,
+        title_animation_duration_slider,
         speed_slider,
         reverse_check,
         slow_motion_dropdown,

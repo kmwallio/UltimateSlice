@@ -1186,6 +1186,23 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                                     .push_attribute(("us:multicam-switches", escaped.as_str()));
                             }
                         }
+                    } else if clip.kind == crate::model::clip::ClipKind::Drawing {
+                        asset_clip.push_attribute(("us:clip-kind", "drawing"));
+                        if !clip.drawing_items.is_empty() {
+                            if let Ok(json) = serde_json::to_string(&clip.drawing_items) {
+                                let escaped = json.replace('"', "&quot;");
+                                asset_clip.push_attribute((
+                                    "us:drawing-items",
+                                    escaped.as_str(),
+                                ));
+                            }
+                        }
+                        if clip.drawing_animation_reveal_ns != 0 {
+                            asset_clip.push_attribute((
+                                "us:drawing-animation-reveal-ns",
+                                clip.drawing_animation_reveal_ns.to_string().as_str(),
+                            ));
+                        }
                     } else if clip.kind == crate::model::clip::ClipKind::Audition {
                         asset_clip.push_attribute(("us:clip-kind", "audition"));
                         if let Some(ref takes) = clip.audition_takes {
@@ -3048,7 +3065,30 @@ fn patch_asset_clip_block_transform(
                 crate::model::clip::ClipKind::Compound => Some("compound".to_string()),
                 crate::model::clip::ClipKind::Multicam => Some("multicam".to_string()),
                 crate::model::clip::ClipKind::Audition => Some("audition".to_string()),
+                crate::model::clip::ClipKind::Drawing => Some("drawing".to_string()),
                 _ => None,
+            },
+        ),
+        (
+            "us:drawing-items",
+            if clip.kind == crate::model::clip::ClipKind::Drawing
+                && !clip.drawing_items.is_empty()
+            {
+                serde_json::to_string(&clip.drawing_items)
+                    .ok()
+                    .map(|j| j.replace('"', "&quot;"))
+            } else {
+                None
+            },
+        ),
+        (
+            "us:drawing-animation-reveal-ns",
+            if clip.kind == crate::model::clip::ClipKind::Drawing
+                && clip.drawing_animation_reveal_ns != 0
+            {
+                Some(clip.drawing_animation_reveal_ns.to_string())
+            } else {
+                None
             },
         ),
         (
@@ -4466,6 +4506,8 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:title-clip-bg-color"
             | "us:title-secondary-text"
             | "us:clip-kind"
+            | "us:drawing-items"
+            | "us:drawing-animation-reveal-ns"
             | "us:eq-bands"
             | "us:eq-low-gain-keyframes"
             | "us:eq-mid-gain-keyframes"
@@ -7597,5 +7639,65 @@ mod tests {
         assert_eq!(restored.source_path, "/tmp/close.mov");
         assert_eq!(restored.source_in, 1_000_000_000);
         assert_eq!(restored.source_out, 4_000_000_000);
+    }
+
+    #[test]
+    fn test_write_fcpxml_drawing_round_trip() {
+        use crate::model::clip::{DrawingItem, DrawingKind};
+        let mut project = Project::new("DrawingTest");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut drawing =
+            Clip::new("", 4_000_000_000, 0, ClipKind::Drawing);
+        drawing.label = "Drawing".to_string();
+        drawing.drawing_items = vec![
+            DrawingItem {
+                kind: DrawingKind::Stroke,
+                points: vec![(0.1, 0.1), (0.5, 0.5), (0.9, 0.1)],
+                color: 0xFF0000FF,
+                width: 6.0,
+                fill_color: None,
+            },
+            DrawingItem {
+                kind: DrawingKind::Rectangle,
+                points: vec![(0.2, 0.2), (0.8, 0.8)],
+                color: 0x00FF00FF,
+                width: 4.0,
+                fill_color: Some(0xFFFF0080),
+            },
+        ];
+        drawing.drawing_animation_reveal_ns = 600_000_000;
+        let drawing_id = drawing.id.clone();
+        track.add_clip(drawing);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(
+            xml.contains("us:clip-kind=\"drawing\""),
+            "expected us:clip-kind=drawing in writer output:\n{}",
+            xml
+        );
+        assert!(xml.contains("us:drawing-items="));
+        assert!(xml.contains("us:drawing-animation-reveal-ns=\"600000000\""));
+
+        let parsed = parse_fcpxml(&xml).expect("parse written xml");
+        let restored = parsed
+            .video_tracks()
+            .next()
+            .expect("video track")
+            .clips
+            .iter()
+            .find(|c| c.id == drawing_id)
+            .expect("drawing clip preserved");
+        assert_eq!(restored.kind, ClipKind::Drawing);
+        assert_eq!(restored.drawing_items.len(), 2);
+        assert_eq!(restored.drawing_items[0].kind, DrawingKind::Stroke);
+        assert_eq!(restored.drawing_items[0].color, 0xFF0000FF);
+        assert_eq!(restored.drawing_items[1].kind, DrawingKind::Rectangle);
+        assert_eq!(restored.drawing_items[1].fill_color, Some(0xFFFF0080));
+        assert_eq!(restored.drawing_animation_reveal_ns, 600_000_000);
+        // Drawings render from vector data; source_path stays empty so
+        // stale preview-cache paths don't persist across save/load.
+        assert_eq!(restored.source_path, "");
     }
 }

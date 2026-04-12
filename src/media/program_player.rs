@@ -947,6 +947,12 @@ pub struct ProgramClip {
     pub bg_removal_enabled: bool,
     /// AI background removal threshold: 0.0 (aggressive) to 1.0 (conservative).
     pub bg_removal_threshold: f64,
+    /// Animation to apply to a title clip.
+    pub title_animation: crate::model::clip::TitleAnimation,
+    /// Duration of the title animation (procedural part).
+    pub title_animation_duration_ns: u64,
+    /// Vector items for drawing clips.
+    pub drawing_items: Vec<crate::model::clip::DrawingItem>,
     /// User-applied frei0r filter effects, ordered first-to-last.
     pub frei0r_effects: Vec<crate::model::clip::Frei0rEffect>,
     /// Optional motion-tracking attachment for the clip transform.
@@ -5729,6 +5735,94 @@ impl ProgramPlayer {
             }
         }
         // Don't flush here — caller schedules a debounced compositor flush.
+    }
+
+    /// Apply procedural title animations (Typewriter / Fade / Pop) to every
+    /// slot whose clip has a non-None `title_animation`. Called from the
+    /// ~30 FPS program-monitor tick with the current timeline position.
+    ///
+    /// Typewriter: sets `textoverlay.text` to a prefix of `title_text` based
+    ///   on progress (0..=1 over `title_animation_duration_ns`).
+    /// Fade: scales the compositor pad's alpha from 0→1. Combines
+    ///   multiplicatively with any clip-level opacity already applied.
+    /// Pop: scales the compositor pad's width/height from 0→native around
+    ///   the pad's current centre.
+    pub fn apply_title_animations(&self, timeline_pos_ns: u64) {
+        use crate::model::clip::TitleAnimation;
+        if self.clips.is_empty() || self.slots.is_empty() {
+            return;
+        }
+        for (clip_idx, clip) in self.clips.iter().enumerate() {
+            if !clip.is_title {
+                continue;
+            }
+            if matches!(clip.title_animation, TitleAnimation::None) {
+                continue;
+            }
+            // Clip-local time (ns since the clip's timeline_start).
+            let local_ns = timeline_pos_ns.saturating_sub(clip.timeline_start_ns);
+            let clip_end = clip.timeline_start_ns.saturating_add(
+                clip.source_out_ns.saturating_sub(clip.source_in_ns),
+            );
+            if timeline_pos_ns < clip.timeline_start_ns || timeline_pos_ns >= clip_end {
+                continue;
+            }
+            let progress = crate::media::drawing_render::animation_progress(
+                local_ns,
+                clip.title_animation_duration_ns,
+            );
+            let Some(slot) = self.slot_for_clip(clip_idx) else {
+                continue;
+            };
+            match clip.title_animation {
+                TitleAnimation::None => {}
+                TitleAnimation::Typewriter => {
+                    if let Some(ref to) = slot.textoverlay {
+                        let visible =
+                            crate::media::drawing_render::typewriter_visible_chars(
+                                &clip.title_text,
+                                progress,
+                            );
+                        let prefix: String = clip.title_text.chars().take(visible).collect();
+                        to.set_property("silent", prefix.is_empty());
+                        to.set_property("text", &prefix);
+                    }
+                }
+                TitleAnimation::Fade => {
+                    if let Some(ref pad) = slot.compositor_pad {
+                        // Compose with clip-level opacity so keyframed alpha
+                        // and procedural fade multiply.
+                        let base = clip.opacity_at_timeline_ns(timeline_pos_ns);
+                        pad.set_property("alpha", base * progress);
+                    }
+                }
+                TitleAnimation::Pop => {
+                    if let Some(ref pad) = slot.compositor_pad {
+                        if pad.find_property("width").is_some()
+                            && pad.find_property("height").is_some()
+                        {
+                            let scale_prog = progress.max(0.01);
+                            let base_scale = clip.scale_at_timeline_ns(timeline_pos_ns);
+                            let effective = base_scale * scale_prog;
+                            let pw = self.project_width as f64;
+                            let ph = self.project_height as f64;
+                            let sw = (pw * effective).round().max(1.0) as i32;
+                            let sh = (ph * effective).round().max(1.0) as i32;
+                            pad.set_property("width", sw);
+                            pad.set_property("height", sh);
+                            if pad.find_property("xpos").is_some()
+                                && pad.find_property("ypos").is_some()
+                            {
+                                let xpos = ((pw - sw as f64) * 0.5).round() as i32;
+                                let ypos = ((ph - sh as f64) * 0.5).round() as i32;
+                                pad.set_property("xpos", xpos);
+                                pad.set_property("ypos", ypos);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Fire-and-forget compositor flush.  Sends a FLUSH seek so the
@@ -12855,6 +12949,7 @@ impl ProgramPlayer {
         if clip.title_text.trim().is_empty() {
             return String::new();
         }
+        use crate::model::clip::TitleAnimation;
         const REF_H: f64 = 1080.0;
         let text =
             crate::media::title_font::escape_drawtext_value(&clip.title_text).replace('\n', "\\n");
@@ -12866,14 +12961,13 @@ impl ProgramPlayer {
         let scaled_size = font_size * (4.0 / 3.0) * scale_factor;
         let (r, g, b, a) = crate::ui::colors::rgba_u32_to_u8(clip.title_color);
         let alpha = (a as f64 / 255.0).clamp(0.0, 1.0);
-        let mut filter = format!(
-            ",drawtext={font_option}:text='{text}':fontsize={scaled_size:.2}:fontcolor={r:02x}{g:02x}{b:02x}@{alpha:.4}:x='({rel_x:.6})*w-text_w/2':y='({rel_y:.6})*h-text_h/2'"
-        );
+
+        let mut style = String::new();
         if clip.title_outline_width > 0.0 {
             let bw = (clip.title_outline_width * scale_factor).max(0.5);
             let (or_, og, ob, oa) = crate::ui::colors::rgba_u32_to_u8(clip.title_outline_color);
             let o_alpha = (oa as f64 / 255.0).clamp(0.0, 1.0);
-            filter.push_str(&format!(
+            style.push_str(&format!(
                 ":borderw={bw:.1}:bordercolor={or_:02x}{og:02x}{ob:02x}@{o_alpha:.4}"
             ));
         }
@@ -12882,7 +12976,7 @@ impl ProgramPlayer {
             let sy = (clip.title_shadow_offset_y * scale_factor).round() as i32;
             let (sr, sg, sb, sa) = crate::ui::colors::rgba_u32_to_u8(clip.title_shadow_color);
             let s_alpha = (sa as f64 / 255.0).clamp(0.0, 1.0);
-            filter.push_str(&format!(
+            style.push_str(&format!(
                 ":shadowx={sx}:shadowy={sy}:shadowcolor={sr:02x}{sg:02x}{sb:02x}@{s_alpha:.4}"
             ));
         }
@@ -12890,9 +12984,55 @@ impl ProgramPlayer {
             let pad = (clip.title_bg_box_padding * scale_factor).round() as i32;
             let (br, bgg, bb, ba) = crate::ui::colors::rgba_u32_to_u8(clip.title_bg_box_color);
             let b_alpha = (ba as f64 / 255.0).clamp(0.0, 1.0);
-            filter.push_str(&format!(
+            style.push_str(&format!(
                 ":box=1:boxcolor={br:02x}{bgg:02x}{bb:02x}@{b_alpha:.4}:boxborderw={pad}"
             ));
+        }
+
+        let dur_s = (clip.title_animation_duration_ns as f64 / 1_000_000_000.0).max(1e-6);
+        let pos_x = format!("({rel_x:.6})*w-text_w/2");
+        let pos_y = format!("({rel_y:.6})*h-text_h/2");
+        let base_color = format!("{r:02x}{g:02x}{b:02x}@{alpha:.4}");
+
+        let mut filter = String::new();
+        match clip.title_animation {
+            TitleAnimation::None | TitleAnimation::Pop => {
+                filter.push_str(&format!(
+                    ",drawtext={font_option}:text='{text}':fontsize={scaled_size:.2}:fontcolor={base_color}:x='{pos_x}':y='{pos_y}'{style}"
+                ));
+            }
+            TitleAnimation::Fade => {
+                let alpha_expr = format!("min(1,max(0,t/{dur_s:.4}))*{alpha:.4}");
+                filter.push_str(&format!(
+                    ",drawtext={font_option}:text='{text}':fontsize={scaled_size:.2}:fontcolor={r:02x}{g:02x}{b:02x}:x='{pos_x}':y='{pos_y}':alpha='{alpha_expr}'{style}"
+                ));
+            }
+            TitleAnimation::Typewriter => {
+                let char_count = clip.title_text.chars().count();
+                if char_count == 0 {
+                    filter.push_str(&format!(
+                        ",drawtext={font_option}:text='{text}':fontsize={scaled_size:.2}:fontcolor={base_color}:x='{pos_x}':y='{pos_y}'{style}"
+                    ));
+                } else {
+                    let step = dur_s / char_count as f64;
+                    for i in 0..char_count {
+                        let prefix: String = clip.title_text.chars().take(i + 1).collect();
+                        let prefix_esc =
+                            crate::media::title_font::escape_drawtext_value(&prefix)
+                                .replace('\n', "\\n");
+                        let t0 = i as f64 * step;
+                        let enable = if i + 1 == char_count {
+                            format!("gte(t\\,{t0:.4})")
+                        } else {
+                            let t1 = (i + 1) as f64 * step;
+                            format!("between(t\\,{t0:.4}\\,{t1:.4})")
+                        };
+                        filter.push_str(&format!(
+                            ",drawtext={font_option}:text='{prefix_esc}':fontsize={scaled_size:.2}:fontcolor={base_color}:x='{pos_x}':y='{pos_y}':enable='{enable}'{style}"
+                        ));
+                    }
+                }
+            }
         }
         filter
     }
@@ -16929,6 +17069,9 @@ mod tests {
             anamorphic_desqueeze: 1.0,
             masks: Vec::new(),
             hsl_qualifier: None,
+            title_animation: crate::model::clip::TitleAnimation::None,
+            title_animation_duration_ns: 1_000_000_000,
+            drawing_items: Vec::new(),
         }
     }
 

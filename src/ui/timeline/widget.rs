@@ -137,7 +137,7 @@ fn track_index_at_y_in_project(project: &crate::model::project::Project, y: f64)
     track_index_at_y_in_tracks(&project.tracks, y)
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveTool {
     Select,
     Razor,
@@ -145,6 +145,8 @@ pub enum ActiveTool {
     Roll,
     Slip,
     Slide,
+    /// Vector drawing tool for ClipKind::Drawing.
+    Draw,
 }
 
 /// What a drag gesture is currently doing
@@ -3721,7 +3723,8 @@ fn clip_kind_to_track_kind(kind: &ClipKind) -> TrackKind {
         | ClipKind::Adjustment
         | ClipKind::Compound
         | ClipKind::Multicam
-        | ClipKind::Audition => TrackKind::Video,
+        | ClipKind::Audition
+        | ClipKind::Drawing => TrackKind::Video,
     }
 }
 
@@ -5329,7 +5332,11 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         return;
                     }
                 }
-                match st.active_tool.clone() {
+                match st.active_tool {
+                    ActiveTool::Draw => {
+                        // Drawing happens on the program monitor overlay,
+                        // not the timeline — ignore timeline clicks.
+                    }
                     ActiveTool::Razor => {
                         // Razor cut at click position on the clicked track
                         let ns = st.x_to_ns(x);
@@ -7411,6 +7418,16 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         ActiveTool::Select
                     } else {
                         ActiveTool::Slide
+                    };
+                    notify_tool = Some(st.active_tool.clone());
+                    true
+                }
+                Key::d | Key::D if !ctrl => {
+                    // D = Draw
+                    st.active_tool = if st.active_tool == ActiveTool::Draw {
+                        ActiveTool::Select
+                    } else {
+                        ActiveTool::Draw
                     };
                     notify_tool = Some(st.active_tool.clone());
                     true

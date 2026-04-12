@@ -8,6 +8,8 @@ pub mod audio_sync;
 pub mod bg_removal_cache;
 pub mod color_match;
 pub mod cube_lut;
+pub mod drawing_render;
+pub mod drawing_svg;
 pub mod export;
 pub mod frame_interp_cache;
 pub mod frei0r_registry;

@@ -2109,6 +2109,23 @@ fn build_source_clip(
     link_group_id: Option<&str>,
     media_duration_ns: Option<u64>,
 ) -> Clip {
+    // SVG exports from `drawing_svg::drawing_to_svg` carry a stamp in
+    // the root element. When we see one of our own SVGs get dragged
+    // in as an image, convert it back into a proper `ClipKind::Drawing`
+    // clip so the vector data, animation timing, and editing tools
+    // all work again instead of routing an SVG through the PNG
+    // image pipeline.
+    if matches!(kind, ClipKind::Image)
+        && source_path.to_ascii_lowercase().ends_with(".svg")
+    {
+        if let Some(clip) = try_build_drawing_clip_from_svg(
+            source_path,
+            source_out_ns,
+            timeline_start_ns,
+        ) {
+            return clip;
+        }
+    }
     let mut clip = Clip::new(
         source_path.to_string(),
         source_out_ns,
@@ -2122,6 +2139,32 @@ fn build_source_clip(
     clip.link_group_id = link_group_id.map(str::to_string);
     clip.media_duration_ns = media_duration_ns;
     clip
+}
+
+/// Read an SVG file and, if it's one of our own `drawing_to_svg`
+/// exports, build a `ClipKind::Drawing` clip with vector items and
+/// reveal timing preserved. Returns `None` if the file doesn't
+/// exist, isn't valid SVG, isn't our format, or contains zero
+/// drawable items.
+fn try_build_drawing_clip_from_svg(
+    source_path: &str,
+    source_out_ns: u64,
+    timeline_start_ns: u64,
+) -> Option<Clip> {
+    let content = std::fs::read_to_string(source_path).ok()?;
+    let parsed = crate::media::drawing_svg::try_parse_ultimate_slice_svg(&content)?;
+    if parsed.items.is_empty() {
+        return None;
+    }
+    let mut clip = Clip::new("", source_out_ns, timeline_start_ns, ClipKind::Drawing);
+    let stem = std::path::Path::new(source_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Drawing");
+    clip.label = stem.to_string();
+    clip.drawing_items = parsed.items;
+    clip.drawing_animation_reveal_ns = parsed.reveal_ns;
+    Some(clip)
 }
 
 fn media_item_frame_rate(item: &MediaItem) -> Option<FrameRate> {
@@ -4589,8 +4632,70 @@ fn clip_to_program_clips(
     suppress_embedded_audio_ids: &std::collections::HashSet<String>,
     timeline_offset: u64,
     depth: usize,
+    project_fps_num: u32,
+    project_fps_den: u32,
 ) -> Vec<ProgramClip> {
     use crate::model::clip::ClipKind;
+
+    // Drawing clips: rasterize the vector items into a PNG and feed the
+    // downstream pipeline an image-backed clip. Falls through to the main
+    // ProgramClip construction below with a redirected source_path.
+    let mut drawing_redirect: Option<crate::model::clip::Clip> = None;
+    if c.kind == ClipKind::Drawing {
+        // Fixed rendering resolution matches 1080p reference used by
+        // `DrawingItem::width`. The downstream pipeline will scale to the
+        // project canvas via its normal image / video path.
+        const DRAW_W: i32 = 1920;
+        const DRAW_H: i32 = 1080;
+        if c.drawing_animation_reveal_ns > 0 {
+            // Animated: bake a WebM (VP9 / alpha) in a background
+            // thread. If the cache hit, use it immediately. Otherwise
+            // the non-blocking helper schedules the encode and we fall
+            // back to the static PNG for this render pass — the
+            // installed completion callback will re-trigger
+            // `on_project_changed` once the WebM is ready so the
+            // animated version takes over on the next pass.
+            let clip_duration_ns = c.duration();
+            if let Some(webm_path) = crate::media::drawing_render::
+                ensure_drawing_animation_webm_nonblocking(
+                    &c.id,
+                    &c.drawing_items,
+                    DRAW_W,
+                    DRAW_H,
+                    project_fps_num.max(1),
+                    project_fps_den.max(1),
+                    clip_duration_ns,
+                    c.drawing_animation_reveal_ns,
+                )
+            {
+                let mut redirected = c.clone();
+                redirected.source_path = webm_path.to_string_lossy().into_owned();
+                redirected.source_in = 0;
+                redirected.source_out = clip_duration_ns;
+                drawing_redirect = Some(redirected);
+            }
+        }
+        if drawing_redirect.is_none() {
+            match crate::media::drawing_render::ensure_drawing_png(
+                &c.id,
+                &c.drawing_items,
+                DRAW_W,
+                DRAW_H,
+            ) {
+                Ok(png_path) => {
+                    let mut redirected = c.clone();
+                    redirected.source_path = png_path.to_string_lossy().into_owned();
+                    redirected.kind = ClipKind::Image;
+                    drawing_redirect = Some(redirected);
+                }
+                Err(e) => {
+                    log::warn!("drawing clip {}: failed to rasterize PNG: {e}", c.id);
+                    return Vec::new();
+                }
+            }
+        }
+    }
+    let c = drawing_redirect.as_ref().unwrap_or(c);
 
     // Compound clips: recursively flatten internal clips
     if c.kind == ClipKind::Compound && depth < 16 {
@@ -4626,6 +4731,8 @@ fn clip_to_program_clips(
                         suppress_embedded_audio_ids,
                         compound_offset,
                         depth + 1,
+                        project_fps_num,
+                        project_fps_den,
                     ));
                 }
             }
@@ -4727,6 +4834,8 @@ fn clip_to_program_clips(
                     suppress_embedded_audio_ids,
                     0,
                     depth + 1,
+                    project_fps_num,
+                    project_fps_den,
                 );
                 // Video segments have no embedded audio (audio comes from the mix below)
                 for pc in &mut seg_results {
@@ -4768,6 +4877,8 @@ fn clip_to_program_clips(
                     suppress_embedded_audio_ids,
                     0,
                     depth + 1,
+                    project_fps_num,
+                    project_fps_den,
                 );
                 result.extend(audio_results);
             }
@@ -4894,6 +5005,7 @@ fn clip_to_program_clips(
             && c.kind != ClipKind::Adjustment
             && c.kind != ClipKind::Compound
             && c.kind != ClipKind::Multicam
+            && c.kind != ClipKind::Drawing
             && !suppress_embedded_audio_ids.contains(&c.id),
         // Defensive: ClipKind::Image is the source of truth, but also fall
         // back to extension sniffing in case the kind drifted on a stale or
@@ -4926,6 +5038,9 @@ fn clip_to_program_clips(
         chroma_key_softness: c.chroma_key_softness,
         bg_removal_enabled: c.bg_removal_enabled,
         bg_removal_threshold: c.bg_removal_threshold,
+        title_animation: c.title_animation,
+        title_animation_duration_ns: c.title_animation_duration_ns,
+        drawing_items: c.drawing_items.clone(),
         frei0r_effects: c.frei0r_effects.clone(),
         tracking_binding: c.tracking_binding.clone(),
         masks: c.masks.clone(),
@@ -11033,6 +11148,114 @@ pub fn build_window(
                     sync_tracking_controls();
                 }
             },
+            {
+                let project = project.clone();
+                let timeline_state = timeline_state.clone();
+                let on_project_changed = on_project_changed.clone();
+                move |stroke| {
+                    let mut proj = project.borrow_mut();
+                    let playhead = timeline_state.borrow().playhead_ns;
+                    let selected_track_id = timeline_state.borrow().selected_track_id.clone();
+
+                    let mut target_clip_id = None;
+                    if let Some(ref tid) = selected_track_id {
+                        if let Some(track) = proj.track_mut(tid) {
+                            for clip in &mut track.clips {
+                                if clip.kind == ClipKind::Drawing
+                                    && playhead >= clip.timeline_start
+                                    && playhead < clip.timeline_start + clip.duration()
+                                {
+                                    target_clip_id = Some(clip.id.clone());
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some(clip_id) = target_clip_id {
+                        let old_items = proj
+                            .clip_ref(&clip_id)
+                            .map(|c| c.drawing_items.clone())
+                            .unwrap_or_default();
+                        let mut new_items = old_items.clone();
+                        new_items.push(stroke);
+                        timeline_state.borrow_mut().history.execute(
+                            Box::new(crate::undo::SetDrawingItemsCommand {
+                                clip_id,
+                                old_items,
+                                new_items,
+                            }),
+                            &mut proj,
+                        );
+                    } else if let Some(ref tid) = selected_track_id {
+                        let mut new_clip = Clip::new("", 2_000_000_000, playhead, ClipKind::Drawing);
+                        new_clip.label = "Drawing".to_string();
+                        new_clip.drawing_items.push(stroke);
+                        timeline_state.borrow_mut().history.execute(
+                            Box::new(crate::undo::AddClipCommand {
+                                track_id: tid.clone(),
+                                clip: new_clip,
+                            }),
+                            &mut proj,
+                        );
+                    }
+                    // `on_project_changed` re-borrows the project for
+                    // window-title + preview rebuild; drop our mutable
+                    // borrow first to avoid a `RefCell already
+                    // mutably borrowed` panic mid-drag_end.
+                    drop(proj);
+                    on_project_changed();
+                }
+            },
+            {
+                // Delete key in Draw tool: pop the most recent drawing
+                // item from the drawing clip under the playhead.
+                let project = project.clone();
+                let timeline_state = timeline_state.clone();
+                let on_project_changed = on_project_changed.clone();
+                move || {
+                    let mut proj = project.borrow_mut();
+                    let playhead = timeline_state.borrow().playhead_ns;
+                    let selected_track_id = timeline_state.borrow().selected_track_id.clone();
+                    let mut target_clip_id = None;
+                    if let Some(ref tid) = selected_track_id {
+                        if let Some(track) = proj.track_mut(tid) {
+                            for clip in &track.clips {
+                                if clip.kind == ClipKind::Drawing
+                                    && playhead >= clip.timeline_start
+                                    && playhead < clip.timeline_start + clip.duration()
+                                    && !clip.drawing_items.is_empty()
+                                {
+                                    target_clip_id = Some(clip.id.clone());
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if let Some(clip_id) = target_clip_id {
+                        let old_items = proj
+                            .clip_ref(&clip_id)
+                            .map(|c| c.drawing_items.clone())
+                            .unwrap_or_default();
+                        if old_items.is_empty() {
+                            return;
+                        }
+                        let mut new_items = old_items.clone();
+                        new_items.pop();
+                        timeline_state.borrow_mut().history.execute(
+                            Box::new(crate::undo::SetDrawingItemsCommand {
+                                clip_id,
+                                old_items,
+                                new_items,
+                            }),
+                            &mut proj,
+                        );
+                        drop(proj);
+                        on_project_changed();
+                    }
+                }
+            },
+            timeline_state.borrow().active_tool.clone(),
         ));
         // Initialise project dimensions (default 1920×1080 until first on_project_changed)
         {
@@ -11044,6 +11267,402 @@ pub fn build_window(
         let to = transform_overlay.clone();
         *transform_overlay_cell.borrow_mut() = Some(transform_overlay);
         sync_tracking_controls();
+
+        // Background WebM encodes notify the app via this callback so
+        // the preview rebuilds once the baked animation is on disk.
+        // `on_project_changed` is idempotent — calling it when no
+        // project fields have changed is a cheap no-op.
+        {
+            let on_project_changed = on_project_changed.clone();
+            crate::media::drawing_render::install_drawing_encode_complete_callback(
+                Box::new(move || {
+                    on_project_changed();
+                }),
+            );
+        }
+
+        // Forward tool changes (toolbar or keyboard) to the overlay so
+        // its gesture router switches into Draw-mode capture. Wraps any
+        // pre-installed `on_tool_changed` (toolbar button sync) so both
+        // listeners run.
+        {
+            let overlay_cell = transform_overlay_cell.clone();
+            let mut st = timeline_state.borrow_mut();
+            let prior = st.on_tool_changed.take();
+            st.on_tool_changed = Some(std::rc::Rc::new(
+                move |tool: crate::ui::timeline::ActiveTool| {
+                    if let Some(prev) = prior.as_ref() {
+                        prev(tool);
+                    }
+                    if let Some(ref ov) = *overlay_cell.borrow() {
+                        ov.set_active_tool(tool);
+                    }
+                },
+            ));
+        }
+
+        // ── Draw-tool brush popover (color / width / fill / shape) ──
+        // Attaches a MenuButton into the header next to the existing
+        // tool buttons. Changes route through the TransformOverlay
+        // setters, so the HUD updates immediately.
+        {
+            use gtk::prelude::*;
+            let overlay_cell = transform_overlay_cell.clone();
+            let menu_btn = gtk::MenuButton::new();
+            menu_btn.set_icon_name("applications-graphics-symbolic");
+            menu_btn.set_tooltip_text(Some("Draw-tool brush options"));
+            let pop = gtk::Popover::new();
+            // Click-outside and Escape dismiss the popover. Without the
+            // explicit cascade flag, nested modal dialogs (the color
+            // chooser that `ColorDialogButton` spawns) can leave the
+            // popover's autohide grab in a half-armed state so it
+            // ignores the next outside click.
+            pop.set_autohide(true);
+            pop.set_cascade_popdown(true);
+            let vbox = gtk::Box::new(gtk::Orientation::Vertical, 6);
+            vbox.set_margin_start(10);
+            vbox.set_margin_end(10);
+            vbox.set_margin_top(10);
+            vbox.set_margin_bottom(10);
+
+            // Shape kind.
+            let shape_dd = gtk::DropDown::from_strings(&[
+                "Stroke", "Rectangle", "Ellipse", "Arrow",
+            ]);
+            vbox.append(&gtk::Label::builder().label("Shape").xalign(0.0).build());
+            vbox.append(&shape_dd);
+
+            // Stroke color.
+            let color_dialog = gtk::ColorDialog::new();
+            color_dialog.set_with_alpha(true);
+            let color_btn = gtk::ColorDialogButton::new(Some(color_dialog));
+            color_btn.set_rgba(&gdk4::RGBA::new(1.0, 0.0, 0.0, 1.0));
+            vbox.append(&gtk::Label::builder().label("Color").xalign(0.0).build());
+            vbox.append(&color_btn);
+
+            // Width.
+            let width_spin = gtk::SpinButton::with_range(1.0, 50.0, 1.0);
+            width_spin.set_value(5.0);
+            width_spin.set_digits(0);
+            vbox.append(&gtk::Label::builder().label("Width (px)").xalign(0.0).build());
+            vbox.append(&width_spin);
+
+            // Fill toggle + color.
+            let fill_toggle = gtk::CheckButton::with_label("Fill (Rectangle / Ellipse)");
+            vbox.append(&fill_toggle);
+            let fill_dialog = gtk::ColorDialog::new();
+            fill_dialog.set_with_alpha(true);
+            let fill_btn = gtk::ColorDialogButton::new(Some(fill_dialog));
+            fill_btn.set_rgba(&gdk4::RGBA::new(1.0, 1.0, 0.0, 0.5));
+            fill_btn.set_sensitive(false);
+            vbox.append(&fill_btn);
+
+            // In-video reveal animation for the drawing clip under the
+            // playhead: toggle + per-item duration slider. 0 = static.
+            vbox.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+            vbox.append(
+                &gtk::Label::builder()
+                    .label("Animate drawing under playhead (preview + export)")
+                    .xalign(0.0)
+                    .build(),
+            );
+            let animate_toggle = gtk::CheckButton::with_label("Enable reveal animation");
+            vbox.append(&animate_toggle);
+            vbox.append(
+                &gtk::Label::builder()
+                    .label("Per-item reveal duration (seconds)")
+                    .xalign(0.0)
+                    .build(),
+            );
+            let anim_duration_scale =
+                gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.1, 3.0, 0.1);
+            anim_duration_scale.set_value(0.6);
+            anim_duration_scale.set_draw_value(true);
+            anim_duration_scale.set_digits(1);
+            anim_duration_scale.set_hexpand(true);
+            anim_duration_scale.set_sensitive(false);
+            vbox.append(&anim_duration_scale);
+
+            // Export SVG section (operates on the drawing clip under the
+            // playhead on the selected track).
+            vbox.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+            vbox.append(
+                &gtk::Label::builder()
+                    .label("Export drawing under playhead as SVG")
+                    .xalign(0.0)
+                    .build(),
+            );
+            let export_static_btn = gtk::Button::with_label("Static SVG…");
+            let export_animated_btn = gtk::Button::with_label("Animated SVG…");
+            let svg_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            svg_row.append(&export_static_btn);
+            svg_row.append(&export_animated_btn);
+            vbox.append(&svg_row);
+
+            pop.set_child(Some(&vbox));
+            menu_btn.set_popover(Some(&pop));
+            header.pack_start(&menu_btn);
+
+            // Helper: convert RGBA → 0xRRGGBBAA u32.
+            fn rgba_to_u32(c: &gdk4::RGBA) -> u32 {
+                let r = (c.red() * 255.0).round().clamp(0.0, 255.0) as u32;
+                let g = (c.green() * 255.0).round().clamp(0.0, 255.0) as u32;
+                let b = (c.blue() * 255.0).round().clamp(0.0, 255.0) as u32;
+                let a = (c.alpha() * 255.0).round().clamp(0.0, 255.0) as u32;
+                (r << 24) | (g << 16) | (b << 8) | a
+            }
+
+            {
+                let overlay_cell = overlay_cell.clone();
+                shape_dd.connect_selected_notify(move |dd| {
+                    use crate::model::clip::DrawingKind;
+                    let k = match dd.selected() {
+                        1 => DrawingKind::Rectangle,
+                        2 => DrawingKind::Ellipse,
+                        3 => DrawingKind::Arrow,
+                        _ => DrawingKind::Stroke,
+                    };
+                    if let Some(ref ov) = *overlay_cell.borrow() {
+                        ov.set_drawing_kind(k);
+                    }
+                });
+            }
+            {
+                let overlay_cell = overlay_cell.clone();
+                color_btn.connect_rgba_notify(move |b| {
+                    if let Some(ref ov) = *overlay_cell.borrow() {
+                        ov.set_drawing_color(rgba_to_u32(&b.rgba()));
+                    }
+                });
+            }
+            {
+                let overlay_cell = overlay_cell.clone();
+                width_spin.connect_value_changed(move |s| {
+                    if let Some(ref ov) = *overlay_cell.borrow() {
+                        ov.set_drawing_width(s.value());
+                    }
+                });
+            }
+            {
+                let overlay_cell = overlay_cell.clone();
+                let fill_btn = fill_btn.clone();
+                fill_toggle.connect_toggled(move |t| {
+                    let on = t.is_active();
+                    fill_btn.set_sensitive(on);
+                    if let Some(ref ov) = *overlay_cell.borrow() {
+                        ov.set_drawing_fill(if on { Some(rgba_to_u32(&fill_btn.rgba())) } else { None });
+                    }
+                });
+            }
+            {
+                let overlay_cell = overlay_cell.clone();
+                let fill_toggle = fill_toggle.clone();
+                fill_btn.connect_rgba_notify(move |b| {
+                    if !fill_toggle.is_active() {
+                        return;
+                    }
+                    if let Some(ref ov) = *overlay_cell.borrow() {
+                        ov.set_drawing_fill(Some(rgba_to_u32(&b.rgba())));
+                    }
+                });
+            }
+
+            // Drawing-animation: write a new `drawing_animation_reveal_ns`
+            // value to **every** drawing clip in the project and rebuild
+            // the preview. This is deliberately global rather than
+            // playhead-scoped — users reading the toggle as "enable
+            // animation" don't intuitively need to put the playhead
+            // inside a specific clip for the switch to take effect.
+            // Returns (changed_count, drawing_clip_count).
+            fn apply_drawing_reveal(
+                project: &std::cell::RefCell<crate::model::project::Project>,
+                reveal_ns: u64,
+            ) -> (usize, usize) {
+                let mut proj = project.borrow_mut();
+                let mut changed = 0usize;
+                let mut total = 0usize;
+                for track in proj.tracks.iter_mut() {
+                    for clip in track.clips.iter_mut() {
+                        if clip.kind == crate::model::clip::ClipKind::Drawing {
+                            total += 1;
+                            if clip.drawing_animation_reveal_ns != reveal_ns {
+                                clip.drawing_animation_reveal_ns = reveal_ns;
+                                changed += 1;
+                            }
+                        }
+                    }
+                }
+                if changed > 0 {
+                    proj.dirty = true;
+                }
+                (changed, total)
+            }
+
+            {
+                let project = project.clone();
+                let on_project_changed = on_project_changed.clone();
+                let scale = anim_duration_scale.clone();
+                let window_weak = window.downgrade();
+                animate_toggle.connect_toggled(move |t| {
+                    scale.set_sensitive(t.is_active());
+                    let reveal_ns = if t.is_active() {
+                        (scale.value() * 1_000_000_000.0) as u64
+                    } else {
+                        0
+                    };
+                    let (changed, total) = apply_drawing_reveal(&project, reveal_ns);
+                    log::info!(
+                        "drawing reveal toggle: reveal_ns={reveal_ns} total_drawings={total} changed={changed}"
+                    );
+                    if total == 0 {
+                        if let Some(w) = window_weak.upgrade() {
+                            let alert = gtk::AlertDialog::builder()
+                                .message("No drawings in project")
+                                .detail(
+                                    "Press D and draw on the program monitor first; \
+                                     this toggle animates any drawings you've created.",
+                                )
+                                .buttons(["OK"])
+                                .build();
+                            alert.show(Some(&w));
+                        }
+                    } else if changed > 0 {
+                        on_project_changed();
+                    }
+                });
+            }
+            {
+                let project = project.clone();
+                let on_project_changed = on_project_changed.clone();
+                let toggle = animate_toggle.clone();
+                anim_duration_scale.connect_value_changed(move |s| {
+                    if !toggle.is_active() {
+                        return;
+                    }
+                    let reveal_ns = (s.value() * 1_000_000_000.0) as u64;
+                    let (changed, _total) = apply_drawing_reveal(&project, reveal_ns);
+                    if changed > 0 {
+                        on_project_changed();
+                    }
+                });
+            }
+
+            // SVG export: locate a drawing clip under the playhead on
+            // the selected track and serialise it. Returns None if no
+            // drawing clip is found — callers surface that to the user.
+            fn find_current_drawing(
+                project: &std::cell::RefCell<crate::model::project::Project>,
+                timeline_state: &std::cell::RefCell<crate::ui::timeline::TimelineState>,
+            ) -> Option<(Vec<crate::model::clip::DrawingItem>, String)> {
+                let proj = project.borrow();
+                let ts = timeline_state.borrow();
+                let playhead = ts.playhead_ns;
+                let tid = ts.selected_track_id.clone()?;
+                let track = proj.tracks.iter().find(|t| t.id == tid)?;
+                for clip in &track.clips {
+                    if clip.kind == crate::model::clip::ClipKind::Drawing
+                        && playhead >= clip.timeline_start
+                        && playhead < clip.timeline_start + clip.duration()
+                    {
+                        return Some((clip.drawing_items.clone(), clip.label.clone()));
+                    }
+                }
+                None
+            }
+
+            fn run_svg_export(
+                window: &gtk::ApplicationWindow,
+                pop: &gtk::Popover,
+                project: std::rc::Rc<std::cell::RefCell<crate::model::project::Project>>,
+                timeline_state: std::rc::Rc<
+                    std::cell::RefCell<crate::ui::timeline::TimelineState>,
+                >,
+                animated: bool,
+            ) {
+                let Some((items, label)) = find_current_drawing(&project, &timeline_state)
+                else {
+                    let alert = gtk::AlertDialog::builder()
+                        .message("No drawing under playhead")
+                        .detail(
+                            "Select a track containing a drawing clip and put \
+                             the playhead inside it, then retry.",
+                        )
+                        .buttons(["OK"])
+                        .build();
+                    alert.show(Some(window));
+                    return;
+                };
+                pop.popdown();
+                let dialog = gtk::FileDialog::new();
+                dialog.set_title(if animated {
+                    "Export Animated SVG"
+                } else {
+                    "Export Static SVG"
+                });
+                let filter = gtk::FileFilter::new();
+                filter.add_pattern("*.svg");
+                filter.set_name(Some("SVG"));
+                let filters = gio::ListStore::new::<gtk::FileFilter>();
+                filters.append(&filter);
+                dialog.set_filters(Some(&filters));
+                let safe = label
+                    .chars()
+                    .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
+                    .collect::<String>();
+                dialog.set_initial_name(Some(&format!("{safe}.svg")));
+                let proj_w = project.borrow().width.max(1) as i32;
+                let proj_h = project.borrow().height.max(1) as i32;
+                let win_weak = window.downgrade();
+                dialog.save(Some(window), None::<&gio::Cancellable>, move |result| {
+                    let Ok(file) = result else { return };
+                    let Some(path) = file.path() else { return };
+                    let svg = crate::media::drawing_svg::drawing_to_svg(
+                        &items,
+                        proj_w,
+                        proj_h,
+                        if animated {
+                            Some(crate::media::drawing_svg::SvgAnimation::default())
+                        } else {
+                            None
+                        },
+                    );
+                    if let Err(e) = std::fs::write(&path, svg) {
+                        log::error!("SVG export failed: {e}");
+                        if let Some(w) = win_weak.upgrade() {
+                            let alert = gtk::AlertDialog::builder()
+                                .message("SVG export failed")
+                                .detail(&format!("{e}"))
+                                .buttons(["OK"])
+                                .build();
+                            alert.show(Some(&w));
+                        }
+                    } else {
+                        log::info!("exported SVG: {}", path.display());
+                    }
+                });
+            }
+
+            {
+                let project = project.clone();
+                let timeline_state = timeline_state.clone();
+                let pop = pop.clone();
+                let window_weak = window.downgrade();
+                export_static_btn.connect_clicked(move |_| {
+                    let Some(win) = window_weak.upgrade() else { return };
+                    run_svg_export(&win, &pop, project.clone(), timeline_state.clone(), false);
+                });
+            }
+            {
+                let project = project.clone();
+                let timeline_state = timeline_state.clone();
+                let pop = pop.clone();
+                let window_weak = window.downgrade();
+                export_animated_btn.connect_clicked(move |_| {
+                    let Some(win) = window_weak.upgrade() else { return };
+                    run_svg_export(&win, &pop, project.clone(), timeline_state.clone(), true);
+                });
+            }
+        }
 
         program_monitor::build_program_monitor(
             prog_player.clone(),
@@ -11555,6 +12174,9 @@ pub fn build_window(
                     }
                 }
                 player.poll();
+                // Procedural title animations (Typewriter / Fade / Pop) —
+                // driven per-tick so text/alpha/scale follow the playhead.
+                player.apply_title_animations(player.timeline_pos_ns);
                 let (oa, ob) = player.transition_opacities();
                 let sf = if scopes_rev.reveals_child()
                     || monitor_state_poll.borrow().show_false_color
@@ -13494,6 +14116,8 @@ pub fn build_window(
                 // SAFETY: proj is borrowed immutably for the duration of this block;
                 // the raw pointer just avoids a lifetime conflict with the RefCell borrow.
                 let editing_tracks: &[crate::model::track::Track] = unsafe { &*editing_tracks };
+                let proj_fps_num = proj.frame_rate.numerator;
+                let proj_fps_den = proj.frame_rate.denominator;
                 let mut clips: Vec<ProgramClip> = editing_tracks
                     .iter()
                     .enumerate()
@@ -13511,6 +14135,8 @@ pub fn build_window(
                                 &suppress,
                                 0,
                                 0,
+                                proj_fps_num,
+                                proj_fps_den,
                             )
                         })
                     })
@@ -20319,6 +20945,7 @@ fn handle_mcp_command(
                     ClipKind::Compound => "compound",
                     ClipKind::Multicam => "multicam",
                     ClipKind::Audition => "audition",
+                    ClipKind::Drawing => "drawing",
                 }
             }
 

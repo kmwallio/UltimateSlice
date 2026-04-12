@@ -1808,6 +1808,105 @@ impl EditCommand for AddAdjustmentLayerCommand {
     }
 }
 
+/// Add a clip to a track (undo removes it).
+pub struct AddClipCommand {
+    pub clip: Clip,
+    pub track_id: String,
+}
+
+impl EditCommand for AddClipCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            track.add_clip(self.clip.clone());
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            track.remove_clip(&self.clip.id);
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Add clip"
+    }
+}
+
+/// Set drawing items on a clip.
+pub struct SetDrawingItemsCommand {
+    pub clip_id: String,
+    pub old_items: Vec<crate::model::clip::DrawingItem>,
+    pub new_items: Vec<crate::model::clip::DrawingItem>,
+}
+
+impl EditCommand for SetDrawingItemsCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            clip.drawing_items = self.new_items.clone();
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            clip.drawing_items = self.old_items.clone();
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Draw item"
+    }
+}
+
+/// Set title animation on a clip.
+pub struct SetTitleAnimationCommand {
+    pub clip_id: String,
+    pub old_animation: crate::model::clip::TitleAnimation,
+    pub new_animation: crate::model::clip::TitleAnimation,
+}
+
+impl EditCommand for SetTitleAnimationCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            clip.title_animation = self.new_animation;
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            clip.title_animation = self.old_animation;
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set title animation"
+    }
+}
+
+/// Set title animation duration on a clip.
+pub struct SetTitleAnimationDurationCommand {
+    pub clip_id: String,
+    pub old_duration_ns: u64,
+    pub new_duration_ns: u64,
+}
+
+impl EditCommand for SetTitleAnimationDurationCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            clip.title_animation_duration_ns = self.new_duration_ns;
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            clip.title_animation_duration_ns = self.old_duration_ns;
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set animation duration"
+    }
+}
+
 /// Snapshot of a clip's mask state for undo/redo.
 #[derive(Clone, Debug)]
 pub struct ClipMaskSnapshot {

@@ -231,6 +231,51 @@ pub enum ClipKind {
     /// playback/export see a normal clip. Inactive takes live in
     /// [`Clip::audition_takes`].
     Audition,
+    /// A vector-based drawing overlay. Stores freehand brush strokes
+    /// that are rendered over the video track.
+    Drawing,
+}
+
+/// Type of vector item in a [`ClipKind::Drawing`] clip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum DrawingKind {
+    #[default]
+    /// Freehand brush stroke.
+    Stroke,
+    /// Vector rectangle (defined by 2 points: top-left, bottom-right).
+    Rectangle,
+    /// Vector ellipse (defined by 2 points: bounding box corners).
+    Ellipse,
+    /// Vector arrow (defined by 2 points: start, end/head).
+    Arrow,
+}
+
+/// A single vector item in a [`ClipKind::Drawing`] clip.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DrawingItem {
+    pub kind: DrawingKind,
+    /// Sequence of normalized coordinates (0.0 to 1.0) relative to the project canvas.
+    pub points: Vec<(f64, f64)>,
+    /// Stroke color as 0xRRGGBBAA.
+    pub color: u32,
+    /// Stroke width in pixels (relative to 1080p height).
+    pub width: f64,
+    /// Optional fill color as 0xRRGGBBAA.
+    #[serde(default)]
+    pub fill_color: Option<u32>,
+}
+
+/// Type of procedural animation applied to a title clip's entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TitleAnimation {
+    #[default]
+    None,
+    /// Reveals text character-by-character over the animation duration.
+    Typewriter,
+    /// Fades the title's opacity from 0 to 1 over the animation duration.
+    Fade,
+    /// Scales the title from 0 to 1 over the animation duration.
+    Pop,
 }
 
 /// A single alternate take inside an [`ClipKind::Audition`] clip.
@@ -1525,6 +1570,10 @@ impl Frei0rEffect {
     }
 }
 
+fn default_animation_duration() -> u64 {
+    1_000_000_000 // 1 second
+}
+
 /// A single clip placed on the timeline
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Clip {
@@ -1541,6 +1590,26 @@ pub struct Clip {
     /// Human-readable label (defaults to filename)
     pub label: String,
     pub kind: ClipKind,
+    /// Animation to apply to a title clip.
+    #[serde(default)]
+    pub title_animation: TitleAnimation,
+    /// Duration of the title animation (procedural part).
+    #[serde(default = "default_animation_duration")]
+    pub title_animation_duration_ns: u64,
+    /// Vector items for drawing clips.
+    #[serde(default)]
+    pub drawing_items: Vec<DrawingItem>,
+    /// Per-item reveal duration for drawing clips, in nanoseconds.
+    /// `0` (default) renders the drawing statically — all items
+    /// visible from t=0. Non-zero values enable a progressive reveal
+    /// animation: each item takes this long to fully appear, and
+    /// items are staggered by 70% of this value so consecutive
+    /// strokes overlap slightly. The reveal is rendered by
+    /// `drawing_render::rasterize_drawing_surface_at_time` and
+    /// baked into a cached MP4 that the preview + export pipelines
+    /// consume as a normal video source.
+    #[serde(default)]
+    pub drawing_animation_reveal_ns: u64,
     /// Semantic clip color label used for timeline tinting.
     #[serde(default)]
     pub color_label: ClipColorLabel,
@@ -2315,6 +2384,10 @@ impl Clip {
             timeline_start,
             label,
             kind,
+            title_animation: TitleAnimation::None,
+            title_animation_duration_ns: default_animation_duration(),
+            drawing_items: Vec::new(),
+            drawing_animation_reveal_ns: 0,
             color_label: ClipColorLabel::None,
             brightness: 0.0,
             contrast: 1.0,

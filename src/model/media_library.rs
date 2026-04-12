@@ -338,6 +338,7 @@ pub fn non_file_clip_kind_text(kind: &ClipKind) -> &'static str {
         ClipKind::Video => "Generated video clip",
         ClipKind::Audio => "Generated audio clip",
         ClipKind::Image => "Generated image clip",
+        ClipKind::Drawing => "Drawing overlay",
     }
 }
 

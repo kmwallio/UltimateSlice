@@ -565,6 +565,8 @@ Tracking docs:
 - [x] Recent projects list
 - [x] Auto-save (60s timer, writes to /tmp/ultimateslice-autosave.fcpxml when project is dirty)
 - [x] Proxy media generation and management
+- [ ] Proxy Status Badges on timeline clips indicating Original vs. Proxy resolution
+- [ ] Proxy Watermarks (optional visual burn-in for proxy files)
 - [x] Auto-backup with versioned history (timestamped backups to `$XDG_DATA_HOME/ultimateslice/backups/`, per-project pruning, restore UI, configurable in Preferences, MCP `list_backups` tool)
 
 ### Media Management
@@ -620,6 +622,74 @@ Tracking docs:
 - [x] Customizable workspace layouts (save/restore panel arrangements for different tasks)
 - [x] Named project snapshots (create named versions at milestones without separate files)
 
+### UI Polish & Quality of Life
+
+**Discoverability & first-run experience**
+- [ ] Welcome screen polish — hero thumbnail strip from the most recent project, a "What's New in this version" expandable card, and a "Sample project" button that loads a bundled demo `.uspxml` so a fresh install has something to click into
+- [ ] Empty-state guidance in every panel — timeline shows a drop-zone hint when empty ("Drag media here or press ⌘O to import"); media browser surfaces the import button at center; inspector shows a keyboard hint to select a clip
+- [ ] In-app onboarding tour — first-launch coachmark sequence pointing to the five core regions (browser, source monitor, timeline, program monitor, inspector) with skip/replay from Help menu; persist `seen_onboarding_v1` in preferences
+- [ ] Tooltips audit — one-pass review using `set_tooltip_text` on every icon-only button across `inspector.rs` and `toolbar.rs`
+
+**Notifications & feedback**
+- [ ] Toast/notification system (libadwaita-style `AdwToastOverlay` equivalent or custom GTK4) for non-modal feedback: "Project saved", "Export complete", "Proxy generation finished", "SAM mask ready"
+- [ ] Background job tray — single dropdown in the header bar showing all active background jobs (proxy transcode, thumbnail extraction, STT, SAM, MusicGen, RIFE, motion tracking, export queue) with per-job progress and cancel
+- [ ] Undo toast with action label — after Ctrl+Z show "Undid: trim clip" briefly, reusing the existing `EditCommand::description()` strings
+
+**Timeline polish**
+- [ ] Hover Scrubbing (Scrubbable Tooltips) in the Media Library and timeline
+- [ ] Two-Up / Four-Up Trim Displays in the Program Monitor for precision edits (Slip/Slide/Roll)
+- [ ] Kinetic Scrolling & Playhead Elasticity
+- [ ] Snap indicator visual — when snapping to a clip edge, marker, or playhead, draw a vertical guideline + small badge ("clip end", "marker", "playhead") at the snap point
+- [ ] Drag preview ghosting — translucent ghost of the clip at the drop target with the new in/out timecode floating above it during move/trim
+- [ ] Mini-map / timeline overview strip — thin strip above the ruler showing the whole project at a glance with a viewport rectangle for the visible region
+- [ ] Track header redesign — per-track color swatch, clearer Solo/Mute/Lock button states, drag handle for reorder, double-click to rename inline
+- [ ] Marker list panel — a sortable list of timeline markers with name, time, color, and notes; double-click to seek
+- [ ] Configurable timeline row heights — preset (Compact / Normal / Tall) plus drag-to-resize per track (uses existing `height_preset` field)
+- [ ] Color-tag legend — a small persistent legend showing what each clip color means in this project, editable
+- [ ] Auto-scroll timeline to keep playhead in view during playback — when the playhead reaches the right edge of the visible region, smoothly page (or continuously scroll) the timeline so the playhead stays visible; preference toggle for Page / Smooth / Off, and suspend auto-scroll while the user is actively dragging/scrolling the timeline
+
+**Inspector polish**
+- [ ] Collapsible sections with persisted state — each section (Color, Audio, Video, Transform, Effects, Masks, Subtitles) is a collapsible expander whose open/closed state is remembered per-session
+- [ ] Search field at the top of the inspector — type "denoise" and only the relevant slider is shown
+- [ ] Reset-to-default badge on every slider — small circular reset button that appears only when a value differs from the default; click to reset that property with undo
+- [ ] Right-click → "Copy/Paste this property" on any slider/control, with a "Paste to all selected clips" variant (currently only color grading has copy/paste)
+- [ ] Numeric-entry on every slider — inline `SpinButton` or click-to-edit so users can type exact values
+
+**Program Monitor polish**
+- [ ] HUD overlay — togglable overlay showing timecode, frame number, fps, resolution, and dropped-frame count (reuse `src/ui/timecode.rs`)
+- [ ] A/B compare / split-view — vertical wipe between graded and ungraded versions of the current frame, draggable midline
+- [ ] Reference still pin — capture the current frame as a pinned thumbnail strip (up to 4 stills) for color-matching across scenes
+- [ ] Cinemascope / aspect-ratio mask overlay — togglable letterbox preview at 2.39:1, 2.00:1, 1.85:1, 1:1, 9:16, 4:5 etc. for delivery-format previewing
+
+**Workspace & Ergonomics**
+- [ ] Detachable / Multi-Monitor Panels for Scopes, Media Library, and Inspector
+
+**Theming & visual**
+- [ ] Light theme + system-follow option (`src/style.css` is dark-only today)
+- [ ] High-contrast / large-text accessibility theme for dim rooms / vision needs
+- [ ] Accent color preference — pick the highlight color (currently red playhead, teal compound bar, gold audition badge are fixed in `src/ui/colors.rs`)
+- [ ] Icon set audit — replace any remaining stock icons that don't fit the dark theme; ensure all toolbar icons have consistent visual weight
+
+**Export & sharing**
+- [ ] Export presets gallery with thumbnail cards (YouTube 1080p, YouTube 4K, Instagram Reel 9:16, TikTok, ProRes Master, Web Compressed, etc.) instead of a flat dropdown
+- [ ] Share-link panel — after export, a popover with "Reveal in file manager", "Open with...", "Copy path", and (optional) upload-to-service hooks
+- [ ] Export queue panel persistence + drag-reorder — add reorder, pause-all, retry-failed, and persistence across app restarts to `src/ui/export_queue.rs`
+
+**Performance perception**
+- [ ] Skeleton loaders during project open — show track placeholders + "Loading project…" with the project filename instead of a blank window
+- [ ] Lazy-render off-screen tracks in `timeline/widget.rs` Cairo draw path on very tall timelines (12+ tracks)
+- [ ] Thumbnail/waveform progressive reveal with a subtle fade-in instead of pop-in when caches finish
+
+**Help & learning**
+- [ ] Contextual help button in each panel header that opens the matching page from `docs/user/` (in-app webview or external browser)
+- [ ] Command palette (Ctrl+Shift+P) listing every menu action and MCP-exposed command with fuzzy search and hotkey hints — bridges discoverability for the 90% of features that don't have a toolbar button
+- [ ] "What's this?" mode — toggle via Shift+F1 that turns the cursor into a help cursor; clicking any UI element opens the relevant docs section
+
+**Project housekeeping**
+- [ ] Autosave + crash recovery with versioned `.uspxml.autosave` files and a "Recover unsaved changes" prompt on next launch
+- [ ] Project health panel — surface missing media, offline proxies, cache staleness, and disk-usage breakdown (proxy/thumbnail/STT/AI caches) with one-click cleanup
+- [ ] Recent projects with thumbnails in the welcome screen and a File menu submenu (currently text-only in `welcome.rs`)
+
 ### Professional Workflow (The "Pro" Edge)
 - [x] Multicam editing (sync by audio or timecode)
   - [x] Audio cross-correlation sync for selected clips (FFT-based, background thread, MCP tool)
@@ -653,6 +723,8 @@ Tracking docs:
   - [x] Pitch-preserved J/K/L shuttle (scaletempo in main pipeline + rate-based decoder seeks for hot rate changes)
 - [x] Audio Roles (Dialogue, Effects, Music) with submixing — per-track `AudioRole` enum, inspector dropdown, timeline color-coded labels, MCP `set_track_role` tool, FCPXML persistence, export per-role submix routing
 - [ ] Audio Track Mixer (Panel for track-level volume, panning, effects, and bus routing)
+- [ ] Sub-frame Audio Editing (sample-level precision for cuts and crossfades)
+- [ ] Waveform Drawing Optimizations (LOD caching for zoomed-out performance)
 - [x] **Advanced Audio Mode — surround (5.1 / 7.1) export**: opt-in `Audio Channels` dropdown in the export dialog selects Stereo (default) / 5.1 / 7.1; role-based auto-routing (Dialogue → FC, Music → FL/FR, Effects → FL/FR + SL/SR with both back- and side-rears in 7.1) plus per-track inspector override (FL/FR/FC/BL/BR/SL/SR/LFE/Auto); automatic LFE bass tap from Music + Effects via cascaded 120 Hz lowpass; AAC + Opus (`-mapping_family 1`) + FLAC + PCM compatible; preset round-trip (`#[serde(default)]` keeps legacy JSON loading as Stereo); built-in `Cinema H.264 5.1 1080p` factory preset; MCP `export_mp4` / `save_export_preset` / `list_export_presets` accept the new `audio_channel_layout` argument; FCPXML strict-DTD writer can emit non-stereo `audioLayout` (7.1 falls back to 5.1); OTIO writer/parser round-trip the per-track surround override; stereo path is byte-identical to the pre-surround code so all 922 prior tests still pass plus 13 new surround unit tests
 - [ ] Dynamic per-clip surround pan keyframes (`pan=...:eval=frame`) for moving audio between channels during playback
 - [x] Loudness Radar / Normalization to Standards (Tools for broadcast-standard compliance like EBU R128)
@@ -718,6 +790,7 @@ Tracking docs:
 - [ ] Hardware-accelerated decoding/encoding (VA-API, NVENC)
 - [ ] Background rendering for complex effect stacks
 - [ ] Render-and-Replace (Bake complex effect stacks into temporary high-quality clips)
+- [ ] Resource Quotas & Graceful Degradation (dynamically degrading preview or pausing background tasks when RAM/VRAM is exhausted)
 - [ ] Project & Bin Locking (Collaborative project/media locking)
 - [x] OpenTimelineIO (OTIO) import/export (native Rust JSON serializer via serde_json; clips/tracks/gaps/transitions/markers/speed plus current OTIO metadata round-trip; versioned `metadata.ultimateslice` contract; title/subtitle metadata, track audio-role metadata, transform/crop/blend metadata, and core transform/opacity keyframe round-trip; absolute/relative OTIO media-reference export with base-path-aware reimport; MCP `save_otio`/`open_otio` tools; Export dropdown + File Open dialog)
 - [x] Full OTIO metadata parity for UltimateSlice-specific features not yet covered by OTIO round-trip (remaining advanced effects, mask payloads/animation, secondary keyframe lanes such as crop animation, and nested clip internals; script-to-timeline scene_id/script_confidence; track height_preset)

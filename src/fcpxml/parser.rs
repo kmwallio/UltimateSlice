@@ -795,6 +795,45 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
         project.tracks.push(Track::new_audio("Audio 1"));
     }
 
+    // Migration: any `ClipKind::Image` clip whose source is an
+    // UltimateSlice-exported SVG gets auto-converted to a proper
+    // `ClipKind::Drawing` clip. Without this, projects that were
+    // saved before the drawing round-trip landed would keep
+    // pointing at `.svg` files (which the image pipeline can't
+    // decode) and stay frozen at their initial state. Narrow to our
+    // stamped exports so foreign SVGs untouched.
+    for track in project.tracks.iter_mut() {
+        for clip in track.clips.iter_mut() {
+            if clip.kind != crate::model::clip::ClipKind::Image {
+                continue;
+            }
+            if !clip.source_path.to_ascii_lowercase().ends_with(".svg") {
+                continue;
+            }
+            let Ok(svg) = std::fs::read_to_string(&clip.source_path) else {
+                continue;
+            };
+            let Some(parsed) =
+                crate::media::drawing_svg::try_parse_ultimate_slice_svg(&svg)
+            else {
+                continue;
+            };
+            if parsed.items.is_empty() {
+                continue;
+            }
+            log::info!(
+                "migrating SVG image clip {} → ClipKind::Drawing ({} items, reveal_ns={})",
+                clip.id,
+                parsed.items.len(),
+                parsed.reveal_ns
+            );
+            clip.kind = crate::model::clip::ClipKind::Drawing;
+            clip.drawing_items = parsed.items;
+            clip.drawing_animation_reveal_ns = parsed.reveal_ns;
+            clip.source_path = String::new();
+        }
+    }
+
     project.source_fcpxml = Some(xml.to_string());
     Ok(project)
 }
@@ -813,7 +852,11 @@ fn parse_asset_clip(
         // so the rest of the parser can proceed normally.
         let is_sourceless_clip = matches!(
             attrs.get("us:clip-kind").map(|s| s.as_str()),
-            Some("compound") | Some("multicam") | Some("title") | Some("adjustment")
+            Some("compound")
+                | Some("multicam")
+                | Some("title")
+                | Some("adjustment")
+                | Some("drawing")
         );
         let synthetic_asset;
         let asset: &Asset = if let Some(a) = assets.get(asset_ref) {
@@ -912,7 +955,8 @@ fn parse_asset_clip(
             | ClipKind::Adjustment
             | ClipKind::Compound
             | ClipKind::Multicam
-            | ClipKind::Audition => lane.filter(|l| *l > 0).map(|l| l as usize).unwrap_or(0),
+            | ClipKind::Audition
+            | ClipKind::Drawing => lane.filter(|l| *l > 0).map(|l| l as usize).unwrap_or(0),
         };
         let track_idx = explicit_track_idx.unwrap_or(inferred_track_idx);
         let track_name = attrs.get("us:track-name").cloned().unwrap_or_else(|| {
@@ -1391,6 +1435,22 @@ fn parse_asset_clip(
                     if let Some(idx) = attrs.get("us:audition-active-take-index") {
                         clip.audition_active_take_index = idx.parse().unwrap_or(0);
                     }
+                }
+                "drawing" => {
+                    clip.kind = ClipKind::Drawing;
+                    if let Some(items_json) = attrs.get("us:drawing-items") {
+                        let json_str = items_json.replace("&quot;", "\"");
+                        clip.drawing_items = serde_json::from_str(&json_str)
+                            .unwrap_or_default();
+                    }
+                    if let Some(reveal) = attrs.get("us:drawing-animation-reveal-ns")
+                    {
+                        clip.drawing_animation_reveal_ns = reveal.parse().unwrap_or(0);
+                    }
+                    // Drawings render from their vector data, so any
+                    // stale source_path from a previous preview bake
+                    // (the temp PNG/MOV cache) shouldn't persist.
+                    clip.source_path = String::new();
                 }
                 _ => {}
             }
@@ -2854,6 +2914,8 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:multicam-switches"
             | "us:audition-takes"
             | "us:audition-active-take-index"
+            | "us:drawing-items"
+            | "us:drawing-animation-reveal-ns"
             | "us:scene-id"
             | "us:script-confidence"
             | "us:eq-bands"
