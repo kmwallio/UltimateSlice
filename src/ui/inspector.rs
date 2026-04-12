@@ -10552,6 +10552,10 @@ pub fn build_inspector(
                             // The overlay fires this with normalized
                             // clip-local coords. Build a prompt and
                             // dispatch the background SAM job.
+                            log::info!(
+                                "SAM prompt: normalized box ({:.4},{:.4})–({:.4},{:.4})",
+                                nx1, ny1, nx2, ny2,
+                            );
                             let normalized_box = (
                                 nx1 as f32,
                                 ny1 as f32,

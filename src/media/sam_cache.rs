@@ -856,6 +856,12 @@ pub fn segment_with_box(
     let cy = ((prompt.y1 + prompt.y2) * 0.5) / src_h_f;
     let bw = (prompt.x2 - prompt.x1) / src_w_f;
     let bh = (prompt.y2 - prompt.y1) / src_h_f;
+    log::debug!(
+        "segment_with_box: prompt px=({:.1},{:.1})–({:.1},{:.1}), \
+         norm cxcywh=({:.4},{:.4},{:.4},{:.4}), source={}x{}",
+        prompt.x1, prompt.y1, prompt.x2, prompt.y2,
+        cx, cy, bw, bh, src_w, src_h,
+    );
     let box_coords = Array3::<f32>::from_shape_vec((1, 1, 4), vec![cx, cy, bw, bh])
         .map_err(|e| format!("segment_with_box: box_coords shape: {e}"))?;
     let box_labels = Array2::<i64>::from_shape_vec((1, 1), vec![1])
@@ -931,7 +937,12 @@ pub fn segment_with_box(
         None => return Err("decoder output missing 'scores'".to_string()),
     };
     if scores.is_empty() {
-        return Err("decoder returned zero-length scores vector".to_string());
+        return Err(
+            "SAM could not find a subject in the selected region. \
+             Try drawing a tighter box closely around the subject — \
+             SAM 3 needs the box to fit snugly with minimal background."
+                .to_string(),
+        );
     }
     let (best_idx, best_score) = scores
         .iter()
