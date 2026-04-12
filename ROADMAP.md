@@ -720,7 +720,7 @@ Tracking docs:
 - [ ] Render-and-Replace (Bake complex effect stacks into temporary high-quality clips)
 - [ ] Project & Bin Locking (Collaborative project/media locking)
 - [x] OpenTimelineIO (OTIO) import/export (native Rust JSON serializer via serde_json; clips/tracks/gaps/transitions/markers/speed plus current OTIO metadata round-trip; versioned `metadata.ultimateslice` contract; title/subtitle metadata, track audio-role metadata, transform/crop/blend metadata, and core transform/opacity keyframe round-trip; absolute/relative OTIO media-reference export with base-path-aware reimport; MCP `save_otio`/`open_otio` tools; Export dropdown + File Open dialog)
-- [ ] Full OTIO metadata parity for UltimateSlice-specific features not yet covered by OTIO round-trip (remaining advanced effects, mask payloads/animation, secondary keyframe lanes such as crop animation, and nested clip internals)
+- [x] Full OTIO metadata parity for UltimateSlice-specific features not yet covered by OTIO round-trip (remaining advanced effects, mask payloads/animation, secondary keyframe lanes such as crop animation, and nested clip internals; script-to-timeline scene_id/script_confidence; track height_preset)
 - [ ] Shared Project/Library support for collaborative editing
 
 ---

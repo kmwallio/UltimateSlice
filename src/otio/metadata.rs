@@ -351,6 +351,14 @@ pub(crate) struct UltimateSliceClipOtioMetadata {
     pub(crate) subtitle_word_window_secs: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) subtitle_position_y: Option<f64>,
+
+    // ── Script-to-Timeline metadata ─────────────────────────────────
+    /// Script scene identifier linking this clip to a screenplay scene.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) scene_id: Option<String>,
+    /// Script-to-clip alignment confidence (0.0..1.0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) script_confidence: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -373,6 +381,9 @@ pub(crate) struct UltimateSliceTrackOtioMetadata {
     /// older OTIO files) means `Auto`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) surround_position: Option<String>,
+    /// Timeline track height preset (small / medium / large).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) height_preset: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

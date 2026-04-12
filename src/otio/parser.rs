@@ -85,6 +85,13 @@ pub fn parse_otio_with_path(json: &str, otio_path: Option<&Path>) -> Result<Proj
                 track.surround_position =
                     crate::model::track::SurroundPositionOverride::from_str(pos);
             }
+            if let Some(hp) = us.height_preset.as_deref() {
+                track.height_preset = match hp {
+                    "small" => crate::model::track::TrackHeightPreset::Small,
+                    "large" => crate::model::track::TrackHeightPreset::Large,
+                    _ => crate::model::track::TrackHeightPreset::Medium,
+                };
+            }
         }
 
         // Walk children: Clips advance cursor, Gaps advance cursor without
@@ -635,6 +642,13 @@ fn otio_clip_to_clip(
         }
         if let Some(v) = us.subtitle_position_y {
             clip.subtitle_position_y = v;
+        }
+        // Script-to-Timeline metadata
+        if let Some(v) = us.scene_id.clone() {
+            clip.scene_id = Some(v);
+        }
+        if let Some(v) = us.script_confidence {
+            clip.script_confidence = Some(v);
         }
     }
 
