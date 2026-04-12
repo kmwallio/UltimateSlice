@@ -339,6 +339,18 @@ thread_local! {
         std::cell::RefCell<std::collections::HashSet<PathBuf>> =
         std::cell::RefCell::new(std::collections::HashSet::new());
 
+    /// Cache paths whose last encode attempt failed. We keep
+    /// bouncing between "cache miss" and "spawn worker" without this:
+    /// each completed-but-failed encode re-fires the completion
+    /// callback → `on_project_changed` → preview rebuild →
+    /// `ensure_drawing_animation_webm_nonblocking` sees the file
+    /// still doesn't exist → spawns another encoder → loops. A
+    /// failure marker turns the subsequent calls into static-PNG
+    /// fallbacks for the rest of the session.
+    static FAILED_DRAWING_ENCODES:
+        std::cell::RefCell<std::collections::HashSet<PathBuf>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+
     /// Callback fired on the main thread when any background encode
     /// completes. The app registers a closure here that invalidates
     /// the preview (typically `on_project_changed`). Main-thread only.
@@ -395,6 +407,14 @@ pub fn ensure_drawing_animation_webm_nonblocking(
     if path.exists() {
         return Some(path);
     }
+    // Skip permanently-failed paths — the encode threw once and the
+    // file never materialised, so stop spawning worker threads on
+    // every preview rebuild. Caller falls back to the static PNG.
+    let already_failed =
+        FAILED_DRAWING_ENCODES.with(|set| set.borrow().contains(&path));
+    if already_failed {
+        return None;
+    }
     let already_pending = PENDING_DRAWING_ENCODES.with(|set| {
         let mut set = set.borrow_mut();
         if set.contains(&path) {
@@ -422,18 +442,27 @@ pub fn ensure_drawing_animation_webm_nonblocking(
             clip_duration_ns,
             reveal_ns,
         );
+        let succeeded = result.is_ok();
         if let Err(ref e) = result {
             log::warn!(
                 "drawing animation encode failed for {}: {e}",
                 path_for_thread.display()
             );
         }
-        // Bounce to the GTK main thread: clear the pending marker
-        // and notify the app so it can rebuild the preview.
+        // Bounce to the GTK main thread: clear the pending marker,
+        // remember the failure if any, and notify the app so it can
+        // rebuild the preview. On failure the preview keeps using the
+        // static PNG — subsequent calls short-circuit on
+        // `FAILED_DRAWING_ENCODES` instead of re-spawning.
         gtk4::glib::idle_add_once(move || {
             PENDING_DRAWING_ENCODES.with(|set| {
                 set.borrow_mut().remove(&path_for_thread);
             });
+            if !succeeded {
+                FAILED_DRAWING_ENCODES.with(|set| {
+                    set.borrow_mut().insert(path_for_thread.clone());
+                });
+            }
             DRAWING_ENCODE_COMPLETE.with(|slot| {
                 if let Some(ref cb) = *slot.borrow() {
                     cb();
