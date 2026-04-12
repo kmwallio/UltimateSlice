@@ -6461,6 +6461,53 @@ fn flatten_clips(clips: &[Clip], timeline_offset: u64, depth: usize) -> Vec<Clip
                         .saturating_add(*seg_end)
                         .min(angle.source_out);
                     seg.id = uuid::Uuid::new_v4().to_string();
+                    // Inherit color from the multicam clip, overridden by per-angle
+                    // grade when the angle's field is non-neutral.
+                    seg.brightness = if angle.brightness != 0.0 {
+                        angle.brightness
+                    } else {
+                        clip.brightness
+                    };
+                    seg.contrast = if (angle.contrast - 1.0).abs() > f32::EPSILON {
+                        angle.contrast
+                    } else {
+                        clip.contrast
+                    };
+                    seg.saturation = if (angle.saturation - 1.0).abs() > f32::EPSILON {
+                        angle.saturation
+                    } else {
+                        clip.saturation
+                    };
+                    seg.temperature = if (angle.temperature - 6500.0).abs() > 1.0 {
+                        angle.temperature
+                    } else {
+                        clip.temperature
+                    };
+                    seg.tint = if angle.tint.abs() > f32::EPSILON {
+                        angle.tint
+                    } else {
+                        clip.tint
+                    };
+                    // Inherit all remaining visual fields from the multicam clip.
+                    // Per-angle LUT overrides clip-level LUT when non-empty.
+                    seg.lut_paths = if !angle.lut_paths.is_empty() {
+                        angle.lut_paths.clone()
+                    } else {
+                        clip.lut_paths.clone()
+                    };
+                    seg.denoise = clip.denoise;
+                    seg.sharpness = clip.sharpness;
+                    seg.shadows = clip.shadows;
+                    seg.midtones = clip.midtones;
+                    seg.highlights = clip.highlights;
+                    seg.exposure = clip.exposure;
+                    seg.black_point = clip.black_point;
+                    seg.highlights_warmth = clip.highlights_warmth;
+                    seg.highlights_tint = clip.highlights_tint;
+                    seg.midtones_warmth = clip.midtones_warmth;
+                    seg.midtones_tint = clip.midtones_tint;
+                    seg.shadows_warmth = clip.shadows_warmth;
+                    seg.shadows_tint = clip.shadows_tint;
                     result.push(seg);
                 }
             }
@@ -8677,6 +8724,7 @@ mod tests {
                     media_duration_ns: None,
                     volume: 1.0,
                     muted: false,
+                    ..Default::default()
                 },
                 MulticamAngle {
                     id: "a2".into(),
@@ -8689,6 +8737,7 @@ mod tests {
                     media_duration_ns: None,
                     volume: 0.5,
                     muted: false,
+                    ..Default::default()
                 },
             ],
         );
@@ -8747,6 +8796,7 @@ mod tests {
                     media_duration_ns: None,
                     volume: 1.0,
                     muted: false,
+                    ..Default::default()
                 },
                 MulticamAngle {
                     id: "a2".into(),
@@ -8759,6 +8809,7 @@ mod tests {
                     media_duration_ns: None,
                     volume: 0.0,
                     muted: true, // muted
+                    ..Default::default()
                 },
             ],
         );
@@ -8799,6 +8850,7 @@ mod tests {
                 media_duration_ns: None,
                 volume: 1.0,
                 muted: false,
+                ..Default::default()
             }],
         );
 

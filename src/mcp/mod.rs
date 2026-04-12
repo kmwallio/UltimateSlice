@@ -834,6 +834,17 @@ pub enum McpCommand {
         muted: Option<bool>,
         reply: SyncSender<Value>,
     },
+    SetMulticamAngleColor {
+        clip_id: String,
+        angle_index: usize,
+        brightness: Option<f32>,
+        contrast: Option<f32>,
+        saturation: Option<f32>,
+        temperature: Option<f32>,
+        tint: Option<f32>,
+        lut_paths: Option<Vec<String>>,
+        reply: SyncSender<Value>,
+    },
     // ── Audition / clip-versions commands ─────────────────────────────
     CreateAuditionClip {
         clip_ids: Vec<String>,

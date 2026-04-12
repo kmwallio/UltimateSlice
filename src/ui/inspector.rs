@@ -1861,7 +1861,7 @@ impl InspectorView {
                     || is_multicam
                     || is_audition;
                 self.color_section
-                    .set_visible(is_video || is_image || is_adjustment || is_audition);
+                    .set_visible(is_video || is_image || is_adjustment || is_audition || is_multicam);
                 self.audio_section.set_visible(is_video || is_audio || is_audition);
                 self.transform_section.set_visible(is_visual);
                 self.title_section_box
@@ -1874,7 +1874,7 @@ impl InspectorView {
                     self.refresh_audition_takes_list(c);
                 }
                 self.lut_section_box
-                    .set_visible(is_video || is_image || is_adjustment);
+                    .set_visible(is_video || is_image || is_adjustment || is_multicam);
                 self.chroma_key_section.set_visible(is_video || is_image);
                 self.bg_removal_section
                     .set_visible((is_video || is_image) && self.bg_removal_model_available.get());

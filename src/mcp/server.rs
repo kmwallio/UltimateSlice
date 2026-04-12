@@ -2045,6 +2045,24 @@ fn tools_list() -> Value {
                 "required": ["clip_id", "angle_index"]
             }
         },
+        {
+            "name": "set_multicam_angle_color",
+            "description": "Set per-angle color grade and/or LUT for a multicam angle. When set, these override the clip-level values for this angle. Omit a field to keep its current value. Pass an empty lut_paths array to clear the per-angle LUT (falls back to clip-level).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "ID of the multicam clip" },
+                    "angle_index": { "type": "integer", "description": "0-based angle index" },
+                    "brightness": { "type": "number", "description": "Brightness (−1.0 to 1.0, neutral 0.0); omit to keep current" },
+                    "contrast": { "type": "number", "description": "Contrast (0.0 to 2.0, neutral 1.0); omit to keep current" },
+                    "saturation": { "type": "number", "description": "Saturation (0.0 to 2.0, neutral 1.0); omit to keep current" },
+                    "temperature": { "type": "number", "description": "Temperature in Kelvin (2000 to 10000, neutral 6500); omit to keep current" },
+                    "tint": { "type": "number", "description": "Tint (−1.0 to 1.0, neutral 0.0); omit to keep current" },
+                    "lut_paths": { "type": "array", "items": { "type": "string" }, "description": "Per-angle .cube LUT file paths; overrides clip-level LUT. Empty array clears." }
+                },
+                "required": ["clip_id", "angle_index"]
+            }
+        },
         // ── Audition / clip-versions tools ────────────────────────────────
         {
             "name": "create_audition_clip",
@@ -3637,6 +3655,21 @@ fn dispatch_tool_payload(
             angle_index: arg_u64!(args, "angle_index", 0) as usize,
             volume: args["volume"].as_f64().map(|v| v as f32),
             muted: args["muted"].as_bool(),
+            reply: tx,
+        },
+        "set_multicam_angle_color" => McpCommand::SetMulticamAngleColor {
+            clip_id: arg_str!(args, "clip_id"),
+            angle_index: arg_u64!(args, "angle_index", 0) as usize,
+            brightness: args["brightness"].as_f64().map(|v| v as f32),
+            contrast: args["contrast"].as_f64().map(|v| v as f32),
+            saturation: args["saturation"].as_f64().map(|v| v as f32),
+            temperature: args["temperature"].as_f64().map(|v| v as f32),
+            tint: args["tint"].as_f64().map(|v| v as f32),
+            lut_paths: args["lut_paths"].as_array().map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            }),
             reply: tx,
         },
         // ── Audition / clip-versions tools ────────────────────────────────

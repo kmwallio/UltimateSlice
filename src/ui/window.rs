@@ -3631,14 +3631,49 @@ fn apply_audio_sync_results(
             .unwrap_or(0)
     };
 
+    // Renormalize offsets so no clip would need a negative timeline_start.
+    // GCC-PHAT returns τ = T_clip − T_anchor; when the anchor isn't the
+    // latest-starting recording, τ is negative for some clips and the old
+    // .max(0) clamp silently pinned them to 0 instead of moving them left of
+    // the anchor. Shift all assignments forward (and the anchor too) by the
+    // magnitude of the most-negative desired position, so the earliest clip
+    // lands at 0 and all relative distances are preserved.
+    let min_desired = results
+        .iter()
+        .map(|(_, off, _, _)| anchor_timeline_start as i64 + off)
+        .min()
+        .unwrap_or(anchor_timeline_start as i64)
+        .min(anchor_timeline_start as i64);
+    let shift: i64 = if min_desired < 0 { -min_desired } else { 0 };
+    let shifted_anchor_start = ((anchor_timeline_start as i64) + shift) as u64;
+
     // Build new clip positions and collect drift corrections.
     let mut assignments: HashMap<String, u64> = HashMap::new();
     let mut drift_corrections: HashMap<String, f64> = HashMap::new();
+    // Include the anchor (if we can identify it) so it also moves when shifted.
+    // The anchor isn't in `results` (sync_clips_by_audio only returns non-anchor
+    // results), so we need to find it from the current selection and update it
+    // separately if shift != 0.
     for (clip_id, offset_ns, _, drift_speed) in results {
-        let new_start = (anchor_timeline_start as i64 + offset_ns).max(0) as u64;
+        let new_start = ((anchor_timeline_start as i64) + offset_ns + shift) as u64;
         assignments.insert(clip_id.clone(), new_start);
         if let Some(drift) = drift_speed {
             drift_corrections.insert(clip_id.clone(), *drift);
+        }
+    }
+    // If we shifted, the anchor needs to move too (by `shift`). Locate it via
+    // the selection and record its new position.
+    if shift != 0 {
+        let proj = project.borrow();
+        let st = timeline_state.borrow();
+        let all_ids = st.selected_ids_or_primary();
+        if let Some(anchor_clip) = proj
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .find(|c| all_ids.contains(&c.id) && !synced_ids.contains(c.id.as_str()))
+        {
+            assignments.insert(anchor_clip.id.clone(), shifted_anchor_start);
         }
     }
 
@@ -4314,26 +4349,50 @@ fn collect_unique_proxy_variants(
     scale: crate::media::proxy_cache::ProxyScale,
 ) -> Vec<crate::media::proxy_cache::ProxyVariantSpec> {
     let mut seen: HashSet<crate::media::proxy_cache::ProxyVariantSpec> = HashSet::new();
-    project
-        .tracks
-        .iter()
-        .filter(|t| t.is_video())
-        .flat_map(|t| t.clips.iter())
-        .filter_map(|c| {
-            let spec = crate::media::proxy_cache::ProxyVariantSpec::new(
-                c.source_path.clone(),
-                scale,
-                c.lut_key(),
-                c.vidstab_enabled,
-                c.vidstab_smoothing,
-            );
-            if seen.insert(spec.clone()) {
-                Some(spec)
-            } else {
-                None
+    let mut out = Vec::new();
+    for track in project.tracks.iter().filter(|t| t.is_video()) {
+        for c in &track.clips {
+            // Regular clip (or any clip with a source path).
+            if !c.source_path.is_empty() {
+                let spec = crate::media::proxy_cache::ProxyVariantSpec::new(
+                    c.source_path.clone(),
+                    scale,
+                    c.lut_key(),
+                    c.vidstab_enabled,
+                    c.vidstab_smoothing,
+                );
+                if seen.insert(spec.clone()) {
+                    out.push(spec);
+                }
             }
-        })
-        .collect()
+            // Multicam clip: collect proxy variants for each angle's source path
+            // so that playback can use proxies for the decoded angle segments.
+            // Per-angle LUTs override the clip-level LUT in the proxy key.
+            if let Some(ref angles) = c.multicam_angles {
+                for angle in angles {
+                    if angle.source_path.is_empty() {
+                        continue;
+                    }
+                    let angle_lut = if !angle.lut_paths.is_empty() {
+                        Some(angle.lut_paths.join("|"))
+                    } else {
+                        c.lut_key()
+                    };
+                    let spec = crate::media::proxy_cache::ProxyVariantSpec::new(
+                        angle.source_path.clone(),
+                        scale,
+                        angle_lut,
+                        false, // angles don't have per-angle vidstab
+                        0.0,
+                    );
+                    if seen.insert(spec.clone()) {
+                        out.push(spec);
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 fn collect_unique_preview_lut_proxy_variants(
@@ -4344,30 +4403,53 @@ fn collect_unique_preview_lut_proxy_variants(
         width: project.width,
         height: project.height,
     };
-    project
-        .tracks
-        .iter()
-        .filter(|t| t.is_video())
-        .flat_map(|t| t.clips.iter())
-        .filter_map(|c| {
-            let lut = c.lut_key()?;
-            if lut.is_empty() {
-                return None;
+    let mut out = Vec::new();
+    for track in project.tracks.iter().filter(|t| t.is_video()) {
+        for c in &track.clips {
+            if let Some(lut) = c.lut_key() {
+                if !lut.is_empty() {
+                    // Regular clip
+                    if !c.source_path.is_empty() {
+                        let spec = crate::media::proxy_cache::ProxyVariantSpec::new(
+                            c.source_path.clone(),
+                            scale,
+                            Some(lut.clone()),
+                            false,
+                            0.0,
+                        );
+                        if seen.insert(spec.clone()) {
+                            out.push(spec);
+                        }
+                    }
+                    // Multicam: request LUT proxy for each angle's source.
+                    // Per-angle LUT overrides clip-level LUT.
+                    if let Some(ref angles) = c.multicam_angles {
+                        for angle in angles {
+                            if angle.source_path.is_empty() {
+                                continue;
+                            }
+                            let angle_lut = if !angle.lut_paths.is_empty() {
+                                angle.lut_paths.join("|")
+                            } else {
+                                lut.clone()
+                            };
+                            let spec = crate::media::proxy_cache::ProxyVariantSpec::new(
+                                angle.source_path.clone(),
+                                scale,
+                                Some(angle_lut),
+                                false,
+                                0.0,
+                            );
+                            if seen.insert(spec.clone()) {
+                                out.push(spec);
+                            }
+                        }
+                    }
+                }
             }
-            let spec = crate::media::proxy_cache::ProxyVariantSpec::new(
-                c.source_path.clone(),
-                scale,
-                Some(lut),
-                false,
-                0.0,
-            );
-            if seen.insert(spec.clone()) {
-                Some(spec)
-            } else {
-                None
-            }
-        })
-        .collect()
+        }
+    }
+    out
 }
 
 fn collect_near_playhead_proxy_variants(
@@ -4383,13 +4465,13 @@ fn collect_near_playhead_proxy_variants(
     let window_start = playhead_ns.saturating_sub(window_ns);
     let window_end = playhead_ns.saturating_add(window_ns);
 
-    let mut candidates: Vec<(u64, u64, crate::media::proxy_cache::ProxyVariantSpec)> = project
-        .tracks
-        .iter()
-        .filter(|t| t.is_video())
-        .flat_map(|t| t.clips.iter())
-        .filter(|c| c.timeline_end() >= window_start && c.timeline_start <= window_end)
-        .map(|c| {
+    let mut candidates: Vec<(u64, u64, crate::media::proxy_cache::ProxyVariantSpec)> = Vec::new();
+    for track in project.tracks.iter().filter(|t| t.is_video()) {
+        for c in track
+            .clips
+            .iter()
+            .filter(|c| c.timeline_end() >= window_start && c.timeline_start <= window_end)
+        {
             let clip_end = c.timeline_end();
             let distance = if playhead_ns < c.timeline_start {
                 c.timeline_start.saturating_sub(playhead_ns)
@@ -4398,19 +4480,47 @@ fn collect_near_playhead_proxy_variants(
             } else {
                 0
             };
-            (
-                distance,
-                c.timeline_start,
-                crate::media::proxy_cache::ProxyVariantSpec::new(
-                    c.source_path.clone(),
-                    scale,
-                    c.lut_key(),
-                    c.vidstab_enabled,
-                    c.vidstab_smoothing,
-                ),
-            )
-        })
-        .collect();
+            // Regular clip
+            if !c.source_path.is_empty() {
+                candidates.push((
+                    distance,
+                    c.timeline_start,
+                    crate::media::proxy_cache::ProxyVariantSpec::new(
+                        c.source_path.clone(),
+                        scale,
+                        c.lut_key(),
+                        c.vidstab_enabled,
+                        c.vidstab_smoothing,
+                    ),
+                ));
+            }
+            // Multicam clip: include each angle's source path.
+            // Per-angle LUTs override the clip-level LUT in the proxy key.
+            if let Some(ref angles) = c.multicam_angles {
+                for angle in angles {
+                    if angle.source_path.is_empty() {
+                        continue;
+                    }
+                    let angle_lut = if !angle.lut_paths.is_empty() {
+                        Some(angle.lut_paths.join("|"))
+                    } else {
+                        c.lut_key()
+                    };
+                    candidates.push((
+                        distance,
+                        c.timeline_start,
+                        crate::media::proxy_cache::ProxyVariantSpec::new(
+                            angle.source_path.clone(),
+                            scale,
+                            angle_lut,
+                            false,
+                            0.0,
+                        ),
+                    ));
+                }
+            }
+        }
+    }
 
     candidates.sort_by_key(|(distance, timeline_start, _)| (*distance, *timeline_start));
 
@@ -4554,6 +4664,60 @@ fn clip_to_program_clips(
                 seg_clip.source_in = angle_source_in;
                 seg_clip.source_out = angle_source_out;
                 seg_clip.timeline_start = clip_start.saturating_add(*seg_start);
+                // Inherit color grade from the multicam clip (Inspector writes
+                // to the clip) layered with the per-angle adjustments.
+                // Per-angle fields start neutral; if the user grades an angle
+                // via MCP they override the clip-level grade for that angle.
+                seg_clip.brightness = if angle.brightness != 0.0 {
+                    angle.brightness
+                } else {
+                    c.brightness
+                };
+                seg_clip.contrast = if (angle.contrast - 1.0).abs() > f32::EPSILON
+                {
+                    angle.contrast
+                } else {
+                    c.contrast
+                };
+                seg_clip.saturation =
+                    if (angle.saturation - 1.0).abs() > f32::EPSILON {
+                        angle.saturation
+                    } else {
+                        c.saturation
+                    };
+                seg_clip.temperature =
+                    if (angle.temperature - 6500.0).abs() > 1.0 {
+                        angle.temperature
+                    } else {
+                        c.temperature
+                    };
+                seg_clip.tint = if angle.tint.abs() > f32::EPSILON {
+                    angle.tint
+                } else {
+                    c.tint
+                };
+                // Inherit all remaining visual fields from the multicam clip
+                // so the Inspector's color, LUT, and denoise/sharpen controls
+                // take effect on the flattened segments.
+                // Per-angle LUT overrides clip-level LUT when non-empty.
+                seg_clip.lut_paths = if !angle.lut_paths.is_empty() {
+                    angle.lut_paths.clone()
+                } else {
+                    c.lut_paths.clone()
+                };
+                seg_clip.denoise = c.denoise;
+                seg_clip.sharpness = c.sharpness;
+                seg_clip.shadows = c.shadows;
+                seg_clip.midtones = c.midtones;
+                seg_clip.highlights = c.highlights;
+                seg_clip.exposure = c.exposure;
+                seg_clip.black_point = c.black_point;
+                seg_clip.highlights_warmth = c.highlights_warmth;
+                seg_clip.highlights_tint = c.highlights_tint;
+                seg_clip.midtones_warmth = c.midtones_warmth;
+                seg_clip.midtones_tint = c.midtones_tint;
+                seg_clip.shadows_warmth = c.shadows_warmth;
+                seg_clip.shadows_tint = c.shadows_tint;
                 let mut seg_results = clip_to_program_clips(
                     &seg_clip,
                     false, // not audio_only
@@ -8151,7 +8315,11 @@ pub fn build_window(
                         let active =
                             clip.active_angle_at(playhead_ns.saturating_sub(clip.timeline_start));
                         if let Some(ref angles) = clip.multicam_angles {
+                            let local_pos =
+                                playhead_ns.saturating_sub(clip.timeline_start);
                             for (i, angle) in angles.iter().enumerate() {
+                                let available =
+                                    clip.multicam_angle_available_at(i, local_pos);
                                 let row = gtk::Box::new(Orientation::Horizontal, 4);
                                 // Angle switch button
                                 let btn = gtk::Button::with_label(&format!(
@@ -8163,6 +8331,12 @@ pub fn build_window(
                                 btn.set_hexpand(true);
                                 if i == active {
                                     btn.add_css_class("suggested-action");
+                                }
+                                if !available {
+                                    row.add_css_class("multicam-angle-unavailable");
+                                    btn.set_tooltip_text(Some(
+                                        "No footage at current position",
+                                    ));
                                 }
                                 let ts = timeline_state_for_multicam_btn.clone();
                                 btn.connect_clicked(move |_| {
@@ -8193,6 +8367,124 @@ pub fn build_window(
                                 };
                                 audio_btn.set_tooltip_text(Some(&vol_str));
                                 row.append(&audio_btn);
+                                // Per-angle LUT button
+                                let lut_label_text = if angle.lut_paths.is_empty() {
+                                    "LUT".to_string()
+                                } else {
+                                    let name = std::path::Path::new(
+                                        angle.lut_paths.last().unwrap(),
+                                    )
+                                    .file_stem()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or("LUT");
+                                    // Truncate long names
+                                    if name.len() > 10 {
+                                        format!("{}…", &name[..9])
+                                    } else {
+                                        name.to_string()
+                                    }
+                                };
+                                let lut_btn = gtk::Button::with_label(&lut_label_text);
+                                lut_btn.add_css_class("flat");
+                                if angle.lut_paths.is_empty() {
+                                    lut_btn.add_css_class("dim-label");
+                                }
+                                lut_btn.set_tooltip_text(Some(if angle.lut_paths.is_empty() {
+                                    "Assign per-angle LUT"
+                                } else {
+                                    "Change per-angle LUT (right-click to clear)"
+                                }));
+                                {
+                                    let ts = timeline_state_for_multicam_btn.clone();
+                                    let opc = on_project_changed_for_multicam.clone();
+                                    let angle_idx = i;
+                                    let clip_id = clip.id.clone();
+                                    lut_btn.connect_clicked(move |btn| {
+                                        let dialog = gtk::FileDialog::new();
+                                        dialog.set_title("Select LUT file");
+                                        let filter = gtk::FileFilter::new();
+                                        filter.set_name(Some("LUT files (*.cube)"));
+                                        filter.add_pattern("*.cube");
+                                        filter.add_pattern("*.CUBE");
+                                        let filters = gtk::gio::ListStore::new::<gtk::FileFilter>();
+                                        filters.append(&filter);
+                                        dialog.set_filters(Some(&filters));
+                                        let ts = ts.clone();
+                                        let opc = opc.clone();
+                                        let cid = clip_id.clone();
+                                        let win = btn.root().and_then(|r| {
+                                            r.downcast::<gtk::Window>().ok()
+                                        });
+                                        dialog.open(
+                                            win.as_ref(),
+                                            gtk::gio::Cancellable::NONE,
+                                            move |result| {
+                                                if let Ok(file) = result {
+                                                    if let Some(path) = file.path() {
+                                                        let path_str = path
+                                                            .to_string_lossy()
+                                                            .to_string();
+                                                        let st = ts.borrow();
+                                                        let proj_rc = st.project.clone();
+                                                        let mut proj = proj_rc.borrow_mut();
+                                                        if let Some(clip) =
+                                                            proj.clip_mut(&cid)
+                                                        {
+                                                            if let Some(ref mut angles) =
+                                                                clip.multicam_angles
+                                                            {
+                                                                if let Some(a) =
+                                                                    angles.get_mut(angle_idx)
+                                                                {
+                                                                    a.lut_paths =
+                                                                        vec![path_str];
+                                                                    proj.dirty = true;
+                                                                }
+                                                            }
+                                                        }
+                                                        drop(proj);
+                                                        drop(st);
+                                                        opc();
+                                                    }
+                                                }
+                                            },
+                                        );
+                                    });
+                                }
+                                // Right-click gesture to clear the per-angle LUT.
+                                if !angle.lut_paths.is_empty() {
+                                    let gesture =
+                                        gtk::GestureClick::new();
+                                    gesture.set_button(3); // right-click
+                                    let ts = timeline_state_for_multicam_btn.clone();
+                                    let opc = on_project_changed_for_multicam.clone();
+                                    let angle_idx = i;
+                                    let clip_id = clip.id.clone();
+                                    gesture.connect_released(
+                                        move |_, _, _, _| {
+                                            let st = ts.borrow();
+                                            let proj_rc = st.project.clone();
+                                            let mut proj = proj_rc.borrow_mut();
+                                            if let Some(clip) = proj.clip_mut(&clip_id) {
+                                                if let Some(ref mut angles) =
+                                                    clip.multicam_angles
+                                                {
+                                                    if let Some(a) =
+                                                        angles.get_mut(angle_idx)
+                                                    {
+                                                        a.lut_paths.clear();
+                                                        proj.dirty = true;
+                                                    }
+                                                }
+                                            }
+                                            drop(proj);
+                                            drop(st);
+                                            opc();
+                                        },
+                                    );
+                                    lut_btn.add_controller(gesture);
+                                }
+                                row.append(&lut_btn);
                                 multicam_angles_box_for_sel.append(&row);
                             }
                         }
@@ -9263,6 +9555,10 @@ pub fn build_window(
 
     // Shared flag: true while audio sync is running (read by status bar timer).
     let audio_sync_in_progress: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    // Shared flag: true while a multicam clip is being created (audio sync + angle build).
+    // Read by the status bar timer so the user gets visible feedback during the long
+    // background sync rather than only a title-bar hint.
+    let multicam_sync_in_progress: Rc<Cell<bool>> = Rc::new(Cell::new(false));
     // Whether the current sync operation should also replace audio (link + mute anchor).
     let sync_replace_mode: Rc<Cell<bool>> = Rc::new(Cell::new(false));
 
@@ -9410,6 +9706,7 @@ pub fn build_window(
             let timeline_state = timeline_state.clone();
             let on_project_changed = on_project_changed.clone();
             let window_weak = window_weak.clone();
+            let multicam_sync_in_progress_timer = multicam_sync_in_progress.clone();
             glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
                 let result = {
                     let rx_opt = multicam_sync_rx.borrow();
@@ -9417,6 +9714,7 @@ pub fn build_window(
                 };
                 if let Some((clip_infos, sync_results)) = result {
                     *multicam_sync_rx.borrow_mut() = None;
+                    multicam_sync_in_progress_timer.set(false);
                     // Build multicam angles from sync results
                     let anchor_id = clip_infos
                         .first()
@@ -9426,22 +9724,63 @@ pub fn build_window(
                         .first()
                         .map(|(_, _, _, _, tl, _)| *tl)
                         .unwrap_or(0);
-                    let mut angles: Vec<crate::model::clip::MulticamAngle> = Vec::new();
-                    for (i, (id, path, src_in, src_out, _tl_start, _track_id)) in
-                        clip_infos.iter().enumerate()
-                    {
-                        let offset_ns = if *id == anchor_id {
-                            0i64
+                    // Lookup helper: raw GCC-PHAT offset_ns for each clip (anchor = 0).
+                    // See `AudioSyncResult::offset_ns` — positive means the ANCHOR's
+                    // audio landmark is later in its source than the clip's.
+                    let offset_for = |id: &str| -> i64 {
+                        if id == anchor_id {
+                            0
                         } else {
                             sync_results
                                 .iter()
                                 .find(|(rid, ..)| rid == id)
                                 .map(|(_, o, _, _)| *o)
                                 .unwrap_or(0)
+                        }
+                    };
+                    // Compute the desired signed source_in for every angle.
+                    //
+                    // For multicam alignment we want: at some multicam time E, every
+                    // angle plays its shared landmark. `angle.source_in` is where in the
+                    // source file to seek at multicam time 0, so:
+                    //     angle.source_in[i] = (src_in_orig[i] + e_i) − E
+                    // where `e_i` is the landmark's offset inside clip i's extracted audio.
+                    //
+                    // Only pairwise differences are known: gcc_phat returns
+                    //     offset_ns = e_anchor − e_clip
+                    // Fix e_anchor ≡ 0 (free parameter, cancels via the min() below), so
+                    //     e_anchor = 0, e_clip = −offset_ns.
+                    // Therefore the effective landmark position in the source is:
+                    //     d_i = src_in_orig[i] + (0 if anchor else −offset_ns)
+                    // and the final source_in is `d_i − min(d_j)`, which is always ≥ 0.
+                    //
+                    // (This is the opposite sign from the standalone timeline sync at
+                    // `apply_audio_sync_results`, where we use `+offset_ns` on
+                    // `timeline_start` instead. Both produce the same physical alignment
+                    // because advancing `source_in` and advancing `timeline_start` are
+                    // opposite-signed corrections for the same thing.)
+                    let signed_event_for = |id: &str, src_in: u64| -> i64 {
+                        let landmark = if id == anchor_id {
+                            0
+                        } else {
+                            -offset_for(id)
                         };
+                        src_in as i64 + landmark
+                    };
+                    let desired: Vec<i64> = clip_infos
+                        .iter()
+                        .map(|(id, _, src_in, _, _, _)| signed_event_for(id, *src_in))
+                        .collect();
+                    let min_desired = desired.iter().copied().min().unwrap_or(0);
+                    let mut angles: Vec<crate::model::clip::MulticamAngle> = Vec::new();
+                    for (i, (id, path, src_in, src_out, _tl_start, _track_id)) in
+                        clip_infos.iter().enumerate()
+                    {
+                        let offset_ns = offset_for(id);
                         let label = format!("Angle {}", i + 1);
-                        // Compute synced source_in: anchor's source_in + offset
-                        let synced_in = (*src_in as i64 + offset_ns).max(0) as u64;
+                        // Final synced source_in: effective landmark − min, always ≥ 0.
+                        let synced_in =
+                            (signed_event_for(id, *src_in) - min_desired) as u64;
                         let synced_out = *src_out;
                         angles.push(crate::model::clip::MulticamAngle {
                             id: uuid::Uuid::new_v4().to_string(),
@@ -9449,11 +9788,13 @@ pub fn build_window(
                             source_path: path.clone(),
                             source_in: synced_in,
                             source_out: synced_out,
+                            // Stored metadata is the raw GCC-PHAT offset for this angle.
                             sync_offset_ns: offset_ns,
                             source_timecode_base_ns: None,
                             media_duration_ns: None,
                             volume: if i == 0 { 1.0 } else { 0.0 },
                             muted: i != 0,
+                            ..Default::default()
                         });
                     }
                     if angles.len() >= 2 {
@@ -9506,11 +9847,13 @@ pub fn build_window(
                 glib::ControlFlow::Continue
             });
         }
+        let multicam_sync_in_progress_cb = multicam_sync_in_progress.clone();
         timeline_state.borrow_mut().on_create_multicam = Some(Rc::new(
             move |clip_infos: Vec<(String, String, u64, u64, u64, String)>| {
                 if multicam_sync_rx.borrow().is_some() {
                     return; // sync already in progress
                 }
+                multicam_sync_in_progress_cb.set(true);
                 if let Some(win) = window_weak.upgrade() {
                     let proj = project.borrow();
                     win.set_title(Some(&format!(
@@ -14800,6 +15143,7 @@ pub fn build_window(
         let player = player.clone();
         let source_marks = source_marks.clone();
         let audio_sync_in_progress = audio_sync_in_progress.clone();
+        let multicam_sync_in_progress = multicam_sync_in_progress.clone();
         let silence_detect_in_progress = silence_detect_in_progress.clone();
         let scene_detect_in_progress = scene_detect_in_progress.clone();
         let match_audio_in_progress = match_audio_in_progress.clone();
@@ -15162,6 +15506,7 @@ pub fn build_window(
             let tracking_active = tracking_progress.in_flight;
             let voice_enhance_active = voice_enhance_progress.in_flight;
             let syncing_audio = audio_sync_in_progress.get();
+            let syncing_multicam = multicam_sync_in_progress.get();
             let detecting_silence = silence_detect_in_progress.get();
             let detecting_scene_cuts = scene_detect_in_progress.get();
             let matching_audio = match_audio_in_progress.get();
@@ -15242,6 +15587,7 @@ pub fn build_window(
             if proxy_active
                 || prerender_active
                 || syncing_audio
+                || syncing_multicam
                 || detecting_silence
                 || detecting_scene_cuts
                 || matching_audio
@@ -15255,6 +15601,9 @@ pub fn build_window(
                 let mut parts = Vec::new();
                 if syncing_audio {
                     parts.push("Syncing audio…".to_string());
+                }
+                if syncing_multicam {
+                    parts.push("Creating multicam clip…".to_string());
                 }
                 if detecting_silence {
                     parts.push("Detecting silence\u{2026}".to_string());
@@ -15337,6 +15686,11 @@ pub fn build_window(
                     status_progress.set_fraction(0.0);
                     status_progress.pulse();
                     status_progress.set_text(Some("Matching…"));
+                } else if syncing_multicam {
+                    status_progress.set_visible(true);
+                    status_progress.set_fraction(0.0);
+                    status_progress.pulse();
+                    status_progress.set_text(Some("Multicam sync…"));
                 } else {
                     status_progress.set_visible(false);
                 }
@@ -21947,22 +22301,45 @@ fn handle_mcp_command(
             let sync_results = crate::media::audio_sync::sync_clips_by_audio(&sync_clips);
             let anchor_id = clip_infos[0].0.clone();
             let anchor_start = clip_infos[0].4;
+            // Lookup helper: offset_ns for each clip (anchor = 0).
+            let offset_for = |id: &str| -> i64 {
+                if id == anchor_id {
+                    0
+                } else {
+                    sync_results
+                        .iter()
+                        .find(|r| r.clip_id == id)
+                        .map(|r| r.offset_ns)
+                        .unwrap_or(0)
+                }
+            };
+            // Compute each angle's effective landmark position in its source.
+            // See the matching logic in the GUI multicam result handler above for
+            // the full derivation. Short version: gcc_phat returns
+            // `T_anchor − T_clip`, so the clip's landmark is at `−offset_ns`
+            // relative to the anchor, and we SUBTRACT offset_ns here (not add).
+            let signed_event_for = |id: &str, src_in: u64| -> i64 {
+                let landmark = if id == anchor_id {
+                    0
+                } else {
+                    -offset_for(id)
+                };
+                src_in as i64 + landmark
+            };
+            let desired: Vec<i64> = clip_infos
+                .iter()
+                .map(|(id, _, src_in, _, _, _)| signed_event_for(id, *src_in))
+                .collect();
+            let min_desired = desired.iter().copied().min().unwrap_or(0);
             // Build multicam angles from sync results
             let mut angles: Vec<crate::model::clip::MulticamAngle> = Vec::new();
             for (i, (id, path, src_in, src_out, _tl_start, _track_id)) in
                 clip_infos.iter().enumerate()
             {
-                let offset_ns = if *id == anchor_id {
-                    0i64
-                } else {
-                    sync_results
-                        .iter()
-                        .find(|r| r.clip_id == *id)
-                        .map(|r| r.offset_ns)
-                        .unwrap_or(0)
-                };
+                let offset_ns = offset_for(id);
                 let label = format!("Angle {}", i + 1);
-                let synced_in = (*src_in as i64 + offset_ns).max(0) as u64;
+                // Final synced source_in: effective landmark − min, always ≥ 0.
+                let synced_in = (signed_event_for(id, *src_in) - min_desired) as u64;
                 let synced_out = *src_out;
                 angles.push(crate::model::clip::MulticamAngle {
                     id: uuid::Uuid::new_v4().to_string(),
@@ -21975,6 +22352,7 @@ fn handle_mcp_command(
                     media_duration_ns: None,
                     volume: if i == 0 { 1.0 } else { 0.0 },
                     muted: i != 0,
+                    ..Default::default()
                 });
             }
             if angles.len() >= 2 {
@@ -22091,6 +22469,12 @@ fn handle_mcp_command(
                                         "sync_offset_ns": angle.sync_offset_ns,
                                         "volume": angle.volume,
                                         "muted": angle.muted,
+                                        "brightness": angle.brightness,
+                                        "contrast": angle.contrast,
+                                        "saturation": angle.saturation,
+                                        "temperature": angle.temperature,
+                                        "tint": angle.tint,
+                                        "lut_paths": angle.lut_paths,
                                     })
                                 })
                                 .collect()
@@ -22154,6 +22538,73 @@ fn handle_mcp_command(
                     drop(proj);
                     on_project_changed();
                     reply.send(json!({"success": true})).ok();
+                } else {
+                    reply
+                        .send(json!({"error": "Multicam clip has no angles"}))
+                        .ok();
+                }
+            } else {
+                reply
+                    .send(json!({"error": format!("Clip not found: {clip_id}")}))
+                    .ok();
+            }
+        }
+        McpCommand::SetMulticamAngleColor {
+            clip_id,
+            angle_index,
+            brightness,
+            contrast,
+            saturation,
+            temperature,
+            tint,
+            lut_paths,
+            reply,
+        } => {
+            let mut proj = project.borrow_mut();
+            if let Some(clip) = proj.clip_mut(&clip_id) {
+                if !clip.is_multicam() {
+                    reply
+                        .send(json!({"error": "Clip is not a multicam clip"}))
+                        .ok();
+                    return;
+                }
+                if let Some(ref mut angles) = clip.multicam_angles {
+                    if angle_index >= angles.len() {
+                        reply.send(json!({"error": format!("Angle index {} out of range (0..{})", angle_index, angles.len())})).ok();
+                        return;
+                    }
+                    let a = &mut angles[angle_index];
+                    if let Some(v) = brightness {
+                        a.brightness = v.clamp(-1.0, 1.0);
+                    }
+                    if let Some(v) = contrast {
+                        a.contrast = v.clamp(0.0, 2.0);
+                    }
+                    if let Some(v) = saturation {
+                        a.saturation = v.clamp(0.0, 2.0);
+                    }
+                    if let Some(v) = temperature {
+                        a.temperature = v.clamp(2000.0, 10000.0);
+                    }
+                    if let Some(v) = tint {
+                        a.tint = v.clamp(-1.0, 1.0);
+                    }
+                    if let Some(luts) = lut_paths {
+                        a.lut_paths = luts;
+                    }
+                    let result = json!({
+                        "success": true,
+                        "brightness": a.brightness,
+                        "contrast": a.contrast,
+                        "saturation": a.saturation,
+                        "temperature": a.temperature,
+                        "tint": a.tint,
+                        "lut_paths": a.lut_paths,
+                    });
+                    proj.dirty = true;
+                    drop(proj);
+                    on_project_changed();
+                    reply.send(result).ok();
                 } else {
                     reply
                         .send(json!({"error": "Multicam clip has no angles"}))

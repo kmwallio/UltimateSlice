@@ -7,8 +7,25 @@ use rustfft::FftPlanner;
 /// Result of syncing one clip against the anchor.
 pub struct AudioSyncResult {
     pub clip_id: String,
-    /// Offset in nanoseconds relative to the anchor clip's timeline_start.
-    /// Positive means the clip's audio event happens later in its source.
+    /// Raw GCC-PHAT peak lag in nanoseconds: `offset_ns = T_anchor − T_clip`,
+    /// where `T_x` is the position of the shared audio landmark within `x`'s
+    /// extracted audio window (starting at its `source_in`).
+    ///
+    /// Positive means the **anchor's** audio landmark is later in its source
+    /// than the clip's (equivalently, the anchor was started recording
+    /// earlier and has more leading content before the shared event).
+    ///
+    /// This sign convention makes the two consumers look opposite:
+    /// - **Moving clips on the timeline** (`apply_audio_sync_results`): want
+    ///   `new_timeline_start = anchor_timeline_start + offset_ns` so that a
+    ///   clip whose event is earlier in its own source starts later on the
+    ///   timeline.
+    /// - **Building multicam angles** (`window.rs` multicam handler): want
+    ///   `angle.source_in = src_in_orig − offset_ns + shift` so that a clip
+    ///   whose event is earlier in its source plays from the start while the
+    ///   clip with more leading content seeks past it. The signs look
+    ///   opposite because moving `timeline_start` right is equivalent to
+    ///   moving `source_in` left — both delay the content by the same amount.
     pub offset_ns: i64,
     /// Confidence score: peak / mean of cross-correlation magnitudes.
     /// Higher = more confident. Values below ~3.0 are likely noise.

@@ -1693,6 +1693,7 @@ mod tests {
                 media_duration_ns: Some(8_000_000_000),
                 volume: 1.0,
                 muted: false,
+                ..Default::default()
             },
             MulticamAngle {
                 id: "angle-1".to_string(),
@@ -1705,6 +1706,7 @@ mod tests {
                 media_duration_ns: Some(8_500_000_000),
                 volume: 0.0,
                 muted: true,
+                ..Default::default()
             },
         ]);
         multicam.multicam_switches = Some(vec![

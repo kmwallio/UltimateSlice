@@ -268,10 +268,59 @@ pub struct MulticamAngle {
     /// When true, this angle's audio is excluded from the mix.
     #[serde(default)]
     pub muted: bool,
+    // ── Per-angle color grade (applied when this angle is the active video segment) ──
+    // These use the SAME neutral defaults and ranges as the Clip-level fields:
+    //   brightness  0.0  (−1.0 … 1.0)
+    //   contrast    1.0  ( 0.0 … 2.0)   ← multiplier, NOT offset!
+    //   saturation  1.0  ( 0.0 … 2.0)   ← multiplier, NOT offset!
+    //   temperature 6500 (2000 … 10000)  ← Kelvin, NOT offset!
+    //   tint        0.0  (−1.0 … 1.0)
+    /// Brightness adjustment: −1.0 (dark) to 1.0 (bright), 0.0 = no change.
+    #[serde(default)]
+    pub brightness: f32,
+    /// Contrast multiplier: 0.0 to 2.0, 1.0 = no change.
+    #[serde(default = "default_contrast")]
+    pub contrast: f32,
+    /// Saturation multiplier: 0.0 (greyscale) to 2.0 (vivid), 1.0 = no change.
+    #[serde(default = "default_saturation")]
+    pub saturation: f32,
+    /// Color temperature in Kelvin: 2000 (warm) to 10000 (cool), 6500 = daylight neutral.
+    #[serde(default = "default_temperature")]
+    pub temperature: f32,
+    /// Tint on green–magenta axis: −1.0 (green) to 1.0 (magenta), 0.0 = no change.
+    #[serde(default)]
+    pub tint: f32,
+    /// Per-angle LUT paths (.cube files). When non-empty, overrides the clip-level
+    /// `lut_paths` for this angle — lets each camera use its own colour transform.
+    #[serde(default)]
+    pub lut_paths: Vec<String>,
 }
 
 fn default_multicam_angle_volume() -> f32 {
     1.0
+}
+
+impl Default for MulticamAngle {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            label: String::new(),
+            source_path: String::new(),
+            source_in: 0,
+            source_out: 0,
+            sync_offset_ns: 0,
+            source_timecode_base_ns: None,
+            media_duration_ns: None,
+            volume: default_multicam_angle_volume(),
+            muted: false,
+            brightness: 0.0,
+            contrast: default_contrast(),
+            saturation: default_saturation(),
+            temperature: default_temperature(),
+            tint: 0.0,
+            lut_paths: Vec::new(),
+        }
+    }
 }
 
 /// An angle switch point within a multicam clip.
@@ -2534,6 +2583,23 @@ impl Clip {
     pub fn active_angle_ref_at(&self, local_pos_ns: u64) -> Option<&MulticamAngle> {
         let idx = self.active_angle_at(local_pos_ns);
         self.multicam_angles.as_ref().and_then(|a| a.get(idx))
+    }
+
+    /// Returns true if the given multicam angle has source footage at the
+    /// given local position (relative to the clip's visible start, i.e.
+    /// accounting for `source_in` after a razor cut).
+    pub fn multicam_angle_available_at(&self, angle_index: usize, local_pos_ns: u64) -> bool {
+        self.multicam_angles
+            .as_ref()
+            .and_then(|a| a.get(angle_index))
+            .map_or(false, |angle| {
+                // Position within the multicam's internal timeline.
+                let internal_pos = self.source_in.saturating_add(local_pos_ns);
+                angle
+                    .source_in
+                    .saturating_add(internal_pos)
+                    < angle.source_out
+            })
     }
 
     /// Insert an angle switch, keeping the list sorted by position.
@@ -5064,6 +5130,7 @@ mod tests {
                 media_duration_ns: None,
                 volume: 1.0,
                 muted: false,
+                ..Default::default()
             },
             MulticamAngle {
                 id: "a2".into(),
@@ -5076,6 +5143,7 @@ mod tests {
                 media_duration_ns: None,
                 volume: 1.0,
                 muted: false,
+                ..Default::default()
             },
         ];
         let mc = Clip::new_multicam(1_000_000_000, angles);
@@ -5109,6 +5177,7 @@ mod tests {
                     media_duration_ns: None,
                     volume: 1.0,
                     muted: false,
+                    ..Default::default()
                 },
                 MulticamAngle {
                     id: "a2".into(),
@@ -5121,6 +5190,7 @@ mod tests {
                     media_duration_ns: None,
                     volume: 1.0,
                     muted: false,
+                    ..Default::default()
                 },
             ],
         );
@@ -5157,6 +5227,7 @@ mod tests {
                     media_duration_ns: None,
                     volume: 1.0,
                     muted: false,
+                    ..Default::default()
                 },
                 MulticamAngle {
                     id: "a2".into(),
@@ -5169,6 +5240,7 @@ mod tests {
                     media_duration_ns: None,
                     volume: 1.0,
                     muted: false,
+                    ..Default::default()
                 },
             ],
         );
@@ -5204,6 +5276,7 @@ mod tests {
                     media_duration_ns: None,
                     volume: 1.0,
                     muted: false,
+                    ..Default::default()
                 },
                 MulticamAngle {
                     id: "a2".into(),
@@ -5216,6 +5289,7 @@ mod tests {
                     media_duration_ns: None,
                     volume: 1.0,
                     muted: false,
+                    ..Default::default()
                 },
             ],
         );
@@ -5250,6 +5324,7 @@ mod tests {
                     media_duration_ns: None,
                     volume: 1.0,
                     muted: false,
+                    ..Default::default()
                 },
                 MulticamAngle {
                     id: "a2".into(),
@@ -5262,6 +5337,7 @@ mod tests {
                     media_duration_ns: None,
                     volume: 1.0,
                     muted: false,
+                    ..Default::default()
                 },
             ],
         );
@@ -5289,6 +5365,7 @@ mod tests {
                 media_duration_ns: Some(15_000),
                 volume: 1.0,
                 muted: false,
+                ..Default::default()
             }],
         );
         mc.insert_angle_switch(5_000, 0);
@@ -5330,6 +5407,7 @@ mod tests {
                     media_duration_ns: None,
                     volume: 0.75,
                     muted: false,
+                    ..Default::default()
                 },
                 MulticamAngle {
                     id: "a2".into(),
@@ -5342,6 +5420,7 @@ mod tests {
                     media_duration_ns: None,
                     volume: 0.0,
                     muted: true,
+                    ..Default::default()
                 },
             ],
         );
