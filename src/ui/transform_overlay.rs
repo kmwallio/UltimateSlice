@@ -163,6 +163,15 @@ pub struct TransformOverlay {
     drawing_kind: Rc<Cell<crate::model::clip::DrawingKind>>,
     /// Optional fill color for Rectangle/Ellipse. `None` = stroke only.
     drawing_fill: Rc<Cell<Option<u32>>>,
+    /// Snapshot of the drawing items under the playhead. The app
+    /// pushes this via `set_current_drawing_items` so the overlay
+    /// can hit-test clicks and paint the selected item's highlight
+    /// without having to round-trip to the project model on every
+    /// frame.
+    drawing_items_snapshot: Rc<RefCell<Vec<crate::model::clip::DrawingItem>>>,
+    /// Index (into `drawing_items_snapshot`) of the currently
+    /// selected item, or `None` when no click-to-select is active.
+    selected_drawing_item: Rc<Cell<Option<usize>>>,
 }
 
 impl TransformOverlay {
@@ -178,11 +187,15 @@ impl TransformOverlay {
         on_mask_path_dbl_click: impl Fn(&[crate::model::clip::BezierPoint]) + 'static,
         on_tracking_region_change: impl Fn(f64, f64, f64, f64) + 'static,
         on_drawing_finish: impl Fn(crate::model::clip::DrawingItem) + 'static,
-        on_drawing_delete_last: impl Fn() + 'static,
+        // `Some(idx)` = delete the specific item at that index in
+        // the overlay's current drawing snapshot; `None` = the
+        // pre-selection LIFO behaviour (pop the most-recent item
+        // in the drawing clip under the playhead).
+        on_drawing_delete_at: impl Fn(Option<usize>) + 'static,
         active_tool: crate::ui::timeline::ActiveTool,
     ) -> Self {
         let active_tool = Rc::new(Cell::new(active_tool));
-        let on_drawing_delete_last = Rc::new(on_drawing_delete_last);
+        let on_drawing_delete_at = Rc::new(on_drawing_delete_at);
         let scale = Rc::new(Cell::new(1.0_f64));
         let position_x = Rc::new(Cell::new(0.0_f64));
         let position_y = Rc::new(Cell::new(0.0_f64));
@@ -230,6 +243,9 @@ impl TransformOverlay {
         let drawing_width = Rc::new(Cell::new(5.0)); // Default 5px
         let drawing_kind = Rc::new(Cell::new(crate::model::clip::DrawingKind::Stroke));
         let drawing_fill: Rc<Cell<Option<u32>>> = Rc::new(Cell::new(None));
+        let drawing_items_snapshot: Rc<RefCell<Vec<crate::model::clip::DrawingItem>>> =
+            Rc::new(RefCell::new(Vec::new()));
+        let selected_drawing_item: Rc<Cell<Option<usize>>> = Rc::new(Cell::new(None));
         let on_drawing_finish = Rc::new(on_drawing_finish);
 
         let da = DrawingArea::new();
@@ -281,6 +297,8 @@ impl TransformOverlay {
             let drawing_kind_draw = drawing_kind.clone();
             let drawing_fill_draw = drawing_fill.clone();
             let active_tool_draw = active_tool.clone();
+            let drawing_items_draw = drawing_items_snapshot.clone();
+            let selected_drawing_draw = selected_drawing_item.clone();
 
             da.set_draw_func(move |da, cr, ww, wh| {
                 let draw_active =
@@ -392,9 +410,83 @@ impl TransformOverlay {
                     }
                 }
 
+                // ── Selected drawing item highlight ─────────────
+                if let Some(sel_idx) = selected_drawing_draw.get() {
+                    let items = drawing_items_draw.borrow();
+                    if let Some(item) = items.get(sel_idx) {
+                        use crate::model::clip::DrawingKind;
+                        let (cx0, cy0, cx1, cy1) = match item.kind {
+                            DrawingKind::Stroke => {
+                                let mut min_x = f64::MAX;
+                                let mut min_y = f64::MAX;
+                                let mut max_x = f64::MIN;
+                                let mut max_y = f64::MIN;
+                                for (nx, ny) in &item.points {
+                                    let x = vx + nx * vw;
+                                    let y = vy + ny * vh;
+                                    min_x = min_x.min(x);
+                                    min_y = min_y.min(y);
+                                    max_x = max_x.max(x);
+                                    max_y = max_y.max(y);
+                                }
+                                (min_x, min_y, max_x, max_y)
+                            }
+                            _ => {
+                                let p0 = item.points[0];
+                                let p1 = *item.points.last().unwrap();
+                                let a = (vx + p0.0 * vw, vy + p0.1 * vh);
+                                let b = (vx + p1.0 * vw, vy + p1.1 * vh);
+                                (a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1))
+                            }
+                        };
+                        let pad = 4.0;
+                        cr.save().ok();
+                        cr.set_source_rgba(0.2, 0.8, 1.0, 0.9);
+                        cr.set_line_width(1.5);
+                        cr.set_dash(&[6.0, 4.0], 0.0);
+                        cr.rectangle(
+                            cx0 - pad,
+                            cy0 - pad,
+                            (cx1 - cx0) + pad * 2.0,
+                            (cy1 - cy0) + pad * 2.0,
+                        );
+                        let _ = cr.stroke();
+                        cr.restore().ok();
+                    }
+                }
+
                 // Always draw: dark vignette + canvas border
                 draw_outside_vignette(cr, ww as f64, wh as f64, vx, vy, vw, vh);
                 draw_frame_border(cr, vx, vy, vw, vh);
+
+                // ── Background-encode feedback ──────────────────
+                // Visible in *any* tool while a drawing animation
+                // WebM is baking; keeps users from thinking the
+                // static PNG they see is the final render.
+                if !draw_active
+                    && crate::media::drawing_render::drawing_encode_is_pending()
+                {
+                    let note = "Baking drawing animation…";
+                    cr.select_font_face(
+                        "Sans",
+                        gtk4::cairo::FontSlant::Normal,
+                        gtk4::cairo::FontWeight::Bold,
+                    );
+                    cr.set_font_size(12.0);
+                    let ext = cr.text_extents(note).unwrap_or(
+                        gtk4::cairo::TextExtents::new(0.0, 0.0, 180.0, 12.0, 0.0, 0.0),
+                    );
+                    let pill_w = ext.width() + 24.0;
+                    let pill_h = ext.height() + 12.0;
+                    let px = vx + 12.0;
+                    let py = vy + 12.0;
+                    cr.set_source_rgba(0.0, 0.0, 0.0, 0.72);
+                    cr.rectangle(px, py, pill_w, pill_h);
+                    let _ = cr.fill();
+                    cr.set_source_rgba(0.2, 0.8, 1.0, 0.95);
+                    cr.move_to(px + 12.0, py + 6.0 + ext.height());
+                    let _ = cr.show_text(note);
+                }
 
                 // ── Draw-tool HUD: show current brush state ─────
                 if draw_active {
@@ -411,8 +503,17 @@ impl TransformOverlay {
                         Some(_) => " +fill",
                         None => "",
                     };
+                    // Signal a background WebM bake in flight so the
+                    // user knows the static PNG they're seeing isn't
+                    // the final state.
+                    let baking_text =
+                        if crate::media::drawing_render::drawing_encode_is_pending() {
+                            "   • baking animation…"
+                        } else {
+                            ""
+                        };
                     let label = format!(
-                        "Draw [{kind_label}]  •  #{:06X}  •  {w:.0}px{fill_text}   (1/2/3/4 pick shape · Del undoes)",
+                        "Draw [{kind_label}]  •  #{:06X}  •  {w:.0}px{fill_text}{baking_text}   (1/2/3/4 pick shape · click to select · Del removes)",
                         color >> 8
                     );
                     // Dark pill in the canvas top-left.
@@ -1391,6 +1492,8 @@ impl TransformOverlay {
             let on_drawing_finish_end = on_drawing_finish.clone();
             let drawing_kind_end = drawing_kind.clone();
             let drawing_fill_end = drawing_fill.clone();
+            let drawing_items_snapshot_end = drawing_items_snapshot.clone();
+            let selected_drawing_item_end = selected_drawing_item.clone();
 
             gesture.connect_drag_end(move |_g, _ox, _oy| {
                 // Capture the completed handle BEFORE clearing
@@ -1407,6 +1510,42 @@ impl TransformOverlay {
                         // would panic — see past bug).
                         let collected: Vec<(f64, f64)> =
                             std::mem::take(&mut *drawing_points_end.borrow_mut());
+                        // A press-release without measurable motion is
+                        // a click, not a stroke — route it through
+                        // hit-testing so the user can select an
+                        // existing drawing item for per-item Delete.
+                        let moved = collected.len() > 1
+                            || collected
+                                .last()
+                                .map(|last| {
+                                    (last.0 - ds.start_wx).abs() > 3.0
+                                        || (last.1 - ds.start_wy).abs() > 3.0
+                                })
+                                .unwrap_or(false);
+                        if !moved {
+                            let click_wx = collected
+                                .first()
+                                .map(|p| p.0)
+                                .unwrap_or(ds.start_wx);
+                            let click_wy = collected
+                                .first()
+                                .map(|p| p.1)
+                                .unwrap_or(ds.start_wy);
+                            let items = drawing_items_snapshot_end.borrow();
+                            // Iterate in reverse so the top-most
+                            // (last-drawn) hit wins.
+                            let hit = items.iter().enumerate().rev().find_map(|(i, it)| {
+                                drawing_item_hit(
+                                    it, click_wx, click_wy, ds.vx, ds.vy, ds.vw, ds.vh,
+                                )
+                                .then_some(i)
+                            });
+                            selected_drawing_item_end.set(hit);
+                            drop(items);
+                            da_end.queue_draw();
+                            on_drag_end();
+                            return;
+                        }
                         if collected.len() >= 2 {
                             use crate::model::clip::DrawingKind;
                             let kind = drawing_kind_end.get();
@@ -1713,7 +1852,8 @@ impl TransformOverlay {
             let active_tool_key = active_tool.clone();
             let drawing_kind_key = drawing_kind.clone();
             let da_redraw_key = da.clone();
-            let on_drawing_delete_last_key = on_drawing_delete_last.clone();
+            let on_drawing_delete_at_key = on_drawing_delete_at.clone();
+            let selected_item_key = selected_drawing_item.clone();
             let key_ctrl = gtk::EventControllerKey::new();
             key_ctrl.connect_key_pressed(move |_, key, _, mods| {
                 use gtk::gdk::{Key, ModifierType};
@@ -1737,7 +1877,12 @@ impl TransformOverlay {
                         return glib::Propagation::Stop;
                     }
                     if matches!(key, Key::Delete | Key::BackSpace | Key::KP_Delete) {
-                        on_drawing_delete_last_key();
+                        // Selected-item delete if the user picked one
+                        // via click; otherwise fall through to LIFO
+                        // (the `None` arm on the callback).
+                        let target = selected_item_key.get();
+                        on_drawing_delete_at_key(target);
+                        selected_item_key.set(None);
                         da_redraw_key.queue_draw();
                         return glib::Propagation::Stop;
                     }
@@ -1862,7 +2007,38 @@ impl TransformOverlay {
             drawing_width,
             drawing_kind,
             drawing_fill,
+            drawing_items_snapshot,
+            selected_drawing_item,
         }
+    }
+
+    /// Push the current drawing clip's items into the overlay so
+    /// hit-test clicks and the selected-item highlight have something
+    /// to reference. The app calls this after each project change /
+    /// playhead move; an empty Vec clears the selection as a side
+    /// effect.
+    pub fn set_current_drawing_items(
+        &self,
+        items: &[crate::model::clip::DrawingItem],
+    ) {
+        let mut slot = self.drawing_items_snapshot.borrow_mut();
+        if *slot != items {
+            *slot = items.to_vec();
+            // Clear a stale selection when the backing list changes
+            // out from under us.
+            if let Some(idx) = self.selected_drawing_item.get() {
+                if idx >= slot.len() {
+                    self.selected_drawing_item.set(None);
+                }
+            }
+            drop(slot);
+            self.drawing_area.queue_draw();
+        }
+    }
+
+    /// Current per-item selection (`None` when nothing is selected).
+    pub fn selected_drawing_item(&self) -> Option<usize> {
+        self.selected_drawing_item.get()
     }
 
     /// Set the Draw tool's brush color (0xRRGGBBAA). Applied to
@@ -2092,6 +2268,109 @@ fn paintable_dims(
 /// fills the full scroll viewport and the canvas_frame is smaller due to zoom < 1.0).
 ///
 /// Falls back to `video_rect()` on the full DA if compute_bounds() fails.
+/// Distance from `(px, py)` to the line segment `(x0, y0)-(x1, y1)`.
+fn point_to_segment_distance(
+    px: f64,
+    py: f64,
+    x0: f64,
+    y0: f64,
+    x1: f64,
+    y1: f64,
+) -> f64 {
+    let dx = x1 - x0;
+    let dy = y1 - y0;
+    let len2 = dx * dx + dy * dy;
+    if len2 < 1e-6 {
+        let ex = px - x0;
+        let ey = py - y0;
+        return (ex * ex + ey * ey).sqrt();
+    }
+    let t = (((px - x0) * dx + (py - y0) * dy) / len2).clamp(0.0, 1.0);
+    let fx = x0 + t * dx;
+    let fy = y0 + t * dy;
+    let ex = px - fx;
+    let ey = py - fy;
+    (ex * ex + ey * ey).sqrt()
+}
+
+/// Hit-test a single drawing item against a widget-space click.
+/// Normalized item points are scaled to the video rect
+/// `(vx, vy, vw, vh)` so the test matches what the user sees.
+/// `tol` is the widget-pixel tolerance for stroke-only hits.
+fn drawing_item_hit(
+    item: &crate::model::clip::DrawingItem,
+    click_wx: f64,
+    click_wy: f64,
+    vx: f64,
+    vy: f64,
+    vw: f64,
+    vh: f64,
+) -> bool {
+    use crate::model::clip::DrawingKind;
+    let scale_ref = (vh / 1080.0).max(1e-3);
+    let tol = (item.width * scale_ref).max(4.0) * 1.8;
+    let to_widget = |(nx, ny): (f64, f64)| (vx + nx * vw, vy + ny * vh);
+    match item.kind {
+        DrawingKind::Stroke => {
+            if item.points.len() < 2 {
+                return false;
+            }
+            item.points.windows(2).any(|pair| {
+                let a = to_widget(pair[0]);
+                let b = to_widget(pair[1]);
+                point_to_segment_distance(click_wx, click_wy, a.0, a.1, b.0, b.1) <= tol
+            })
+        }
+        DrawingKind::Rectangle => {
+            let p0 = to_widget(item.points[0]);
+            let p1 = to_widget(*item.points.last().unwrap());
+            let x0 = p0.0.min(p1.0);
+            let y0 = p0.1.min(p1.1);
+            let x1 = p0.0.max(p1.0);
+            let y1 = p0.1.max(p1.1);
+            if item.fill_color.is_some() {
+                click_wx >= x0 && click_wx <= x1 && click_wy >= y0 && click_wy <= y1
+            } else {
+                let on_top = (click_wy - y0).abs() <= tol
+                    && click_wx >= x0 - tol
+                    && click_wx <= x1 + tol;
+                let on_bot = (click_wy - y1).abs() <= tol
+                    && click_wx >= x0 - tol
+                    && click_wx <= x1 + tol;
+                let on_left = (click_wx - x0).abs() <= tol
+                    && click_wy >= y0 - tol
+                    && click_wy <= y1 + tol;
+                let on_right = (click_wx - x1).abs() <= tol
+                    && click_wy >= y0 - tol
+                    && click_wy <= y1 + tol;
+                on_top || on_bot || on_left || on_right
+            }
+        }
+        DrawingKind::Ellipse => {
+            let p0 = to_widget(item.points[0]);
+            let p1 = to_widget(*item.points.last().unwrap());
+            let cx = (p0.0 + p1.0) * 0.5;
+            let cy = (p0.1 + p1.1) * 0.5;
+            let rx = ((p1.0 - p0.0).abs() * 0.5).max(1.0);
+            let ry = ((p1.1 - p0.1).abs() * 0.5).max(1.0);
+            let dx = (click_wx - cx) / rx;
+            let dy = (click_wy - cy) / ry;
+            let d = (dx * dx + dy * dy).sqrt();
+            let rel_tol = tol / rx.min(ry).max(1.0);
+            if item.fill_color.is_some() {
+                d <= 1.0 + rel_tol
+            } else {
+                (d - 1.0).abs() <= rel_tol
+            }
+        }
+        DrawingKind::Arrow => {
+            let a = to_widget(item.points[0]);
+            let b = to_widget(*item.points.last().unwrap());
+            point_to_segment_distance(click_wx, click_wy, a.0, a.1, b.0, b.1) <= tol
+        }
+    }
+}
+
 fn canvas_video_rect(
     da: &DrawingArea,
     canvas_widget: &Rc<RefCell<Option<gtk4::Widget>>>,

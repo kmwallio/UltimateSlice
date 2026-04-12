@@ -11208,12 +11208,14 @@ pub fn build_window(
                 }
             },
             {
-                // Delete key in Draw tool: pop the most recent drawing
-                // item from the drawing clip under the playhead.
+                // Delete in Draw tool. `Some(idx)` = remove the
+                // specific drawing item the user clicked to select;
+                // `None` = pre-selection LIFO fallback (pop the most
+                // recent item in the drawing clip under the playhead).
                 let project = project.clone();
                 let timeline_state = timeline_state.clone();
                 let on_project_changed = on_project_changed.clone();
-                move || {
+                move |target_idx: Option<usize>| {
                     let mut proj = project.borrow_mut();
                     let playhead = timeline_state.borrow().playhead_ns;
                     let selected_track_id = timeline_state.borrow().selected_track_id.clone();
@@ -11241,7 +11243,14 @@ pub fn build_window(
                             return;
                         }
                         let mut new_items = old_items.clone();
-                        new_items.pop();
+                        match target_idx {
+                            Some(idx) if idx < new_items.len() => {
+                                new_items.remove(idx);
+                            }
+                            _ => {
+                                new_items.pop();
+                            }
+                        }
                         timeline_state.borrow_mut().history.execute(
                             Box::new(crate::undo::SetDrawingItemsCommand {
                                 clip_id,
@@ -12271,6 +12280,32 @@ pub fn build_window(
                         let (ix, iy) = pp_ref.content_inset_for_clip(selected.as_deref());
                         to.set_content_inset(ix, iy);
                     }
+                    // Push the drawing items under the playhead into
+                    // the overlay so its hit-test / selection
+                    // highlight have a current snapshot to work from.
+                    let items_now = {
+                        let proj = project.borrow();
+                        let ts = timeline_state_poll.borrow();
+                        let mut items: Vec<crate::model::clip::DrawingItem> = Vec::new();
+                        if let Some(tid) = ts.selected_track_id.as_ref() {
+                            if let Some(track) =
+                                proj.tracks.iter().find(|t| &t.id == tid)
+                            {
+                                for clip in &track.clips {
+                                    if clip.kind == crate::model::clip::ClipKind::Drawing
+                                        && root_pos >= clip.timeline_start
+                                        && root_pos
+                                            < clip.timeline_start + clip.duration()
+                                    {
+                                        items = clip.drawing_items.clone();
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        items
+                    };
+                    to.set_current_drawing_items(&items_now);
                 }
                 // Update inspector sliders to reflect keyframe-evaluated values
                 // at the new playhead position.

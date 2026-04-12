@@ -583,6 +583,50 @@ Tracking docs:
 - [ ] Consolidated Archiving with Handles (Trim source media to used regions plus configurable handles during collection)
 - [x] Metadata display & filtering — media browser cards now surface resolution, codec, frame rate, duration, and file size with search/type/resolution filters and expanded `list_library` metadata
 
+### Drawings & Procedural Animations
+See [`animations.md`](animations.md) for the full breakdown of what's
+already shipped (vector drawing clips, in-video reveal animations,
+title Typewriter/Fade/Pop, SVG sidecar export with round-trip import,
+FCPXML persistence).
+
+- [x] Draw tool (`D`) on the program monitor, keyboard shape picker
+  (`1`/`2`/`3`/`4`), Delete pops most-recent item, brush popover with
+  color / width / fill / reveal-animation controls + Static/Animated
+  SVG export, in-monitor HUD
+- [x] Cairo rasteriser with per-item time reveal; QuickTime-RLE MOV
+  bake (argb alpha) for animated drawings, cached by content hash;
+  background-thread encode with `on_project_changed` re-trigger on
+  completion
+- [x] Title animations (Typewriter / Fade / Pop) driven live on
+  textoverlay + compositor pad in preview, emitted as drawtext
+  cascade + alpha expression in export
+- [x] FCPXML round-trip for `ClipKind::Drawing`; auto-migration of
+  stamped `.svg` Image clips on project load
+- [ ] **Hit-test shape selection.** Click an existing stroke / shape
+  in the monitor to highlight it; per-item Delete replaces the
+  current LIFO behaviour. Data already supports it via
+  `SetDrawingItemsCommand`.
+- [ ] **Background-encode progress feedback.** Show a spinner (or
+  HUD text) while the first MOV bake is in flight so users know
+  the static PNG they see isn't the final state.
+- [ ] **Cache janitor.** LRU or age-based sweep for
+  `/tmp/ultimate-slice-drawing-{png,mov}` at startup.
+- [ ] **Option B — minimal SMIL interpreter for third-party SVGs.**
+  Today only our own SVG exports round-trip (and older pre-stamp
+  exports via a structural heuristic). A ~150-line evaluator on
+  top of `usvg::Tree` that handles `stroke-dashoffset` + `opacity`
+  animations would let any "draw-on" SVG from the wider ecosystem
+  play inside preview + export using the same frame-time Cairo
+  rasterisation + MOV bake path. Full SMIL (motion paths, keyframe
+  splines, `animateColor`) is out of scope — too large for the
+  value.
+- [ ] Rectangle / ellipse "grow from corner" reveal as an alternative
+  to the current alpha fade (per-clip setting).
+- [ ] Live cursor-follow ghost preview for freehand strokes (today
+  commits on mouse-up only).
+- [ ] Drawing presets (named `(color, width, fill)` combos) in the
+  brush popover.
+
 ### Canvas / Sequence Settings
 - [x] Canvas size dialog (project resolution: 1080p, 4K, custom W×H)
 - [x] Frame rate selector in project settings (23.976, 24, 25, 29.97, 30, 60 fps)

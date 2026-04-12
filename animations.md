@@ -133,6 +133,30 @@ and export. What remains is UI polish.
   (`project_fps_num`, `project_fps_den`); call sites thread them
   through from `proj.frame_rate`.
 
+### Hit-test selection + encode feedback
+- `TransformOverlay` now holds a `drawing_items_snapshot` plus a
+  `selected_drawing_item: Option<usize>`. The 33 ms tick pushes the
+  items under the playhead via `set_current_drawing_items`, so the
+  overlay always has a current hit-test source.
+- Clicks on the monitor without measurable motion (> 3 px) run
+  `drawing_item_hit` against the snapshot (reverse iteration →
+  top-most wins). Strokes + arrows use
+  `point_to_segment_distance`, rects use edge-or-fill hit tests,
+  ellipses use normalised-radius distance. Tolerance scales with
+  per-item stroke width (floor 4 px × 1.8 = ~8 px).
+- Selected item renders a cyan dashed bounding rectangle (offset
+  by 4 px) in the overlay's draw pass.
+- `Delete` / `Backspace` now routes through
+  `on_drawing_delete_at(Option<usize>)`: `Some(idx)` removes the
+  selected item via `SetDrawingItemsCommand`; `None` falls back to
+  LIFO. Selection clears on each delete.
+- `drawing_encode_is_pending()` exposes the thread-local pending
+  set so the overlay shows a "Baking drawing animation…" pill
+  (cyan text on dark pill) whenever a WebM bake is in flight,
+  visible in *any* tool. When the Draw tool is active, the
+  existing brush HUD grows an inline `• baking animation…` suffix
+  in the same spot.
+
 ### In-video drawing reveal (`src/media/drawing_render.rs`)
 - New `Clip.drawing_animation_reveal_ns: u64` (serde default 0).
   0 keeps the existing static PNG path; non-zero triggers a baked

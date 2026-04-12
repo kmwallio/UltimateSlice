@@ -347,6 +347,15 @@ thread_local! {
         std::cell::RefCell::new(None);
 }
 
+/// `true` while at least one animation WebM encode is running in the
+/// background. Main-thread only — mirrors `PENDING_DRAWING_ENCODES`.
+/// The overlay reads this to show a "Baking animation…" HUD so users
+/// have a visible signal that the static PNG they see isn't the
+/// final state.
+pub fn drawing_encode_is_pending() -> bool {
+    PENDING_DRAWING_ENCODES.with(|set| !set.borrow().is_empty())
+}
+
 /// Install the "encode finished" callback once at window build time.
 /// Replaces any previously installed callback.
 pub fn install_drawing_encode_complete_callback(cb: Box<dyn Fn()>) {
