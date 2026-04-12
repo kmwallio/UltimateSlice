@@ -4498,6 +4498,14 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         "Collapse this audition to a normal clip using only the active take",
     ));
     clip_context_box.append(&btn_finalize_audition);
+    // Script-to-Timeline: Re-order by Script
+    let btn_reorder_by_script = gtk::Button::with_label("Re-order by Script");
+    btn_reorder_by_script.add_css_class("flat");
+    btn_reorder_by_script.set_tooltip_text(Some(
+        "Re-sort clips on this track by screenplay scene order",
+    ));
+    clip_context_box.append(&btn_reorder_by_script);
+
     clip_context_pop.set_child(Some(&clip_context_box));
 
     let track_context_pop = gtk::Popover::new();
@@ -4963,6 +4971,25 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 let mut st = state.borrow_mut();
                 st.finalize_selected_audition()
             };
+            if changed {
+                TimelineState::notify_project_changed(&state);
+            }
+            if let Some(a) = area_weak.upgrade() {
+                a.queue_draw();
+            }
+        });
+    }
+
+    // Script-to-Timeline: Re-order by Script handler
+    {
+        let state = state.clone();
+        let area_weak = area.downgrade();
+        let pop_weak = clip_context_pop.downgrade();
+        btn_reorder_by_script.connect_clicked(move |_| {
+            if let Some(pop) = pop_weak.upgrade() {
+                pop.popdown();
+            }
+            let changed = reorder_track_by_script(&state);
             if changed {
                 TimelineState::notify_project_changed(&state);
             }
@@ -9727,6 +9754,101 @@ pub fn show_shortcuts_dialog(parent: &gtk::Window) {
 
     dialog.connect_response(|d, _| d.destroy());
     dialog.present();
+}
+
+/// Re-order clips on the selected track by their `scene_id`, matching the
+/// screenplay scene order stored in the project's `parsed_script_path`.
+///
+/// Only affects clips that have a `scene_id` set (from script-to-timeline
+/// assembly). Clips without a `scene_id` are left at the end.
+fn reorder_track_by_script(
+    state: &std::rc::Rc<std::cell::RefCell<TimelineState>>,
+) -> bool {
+    // First, gather the info we need without holding borrows.
+    let (track_id, old_clips, script_path) = {
+        let st = state.borrow();
+        let proj = st.project.borrow();
+        let track_id = match st.selected_track_id.as_ref() {
+            Some(id) => id.clone(),
+            None => return false,
+        };
+        let track = match proj.tracks.iter().find(|t| t.id == track_id) {
+            Some(t) => t,
+            None => return false,
+        };
+        if !track.clips.iter().any(|c| c.scene_id.is_some()) {
+            return false;
+        }
+        (
+            track_id,
+            track.clips.clone(),
+            proj.parsed_script_path.clone(),
+        )
+    };
+
+    // Try to load the script for scene ordering.
+    // Since scene IDs are UUIDs generated at parse time, we use the
+    // clip scene_id values directly for relative ordering (alphabetical
+    // as a fallback when the script can't be re-parsed).
+    let scene_order: std::collections::HashMap<String, usize> =
+        if let Some(ref script_path) = script_path {
+            match crate::media::script::parse_script(script_path) {
+                Ok(script) => script
+                    .scenes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| (s.id.clone(), i))
+                    .collect(),
+                Err(_) => std::collections::HashMap::new(),
+            }
+        } else {
+            std::collections::HashMap::new()
+        };
+
+    // Sort clips: by scene order for those with scene_id, rest at the end.
+    let mut new_clips = old_clips.clone();
+    new_clips.sort_by(|a, b| {
+        let a_order = a
+            .scene_id
+            .as_ref()
+            .and_then(|id| scene_order.get(id))
+            .copied()
+            .unwrap_or(usize::MAX);
+        let b_order = b
+            .scene_id
+            .as_ref()
+            .and_then(|id| scene_order.get(id))
+            .copied()
+            .unwrap_or(usize::MAX);
+        a_order.cmp(&b_order)
+    });
+
+    // Reassign timeline_start values gap-free.
+    let mut cursor: u64 = 0;
+    for clip in &mut new_clips {
+        clip.timeline_start = cursor;
+        cursor += clip.duration() as u64;
+    }
+
+    // Check if anything actually changed.
+    let changed = new_clips
+        .iter()
+        .zip(old_clips.iter())
+        .any(|(a, b)| a.id != b.id || a.timeline_start != b.timeline_start);
+
+    if changed {
+        let cmd = crate::undo::SetTrackClipsCommand {
+            track_id,
+            old_clips,
+            new_clips,
+            label: "Re-order by Script".into(),
+        };
+        let project_rc = state.borrow().project.clone();
+        let mut proj = project_rc.borrow_mut();
+        state.borrow_mut().history.execute(Box::new(cmd), &mut proj);
+    }
+
+    changed
 }
 
 #[cfg(test)]

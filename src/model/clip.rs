@@ -2044,6 +2044,14 @@ pub struct Clip {
     /// meaningful when `kind == ClipKind::Audition`.
     #[serde(default)]
     pub audition_active_take_index: usize,
+
+    // ── Script-to-Timeline metadata ─────────────────────────────────
+    /// Script scene identifier linking this clip to a screenplay scene.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene_id: Option<String>,
+    /// Script-to-clip alignment confidence (0.0..1.0). None if not script-aligned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_confidence: Option<f64>,
 }
 
 fn default_anamorphic_desqueeze() -> f64 {
@@ -2459,6 +2467,8 @@ impl Clip {
             multicam_switches: None,
             audition_takes: None,
             audition_active_take_index: 0,
+            scene_id: None,
+            script_confidence: None,
         }
     }
 

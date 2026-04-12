@@ -25,6 +25,9 @@ pub mod proxy_cache;
 pub mod sam_cache;
 #[cfg(feature = "ai-inference")]
 pub mod sam_job;
+pub mod script;
+pub mod script_align;
+pub mod script_assembly;
 pub mod stt_cache;
 pub mod thumb_cache;
 pub mod thumbnail;

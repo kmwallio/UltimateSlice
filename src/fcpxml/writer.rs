@@ -232,6 +232,17 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                 event.push_attribute(("us:media-annotations", annotations_json.as_str()));
             }
         }
+        // Script-to-Timeline metadata
+        if let Some(ref script_path) = project.parsed_script_path {
+            if !script_path.is_empty() {
+                event.push_attribute(("us:script-path", script_path.as_str()));
+            }
+        }
+        if let Some(ref transcript_cache) = project.parsed_transcript_cache_json {
+            if transcript_cache != "{}" {
+                event.push_attribute(("us:transcript-cache", transcript_cache.as_str()));
+            }
+        }
     }
     writer.write_event(Event::Start(event))?;
 
@@ -1189,6 +1200,17 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                             clip.audition_active_take_index.to_string().as_str(),
                         ));
                     }
+                    // Script-to-Timeline metadata
+                    if let Some(ref scene_id) = clip.scene_id {
+                        asset_clip.push_attribute(("us:scene-id", scene_id.as_str()));
+                    }
+                    if let Some(confidence) = clip.script_confidence {
+                        asset_clip.push_attribute((
+                            "us:script-confidence",
+                            format!("{confidence:.3}").as_str(),
+                        ));
+                    }
+
                     asset_clip.push_attribute(("us:speed", clip.speed.to_string().as_str()));
                     let speed_keyframes_json = if clip.speed_keyframes.is_empty() {
                         None
@@ -4295,6 +4317,8 @@ fn is_writer_managed_event_attr(_key: &str) -> bool {
             | "us:smart-collections"
             | "us:library-items"
             | "us:media-annotations"
+            | "us:script-path"
+            | "us:transcript-cache"
     )
 }
 

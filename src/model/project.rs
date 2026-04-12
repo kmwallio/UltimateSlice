@@ -146,6 +146,12 @@ pub struct Project {
     /// Transient: parsed ratings + keyword ranges from `us:media-annotations`.
     #[serde(skip)]
     pub parsed_media_annotations_json: Option<String>,
+    /// Transient: script path from `us:script-path` FCPXML event attribute.
+    #[serde(skip)]
+    pub parsed_script_path: Option<String>,
+    /// Transient: transcript cache JSON from `us:transcript-cache` FCPXML event attribute.
+    #[serde(skip)]
+    pub parsed_transcript_cache_json: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,6 +190,8 @@ impl Project {
             parsed_collections_json: None,
             parsed_library_items_json: None,
             parsed_media_annotations_json: None,
+            parsed_script_path: None,
+            parsed_transcript_cache_json: None,
         };
         // Default tracks like FCP
         project.tracks.push(Track::new_video("Video 1"));

@@ -2273,6 +2273,68 @@ fn tools_list() -> Value {
                 },
                 "required": ["path"]
             }
+        },
+        {
+            "name": "load_script",
+            "description": "Parse a screenplay file (Final Draft .fdx or Fountain .fountain) and load it for script-to-timeline alignment. Returns the list of scenes.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path to the screenplay file (.fdx or .fountain)" }
+                },
+                "required": ["path"]
+            }
+        },
+        {
+            "name": "get_script_scenes",
+            "description": "List the scenes from the currently loaded screenplay.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        },
+        {
+            "name": "run_script_alignment",
+            "description": "Run speech-to-text on the specified clips and align transcripts to the loaded screenplay. Returns scene-to-clip mappings with confidence scores.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_paths": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "List of absolute paths to media clips to transcribe and align"
+                    },
+                    "confidence_threshold": {
+                        "type": "number",
+                        "description": "Minimum confidence (0.0-1.0) for a match. Default 0.15"
+                    }
+                },
+                "required": ["clip_paths"]
+            }
+        },
+        {
+            "name": "apply_script_assembly",
+            "description": "Assemble the timeline from the most recent script alignment results. Places clips in screenplay order with optional scene heading title cards.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "include_titles": {
+                        "type": "boolean",
+                        "description": "Whether to add scene heading title cards (default true)"
+                    }
+                }
+            }
+        },
+        {
+            "name": "reorder_by_script",
+            "description": "Re-sort clips on a track by their screenplay scene order. Only affects clips that were placed via script-to-timeline assembly.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string", "description": "ID of the track to reorder" }
+                },
+                "required": ["track_id"]
+            }
         }
     ]})
 }
@@ -3808,6 +3870,43 @@ fn dispatch_tool_payload(
         },
         "export_srt" => McpCommand::ExportSrt {
             path: arg_str!(args, "path"),
+            reply: tx,
+        },
+        // ── Script-to-Timeline tools ─────────────────────────────────────
+        "load_script" => McpCommand::LoadScript {
+            path: arg_str!(args, "path"),
+            reply: tx,
+        },
+        "get_script_scenes" => McpCommand::GetScriptScenes { reply: tx },
+        "run_script_alignment" => {
+            let clip_paths: Vec<String> = args
+                .get("clip_paths")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let threshold = args
+                .get("confidence_threshold")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.15);
+            McpCommand::RunScriptAlignment {
+                clip_paths,
+                confidence_threshold: threshold,
+                reply: tx,
+            }
+        }
+        "apply_script_assembly" => McpCommand::ApplyScriptAssembly {
+            include_titles: args
+                .get("include_titles")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            reply: tx,
+        },
+        "reorder_by_script" => McpCommand::ReorderByScript {
+            track_id: arg_str!(args, "track_id"),
             reply: tx,
         },
 

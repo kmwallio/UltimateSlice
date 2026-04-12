@@ -8991,6 +8991,36 @@ pub fn build_window(
             }
         },
     );
+    // ── Script to Timeline button ─────────────────────────────────────
+    {
+        let btn_script = gtk4::Button::with_label("Script");
+        btn_script.set_tooltip_text(Some("Script to Timeline wizard"));
+        btn_script.add_css_class("small-btn");
+        let project = project.clone();
+        let library = library.clone();
+        let stt_cache = stt_cache.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let window_weak = window.downgrade();
+        btn_script.connect_clicked(move |_| {
+            let parent = window_weak
+                .upgrade()
+                .map(|w| w.upcast::<gtk4::Window>());
+            crate::ui::script_wizard::show_script_wizard(
+                parent.as_ref(),
+                project.clone(),
+                library.clone(),
+                stt_cache.clone(),
+                timeline_state.clone(),
+                Rc::new({
+                    let cb = on_project_changed.clone();
+                    move || cb()
+                }),
+            );
+        });
+        header.pack_end(&btn_script);
+    }
+
     window.set_titlebar(Some(&header));
 
     // Sync Record button state with voiceover_recording flag.
@@ -16381,6 +16411,13 @@ pub fn build_window(
     window.present();
 }
 
+// ── MCP Script-to-Timeline state (GTK main thread only) ─────────────────────
+
+thread_local! {
+    static MCP_LOADED_SCRIPT: RefCell<Option<crate::media::script::Script>> = RefCell::new(None);
+    static MCP_ALIGNMENT_RESULT: RefCell<Option<crate::media::script_align::AlignmentResult>> = RefCell::new(None);
+}
+
 // ── MCP command handler (runs on GTK main thread) ────────────────────────────
 
 fn handle_mcp_command(
@@ -23409,6 +23446,255 @@ fn handle_mcp_command(
                     .send(json!({"error": format!("SRT export failed: {e}")}))
                     .ok(),
             };
+        }
+        // ── Script-to-Timeline MCP tools ────────────────────────────────
+        McpCommand::LoadScript { path, reply } => {
+            match crate::media::script::parse_script(&path) {
+                Ok(script) => {
+                    let scenes: Vec<serde_json::Value> = script
+                        .scenes
+                        .iter()
+                        .map(|s| {
+                            json!({
+                                "id": s.id,
+                                "heading": s.heading,
+                                "scene_number": s.scene_number,
+                                "element_count": s.elements.len(),
+                            })
+                        })
+                        .collect();
+                    // Store script path on project for persistence.
+                    project.borrow_mut().parsed_script_path = Some(path.clone());
+                    // Store parsed script in a thread-local for subsequent alignment.
+                    MCP_LOADED_SCRIPT.with(|cell| {
+                        *cell.borrow_mut() = Some(script);
+                    });
+                    reply
+                        .send(json!({
+                            "success": true,
+                            "scene_count": scenes.len(),
+                            "scenes": scenes,
+                        }))
+                        .ok();
+                }
+                Err(e) => {
+                    reply
+                        .send(json!({"error": format!("Failed to parse script: {e}")}))
+                        .ok();
+                }
+            }
+        }
+        McpCommand::GetScriptScenes { reply } => {
+            let result = MCP_LOADED_SCRIPT.with(|cell| {
+                let script = cell.borrow();
+                match script.as_ref() {
+                    Some(s) => {
+                        let scenes: Vec<serde_json::Value> = s
+                            .scenes
+                            .iter()
+                            .map(|sc| {
+                                json!({
+                                    "id": sc.id,
+                                    "heading": sc.heading,
+                                    "scene_number": sc.scene_number,
+                                    "element_count": sc.elements.len(),
+                                })
+                            })
+                            .collect();
+                        json!({"scenes": scenes})
+                    }
+                    None => json!({"error": "No script loaded. Call load_script first."}),
+                }
+            });
+            reply.send(result).ok();
+        }
+        McpCommand::RunScriptAlignment {
+            clip_paths,
+            confidence_threshold,
+            reply,
+        } => {
+            let result = MCP_LOADED_SCRIPT.with(|cell| {
+                let script = cell.borrow();
+                match script.as_ref() {
+                    None => json!({"error": "No script loaded. Call load_script first."}),
+                    Some(scr) => {
+                        // Collect transcripts from clips that already have subtitles.
+                        let proj = project.borrow();
+                        let mut transcripts: Vec<(String, Vec<crate::model::clip::SubtitleSegment>)> =
+                            Vec::new();
+                        for path in &clip_paths {
+                            // Find clip by source path.
+                            let segs: Vec<crate::model::clip::SubtitleSegment> = proj
+                                .tracks
+                                .iter()
+                                .flat_map(|t| t.clips.iter())
+                                .filter(|c| c.source_path == *path)
+                                .flat_map(|c| c.subtitle_segments.clone())
+                                .collect();
+                            if !segs.is_empty() {
+                                transcripts.push((path.clone(), segs));
+                            }
+                        }
+                        if transcripts.is_empty() {
+                            return json!({"error": "No clips with subtitles found. Run generate_subtitles first."});
+                        }
+                        let result = crate::media::script_align::align_transcripts_to_script(
+                            scr,
+                            &transcripts,
+                            confidence_threshold,
+                        );
+                        // Store for apply_script_assembly.
+                        let mappings_json: Vec<serde_json::Value> = result
+                            .mappings
+                            .iter()
+                            .map(|m| {
+                                json!({
+                                    "clip_source_path": m.clip_source_path,
+                                    "scene_id": m.scene_id,
+                                    "confidence": m.confidence,
+                                    "source_in_ns": m.source_in_ns,
+                                    "source_out_ns": m.source_out_ns,
+                                    "transcript_excerpt": m.transcript_excerpt,
+                                })
+                            })
+                            .collect();
+                        let response = json!({
+                            "mappings": mappings_json,
+                            "unmatched_clips": result.unmatched_clips,
+                            "mapped_count": result.mappings.len(),
+                            "unmatched_count": result.unmatched_clips.len(),
+                        });
+                        MCP_ALIGNMENT_RESULT.with(|cell| {
+                            *cell.borrow_mut() = Some(result);
+                        });
+                        response
+                    }
+                }
+            });
+            reply.send(result).ok();
+        }
+        McpCommand::ApplyScriptAssembly {
+            include_titles,
+            reply,
+        } => {
+            let result = MCP_LOADED_SCRIPT.with(|script_cell| {
+                MCP_ALIGNMENT_RESULT.with(|align_cell| {
+                    let script = script_cell.borrow();
+                    let alignment = align_cell.borrow();
+                    match (script.as_ref(), alignment.as_ref()) {
+                        (None, _) => json!({"error": "No script loaded."}),
+                        (_, None) => json!({"error": "No alignment results. Call run_script_alignment first."}),
+                        (Some(scr), Some(al)) => {
+                            let plan = crate::media::script_assembly::build_assembly_plan(
+                                scr,
+                                al,
+                                0,
+                                3_000_000_000,
+                                include_titles,
+                            );
+                            let old_tracks = {
+                                let mut proj = project.borrow_mut();
+                                let mut lib = library.borrow_mut();
+                                crate::media::script_assembly::apply_assembly_plan(
+                                    &mut proj, &mut lib, &plan,
+                                )
+                            };
+                            // Register undo.
+                            let new_tracks = project.borrow().tracks.clone();
+                            let cmd = crate::undo::ScriptAssemblyCommand {
+                                old_tracks,
+                                new_tracks,
+                                label: "Script to Timeline (MCP)".to_string(),
+                            };
+                            crate::undo::EditCommand::undo(&cmd, &mut project.borrow_mut());
+                            {
+                                let mut st = timeline_state.borrow_mut();
+                                let mut proj = project.borrow_mut();
+                                st.history.execute(Box::new(cmd), &mut proj);
+                            }
+                            on_project_changed();
+                            json!({
+                                "success": true,
+                                "video_clips": plan.video_clips.len(),
+                                "title_clips": plan.title_clips.len(),
+                                "unmatched": plan.unmatched_paths.len(),
+                            })
+                        }
+                    }
+                })
+            });
+            reply.send(result).ok();
+        }
+        McpCommand::ReorderByScript { track_id, reply } => {
+            let proj = project.borrow();
+            let script_path = proj.parsed_script_path.clone();
+            drop(proj);
+
+            let scene_order: std::collections::HashMap<String, usize> =
+                if let Some(ref sp) = script_path {
+                    crate::media::script::parse_script(sp)
+                        .map(|s| {
+                            s.scenes
+                                .iter()
+                                .enumerate()
+                                .map(|(i, sc)| (sc.id.clone(), i))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                } else {
+                    std::collections::HashMap::new()
+                };
+
+            let mut proj = project.borrow_mut();
+            let track = proj.tracks.iter_mut().find(|t| t.id == track_id);
+            match track {
+                None => {
+                    reply
+                        .send(json!({"error": format!("Track not found: {track_id}")}))
+                        .ok();
+                }
+                Some(track) => {
+                    let old_clips = track.clips.clone();
+                    track.clips.sort_by(|a, b| {
+                        let ao = a
+                            .scene_id
+                            .as_ref()
+                            .and_then(|id| scene_order.get(id))
+                            .copied()
+                            .unwrap_or(usize::MAX);
+                        let bo = b
+                            .scene_id
+                            .as_ref()
+                            .and_then(|id| scene_order.get(id))
+                            .copied()
+                            .unwrap_or(usize::MAX);
+                        ao.cmp(&bo)
+                    });
+                    let mut cursor: u64 = 0;
+                    for clip in &mut track.clips {
+                        clip.timeline_start = cursor;
+                        cursor += clip.duration() as u64;
+                    }
+                    let new_clips = track.clips.clone();
+                    let tid = track_id.clone();
+                    drop(proj);
+
+                    let cmd = crate::undo::SetTrackClipsCommand {
+                        track_id: tid,
+                        old_clips,
+                        new_clips,
+                        label: "Re-order by Script (MCP)".into(),
+                    };
+                    crate::undo::EditCommand::undo(&cmd, &mut project.borrow_mut());
+                    {
+                        let mut st = timeline_state.borrow_mut();
+                        let mut p = project.borrow_mut();
+                        st.history.execute(Box::new(cmd), &mut p);
+                    }
+                    on_project_changed();
+                    reply.send(json!({"success": true})).ok();
+                }
+            }
         }
     }
 }

@@ -1,5 +1,6 @@
 use crate::model::clip::{AuditionTake, Clip, VoiceIsolationSource};
 use crate::model::project::Project;
+use crate::model::track::Track;
 use crate::model::transition::OutgoingTransition;
 
 /// A reversible edit operation on the project.
@@ -2259,6 +2260,32 @@ impl EditCommand for FinalizeAuditionCommand {
     }
     fn description(&self) -> &str {
         "Finalize audition"
+    }
+}
+
+/// Undo command for script-to-timeline assembly.
+///
+/// Captures the full track state before and after assembly so the
+/// entire operation can be reverted atomically.
+pub struct ScriptAssemblyCommand {
+    /// All tracks before assembly.
+    pub old_tracks: Vec<Track>,
+    /// All tracks after assembly.
+    pub new_tracks: Vec<Track>,
+    pub label: String,
+}
+
+impl EditCommand for ScriptAssemblyCommand {
+    fn execute(&self, project: &mut Project) {
+        project.tracks = self.new_tracks.clone();
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        project.tracks = self.old_tracks.clone();
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        &self.label
     }
 }
 

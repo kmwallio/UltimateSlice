@@ -967,6 +967,27 @@ pub enum McpCommand {
         path: String,
         reply: SyncSender<Value>,
     },
+    // ── Script-to-Timeline ──────────────────────────────────────────
+    LoadScript {
+        path: String,
+        reply: SyncSender<Value>,
+    },
+    GetScriptScenes {
+        reply: SyncSender<Value>,
+    },
+    RunScriptAlignment {
+        clip_paths: Vec<String>,
+        confidence_threshold: f64,
+        reply: SyncSender<Value>,
+    },
+    ApplyScriptAssembly {
+        include_titles: bool,
+        reply: SyncSender<Value>,
+    },
+    ReorderByScript {
+        track_id: String,
+        reply: SyncSender<Value>,
+    },
 }
 
 /// Spawn the MCP stdio server on a background thread.

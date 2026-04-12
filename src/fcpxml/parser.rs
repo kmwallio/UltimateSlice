@@ -175,6 +175,13 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                                 project.parsed_media_annotations_json =
                                     Some(annotations_json.clone());
                             }
+                            if let Some(script_path) = attrs.get("us:script-path") {
+                                project.parsed_script_path = Some(script_path.clone());
+                            }
+                            if let Some(transcript_cache) = attrs.get("us:transcript-cache") {
+                                project.parsed_transcript_cache_json =
+                                    Some(transcript_cache.clone());
+                            }
                             project.fcpxml_unknown_event.attrs =
                                 collect_unknown_attrs(&attrs, is_known_event_attr);
                         } else {
@@ -1388,6 +1395,14 @@ fn parse_asset_clip(
                 _ => {}
             }
         }
+        // Script-to-Timeline metadata
+        if let Some(v) = attrs.get("us:scene-id") {
+            clip.scene_id = Some(v.to_string());
+        }
+        if let Some(v) = attrs.get("us:script-confidence") {
+            clip.script_confidence = v.parse().ok();
+        }
+
         if let Some(v) = attrs.get("us:speed") {
             clip.speed = v.parse().unwrap_or(1.0);
         }
@@ -2839,6 +2854,8 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:multicam-switches"
             | "us:audition-takes"
             | "us:audition-active-take-index"
+            | "us:scene-id"
+            | "us:script-confidence"
             | "us:eq-bands"
             | "us:eq-low-gain-keyframes"
             | "us:eq-mid-gain-keyframes"
@@ -2904,6 +2921,8 @@ fn is_known_event_attr(_key: &str) -> bool {
             | "us:smart-collections"
             | "us:library-items"
             | "us:media-annotations"
+            | "us:script-path"
+            | "us:transcript-cache"
     )
 }
 
