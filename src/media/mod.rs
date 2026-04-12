@@ -23,6 +23,8 @@ pub mod program_player;
 pub mod proxy_cache;
 #[cfg(feature = "ai-inference")]
 pub mod sam_cache;
+#[cfg(feature = "ai-inference")]
+pub mod sam_job;
 pub mod stt_cache;
 pub mod thumb_cache;
 pub mod thumbnail;
