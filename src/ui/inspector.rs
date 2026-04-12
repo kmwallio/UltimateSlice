@@ -90,6 +90,7 @@ use gtk4::prelude::*;
 pub struct SamJobInFlight {
     pub handle: crate::media::sam_job::SamJobHandle,
     pub clip_id: String,
+    pub track_id: String,
 }
 use gtk4::{
     self as gtk, Box as GBox, Button, CheckButton, DropDown, Entry, Expander, Label, Orientation,
@@ -10487,6 +10488,7 @@ pub fn build_inspector(
                 proj.tracks.iter().find_map(|t| {
                     t.clips.iter().find(|c| c.id == clip_id).map(|c| {
                         (
+                            t.id.clone(),
                             c.source_path.clone(),
                             c.source_in,
                             c.source_out,
@@ -10516,7 +10518,7 @@ pub fn build_inspector(
                     })
                 })
             };
-            let Some((source_path, source_in, _source_out, has_existing_mask)) =
+            let Some((track_id, source_path, source_in, _source_out, has_existing_mask)) =
                 clip_info
             else {
                 return;
@@ -10530,6 +10532,7 @@ pub fn build_inspector(
             // a real user-drawn box.
             let enter_prompt = {
                 let clip_id = clip_id.clone();
+                let track_id = track_id.clone();
                 let source_path = source_path.clone();
                 let sam_job_handle_click = sam_job_handle_click.clone();
                 let button_click = button_click.clone();
@@ -10539,6 +10542,7 @@ pub fn build_inspector(
                     button_click.set_sensitive(false);
 
                     let clip_id = clip_id.clone();
+                    let track_id = track_id.clone();
                     let source_path = source_path.clone();
                     let sam_job_handle_click = sam_job_handle_click.clone();
                     let button_click = button_click.clone();
@@ -10573,6 +10577,7 @@ pub fn build_inspector(
                                 Some(SamJobInFlight {
                                     handle,
                                     clip_id: clip_id.clone(),
+                                    track_id: track_id.clone(),
                                 });
                             button_click.set_label("Generating… (~6s)");
                             // Button stays insensitive (already set above).
@@ -10625,6 +10630,7 @@ pub fn build_inspector(
         let sam_job_handle_tick = sam_job_handle.clone();
         let button_tick = sam_generate_btn.clone();
         let on_frei0r_changed_tick = on_frei0r_changed.clone();
+        let on_execute_command_tick = on_execute_command.clone();
         glib::timeout_add_local(
             std::time::Duration::from_millis(100),
             move || {
@@ -10653,6 +10659,7 @@ pub fn build_inspector(
                     return glib::ControlFlow::Continue;
                 };
                 let clip_id = inflight.clip_id;
+                let track_id = inflight.track_id;
 
                 // Restore the button regardless of outcome.
                 button_tick.set_label("Generate with SAM");
@@ -10669,39 +10676,51 @@ pub fn build_inspector(
                             mask_points.len(),
                             score
                         );
-                        let applied = {
-                            let mut proj = project_tick.borrow_mut();
-                            let mut found = false;
-                            for track in proj.tracks.iter_mut() {
-                                if let Some(clip) =
-                                    track.clips.iter_mut().find(|c| c.id == clip_id)
-                                {
-                                    let new_mask =
-                                        crate::model::clip::ClipMask::new_path(
-                                            mask_points.clone(),
-                                        );
-                                    if clip.masks.is_empty() {
-                                        clip.masks.push(new_mask);
-                                    } else {
-                                        clip.masks[0] = new_mask;
-                                    }
-                                    found = true;
-                                    break;
-                                }
-                            }
-                            if found {
-                                proj.dirty = true;
-                            }
-                            found
+                        // Snapshot the old mask state and build the
+                        // new one, then push a SetClipMaskCommand
+                        // through the undo history so Ctrl+Z reverts
+                        // the SAM mask replacement in one step.
+                        let old_mask = {
+                            let proj = project_tick.borrow();
+                            proj.tracks.iter().find_map(|t| {
+                                t.clips
+                                    .iter()
+                                    .find(|c| c.id == clip_id)
+                                    .map(|c| {
+                                        crate::undo::ClipMaskSnapshot::from_clip(c)
+                                    })
+                            })
                         };
-                        if applied {
-                            on_frei0r_changed_tick();
-                        } else {
+                        let Some(old_mask) = old_mask else {
                             log::warn!(
                                 "SAM: clip {} no longer exists; mask discarded",
                                 clip_id
                             );
-                        }
+                            return glib::ControlFlow::Continue;
+                        };
+                        // Build new mask state: replace masks[0]
+                        // (or create it if the clip had none).
+                        let new_mask = {
+                            let mut masks = old_mask.masks.clone();
+                            let sam_mask =
+                                crate::model::clip::ClipMask::new_path(
+                                    mask_points,
+                                );
+                            if masks.is_empty() {
+                                masks.push(sam_mask);
+                            } else {
+                                masks[0] = sam_mask;
+                            }
+                            crate::undo::ClipMaskSnapshot { masks }
+                        };
+                        let cmd = crate::undo::SetClipMaskCommand {
+                            clip_id,
+                            track_id,
+                            old_mask,
+                            new_mask,
+                        };
+                        on_execute_command_tick(Box::new(cmd));
+                        on_frei0r_changed_tick();
                     }
                     SamJobResult::Error(msg) => {
                         log::warn!("SAM: clip={} error={}", clip_id, msg);
