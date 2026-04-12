@@ -978,18 +978,44 @@ pub fn segment_with_box(
     let mask_bool = &mask_flat[mask_slice_start..mask_slice_end];
 
     // 8. Rescale the bool mask back to source resolution. The
-    //    decoder's mask output is at some intermediate resolution
-    //    (often 1008×1008 or the source size directly since we pass
-    //    `original_height`/`original_width`). We do a nearest-
-    //    neighbor rescale either way so the caller always gets
-    //    `src_w × src_h` bytes.
+    //    decoder's mask output has the same aspect-ratio padding as
+    //    the encoder input: content occupies the top-left
+    //    `padded_w × padded_h` fraction of the full `SAM_INPUT_SIZE
+    //    × SAM_INPUT_SIZE` frame; everything past that is zero pad.
+    //    The decoder's `mask_w × mask_h` output inherits the same
+    //    proportional layout — for a 1920×1080 source the content
+    //    region is `mask_w × mask_h * (padded_h / SAM_INPUT_SIZE)`
+    //    ≈ `mask_w × mask_h * 567 / 1008`, which is ~52.5% of the
+    //    decoder's height. Mapping source pixels into the FULL
+    //    `mask_w × mask_h` extent (as a naive 1:1 ratio would)
+    //    reads decoder rows inside the zero-pad region for every
+    //    source y > ~566, which is why the smoke test passes on
+    //    square synthetic images but real non-square footage lands
+    //    masks at the wrong Y coordinates.
+    //
+    //    Fix: compute the content sub-rectangle of the decoder
+    //    output and rescale source → content, ignoring the pad
+    //    region entirely.
+    let pad_frac_w = preprocessed.padded_w as f64 / SAM_INPUT_SIZE as f64;
+    let pad_frac_h = preprocessed.padded_h as f64 / SAM_INPUT_SIZE as f64;
+    let content_mask_w = ((mask_w as f64 * pad_frac_w).round() as usize).max(1);
+    let content_mask_h = ((mask_h as f64 * pad_frac_h).round() as usize).max(1);
+    log::info!(
+        "segment_with_box: decoder mask = {mask_w}x{mask_h}, \
+         padded content in encoder = {}x{} / {SAM_INPUT_SIZE}, \
+         decoder content region = {content_mask_w}x{content_mask_h}, \
+         source = {src_w}x{src_h}",
+        preprocessed.padded_w,
+        preprocessed.padded_h,
+    );
+
     let mut source_mask = vec![0u8; src_w * src_h];
-    let x_ratio = mask_w as f32 / src_w as f32;
-    let y_ratio = mask_h as f32 / src_h as f32;
+    let x_ratio = content_mask_w as f32 / src_w as f32;
+    let y_ratio = content_mask_h as f32 / src_h as f32;
     for sy in 0..src_h {
-        let my = ((sy as f32 * y_ratio) as usize).min(mask_h.saturating_sub(1));
+        let my = ((sy as f32 * y_ratio) as usize).min(content_mask_h.saturating_sub(1));
         for sx in 0..src_w {
-            let mx = ((sx as f32 * x_ratio) as usize).min(mask_w.saturating_sub(1));
+            let mx = ((sx as f32 * x_ratio) as usize).min(content_mask_w.saturating_sub(1));
             if mask_bool[my * mask_w + mx] {
                 source_mask[sy * src_w + sx] = 255;
             }
