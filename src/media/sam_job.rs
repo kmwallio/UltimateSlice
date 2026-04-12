@@ -250,6 +250,37 @@ pub fn run_sam_pipeline(input: SamJobInput) -> SamJobResult {
         }
     };
 
+    // Diagnostic: log the prompt vs mask centroid so coordinate
+    // mapping issues are visible in the log.
+    if !mask_points.is_empty() {
+        let (sum_x, sum_y) = mask_points
+            .iter()
+            .fold((0.0_f64, 0.0_f64), |(sx, sy), p| (sx + p.x, sy + p.y));
+        let n = mask_points.len() as f64;
+        let prompt_cx = if let Some((nx1, _, nx2, _)) = input.normalized_box {
+            (nx1 + nx2) as f64 / 2.0
+        } else {
+            (input.prompt.x1 + input.prompt.x2) as f64 / 2.0 / src_w as f64
+        };
+        let prompt_cy = if let Some((_, ny1, _, ny2)) = input.normalized_box {
+            (ny1 + ny2) as f64 / 2.0
+        } else {
+            (input.prompt.y1 + input.prompt.y2) as f64 / 2.0 / src_h as f64
+        };
+        log::info!(
+            "SAM: prompt center=({:.4},{:.4}), mask centroid=({:.4},{:.4}), \
+             {} bezier points, score={:.3}, source={}x{}",
+            prompt_cx,
+            prompt_cy,
+            sum_x / n,
+            sum_y / n,
+            mask_points.len(),
+            result.score,
+            src_w,
+            src_h,
+        );
+    }
+
     SamJobResult::Success {
         mask_points,
         score: result.score,
