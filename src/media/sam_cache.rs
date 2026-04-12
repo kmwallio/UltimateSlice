@@ -487,6 +487,22 @@ impl BoxPrompt {
         }
     }
 
+    /// Return a new box shrunk by `fraction` (0..1) towards its
+    /// center. `fraction = 0.15` shrinks by 15 % on each side,
+    /// i.e. the new box is 70 % the area of the original.
+    pub fn shrink_towards_center(&self, fraction: f32) -> Self {
+        let cx = (self.x1 + self.x2) * 0.5;
+        let cy = (self.y1 + self.y2) * 0.5;
+        let hw = (self.x2 - self.x1) * 0.5 * (1.0 - fraction);
+        let hh = (self.y2 - self.y1) * 0.5 * (1.0 - fraction);
+        Self {
+            x1: cx - hw,
+            y1: cy - hh,
+            x2: cx + hw,
+            y2: cy + hh,
+        }
+    }
+
     /// Clamp all four corners into the source-image bounds. Called
     /// internally before the 1008-space rescale to guarantee the
     /// decoder never sees out-of-frame coordinates.
@@ -828,52 +844,33 @@ pub fn segment_with_box(
     )
     .map_err(|e| format!("reshape text_memory: {e}"))?;
 
-    // 4. Build the box prompt tensors. The SAM 3 decoder expects:
+    // 4–6. Build box prompt → run decoder → extract scores.
     //
-    //    * `box_coords: [1, 1, 4] f32` in `[cx, cy, w, h]` normalized
-    //      to `[0, 1]` against the ORIGINAL source-image dimensions
-    //      (not the 1008-space encoder input). The decoder uses the
-    //      `original_height`/`original_width` inputs internally to
-    //      rescale its outputs back to source resolution, so raw
-    //      normalized coords are the right convention. An earlier
-    //      draft of this file fed xyxy in 1008-pixel space, which
-    //      made every box clamp to garbage inside the decoder.
-    //    * `box_labels: [1, 1] i64`, value `1` for "positive /
-    //      foreground".
-    //    * `box_masks: [1, 1] bool`, value `false` to indicate "this
-    //      box slot is present" — standard PyTorch attention-mask
-    //      convention where `true` means "masked out / ignored".
-    //      Setting this to `true` makes the decoder skip the box
-    //      slot and return zero detections.
+    // SAM 3's decoder can return zero scores when the prompt box is
+    // too loose relative to the subject (Phase 2a constraint #1). To
+    // mitigate this we retry with progressively tighter boxes: the
+    // original box first, then shrunk by 15 % towards the center on
+    // each retry, up to 5 attempts. The encoder outputs are reused
+    // across all attempts — only the cheap decoder re-runs (~0.5 s
+    // each).
     //
-    //    Verified against `wkentaro/sam3-onnx`'s `infer_onnx.py` and
-    //    `export_onnx.py` (the latter's main() calls the decoder with
-    //    `box_coords=[[[0.162, 0.401, 0.064, 0.018]]]`, all values
-    //    `< 1`, confirming the normalized cxcywh format).
+    // Box prompt format:
+    //   * `box_coords: [1, 1, 4] f32` as `[cx, cy, w, h]` normalized
+    //     to `[0, 1]` against the ORIGINAL source dimensions. The
+    //     decoder internally rescales via `original_height`/`original_width`.
+    //   * `box_labels: [1, 1] i64`, value `1` = foreground.
+    //   * `box_masks: [1, 1] bool`, value `false` = "slot is present".
+    //
+    // Tensors that don't change across retries are built once outside
+    // the loop.
     let src_w_f = src_w as f32;
     let src_h_f = src_h as f32;
-    let cx = ((prompt.x1 + prompt.x2) * 0.5) / src_w_f;
-    let cy = ((prompt.y1 + prompt.y2) * 0.5) / src_h_f;
-    let bw = (prompt.x2 - prompt.x1) / src_w_f;
-    let bh = (prompt.y2 - prompt.y1) / src_h_f;
-    log::debug!(
-        "segment_with_box: prompt px=({:.1},{:.1})–({:.1},{:.1}), \
-         norm cxcywh=({:.4},{:.4},{:.4},{:.4}), source={}x{}",
-        prompt.x1, prompt.y1, prompt.x2, prompt.y2,
-        cx, cy, bw, bh, src_w, src_h,
-    );
-    let box_coords = Array3::<f32>::from_shape_vec((1, 1, 4), vec![cx, cy, bw, bh])
-        .map_err(|e| format!("segment_with_box: box_coords shape: {e}"))?;
     let box_labels = Array2::<i64>::from_shape_vec((1, 1), vec![1])
         .map_err(|e| format!("segment_with_box: box_labels shape: {e}"))?;
     let box_masks = Array2::<bool>::from_shape_vec((1, 1), vec![false])
         .map_err(|e| format!("segment_with_box: box_masks shape: {e}"))?;
-
     let orig_h = Array1::<i64>::from_vec(vec![src_h as i64]);
     let orig_w = Array1::<i64>::from_vec(vec![src_w as i64]);
-    // Decoder wants these as scalar tensors (rank 0). Collapsing a
-    // 1-element Array1 to a 0-dim shape is the easiest way to
-    // produce that shape with ndarray.
     let orig_h_scalar = orig_h
         .into_shape_with_order(())
         .map_err(|e| format!("original_height scalar reshape: {e}"))?;
@@ -881,69 +878,126 @@ pub fn segment_with_box(
         .into_shape_with_order(())
         .map_err(|e| format!("original_width scalar reshape: {e}"))?;
 
-    // Wrap each ndarray in a TensorRef for ort::inputs!.
-    let in_orig_h = TensorRef::from_array_view(&orig_h_scalar)
-        .map_err(|e| format!("original_height tensor: {e}"))?;
-    let in_orig_w = TensorRef::from_array_view(&orig_w_scalar)
-        .map_err(|e| format!("original_width tensor: {e}"))?;
-    let in_pe2 = TensorRef::from_array_view(&pe2_arr)
-        .map_err(|e| format!("vision_pos_enc_2 tensor: {e}"))?;
-    let in_fpn0 = TensorRef::from_array_view(&fpn0_arr)
-        .map_err(|e| format!("backbone_fpn_0 tensor: {e}"))?;
-    let in_fpn1 = TensorRef::from_array_view(&fpn1_arr)
-        .map_err(|e| format!("backbone_fpn_1 tensor: {e}"))?;
-    let in_fpn2 = TensorRef::from_array_view(&fpn2_arr)
-        .map_err(|e| format!("backbone_fpn_2 tensor: {e}"))?;
-    let in_lang_mask = TensorRef::from_array_view(&language_mask)
-        .map_err(|e| format!("language_mask tensor: {e}"))?;
-    let in_lang_feat = TensorRef::from_array_view(&language_features)
-        .map_err(|e| format!("language_features tensor: {e}"))?;
-    let in_box_coords = TensorRef::from_array_view(&box_coords)
-        .map_err(|e| format!("box_coords tensor: {e}"))?;
-    let in_box_labels = TensorRef::from_array_view(&box_labels)
-        .map_err(|e| format!("box_labels tensor: {e}"))?;
-    let in_box_masks = TensorRef::from_array_view(&box_masks)
-        .map_err(|e| format!("box_masks tensor: {e}"))?;
+    const MAX_SHRINK_ATTEMPTS: usize = 5;
+    const SHRINK_FRACTION: f32 = 0.15;
+    let mut current_prompt = prompt;
+    let mut scores: Vec<f32> = Vec::new();
+    let mut mask_shape_extracted: Option<Vec<i64>> = None;
+    let mut mask_flat_extracted: Option<Vec<bool>> = None;
 
-    // 5. Run decoder with all 11 inputs in one call.
-    let decoder_outputs = sessions
-        .decoder
-        .run(ort::inputs![
-            "original_height" => in_orig_h,
-            "original_width" => in_orig_w,
-            "vision_pos_enc_2" => in_pe2,
-            "backbone_fpn_0" => in_fpn0,
-            "backbone_fpn_1" => in_fpn1,
-            "backbone_fpn_2" => in_fpn2,
-            "language_mask" => in_lang_mask,
-            "language_features" => in_lang_feat,
-            "box_coords" => in_box_coords,
-            "box_labels" => in_box_labels,
-            "box_masks" => in_box_masks,
-        ])
-        .map_err(|e| format!("segment_with_box: decoder run failed: {e}"))?;
+    for attempt in 0..MAX_SHRINK_ATTEMPTS {
+        if attempt > 0 {
+            current_prompt = current_prompt.shrink_towards_center(SHRINK_FRACTION);
+            let clamped = current_prompt.clamp_to_source(src_w, src_h);
+            if clamped.x2 <= clamped.x1 || clamped.y2 <= clamped.y1 {
+                break; // Box collapsed to zero area — stop retrying.
+            }
+            current_prompt = clamped;
+        }
+        let cx = ((current_prompt.x1 + current_prompt.x2) * 0.5) / src_w_f;
+        let cy = ((current_prompt.y1 + current_prompt.y2) * 0.5) / src_h_f;
+        let bw = (current_prompt.x2 - current_prompt.x1) / src_w_f;
+        let bh = (current_prompt.y2 - current_prompt.y1) / src_h_f;
+        log::info!(
+            "segment_with_box: attempt {}/{} prompt px=({:.1},{:.1})–({:.1},{:.1}), \
+             norm cxcywh=({:.4},{:.4},{:.4},{:.4}), source={}x{}",
+            attempt + 1, MAX_SHRINK_ATTEMPTS,
+            current_prompt.x1, current_prompt.y1, current_prompt.x2, current_prompt.y2,
+            cx, cy, bw, bh, src_w, src_h,
+        );
+        let box_coords = Array3::<f32>::from_shape_vec((1, 1, 4), vec![cx, cy, bw, bh])
+            .map_err(|e| format!("segment_with_box: box_coords shape: {e}"))?;
 
-    // 6. Extract scores and pick the highest one. The decoder can
-    //    return multiple candidate instances matching the box prompt;
-    //    for a single-object "click to mask" workflow we only care
-    //    about the best one. (A future multi-instance UI could show
-    //    all of them ranked.)
-    let scores = match decoder_outputs.get("scores") {
-        Some(val) => val
-            .try_extract_tensor::<f32>()
-            .map_err(|e| format!("decoder scores extract: {e}"))?
-            .1
-            .to_vec(),
-        None => return Err("decoder output missing 'scores'".to_string()),
-    };
+        let in_orig_h = TensorRef::from_array_view(&orig_h_scalar)
+            .map_err(|e| format!("original_height tensor: {e}"))?;
+        let in_orig_w = TensorRef::from_array_view(&orig_w_scalar)
+            .map_err(|e| format!("original_width tensor: {e}"))?;
+        let in_pe2 = TensorRef::from_array_view(&pe2_arr)
+            .map_err(|e| format!("vision_pos_enc_2 tensor: {e}"))?;
+        let in_fpn0 = TensorRef::from_array_view(&fpn0_arr)
+            .map_err(|e| format!("backbone_fpn_0 tensor: {e}"))?;
+        let in_fpn1 = TensorRef::from_array_view(&fpn1_arr)
+            .map_err(|e| format!("backbone_fpn_1 tensor: {e}"))?;
+        let in_fpn2 = TensorRef::from_array_view(&fpn2_arr)
+            .map_err(|e| format!("backbone_fpn_2 tensor: {e}"))?;
+        let in_lang_mask = TensorRef::from_array_view(&language_mask)
+            .map_err(|e| format!("language_mask tensor: {e}"))?;
+        let in_lang_feat = TensorRef::from_array_view(&language_features)
+            .map_err(|e| format!("language_features tensor: {e}"))?;
+        let in_box_coords = TensorRef::from_array_view(&box_coords)
+            .map_err(|e| format!("box_coords tensor: {e}"))?;
+        let in_box_labels = TensorRef::from_array_view(&box_labels)
+            .map_err(|e| format!("box_labels tensor: {e}"))?;
+        let in_box_masks = TensorRef::from_array_view(&box_masks)
+            .map_err(|e| format!("box_masks tensor: {e}"))?;
+
+        let outputs = sessions
+            .decoder
+            .run(ort::inputs![
+                "original_height" => in_orig_h,
+                "original_width" => in_orig_w,
+                "vision_pos_enc_2" => in_pe2,
+                "backbone_fpn_0" => in_fpn0,
+                "backbone_fpn_1" => in_fpn1,
+                "backbone_fpn_2" => in_fpn2,
+                "language_mask" => in_lang_mask,
+                "language_features" => in_lang_feat,
+                "box_coords" => in_box_coords,
+                "box_labels" => in_box_labels,
+                "box_masks" => in_box_masks,
+            ])
+            .map_err(|e| format!("segment_with_box: decoder run failed: {e}"))?;
+
+        scores = match outputs.get("scores") {
+            Some(val) => val
+                .try_extract_tensor::<f32>()
+                .map_err(|e| format!("decoder scores extract: {e}"))?
+                .1
+                .to_vec(),
+            None => return Err("decoder output missing 'scores'".to_string()),
+        };
+        if !scores.is_empty() {
+            // Extract masks NOW while the borrow on `outputs` is
+            // alive — we can't hold `outputs` across loop iterations
+            // because the decoder session is re-borrowed each time.
+            let (shape, flat) = match outputs.get("masks") {
+                Some(val) => val
+                    .try_extract_tensor::<bool>()
+                    .map(|(s, d)| {
+                        (s.iter().copied().collect::<Vec<_>>(), d.to_vec())
+                    })
+                    .map_err(|e| format!("decoder masks extract: {e}"))?,
+                None => return Err("decoder output missing 'masks'".to_string()),
+            };
+            mask_shape_extracted = Some(shape);
+            mask_flat_extracted = Some(flat);
+            if attempt > 0 {
+                log::info!(
+                    "segment_with_box: succeeded on attempt {} (shrunk {:.0}%)",
+                    attempt + 1,
+                    (1.0 - (1.0 - SHRINK_FRACTION).powi(attempt as i32)) * 100.0,
+                );
+            }
+            break;
+        }
+        log::info!(
+            "segment_with_box: attempt {} returned zero scores, \
+             shrinking box by {:.0}% and retrying",
+            attempt + 1, SHRINK_FRACTION * 100.0,
+        );
+    }
     if scores.is_empty() {
         return Err(
-            "SAM could not find a subject in the selected region. \
-             Try drawing a tighter box closely around the subject — \
-             SAM 3 needs the box to fit snugly with minimal background."
+            "SAM could not find a subject in the selected region \
+             after shrinking the box 5 times. Try clicking directly \
+             on the subject instead of drawing a box."
                 .to_string(),
         );
     }
+    let mask_shape_i64 = mask_shape_extracted
+        .expect("scores non-empty implies mask was extracted");
+    let mask_flat = mask_flat_extracted
+        .expect("scores non-empty implies mask was extracted");
     let (best_idx, best_score) = scores
         .iter()
         .enumerate()
@@ -955,18 +1009,8 @@ pub fn segment_with_box(
             }
         });
 
-    // 7. Extract the masks tensor and pull out the best slice. The
-    //    decoder output is declared as `masks: [N, H, W, ?] bool` —
-    //    but the actual emitted shape varies between exports. We
-    //    reshape generically and fall back to the declared rank
-    //    elsewhere.
-    let (mask_shape_i64, mask_flat) = match decoder_outputs.get("masks") {
-        Some(val) => val
-            .try_extract_tensor::<bool>()
-            .map(|(s, d)| (s.iter().copied().collect::<Vec<_>>(), d.to_vec()))
-            .map_err(|e| format!("decoder masks extract: {e}"))?,
-        None => return Err("decoder output missing 'masks'".to_string()),
-    };
+    // 7. Pull out the best mask slice from the data extracted inside
+    //    the retry loop above.
     // Compute [N, mask_h, mask_w] from the emitted shape (dropping
     // any trailing singleton channel dim). This keeps us tolerant to
     // variants that emit [N, H, W] vs [N, H, W, 1] vs [N, 1, H, W].
