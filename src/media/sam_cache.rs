@@ -332,11 +332,7 @@ pub fn install_status() -> SamInstallStatus {
 
     for dir in &candidates {
         let paths = SamModelPaths::from_dir(dir);
-        let present_count = paths
-            .all_paths()
-            .iter()
-            .filter(|p| p.is_file())
-            .count();
+        let present_count = paths.all_paths().iter().filter(|p| p.is_file()).count();
 
         if present_count == REQUIRED_FILES.len() {
             return SamInstallStatus::Installed;
@@ -675,10 +671,7 @@ impl SamSessions {
             .and_then(|mut b| b.commit_from_file(&paths.language_encoder))
             .map_err(|e| format!("Failed to load SAM language encoder: {e}"))?;
 
-        log::info!(
-            "SamCache: loading decoder from {}",
-            paths.decoder.display()
-        );
+        log::info!("SamCache: loading decoder from {}", paths.decoder.display());
         let decoder = Session::builder()
             .and_then(|b| Ok(b.with_optimization_level(GraphOptimizationLevel::Level3)?))
             .and_then(|b| ai_providers::configure_session_builder(b, backend))
@@ -797,11 +790,9 @@ pub fn segment_with_box(
     //    "visual" whenever the user supplies a box prompt without a
     //    text prompt, and we mirror that here. See
     //    [`VISUAL_PLACEHOLDER_TOKENS`].
-    let tokens_arr = Array2::<i64>::from_shape_vec(
-        (1, LANG_TOKENS),
-        VISUAL_PLACEHOLDER_TOKENS.to_vec(),
-    )
-    .map_err(|e| format!("segment_with_box: tokens shape: {e}"))?;
+    let tokens_arr =
+        Array2::<i64>::from_shape_vec((1, LANG_TOKENS), VISUAL_PLACEHOLDER_TOKENS.to_vec())
+            .map_err(|e| format!("segment_with_box: tokens shape: {e}"))?;
     let tokens_input = TensorRef::from_array_view(&tokens_arr)
         .map_err(|e| format!("segment_with_box: wrap tokens tensor: {e}"))?;
     let lang_outputs = sessions
@@ -818,11 +809,7 @@ pub fn segment_with_box(
             .try_extract_tensor::<bool>()
             .map(|(s, d)| (s.iter().copied().collect::<Vec<i64>>(), d.to_vec()))
             .map_err(|e| format!("language text_attention_mask extract: {e}"))?,
-        None => {
-            return Err(
-                "language encoder output missing 'text_attention_mask'".to_string()
-            )
-        }
+        None => return Err("language encoder output missing 'text_attention_mask'".to_string()),
     };
     if lang_mask_shape.as_slice() != [1i64, LANG_TOKENS as i64] {
         return Err(format!(
@@ -838,11 +825,9 @@ pub fn segment_with_box(
             "language text_memory has unexpected shape {lang_feat_shape:?}, expected [{LANG_TOKENS}, 1, {LANG_EMBED_DIM}]"
         ));
     }
-    let language_features = Array3::<f32>::from_shape_vec(
-        (LANG_TOKENS, 1, LANG_EMBED_DIM),
-        lang_feat_data,
-    )
-    .map_err(|e| format!("reshape text_memory: {e}"))?;
+    let language_features =
+        Array3::<f32>::from_shape_vec((LANG_TOKENS, 1, LANG_EMBED_DIM), lang_feat_data)
+            .map_err(|e| format!("reshape text_memory: {e}"))?;
 
     // 4–6. Build box prompt → run decoder → extract scores.
     //
@@ -901,9 +886,18 @@ pub fn segment_with_box(
         log::info!(
             "segment_with_box: attempt {}/{} prompt px=({:.1},{:.1})–({:.1},{:.1}), \
              norm cxcywh=({:.4},{:.4},{:.4},{:.4}), source={}x{}",
-            attempt + 1, MAX_SHRINK_ATTEMPTS,
-            current_prompt.x1, current_prompt.y1, current_prompt.x2, current_prompt.y2,
-            cx, cy, bw, bh, src_w, src_h,
+            attempt + 1,
+            MAX_SHRINK_ATTEMPTS,
+            current_prompt.x1,
+            current_prompt.y1,
+            current_prompt.x2,
+            current_prompt.y2,
+            cx,
+            cy,
+            bw,
+            bh,
+            src_w,
+            src_h,
         );
         let box_coords = Array3::<f32>::from_shape_vec((1, 1, 4), vec![cx, cy, bw, bh])
             .map_err(|e| format!("segment_with_box: box_coords shape: {e}"))?;
@@ -928,8 +922,8 @@ pub fn segment_with_box(
             .map_err(|e| format!("box_coords tensor: {e}"))?;
         let in_box_labels = TensorRef::from_array_view(&box_labels)
             .map_err(|e| format!("box_labels tensor: {e}"))?;
-        let in_box_masks = TensorRef::from_array_view(&box_masks)
-            .map_err(|e| format!("box_masks tensor: {e}"))?;
+        let in_box_masks =
+            TensorRef::from_array_view(&box_masks).map_err(|e| format!("box_masks tensor: {e}"))?;
 
         let outputs = sessions
             .decoder
@@ -963,9 +957,7 @@ pub fn segment_with_box(
             let (shape, flat) = match outputs.get("masks") {
                 Some(val) => val
                     .try_extract_tensor::<bool>()
-                    .map(|(s, d)| {
-                        (s.iter().copied().collect::<Vec<_>>(), d.to_vec())
-                    })
+                    .map(|(s, d)| (s.iter().copied().collect::<Vec<_>>(), d.to_vec()))
                     .map_err(|e| format!("decoder masks extract: {e}"))?,
                 None => return Err("decoder output missing 'masks'".to_string()),
             };
@@ -983,31 +975,29 @@ pub fn segment_with_box(
         log::info!(
             "segment_with_box: attempt {} returned zero scores, \
              shrinking box by {:.0}% and retrying",
-            attempt + 1, SHRINK_FRACTION * 100.0,
+            attempt + 1,
+            SHRINK_FRACTION * 100.0,
         );
     }
     if scores.is_empty() {
-        return Err(
-            "SAM could not find a subject in the selected region \
+        return Err("SAM could not find a subject in the selected region \
              after shrinking the box 5 times. Try clicking directly \
              on the subject instead of drawing a box."
-                .to_string(),
-        );
+            .to_string());
     }
-    let mask_shape_i64 = mask_shape_extracted
-        .expect("scores non-empty implies mask was extracted");
-    let mask_flat = mask_flat_extracted
-        .expect("scores non-empty implies mask was extracted");
-    let (best_idx, best_score) = scores
-        .iter()
-        .enumerate()
-        .fold((0usize, f32::NEG_INFINITY), |(bi, bs), (i, &s)| {
-            if s > bs {
-                (i, s)
-            } else {
-                (bi, bs)
-            }
-        });
+    let mask_shape_i64 = mask_shape_extracted.expect("scores non-empty implies mask was extracted");
+    let mask_flat = mask_flat_extracted.expect("scores non-empty implies mask was extracted");
+    let (best_idx, best_score) =
+        scores
+            .iter()
+            .enumerate()
+            .fold((0usize, f32::NEG_INFINITY), |(bi, bs), (i, &s)| {
+                if s > bs {
+                    (i, s)
+                } else {
+                    (bi, bs)
+                }
+            });
 
     // 7. Pull out the best mask slice from the data extracted inside
     //    the retry loop above.
@@ -1126,9 +1116,8 @@ pub fn decode_single_frame(
     // runs into buffering races on short single-frame outputs,
     // and the temp-file path is what the rest of the AI cache
     // modules already use.
-    let temp = NamedTempFile::new().map_err(|e| {
-        format!("decode_single_frame: failed to create temp file: {e}")
-    })?;
+    let temp = NamedTempFile::new()
+        .map_err(|e| format!("decode_single_frame: failed to create temp file: {e}"))?;
     let temp_path = temp.path().to_path_buf();
 
     // `-accurate_seek` + `-ss` before `-i` does a fast keyframe
@@ -1237,11 +1226,7 @@ fn extract_float_tensor(
     Ok((data.to_vec(), shape.iter().copied().collect()))
 }
 
-fn reshape_to_array4(
-    data: Vec<f32>,
-    shape: &[i64],
-    name: &str,
-) -> Result<Array4<f32>, String> {
+fn reshape_to_array4(data: Vec<f32>, shape: &[i64], name: &str) -> Result<Array4<f32>, String> {
     if shape.len() != 4 {
         return Err(format!(
             "'{name}' expected rank-4 tensor, got rank {}",
@@ -1499,12 +1484,7 @@ mod tests {
         // The app should match any `sam3*.pt` file so different
         // checkpoint variants (sam3.pt, sam3_large.pt, etc.) work
         // without users having to rename their downloads.
-        for filename in &[
-            "sam3.pt",
-            "sam3_large.pt",
-            "sam3_multiplex.pt",
-            "sam3.1.pt",
-        ] {
+        for filename in &["sam3.pt", "sam3_large.pt", "sam3_multiplex.pt", "sam3.1.pt"] {
             let tmp = TempDir::new().unwrap();
             let path = tmp.path().join(filename);
             fs::write(&path, b"").unwrap();
@@ -1553,8 +1533,7 @@ mod tests {
     fn box_prompt_clamp_to_source_clips_oob_corners() {
         // Prompt partially outside the source rectangle gets
         // clipped, not rejected.
-        let b = BoxPrompt::from_corners(-10.0, -5.0, 200.0, 300.0)
-            .clamp_to_source(100, 80);
+        let b = BoxPrompt::from_corners(-10.0, -5.0, 200.0, 300.0).clamp_to_source(100, 80);
         assert_eq!(b.x1, 0.0);
         assert_eq!(b.y1, 0.0);
         assert_eq!(b.x2, 99.0);
@@ -1617,10 +1596,7 @@ mod tests {
         assert_eq!(pp.padded_w, SAM_INPUT_SIZE);
         assert_eq!(pp.padded_h, SAM_INPUT_SIZE);
         assert_eq!(pp.tensor[[0, 0, 0]], 123);
-        assert_eq!(
-            pp.tensor[[2, SAM_INPUT_SIZE - 1, SAM_INPUT_SIZE - 1]],
-            123
-        );
+        assert_eq!(pp.tensor[[2, SAM_INPUT_SIZE - 1, SAM_INPUT_SIZE - 1]], 123);
     }
 
     #[test]
@@ -1686,7 +1662,10 @@ mod tests {
             }
         };
 
-        eprintln!("Loading SAM sessions from {}...", paths.image_encoder.display());
+        eprintln!(
+            "Loading SAM sessions from {}...",
+            paths.image_encoder.display()
+        );
         let mut sessions = SamSessions::load(&paths).expect("SamSessions::load");
 
         // Synthesize a 512×512 RGB image with a bright white 100×100
@@ -1708,8 +1687,8 @@ mod tests {
         let prompt = BoxPrompt::from_corners(145.0, 145.0, 255.0, 255.0);
 
         eprintln!("Running segment_with_box (this may take 10-60s on CPU)...");
-        let result = segment_with_box(&mut sessions, &rgb, src_w, src_h, prompt)
-            .expect("segment_with_box");
+        let result =
+            segment_with_box(&mut sessions, &rgb, src_w, src_h, prompt).expect("segment_with_box");
 
         eprintln!("SAM returned mask with score={}", result.score);
         assert_eq!(result.src_w, src_w);

@@ -2262,9 +2262,10 @@ impl EditCommand for SetActiveAuditionTakeCommand {
         project.dirty = true;
     }
     fn undo(&self, project: &mut Project) {
-        if let (Some(clip), Some(snap)) =
-            (project.clip_mut(&self.clip_id), self.before_snapshot.as_ref())
-        {
+        if let (Some(clip), Some(snap)) = (
+            project.clip_mut(&self.clip_id),
+            self.before_snapshot.as_ref(),
+        ) {
             *clip = snap.clone();
         }
         project.dirty = true;
@@ -2350,9 +2351,10 @@ impl EditCommand for FinalizeAuditionCommand {
         project.dirty = true;
     }
     fn undo(&self, project: &mut Project) {
-        if let (Some(clip), Some(snap)) =
-            (project.clip_mut(&self.clip_id), self.before_snapshot.as_ref())
-        {
+        if let (Some(clip), Some(snap)) = (
+            project.clip_mut(&self.clip_id),
+            self.before_snapshot.as_ref(),
+        ) {
             *clip = snap.clone();
         }
         project.dirty = true;
@@ -2450,9 +2452,7 @@ mod tests {
         cmd.execute(&mut project);
         let applied = project.clip_ref("clip-1").unwrap();
         assert!(applied.tracking_binding.is_some());
-        assert!(
-            (applied.tracking_binding.as_ref().unwrap().scale_multiplier - 1.818).abs() < 1e-9
-        );
+        assert!((applied.tracking_binding.as_ref().unwrap().scale_multiplier - 1.818).abs() < 1e-9);
         assert!(project.dirty);
 
         project.dirty = false;
@@ -2468,7 +2468,10 @@ mod tests {
         let mut project = Project::new("Loudness Test");
         assert_eq!(project.master_gain_db, 0.0);
 
-        let cmd = SetProjectMasterGainCommand { old_db: 0.0, new_db: -3.5 };
+        let cmd = SetProjectMasterGainCommand {
+            old_db: 0.0,
+            new_db: -3.5,
+        };
         cmd.execute(&mut project);
         assert!((project.master_gain_db + 3.5).abs() < 1e-9);
         assert!(project.dirty);
@@ -2482,11 +2485,17 @@ mod tests {
     #[test]
     fn master_gain_command_clamps_to_plus_minus_24() {
         let mut project = Project::new("Loudness Test");
-        let cmd = SetProjectMasterGainCommand { old_db: 0.0, new_db: 99.0 };
+        let cmd = SetProjectMasterGainCommand {
+            old_db: 0.0,
+            new_db: 99.0,
+        };
         cmd.execute(&mut project);
         assert_eq!(project.master_gain_db, 24.0, "upper clamp");
 
-        let cmd2 = SetProjectMasterGainCommand { old_db: 0.0, new_db: -99.0 };
+        let cmd2 = SetProjectMasterGainCommand {
+            old_db: 0.0,
+            new_db: -99.0,
+        };
         cmd2.execute(&mut project);
         assert_eq!(project.master_gain_db, -24.0, "lower clamp");
     }

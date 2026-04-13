@@ -813,9 +813,7 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
             let Ok(svg) = std::fs::read_to_string(&clip.source_path) else {
                 continue;
             };
-            let Some(parsed) =
-                crate::media::drawing_svg::try_parse_ultimate_slice_svg(&svg)
-            else {
+            let Some(parsed) = crate::media::drawing_svg::try_parse_ultimate_slice_svg(&svg) else {
                 continue;
             };
             if parsed.items.is_empty() {
@@ -1440,11 +1438,9 @@ fn parse_asset_clip(
                     clip.kind = ClipKind::Drawing;
                     if let Some(items_json) = attrs.get("us:drawing-items") {
                         let json_str = items_json.replace("&quot;", "\"");
-                        clip.drawing_items = serde_json::from_str(&json_str)
-                            .unwrap_or_default();
+                        clip.drawing_items = serde_json::from_str(&json_str).unwrap_or_default();
                     }
-                    if let Some(reveal) = attrs.get("us:drawing-animation-reveal-ns")
-                    {
+                    if let Some(reveal) = attrs.get("us:drawing-animation-reveal-ns") {
                         clip.drawing_animation_reveal_ns = reveal.parse().unwrap_or(0);
                     }
                     if let Some(style) = attrs.get("us:drawing-reveal-style") {

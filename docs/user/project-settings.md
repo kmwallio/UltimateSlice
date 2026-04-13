@@ -73,6 +73,7 @@ All clips are automatically scaled and letterboxed/pillarboxed to fit the chosen
 
 - Click **Apply** to confirm. Changes take effect immediately.
 - The project is marked dirty (unsaved) after applying.
+- On empty timelines, the Program Monitor keeps showing a blank preview box at the updated aspect ratio so you can confirm the new canvas framing before adding clips.
 
 ## Saving
 

@@ -2702,10 +2702,7 @@ impl Clip {
             .map_or(false, |angle| {
                 // Position within the multicam's internal timeline.
                 let internal_pos = self.source_in.saturating_add(local_pos_ns);
-                angle
-                    .source_in
-                    .saturating_add(internal_pos)
-                    < angle.source_out
+                angle.source_in.saturating_add(internal_pos) < angle.source_out
             })
     }
 
@@ -2820,27 +2817,18 @@ impl Clip {
     /// `active` index designates which take's fields populate the host
     /// clip (and therefore drive playback/export). Duration follows the
     /// active take's source range.
-    pub fn new_audition(
-        timeline_start: u64,
-        takes: Vec<AuditionTake>,
-        active: usize,
-    ) -> Self {
+    pub fn new_audition(timeline_start: u64, takes: Vec<AuditionTake>, active: usize) -> Self {
         let active = active.min(takes.len().saturating_sub(1));
-        let active_take = takes
-            .get(active)
-            .cloned()
-            .unwrap_or_else(|| AuditionTake {
-                id: String::new(),
-                label: String::new(),
-                source_path: String::new(),
-                source_in: 0,
-                source_out: 0,
-                source_timecode_base_ns: None,
-                media_duration_ns: None,
-            });
-        let duration = active_take
-            .source_out
-            .saturating_sub(active_take.source_in);
+        let active_take = takes.get(active).cloned().unwrap_or_else(|| AuditionTake {
+            id: String::new(),
+            label: String::new(),
+            source_path: String::new(),
+            source_in: 0,
+            source_out: 0,
+            source_timecode_base_ns: None,
+            media_duration_ns: None,
+        });
+        let duration = active_take.source_out.saturating_sub(active_take.source_in);
         let mut c = Self::new(
             &active_take.source_path,
             duration,
@@ -2916,9 +2904,7 @@ impl Clip {
         if self.kind != ClipKind::Audition {
             return;
         }
-        self.audition_takes
-            .get_or_insert_with(Vec::new)
-            .push(take);
+        self.audition_takes.get_or_insert_with(Vec::new).push(take);
     }
 
     /// Remove an audition take by index. Refuses to remove the currently
@@ -2977,8 +2963,9 @@ impl Clip {
             .map(|s| s.to_ascii_lowercase())
             .unwrap_or_default();
         match ext.as_str() {
-            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "tif" | "tiff" | "webp" | "heic"
-            | "svg" => ClipKind::Image,
+            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "tif" | "tiff" | "webp" | "heic" | "svg" => {
+                ClipKind::Image
+            }
             "wav" | "mp3" | "aac" | "flac" | "ogg" | "m4a" | "opus" => ClipKind::Audio,
             _ => ClipKind::Video,
         }

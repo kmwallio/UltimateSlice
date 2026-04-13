@@ -888,15 +888,11 @@ fn run_auto_crop_track_for_clip(
         // frame) via the probe cache. Done now, before the job goes
         // into the cache key, so repeat requests for the same source
         // hit the same cache entry.
-        job.frame_step_ns =
-            crate::media::tracking::source_frame_step_ns(&clip.source_path);
+        job.frame_step_ns = crate::media::tracking::source_frame_step_ns(&clip.source_path);
         let source_path = clip.source_path.clone();
         let old_tracking_binding = clip.tracking_binding.clone();
         let old_motion_trackers = clip.motion_trackers.clone();
-        let old_first_mask_binding = clip
-            .masks
-            .first()
-            .map(|mask| mask.tracking_binding.clone());
+        let old_first_mask_binding = clip.masks.first().map(|mask| mask.tracking_binding.clone());
         (
             project_width,
             project_height,
@@ -917,8 +913,7 @@ fn run_auto_crop_track_for_clip(
     if source_width == 0 || source_height == 0 {
         return (
             AutoCropOutcome::Err {
-                message: "Could not determine source clip dimensions for auto-crop."
-                    .to_string(),
+                message: "Could not determine source clip dimensions for auto-crop.".to_string(),
             },
             None,
         );
@@ -956,10 +951,7 @@ fn run_auto_crop_track_for_clip(
     let mut sample_count = 0usize;
     if let Some(tracker) = &cached_tracker {
         sample_count = tracker.samples.len();
-        if let Some(existing) = new_motion_trackers
-            .iter_mut()
-            .find(|t| t.id == tracker.id)
-        {
+        if let Some(existing) = new_motion_trackers.iter_mut().find(|t| t.id == tracker.id) {
             *existing = tracker.clone();
         } else {
             new_motion_trackers.push(tracker.clone());
@@ -2115,14 +2107,10 @@ fn build_source_clip(
     // clip so the vector data, animation timing, and editing tools
     // all work again instead of routing an SVG through the PNG
     // image pipeline.
-    if matches!(kind, ClipKind::Image)
-        && source_path.to_ascii_lowercase().ends_with(".svg")
-    {
-        if let Some(clip) = try_build_drawing_clip_from_svg(
-            source_path,
-            source_out_ns,
-            timeline_start_ns,
-        ) {
+    if matches!(kind, ClipKind::Image) && source_path.to_ascii_lowercase().ends_with(".svg") {
+        if let Some(clip) =
+            try_build_drawing_clip_from_svg(source_path, source_out_ns, timeline_start_ns)
+        {
             return clip;
         }
     }
@@ -4768,17 +4756,13 @@ fn clip_to_program_clips(
             ) {
                 Ok(static_mov) => {
                     let mut redirected = c.clone();
-                    redirected.source_path =
-                        static_mov.to_string_lossy().into_owned();
+                    redirected.source_path = static_mov.to_string_lossy().into_owned();
                     redirected.source_in = 0;
                     redirected.source_out = clip_duration_ns;
                     drawing_redirect = Some(redirected);
                 }
                 Err(e) => {
-                    log::warn!(
-                        "drawing clip {}: static-MOV fallback failed: {e}",
-                        c.id
-                    );
+                    log::warn!("drawing clip {}: static-MOV fallback failed: {e}", c.id);
                     return Vec::new();
                 }
             }
@@ -4869,24 +4853,21 @@ fn clip_to_program_clips(
                 } else {
                     c.brightness
                 };
-                seg_clip.contrast = if (angle.contrast - 1.0).abs() > f32::EPSILON
-                {
+                seg_clip.contrast = if (angle.contrast - 1.0).abs() > f32::EPSILON {
                     angle.contrast
                 } else {
                     c.contrast
                 };
-                seg_clip.saturation =
-                    if (angle.saturation - 1.0).abs() > f32::EPSILON {
-                        angle.saturation
-                    } else {
-                        c.saturation
-                    };
-                seg_clip.temperature =
-                    if (angle.temperature - 6500.0).abs() > 1.0 {
-                        angle.temperature
-                    } else {
-                        c.temperature
-                    };
+                seg_clip.saturation = if (angle.saturation - 1.0).abs() > f32::EPSILON {
+                    angle.saturation
+                } else {
+                    c.saturation
+                };
+                seg_clip.temperature = if (angle.temperature - 6500.0).abs() > 1.0 {
+                    angle.temperature
+                } else {
+                    c.temperature
+                };
                 seg_clip.tint = if angle.tint.abs() > f32::EPSILON {
                     angle.tint
                 } else {
@@ -5518,12 +5499,9 @@ pub fn build_window(
             // Push the cache cap to the voice enhance cache so future
             // request() calls evict against the new ceiling.
             {
-                let cap_bytes = (new_state
-                    .voice_enhance_cache_cap_gib
-                    .max(0.5)
-                    * 1024.0
-                    * 1024.0
-                    * 1024.0) as u64;
+                let cap_bytes =
+                    (new_state.voice_enhance_cache_cap_gib.max(0.5) * 1024.0 * 1024.0 * 1024.0)
+                        as u64;
                 voice_enhance_cache_apply
                     .borrow_mut()
                     .set_cache_cap_bytes(cap_bytes);
@@ -5655,8 +5633,9 @@ pub fn build_window(
     let match_audio_in_progress: Rc<std::cell::Cell<bool>> = Rc::new(std::cell::Cell::new(false));
     let keyframe_editor_cell: Rc<RefCell<Option<Rc<keyframe_editor::KeyframeEditorView>>>> =
         Rc::new(RefCell::new(None));
-    let transcript_panel_cell: Rc<RefCell<Option<Rc<crate::ui::transcript_panel::TranscriptPanelView>>>> =
-        Rc::new(RefCell::new(None));
+    let transcript_panel_cell: Rc<
+        RefCell<Option<Rc<crate::ui::transcript_panel::TranscriptPanelView>>>,
+    > = Rc::new(RefCell::new(None));
     // transform_overlay_cell holds the TransformOverlay after the program monitor is built.
     let transform_overlay_cell: Rc<
         RefCell<Option<Rc<crate::ui::transform_overlay::TransformOverlay>>>,
@@ -6704,9 +6683,7 @@ pub fn build_window(
                 for track in &mut proj.tracks {
                     if track.clips.iter().any(|c| c.id == clip_id) {
                         track.surround_position =
-                            crate::model::track::SurroundPositionOverride::from_str(
-                                position_str,
-                            );
+                            crate::model::track::SurroundPositionOverride::from_str(position_str);
                         proj.dirty = true;
                         break;
                     }
@@ -7371,8 +7348,7 @@ pub fn build_window(
                 // "Every source frame" step, resolved at enqueue time
                 // so the cache key is deterministic for the same
                 // source + region.
-                job.frame_step_ns =
-                    crate::media::tracking::source_frame_step_ns(&clip.source_path);
+                job.frame_step_ns = crate::media::tracking::source_frame_step_ns(&clip.source_path);
                 job
             };
 
@@ -8567,11 +8543,9 @@ pub fn build_window(
                         let active =
                             clip.active_angle_at(playhead_ns.saturating_sub(clip.timeline_start));
                         if let Some(ref angles) = clip.multicam_angles {
-                            let local_pos =
-                                playhead_ns.saturating_sub(clip.timeline_start);
+                            let local_pos = playhead_ns.saturating_sub(clip.timeline_start);
                             for (i, angle) in angles.iter().enumerate() {
-                                let available =
-                                    clip.multicam_angle_available_at(i, local_pos);
+                                let available = clip.multicam_angle_available_at(i, local_pos);
                                 let row = gtk::Box::new(Orientation::Horizontal, 4);
                                 // Angle switch button
                                 let btn = gtk::Button::with_label(&format!(
@@ -8586,9 +8560,7 @@ pub fn build_window(
                                 }
                                 if !available {
                                     row.add_css_class("multicam-angle-unavailable");
-                                    btn.set_tooltip_text(Some(
-                                        "No footage at current position",
-                                    ));
+                                    btn.set_tooltip_text(Some("No footage at current position"));
                                 }
                                 let ts = timeline_state_for_multicam_btn.clone();
                                 btn.connect_clicked(move |_| {
@@ -8623,12 +8595,11 @@ pub fn build_window(
                                 let lut_label_text = if angle.lut_paths.is_empty() {
                                     "LUT".to_string()
                                 } else {
-                                    let name = std::path::Path::new(
-                                        angle.lut_paths.last().unwrap(),
-                                    )
-                                    .file_stem()
-                                    .and_then(|s| s.to_str())
-                                    .unwrap_or("LUT");
+                                    let name =
+                                        std::path::Path::new(angle.lut_paths.last().unwrap())
+                                            .file_stem()
+                                            .and_then(|s| s.to_str())
+                                            .unwrap_or("LUT");
                                     // Truncate long names
                                     if name.len() > 10 {
                                         format!("{}…", &name[..9])
@@ -8664,32 +8635,28 @@ pub fn build_window(
                                         let ts = ts.clone();
                                         let opc = opc.clone();
                                         let cid = clip_id.clone();
-                                        let win = btn.root().and_then(|r| {
-                                            r.downcast::<gtk::Window>().ok()
-                                        });
+                                        let win = btn
+                                            .root()
+                                            .and_then(|r| r.downcast::<gtk::Window>().ok());
                                         dialog.open(
                                             win.as_ref(),
                                             gtk::gio::Cancellable::NONE,
                                             move |result| {
                                                 if let Ok(file) = result {
                                                     if let Some(path) = file.path() {
-                                                        let path_str = path
-                                                            .to_string_lossy()
-                                                            .to_string();
+                                                        let path_str =
+                                                            path.to_string_lossy().to_string();
                                                         let st = ts.borrow();
                                                         let proj_rc = st.project.clone();
                                                         let mut proj = proj_rc.borrow_mut();
-                                                        if let Some(clip) =
-                                                            proj.clip_mut(&cid)
-                                                        {
+                                                        if let Some(clip) = proj.clip_mut(&cid) {
                                                             if let Some(ref mut angles) =
                                                                 clip.multicam_angles
                                                             {
                                                                 if let Some(a) =
                                                                     angles.get_mut(angle_idx)
                                                                 {
-                                                                    a.lut_paths =
-                                                                        vec![path_str];
+                                                                    a.lut_paths = vec![path_str];
                                                                     proj.dirty = true;
                                                                 }
                                                             }
@@ -8705,35 +8672,28 @@ pub fn build_window(
                                 }
                                 // Right-click gesture to clear the per-angle LUT.
                                 if !angle.lut_paths.is_empty() {
-                                    let gesture =
-                                        gtk::GestureClick::new();
+                                    let gesture = gtk::GestureClick::new();
                                     gesture.set_button(3); // right-click
                                     let ts = timeline_state_for_multicam_btn.clone();
                                     let opc = on_project_changed_for_multicam.clone();
                                     let angle_idx = i;
                                     let clip_id = clip.id.clone();
-                                    gesture.connect_released(
-                                        move |_, _, _, _| {
-                                            let st = ts.borrow();
-                                            let proj_rc = st.project.clone();
-                                            let mut proj = proj_rc.borrow_mut();
-                                            if let Some(clip) = proj.clip_mut(&clip_id) {
-                                                if let Some(ref mut angles) =
-                                                    clip.multicam_angles
-                                                {
-                                                    if let Some(a) =
-                                                        angles.get_mut(angle_idx)
-                                                    {
-                                                        a.lut_paths.clear();
-                                                        proj.dirty = true;
-                                                    }
+                                    gesture.connect_released(move |_, _, _, _| {
+                                        let st = ts.borrow();
+                                        let proj_rc = st.project.clone();
+                                        let mut proj = proj_rc.borrow_mut();
+                                        if let Some(clip) = proj.clip_mut(&clip_id) {
+                                            if let Some(ref mut angles) = clip.multicam_angles {
+                                                if let Some(a) = angles.get_mut(angle_idx) {
+                                                    a.lut_paths.clear();
+                                                    proj.dirty = true;
                                                 }
                                             }
-                                            drop(proj);
-                                            drop(st);
-                                            opc();
-                                        },
-                                    );
+                                        }
+                                        drop(proj);
+                                        drop(st);
+                                        opc();
+                                    });
                                     lut_btn.add_controller(gesture);
                                 }
                                 row.append(&lut_btn);
@@ -9210,9 +9170,7 @@ pub fn build_window(
         let on_project_changed = on_project_changed.clone();
         let window_weak = window.downgrade();
         btn_script.connect_clicked(move |_| {
-            let parent = window_weak
-                .upgrade()
-                .map(|w| w.upcast::<gtk4::Window>());
+            let parent = window_weak.upgrade().map(|w| w.upcast::<gtk4::Window>());
             crate::ui::script_wizard::show_script_wizard(
                 parent.as_ref(),
                 project.clone(),
@@ -10042,11 +10000,7 @@ pub fn build_window(
                     // because advancing `source_in` and advancing `timeline_start` are
                     // opposite-signed corrections for the same thing.)
                     let signed_event_for = |id: &str, src_in: u64| -> i64 {
-                        let landmark = if id == anchor_id {
-                            0
-                        } else {
-                            -offset_for(id)
-                        };
+                        let landmark = if id == anchor_id { 0 } else { -offset_for(id) };
                         src_in as i64 + landmark
                     };
                     let desired: Vec<i64> = clip_infos
@@ -10061,8 +10015,7 @@ pub fn build_window(
                         let offset_ns = offset_for(id);
                         let label = format!("Angle {}", i + 1);
                         // Final synced source_in: effective landmark − min, always ≥ 0.
-                        let synced_in =
-                            (signed_event_for(id, *src_in) - min_desired) as u64;
+                        let synced_in = (signed_event_for(id, *src_in) - min_desired) as u64;
                         let synced_out = *src_out;
                         angles.push(crate::model::clip::MulticamAngle {
                             id: uuid::Uuid::new_v4().to_string(),
@@ -10858,8 +10811,7 @@ pub fn build_window(
         // noticeable enough that users can't focus on what they're
         // drawing. Coalesce rapid drawing commits into a single
         // trailing rebuild ~220 ms after the last edit.
-        let drawing_commit_timer: Rc<Cell<Option<gtk4::glib::SourceId>>> =
-            Rc::new(Cell::new(None));
+        let drawing_commit_timer: Rc<Cell<Option<gtk4::glib::SourceId>>> = Rc::new(Cell::new(None));
         let schedule_drawing_commit_rebuild: Rc<dyn Fn()> = {
             let on_project_changed = on_project_changed.clone();
             let timer = drawing_commit_timer.clone();
@@ -11311,7 +11263,8 @@ pub fn build_window(
                             &mut proj,
                         );
                     } else if let Some(ref tid) = selected_track_id {
-                        let mut new_clip = Clip::new("", 2_000_000_000, playhead, ClipKind::Drawing);
+                        let mut new_clip =
+                            Clip::new("", 2_000_000_000, playhead, ClipKind::Drawing);
                         new_clip.label = "Drawing".to_string();
                         new_clip.drawing_items.push(stroke);
                         timeline_state.borrow_mut().history.execute(
@@ -11409,11 +11362,11 @@ pub fn build_window(
         // project fields have changed is a cheap no-op.
         {
             let on_project_changed = on_project_changed.clone();
-            crate::media::drawing_render::install_drawing_encode_complete_callback(
-                Box::new(move || {
+            crate::media::drawing_render::install_drawing_encode_complete_callback(Box::new(
+                move || {
                     on_project_changed();
-                }),
-            );
+                },
+            ));
         }
 
         // Forward tool changes (toolbar or keyboard) to the overlay so
@@ -11461,9 +11414,8 @@ pub fn build_window(
             vbox.set_margin_bottom(10);
 
             // Shape kind.
-            let shape_dd = gtk::DropDown::from_strings(&[
-                "Stroke", "Rectangle", "Ellipse", "Arrow",
-            ]);
+            let shape_dd =
+                gtk::DropDown::from_strings(&["Stroke", "Rectangle", "Ellipse", "Arrow"]);
             vbox.append(&gtk::Label::builder().label("Shape").xalign(0.0).build());
             vbox.append(&shape_dd);
 
@@ -11479,7 +11431,12 @@ pub fn build_window(
             let width_spin = gtk::SpinButton::with_range(1.0, 50.0, 1.0);
             width_spin.set_value(5.0);
             width_spin.set_digits(0);
-            vbox.append(&gtk::Label::builder().label("Width (px)").xalign(0.0).build());
+            vbox.append(
+                &gtk::Label::builder()
+                    .label("Width (px)")
+                    .xalign(0.0)
+                    .build(),
+            );
             vbox.append(&width_spin);
 
             // Fill toggle + color.
@@ -11544,9 +11501,7 @@ pub fn build_window(
                     fill: None,
                 },
             ];
-            vbox.append(
-                &gtk::Label::builder().label("Presets").xalign(0.0).build(),
-            );
+            vbox.append(&gtk::Label::builder().label("Presets").xalign(0.0).build());
             let preset_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
             for preset in &presets {
                 let swatch = gtk::DrawingArea::new();
@@ -11647,8 +11602,7 @@ pub fn build_window(
                     .xalign(0.0)
                     .build(),
             );
-            let reveal_style_dd =
-                gtk::DropDown::from_strings(&["Fade", "Grow from corner"]);
+            let reveal_style_dd = gtk::DropDown::from_strings(&["Fade", "Grow from corner"]);
             vbox.append(&reveal_style_dd);
 
             // Export SVG section (operates on the drawing clip under the
@@ -11718,7 +11672,11 @@ pub fn build_window(
                     let on = t.is_active();
                     fill_btn.set_sensitive(on);
                     if let Some(ref ov) = *overlay_cell.borrow() {
-                        ov.set_drawing_fill(if on { Some(rgba_to_u32(&fill_btn.rgba())) } else { None });
+                        ov.set_drawing_fill(if on {
+                            Some(rgba_to_u32(&fill_btn.rgba()))
+                        } else {
+                            None
+                        });
                     }
                 });
             }
@@ -11874,13 +11832,10 @@ pub fn build_window(
                 window: &gtk::ApplicationWindow,
                 pop: &gtk::Popover,
                 project: std::rc::Rc<std::cell::RefCell<crate::model::project::Project>>,
-                timeline_state: std::rc::Rc<
-                    std::cell::RefCell<crate::ui::timeline::TimelineState>,
-                >,
+                timeline_state: std::rc::Rc<std::cell::RefCell<crate::ui::timeline::TimelineState>>,
                 animated: bool,
             ) {
-                let Some((items, label)) = find_current_drawing(&project, &timeline_state)
-                else {
+                let Some((items, label)) = find_current_drawing(&project, &timeline_state) else {
                     let alert = gtk::AlertDialog::builder()
                         .message("No drawing under playhead")
                         .detail(
@@ -11907,7 +11862,13 @@ pub fn build_window(
                 dialog.set_filters(Some(&filters));
                 let safe = label
                     .chars()
-                    .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
+                    .map(|c| {
+                        if c.is_alphanumeric() || c == '-' {
+                            c
+                        } else {
+                            '_'
+                        }
+                    })
                     .collect::<String>();
                 dialog.set_initial_name(Some(&format!("{safe}.svg")));
                 let proj_w = project.borrow().width.max(1) as i32;
@@ -11948,7 +11909,9 @@ pub fn build_window(
                 let pop = pop.clone();
                 let window_weak = window.downgrade();
                 export_static_btn.connect_clicked(move |_| {
-                    let Some(win) = window_weak.upgrade() else { return };
+                    let Some(win) = window_weak.upgrade() else {
+                        return;
+                    };
                     run_svg_export(&win, &pop, project.clone(), timeline_state.clone(), false);
                 });
             }
@@ -11958,7 +11921,9 @@ pub fn build_window(
                 let pop = pop.clone();
                 let window_weak = window.downgrade();
                 export_animated_btn.connect_clicked(move |_| {
-                    let Some(win) = window_weak.upgrade() else { return };
+                    let Some(win) = window_weak.upgrade() else {
+                        return;
+                    };
                     run_svg_export(&win, &pop, project.clone(), timeline_state.clone(), true);
                 });
             }
@@ -12192,10 +12157,9 @@ pub fn build_window(
                 let tx_clone = tx_rc.borrow().as_ref().cloned();
                 if let Some(tx_send) = tx_clone {
                     std::thread::spawn(move || {
-                        let result = crate::media::export::analyze_project_loudness(
-                            &project_snapshot,
-                        )
-                        .map_err(|e| e.to_string());
+                        let result =
+                            crate::media::export::analyze_project_loudness(&project_snapshot)
+                                .map_err(|e| e.to_string());
                         let _ = tx_send.send(result);
                     });
                 }
@@ -12239,10 +12203,9 @@ pub fn build_window(
                 }
                 prog_player.borrow_mut().set_master_gain_db(new_db);
                 view_click.set_current_gain(new_db);
-                view_click.status_label.set_text(&format!(
-                    "Normalized ({:+.2} dB applied)",
-                    applied_db
-                ));
+                view_click
+                    .status_label
+                    .set_text(&format!("Normalized ({:+.2} dB applied)", applied_db));
                 on_project_changed();
             });
         }
@@ -12260,12 +12223,11 @@ pub fn build_window(
                     view_click.status_label.set_text("Gain already 0 dB");
                     return;
                 }
-                let cmd: Box<dyn crate::undo::EditCommand> = Box::new(
-                    crate::undo::SetProjectMasterGainCommand {
+                let cmd: Box<dyn crate::undo::EditCommand> =
+                    Box::new(crate::undo::SetProjectMasterGainCommand {
                         old_db,
                         new_db: 0.0,
-                    },
-                );
+                    });
                 {
                     let mut proj = project.borrow_mut();
                     timeline_state_c
@@ -12601,14 +12563,11 @@ pub fn build_window(
                         let ts = timeline_state_poll.borrow();
                         let mut items: Vec<crate::model::clip::DrawingItem> = Vec::new();
                         if let Some(tid) = ts.selected_track_id.as_ref() {
-                            if let Some(track) =
-                                proj.tracks.iter().find(|t| &t.id == tid)
-                            {
+                            if let Some(track) = proj.tracks.iter().find(|t| &t.id == tid) {
                                 for clip in &track.clips {
                                     if clip.kind == crate::model::clip::ClipKind::Drawing
                                         && root_pos >= clip.timeline_start
-                                        && root_pos
-                                            < clip.timeline_start + clip.duration()
+                                        && root_pos < clip.timeline_start + clip.duration()
                                     {
                                         items = clip.drawing_items.clone();
                                         break;
@@ -15082,10 +15041,8 @@ pub fn build_window(
         Rc::new(move || {
             let visible = stack.is_visible();
             let active = stack.visible_child_name();
-            let kf_active =
-                visible && active.as_deref() == Some("keyframes");
-            let tr_active =
-                visible && active.as_deref() == Some("transcript");
+            let kf_active = visible && active.as_deref() == Some("keyframes");
+            let tr_active = visible && active.as_deref() == Some("transcript");
             kf.set_label(if kf_active {
                 "Hide Keyframes"
             } else {
@@ -16377,10 +16334,9 @@ pub fn build_window(
                                 VoiceEnhanceStatus::Ready => {
                                     ("Enhanced audio ready".to_string(), false)
                                 }
-                                VoiceEnhanceStatus::Failed => (
-                                    "Voice enhance failed — click Retry".to_string(),
-                                    true,
-                                ),
+                                VoiceEnhanceStatus::Failed => {
+                                    ("Voice enhance failed — click Retry".to_string(), true)
+                                }
                             }
                         }
                         _ => ("".to_string(), false),
@@ -19265,19 +19221,21 @@ fn handle_mcp_command(
             let clip_info = {
                 let proj = project.borrow();
                 proj.tracks.iter().find_map(|t| {
-                    t.clips.iter().find(|c| c.id == clip_id).map(|c| {
-                        (c.source_path.clone(), c.source_in, c.source_out)
-                    })
+                    t.clips
+                        .iter()
+                        .find(|c| c.id == clip_id)
+                        .map(|c| (c.source_path.clone(), c.source_in, c.source_out))
                 })
             };
             let Some((source_path, source_in, source_out)) = clip_info else {
-                reply.send(serde_json::json!({"success": false, "error": "Clip not found"})).ok();
+                reply
+                    .send(serde_json::json!({"success": false, "error": "Clip not found"}))
+                    .ok();
                 return;
             };
 
             // Step 2 — build prompt in normalized coords.
-            let target_frame_ns =
-                frame_ns.unwrap_or(source_in).clamp(source_in, source_out);
+            let target_frame_ns = frame_ns.unwrap_or(source_in).clamp(source_in, source_out);
             use crate::media::sam_cache::BoxPrompt;
             let placeholder = BoxPrompt::from_corners(0.0, 0.0, 1.0, 1.0);
             let normalized_box: Result<Option<(f32, f32, f32, f32)>, &'static str> =
@@ -19303,7 +19261,9 @@ fn handle_mcp_command(
             let normalized_box = match normalized_box {
                 Ok(b) => b,
                 Err(msg) => {
-                    reply.send(serde_json::json!({"success": false, "error": msg})).ok();
+                    reply
+                        .send(serde_json::json!({"success": false, "error": msg}))
+                        .ok();
                     return;
                 }
             };
@@ -19321,18 +19281,13 @@ fn handle_mcp_command(
 
             // Step 4 — on success, append the mask to the clip.
             match result {
-                crate::media::sam_job::SamJobResult::Success {
-                    mask_points,
-                    score,
-                } => {
+                crate::media::sam_job::SamJobResult::Success { mask_points, score } => {
                     let point_count = mask_points.len();
                     let appended: Option<String> = {
                         let mut proj = project.borrow_mut();
                         let mut out: Option<String> = None;
                         for track in proj.tracks.iter_mut() {
-                            if let Some(clip) =
-                                track.clips.iter_mut().find(|c| c.id == clip_id)
-                            {
+                            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
                                 let mask =
                                     crate::model::clip::ClipMask::new_path(mask_points.clone());
                                 let mask_id = mask.id.clone();
@@ -19349,23 +19304,29 @@ fn handle_mcp_command(
                     match appended {
                         Some(mask_id) => {
                             on_project_changed();
-                            reply.send(serde_json::json!({
-                                "success": true,
-                                "mask_id": mask_id,
-                                "score": score,
-                                "point_count": point_count,
-                            })).ok();
+                            reply
+                                .send(serde_json::json!({
+                                    "success": true,
+                                    "mask_id": mask_id,
+                                    "score": score,
+                                    "point_count": point_count,
+                                }))
+                                .ok();
                         }
                         None => {
-                            reply.send(serde_json::json!({
-                                "success": false,
-                                "error": "Clip disappeared during SAM inference"
-                            })).ok();
+                            reply
+                                .send(serde_json::json!({
+                                    "success": false,
+                                    "error": "Clip disappeared during SAM inference"
+                                }))
+                                .ok();
                         }
                     }
                 }
                 crate::media::sam_job::SamJobResult::Error(msg) => {
-                    reply.send(serde_json::json!({"success": false, "error": msg})).ok();
+                    reply
+                        .send(serde_json::json!({"success": false, "error": msg}))
+                        .ok();
                 }
             }
         }
@@ -19954,10 +19915,8 @@ fn handle_mcp_command(
             };
             match result {
                 Ok(report) => {
-                    let target_lufs = crate::ui_state::loudness_target_preset_to_lufs(
-                        &pref_preset,
-                    )
-                    .unwrap_or(pref_target);
+                    let target_lufs = crate::ui_state::loudness_target_preset_to_lufs(&pref_preset)
+                        .unwrap_or(pref_target);
                     let delta = target_lufs - report.integrated_lufs;
                     reply
                         .send(json!({
@@ -19990,12 +19949,11 @@ fn handle_mcp_command(
             let clamped = master_gain_db.clamp(-24.0, 24.0);
             let old_db = project.borrow().master_gain_db;
             if (clamped - old_db).abs() > 1e-9 {
-                let cmd: Box<dyn crate::undo::EditCommand> = Box::new(
-                    crate::undo::SetProjectMasterGainCommand {
+                let cmd: Box<dyn crate::undo::EditCommand> =
+                    Box::new(crate::undo::SetProjectMasterGainCommand {
                         old_db,
                         new_db: clamped,
-                    },
-                );
+                    });
                 {
                     let mut proj = project.borrow_mut();
                     timeline_state.borrow_mut().history.execute(cmd, &mut proj);
@@ -20958,9 +20916,7 @@ fn handle_mcp_command(
             let proj = project.borrow().clone();
             let bg_paths = bg_removal_cache.borrow().paths.clone();
             let interp_paths = frame_interp_cache.borrow().snapshot_paths_by_clip_id(&proj);
-            let layout = crate::media::export::AudioChannelLayout::from_str(
-                &audio_channel_layout,
-            );
+            let layout = crate::media::export::AudioChannelLayout::from_str(&audio_channel_layout);
             std::thread::spawn(move || {
                 let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
                 let proj_worker = proj.clone();
@@ -21100,9 +21056,7 @@ fn handle_mcp_command(
                     .ok();
                 return;
             }
-            let layout = crate::media::export::AudioChannelLayout::from_str(
-                &audio_channel_layout,
-            );
+            let layout = crate::media::export::AudioChannelLayout::from_str(&audio_channel_layout);
             let options = crate::media::export::ExportOptions {
                 video_codec,
                 container,
@@ -22739,9 +22693,7 @@ fn handle_mcp_command(
                     return;
                 };
                 if let Err(message) = clip_supports_tracking_analysis(clip) {
-                    reply
-                        .send(json!({"ok": false, "error": message}))
-                        .ok();
+                    reply.send(json!({"ok": false, "error": message})).ok();
                     return;
                 }
                 let new_region = crate::model::clip::TrackingRegion {
@@ -23286,8 +23238,7 @@ fn handle_mcp_command(
                         audio_codec: crate::ui_state::ExportAudioCodec::Aac,
                         audio_bitrate_kbps: 192,
                         gif_fps: None,
-                        audio_channel_layout:
-                            crate::ui_state::ExportAudioChannelLayout::Stereo,
+                        audio_channel_layout: crate::ui_state::ExportAudioChannelLayout::Stereo,
                     })
             };
             let job = crate::ui_state::ExportQueueJob::new(&output_path, preset);
@@ -23523,11 +23474,7 @@ fn handle_mcp_command(
             // `T_anchor − T_clip`, so the clip's landmark is at `−offset_ns`
             // relative to the anchor, and we SUBTRACT offset_ns here (not add).
             let signed_event_for = |id: &str, src_in: u64| -> i64 {
-                let landmark = if id == anchor_id {
-                    0
-                } else {
-                    -offset_for(id)
-                };
+                let landmark = if id == anchor_id { 0 } else { -offset_for(id) };
                 src_in as i64 + landmark
             };
             let desired: Vec<i64> = clip_infos
@@ -23875,12 +23822,11 @@ fn handle_mcp_command(
                     media_duration_ns: c.media_duration_ns,
                 })
                 .collect();
-            let audition = crate::model::clip::Clip::new_audition(anchor_start, takes, active_index);
+            let audition =
+                crate::model::clip::Clip::new_audition(anchor_start, takes, active_index);
             let audition_id = audition.id.clone();
-            let selected_ids: std::collections::HashSet<String> = hits
-                .iter()
-                .map(|(c, _)| c.id.clone())
-                .collect();
+            let selected_ids: std::collections::HashSet<String> =
+                hits.iter().map(|(c, _)| c.id.clone()).collect();
             let mut proj = project.borrow_mut();
             let mut changes = Vec::new();
             for track in &proj.tracks {
@@ -24292,9 +24238,11 @@ fn handle_mcp_command(
 
             match resolved {
                 Ok((word_start_ns, word_end_ns)) => {
-                    let changed = timeline_state
-                        .borrow_mut()
-                        .delete_transcript_word_range(&clip_id, word_start_ns, word_end_ns);
+                    let changed = timeline_state.borrow_mut().delete_transcript_word_range(
+                        &clip_id,
+                        word_start_ns,
+                        word_end_ns,
+                    );
                     if changed {
                         on_project_changed();
                         reply

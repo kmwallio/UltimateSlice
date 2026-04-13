@@ -1267,8 +1267,7 @@ pub fn export_project(
 
             // Group audio labels by role for submix routing.
             let roles_in_use: Vec<AudioRole> = {
-                let mut roles: Vec<AudioRole> =
-                    audio_labels.iter().map(|s| s.role).collect();
+                let mut roles: Vec<AudioRole> = audio_labels.iter().map(|s| s.role).collect();
                 roles.sort_by_key(|r| *r as u8);
                 roles.dedup();
                 roles
@@ -1306,9 +1305,7 @@ pub fn export_project(
                         // Single input — just rename, no amix needed.
                         filter.push_str(&format!("anull[{submix_name}]"));
                     } else {
-                        filter.push_str(&format!(
-                            "amix=inputs={n}:normalize=0[{submix_name}]"
-                        ));
+                        filter.push_str(&format!("amix=inputs={n}:normalize=0[{submix_name}]"));
                     }
                     submix_labels.push(submix_name);
                 }
@@ -1363,11 +1360,7 @@ pub fn export_project(
             let stems_meta: Vec<(String, AudioRole, SurroundPosition)> = audio_labels
                 .iter()
                 .map(|stem| {
-                    let pos = resolve_stem_position(
-                        stem.role,
-                        stem.surround_override,
-                        layout,
-                    );
+                    let pos = resolve_stem_position(stem.role, stem.surround_override, layout);
                     (stem.label.clone(), stem.role, pos)
                 })
                 .collect();
@@ -1385,17 +1378,11 @@ pub fn export_project(
                 // Auto LFE bass tap for Music / Effects (and only when not
                 // already explicitly routed to LFE — that case already puts
                 // bass content there via the upmix filter).
-                let auto_lfe_eligible = matches!(
-                    role,
-                    AudioRole::Music | AudioRole::Effects
-                ) && *position != SurroundPosition::Lfe;
+                let auto_lfe_eligible = matches!(role, AudioRole::Music | AudioRole::Effects)
+                    && *position != SurroundPosition::Lfe;
                 if auto_lfe_eligible {
                     let lfe_label = format!("{label}_lfe");
-                    filter.push_str(&build_surround_lfe_tap_filter(
-                        label,
-                        &lfe_label,
-                        layout,
-                    ));
+                    filter.push_str(&build_surround_lfe_tap_filter(label, &lfe_label, layout));
                     push_role_input(*role, lfe_label);
                 }
             }
@@ -3238,9 +3225,7 @@ fn build_hsl_qualifier_filter(clip: &crate::model::clip::Clip) -> String {
     let g_expr = "255*ld(26)";
     let b_expr = "255*ld(27)";
 
-    format!(
-        ",format=gbrp,geq=r='{r_expr}':g='{g_expr}':b='{b_expr}',format=yuva420p"
-    )
+    format!(",format=gbrp,geq=r='{r_expr}':g='{g_expr}':b='{b_expr}',format=yuva420p")
 }
 
 /// Run vidstab analysis (pass 1) for a clip, producing a .trf transform file.
@@ -4041,10 +4026,7 @@ fn build_subtitle_filter_composited(
                     let group_time_start = if group_start == 0 {
                         seg.start_ns
                     } else {
-                        group_slice[0]
-                            .start_ns
-                            .max(seg.start_ns)
-                            .min(seg.end_ns)
+                        group_slice[0].start_ns.max(seg.start_ns).min(seg.end_ns)
                     };
                     let group_time_end = if group_end == total_words {
                         seg.end_ns
@@ -4076,10 +4058,7 @@ fn build_subtitle_filter_composited(
                         let ev_local_end = if wi_in_group + 1 == group_slice.len() {
                             group_time_end
                         } else {
-                            seg.words[wi]
-                                .end_ns
-                                .max(ev_local_start)
-                                .min(group_time_end)
+                            seg.words[wi].end_ns.max(ev_local_start).min(group_time_end)
                         };
                         if ev_local_end <= ev_local_start {
                             continue;
@@ -4108,8 +4087,7 @@ fn build_subtitle_filter_composited(
                                     overrides.push_str("\\u1");
                                 }
                                 if flags.color {
-                                    overrides
-                                        .push_str(&format!("\\c&H{hb:02X}{hg:02X}{hr:02X}&"));
+                                    overrides.push_str(&format!("\\c&H{hb:02X}{hg:02X}{hr:02X}&"));
                                 }
                                 if flags.stroke {
                                     // Stroke colour is independent from
@@ -5123,9 +5101,7 @@ fn resolve_stem_position(
         },
         SurroundPositionOverride::FrontLR => SurroundPosition::FrontLR,
         SurroundPositionOverride::FrontCenter => SurroundPosition::FrontCenter,
-        SurroundPositionOverride::FrontLRPlusSurroundLR => {
-            SurroundPosition::FrontLRPlusSurroundLR
-        }
+        SurroundPositionOverride::FrontLRPlusSurroundLR => SurroundPosition::FrontLRPlusSurroundLR,
         SurroundPositionOverride::SurroundLR => SurroundPosition::SurroundLR,
         SurroundPositionOverride::Lfe => SurroundPosition::Lfe,
         SurroundPositionOverride::FrontLeft => SurroundPosition::FrontLeft,
@@ -6096,11 +6072,7 @@ pub(crate) fn parse_loudness_report(stderr: &str) -> Result<LoudnessReport> {
 fn extract_ebur128_metric(line: &str, key: &str) -> Option<f64> {
     let idx = line.find(key)?;
     let rest = &line[idx + key.len()..];
-    let token = rest
-        .trim_start()
-        .split_whitespace()
-        .next()
-        .unwrap_or("");
+    let token = rest.trim_start().split_whitespace().next().unwrap_or("");
     if token.is_empty() || token.contains("inf") || token.contains("nan") {
         return None;
     }
@@ -6191,8 +6163,10 @@ pub(crate) fn analyze_loudness_lufs_with_prefilter(
     source_out_ns: u64,
     prefilter: Option<String>,
 ) -> Result<f64> {
-    Ok(analyze_loudness_full_with_prefilter(source_path, source_in_ns, source_out_ns, prefilter)?
-        .integrated_lufs)
+    Ok(
+        analyze_loudness_full_with_prefilter(source_path, source_in_ns, source_out_ns, prefilter)?
+            .integrated_lufs,
+    )
 }
 
 /// Measure peak amplitude (dB) of a clip's audio via FFmpeg `volumedetect` filter.
@@ -6288,10 +6262,8 @@ pub fn analyze_project_loudness(project: &Project) -> Result<LoudnessReport> {
     };
 
     let (tx, _rx) = mpsc::channel();
-    let empty_bg: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
-    let empty_fi: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
+    let empty_bg: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let empty_fi: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     export_project(
         &analysis_project,
         &path,
@@ -6666,10 +6638,7 @@ fn flatten_clips(
                     result.push(c);
                 }
                 Err(e) => {
-                    log::warn!(
-                        "export: failed to rasterize drawing clip {}: {e}",
-                        clip.id
-                    );
+                    log::warn!("export: failed to rasterize drawing clip {}: {e}", clip.id);
                 }
             }
         } else {
@@ -6689,25 +6658,25 @@ mod tests {
         build_adjustment_export_roi, build_adjustment_layer_filter_graph,
         build_adjustment_scope_alpha_expression, build_audio_crossfade_filters, build_color_filter,
         build_crop_filter, build_grading_filter, build_hsl_qualifier_filter,
-        build_keyframed_property_expression,
-        build_pan_expression, build_rotation_filter, build_scale_position_filter,
-        build_subtitle_filter_composited, build_surround_lfe_tap_filter,
-        build_surround_upmix_filter, build_temperature_tint_filter, build_timing_filter,
-        build_title_filter, build_volume_filter, clamped_primary_transition_timing,
-        clamped_primary_xfade_duration_s, compute_clip_audio_fades, compute_export_coloradj_params,
-        estimate_export_size_bytes, find_ffmpeg, flatten_compound_tracks, has_linked_audio_peer,
-        has_transform_keyframes, parse_loudness_report, parse_progress_line,
-        primary_clip_transition_stop_pad_ns, resolve_stem_position, resolve_subtitle_font_style,
-        split_active_video_tracks_for_export, video_input_seek_and_duration, write_chapter_metadata,
-        AdjustmentExportRoi, AdjustmentMatteInput, AudioChannelLayout, AudioCodec, ClipAudioFade,
+        build_keyframed_property_expression, build_pan_expression, build_rotation_filter,
+        build_scale_position_filter, build_subtitle_filter_composited,
+        build_surround_lfe_tap_filter, build_surround_upmix_filter, build_temperature_tint_filter,
+        build_timing_filter, build_title_filter, build_volume_filter,
+        clamped_primary_transition_timing, clamped_primary_xfade_duration_s,
+        compute_clip_audio_fades, compute_export_coloradj_params, estimate_export_size_bytes,
+        find_ffmpeg, flatten_compound_tracks, has_linked_audio_peer, has_transform_keyframes,
+        parse_loudness_report, parse_progress_line, primary_clip_transition_stop_pad_ns,
+        resolve_stem_position, resolve_subtitle_font_style, split_active_video_tracks_for_export,
+        video_input_seek_and_duration, write_chapter_metadata, AdjustmentExportRoi,
+        AdjustmentMatteInput, AudioChannelLayout, AudioCodec, ClipAudioFade,
         ColorFilterCapabilities, ExportOptions, LoudnessReport, SurroundPosition, VideoCodec,
     };
-    use crate::model::track::{AudioRole, SurroundPositionOverride};
     use crate::media::program_player::ProgramPlayer;
     use crate::model::clip::{
         Clip, ClipKind, KeyframeInterpolation, NumericKeyframe, SubtitleSegment, SubtitleWord,
     };
     use crate::model::project::Project;
+    use crate::model::track::{AudioRole, SurroundPositionOverride};
     use crate::ui_state::CrossfadeCurve;
     use gstreamer as gst;
     use std::process::Command;
@@ -7867,14 +7836,38 @@ mod tests {
     Peak:       -1.2 dBFS
 "#;
         let r = parse_loudness_report(stderr).expect("parse ok");
-        assert!((r.integrated_lufs + 23.0).abs() < 1e-6, "I: {}", r.integrated_lufs);
-        assert!((r.loudness_range_lu - 8.4).abs() < 1e-6, "LRA: {}", r.loudness_range_lu);
-        assert!((r.threshold_lufs + 33.0).abs() < 1e-6, "Thresh: {}", r.threshold_lufs);
-        assert!((r.true_peak_dbtp + 1.2).abs() < 1e-6, "TP: {}", r.true_peak_dbtp);
+        assert!(
+            (r.integrated_lufs + 23.0).abs() < 1e-6,
+            "I: {}",
+            r.integrated_lufs
+        );
+        assert!(
+            (r.loudness_range_lu - 8.4).abs() < 1e-6,
+            "LRA: {}",
+            r.loudness_range_lu
+        );
+        assert!(
+            (r.threshold_lufs + 33.0).abs() < 1e-6,
+            "Thresh: {}",
+            r.threshold_lufs
+        );
+        assert!(
+            (r.true_peak_dbtp + 1.2).abs() < 1e-6,
+            "TP: {}",
+            r.true_peak_dbtp
+        );
         // Max of per-frame M values: -18.7 (largest / loudest).
-        assert!((r.momentary_max_lufs + 18.7).abs() < 1e-6, "M max: {}", r.momentary_max_lufs);
+        assert!(
+            (r.momentary_max_lufs + 18.7).abs() < 1e-6,
+            "M max: {}",
+            r.momentary_max_lufs
+        );
         // Max of per-frame S values (ignoring -inf): -19.9.
-        assert!((r.short_term_max_lufs + 19.9).abs() < 1e-6, "S max: {}", r.short_term_max_lufs);
+        assert!(
+            (r.short_term_max_lufs + 19.9).abs() < 1e-6,
+            "S max: {}",
+            r.short_term_max_lufs
+        );
     }
 
     #[test]
@@ -7896,7 +7889,11 @@ mod tests {
         let r = parse_loudness_report(stderr).expect("parse ok");
         assert!((r.integrated_lufs + 20.0).abs() < 1e-6);
         assert!((r.loudness_range_lu - 3.0).abs() < 1e-6);
-        assert!(r.true_peak_dbtp == 0.0, "TP should default to 0.0, got {}", r.true_peak_dbtp);
+        assert!(
+            r.true_peak_dbtp == 0.0,
+            "TP should default to 0.0, got {}",
+            r.true_peak_dbtp
+        );
     }
 
     #[test]
@@ -9105,11 +9102,7 @@ mod tests {
             SurroundPositionOverride::Lfe,
             SurroundPositionOverride::SideRight,
         ] {
-            let p = resolve_stem_position(
-                AudioRole::Dialogue,
-                ovr,
-                AudioChannelLayout::Stereo,
-            );
+            let p = resolve_stem_position(AudioRole::Dialogue, ovr, AudioChannelLayout::Stereo);
             assert_eq!(p, SurroundPosition::FrontLR);
         }
     }
@@ -9118,35 +9111,19 @@ mod tests {
     fn resolve_stem_position_auto_uses_role_defaults_for_5_1() {
         let layout = AudioChannelLayout::Surround51;
         assert_eq!(
-            resolve_stem_position(
-                AudioRole::Dialogue,
-                SurroundPositionOverride::Auto,
-                layout
-            ),
+            resolve_stem_position(AudioRole::Dialogue, SurroundPositionOverride::Auto, layout),
             SurroundPosition::FrontCenter
         );
         assert_eq!(
-            resolve_stem_position(
-                AudioRole::Music,
-                SurroundPositionOverride::Auto,
-                layout
-            ),
+            resolve_stem_position(AudioRole::Music, SurroundPositionOverride::Auto, layout),
             SurroundPosition::FrontLR
         );
         assert_eq!(
-            resolve_stem_position(
-                AudioRole::Effects,
-                SurroundPositionOverride::Auto,
-                layout
-            ),
+            resolve_stem_position(AudioRole::Effects, SurroundPositionOverride::Auto, layout),
             SurroundPosition::FrontLRPlusSurroundLR
         );
         assert_eq!(
-            resolve_stem_position(
-                AudioRole::None,
-                SurroundPositionOverride::Auto,
-                layout
-            ),
+            resolve_stem_position(AudioRole::None, SurroundPositionOverride::Auto, layout),
             SurroundPosition::FrontLR
         );
     }
@@ -9165,11 +9142,7 @@ mod tests {
             SurroundPosition::SideLeft
         );
         assert_eq!(
-            resolve_stem_position(
-                AudioRole::Music,
-                SurroundPositionOverride::Lfe,
-                layout
-            ),
+            resolve_stem_position(AudioRole::Music, SurroundPositionOverride::Lfe, layout),
             SurroundPosition::Lfe
         );
     }
@@ -9250,11 +9223,7 @@ mod tests {
 
     #[test]
     fn build_surround_lfe_tap_emits_two_lowpass_stages() {
-        let s = build_surround_lfe_tap_filter(
-            "aa4",
-            "aa4_lfe",
-            AudioChannelLayout::Surround51,
-        );
+        let s = build_surround_lfe_tap_filter("aa4", "aa4_lfe", AudioChannelLayout::Surround51);
         assert!(s.starts_with(";[aa4]"));
         assert!(s.ends_with("[aa4_lfe]"));
         // Cascaded lowpass for ~24 dB/oct.
@@ -9286,10 +9255,7 @@ mod tests {
             SurroundPosition::FrontLR,
             AudioChannelLayout::Surround51,
         );
-        let after_pan = s
-            .split_once("pan=5.1|")
-            .map(|(_, rest)| rest)
-            .unwrap_or("");
+        let after_pan = s.split_once("pan=5.1|").map(|(_, rest)| rest).unwrap_or("");
         // Strip the trailing `,aformat=...[y]`
         let body = after_pan.split(',').next().unwrap();
         let order: Vec<&str> = body
@@ -9307,10 +9273,7 @@ mod tests {
             SurroundPosition::FrontLR,
             AudioChannelLayout::Surround71,
         );
-        let after_pan = s
-            .split_once("pan=7.1|")
-            .map(|(_, rest)| rest)
-            .unwrap_or("");
+        let after_pan = s.split_once("pan=7.1|").map(|(_, rest)| rest).unwrap_or("");
         let body = after_pan.split(',').next().unwrap();
         let order: Vec<&str> = body
             .split('|')

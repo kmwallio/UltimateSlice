@@ -154,11 +154,7 @@ struct LargestComponent {
 /// contour-tracing defines "boundary."
 ///
 /// Returns `None` if the mask has no foreground pixels at all.
-fn find_largest_component(
-    mask: &[u8],
-    width: usize,
-    height: usize,
-) -> Option<LargestComponent> {
+fn find_largest_component(mask: &[u8], width: usize, height: usize) -> Option<LargestComponent> {
     // visited[y * width + x] tracks which pixels we've assigned to
     // a component. We don't need per-component labels; just knowing
     // which component (if any) wins on pixel count is enough.
@@ -218,10 +214,7 @@ fn find_largest_component(
                 }
             }
 
-            let is_best = best
-                .as_ref()
-                .map(|b| count > b.pixel_count)
-                .unwrap_or(true);
+            let is_best = best.as_ref().map(|b| count > b.pixel_count).unwrap_or(true);
             if is_best {
                 best = Some(LargestComponent {
                     pixel_count: count,
@@ -387,10 +380,7 @@ fn has_foreground_neighbor<F>(is_fg: &F, p: (i32, i32)) -> bool
 where
     F: Fn(i32, i32) -> bool,
 {
-    is_fg(p.0 - 1, p.1)
-        || is_fg(p.0 + 1, p.1)
-        || is_fg(p.0, p.1 - 1)
-        || is_fg(p.0, p.1 + 1)
+    is_fg(p.0 - 1, p.1) || is_fg(p.0 + 1, p.1) || is_fg(p.0, p.1 - 1) || is_fg(p.0, p.1 + 1)
 }
 
 // ── Douglas-Peucker simplification ────────────────────────────────────────
@@ -676,8 +666,8 @@ mod tests {
         // D-P to keep somewhere around 10–30 points — enough to
         // approximate the curve but nowhere near the raw contour.
         let mask = circle_mask(100, 100, 50.0, 50.0, 20.0);
-        let points = mask_to_bezier_path(&mask, 100, 100, 2.0)
-            .expect("circle should produce a polygon");
+        let points =
+            mask_to_bezier_path(&mask, 100, 100, 2.0).expect("circle should produce a polygon");
         assert!(
             (6..=40).contains(&points.len()),
             "expected 6-40 points for circle, got {}",
@@ -761,14 +751,7 @@ mod tests {
     fn douglas_peucker_drops_near_colinear_points() {
         // Nearly straight polyline → with a 2.0 tolerance,
         // everything except the endpoints should be dropped.
-        let line: Vec<(i32, i32)> = vec![
-            (0, 0),
-            (10, 0),
-            (20, 0),
-            (30, 0),
-            (40, 0),
-            (50, 0),
-        ];
+        let line: Vec<(i32, i32)> = vec![(0, 0), (10, 0), (20, 0), (30, 0), (40, 0), (50, 0)];
         let simp = douglas_peucker(&line, 1.0);
         assert_eq!(simp.len(), 2);
         assert_eq!(simp[0], (0, 0));

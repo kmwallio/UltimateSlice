@@ -2,7 +2,7 @@
 
 The **Program Monitor** shows the assembled timeline played back in real time, clip by clip.
 
-When no timeline clips are present, the monitor area shows a short first-use hint to import media and append/insert clips, and previous-project frames are cleared on project switch/new project.
+When no timeline clips are present, the monitor area shows a short first-use hint to import media and append/insert clips, clears previous-project frames on project switch/new project, and keeps a blank canvas visible at the current project aspect ratio so you can still judge framing.
 
 ## Canvas Aspect Ratio
 
@@ -15,7 +15,7 @@ The program monitor constrains its video display area to the **project canvas ra
 - If the canvas is wider than the clip (e.g. a 4:3 clip on a 16:9 canvas), black **pillarbox
   bars** appear on the sides.
 - The canvas ratio updates automatically when you change the project resolution in
-  **Project Settings**.
+  **Project Settings**, even on a brand-new project with an empty timeline.
 
 This makes it much easier to judge clip placement, scale, and whether content is inside
 or outside the export frame.

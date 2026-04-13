@@ -9,9 +9,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::model::clip::{AuditionTake, Clip, ClipKind};
-use crate::model::track::Track;
-use crate::model::project::Project;
 use crate::model::media_library::{MediaBin, MediaLibrary};
+use crate::model::project::Project;
+use crate::model::track::Track;
 
 use super::script::Script;
 use super::script_align::AlignmentResult;
@@ -390,8 +390,7 @@ mod tests {
             unmatched_clips: vec!["extra.mp4".to_string()],
         };
 
-        let plan =
-            build_assembly_plan(&script, &alignment, 0, 3_000_000_000, true);
+        let plan = build_assembly_plan(&script, &alignment, 0, 3_000_000_000, true);
 
         assert_eq!(plan.video_clips.len(), 2);
         assert_eq!(plan.title_clips.len(), 2);
@@ -419,8 +418,7 @@ mod tests {
             unmatched_clips: Vec::new(),
         };
 
-        let plan =
-            build_assembly_plan(&script, &alignment, 0, 3_000_000_000, false);
+        let plan = build_assembly_plan(&script, &alignment, 0, 3_000_000_000, false);
 
         assert!(plan.title_clips.is_empty());
         assert_eq!(plan.video_clips.len(), 1);
@@ -456,7 +454,11 @@ mod tests {
         let plan = build_assembly_plan(&script, &alignment, 0, 3_000_000_000, false);
 
         // Should produce a single audition clip, not two separate clips.
-        assert_eq!(plan.video_clips.len(), 1, "Multiple takes => single audition");
+        assert_eq!(
+            plan.video_clips.len(),
+            1,
+            "Multiple takes => single audition"
+        );
         let clip = &plan.video_clips[0];
         assert_eq!(clip.kind, ClipKind::Audition);
         assert_eq!(

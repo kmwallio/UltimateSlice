@@ -98,9 +98,7 @@ pub fn drawing_to_svg(
         let lw = (item.width * scale_ref).max(0.5);
         let stroke = hex_rgb(item.color);
         let stroke_a = alpha(item.color);
-        let begin_s = animation
-            .map(|a| i as f64 * a.stagger_s)
-            .unwrap_or(0.0);
+        let begin_s = animation.map(|a| i as f64 * a.stagger_s).unwrap_or(0.0);
         let dur_s = animation.map(|a| a.per_item_duration_s).unwrap_or(0.0);
 
         match item.kind {
@@ -569,7 +567,12 @@ mod tests {
 
     #[test]
     fn static_svg_has_viewbox_and_closes() {
-        let svg = drawing_to_svg(&[stroke(0xFF0000FF, &[(0.1, 0.1), (0.9, 0.9)])], 320, 180, None);
+        let svg = drawing_to_svg(
+            &[stroke(0xFF0000FF, &[(0.1, 0.1), (0.9, 0.9)])],
+            320,
+            180,
+            None,
+        );
         assert!(svg.starts_with("<?xml"));
         assert!(svg.contains("viewBox=\"0 0 320 180\""));
         assert!(svg.trim_end().ends_with("</svg>"));
@@ -615,8 +618,7 @@ mod tests {
             width: 4.0,
             fill_color: Some(0xFFFF00AA),
         };
-        let svg =
-            drawing_to_svg(&[item], 100, 100, Some(SvgAnimation::default()));
+        let svg = drawing_to_svg(&[item], 100, 100, Some(SvgAnimation::default()));
         assert!(svg.contains("<rect "), "svg: {svg}");
         assert!(svg.contains("attributeName=\"opacity\""), "svg: {svg}");
         assert!(svg.contains("fill=\"#ffff00\""), "svg: {svg}");
@@ -670,8 +672,7 @@ mod tests {
             },
         ];
         let svg = drawing_to_svg(&items, 1920, 1080, Some(SvgAnimation::default()));
-        let parsed =
-            try_parse_ultimate_slice_svg(&svg).expect("our own SVG should round-trip");
+        let parsed = try_parse_ultimate_slice_svg(&svg).expect("our own SVG should round-trip");
 
         assert_eq!(parsed.width, 1920);
         assert_eq!(parsed.height, 1080);

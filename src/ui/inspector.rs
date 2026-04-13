@@ -401,7 +401,6 @@ pub struct InspectorView {
     pub title_animation_dropdown: gtk4::DropDown,
     pub title_animation_duration_slider: Scale,
     // Transitions
-
     pub speed_slider: Scale,
     pub reverse_check: CheckButton,
     pub slow_motion_dropdown: DropDown,
@@ -641,10 +640,7 @@ impl InspectorView {
                 title_lbl.add_css_class("heading");
             }
             label_box.append(&title_lbl);
-            let dur_secs = take
-                .source_out
-                .saturating_sub(take.source_in) as f64
-                / 1_000_000_000.0;
+            let dur_secs = take.source_out.saturating_sub(take.source_in) as f64 / 1_000_000_000.0;
             let stem = std::path::Path::new(&take.source_path)
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -1885,14 +1881,22 @@ impl InspectorView {
                     || is_compound
                     || is_multicam
                     || is_audition;
-                self.color_section
-                    .set_visible(is_video || is_image || is_adjustment || is_audition || is_multicam);
-                self.audio_section.set_visible(is_video || is_audio || is_audition);
+                self.color_section.set_visible(
+                    is_video || is_image || is_adjustment || is_audition || is_multicam,
+                );
+                self.audio_section
+                    .set_visible(is_video || is_audio || is_audition);
                 self.transform_section.set_visible(is_visual);
-                self.title_section_box
-                    .set_visible(is_visual && !is_adjustment && !is_compound && !is_multicam && !is_audition);
-                self.speed_section_box
-                    .set_visible(!is_title_clip && !is_adjustment && !is_compound && !is_multicam && !is_audition);
+                self.title_section_box.set_visible(
+                    is_visual && !is_adjustment && !is_compound && !is_multicam && !is_audition,
+                );
+                self.speed_section_box.set_visible(
+                    !is_title_clip
+                        && !is_adjustment
+                        && !is_compound
+                        && !is_multicam
+                        && !is_audition,
+                );
                 // Audition section is visible only for audition clips. Repopulate the takes list.
                 self.audition_section_box.set_visible(is_audition);
                 if is_audition {
@@ -2232,9 +2236,8 @@ impl InspectorView {
                         .set_rgba(&gdk4::RGBA::new(hr, hg, hb, ha));
                 }
                 if flags.stroke {
-                    let (sr, sg, sb, sa) = crate::ui::colors::rgba_u32_to_f32(
-                        c.subtitle_highlight_stroke_color,
-                    );
+                    let (sr, sg, sb, sa) =
+                        crate::ui::colors::rgba_u32_to_f32(c.subtitle_highlight_stroke_color);
                     self.subtitle_highlight_stroke_color_btn
                         .set_rgba(&gdk4::RGBA::new(sr, sg, sb, sa));
                 }
@@ -2255,14 +2258,10 @@ impl InspectorView {
                 // running on this Inspector instance.
                 #[cfg(feature = "ai-inference")]
                 {
-                    let sam_ready =
-                        crate::media::sam_cache::find_sam_model_paths().is_some();
+                    let sam_ready = crate::media::sam_cache::find_sam_model_paths().is_some();
                     let job_busy = self.sam_job_handle.borrow().is_some();
-                    self.sam_generate_btn.set_sensitive(
-                        sam_ready
-                            && !job_busy
-                            && (is_video || is_image),
-                    );
+                    self.sam_generate_btn
+                        .set_sensitive(sam_ready && !job_busy && (is_video || is_image));
                 }
 
                 // Populate mask section from masks[0].
@@ -2921,14 +2920,13 @@ impl InspectorView {
                 }
                 self.title_bg_box_padding_slider
                     .set_value(c.title_bg_box_padding);
-                self.title_animation_dropdown.set_selected(
-                    match c.title_animation {
+                self.title_animation_dropdown
+                    .set_selected(match c.title_animation {
                         crate::model::clip::TitleAnimation::None => 0,
                         crate::model::clip::TitleAnimation::Typewriter => 1,
                         crate::model::clip::TitleAnimation::Fade => 2,
                         crate::model::clip::TitleAnimation::Pop => 3,
-                    },
-                );
+                    });
                 self.title_animation_duration_slider
                     .set_value(c.title_animation_duration_ns as f64 / 1_000_000_000.0);
                 // When speed keyframes are present, don't auto-update the slider —
@@ -4143,7 +4141,10 @@ pub fn build_inspector(
     // visible when the Stroke highlight flag is enabled. Defaults to the
     // same value as the highlight colour for legacy projects.
     let subtitle_highlight_stroke_color_row = GBox::new(Orientation::Vertical, 4);
-    row_label(&subtitle_highlight_stroke_color_row, "Highlight Stroke Color");
+    row_label(
+        &subtitle_highlight_stroke_color_row,
+        "Highlight Stroke Color",
+    );
     let sub_hl_stroke_color_dialog = gtk4::ColorDialog::new();
     sub_hl_stroke_color_dialog.set_with_alpha(true);
     let subtitle_highlight_stroke_color_btn =
@@ -4811,8 +4812,7 @@ pub fn build_inspector(
     audio_inner.append(&voice_enhance_check);
 
     row_label(&audio_inner, "  Strength");
-    let voice_enhance_strength_slider =
-        Scale::with_range(Orientation::Horizontal, 0.0, 100.0, 1.0);
+    let voice_enhance_strength_slider = Scale::with_range(Orientation::Horizontal, 0.0, 100.0, 1.0);
     voice_enhance_strength_slider.set_value(50.0);
     voice_enhance_strength_slider.set_draw_value(true);
     voice_enhance_strength_slider.set_digits(0);
@@ -4836,9 +4836,8 @@ pub fn build_inspector(
     voice_enhance_status_label.add_css_class("dim-label");
     voice_enhance_status_label.set_visible(false);
     let voice_enhance_retry_btn = Button::with_label("Retry");
-    voice_enhance_retry_btn.set_tooltip_text(Some(
-        "Re-queue the voice enhance ffmpeg job for this clip.",
-    ));
+    voice_enhance_retry_btn
+        .set_tooltip_text(Some("Re-queue the voice enhance ffmpeg job for this clip."));
     voice_enhance_retry_btn.set_visible(false);
     voice_enhance_status_row.append(&voice_enhance_status_label);
     voice_enhance_status_row.append(&voice_enhance_retry_btn);
@@ -5347,16 +5346,16 @@ pub fn build_inspector(
     transform_inner.append(&motion_blur_row);
 
     row_label(&transform_inner, "Shutter Angle");
-    let motion_blur_shutter_slider =
-        Scale::with_range(Orientation::Horizontal, 0.0, 720.0, 1.0);
+    let motion_blur_shutter_slider = Scale::with_range(Orientation::Horizontal, 0.0, 720.0, 1.0);
     motion_blur_shutter_slider.set_value(180.0);
     motion_blur_shutter_slider.set_draw_value(true);
     motion_blur_shutter_slider.set_digits(0);
     motion_blur_shutter_slider.add_mark(180.0, gtk4::PositionType::Bottom, Some("180°"));
     motion_blur_shutter_slider.add_mark(360.0, gtk4::PositionType::Bottom, Some("360°"));
     motion_blur_shutter_slider.set_hexpand(true);
-    motion_blur_shutter_slider
-        .set_tooltip_text(Some("Shutter angle in degrees: 180° = cinematic, 360° = full natural blur"));
+    motion_blur_shutter_slider.set_tooltip_text(Some(
+        "Shutter angle in degrees: 180° = cinematic, 360° = full natural blur",
+    ));
     transform_inner.append(&motion_blur_shutter_slider);
 
     row_label(&transform_inner, "Scale");
@@ -5735,8 +5734,7 @@ pub fn build_inspector(
     title_inner.append(&title_animation_dropdown);
 
     row_label(&title_inner, "  Duration (s)");
-    let title_animation_duration_slider =
-        Scale::with_range(Orientation::Horizontal, 0.1, 5.0, 0.1);
+    let title_animation_duration_slider = Scale::with_range(Orientation::Horizontal, 0.1, 5.0, 0.1);
     title_animation_duration_slider.set_value(1.0);
     title_animation_duration_slider.set_draw_value(true);
     title_animation_duration_slider.set_hexpand(true);
@@ -10537,8 +10535,7 @@ pub fn build_inspector(
     // live `Rc<RefCell<Option<SamJobInFlight>>>`; without the feature
     // we skip the whole block and the struct field never exists.
     #[cfg(feature = "ai-inference")]
-    let sam_job_handle: Rc<RefCell<Option<SamJobInFlight>>> =
-        Rc::new(RefCell::new(None));
+    let sam_job_handle: Rc<RefCell<Option<SamJobInFlight>>> = Rc::new(RefCell::new(None));
 
     #[cfg(feature = "ai-inference")]
     {
@@ -10638,35 +10635,28 @@ pub fn build_inspector(
                             // dispatch the background SAM job.
                             log::info!(
                                 "SAM prompt: normalized box ({:.4},{:.4})–({:.4},{:.4})",
-                                nx1, ny1, nx2, ny2,
+                                nx1,
+                                ny1,
+                                nx2,
+                                ny2,
                             );
-                            let normalized_box = (
-                                nx1 as f32,
-                                ny1 as f32,
-                                nx2 as f32,
-                                ny2 as f32,
+                            let normalized_box = (nx1 as f32, ny1 as f32, nx2 as f32, ny2 as f32);
+                            let prompt = crate::media::sam_cache::BoxPrompt::from_corners(
+                                0.0, 0.0, 1.0, 1.0,
                             );
-                            let prompt =
-                                crate::media::sam_cache::BoxPrompt::from_corners(
-                                    0.0, 0.0, 1.0, 1.0,
-                                );
                             let input = crate::media::sam_job::SamJobInput {
-                                source_path: std::path::PathBuf::from(
-                                    &source_path,
-                                ),
+                                source_path: std::path::PathBuf::from(&source_path),
                                 frame_ns: source_in,
                                 prompt,
                                 normalized_box: Some(normalized_box),
                                 tolerance_px: 2.0,
                             };
-                            let handle =
-                                crate::media::sam_job::spawn_sam_job(input);
-                            *sam_job_handle_click.borrow_mut() =
-                                Some(SamJobInFlight {
-                                    handle,
-                                    clip_id: clip_id.clone(),
-                                    track_id: track_id.clone(),
-                                });
+                            let handle = crate::media::sam_job::spawn_sam_job(input);
+                            *sam_job_handle_click.borrow_mut() = Some(SamJobInFlight {
+                                handle,
+                                clip_id: clip_id.clone(),
+                                track_id: track_id.clone(),
+                            });
                             button_click.set_label("Generating… (~6s)");
                             // Button stays insensitive (already set above).
                         },
@@ -10694,15 +10684,11 @@ pub fn build_inspector(
                     .modal(true)
                     .build();
                 let enter_prompt = enter_prompt.clone();
-                alert.choose(
-                    parent.as_ref(),
-                    gio::Cancellable::NONE,
-                    move |res| {
-                        if matches!(res, Ok(1)) {
-                            enter_prompt();
-                        }
-                    },
-                );
+                alert.choose(parent.as_ref(), gio::Cancellable::NONE, move |res| {
+                    if matches!(res, Ok(1)) {
+                        enter_prompt();
+                    }
+                });
             } else {
                 enter_prompt();
             }
@@ -10719,115 +10705,101 @@ pub fn build_inspector(
         let button_tick = sam_generate_btn.clone();
         let on_frei0r_changed_tick = on_frei0r_changed.clone();
         let on_execute_command_tick = on_execute_command.clone();
-        glib::timeout_add_local(
-            std::time::Duration::from_millis(100),
-            move || {
-                use crate::media::sam_job::SamJobResult;
+        glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+            use crate::media::sam_job::SamJobResult;
 
-                // Fast path: no job in flight, nothing to do. Use a
-                // nested borrow so we can free it before taking the
-                // job result out.
-                let has_result = {
-                    let borrow = sam_job_handle_tick.borrow();
-                    match borrow.as_ref() {
-                        Some(inflight) => inflight.handle.try_recv(),
-                        None => None,
-                    }
-                };
-                let Some(result) = has_result else {
-                    return glib::ControlFlow::Continue;
-                };
-
-                // Take the in-flight state out so follow-up clicks
-                // can spawn a fresh job.
-                let inflight = sam_job_handle_tick.borrow_mut().take();
-                let Some(inflight) = inflight else {
-                    // Should never happen since we just observed a
-                    // Some above, but defend against races anyway.
-                    return glib::ControlFlow::Continue;
-                };
-                let clip_id = inflight.clip_id;
-                let track_id = inflight.track_id;
-
-                // Restore the button regardless of outcome.
-                button_tick.set_label("Generate with SAM");
-                button_tick.set_sensitive(true);
-
-                match result {
-                    SamJobResult::Success {
-                        mask_points,
-                        score,
-                    } => {
-                        log::info!(
-                            "SAM: clip={} points={} score={:.3}",
-                            clip_id,
-                            mask_points.len(),
-                            score
-                        );
-                        // Snapshot the old mask state and build the
-                        // new one, then push a SetClipMaskCommand
-                        // through the undo history so Ctrl+Z reverts
-                        // the SAM mask replacement in one step.
-                        let old_mask = {
-                            let proj = project_tick.borrow();
-                            proj.tracks.iter().find_map(|t| {
-                                t.clips
-                                    .iter()
-                                    .find(|c| c.id == clip_id)
-                                    .map(|c| {
-                                        crate::undo::ClipMaskSnapshot::from_clip(c)
-                                    })
-                            })
-                        };
-                        let Some(old_mask) = old_mask else {
-                            log::warn!(
-                                "SAM: clip {} no longer exists; mask discarded",
-                                clip_id
-                            );
-                            return glib::ControlFlow::Continue;
-                        };
-                        // Build new mask state: replace masks[0]
-                        // (or create it if the clip had none).
-                        let new_mask = {
-                            let mut masks = old_mask.masks.clone();
-                            let sam_mask =
-                                crate::model::clip::ClipMask::new_path(
-                                    mask_points,
-                                );
-                            if masks.is_empty() {
-                                masks.push(sam_mask);
-                            } else {
-                                masks[0] = sam_mask;
-                            }
-                            crate::undo::ClipMaskSnapshot { masks }
-                        };
-                        let cmd = crate::undo::SetClipMaskCommand {
-                            clip_id,
-                            track_id,
-                            old_mask,
-                            new_mask,
-                        };
-                        on_execute_command_tick(Box::new(cmd));
-                        on_frei0r_changed_tick();
-                    }
-                    SamJobResult::Error(msg) => {
-                        log::warn!("SAM: clip={} error={}", clip_id, msg);
-                        let parent = button_tick
-                            .root()
-                            .and_then(|r| r.downcast::<gtk::Window>().ok());
-                        let alert = gtk::AlertDialog::builder()
-                            .message("SAM mask generation failed")
-                            .detail(&msg)
-                            .buttons(["OK"])
-                            .modal(true)
-                            .build();
-                        alert.show(parent.as_ref());
-                    }
+            // Fast path: no job in flight, nothing to do. Use a
+            // nested borrow so we can free it before taking the
+            // job result out.
+            let has_result = {
+                let borrow = sam_job_handle_tick.borrow();
+                match borrow.as_ref() {
+                    Some(inflight) => inflight.handle.try_recv(),
+                    None => None,
                 }
+            };
+            let Some(result) = has_result else {
+                return glib::ControlFlow::Continue;
+            };
 
-                glib::ControlFlow::Continue
-            },
-        );
+            // Take the in-flight state out so follow-up clicks
+            // can spawn a fresh job.
+            let inflight = sam_job_handle_tick.borrow_mut().take();
+            let Some(inflight) = inflight else {
+                // Should never happen since we just observed a
+                // Some above, but defend against races anyway.
+                return glib::ControlFlow::Continue;
+            };
+            let clip_id = inflight.clip_id;
+            let track_id = inflight.track_id;
+
+            // Restore the button regardless of outcome.
+            button_tick.set_label("Generate with SAM");
+            button_tick.set_sensitive(true);
+
+            match result {
+                SamJobResult::Success { mask_points, score } => {
+                    log::info!(
+                        "SAM: clip={} points={} score={:.3}",
+                        clip_id,
+                        mask_points.len(),
+                        score
+                    );
+                    // Snapshot the old mask state and build the
+                    // new one, then push a SetClipMaskCommand
+                    // through the undo history so Ctrl+Z reverts
+                    // the SAM mask replacement in one step.
+                    let old_mask = {
+                        let proj = project_tick.borrow();
+                        proj.tracks.iter().find_map(|t| {
+                            t.clips
+                                .iter()
+                                .find(|c| c.id == clip_id)
+                                .map(|c| crate::undo::ClipMaskSnapshot::from_clip(c))
+                        })
+                    };
+                    let Some(old_mask) = old_mask else {
+                        log::warn!("SAM: clip {} no longer exists; mask discarded", clip_id);
+                        return glib::ControlFlow::Continue;
+                    };
+                    // Build new mask state: replace masks[0]
+                    // (or create it if the clip had none).
+                    let new_mask = {
+                        let mut masks = old_mask.masks.clone();
+                        let sam_mask = crate::model::clip::ClipMask::new_path(mask_points);
+                        if masks.is_empty() {
+                            masks.push(sam_mask);
+                        } else {
+                            masks[0] = sam_mask;
+                        }
+                        crate::undo::ClipMaskSnapshot { masks }
+                    };
+                    let cmd = crate::undo::SetClipMaskCommand {
+                        clip_id,
+                        track_id,
+                        old_mask,
+                        new_mask,
+                    };
+                    on_execute_command_tick(Box::new(cmd));
+                    on_frei0r_changed_tick();
+                }
+                SamJobResult::Error(msg) => {
+                    log::warn!("SAM: clip={} error={}", clip_id, msg);
+                    let parent = button_tick
+                        .root()
+                        .and_then(|r| r.downcast::<gtk::Window>().ok());
+                    let alert = gtk::AlertDialog::builder()
+                        .message("SAM mask generation failed")
+                        .detail(&msg)
+                        .buttons(["OK"])
+                        .modal(true)
+                        .build();
+                    alert.show(parent.as_ref());
+                }
+            }
+
+            glib::ControlFlow::Continue
+        });
     }
 
     // ── HSL Qualifier wiring ──────────────────────────────────────────
@@ -10850,8 +10822,7 @@ pub fn build_inspector(
                     let mut proj = project.borrow_mut();
                     if let Some(clip) = proj.clip_mut(clip_id) {
                         if clip.hsl_qualifier.is_none() {
-                            clip.hsl_qualifier =
-                                Some(crate::model::clip::HslQualifier::default());
+                            clip.hsl_qualifier = Some(crate::model::clip::HslQualifier::default());
                         }
                         if let Some(ref mut q) = clip.hsl_qualifier {
                             q.enabled = enabled;
@@ -11226,7 +11197,9 @@ pub fn build_inspector(
         let view_weak = Rc::downgrade(&view);
         view.audition_takes_list
             .connect_row_activated(move |_list, row| {
-                let Some(view) = view_weak.upgrade() else { return };
+                let Some(view) = view_weak.upgrade() else {
+                    return;
+                };
                 let cid = view.selected_clip_id.borrow().clone();
                 let Some(cid) = cid else { return };
                 let name = row.widget_name();
@@ -11239,11 +11212,7 @@ pub fn build_inspector(
                 // Snapshot the clip before mutation so undo restores any
                 // host-field tweaks the user made while the previous take
                 // was active.
-                let snapshot = view
-                    .project
-                    .borrow()
-                    .clip_ref(&cid)
-                    .cloned();
+                let snapshot = view.project.borrow().clip_ref(&cid).cloned();
                 if snapshot.is_none() {
                     return;
                 }
@@ -11253,13 +11222,11 @@ pub fn build_inspector(
                     view.audition_remove_take_btn.set_sensitive(false);
                     return;
                 }
-                (view.on_execute_command)(Box::new(
-                    crate::undo::SetActiveAuditionTakeCommand {
-                        clip_id: cid,
-                        new_index,
-                        before_snapshot: snapshot,
-                    },
-                ));
+                (view.on_execute_command)(Box::new(crate::undo::SetActiveAuditionTakeCommand {
+                    clip_id: cid,
+                    new_index,
+                    before_snapshot: snapshot,
+                }));
                 (view.on_frei0r_changed)();
             });
     }
@@ -11269,7 +11236,9 @@ pub fn build_inspector(
         let view_weak = Rc::downgrade(&view);
         view.audition_takes_list
             .connect_row_selected(move |_list, row| {
-                let Some(view) = view_weak.upgrade() else { return };
+                let Some(view) = view_weak.upgrade() else {
+                    return;
+                };
                 let Some(row) = row else {
                     view.audition_remove_take_btn.set_sensitive(false);
                     return;
@@ -11299,28 +11268,29 @@ pub fn build_inspector(
     // Remove the currently selected (non-active) take.
     {
         let view_weak = Rc::downgrade(&view);
-        view.audition_remove_take_btn
-            .connect_clicked(move |_| {
-                let Some(view) = view_weak.upgrade() else { return };
-                let cid = view.selected_clip_id.borrow().clone();
-                let Some(cid) = cid else { return };
-                let Some(row) = view.audition_takes_list.selected_row() else {
-                    return;
-                };
-                let name = row.widget_name();
-                let Some(idx_str) = name.strip_prefix("audition-take-") else {
-                    return;
-                };
-                let Ok(take_index) = idx_str.parse::<usize>() else {
-                    return;
-                };
-                (view.on_execute_command)(Box::new(crate::undo::RemoveAuditionTakeCommand {
-                    clip_id: cid,
-                    take_index,
-                    removed: std::cell::RefCell::new(None),
-                }));
-                (view.on_frei0r_changed)();
-            });
+        view.audition_remove_take_btn.connect_clicked(move |_| {
+            let Some(view) = view_weak.upgrade() else {
+                return;
+            };
+            let cid = view.selected_clip_id.borrow().clone();
+            let Some(cid) = cid else { return };
+            let Some(row) = view.audition_takes_list.selected_row() else {
+                return;
+            };
+            let name = row.widget_name();
+            let Some(idx_str) = name.strip_prefix("audition-take-") else {
+                return;
+            };
+            let Ok(take_index) = idx_str.parse::<usize>() else {
+                return;
+            };
+            (view.on_execute_command)(Box::new(crate::undo::RemoveAuditionTakeCommand {
+                clip_id: cid,
+                take_index,
+                removed: std::cell::RefCell::new(None),
+            }));
+            (view.on_frei0r_changed)();
+        });
     }
     // Add Take From Source — pulls the source monitor's currently loaded
     // clip + In/Out marks via the `selected_clip_id`'s source path. Without
@@ -11333,13 +11303,17 @@ pub fn build_inspector(
     {
         let view_weak = Rc::downgrade(&view);
         view.audition_add_take_btn.connect_clicked(move |_| {
-            let Some(view) = view_weak.upgrade() else { return };
+            let Some(view) = view_weak.upgrade() else {
+                return;
+            };
             let cid = view.selected_clip_id.borrow().clone();
             let Some(cid) = cid else { return };
             // Build a new take from the active take as a starting point.
             let take = {
                 let proj = view.project.borrow();
-                let Some(clip) = proj.clip_ref(&cid) else { return };
+                let Some(clip) = proj.clip_ref(&cid) else {
+                    return;
+                };
                 let active = clip.audition_active_take_index;
                 let label_n = clip
                     .audition_takes
@@ -11374,7 +11348,9 @@ pub fn build_inspector(
     {
         let view_weak = Rc::downgrade(&view);
         view.audition_finalize_btn.connect_clicked(move |_| {
-            let Some(view) = view_weak.upgrade() else { return };
+            let Some(view) = view_weak.upgrade() else {
+                return;
+            };
             let cid = view.selected_clip_id.borrow().clone();
             let Some(cid) = cid else { return };
             let snapshot = view.project.borrow().clip_ref(&cid).cloned();

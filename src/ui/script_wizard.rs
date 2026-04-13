@@ -346,10 +346,7 @@ fn build_step1(parsed_script: &Rc<RefCell<Option<Script>>>) -> gtk::Box {
                         match script::parse_script(&path_str) {
                             Ok(s) => {
                                 let scene_count = s.scenes.len();
-                                let title_str = s
-                                    .title
-                                    .as_deref()
-                                    .unwrap_or("(untitled)");
+                                let title_str = s.title.as_deref().unwrap_or("(untitled)");
                                 file_label.set_text(&path_str);
                                 info_label.set_text(&format!(
                                     "Title: {title_str} | {scene_count} scenes"
@@ -431,33 +428,28 @@ fn build_step2(selected_paths: &Rc<RefCell<Vec<String>>>) -> gtk::Box {
             let selected_paths = selected_paths.clone();
             let list_box = list_box.clone();
             let count_label = count_label.clone();
-            dialog.open_multiple(
-                window.as_ref(),
-                gio::Cancellable::NONE,
-                move |result| {
-                    if let Ok(files) = result {
-                        let mut paths = selected_paths.borrow_mut();
-                        for i in 0..files.n_items() {
-                            if let Some(file) = files.item(i) {
-                                if let Some(f) = file.downcast_ref::<gio::File>() {
-                                    if let Some(p) = f.path() {
-                                        let ps = p.to_string_lossy().to_string();
-                                        if !paths.contains(&ps) {
-                                            paths.push(ps.clone());
-                                            let row = gtk::Label::new(Some(&ps));
-                                            row.set_halign(gtk::Align::Start);
-                                            row.set_ellipsize(pango::EllipsizeMode::Middle);
-                                            list_box.append(&row);
-                                        }
+            dialog.open_multiple(window.as_ref(), gio::Cancellable::NONE, move |result| {
+                if let Ok(files) = result {
+                    let mut paths = selected_paths.borrow_mut();
+                    for i in 0..files.n_items() {
+                        if let Some(file) = files.item(i) {
+                            if let Some(f) = file.downcast_ref::<gio::File>() {
+                                if let Some(p) = f.path() {
+                                    let ps = p.to_string_lossy().to_string();
+                                    if !paths.contains(&ps) {
+                                        paths.push(ps.clone());
+                                        let row = gtk::Label::new(Some(&ps));
+                                        row.set_halign(gtk::Align::Start);
+                                        row.set_ellipsize(pango::EllipsizeMode::Middle);
+                                        list_box.append(&row);
                                     }
                                 }
                             }
                         }
-                        count_label
-                            .set_text(&format!("{} clips selected", paths.len()));
                     }
-                },
-            );
+                    count_label.set_text(&format!("{} clips selected", paths.len()));
+                }
+            });
         });
     }
 
@@ -534,8 +526,7 @@ fn start_stt_and_align(
             let script_opt = parsed_script_poll.borrow();
             if let Some(ref scr) = *script_opt {
                 let transcripts_vec = transcripts_poll.borrow().clone();
-                let result =
-                    script_align::align_transcripts_to_script(scr, &transcripts_vec, 0.15);
+                let result = script_align::align_transcripts_to_script(scr, &transcripts_vec, 0.15);
                 let n_mapped = result.mappings.len();
                 let n_unmatched = result.unmatched_clips.len();
                 *alignment_result_poll.borrow_mut() = Some(result);
@@ -668,7 +659,13 @@ fn execute_assembly(
     };
 
     let title_duration_ns = 3_000_000_000; // 3 seconds per title card
-    let plan = script_assembly::build_assembly_plan(script, alignment, 0, title_duration_ns, include_titles);
+    let plan = script_assembly::build_assembly_plan(
+        script,
+        alignment,
+        0,
+        title_duration_ns,
+        include_titles,
+    );
 
     let old_tracks = {
         let mut proj = project.borrow_mut();

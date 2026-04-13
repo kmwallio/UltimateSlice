@@ -1,6 +1,4 @@
-use crate::media::export::{
-    AudioChannelLayout, AudioCodec, Container, ExportOptions, VideoCodec,
-};
+use crate::media::export::{AudioChannelLayout, AudioCodec, Container, ExportOptions, VideoCodec};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -1526,8 +1524,7 @@ mod tests {
         };
         let preset = ExportPreset::from_export_options("Cinema", &options);
         let json = serde_json::to_string(&preset).expect("serialize");
-        let parsed: ExportPreset =
-            serde_json::from_str(&json).expect("round-trip deserialize");
+        let parsed: ExportPreset = serde_json::from_str(&json).expect("round-trip deserialize");
         assert_eq!(
             parsed.audio_channel_layout,
             ExportAudioChannelLayout::Surround51

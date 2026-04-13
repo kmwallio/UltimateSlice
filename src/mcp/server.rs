@@ -2663,10 +2663,7 @@ fn dispatch_tool_payload(
 
         "set_clip_hsl_qualifier" => {
             let clip_id = arg_str!(args, "clip_id");
-            let clear = args
-                .get("clear")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
+            let clear = args.get("clear").and_then(|v| v.as_bool()).unwrap_or(false);
             let qualifier = if clear {
                 None
             } else {
@@ -3544,22 +3541,10 @@ fn dispatch_tool_payload(
         },
         "set_clip_auto_crop_track" => McpCommand::SetClipAutoCropTrack {
             clip_id: arg_str!(args, "clip_id"),
-            center_x: args
-                .get("center_x")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.5),
-            center_y: args
-                .get("center_y")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.5),
-            width: args
-                .get("width")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.25),
-            height: args
-                .get("height")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.25),
+            center_x: args.get("center_x").and_then(|v| v.as_f64()).unwrap_or(0.5),
+            center_y: args.get("center_y").and_then(|v| v.as_f64()).unwrap_or(0.5),
+            width: args.get("width").and_then(|v| v.as_f64()).unwrap_or(0.25),
+            height: args.get("height").and_then(|v| v.as_f64()).unwrap_or(0.25),
             padding: args.get("padding").and_then(|v| v.as_f64()),
             reply: tx,
         },
@@ -3863,9 +3848,7 @@ fn dispatch_tool_payload(
             highlight_background: args["highlight_background"].as_bool(),
             highlight_shadow: args["highlight_shadow"].as_bool(),
             bg_highlight_color: args["bg_highlight_color"].as_u64().map(|v| v as u32),
-            highlight_stroke_color: args["highlight_stroke_color"]
-                .as_u64()
-                .map(|v| v as u32),
+            highlight_stroke_color: args["highlight_stroke_color"].as_u64().map(|v| v as u32),
             reply: tx,
         },
         "export_srt" => McpCommand::ExportSrt {

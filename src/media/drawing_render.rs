@@ -43,9 +43,7 @@ pub fn sweep_drawing_cache() -> (usize, u64) {
         // before the qtrle swap — all share the
         // `ultimate-slice-drawing-` prefix.
         let is_drawing_artifact = name.starts_with("ultimate-slice-drawing-")
-            && (name.ends_with(".png")
-                || name.ends_with(".mov")
-                || name.ends_with(".webm"));
+            && (name.ends_with(".png") || name.ends_with(".mov") || name.ends_with(".webm"));
         if !is_drawing_artifact {
             continue;
         }
@@ -77,11 +75,7 @@ const REVEAL_STAGGER_FRACTION: f64 = 0.7;
 /// Per-item reveal progress `[0, 1]` at `elapsed_ns`, using the same
 /// stagger model as `drawing_svg`. `reveal_ns == 0` always returns 1.0
 /// (static rendering).
-pub fn item_reveal_progress(
-    item_index: usize,
-    elapsed_ns: u64,
-    reveal_ns: u64,
-) -> f64 {
+pub fn item_reveal_progress(item_index: usize, elapsed_ns: u64, reveal_ns: u64) -> f64 {
     if reveal_ns == 0 {
         return 1.0;
     }
@@ -501,8 +495,7 @@ pub fn ensure_drawing_animation_webm_nonblocking(
     // Skip permanently-failed paths — the encode threw once and the
     // file never materialised, so stop spawning worker threads on
     // every preview rebuild. Caller falls back to the static PNG.
-    let already_failed =
-        FAILED_DRAWING_ENCODES.with(|set| set.borrow().contains(&path));
+    let already_failed = FAILED_DRAWING_ENCODES.with(|set| set.borrow().contains(&path));
     if already_failed {
         return None;
     }
@@ -629,7 +622,9 @@ pub fn ensure_drawing_animation_webm(
         .stdin(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("ffmpeg spawn: {e}")))?;
+        .map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("ffmpeg spawn: {e}"))
+        })?;
 
     let mut stdin = encoder.stdin.take().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::Other, "ffmpeg stdin unavailable")
@@ -650,9 +645,9 @@ pub fn ensure_drawing_animation_webm(
         )
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("cairo: {e}")))?;
         let stride = surface.stride() as usize;
-        let data = surface
-            .data()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("cairo data: {e}")))?;
+        let data = surface.data().map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("cairo data: {e}"))
+        })?;
         // Cairo ARGB32 little-endian is BGRA. Convert to straight RGBA.
         for y in 0..h {
             for x in 0..w {
@@ -703,7 +698,12 @@ pub fn ensure_drawing_animation_webm(
 /// Stable path for a drawing clip's rasterized PNG, keyed on a hash of the
 /// clip id + item list. Cached in the OS temp dir so multiple sessions reuse
 /// the same file when content is unchanged.
-pub fn drawing_png_cache_path(clip_id: &str, items: &[DrawingItem], width: i32, height: i32) -> PathBuf {
+pub fn drawing_png_cache_path(
+    clip_id: &str,
+    items: &[DrawingItem],
+    width: i32,
+    height: i32,
+) -> PathBuf {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     clip_id.hash(&mut h);
@@ -799,7 +799,9 @@ pub fn ensure_static_drawing_mov(
         .arg(&path)
         .stderr(std::process::Stdio::null())
         .status()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("ffmpeg spawn: {e}")))?;
+        .map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("ffmpeg spawn: {e}"))
+        })?;
     if !status.success() {
         let _ = std::fs::remove_file(&path);
         return Err(std::io::Error::new(
@@ -903,10 +905,7 @@ mod tests {
     #[test]
     fn total_reveal_duration_math() {
         // 3 items, 1s reveal, 0.7s stagger → 2*0.7 + 1.0 = 2.4s.
-        assert_eq!(
-            total_reveal_duration_ns(3, 1_000_000_000),
-            2_400_000_000
-        );
+        assert_eq!(total_reveal_duration_ns(3, 1_000_000_000), 2_400_000_000);
         // Static and empty cases.
         assert_eq!(total_reveal_duration_ns(3, 0), 0);
         assert_eq!(total_reveal_duration_ns(0, 1_000_000_000), 0);
@@ -915,12 +914,24 @@ mod tests {
     #[test]
     fn rasterize_partial_reveal_differs_from_full() {
         let items = vec![sample_stroke()];
-        let surface_full =
-            rasterize_drawing_surface_at_time(&items, 320, 180, 500_000_000, 1_000_000_000, DrawingRevealStyle::Fade)
-                .unwrap();
-        let surface_partial =
-            rasterize_drawing_surface_at_time(&items, 320, 180, 100_000_000, 1_000_000_000, DrawingRevealStyle::Fade)
-                .unwrap();
+        let surface_full = rasterize_drawing_surface_at_time(
+            &items,
+            320,
+            180,
+            500_000_000,
+            1_000_000_000,
+            DrawingRevealStyle::Fade,
+        )
+        .unwrap();
+        let surface_partial = rasterize_drawing_surface_at_time(
+            &items,
+            320,
+            180,
+            100_000_000,
+            1_000_000_000,
+            DrawingRevealStyle::Fade,
+        )
+        .unwrap();
         // Crude "has pixels" check via stride — both have the surface
         // object; distinguish that they are different objects, not
         // that pixel counts differ.

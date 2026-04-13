@@ -110,7 +110,11 @@ fn range_membership(value: f64, min: f64, max: f64, softness: f64) -> f64 {
     }
     let s = softness.max(0.0);
     if s < 1e-9 {
-        return if value >= min && value <= max { 1.0 } else { 0.0 };
+        return if value >= min && value <= max {
+            1.0
+        } else {
+            0.0
+        };
     }
     let lo = smoothstep(min - s, min + s, value);
     let hi = 1.0 - smoothstep(max - s, max + s, value);
@@ -135,7 +139,11 @@ fn hue_membership(hue_deg: f64, min: f64, max: f64, softness: f64) -> f64 {
     // high-side at `max`.
     let s = softness.max(0.0);
     if s < 1e-9 {
-        return if hue_deg >= min || hue_deg <= max { 1.0 } else { 0.0 };
+        return if hue_deg >= min || hue_deg <= max {
+            1.0
+        } else {
+            0.0
+        };
     }
     let lo = smoothstep(min - s, min + s, hue_deg);
     let hi = 1.0 - smoothstep(max - s, max + s, hue_deg);
@@ -421,7 +429,12 @@ mod tests {
             enabled: true,
             ..HslQualifier::default()
         };
-        for (r, g, b) in [(0.1, 0.2, 0.3), (0.9, 0.5, 0.1), (0.0, 0.0, 0.0), (1.0, 1.0, 1.0)] {
+        for (r, g, b) in [
+            (0.1, 0.2, 0.3),
+            (0.9, 0.5, 0.1),
+            (0.0, 0.0, 0.0),
+            (1.0, 1.0, 1.0),
+        ] {
             assert!(approx(hsl_qualifier_alpha(&q, r, g, b), 1.0, 1e-9));
         }
     }

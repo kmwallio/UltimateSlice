@@ -287,9 +287,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
             None | Some(crate::media::export::AudioChannelLayout::Stereo) => "stereo",
             Some(crate::media::export::AudioChannelLayout::Surround51) => "5.1",
             Some(crate::media::export::AudioChannelLayout::Surround71) => {
-                log::warn!(
-                    "FCPXML strict DTD has no 7.1 audioLayout — falling back to 5.1"
-                );
+                log::warn!("FCPXML strict DTD has no 7.1 audioLayout — falling back to 5.1");
                 "5.1"
             }
         };
@@ -1191,10 +1189,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                         if !clip.drawing_items.is_empty() {
                             if let Ok(json) = serde_json::to_string(&clip.drawing_items) {
                                 let escaped = json.replace('"', "&quot;");
-                                asset_clip.push_attribute((
-                                    "us:drawing-items",
-                                    escaped.as_str(),
-                                ));
+                                asset_clip.push_attribute(("us:drawing-items", escaped.as_str()));
                             }
                         }
                         if clip.drawing_animation_reveal_ns != 0 {
@@ -1207,18 +1202,15 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                             clip.drawing_reveal_style,
                             crate::model::clip::DrawingRevealStyle::Fade
                         ) {
-                            asset_clip.push_attribute((
-                                "us:drawing-reveal-style",
-                                "grow_from_corner",
-                            ));
+                            asset_clip
+                                .push_attribute(("us:drawing-reveal-style", "grow_from_corner"));
                         }
                     } else if clip.kind == crate::model::clip::ClipKind::Audition {
                         asset_clip.push_attribute(("us:clip-kind", "audition"));
                         if let Some(ref takes) = clip.audition_takes {
                             if let Ok(json) = serde_json::to_string(takes) {
                                 let escaped = json.replace('"', "&quot;");
-                                asset_clip
-                                    .push_attribute(("us:audition-takes", escaped.as_str()));
+                                asset_clip.push_attribute(("us:audition-takes", escaped.as_str()));
                             }
                         }
                         asset_clip.push_attribute((
@@ -1315,9 +1307,10 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                         "us:shadows-tint",
                         clip.shadows_tint.to_string().as_str(),
                     ));
-                    let hsl_json = clip.hsl_qualifier.as_ref().and_then(|q| {
-                        serde_json::to_string(q).ok()
-                    });
+                    let hsl_json = clip
+                        .hsl_qualifier
+                        .as_ref()
+                        .and_then(|q| serde_json::to_string(q).ok());
                     if let Some(ref json) = hsl_json {
                         asset_clip.push_attribute(("us:hsl-qualifier", json.as_str()));
                     }
@@ -3080,8 +3073,7 @@ fn patch_asset_clip_block_transform(
         ),
         (
             "us:drawing-items",
-            if clip.kind == crate::model::clip::ClipKind::Drawing
-                && !clip.drawing_items.is_empty()
+            if clip.kind == crate::model::clip::ClipKind::Drawing && !clip.drawing_items.is_empty()
             {
                 serde_json::to_string(&clip.drawing_items)
                     .ok()
@@ -4378,12 +4370,7 @@ fn is_writer_managed_project_attr(key: &str) -> bool {
 fn is_writer_managed_sequence_attr(key: &str) -> bool {
     matches!(
         key,
-        "duration"
-            | "format"
-            | "tcFormat"
-            | "audioLayout"
-            | "audioRate"
-            | "us:master-gain-db"
+        "duration" | "format" | "tcFormat" | "audioLayout" | "audioRate" | "us:master-gain-db"
     )
 }
 
@@ -7638,10 +7625,7 @@ mod tests {
             .expect("audition clip preserved");
         assert_eq!(restored.kind, ClipKind::Audition);
         assert_eq!(restored.audition_active_take_index, 1);
-        let takes = restored
-            .audition_takes
-            .as_ref()
-            .expect("takes preserved");
+        let takes = restored.audition_takes.as_ref().expect("takes preserved");
         assert_eq!(takes.len(), 2);
         assert_eq!(takes[0].label, "Wide");
         assert_eq!(takes[1].label, "Close");
@@ -7657,8 +7641,7 @@ mod tests {
         let mut project = Project::new("DrawingTest");
         project.tracks.clear();
         let mut track = Track::new_video("Video 1");
-        let mut drawing =
-            Clip::new("", 4_000_000_000, 0, ClipKind::Drawing);
+        let mut drawing = Clip::new("", 4_000_000_000, 0, ClipKind::Drawing);
         drawing.label = "Drawing".to_string();
         drawing.drawing_items = vec![
             DrawingItem {
@@ -7677,8 +7660,7 @@ mod tests {
             },
         ];
         drawing.drawing_animation_reveal_ns = 600_000_000;
-        drawing.drawing_reveal_style =
-            crate::model::clip::DrawingRevealStyle::GrowFromCorner;
+        drawing.drawing_reveal_style = crate::model::clip::DrawingRevealStyle::GrowFromCorner;
         let drawing_id = drawing.id.clone();
         track.add_clip(drawing);
         project.tracks.push(track);

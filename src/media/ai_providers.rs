@@ -174,11 +174,7 @@ impl AiBackendReport {
         if self.runtime_available.is_empty() {
             return "No AI execution providers available (including CPU)".to_string();
         }
-        let parts: Vec<&'static str> = self
-            .runtime_available
-            .iter()
-            .map(|b| b.label())
-            .collect();
+        let parts: Vec<&'static str> = self.runtime_available.iter().map(|b| b.label()).collect();
         format!("Available: {}", parts.join(", "))
     }
 }

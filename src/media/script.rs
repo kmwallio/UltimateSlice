@@ -218,7 +218,10 @@ fn parse_fdx_str(xml: &str, path: &str) -> Result<Script> {
             }
             Ok(Event::Eof) => break,
             Err(e) => {
-                return Err(anyhow::anyhow!("FDX parse error at position {}: {e}", reader.error_position()));
+                return Err(anyhow::anyhow!(
+                    "FDX parse error at position {}: {e}",
+                    reader.error_position()
+                ));
             }
             _ => {}
         }
@@ -355,8 +358,8 @@ fn build_full_text(heading: &str, elements: &[ScriptElement]) -> String {
 /// - Title page: `Key: Value` pairs at the start of the file before first blank line.
 /// - Action: everything else.
 pub fn parse_fountain(path: &str) -> Result<Script> {
-    let text =
-        std::fs::read_to_string(path).with_context(|| format!("Failed to read Fountain: {path}"))?;
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read Fountain: {path}"))?;
     Ok(parse_fountain_str(&text, path))
 }
 
@@ -590,9 +593,7 @@ fn try_parse_character(line: &str, lines: &[&str], next_idx: usize) -> Option<St
     }
 
     // Must be all uppercase letters (allow spaces, periods, apostrophes).
-    let is_upper = base
-        .chars()
-        .all(|c| c.is_uppercase() || !c.is_alphabetic());
+    let is_upper = base.chars().all(|c| c.is_uppercase() || !c.is_alphabetic());
     // Must contain at least one letter.
     let has_letter = base.chars().any(|c| c.is_alphabetic());
 

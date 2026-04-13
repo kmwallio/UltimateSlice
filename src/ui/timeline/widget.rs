@@ -588,8 +588,8 @@ impl TimelineState {
             self.user_scroll_cooldown_until = None;
         }
         let usable_w = (viewport_width - TRACK_LABEL_WIDTH).max(100.0);
-        let ph_abs = (self.playhead_ns as f64 / NS_PER_SECOND) * self.pixels_per_second
-            + TRACK_LABEL_WIDTH;
+        let ph_abs =
+            (self.playhead_ns as f64 / NS_PER_SECOND) * self.pixels_per_second + TRACK_LABEL_WIDTH;
         let ph_x = ph_abs - self.scroll_offset;
         match self.timeline_autoscroll {
             AutoScrollMode::Page => {
@@ -1040,9 +1040,7 @@ impl TimelineState {
         };
 
         // Local 1× duration (the upper bound of subtitle/keyframe times).
-        let original_local_duration = original
-            .source_out
-            .saturating_sub(original.source_in);
+        let original_local_duration = original.source_out.saturating_sub(original.source_in);
         // Clamp the requested word range to the clip's actual local duration.
         let word_start_ns = word_start_ns.min(original_local_duration);
         let word_end_ns = word_end_ns.min(original_local_duration);
@@ -1054,7 +1052,11 @@ impl TimelineState {
         // us, but we need the offsets of arbitrary local times, not just the
         // full duration, so we apply the same `/ speed` ourselves. Guard
         // against zero/negative speed (shouldn't happen but stay defensive).
-        let speed = if original.speed > 0.0 { original.speed } else { 1.0 };
+        let speed = if original.speed > 0.0 {
+            original.speed
+        } else {
+            1.0
+        };
         let cut_a_local_timeline = (word_start_ns as f64 / speed as f64) as u64;
         let cut_b_local_timeline = (word_end_ns as f64 / speed as f64) as u64;
         let deleted_timeline_span = cut_b_local_timeline.saturating_sub(cut_a_local_timeline);
@@ -3226,11 +3228,7 @@ impl TimelineState {
         let cid = self.selected_clip_id.clone();
         let Some(cid) = cid else { return false };
         let snapshot = self.project.borrow().clip_ref(&cid).cloned();
-        if !snapshot
-            .as_ref()
-            .map(|c| c.is_audition())
-            .unwrap_or(false)
-        {
+        if !snapshot.as_ref().map(|c| c.is_audition()).unwrap_or(false) {
             return false;
         }
         let cmd = Box::new(crate::undo::FinalizeAuditionCommand {
@@ -5161,8 +5159,8 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     return;
                 };
                 let track_id = track.id.clone();
-                let row_top = track_row_top_in_tracks(editing_tracks, idx)
-                    + st.breadcrumb_bar_height();
+                let row_top =
+                    track_row_top_in_tracks(editing_tracks, idx) + st.breadcrumb_bar_height();
                 let row_height = track_row_height(track);
                 let rect = gtk::gdk::Rectangle::new(
                     0,
@@ -5999,10 +5997,8 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         // Middle/right drag on ruler = pan timeline.
                         let mut st = state.borrow_mut();
                         st.scroll_offset = (st.ruler_pan_start_offset - offset_x).max(0.0);
-                        st.user_scroll_cooldown_until = Some(
-                            std::time::Instant::now()
-                                + std::time::Duration::from_millis(600),
-                        );
+                        st.user_scroll_cooldown_until =
+                            Some(std::time::Instant::now() + std::time::Duration::from_millis(600));
                         if let Some(a) = area_weak.upgrade() {
                             a.queue_draw();
                         }
@@ -6277,8 +6273,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                     cands.push((c.timeline_end(), "clip end"));
                                 }
                             }
-                            let (s, h) =
-                                snap_to_candidates(new_start_raw as i64, snap_ns, &cands);
+                            let (s, h) = snap_to_candidates(new_start_raw as i64, snap_ns, &cands);
                             (s.max(0) as u64, h)
                         };
                         st.active_snap_hit = hit;
@@ -6357,8 +6352,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                     cands.push((c.timeline_end(), "clip end"));
                                 }
                             }
-                            let (s, h) =
-                                snap_to_candidates(current_ns as i64, snap_ns, &cands);
+                            let (s, h) = snap_to_candidates(current_ns as i64, snap_ns, &cands);
                             (s.max(0) as u64, h)
                         };
                         st.active_snap_hit = hit;
@@ -7613,9 +7607,8 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             if dx.abs() > dy.abs() {
                 // Horizontal pan
                 st.scroll_offset = (st.scroll_offset + dx * 20.0).max(0.0);
-                st.user_scroll_cooldown_until = Some(
-                    std::time::Instant::now() + std::time::Duration::from_millis(600),
-                );
+                st.user_scroll_cooldown_until =
+                    Some(std::time::Instant::now() + std::time::Duration::from_millis(600));
             } else if ctrl_held || dy.abs() > 0.0 {
                 // Zoom (Ctrl+scroll or plain vertical scroll)
                 let factor = if dy < 0.0 { 1.1 } else { 0.9 };
@@ -8890,11 +8883,7 @@ fn draw_clip(
         if let Some(takes) = clip.audition_takes.as_ref() {
             if !takes.is_empty() && cw > 60.0 {
                 cr.save().ok();
-                let indicator = format!(
-                    "{}/{}",
-                    clip.audition_active_take_index + 1,
-                    takes.len()
-                );
+                let indicator = format!("{}/{}", clip.audition_active_take_index + 1, takes.len());
                 let fs2 = (ch * 0.32).clamp(8.0, 12.0);
                 cr.set_font_size(fs2);
                 cr.set_source_rgba(1.0, 1.0, 1.0, 0.85);
@@ -9926,9 +9915,7 @@ pub fn show_shortcuts_dialog(parent: &gtk::Window) {
 ///
 /// Only affects clips that have a `scene_id` set (from script-to-timeline
 /// assembly). Clips without a `scene_id` are left at the end.
-fn reorder_track_by_script(
-    state: &std::rc::Rc<std::cell::RefCell<TimelineState>>,
-) -> bool {
+fn reorder_track_by_script(state: &std::rc::Rc<std::cell::RefCell<TimelineState>>) -> bool {
     // First, gather the info we need without holding borrows.
     let (track_id, old_clips, script_path) = {
         let st = state.borrow();
@@ -11763,9 +11750,7 @@ mod tests {
         // Attach a transcript to clip A.
         {
             let mut proj = project.borrow_mut();
-            let clip_a = proj
-                .clip_mut(&ids[0])
-                .expect("clip A should exist");
+            let clip_a = proj.clip_mut(&ids[0]).expect("clip A should exist");
             clip_a.subtitle_segments = vec![make_segment_with_words(&[
                 (2 * s, 3 * s, "alpha"),
                 (4 * s, 5 * s, "beta"),
@@ -11822,11 +11807,7 @@ mod tests {
         assert_eq!(right.subtitle_segments[0].words[0].end_ns, 2 * s);
 
         // Downstream clip B: shifted left by the deleted span (1s).
-        let b = track
-            .clips
-            .iter()
-            .find(|c| c.id == ids[1])
-            .expect("clip B");
+        let b = track.clips.iter().find(|c| c.id == ids[1]).expect("clip B");
         assert_eq!(b.timeline_start, 9 * s);
         assert_eq!(b.duration(), 10 * s);
     }
@@ -11861,10 +11842,7 @@ mod tests {
                 assert_eq!(gc.timeline_start, wc.timeline_start);
                 assert_eq!(gc.source_in, wc.source_in);
                 assert_eq!(gc.source_out, wc.source_out);
-                assert_eq!(
-                    gc.subtitle_segments.len(),
-                    wc.subtitle_segments.len()
-                );
+                assert_eq!(gc.subtitle_segments.len(), wc.subtitle_segments.len());
             }
         }
     }
@@ -11942,11 +11920,7 @@ mod tests {
 
         let proj = project.borrow();
         // Outer track unchanged: still one compound clip.
-        let outer = proj
-            .tracks
-            .iter()
-            .find(|t| t.id == outer_track_id)
-            .unwrap();
+        let outer = proj.tracks.iter().find(|t| t.id == outer_track_id).unwrap();
         assert_eq!(outer.clips.len(), 1);
         assert_eq!(outer.clips[0].id, "COMPOUND");
         // Inner track was mutated: now two clips (left + right halves).

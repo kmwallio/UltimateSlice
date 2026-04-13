@@ -1676,11 +1676,7 @@ pub fn build_toolbar(
             // Hidden for GIF (no audio).
             let cl_label = gtk::Label::new(Some("Audio Channels:"));
             cl_label.set_halign(gtk::Align::End);
-            let cl_combo = gtk::DropDown::from_strings(&[
-                "Stereo",
-                "5.1 Surround",
-                "7.1 Surround",
-            ]);
+            let cl_combo = gtk::DropDown::from_strings(&["Stereo", "5.1 Surround", "7.1 Surround"]);
             cl_combo.set_selected(0);
             cl_combo.set_tooltip_text(Some(
                 "Output audio channel layout. Surround uses role-based auto-routing \
@@ -2871,10 +2867,7 @@ pub fn build_toolbar(
     // listener (the TransformOverlay's draw-mode subscriber lives
     // there). Idempotent: calling with the already-active tool is a
     // no-op for listeners via GTK's set_active short-circuit.
-    fn apply_tool(
-        timeline_state: &Rc<RefCell<TimelineState>>,
-        tool: ActiveTool,
-    ) {
+    fn apply_tool(timeline_state: &Rc<RefCell<TimelineState>>, tool: ActiveTool) {
         let cb = {
             let mut st = timeline_state.borrow_mut();
             if st.active_tool == tool {

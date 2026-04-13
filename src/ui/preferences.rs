@@ -557,7 +557,10 @@ pub fn show_preferences_dialog(
     {
         let spin = loudness_custom_spin.clone();
         loudness_preset_combo.connect_changed(move |combo| {
-            let id = combo.active_id().unwrap_or_else(|| "ebu_r128".into()).to_string();
+            let id = combo
+                .active_id()
+                .unwrap_or_else(|| "ebu_r128".into())
+                .to_string();
             spin.set_sensitive(id == "custom");
             if let Some(lufs) = crate::ui_state::loudness_target_preset_to_lufs(&id) {
                 spin.set_value(lufs);
@@ -622,7 +625,11 @@ pub fn show_preferences_dialog(
     integration_box.append(&integration_label);
     integration_box.append(&mcp_socket_check);
     integration_box.append(&mcp_socket_hint);
-    stack.add_titled(&wrap_scroll(&integration_box), Some("integration"), "Integration");
+    stack.add_titled(
+        &wrap_scroll(&integration_box),
+        Some("integration"),
+        "Integration",
+    );
 
     // Shared handle so the AI-backend dropdown (created inside the
     // Models page block below) can be read by the dialog response
@@ -660,9 +667,7 @@ pub fn show_preferences_dialog(
         // the current build supports. "Auto" lets ort fall back to
         // whichever compiled-in backend loads at runtime.
         {
-            use crate::media::ai_providers::{
-                detect_backends, set_current_backend, AiBackend,
-            };
+            use crate::media::ai_providers::{detect_backends, set_current_backend, AiBackend};
             let accel_label = Label::new(Some("AI Acceleration"));
             accel_label.set_halign(gtk::Align::Start);
             accel_label.add_css_class("heading");
@@ -1442,9 +1447,7 @@ pub fn show_preferences_dialog(
                     .map(|id| id.to_string())
                     .unwrap_or_else(|| "ebu_r128".to_string()),
                 loudness_target_lufs: loudness_custom_spin.value(),
-                voice_enhance_cache_cap_gib: voice_enhance_cap_spin
-                    .value()
-                    .clamp(0.5, 50.0),
+                voice_enhance_cache_cap_gib: voice_enhance_cap_spin.value().clamp(0.5, 50.0),
                 // AI backend is edited via its own dropdown on the
                 // Models page. If that dropdown exists (i.e. the
                 // `ai-inference` feature is enabled *and* the Models

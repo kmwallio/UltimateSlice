@@ -5,9 +5,9 @@
 //! 1. Coarse scene matching via TF-IDF weighted Jaccard similarity.
 //! 2. Fine-grained Smith-Waterman local alignment for sub-clip boundaries.
 
-use serde::{Deserialize, Serialize};
-use crate::model::clip::SubtitleSegment;
 use super::script::Script;
+use crate::model::clip::SubtitleSegment;
+use serde::{Deserialize, Serialize};
 
 // ── Data types ──────────────────────────────────────────────────────────
 
@@ -112,8 +112,12 @@ pub fn align_transcripts_to_script(
         }
 
         // Phase 1: Coarse matching.
-        let coarse_scores =
-            coarse_scene_match(&scene_token_sets, &transcript_tokens, &idf, &character_names);
+        let coarse_scores = coarse_scene_match(
+            &scene_token_sets,
+            &transcript_tokens,
+            &idf,
+            &character_names,
+        );
 
         // Phase 2: Fine alignment against ALL scenes above a coarse threshold.
         // Collect candidate regions so a single clip can match multiple scenes.
@@ -127,8 +131,7 @@ pub fn align_transcripts_to_script(
             let scene = &script.scenes[scene_idx];
             let scene_words = tokenize(&scene.full_text);
 
-            let (sw_score, t_start, t_end) =
-                smith_waterman_align(&transcript_tokens, &scene_words);
+            let (sw_score, t_start, t_end) = smith_waterman_align(&transcript_tokens, &scene_words);
 
             if sw_score == 0 {
                 continue;
@@ -199,7 +202,12 @@ pub fn align_transcripts_to_script(
         .enumerate()
         .map(|(i, s)| (s.id.as_str(), i))
         .collect();
-    mappings.sort_by_key(|m| scene_order.get(m.scene_id.as_str()).copied().unwrap_or(usize::MAX));
+    mappings.sort_by_key(|m| {
+        scene_order
+            .get(m.scene_id.as_str())
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
 
     AlignmentResult {
         mappings,
@@ -229,9 +237,9 @@ fn resolve_overlapping_regions(candidates: &[CandidateRegion]) -> Vec<CandidateR
 
     for candidate in candidates {
         // Check if this candidate overlaps any already-accepted region.
-        let overlaps = accepted.iter().any(|a| {
-            candidate.t_start <= a.t_end && candidate.t_end >= a.t_start
-        });
+        let overlaps = accepted
+            .iter()
+            .any(|a| candidate.t_start <= a.t_end && candidate.t_end >= a.t_start);
         if !overlaps {
             accepted.push(candidate.clone());
         }
@@ -456,8 +464,8 @@ fn word_indices_to_timestamps(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::media::script::{Scene, Script, ScriptElement, ScriptElementKind};
     use crate::model::clip::{SubtitleSegment, SubtitleWord};
-    use crate::media::script::{Script, Scene, ScriptElement, ScriptElementKind};
 
     fn make_segment(text: &str, start_ns: u64, end_ns: u64) -> SubtitleSegment {
         let words: Vec<SubtitleWord> = text
@@ -565,7 +573,11 @@ mod tests {
 
         let transcripts = vec![(
             "random.mp4".to_string(),
-            vec![make_segment("completely different content about nothing", 0, 5_000_000_000)],
+            vec![make_segment(
+                "completely different content about nothing",
+                0,
+                5_000_000_000,
+            )],
         )];
 
         let result = align_transcripts_to_script(&script, &transcripts, 0.8);
@@ -668,7 +680,11 @@ mod tests {
             },
         ];
         let accepted = resolve_overlapping_regions(&candidates);
-        assert_eq!(accepted.len(), 1, "Overlapping regions: only highest confidence kept");
+        assert_eq!(
+            accepted.len(),
+            1,
+            "Overlapping regions: only highest confidence kept"
+        );
         assert_eq!(accepted[0].scene_idx, 0);
     }
 
@@ -690,7 +706,11 @@ mod tests {
             },
         ];
         let accepted = resolve_overlapping_regions(&candidates);
-        assert_eq!(accepted.len(), 2, "Non-overlapping regions should both be kept");
+        assert_eq!(
+            accepted.len(),
+            2,
+            "Non-overlapping regions should both be kept"
+        );
         // Should be sorted by t_start.
         assert_eq!(accepted[0].scene_idx, 0);
         assert_eq!(accepted[1].scene_idx, 1);
@@ -710,7 +730,11 @@ mod tests {
 
         let transcripts = vec![(
             "office.mp4".to_string(),
-            vec![make_segment("hello there john how are you", 0, 3_000_000_000)],
+            vec![make_segment(
+                "hello there john how are you",
+                0,
+                3_000_000_000,
+            )],
         )];
 
         let result = align_transcripts_to_script(&script, &transcripts, 0.1);

@@ -5761,9 +5761,9 @@ impl ProgramPlayer {
             }
             // Clip-local time (ns since the clip's timeline_start).
             let local_ns = timeline_pos_ns.saturating_sub(clip.timeline_start_ns);
-            let clip_end = clip.timeline_start_ns.saturating_add(
-                clip.source_out_ns.saturating_sub(clip.source_in_ns),
-            );
+            let clip_end = clip
+                .timeline_start_ns
+                .saturating_add(clip.source_out_ns.saturating_sub(clip.source_in_ns));
             if timeline_pos_ns < clip.timeline_start_ns || timeline_pos_ns >= clip_end {
                 continue;
             }
@@ -5778,11 +5778,10 @@ impl ProgramPlayer {
                 TitleAnimation::None => {}
                 TitleAnimation::Typewriter => {
                     if let Some(ref to) = slot.textoverlay {
-                        let visible =
-                            crate::media::drawing_render::typewriter_visible_chars(
-                                &clip.title_text,
-                                progress,
-                            );
+                        let visible = crate::media::drawing_render::typewriter_visible_chars(
+                            &clip.title_text,
+                            progress,
+                        );
                         let prefix: String = clip.title_text.chars().take(visible).collect();
                         to.set_property("silent", prefix.is_empty());
                         to.set_property("text", &prefix);
@@ -12641,9 +12640,7 @@ impl ProgramPlayer {
         post_tail: &str,
     ) -> String {
         use crate::media::export::build_keyframed_property_expression;
-        use crate::model::transform_bounds::{
-            POSITION_MAX, POSITION_MIN, SCALE_MAX, SCALE_MIN,
-        };
+        use crate::model::transform_bounds::{POSITION_MAX, POSITION_MIN, SCALE_MAX, SCALE_MIN};
         let scale_expr = build_keyframed_property_expression(
             &clip.scale_keyframes,
             clip.scale,
@@ -13017,9 +13014,8 @@ impl ProgramPlayer {
                     let step = dur_s / char_count as f64;
                     for i in 0..char_count {
                         let prefix: String = clip.title_text.chars().take(i + 1).collect();
-                        let prefix_esc =
-                            crate::media::title_font::escape_drawtext_value(&prefix)
-                                .replace('\n', "\\n");
+                        let prefix_esc = crate::media::title_font::escape_drawtext_value(&prefix)
+                            .replace('\n', "\\n");
                         let t0 = i as f64 * step;
                         let enable = if i + 1 == char_count {
                             format!("gte(t\\,{t0:.4})")
@@ -13795,9 +13791,7 @@ impl ProgramPlayer {
                 "ProgramPlayer: skipping audio path for clip {} (no audio)",
                 clip.id
             );
-            (
-                None, None, None, None, None, None, None, None,
-            )
+            (None, None, None, None, None, None, None, None)
         };
 
         // Connect uridecodebin pad-added for dynamic linking.
@@ -17615,8 +17609,7 @@ mod tests {
             interpolation: KeyframeInterpolation::Linear,
             bezier_controls: None,
         });
-        let mut mask =
-            crate::model::clip::ClipMask::new(crate::model::clip::MaskShape::Rectangle);
+        let mut mask = crate::model::clip::ClipMask::new(crate::model::clip::MaskShape::Rectangle);
         mask.enabled = true;
         clip.masks.push(mask);
 
@@ -17727,7 +17720,10 @@ mod tests {
         // Format conversion is applied via a `format=yuv420p` filter
         // (not a leading comma after `]raw`, which would be invalid).
         assert!(tail.contains("[pv0raw]format=yuv420p[pv0]"));
-        assert!(tail.ends_with("[pv0]"), "should end with output label: {tail}");
+        assert!(
+            tail.ends_with("[pv0]"),
+            "should end with output label: {tail}"
+        );
     }
 
     #[test]
@@ -17758,7 +17754,10 @@ mod tests {
             tail.contains("[pv0raw]format=yuv420p,tmix=frames=2:weights='1 1'[pv0]"),
             "got: {tail}"
         );
-        assert!(!tail.contains("[pv0raw],format"), "leading comma not stripped: {tail}");
+        assert!(
+            !tail.contains("[pv0raw],format"),
+            "leading comma not stripped: {tail}"
+        );
     }
 
     #[test]
@@ -17928,7 +17927,15 @@ mod tests {
         let mask_shared = Arc::new(Mutex::new(Vec::new()));
         let hsl_shared = Arc::new(Mutex::new(None));
         let (effects_bin, ..) = ProgramPlayer::build_effects_bin(
-            &clip, false, 640, 360, 640, 360, None, mask_shared, hsl_shared,
+            &clip,
+            false,
+            640,
+            360,
+            640,
+            360,
+            None,
+            mask_shared,
+            hsl_shared,
         );
         assert!(
             effects_bin.by_name("us-mask-identity").is_some(),

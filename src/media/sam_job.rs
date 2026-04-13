@@ -195,10 +195,7 @@ pub fn run_sam_pipeline(input: SamJobInput) -> SamJobResult {
     // if this is the first call (or the cache was poisoned by a
     // previous panic — unlikely but defended against).
     let mut sessions = {
-        let cached = SESSION_CACHE
-            .lock()
-            .ok()
-            .and_then(|mut guard| guard.take());
+        let cached = SESSION_CACHE.lock().ok().and_then(|mut guard| guard.take());
         match cached {
             Some(s) => {
                 log::debug!("SAM: reusing cached sessions");
@@ -206,28 +203,23 @@ pub fn run_sam_pipeline(input: SamJobInput) -> SamJobResult {
             }
             None => match sam_cache::SamSessions::load(&sam_paths) {
                 Ok(s) => s,
-                Err(e) => {
-                    return SamJobResult::Error(format!(
-                        "SAM session load failed: {e}"
-                    ))
-                }
+                Err(e) => return SamJobResult::Error(format!("SAM session load failed: {e}")),
             },
         }
     };
 
     // Step 4 — run inference.
-    let result =
-        match sam_cache::segment_with_box(&mut sessions, &rgb, src_w, src_h, prompt) {
-            Ok(r) => r,
-            Err(e) => {
-                // Return sessions to the cache even on inference
-                // failure — the sessions themselves are still valid.
-                if let Ok(mut guard) = SESSION_CACHE.lock() {
-                    *guard = Some(sessions);
-                }
-                return SamJobResult::Error(format!("SAM inference failed: {e}"));
+    let result = match sam_cache::segment_with_box(&mut sessions, &rgb, src_w, src_h, prompt) {
+        Ok(r) => r,
+        Err(e) => {
+            // Return sessions to the cache even on inference
+            // failure — the sessions themselves are still valid.
+            if let Ok(mut guard) = SESSION_CACHE.lock() {
+                *guard = Some(sessions);
             }
-        };
+            return SamJobResult::Error(format!("SAM inference failed: {e}"));
+        }
+    };
 
     // Return sessions to the cache for the next job.
     if let Ok(mut guard) = SESSION_CACHE.lock() {
@@ -244,8 +236,7 @@ pub fn run_sam_pipeline(input: SamJobInput) -> SamJobResult {
         Some(p) if p.len() >= 3 => p,
         _ => {
             return SamJobResult::Error(
-                "SAM produced an empty or degenerate mask (no closed contour found)"
-                    .to_string(),
+                "SAM produced an empty or degenerate mask (no closed contour found)".to_string(),
             );
         }
     };
@@ -359,10 +350,7 @@ mod tests {
     /// Helper: poll a `SamJobHandle` until it delivers a result or
     /// a timeout elapses. Tests fail fast on stuck jobs instead of
     /// hanging the whole test binary.
-    fn wait_for_result(
-        handle: &SamJobHandle,
-        timeout: Duration,
-    ) -> Option<SamJobResult> {
+    fn wait_for_result(handle: &SamJobHandle, timeout: Duration) -> Option<SamJobResult> {
         let start = std::time::Instant::now();
         while start.elapsed() < timeout {
             if let Some(r) = handle.try_recv() {
@@ -422,10 +410,7 @@ mod tests {
                 let ok = msg.contains("not installed")
                     || msg.contains("Frame decode failed")
                     || msg.contains("decode");
-                assert!(
-                    ok,
-                    "unexpected error variant: {msg}"
-                );
+                assert!(ok, "unexpected error variant: {msg}");
             }
         }
     }

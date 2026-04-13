@@ -16,7 +16,8 @@
     "target",
     "Sample-Media",
     "src",
-    "flatpak-build"
+    "flatpak-build",
+    "build-dir"
   ],
   "folder-order" : [
     "target",
@@ -26,7 +27,8 @@
     "data",
     "tools",
     "flatpak-build",
-    "scripts"
+    "scripts",
+    "build-dir"
   ],
   "notes" : "",
   "icon" : ""

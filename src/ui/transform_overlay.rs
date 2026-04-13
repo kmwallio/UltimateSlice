@@ -234,11 +234,11 @@ impl TransformOverlay {
         let sam_prompt_mode = Rc::new(Cell::new(false));
         let sam_prompt_start: Rc<Cell<Option<(f64, f64)>>> = Rc::new(Cell::new(None));
         let sam_prompt_current: Rc<Cell<Option<(f64, f64)>>> = Rc::new(Cell::new(None));
-        let sam_prompt_callback: Rc<
-            RefCell<Option<Box<dyn Fn(f64, f64, f64, f64)>>>,
-        > = Rc::new(RefCell::new(None));
+        let sam_prompt_callback: Rc<RefCell<Option<Box<dyn Fn(f64, f64, f64, f64)>>>> =
+            Rc::new(RefCell::new(None));
 
-        let current_drawing_points: Rc<RefCell<Vec<(f64, f64)>>> = Rc::new(RefCell::new(Vec::new()));
+        let current_drawing_points: Rc<RefCell<Vec<(f64, f64)>>> =
+            Rc::new(RefCell::new(Vec::new()));
         let drawing_color = Rc::new(Cell::new(0xFF0000FF)); // Default red
         let drawing_width = Rc::new(Cell::new(5.0)); // Default 5px
         let drawing_kind = Rc::new(Cell::new(crate::model::clip::DrawingKind::Stroke));
@@ -704,8 +704,7 @@ impl TransformOverlay {
                 // Draw tool always captures — no clip selection
                 // required because drawing can create a new clip at
                 // the playhead if none exists.
-                let draw_active =
-                    active_tool_d.get() == crate::ui::timeline::ActiveTool::Draw;
+                let draw_active = active_tool_d.get() == crate::ui::timeline::ActiveTool::Draw;
                 if !draw_active && !selected.get() {
                     return;
                 }
@@ -1523,22 +1522,14 @@ impl TransformOverlay {
                                 })
                                 .unwrap_or(false);
                         if !moved {
-                            let click_wx = collected
-                                .first()
-                                .map(|p| p.0)
-                                .unwrap_or(ds.start_wx);
-                            let click_wy = collected
-                                .first()
-                                .map(|p| p.1)
-                                .unwrap_or(ds.start_wy);
+                            let click_wx = collected.first().map(|p| p.0).unwrap_or(ds.start_wx);
+                            let click_wy = collected.first().map(|p| p.1).unwrap_or(ds.start_wy);
                             let items = drawing_items_snapshot_end.borrow();
                             // Iterate in reverse so the top-most
                             // (last-drawn) hit wins.
                             let hit = items.iter().enumerate().rev().find_map(|(i, it)| {
-                                drawing_item_hit(
-                                    it, click_wx, click_wy, ds.vx, ds.vy, ds.vw, ds.vh,
-                                )
-                                .then_some(i)
+                                drawing_item_hit(it, click_wx, click_wy, ds.vx, ds.vy, ds.vw, ds.vh)
+                                    .then_some(i)
                             });
                             selected_drawing_item_end.set(hit);
                             drop(items);
@@ -1554,15 +1545,12 @@ impl TransformOverlay {
                             let norm_pts: Vec<(f64, f64)> = match kind {
                                 DrawingKind::Stroke => collected
                                     .iter()
-                                    .map(|(wx, wy)| {
-                                        ((wx - ds.vx) / ds.vw, (wy - ds.vy) / ds.vh)
-                                    })
+                                    .map(|(wx, wy)| ((wx - ds.vx) / ds.vw, (wy - ds.vy) / ds.vh))
                                     .collect(),
                                 DrawingKind::Rectangle
                                 | DrawingKind::Ellipse
                                 | DrawingKind::Arrow => {
-                                    let first =
-                                        collected.first().copied().unwrap_or((0.0, 0.0));
+                                    let first = collected.first().copied().unwrap_or((0.0, 0.0));
                                     let last = collected.last().copied().unwrap_or(first);
                                     vec![
                                         ((first.0 - ds.vx) / ds.vw, (first.1 - ds.vy) / ds.vh),
@@ -1619,12 +1607,7 @@ impl TransformOverlay {
                                 } else {
                                     // Normalize corners so x1 < x2
                                     // and y1 < y2.
-                                    (
-                                        sx.min(ex),
-                                        sy.min(ey),
-                                        sx.max(ex),
-                                        sy.max(ey),
-                                    )
+                                    (sx.min(ex), sy.min(ey), sx.max(ex), sy.max(ey))
                                 };
 
                             // Widget-space → normalized clip-local
@@ -1643,11 +1626,18 @@ impl TransformOverlay {
                                 );
                             let clip_rot = (-rotation_end.get()).to_radians();
                             let to_norm = |wx: f64, wy: f64| -> (f64, f64) {
-                                let (ux, uy) = unrotate_point_about(
-                                    wx, wy, clip_cx_w, clip_cy_w, clip_rot,
-                                );
-                                let nx = if clip_w > 0.5 { (ux - clip_left_w) / clip_w } else { 0.5 };
-                                let ny = if clip_h > 0.5 { (uy - clip_top_w) / clip_h } else { 0.5 };
+                                let (ux, uy) =
+                                    unrotate_point_about(wx, wy, clip_cx_w, clip_cy_w, clip_rot);
+                                let nx = if clip_w > 0.5 {
+                                    (ux - clip_left_w) / clip_w
+                                } else {
+                                    0.5
+                                };
+                                let ny = if clip_h > 0.5 {
+                                    (uy - clip_top_w) / clip_h
+                                } else {
+                                    0.5
+                                };
                                 (nx.clamp(0.0, 1.0), ny.clamp(0.0, 1.0))
                             };
                             // Unrotating the corners individually can
@@ -2017,10 +2007,7 @@ impl TransformOverlay {
     /// to reference. The app calls this after each project change /
     /// playhead move; an empty Vec clears the selection as a side
     /// effect.
-    pub fn set_current_drawing_items(
-        &self,
-        items: &[crate::model::clip::DrawingItem],
-    ) {
+    pub fn set_current_drawing_items(&self, items: &[crate::model::clip::DrawingItem]) {
         let mut slot = self.drawing_items_snapshot.borrow_mut();
         if *slot != items {
             *slot = items.to_vec();
@@ -2204,16 +2191,12 @@ impl TransformOverlay {
     /// The mode auto-clears after one completed drag or on Escape.
     /// Single clicks (< 4 px drag) produce a small point-emulated
     /// box (see Phase 2a constraint #3 in sam-work.md).
-    pub fn enter_sam_prompt_mode(
-        &self,
-        on_captured: impl Fn(f64, f64, f64, f64) + 'static,
-    ) {
+    pub fn enter_sam_prompt_mode(&self, on_captured: impl Fn(f64, f64, f64, f64) + 'static) {
         self.sam_prompt_mode.set(true);
         self.sam_prompt_start.set(None);
         self.sam_prompt_current.set(None);
         *self.sam_prompt_callback.borrow_mut() = Some(Box::new(on_captured));
-        self.drawing_area
-            .set_cursor_from_name(Some("crosshair"));
+        self.drawing_area.set_cursor_from_name(Some("crosshair"));
         self.drawing_area.queue_draw();
     }
 
@@ -2225,8 +2208,7 @@ impl TransformOverlay {
         self.sam_prompt_start.set(None);
         self.sam_prompt_current.set(None);
         self.sam_prompt_callback.borrow_mut().take();
-        self.drawing_area
-            .set_cursor_from_name(None);
+        self.drawing_area.set_cursor_from_name(None);
         self.drawing_area.queue_draw();
     }
 
@@ -2269,14 +2251,7 @@ fn paintable_dims(
 ///
 /// Falls back to `video_rect()` on the full DA if compute_bounds() fails.
 /// Distance from `(px, py)` to the line segment `(x0, y0)-(x1, y1)`.
-fn point_to_segment_distance(
-    px: f64,
-    py: f64,
-    x0: f64,
-    y0: f64,
-    x1: f64,
-    y1: f64,
-) -> f64 {
+fn point_to_segment_distance(px: f64, py: f64, x0: f64, y0: f64, x1: f64, y1: f64) -> f64 {
     let dx = x1 - x0;
     let dy = y1 - y0;
     let len2 = dx * dx + dy * dy;
@@ -2331,18 +2306,14 @@ fn drawing_item_hit(
             if item.fill_color.is_some() {
                 click_wx >= x0 && click_wx <= x1 && click_wy >= y0 && click_wy <= y1
             } else {
-                let on_top = (click_wy - y0).abs() <= tol
-                    && click_wx >= x0 - tol
-                    && click_wx <= x1 + tol;
-                let on_bot = (click_wy - y1).abs() <= tol
-                    && click_wx >= x0 - tol
-                    && click_wx <= x1 + tol;
-                let on_left = (click_wx - x0).abs() <= tol
-                    && click_wy >= y0 - tol
-                    && click_wy <= y1 + tol;
-                let on_right = (click_wx - x1).abs() <= tol
-                    && click_wy >= y0 - tol
-                    && click_wy <= y1 + tol;
+                let on_top =
+                    (click_wy - y0).abs() <= tol && click_wx >= x0 - tol && click_wx <= x1 + tol;
+                let on_bot =
+                    (click_wy - y1).abs() <= tol && click_wx >= x0 - tol && click_wx <= x1 + tol;
+                let on_left =
+                    (click_wx - x0).abs() <= tol && click_wy >= y0 - tol && click_wy <= y1 + tol;
+                let on_right =
+                    (click_wx - x1).abs() <= tol && click_wy >= y0 - tol && click_wy <= y1 + tol;
                 on_top || on_bot || on_left || on_right
             }
         }

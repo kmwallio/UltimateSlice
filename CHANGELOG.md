@@ -5,6 +5,7 @@ All notable project changes and progress should be recorded here.
 ## [Unreleased]
 
 ### Fixed
+- **Empty-timeline Program Monitor canvas persistence**: changing **Project Settings** on a fresh project with no timeline clips could make the Program Monitor's blank aspect-ratio preview box disappear. Root cause: `window.rs` intentionally hides both video layers on empty timelines to avoid stale decoded frames, but `program_monitor.rs` did not give the always-present canvas base its own preview background. The Program Monitor now styles that base layer with the same `preview-video` surface used by the real video widgets, so the empty-state hint can stay visible while the project-aspect canvas remains visible before and after resolution/aspect changes.
 - **Multicam proxy support**: proxy generation was never requested for multicam angle source files, causing multicam playback to always decode the full-resolution originals. Root cause: `collect_unique_proxy_variants`, `collect_near_playhead_proxy_variants`, and `collect_unique_preview_lut_proxy_variants` iterated `clip.source_path` for every timeline clip — but a multicam clip's `source_path` is empty; the actual media paths live in `clip.multicam_angles[*].source_path`. Fixed all three collection functions to also iterate multicam angles and emit proxy variant specs for each angle's source path. Per-angle LUTs are included in the proxy key so each camera's LUT-baked proxy is distinct. The fix covers both scale-based proxies and LUT-baked preview proxies.
 
 ### Added
