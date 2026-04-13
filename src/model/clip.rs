@@ -265,6 +265,23 @@ pub struct DrawingItem {
     pub fill_color: Option<u32>,
 }
 
+/// How `ClipKind::Drawing` items enter the frame when reveal
+/// animation is enabled. Applies per-clip, not per-item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DrawingRevealStyle {
+    /// Shapes fade in via alpha (strokes and arrows still dash-draw
+    /// along their path length). The default — matches the SVG
+    /// export's SMIL behaviour exactly.
+    #[default]
+    Fade,
+    /// Rectangles and ellipses grow from their starting corner
+    /// outward (geometry interpolated as progress advances).
+    /// Strokes and arrows still dash-draw along their path length
+    /// — this flag only changes the shape family.
+    GrowFromCorner,
+}
+
 /// Type of procedural animation applied to a title clip's entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum TitleAnimation {
@@ -1599,6 +1616,12 @@ pub struct Clip {
     /// Vector items for drawing clips.
     #[serde(default)]
     pub drawing_items: Vec<DrawingItem>,
+    /// Reveal style for `ClipKind::Drawing` animations — controls
+    /// how Rectangle/Ellipse items enter the frame (opacity fade
+    /// vs. grow-from-corner geometry interpolation). Strokes and
+    /// arrows always dash-draw along path length regardless.
+    #[serde(default)]
+    pub drawing_reveal_style: DrawingRevealStyle,
     /// Per-item reveal duration for drawing clips, in nanoseconds.
     /// `0` (default) renders the drawing statically — all items
     /// visible from t=0. Non-zero values enable a progressive reveal
@@ -2387,6 +2410,7 @@ impl Clip {
             title_animation: TitleAnimation::None,
             title_animation_duration_ns: default_animation_duration(),
             drawing_items: Vec::new(),
+            drawing_reveal_style: DrawingRevealStyle::default(),
             drawing_animation_reveal_ns: 0,
             color_label: ClipColorLabel::None,
             brightness: 0.0,

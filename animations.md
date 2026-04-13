@@ -246,9 +246,9 @@ today (draw → animate → preview → export → save/load round-trip
   `.mov`, matching `drawing_render.rs`. Third-party animated SVGs
   from Inkscape / Figma / hand-written SMIL should now preview
   and export with alpha intact.
-- **Rectangle / ellipse "grow from corner" reveal style** as an
-  alternative to the current alpha fade (per-clip setting). Only
-  remaining item — everything else from this list shipped.
+Everything from the "Remaining polish" list has shipped.
+See ROADMAP.md for the full list of completed items under
+"Drawings & Procedural Animations".
 
 ## Testing what's wired
 

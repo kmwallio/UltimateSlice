@@ -4,7 +4,7 @@
 //! preview pipeline (GStreamer `filesrc ! pngdec ! imagefreeze`) and the
 //! export pipeline (FFmpeg `-loop 1 -i <png>` + overlay) can consume.
 
-use crate::model::clip::{DrawingItem, DrawingKind};
+use crate::model::clip::{DrawingItem, DrawingKind, DrawingRevealStyle};
 use gtk4::cairo;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -114,23 +114,27 @@ pub fn rasterize_drawing_surface(
     width: i32,
     height: i32,
 ) -> Result<cairo::ImageSurface, cairo::Error> {
-    rasterize_drawing_surface_at_time(items, width, height, 0, 0)
+    rasterize_drawing_surface_at_time(items, width, height, 0, 0, DrawingRevealStyle::Fade)
 }
 
 /// Like `rasterize_drawing_surface` but applies a time-based reveal.
 /// `elapsed_ns` is the time since the clip started; `reveal_ns` is the
 /// per-item reveal duration (0 = static, everything visible).
+/// `reveal_style` controls how `Rectangle` / `Ellipse` items enter
+/// the frame — alpha fade (matches SVG SMIL) or grow-from-corner
+/// geometry interpolation.
 ///
-/// Freehand strokes and arrow lines are truncated along their path
-/// length to reflect progress. Shapes (Rectangle / Ellipse) and the
-/// arrowhead fade in via alpha. Matches the `drawing_svg` behaviour
-/// so preview / export / SVG stay visually consistent.
+/// Freehand strokes and arrow lines always dash-draw along their
+/// path length regardless of style. Matches the `drawing_svg`
+/// behaviour so preview / export / SVG stay visually consistent
+/// in the default `Fade` case.
 pub fn rasterize_drawing_surface_at_time(
     items: &[DrawingItem],
     width: i32,
     height: i32,
     elapsed_ns: u64,
     reveal_ns: u64,
+    reveal_style: DrawingRevealStyle,
 ) -> Result<cairo::ImageSurface, cairo::Error> {
     let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, width, height)?;
     let cr = cairo::Context::new(&surface)?;
@@ -201,27 +205,50 @@ pub fn rasterize_drawing_surface_at_time(
                 let _ = cr.stroke();
             }
             DrawingKind::Rectangle => {
-                // Fade in via alpha (stroke + optional fill).
-                let (p0, p1) = (item.points[0], *item.points.last().unwrap());
-                let x = (p0.0.min(p1.0)) * w;
-                let y = (p0.1.min(p1.1)) * h;
-                let rw = (p0.0 - p1.0).abs() * w;
-                let rh = (p0.1 - p1.1).abs() * h;
+                let (p0, p1_full) = (item.points[0], *item.points.last().unwrap());
+                // `GrowFromCorner` interpolates the far corner toward
+                // the anchor at progress=0, so the rectangle emerges
+                // from its first corner outward. `Fade` keeps the
+                // full geometry and modulates alpha.
+                let (p1_eff, alpha_mul) = match reveal_style {
+                    DrawingRevealStyle::GrowFromCorner => {
+                        let p1 = (
+                            p0.0 + (p1_full.0 - p0.0) * progress,
+                            p0.1 + (p1_full.1 - p0.1) * progress,
+                        );
+                        (p1, 1.0)
+                    }
+                    DrawingRevealStyle::Fade => (p1_full, progress),
+                };
+                let x = p0.0.min(p1_eff.0) * w;
+                let y = p0.1.min(p1_eff.1) * h;
+                let rw = (p0.0 - p1_eff.0).abs() * w;
+                let rh = (p0.1 - p1_eff.1).abs() * h;
                 cr.rectangle(x, y, rw, rh);
                 if let Some(fill) = item.fill_color {
                     let (fr, fg, fb, fa) = argb_from_u32(fill);
-                    cr.set_source_rgba(fr, fg, fb, fa * progress);
+                    cr.set_source_rgba(fr, fg, fb, fa * alpha_mul);
                     let _ = cr.fill_preserve();
                 }
-                cr.set_source_rgba(r, g, b, a * progress);
+                cr.set_source_rgba(r, g, b, a * alpha_mul);
                 let _ = cr.stroke();
             }
             DrawingKind::Ellipse => {
-                let (p0, p1) = (item.points[0], *item.points.last().unwrap());
-                let x0 = p0.0.min(p1.0) * w;
-                let y0 = p0.1.min(p1.1) * h;
-                let rw = ((p0.0 - p1.0).abs() * w).max(1.0);
-                let rh = ((p0.1 - p1.1).abs() * h).max(1.0);
+                let (p0, p1_full) = (item.points[0], *item.points.last().unwrap());
+                let (p1_eff, alpha_mul) = match reveal_style {
+                    DrawingRevealStyle::GrowFromCorner => {
+                        let p1 = (
+                            p0.0 + (p1_full.0 - p0.0) * progress,
+                            p0.1 + (p1_full.1 - p0.1) * progress,
+                        );
+                        (p1, 1.0)
+                    }
+                    DrawingRevealStyle::Fade => (p1_full, progress),
+                };
+                let x0 = p0.0.min(p1_eff.0) * w;
+                let y0 = p0.1.min(p1_eff.1) * h;
+                let rw = ((p0.0 - p1_eff.0).abs() * w).max(1.0);
+                let rh = ((p0.1 - p1_eff.1).abs() * h).max(1.0);
                 let cx = x0 + rw * 0.5;
                 let cy = y0 + rh * 0.5;
                 cr.save().ok();
@@ -231,10 +258,10 @@ pub fn rasterize_drawing_surface_at_time(
                 cr.restore().ok();
                 if let Some(fill) = item.fill_color {
                     let (fr, fg, fb, fa) = argb_from_u32(fill);
-                    cr.set_source_rgba(fr, fg, fb, fa * progress);
+                    cr.set_source_rgba(fr, fg, fb, fa * alpha_mul);
                     let _ = cr.fill_preserve();
                 }
-                cr.set_source_rgba(r, g, b, a * progress);
+                cr.set_source_rgba(r, g, b, a * alpha_mul);
                 let _ = cr.stroke();
             }
             DrawingKind::Arrow => {
@@ -354,6 +381,7 @@ pub fn drawing_animation_cache_path(
     fps_den: u32,
     clip_duration_ns: u64,
     reveal_ns: u64,
+    reveal_style: DrawingRevealStyle,
 ) -> PathBuf {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -364,6 +392,7 @@ pub fn drawing_animation_cache_path(
     fps_den.hash(&mut h);
     clip_duration_ns.hash(&mut h);
     reveal_ns.hash(&mut h);
+    (reveal_style as u8).hash(&mut h);
     for it in items {
         (it.kind as u8).hash(&mut h);
         it.color.hash(&mut h);
@@ -448,6 +477,7 @@ pub fn ensure_drawing_animation_webm_nonblocking(
     fps_den: u32,
     clip_duration_ns: u64,
     reveal_ns: u64,
+    reveal_style: DrawingRevealStyle,
 ) -> Option<PathBuf> {
     let path = drawing_animation_cache_path(
         clip_id,
@@ -458,6 +488,7 @@ pub fn ensure_drawing_animation_webm_nonblocking(
         fps_den,
         clip_duration_ns,
         reveal_ns,
+        reveal_style,
     );
     if path.exists() {
         return Some(path);
@@ -496,6 +527,7 @@ pub fn ensure_drawing_animation_webm_nonblocking(
             fps_den,
             clip_duration_ns,
             reveal_ns,
+            reveal_style,
         );
         let succeeded = result.is_ok();
         if let Err(ref e) = result {
@@ -545,6 +577,7 @@ pub fn ensure_drawing_animation_webm(
     fps_den: u32,
     clip_duration_ns: u64,
     reveal_ns: u64,
+    reveal_style: DrawingRevealStyle,
 ) -> std::io::Result<PathBuf> {
     let path = drawing_animation_cache_path(
         clip_id,
@@ -555,6 +588,7 @@ pub fn ensure_drawing_animation_webm(
         fps_den,
         clip_duration_ns,
         reveal_ns,
+        reveal_style,
     );
     if path.exists() {
         return Ok(path);
@@ -607,6 +641,7 @@ pub fn ensure_drawing_animation_webm(
             height,
             elapsed_ns,
             reveal_ns,
+            reveal_style,
         )
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("cairo: {e}")))?;
         let stride = surface.stride() as usize;
@@ -791,10 +826,10 @@ mod tests {
     fn rasterize_partial_reveal_differs_from_full() {
         let items = vec![sample_stroke()];
         let surface_full =
-            rasterize_drawing_surface_at_time(&items, 320, 180, 500_000_000, 1_000_000_000)
+            rasterize_drawing_surface_at_time(&items, 320, 180, 500_000_000, 1_000_000_000, DrawingRevealStyle::Fade)
                 .unwrap();
         let surface_partial =
-            rasterize_drawing_surface_at_time(&items, 320, 180, 100_000_000, 1_000_000_000)
+            rasterize_drawing_surface_at_time(&items, 320, 180, 100_000_000, 1_000_000_000, DrawingRevealStyle::Fade)
                 .unwrap();
         // Crude "has pixels" check via stride — both have the surface
         // object; distinguish that they are different objects, not

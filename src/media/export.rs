@@ -6633,6 +6633,7 @@ fn flatten_clips(
                 project_fps_den.max(1),
                 clip_duration_ns,
                 clip.drawing_animation_reveal_ns,
+                clip.drawing_reveal_style,
             ) {
                 Ok(webm_path) => {
                     let mut c = clip.clone();

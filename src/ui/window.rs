@@ -4741,6 +4741,7 @@ fn clip_to_program_clips(
                 project_fps_den.max(1),
                 clip_duration_ns,
                 c.drawing_animation_reveal_ns,
+                c.drawing_reveal_style,
             )
         {
             let mut redirected = c.clone();
@@ -11571,6 +11572,21 @@ pub fn build_window(
             anim_duration_scale.set_sensitive(false);
             vbox.append(&anim_duration_scale);
 
+            // Reveal-style dropdown. Fade (default) matches the SVG
+            // export's SMIL. Grow-from-corner animates Rectangle /
+            // Ellipse geometry outward from the anchor point;
+            // strokes + arrows ignore this and always dash-draw
+            // along their path length regardless.
+            vbox.append(
+                &gtk::Label::builder()
+                    .label("Rect / Ellipse reveal style")
+                    .xalign(0.0)
+                    .build(),
+            );
+            let reveal_style_dd =
+                gtk::DropDown::from_strings(&["Fade", "Grow from corner"]);
+            vbox.append(&reveal_style_dd);
+
             // Export SVG section (operates on the drawing clip under the
             // playhead on the selected track).
             vbox.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
@@ -11730,6 +11746,38 @@ pub fn build_window(
                     let reveal_ns = (s.value() * 1_000_000_000.0) as u64;
                     let (changed, _total) = apply_drawing_reveal(&project, reveal_ns);
                     if changed > 0 {
+                        on_project_changed();
+                    }
+                });
+            }
+            // Reveal-style selector: writes the chosen style to every
+            // drawing clip so the rasteriser picks it up on the next
+            // bake. Cache key includes reveal_style, so re-selecting
+            // invalidates existing MOVs and triggers a fresh encode.
+            {
+                let project = project.clone();
+                let on_project_changed = on_project_changed.clone();
+                reveal_style_dd.connect_selected_notify(move |dd| {
+                    use crate::model::clip::DrawingRevealStyle;
+                    let style = match dd.selected() {
+                        1 => DrawingRevealStyle::GrowFromCorner,
+                        _ => DrawingRevealStyle::Fade,
+                    };
+                    let mut proj = project.borrow_mut();
+                    let mut changed = 0usize;
+                    for track in proj.tracks.iter_mut() {
+                        for clip in track.clips.iter_mut() {
+                            if clip.kind == crate::model::clip::ClipKind::Drawing
+                                && clip.drawing_reveal_style != style
+                            {
+                                clip.drawing_reveal_style = style;
+                                changed += 1;
+                            }
+                        }
+                    }
+                    if changed > 0 {
+                        proj.dirty = true;
+                        drop(proj);
                         on_project_changed();
                     }
                 });

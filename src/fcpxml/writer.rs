@@ -1203,6 +1203,15 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                                 clip.drawing_animation_reveal_ns.to_string().as_str(),
                             ));
                         }
+                        if !matches!(
+                            clip.drawing_reveal_style,
+                            crate::model::clip::DrawingRevealStyle::Fade
+                        ) {
+                            asset_clip.push_attribute((
+                                "us:drawing-reveal-style",
+                                "grow_from_corner",
+                            ));
+                        }
                     } else if clip.kind == crate::model::clip::ClipKind::Audition {
                         asset_clip.push_attribute(("us:clip-kind", "audition"));
                         if let Some(ref takes) = clip.audition_takes {
@@ -4508,6 +4517,7 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:clip-kind"
             | "us:drawing-items"
             | "us:drawing-animation-reveal-ns"
+            | "us:drawing-reveal-style"
             | "us:eq-bands"
             | "us:eq-low-gain-keyframes"
             | "us:eq-mid-gain-keyframes"
@@ -7667,6 +7677,8 @@ mod tests {
             },
         ];
         drawing.drawing_animation_reveal_ns = 600_000_000;
+        drawing.drawing_reveal_style =
+            crate::model::clip::DrawingRevealStyle::GrowFromCorner;
         let drawing_id = drawing.id.clone();
         track.add_clip(drawing);
         project.tracks.push(track);
@@ -7679,6 +7691,7 @@ mod tests {
         );
         assert!(xml.contains("us:drawing-items="));
         assert!(xml.contains("us:drawing-animation-reveal-ns=\"600000000\""));
+        assert!(xml.contains("us:drawing-reveal-style=\"grow_from_corner\""));
 
         let parsed = parse_fcpxml(&xml).expect("parse written xml");
         let restored = parsed
@@ -7696,6 +7709,10 @@ mod tests {
         assert_eq!(restored.drawing_items[1].kind, DrawingKind::Rectangle);
         assert_eq!(restored.drawing_items[1].fill_color, Some(0xFFFF0080));
         assert_eq!(restored.drawing_animation_reveal_ns, 600_000_000);
+        assert_eq!(
+            restored.drawing_reveal_style,
+            crate::model::clip::DrawingRevealStyle::GrowFromCorner
+        );
         // Drawings render from vector data; source_path stays empty so
         // stale preview-cache paths don't persist across save/load.
         assert_eq!(restored.source_path, "");

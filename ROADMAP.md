@@ -626,8 +626,15 @@ FCPXML persistence).
   `.mov`, so third-party animated SVGs (Inkscape / Figma / hand
   SMIL) round-trip with alpha intact. Full SMIL (motion paths,
   keyframe splines, `animateColor`) remains out of scope.
-- [ ] Rectangle / ellipse "grow from corner" reveal as an alternative
-  to the current alpha fade (per-clip setting).
+- [x] Rectangle / ellipse "grow from corner" reveal style. New
+  `DrawingRevealStyle { Fade, GrowFromCorner }` per-clip enum,
+  FCPXML round-trip via `us:drawing-reveal-style`, selectable
+  from a dropdown in the brush popover. In `GrowFromCorner`,
+  Rectangle / Ellipse items animate their far-corner geometry
+  outward from the anchor point at progress 0→1 instead of
+  alpha-fading; strokes + arrows continue to dash-draw along
+  path length regardless. The MOV cache key includes the style
+  so swapping mid-session triggers a fresh bake.
 - [x] Live cursor-follow ghost preview for freehand strokes —
   already shipped in the original ghost-preview pass. Each
   `drag_update` pushes the new point into `current_drawing_points`

@@ -1447,6 +1447,14 @@ fn parse_asset_clip(
                     {
                         clip.drawing_animation_reveal_ns = reveal.parse().unwrap_or(0);
                     }
+                    if let Some(style) = attrs.get("us:drawing-reveal-style") {
+                        clip.drawing_reveal_style = match style.as_str() {
+                            "grow_from_corner" => {
+                                crate::model::clip::DrawingRevealStyle::GrowFromCorner
+                            }
+                            _ => crate::model::clip::DrawingRevealStyle::Fade,
+                        };
+                    }
                     // Drawings render from their vector data, so any
                     // stale source_path from a previous preview bake
                     // (the temp PNG/MOV cache) shouldn't persist.
@@ -2916,6 +2924,7 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:audition-active-take-index"
             | "us:drawing-items"
             | "us:drawing-animation-reveal-ns"
+            | "us:drawing-reveal-style"
             | "us:scene-id"
             | "us:script-confidence"
             | "us:eq-bands"
