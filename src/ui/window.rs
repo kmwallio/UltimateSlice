@@ -17142,6 +17142,37 @@ pub fn build_window(
         });
         window.add_controller(key_ctrl);
     }
+    // ── Window-level Ctrl+Shift+P: command palette ─────────────────────────
+    {
+        use crate::ui::command_palette::{show_palette, CommandRegistry};
+        let registry: Rc<RefCell<CommandRegistry>> =
+            Rc::new(RefCell::new(CommandRegistry::new()));
+        collect_header_commands(&header, &registry);
+
+        let key_ctrl = gtk4::EventControllerKey::new();
+        key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        let registry_for_key = registry.clone();
+        let window_for_key = window.clone();
+        key_ctrl.connect_key_pressed(move |ctrl, key, _, mods| {
+            use gtk4::gdk::{Key, ModifierType};
+            if !(mods.contains(ModifierType::CONTROL_MASK)
+                && mods.contains(ModifierType::SHIFT_MASK)
+                && (key == Key::P || key == Key::p))
+            {
+                return glib::Propagation::Proceed;
+            }
+            if let Some(widget) = ctrl.widget() {
+                if let Some(focused) = widget.root().and_then(|r| r.focus()) {
+                    if is_text_input_focused(&focused) {
+                        return glib::Propagation::Proceed;
+                    }
+                }
+            }
+            show_palette(window_for_key.upcast_ref::<gtk::Window>(), registry_for_key.clone());
+            glib::Propagation::Stop
+        });
+        window.add_controller(key_ctrl);
+    }
     // ── Window-level Alt+Left/Right: keyframe navigation ───────────────────
     {
         let project = project.clone();
@@ -24634,5 +24665,74 @@ fn handle_mcp_command(
                 }
             }
         }
+    }
+}
+
+/// Walk a `HeaderBar` and register every `Button` / `ToggleButton` that has a
+/// visible label as a palette command. Shortcut is extracted from trailing
+/// `(Ctrl+X)` / `(Alt+…)` etc. in the tooltip text; category defaults to
+/// "Toolbar" since the header mixes concerns and we do not yet have a
+/// per-button category tag.
+fn collect_header_commands(
+    header: &gtk::HeaderBar,
+    registry: &Rc<RefCell<crate::ui::command_palette::CommandRegistry>>,
+) {
+    fn walk(widget: &gtk::Widget, out: &mut Vec<(String, Option<String>, gtk::Widget)>) {
+        if let Some(btn) = widget.downcast_ref::<gtk::Button>() {
+            let label = btn.label().map(|s| s.to_string()).unwrap_or_default();
+            let label = label.trim().to_string();
+            if !label.is_empty() {
+                let tip = btn
+                    .tooltip_text()
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                let shortcut = extract_shortcut(&tip);
+                out.push((label, shortcut, widget.clone()));
+            }
+        }
+        let mut child = widget.first_child();
+        while let Some(c) = child {
+            walk(&c, out);
+            child = c.next_sibling();
+        }
+    }
+
+    fn extract_shortcut(tooltip: &str) -> Option<String> {
+        let open = tooltip.rfind('(')?;
+        let close = tooltip[open..].find(')')? + open;
+        let inner = tooltip[open + 1..close].trim();
+        let has_modifier = inner.contains("Ctrl")
+            || inner.contains("Alt")
+            || inner.contains("Shift")
+            || inner.contains("Cmd");
+        let single_key = inner.len() == 1 && inner.chars().next().unwrap().is_ascii_alphabetic();
+        if has_modifier || single_key {
+            Some(inner.to_string())
+        } else {
+            None
+        }
+    }
+
+    let mut found: Vec<(String, Option<String>, gtk::Widget)> = Vec::new();
+    walk(header.upcast_ref::<gtk::Widget>(), &mut found);
+
+    let mut reg = registry.borrow_mut();
+    for (title, shortcut, widget) in found {
+        // Strip leading emoji/icon glyphs to keep titles searchable, but
+        // keep the original if there's no ascii letter to fall back on.
+        let clean: String = title
+            .chars()
+            .skip_while(|c| !c.is_ascii_alphanumeric())
+            .collect();
+        let display = if clean.is_empty() { title } else { clean };
+        let w = widget.clone();
+        let handler: Rc<dyn Fn()> = Rc::new(move || {
+            if let Some(b) = w.downcast_ref::<gtk::Button>() {
+                b.emit_clicked();
+            } else if let Some(tb) = w.downcast_ref::<gtk::ToggleButton>() {
+                tb.emit_clicked();
+            }
+        });
+        reg.push(display, "Toolbar", shortcut.as_deref(), handler);
     }
 }

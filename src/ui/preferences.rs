@@ -20,6 +20,7 @@ Third-party crates and libraries:\n\
 • uuid — MIT OR Apache-2.0\n\
 • anyhow / thiserror / log / env_logger — MIT OR Apache-2.0\n\
 • rustfft — MIT OR Apache-2.0\n\
+• fuzzy-matcher — MIT\n\
 • whisper-rs — Unlicense\n\
 • ort (ONNX Runtime) — MIT OR Apache-2.0\n\
 • ndarray — MIT OR Apache-2.0\n\

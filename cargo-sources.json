@@ -1081,6 +1081,19 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/fuzzy-matcher/fuzzy-matcher-0.3.7.crate",
+        "sha256": "54614a3312934d066701a80f20f15fa3b56d67ac7722b39eea5b4c9dd1d66c94",
+        "dest": "cargo/vendor/fuzzy-matcher-0.3.7"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"54614a3312934d066701a80f20f15fa3b56d67ac7722b39eea5b4c9dd1d66c94\", \"files\": {}}",
+        "dest": "cargo/vendor/fuzzy-matcher-0.3.7",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/gdk-pixbuf/gdk-pixbuf-0.22.0.crate",
         "sha256": "25f420376dbee041b2db374ce4573892a36222bb3f6c0c43e24f0d67eae9b646",
         "dest": "cargo/vendor/gdk-pixbuf-0.22.0"
@@ -3234,6 +3247,19 @@
         "type": "inline",
         "contents": "{\"package\": \"ebc4ee7f67670e9b64d05fa4253e753e016c6c95ff35b89b7941d6b856dec1d5\", \"files\": {}}",
         "dest": "cargo/vendor/thiserror-impl-2.0.18",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/thread_local/thread_local-1.1.9.crate",
+        "sha256": "f60246a4944f24f6e018aa17cdeffb7818b76356965d03b07d6a9886e8962185",
+        "dest": "cargo/vendor/thread_local-1.1.9"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"f60246a4944f24f6e018aa17cdeffb7818b76356965d03b07d6a9886e8962185\", \"files\": {}}",
+        "dest": "cargo/vendor/thread_local-1.1.9",
         "dest-filename": ".cargo-checksum.json"
     },
     {

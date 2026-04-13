@@ -750,7 +750,7 @@ FCPXML persistence).
 
 **Help & learning**
 - [ ] Contextual help button in each panel header that opens the matching page from `docs/user/` (in-app webview or external browser)
-- [ ] Command palette (Ctrl+Shift+P) listing every menu action and MCP-exposed command with fuzzy search and hotkey hints — bridges discoverability for the 90% of features that don't have a toolbar button
+- [x] Command palette (Ctrl+Shift+P) — phase 1: fuzzy-matched (Skim V2) modal listing every toolbar/header action with auto-extracted shortcut hints from tooltips; Up/Down navigates, Enter invokes (via `emit_clicked` on the backing button), Esc closes. Auto-registers all `Button`/`ToggleButton` descendants of the `HeaderBar` so it stays in sync as buttons are added. Text-input focus guard prevents stealing keystrokes. Phase-2 follow-ups: zero-arg MCP tools, parameterized MCP forms, recent-commands memory, and registering keyboard-only + side-panel actions
 - [ ] "What's this?" mode — toggle via Shift+F1 that turns the cursor into a help cursor; clicking any UI element opens the relevant docs section
 
 **Project housekeeping**
