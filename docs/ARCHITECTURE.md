@@ -590,13 +590,56 @@ don't burn the same hours:
 | `thiserror` | `1` | error types |
 | `log` + `env_logger` | latest | logging |
 | `rustfft` | `6` | FFT for audio cross-correlation sync |
-| `ort` | `2.0.0-rc.12` | ONNX Runtime for AI background removal and MusicGen inference |
+| `ort` | `2.0.0-rc.12` | ONNX Runtime for SAM 3 segmentation, MODNet background removal, RIFE frame interpolation, and MusicGen inference. ABI-pinned to Microsoft ONNX Runtime 1.24.2 — any source-build via `scripts/build_onnxruntime.sh` must use that exact tag. |
 | `ndarray` | `0.17` | N-dimensional array for ONNX tensor I/O |
 | `tokenizers` | `0.21` | Hugging Face tokenizer for MusicGen T5 text encoding |
 | `hound` | `3` | WAV audio file writer for MusicGen output |
 | `tempfile` | `3` | Temporary files for ffmpeg chapter metadata |
 
 **Do not upgrade gstreamer without also upgrading gtk4/gdk4/glib to the matching glib version.**
+
+### AI execution providers (GPU acceleration)
+
+All ONNX-backed caches (`src/media/sam_cache.rs`, `bg_removal_cache.rs`,
+`frame_interp_cache.rs`, `music_gen.rs`) route their `SessionBuilder`
+through `crate::media::ai_providers::configure_session_builder(builder,
+current_backend())` before calling `commit_from_file`. This centralizes
+execution-provider registration so a single Preferences selection in
+`src/ui/preferences.rs:640-737` (persisted to `PreferencesState.ai_backend`
+as a string ID) takes effect on every cache without per-cache plumbing.
+
+The backend enum (`AiBackend::{Auto, Cuda, Rocm, OpenVino, WebGpu, Cpu}`)
+is gated by the optional Cargo features `ai-cuda` / `ai-rocm` /
+`ai-openvino` / `ai-webgpu` — each feature compiles the corresponding
+ONNX Runtime execution provider into the binary. The default build is
+CPU-only. `ai-cuda` and `ai-webgpu` use prebuilt ORT binaries from
+`cdn.pyke.io`; `ai-rocm` and `ai-openvino` require a source-built ORT
+1.24.2 via `scripts/build_onnxruntime.sh`, with `ORT_LIB_LOCATION` +
+`ORT_LIB_PROFILE` set before `cargo build`. The Auto ordering in
+`configure_session_builder` is `CUDA → ROCm → OpenVINO → WebGPU → CPU`
+— native vendor EPs win over the cross-vendor WebGPU fallback when
+both are compiled in. See `docs/gpu/README.md` for the decision tree
+and per-vendor setup.
+
+**When adding a new ONNX-backed cache**: do NOT construct
+`ort::session::Session` directly. Use the same pattern as the existing
+caches:
+
+```rust
+use crate::media::ai_providers;
+let backend = ai_providers::current_backend();
+Session::builder()
+    .and_then(|b| Ok(b.with_optimization_level(GraphOptimizationLevel::Level3)?))
+    .and_then(|b| ai_providers::configure_session_builder(b, backend))
+    .and_then(|mut b| b.commit_from_file(model_path))?
+```
+
+If a cache bypasses this, it will silently run CPU-only regardless of
+the user's Preferences selection. `src/media/stt_cache.rs` is an
+exception because it uses `whisper-rs` (GGML) not ONNX Runtime; its GPU
+path is bridged via `whisper-rs?/cuda` and `whisper-rs?/hipblas` Cargo
+feature edges on `ai-cuda` / `ai-rocm`, which pick up the whisper.cpp
+CUDA / HIP backends at compile time.
 
 ---
 

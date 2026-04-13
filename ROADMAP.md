@@ -83,6 +83,7 @@ Tracking docs:
 - [x] **Convert LTC audio to source timecode** — right-click a source-backed audio/video clip and choose **Convert LTC Audio to Timecode…** to decode Linear Timecode from the selected audio side, store it in `source_timecode_base_ns`, and reuse the existing grouped timecode alignment path
 - [x] **Automatic LTC audio cleanup** — when LTC lives on one stereo side, the opposite program-audio side is routed to both speakers via clip `AudioChannelMode`; mono LTC-only clips are muted after conversion, and new placements from the same source inherit the preferred program-audio routing in the current project
 - [x] **Still-image transform overlay alignment** — Program Monitor now uses the selected still-image clip's own preview inset for transform handles, so PNG/JPEG/WebP/SVG overlays stay aligned even when the base video under them has a different aspect ratio
+- [x] **Empty-timeline Program Monitor canvas persists through Project Settings changes** — the Program Monitor now keeps a visible blank preview surface inside its AspectFrame even when the timeline is empty and the video layers are intentionally hidden to avoid stale frames, so changing project resolution/aspect on a new project still shows the canvas ratio box
 - [x] **Tracked overlay movement parity** — Program Monitor, transform-overlay sync, background prerender, and export now use direct canvas translation for titles, adjustment layers, and tracker-followed clips so `Position X/Y` keeps moving at `Scale = 1.0` and near frame edges, while normal still-image clips stay on the existing safe preview path, pin to their source-in frame during playback/transform reseeks, and refresh via a non-blocking compositor flush during transform drags (no per-decoder reseek, so the imagefreeze-parked PNG buffer stays visible while editing). Selecting a still while paused also pushes its own preview inset to the transform overlay and triggers a paused-frame refresh so the Program Monitor immediately shows the selected PNG with correctly aligned handles.
 
 ### Undo / Redo System
@@ -565,6 +566,8 @@ Tracking docs:
 - [x] Recent projects list
 - [x] Auto-save (60s timer, writes to /tmp/ultimateslice-autosave.fcpxml when project is dirty)
 - [x] Proxy media generation and management
+- [ ] Proxy Status Badges on timeline clips indicating Original vs. Proxy resolution
+- [ ] Proxy Watermarks (optional visual burn-in for proxy files)
 - [x] Auto-backup with versioned history (timestamped backups to `$XDG_DATA_HOME/ultimateslice/backups/`, per-project pruning, restore UI, configurable in Preferences, MCP `list_backups` tool)
 
 ### Media Management
@@ -580,6 +583,73 @@ Tracking docs:
 - [x] Consolidate / collect files — copy project media into a chosen folder for archival or transfer, with **Timeline-used only** and **Entire library** modes in the UI plus MCP `collect_project_files` automation
 - [ ] Consolidated Archiving with Handles (Trim source media to used regions plus configurable handles during collection)
 - [x] Metadata display & filtering — media browser cards now surface resolution, codec, frame rate, duration, and file size with search/type/resolution filters and expanded `list_library` metadata
+
+### Drawings & Procedural Animations
+See [`animations.md`](animations.md) for the full breakdown of what's
+already shipped (vector drawing clips, in-video reveal animations,
+title Typewriter/Fade/Pop, SVG sidecar export with round-trip import,
+FCPXML persistence).
+
+- [x] Draw tool (`D`) on the program monitor, keyboard shape picker
+  (`1`/`2`/`3`/`4`), Delete pops most-recent item, brush popover with
+  color / width / fill / reveal-animation controls + Static/Animated
+  SVG export, in-monitor HUD
+- [x] Cairo rasteriser with per-item time reveal; QuickTime-RLE MOV
+  bake (argb alpha) for animated drawings, cached by content hash;
+  background-thread encode with `on_project_changed` re-trigger on
+  completion
+- [x] Title animations (Typewriter / Fade / Pop) driven live on
+  textoverlay + compositor pad in preview, emitted as drawtext
+  cascade + alpha expression in export
+- [x] FCPXML round-trip for `ClipKind::Drawing`; auto-migration of
+  stamped `.svg` Image clips on project load
+- [ ] **Hit-test shape selection.** Click an existing stroke / shape
+  in the monitor to highlight it; per-item Delete replaces the
+  current LIFO behaviour. Data already supports it via
+  `SetDrawingItemsCommand`.
+- [ ] **Background-encode progress feedback.** Show a spinner (or
+  HUD text) while the first MOV bake is in flight so users know
+  the static PNG they see isn't the final state.
+- [x] **Cache janitor.** Age-based sweep
+  (`crate::media::drawing_render::sweep_drawing_cache`) runs at
+  startup and removes cached `ultimate-slice-drawing-*.{png,mov,webm}`
+  files older than 30 days. Content-hashed cache paths are stable
+  across sessions so anything unreached for that long is orphaned;
+  legacy `.webm` bakes from before the qtrle swap get collected too.
+- [x] **Option B — third-party animated SVGs in preview + export.**
+  Discovered mid-implementation that `media/animated_svg.rs`
+  already has the SMIL detector (`analyze_svg_str`), the
+  per-frame `resvg` rasteriser, and the cached-video pipeline
+  baked into both preview and export. The gap was the encoder
+  container: it baked VP9/alpha in `.webm`, same format that
+  stripped alpha on export for drawings before we switched. Now
+  fixed — `render_animated_svg_clip` emits `qtrle / argb` in
+  `.mov`, so third-party animated SVGs (Inkscape / Figma / hand
+  SMIL) round-trip with alpha intact. Full SMIL (motion paths,
+  keyframe splines, `animateColor`) remains out of scope.
+- [x] Rectangle / ellipse "grow from corner" reveal style. New
+  `DrawingRevealStyle { Fade, GrowFromCorner }` per-clip enum,
+  FCPXML round-trip via `us:drawing-reveal-style`, selectable
+  from a dropdown in the brush popover. In `GrowFromCorner`,
+  Rectangle / Ellipse items animate their far-corner geometry
+  outward from the anchor point at progress 0→1 instead of
+  alpha-fading; strokes + arrows continue to dash-draw along
+  path length regardless. The MOV cache key includes the style
+  so swapping mid-session triggers a fresh bake.
+- [x] Live cursor-follow ghost preview for freehand strokes —
+  already shipped in the original ghost-preview pass. Each
+  `drag_update` pushes the new point into `current_drawing_points`
+  and queues a redraw, so strokes follow the cursor during drag
+  and commit on release via `SetDrawingItemsCommand`. Earlier
+  roadmap entry was stale.
+- [x] Drawing presets — six built-in `(color, width, fill)` combos
+  (Red marker, Black pen, Yellow highlighter, Cyan thin, White
+  callout with fill, Lime bold) render as swatch buttons in the
+  brush popover. Clicking a preset populates the color / width /
+  fill controls; the existing signal handlers propagate to the
+  overlay's brush state so the next stroke picks them up. Preset
+  swatches show the stroke color with a corner triangle for
+  optional fill so the palette is readable by eye.
 
 ### Canvas / Sequence Settings
 - [x] Canvas size dialog (project resolution: 1080p, 4K, custom W×H)
@@ -620,6 +690,74 @@ Tracking docs:
 - [x] Customizable workspace layouts (save/restore panel arrangements for different tasks)
 - [x] Named project snapshots (create named versions at milestones without separate files)
 
+### UI Polish & Quality of Life
+
+**Discoverability & first-run experience**
+- [ ] Welcome screen polish — hero thumbnail strip from the most recent project, a "What's New in this version" expandable card, and a "Sample project" button that loads a bundled demo `.uspxml` so a fresh install has something to click into
+- [ ] Empty-state guidance in every panel — timeline shows a drop-zone hint when empty ("Drag media here or press ⌘O to import"); media browser surfaces the import button at center; inspector shows a keyboard hint to select a clip
+- [ ] In-app onboarding tour — first-launch coachmark sequence pointing to the five core regions (browser, source monitor, timeline, program monitor, inspector) with skip/replay from Help menu; persist `seen_onboarding_v1` in preferences
+- [ ] Tooltips audit — one-pass review using `set_tooltip_text` on every icon-only button across `inspector.rs` and `toolbar.rs`
+
+**Notifications & feedback**
+- [ ] Toast/notification system (libadwaita-style `AdwToastOverlay` equivalent or custom GTK4) for non-modal feedback: "Project saved", "Export complete", "Proxy generation finished", "SAM mask ready"
+- [ ] Background job tray — single dropdown in the header bar showing all active background jobs (proxy transcode, thumbnail extraction, STT, SAM, MusicGen, RIFE, motion tracking, export queue) with per-job progress and cancel
+- [ ] Undo toast with action label — after Ctrl+Z show "Undid: trim clip" briefly, reusing the existing `EditCommand::description()` strings
+
+**Timeline polish**
+- [ ] Hover Scrubbing (Scrubbable Tooltips) in the Media Library and timeline
+- [ ] Two-Up / Four-Up Trim Displays in the Program Monitor for precision edits (Slip/Slide/Roll)
+- [ ] Kinetic Scrolling & Playhead Elasticity
+- [x] Snap indicator visual — when snapping to a clip edge, marker, playhead, or sequence start, draw a dashed vertical guideline + small badge ("clip start" / "clip end" / "marker" / "playhead" / "start") at the snap point; snap targets now include the playhead, timeline markers, and time 0 in addition to other clip edges
+- [ ] Drag preview ghosting — translucent ghost of the clip at the drop target with the new in/out timecode floating above it during move/trim
+- [ ] Mini-map / timeline overview strip — thin strip above the ruler showing the whole project at a glance with a viewport rectangle for the visible region
+- [ ] Track header redesign — per-track color swatch, clearer Solo/Mute/Lock button states, drag handle for reorder, double-click to rename inline
+- [ ] Marker list panel — a sortable list of timeline markers with name, time, color, and notes; double-click to seek
+- [ ] Configurable timeline row heights — preset (Compact / Normal / Tall) plus drag-to-resize per track (uses existing `height_preset` field)
+- [ ] Color-tag legend — a small persistent legend showing what each clip color means in this project, editable
+- [x] Auto-scroll timeline to keep playhead in view during playback — when the playhead reaches the right edge of the visible region, smoothly page (or continuously scroll) the timeline so the playhead stays visible; preference toggle for Page / Smooth / Off, and suspend auto-scroll while the user is actively dragging/scrolling the timeline
+
+**Inspector polish**
+- [ ] Collapsible sections with persisted state — each section (Color, Audio, Video, Transform, Effects, Masks, Subtitles) is a collapsible expander whose open/closed state is remembered per-session
+- [ ] Search field at the top of the inspector — type "denoise" and only the relevant slider is shown
+- [ ] Reset-to-default badge on every slider — small circular reset button that appears only when a value differs from the default; click to reset that property with undo
+- [ ] Right-click → "Copy/Paste this property" on any slider/control, with a "Paste to all selected clips" variant (currently only color grading has copy/paste)
+- [ ] Numeric-entry on every slider — inline `SpinButton` or click-to-edit so users can type exact values
+
+**Program Monitor polish**
+- [ ] HUD overlay — togglable overlay showing timecode, frame number, fps, resolution, and dropped-frame count (reuse `src/ui/timecode.rs`)
+- [ ] A/B compare / split-view — vertical wipe between graded and ungraded versions of the current frame, draggable midline
+- [ ] Reference still pin — capture the current frame as a pinned thumbnail strip (up to 4 stills) for color-matching across scenes
+- [ ] Cinemascope / aspect-ratio mask overlay — togglable letterbox preview at 2.39:1, 2.00:1, 1.85:1, 1:1, 9:16, 4:5 etc. for delivery-format previewing
+
+**Workspace & Ergonomics**
+- [ ] Detachable / Multi-Monitor Panels for Scopes, Media Library, and Inspector
+
+**Theming & visual**
+- [ ] Light theme + system-follow option (`src/style.css` is dark-only today)
+- [ ] High-contrast / large-text accessibility theme for dim rooms / vision needs
+- [ ] Accent color preference — pick the highlight color (currently red playhead, teal compound bar, gold audition badge are fixed in `src/ui/colors.rs`)
+- [ ] Icon set audit — replace any remaining stock icons that don't fit the dark theme; ensure all toolbar icons have consistent visual weight
+
+**Export & sharing**
+- [ ] Export presets gallery with thumbnail cards (YouTube 1080p, YouTube 4K, Instagram Reel 9:16, TikTok, ProRes Master, Web Compressed, etc.) instead of a flat dropdown
+- [ ] Share-link panel — after export, a popover with "Reveal in file manager", "Open with...", "Copy path", and (optional) upload-to-service hooks
+- [ ] Export queue panel persistence + drag-reorder — add reorder, pause-all, retry-failed, and persistence across app restarts to `src/ui/export_queue.rs`
+
+**Performance perception**
+- [ ] Skeleton loaders during project open — show track placeholders + "Loading project…" with the project filename instead of a blank window
+- [ ] Lazy-render off-screen tracks in `timeline/widget.rs` Cairo draw path on very tall timelines (12+ tracks)
+- [ ] Thumbnail/waveform progressive reveal with a subtle fade-in instead of pop-in when caches finish
+
+**Help & learning**
+- [ ] Contextual help button in each panel header that opens the matching page from `docs/user/` (in-app webview or external browser)
+- [ ] Command palette (Ctrl+Shift+P) listing every menu action and MCP-exposed command with fuzzy search and hotkey hints — bridges discoverability for the 90% of features that don't have a toolbar button
+- [ ] "What's this?" mode — toggle via Shift+F1 that turns the cursor into a help cursor; clicking any UI element opens the relevant docs section
+
+**Project housekeeping**
+- [ ] Autosave + crash recovery with versioned `.uspxml.autosave` files and a "Recover unsaved changes" prompt on next launch
+- [ ] Project health panel — surface missing media, offline proxies, cache staleness, and disk-usage breakdown (proxy/thumbnail/STT/AI caches) with one-click cleanup
+- [ ] Recent projects with thumbnails in the welcome screen and a File menu submenu (currently text-only in `welcome.rs`)
+
 ### Professional Workflow (The "Pro" Edge)
 - [x] Multicam editing (sync by audio or timecode)
   - [x] Audio cross-correlation sync for selected clips (FFT-based, background thread, MCP tool)
@@ -653,6 +791,8 @@ Tracking docs:
   - [x] Pitch-preserved J/K/L shuttle (scaletempo in main pipeline + rate-based decoder seeks for hot rate changes)
 - [x] Audio Roles (Dialogue, Effects, Music) with submixing — per-track `AudioRole` enum, inspector dropdown, timeline color-coded labels, MCP `set_track_role` tool, FCPXML persistence, export per-role submix routing
 - [ ] Audio Track Mixer (Panel for track-level volume, panning, effects, and bus routing)
+- [ ] Sub-frame Audio Editing (sample-level precision for cuts and crossfades)
+- [ ] Waveform Drawing Optimizations (LOD caching for zoomed-out performance)
 - [x] **Advanced Audio Mode — surround (5.1 / 7.1) export**: opt-in `Audio Channels` dropdown in the export dialog selects Stereo (default) / 5.1 / 7.1; role-based auto-routing (Dialogue → FC, Music → FL/FR, Effects → FL/FR + SL/SR with both back- and side-rears in 7.1) plus per-track inspector override (FL/FR/FC/BL/BR/SL/SR/LFE/Auto); automatic LFE bass tap from Music + Effects via cascaded 120 Hz lowpass; AAC + Opus (`-mapping_family 1`) + FLAC + PCM compatible; preset round-trip (`#[serde(default)]` keeps legacy JSON loading as Stereo); built-in `Cinema H.264 5.1 1080p` factory preset; MCP `export_mp4` / `save_export_preset` / `list_export_presets` accept the new `audio_channel_layout` argument; FCPXML strict-DTD writer can emit non-stereo `audioLayout` (7.1 falls back to 5.1); OTIO writer/parser round-trip the per-track surround override; stereo path is byte-identical to the pre-surround code so all 922 prior tests still pass plus 13 new surround unit tests
 - [ ] Dynamic per-clip surround pan keyframes (`pan=...:eval=frame`) for moving audio between channels during playback
 - [x] Loudness Radar / Normalization to Standards (Tools for broadcast-standard compliance like EBU R128)
@@ -702,25 +842,26 @@ Tracking docs:
   - [x] Follow-up — Reference-audio style guidance for MusicGen prompts: optional **Choose Reference Audio…** picker in the Generate Music dialog (and `reference_audio_path` argument on the `generate_music` MCP tool) analyzes BPM, key/mode, brightness, and dynamics from the reference clip via the new `audio_features` module and appends the derived natural-language descriptors to the text prompt. The musicgen-small model itself is unchanged — this is prompt augmentation, since musicgen-melody (the only variant with native audio conditioning) currently has no off-the-shelf ONNX export.
 
 ### Script-to-Timeline (Create Project from Script & Clips)
-- [ ] **Script import**: parse Final Draft (FDX) and Fountain screenplay files to extract scene headings, dialogue lines, and scene order
-- [ ] **Speech-to-text transcription**: run STT (e.g. Whisper via `whisper-rs` or subprocess) on every imported clip in the background; produce a timestamped transcript per clip
-- [ ] **Transcript-to-script alignment**: use fuzzy text matching (e.g. Smith-Waterman or token-level diff) to align each clip's transcript against the full script; score every clip against every scene and pick the best-fit placement
-- [ ] **Dialogue-aware ordering**: clips are placed on the timeline in the order their best-matching script position falls, so the assembled cut follows the screenplay beat-for-beat
-- [ ] **Sub-clip trimming from transcript**: if a clip's transcript spans multiple scenes, split the clip at the scene boundary timestamps provided by the STT alignment
-- [ ] **Auto-assembly wizard**: multi-step dialog — (1) load script, (2) import clips folder, (3) background STT + alignment pass with progress bar, (4) review/confirm clip↔scene mapping, (5) generate timeline
-- [ ] **Timeline population**: clips inserted in script scene order at correct timeline positions with scene-heading title overlays
-- [ ] **Unmatched clips bin**: clips whose transcript could not be confidently aligned appear in a dedicated "Unassigned" library group for manual placement
-- [ ] **Confidence indicators**: low-confidence matches shown with a warning badge on the clip in the wizard review step
-- [ ] **Re-order by script**: right-click timeline command to re-run alignment and re-sequence existing clips against a newly loaded or updated script
-- [ ] Persist script path, scene mapping, and transcript cache in FCPXML (`us:script-path`, `us:scene-id`, `us:transcript-cache` attributes)
+- [x] **Script import**: parse Final Draft (FDX) and Fountain screenplay files to extract scene headings, dialogue lines, and scene order
+- [x] **Speech-to-text transcription**: run STT (e.g. Whisper via `whisper-rs` or subprocess) on every imported clip in the background; produce a timestamped transcript per clip
+- [x] **Transcript-to-script alignment**: use fuzzy text matching (e.g. Smith-Waterman or token-level diff) to align each clip's transcript against the full script; score every clip against every scene and pick the best-fit placement
+- [x] **Dialogue-aware ordering**: clips are placed on the timeline in the order their best-matching script position falls, so the assembled cut follows the screenplay beat-for-beat
+- [x] **Sub-clip trimming from transcript**: if a clip's transcript spans multiple scenes, split the clip at the scene boundary timestamps provided by the STT alignment
+- [x] **Auto-assembly wizard**: multi-step dialog — (1) load script, (2) import clips folder, (3) background STT + alignment pass with progress bar, (4) review/confirm clip↔scene mapping, (5) generate timeline
+- [x] **Timeline population**: clips inserted in script scene order at correct timeline positions with scene-heading title overlays
+- [x] **Unmatched clips bin**: clips whose transcript could not be confidently aligned appear in a dedicated "Unassigned" library group for manual placement
+- [x] **Confidence indicators**: low-confidence matches shown with a warning badge on the clip in the wizard review step
+- [x] **Re-order by script**: right-click timeline command to re-run alignment and re-sequence existing clips against a newly loaded or updated script
+- [x] Persist script path, scene mapping, and transcript cache in FCPXML (`us:script-path`, `us:scene-id`, `us:transcript-cache` attributes)
 
 ### Performance & Integration
 - [ ] Hardware-accelerated decoding/encoding (VA-API, NVENC)
 - [ ] Background rendering for complex effect stacks
 - [ ] Render-and-Replace (Bake complex effect stacks into temporary high-quality clips)
+- [ ] Resource Quotas & Graceful Degradation (dynamically degrading preview or pausing background tasks when RAM/VRAM is exhausted)
 - [ ] Project & Bin Locking (Collaborative project/media locking)
 - [x] OpenTimelineIO (OTIO) import/export (native Rust JSON serializer via serde_json; clips/tracks/gaps/transitions/markers/speed plus current OTIO metadata round-trip; versioned `metadata.ultimateslice` contract; title/subtitle metadata, track audio-role metadata, transform/crop/blend metadata, and core transform/opacity keyframe round-trip; absolute/relative OTIO media-reference export with base-path-aware reimport; MCP `save_otio`/`open_otio` tools; Export dropdown + File Open dialog)
-- [ ] Full OTIO metadata parity for UltimateSlice-specific features not yet covered by OTIO round-trip (remaining advanced effects, mask payloads/animation, secondary keyframe lanes such as crop animation, and nested clip internals)
+- [x] Full OTIO metadata parity for UltimateSlice-specific features not yet covered by OTIO round-trip (remaining advanced effects, mask payloads/animation, secondary keyframe lanes such as crop animation, and nested clip internals; script-to-timeline scene_id/script_confidence; track height_preset)
 - [ ] Shared Project/Library support for collaborative editing
 
 ---

@@ -456,11 +456,11 @@ fn write_otio_with_mode(
                 subtitle_bg_box_color: Some(clip.subtitle_bg_box_color),
                 subtitle_highlight_mode: Some(clip.subtitle_highlight_mode),
                 subtitle_highlight_color: Some(clip.subtitle_highlight_color),
-                subtitle_highlight_stroke_color: Some(
-                    clip.subtitle_highlight_stroke_color,
-                ),
+                subtitle_highlight_stroke_color: Some(clip.subtitle_highlight_stroke_color),
                 subtitle_word_window_secs: Some(clip.subtitle_word_window_secs),
                 subtitle_position_y: Some(clip.subtitle_position_y),
+                scene_id: clip.scene_id.clone(),
+                script_confidence: clip.script_confidence,
             });
 
             children.push(OtioTrackChild::Clip(OtioClip {
@@ -510,6 +510,13 @@ fn write_otio_with_mode(
                 != crate::model::track::SurroundPositionOverride::Auto
             {
                 Some(track.surround_position.as_str().to_string())
+            } else {
+                None
+            },
+            height_preset: if track.height_preset
+                != crate::model::track::TrackHeightPreset::default()
+            {
+                Some(format!("{:?}", track.height_preset).to_lowercase())
             } else {
                 None
             },

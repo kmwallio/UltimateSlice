@@ -5,6 +5,7 @@ use crate::ui::timecode;
 
 /// Discrete zoom levels for the program monitor zoom in/out buttons.
 const PROGRAM_MONITOR_ZOOM_LEVELS: &[f64] = &[0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
+const PROGRAM_MONITOR_CANVAS_BASE_CSS_CLASSES: &[&str] = &["preview-video"];
 use gtk4::prelude::*;
 use gtk4::{
     self as gtk, AspectFrame, Box as GBox, Button, CheckButton, DrawingArea, EventControllerScroll,
@@ -174,6 +175,12 @@ pub struct ClipTransform {
     pub rotate: i32, // 0, 90, 180, 270
     pub flip_h: bool,
     pub flip_v: bool,
+}
+
+fn style_program_monitor_canvas_base(widget: &impl IsA<gtk::Widget>) {
+    for class in PROGRAM_MONITOR_CANVAS_BASE_CSS_CLASSES {
+        widget.add_css_class(class);
+    }
 }
 
 /// Build the program monitor widget.
@@ -378,6 +385,9 @@ pub fn build_program_monitor(
     overlay_base.set_hexpand(true);
     overlay_base.set_vexpand(true);
     overlay_base.set_size_request(1, 1);
+    // Keep a visible canvas inside the AspectFrame even when window.rs hides
+    // both video layers on empty timelines to avoid showing stale decoded frames.
+    style_program_monitor_canvas_base(&overlay_base);
     overlay.set_child(Some(&overlay_base));
     overlay.add_overlay(&picture_b);
     overlay.add_overlay(&picture_a);
@@ -1156,6 +1166,7 @@ mod tests {
     use super::{
         subtitle_preview_baseline_y, subtitle_preview_box_padding, subtitle_preview_outline_width,
         subtitle_preview_stroke_width, subtitle_preview_underline_metrics,
+        PROGRAM_MONITOR_CANVAS_BASE_CSS_CLASSES,
     };
 
     #[test]
@@ -1201,6 +1212,11 @@ mod tests {
         let bottom_baseline = subtitle_preview_baseline_y(0.85, 100.0, y_bearing, text_height);
         let bottom_edge = bottom_baseline + y_bearing + text_height;
         assert!((bottom_edge - 85.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn canvas_base_keeps_preview_background_class_for_empty_timelines() {
+        assert!(PROGRAM_MONITOR_CANVAS_BASE_CSS_CLASSES.contains(&"preview-video"));
     }
 }
 

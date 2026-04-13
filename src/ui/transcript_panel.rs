@@ -95,7 +95,11 @@ pub fn build_flat_word_cache(tracks: &[Track]) -> (String, Vec<FlatWordRef>) {
     entries.sort_by_key(|(track_idx, _, c)| (c.timeline_start, *track_idx));
 
     for (_, track, clip) in entries {
-        let speed = if clip.speed > 0.0 { clip.speed as f64 } else { 1.0 };
+        let speed = if clip.speed > 0.0 {
+            clip.speed as f64
+        } else {
+            1.0
+        };
 
         // Header line: `[clip-name]\n`
         text.push('[');
@@ -110,10 +114,8 @@ pub fn build_flat_word_cache(tracks: &[Track]) -> (String, Vec<FlatWordRef>) {
                 let buffer_end = char_count(&text);
                 text.push(' ');
 
-                let timeline_start_ns =
-                    clip.timeline_start + (word.start_ns as f64 / speed) as u64;
-                let timeline_end_ns =
-                    clip.timeline_start + (word.end_ns as f64 / speed) as u64;
+                let timeline_start_ns = clip.timeline_start + (word.start_ns as f64 / speed) as u64;
+                let timeline_end_ns = clip.timeline_start + (word.end_ns as f64 / speed) as u64;
 
                 words.push(FlatWordRef {
                     clip_id: clip.id.clone(),
@@ -375,11 +377,9 @@ impl TranscriptPanelView {
 
     /// Convert a window-relative click position to buffer coordinates.
     fn window_to_buffer_coords(&self, x: f64, y: f64) -> Option<(i32, i32)> {
-        let (bx, by) = self.text_view.window_to_buffer_coords(
-            gtk::TextWindowType::Widget,
-            x as i32,
-            y as i32,
-        );
+        let (bx, by) =
+            self.text_view
+                .window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
         Some((bx, by))
     }
 

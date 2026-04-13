@@ -175,6 +175,13 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                                 project.parsed_media_annotations_json =
                                     Some(annotations_json.clone());
                             }
+                            if let Some(script_path) = attrs.get("us:script-path") {
+                                project.parsed_script_path = Some(script_path.clone());
+                            }
+                            if let Some(transcript_cache) = attrs.get("us:transcript-cache") {
+                                project.parsed_transcript_cache_json =
+                                    Some(transcript_cache.clone());
+                            }
                             project.fcpxml_unknown_event.attrs =
                                 collect_unknown_attrs(&attrs, is_known_event_attr);
                         } else {
@@ -788,6 +795,43 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
         project.tracks.push(Track::new_audio("Audio 1"));
     }
 
+    // Migration: any `ClipKind::Image` clip whose source is an
+    // UltimateSlice-exported SVG gets auto-converted to a proper
+    // `ClipKind::Drawing` clip. Without this, projects that were
+    // saved before the drawing round-trip landed would keep
+    // pointing at `.svg` files (which the image pipeline can't
+    // decode) and stay frozen at their initial state. Narrow to our
+    // stamped exports so foreign SVGs untouched.
+    for track in project.tracks.iter_mut() {
+        for clip in track.clips.iter_mut() {
+            if clip.kind != crate::model::clip::ClipKind::Image {
+                continue;
+            }
+            if !clip.source_path.to_ascii_lowercase().ends_with(".svg") {
+                continue;
+            }
+            let Ok(svg) = std::fs::read_to_string(&clip.source_path) else {
+                continue;
+            };
+            let Some(parsed) = crate::media::drawing_svg::try_parse_ultimate_slice_svg(&svg) else {
+                continue;
+            };
+            if parsed.items.is_empty() {
+                continue;
+            }
+            log::info!(
+                "migrating SVG image clip {} → ClipKind::Drawing ({} items, reveal_ns={})",
+                clip.id,
+                parsed.items.len(),
+                parsed.reveal_ns
+            );
+            clip.kind = crate::model::clip::ClipKind::Drawing;
+            clip.drawing_items = parsed.items;
+            clip.drawing_animation_reveal_ns = parsed.reveal_ns;
+            clip.source_path = String::new();
+        }
+    }
+
     project.source_fcpxml = Some(xml.to_string());
     Ok(project)
 }
@@ -806,7 +850,11 @@ fn parse_asset_clip(
         // so the rest of the parser can proceed normally.
         let is_sourceless_clip = matches!(
             attrs.get("us:clip-kind").map(|s| s.as_str()),
-            Some("compound") | Some("multicam") | Some("title") | Some("adjustment")
+            Some("compound")
+                | Some("multicam")
+                | Some("title")
+                | Some("adjustment")
+                | Some("drawing")
         );
         let synthetic_asset;
         let asset: &Asset = if let Some(a) = assets.get(asset_ref) {
@@ -905,7 +953,8 @@ fn parse_asset_clip(
             | ClipKind::Adjustment
             | ClipKind::Compound
             | ClipKind::Multicam
-            | ClipKind::Audition => lane.filter(|l| *l > 0).map(|l| l as usize).unwrap_or(0),
+            | ClipKind::Audition
+            | ClipKind::Drawing => lane.filter(|l| *l > 0).map(|l| l as usize).unwrap_or(0),
         };
         let track_idx = explicit_track_idx.unwrap_or(inferred_track_idx);
         let track_name = attrs.get("us:track-name").cloned().unwrap_or_else(|| {
@@ -1385,9 +1434,39 @@ fn parse_asset_clip(
                         clip.audition_active_take_index = idx.parse().unwrap_or(0);
                     }
                 }
+                "drawing" => {
+                    clip.kind = ClipKind::Drawing;
+                    if let Some(items_json) = attrs.get("us:drawing-items") {
+                        let json_str = items_json.replace("&quot;", "\"");
+                        clip.drawing_items = serde_json::from_str(&json_str).unwrap_or_default();
+                    }
+                    if let Some(reveal) = attrs.get("us:drawing-animation-reveal-ns") {
+                        clip.drawing_animation_reveal_ns = reveal.parse().unwrap_or(0);
+                    }
+                    if let Some(style) = attrs.get("us:drawing-reveal-style") {
+                        clip.drawing_reveal_style = match style.as_str() {
+                            "grow_from_corner" => {
+                                crate::model::clip::DrawingRevealStyle::GrowFromCorner
+                            }
+                            _ => crate::model::clip::DrawingRevealStyle::Fade,
+                        };
+                    }
+                    // Drawings render from their vector data, so any
+                    // stale source_path from a previous preview bake
+                    // (the temp PNG/MOV cache) shouldn't persist.
+                    clip.source_path = String::new();
+                }
                 _ => {}
             }
         }
+        // Script-to-Timeline metadata
+        if let Some(v) = attrs.get("us:scene-id") {
+            clip.scene_id = Some(v.to_string());
+        }
+        if let Some(v) = attrs.get("us:script-confidence") {
+            clip.script_confidence = v.parse().ok();
+        }
+
         if let Some(v) = attrs.get("us:speed") {
             clip.speed = v.parse().unwrap_or(1.0);
         }
@@ -2839,6 +2918,11 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:multicam-switches"
             | "us:audition-takes"
             | "us:audition-active-take-index"
+            | "us:drawing-items"
+            | "us:drawing-animation-reveal-ns"
+            | "us:drawing-reveal-style"
+            | "us:scene-id"
+            | "us:script-confidence"
             | "us:eq-bands"
             | "us:eq-low-gain-keyframes"
             | "us:eq-mid-gain-keyframes"
@@ -2904,6 +2988,8 @@ fn is_known_event_attr(_key: &str) -> bool {
             | "us:smart-collections"
             | "us:library-items"
             | "us:media-annotations"
+            | "us:script-path"
+            | "us:transcript-cache"
     )
 }
 

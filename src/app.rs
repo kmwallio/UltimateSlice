@@ -23,6 +23,17 @@ pub fn run(mcp_enabled: bool, startup_project_path: Option<String>) {
 
     app.connect_startup(|_| {
         load_css();
+        // Sweep cached drawing artifacts older than the threshold
+        // (30 days). Content-hashed cache files are stable across
+        // sessions, so anything that hasn't been hit in a month is
+        // orphaned — saves disk over time without functional impact.
+        let (removed, freed) = crate::media::drawing_render::sweep_drawing_cache();
+        if removed > 0 {
+            log::info!(
+                "drawing cache sweep: removed {removed} stale artifact(s), freed {:.1} MB",
+                freed as f64 / (1024.0 * 1024.0)
+            );
+        }
     });
 
     let startup_project_path = Rc::new(RefCell::new(startup_project_path));

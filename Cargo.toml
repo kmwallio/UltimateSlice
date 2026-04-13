@@ -31,10 +31,38 @@ hound = { version = "3", optional = true }
 whisper-rs = { version = "0.12", optional = true }
 tempfile = "3.27.0"
 resvg = "0.47.0"
+png = "0.17"
 
 [features]
 default = ["speech-to-text", "ai-inference"]
 ai-inference = ["ort", "ndarray", "tokenizers", "hound"]
+# GPU execution-provider features. Layer on top of `ai-inference` and
+# enable the corresponding ort execution provider. Default build is
+# CPU-only. Three categories:
+#
+#   * `ai-webgpu` — cross-vendor. Uses ort's prebuilt WebGPU EP
+#     (Dawn → Vulkan) and works on Intel Arc, AMD, and NVIDIA with
+#     zero source-build. Recommended default for users who want GPU
+#     acceleration without installing vendor SDKs. See docs/gpu/webgpu.md.
+#
+#   * `ai-cuda` — NVIDIA-only. Prebuilt ort/cuda binaries are downloaded
+#     automatically during `cargo build`. Requires CUDA toolkit at
+#     runtime. See docs/gpu/nvidia-cuda.md.
+#
+#   * `ai-rocm`, `ai-openvino` — max-performance, source-build required.
+#     No prebuilts exist; users must source-build ONNX Runtime 1.24.2
+#     (matching the `ort` 2.0-rc.12 ABI pin) with the matching EP flag.
+#     See scripts/build_onnxruntime.sh and docs/gpu/amd-rocm.md +
+#     docs/gpu/intel-arc-openvino.md.
+#
+# `ai-cuda` and `ai-rocm` also bridge GPU acceleration through to
+# whisper-rs (STT subtitle generation) via its `cuda`/`hipblas`
+# features. WebGPU and OpenVINO have no whisper.cpp backend, so STT
+# stays on CPU for those builds.
+ai-cuda = ["ai-inference", "ort/cuda", "whisper-rs?/cuda"]
+ai-rocm = ["ai-inference", "ort/rocm", "whisper-rs?/hipblas"]
+ai-openvino = ["ai-inference", "ort/openvino"]
+ai-webgpu = ["ai-inference", "ort/webgpu"]
 speech-to-text = ["whisper-rs"]
 
 [profile.dev]

@@ -1,0 +1,28 @@
+# Linker settings shared across the workspace.
+#
+# The `ai-webgpu` Cargo feature pulls a prebuilt ONNX Runtime + Dawn
+# bundle from `cdn.pyke.io`. Dawn is shipped as a *dynamic* library
+# (`libwebgpu_dawn.so`) that `ort-sys` drops into `target/<profile>/`
+# as a symlink. `cargo run` and `cargo test` prepend that directory
+# to `LD_LIBRARY_PATH` automatically, but direct execution of the
+# built binary (e.g. `./target/debug/ultimate-slice --mcp` from a
+# shell, systemd unit, or agent invocation) does not inherit that
+# path and fails with:
+#
+#   error while loading shared libraries: libwebgpu_dawn.so:
+#   cannot open shared object file: No such file or directory
+#
+# Fix: embed `$ORIGIN` (the executable's own directory at run time)
+# in the binary's DT_RUNPATH so the dynamic loader searches
+# `target/<profile>/` next to the binary. This is the standard Unix
+# "executable and its bundled libs live together" pattern and
+# produces a no-op rpath entry when no bundled libs are present, so
+# default (CPU-only) builds are unaffected.
+#
+# $ORIGIN is a literal ELF string interpreted by the loader, not a
+# shell variable — quoting keeps TOML from expanding it.
+#
+# Only applied on Linux because macOS uses `@loader_path` (different
+# spelling) and Windows doesn't have an rpath concept.
+[target.'cfg(target_os = "linux")']
+rustflags = ["-C", "link-arg=-Wl,-rpath,$ORIGIN"]

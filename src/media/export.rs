@@ -297,7 +297,11 @@ pub fn export_project(
     // recursively expanded into its constituent leaf clips with rebased
     // timeline positions. The rest of the export pipeline operates on this
     // flat representation unchanged.
-    let mut flattened_tracks = flatten_compound_tracks(&project.tracks);
+    let mut flattened_tracks = flatten_compound_tracks_with_fps(
+        &project.tracks,
+        project.frame_rate.numerator,
+        project.frame_rate.denominator,
+    );
     crate::media::tracking::apply_tracking_bindings_to_tracks(&mut flattened_tracks);
     let flattened_project_tracks = &flattened_tracks;
 
@@ -1263,8 +1267,7 @@ pub fn export_project(
 
             // Group audio labels by role for submix routing.
             let roles_in_use: Vec<AudioRole> = {
-                let mut roles: Vec<AudioRole> =
-                    audio_labels.iter().map(|s| s.role).collect();
+                let mut roles: Vec<AudioRole> = audio_labels.iter().map(|s| s.role).collect();
                 roles.sort_by_key(|r| *r as u8);
                 roles.dedup();
                 roles
@@ -1302,9 +1305,7 @@ pub fn export_project(
                         // Single input — just rename, no amix needed.
                         filter.push_str(&format!("anull[{submix_name}]"));
                     } else {
-                        filter.push_str(&format!(
-                            "amix=inputs={n}:normalize=0[{submix_name}]"
-                        ));
+                        filter.push_str(&format!("amix=inputs={n}:normalize=0[{submix_name}]"));
                     }
                     submix_labels.push(submix_name);
                 }
@@ -1359,11 +1360,7 @@ pub fn export_project(
             let stems_meta: Vec<(String, AudioRole, SurroundPosition)> = audio_labels
                 .iter()
                 .map(|stem| {
-                    let pos = resolve_stem_position(
-                        stem.role,
-                        stem.surround_override,
-                        layout,
-                    );
+                    let pos = resolve_stem_position(stem.role, stem.surround_override, layout);
                     (stem.label.clone(), stem.role, pos)
                 })
                 .collect();
@@ -1381,17 +1378,11 @@ pub fn export_project(
                 // Auto LFE bass tap for Music / Effects (and only when not
                 // already explicitly routed to LFE — that case already puts
                 // bass content there via the upmix filter).
-                let auto_lfe_eligible = matches!(
-                    role,
-                    AudioRole::Music | AudioRole::Effects
-                ) && *position != SurroundPosition::Lfe;
+                let auto_lfe_eligible = matches!(role, AudioRole::Music | AudioRole::Effects)
+                    && *position != SurroundPosition::Lfe;
                 if auto_lfe_eligible {
                     let lfe_label = format!("{label}_lfe");
-                    filter.push_str(&build_surround_lfe_tap_filter(
-                        label,
-                        &lfe_label,
-                        layout,
-                    ));
+                    filter.push_str(&build_surround_lfe_tap_filter(label, &lfe_label, layout));
                     push_role_input(*role, lfe_label);
                 }
             }
@@ -3234,9 +3225,7 @@ fn build_hsl_qualifier_filter(clip: &crate::model::clip::Clip) -> String {
     let g_expr = "255*ld(26)";
     let b_expr = "255*ld(27)";
 
-    format!(
-        ",format=gbrp,geq=r='{r_expr}':g='{g_expr}':b='{b_expr}',format=yuva420p"
-    )
+    format!(",format=gbrp,geq=r='{r_expr}':g='{g_expr}':b='{b_expr}',format=yuva420p")
 }
 
 /// Run vidstab analysis (pass 1) for a clip, producing a .trf transform file.
@@ -3707,50 +3696,98 @@ fn build_title_filter(clip: &crate::model::clip::Clip, out_h: u32) -> String {
     let (r, g, b, a) = crate::ui::colors::rgba_u32_to_u8(clip.title_color);
     let alpha = (a as f64 / 255.0).clamp(0.0, 1.0);
 
-    // Base drawtext filter
-    let mut filter = format!(
-        ",drawtext={font_option}:text='{text}':fontsize={scaled_size:.2}:fontcolor={r:02x}{g:02x}{b:02x}@{alpha:.4}:x='({rel_x:.6})*w-text_w/2':y='({rel_y:.6})*h-text_h/2'"
-    );
-
-    // Outline (border)
+    // Build the shared drawtext style suffix (everything after text=, x=, y=).
+    let mut style = String::new();
     if clip.title_outline_width > 0.0 {
         let bw = (clip.title_outline_width * scale_factor).max(0.5);
         let (or, og, ob, oa) = crate::ui::colors::rgba_u32_to_u8(clip.title_outline_color);
         let o_alpha = (oa as f64 / 255.0).clamp(0.0, 1.0);
-        filter.push_str(&format!(
+        style.push_str(&format!(
             ":borderw={bw:.1}:bordercolor={or:02x}{og:02x}{ob:02x}@{o_alpha:.4}"
         ));
     }
-
-    // Shadow
     if clip.title_shadow {
         let sx = (clip.title_shadow_offset_x * scale_factor).round() as i32;
         let sy = (clip.title_shadow_offset_y * scale_factor).round() as i32;
         let (sr, sg, sb, sa) = crate::ui::colors::rgba_u32_to_u8(clip.title_shadow_color);
         let s_alpha = (sa as f64 / 255.0).clamp(0.0, 1.0);
-        filter.push_str(&format!(
+        style.push_str(&format!(
             ":shadowx={sx}:shadowy={sy}:shadowcolor={sr:02x}{sg:02x}{sb:02x}@{s_alpha:.4}"
         ));
     }
-
-    // Background box
     if clip.title_bg_box {
         let pad = (clip.title_bg_box_padding * scale_factor).round() as i32;
         let (br, bg, bb, ba) = crate::ui::colors::rgba_u32_to_u8(clip.title_bg_box_color);
         let b_alpha = (ba as f64 / 255.0).clamp(0.0, 1.0);
-        filter.push_str(&format!(
+        style.push_str(&format!(
             ":box=1:boxcolor={br:02x}{bg:02x}{bb:02x}@{b_alpha:.4}:boxborderw={pad}"
         ));
     }
 
-    // Secondary text (second drawtext filter below primary)
+    // Procedural title animations. Input-time `t` is zero at the clip's
+    // start (each clip is fed with `-ss … -t …` + `setpts=PTS-STARTPTS`).
+    let dur_s = (clip.title_animation_duration_ns as f64 / 1_000_000_000.0).max(1e-6);
+    let pos_x = format!("({rel_x:.6})*w-text_w/2");
+    let pos_y = format!("({rel_y:.6})*h-text_h/2");
+    let base_color = format!("{r:02x}{g:02x}{b:02x}@{alpha:.4}");
+
+    let mut filter = String::new();
+    match clip.title_animation {
+        crate::model::clip::TitleAnimation::None | crate::model::clip::TitleAnimation::Pop => {
+            // Pop (font-size grow) isn't expressible in drawtext because
+            // `fontsize` is evaluated once at init. Fall back to static
+            // rendering; preview gets the full animation via the
+            // compositor pad.
+            filter.push_str(&format!(
+                ",drawtext={font_option}:text='{text}':fontsize={scaled_size:.2}:fontcolor={base_color}:x='{pos_x}':y='{pos_y}'{style}"
+            ));
+        }
+        crate::model::clip::TitleAnimation::Fade => {
+            // `alpha` accepts a time expression in drawtext.
+            let alpha_expr = format!("min(1,max(0,t/{dur_s:.4}))*{alpha:.4}");
+            filter.push_str(&format!(
+                ",drawtext={font_option}:text='{text}':fontsize={scaled_size:.2}:fontcolor={r:02x}{g:02x}{b:02x}:x='{pos_x}':y='{pos_y}':alpha='{alpha_expr}'{style}"
+            ));
+        }
+        crate::model::clip::TitleAnimation::Typewriter => {
+            // Emit one drawtext per visible-char threshold, each active
+            // in an exclusive time window so only one layer renders at a
+            // time. The final drawtext stays on for the remaining clip.
+            let char_count = clip.title_text.chars().count();
+            if char_count == 0 {
+                filter.push_str(&format!(
+                    ",drawtext={font_option}:text='{text}':fontsize={scaled_size:.2}:fontcolor={base_color}:x='{pos_x}':y='{pos_y}'{style}"
+                ));
+            } else {
+                let step = dur_s / char_count as f64;
+                for i in 0..char_count {
+                    let prefix: String = clip.title_text.chars().take(i + 1).collect();
+                    let prefix_esc = crate::media::title_font::escape_drawtext_value(&prefix)
+                        .replace('\n', "\\n");
+                    let t0 = i as f64 * step;
+                    let enable = if i + 1 == char_count {
+                        format!("gte(t\\,{t0:.4})")
+                    } else {
+                        let t1 = (i + 1) as f64 * step;
+                        format!("between(t\\,{t0:.4}\\,{t1:.4})")
+                    };
+                    filter.push_str(&format!(
+                        ",drawtext={font_option}:text='{prefix_esc}':fontsize={scaled_size:.2}:fontcolor={base_color}:x='{pos_x}':y='{pos_y}':enable='{enable}'{style}"
+                    ));
+                }
+            }
+        }
+    }
+
+    // Secondary text (second drawtext filter below primary). Not
+    // animated — follows the primary's static style.
     if !clip.title_secondary_text.trim().is_empty() {
         let sec_text = crate::media::title_font::escape_drawtext_value(&clip.title_secondary_text)
             .replace('\n', "\\n");
-        let sec_size = scaled_size * 0.7; // secondary text is 70% of primary
-        let sec_y_offset = scaled_size * 1.5; // offset below primary
+        let sec_size = scaled_size * 0.7;
+        let sec_y_offset = scaled_size * 1.5;
         filter.push_str(&format!(
-            ",drawtext={font_option}:text='{sec_text}':fontsize={sec_size:.2}:fontcolor={r:02x}{g:02x}{b:02x}@{alpha:.4}:x='({rel_x:.6})*w-text_w/2':y='({rel_y:.6})*h-text_h/2+{sec_y_offset:.0}'"
+            ",drawtext={font_option}:text='{sec_text}':fontsize={sec_size:.2}:fontcolor={base_color}:x='({rel_x:.6})*w-text_w/2':y='({rel_y:.6})*h-text_h/2+{sec_y_offset:.0}'"
         ));
     }
 
@@ -3989,10 +4026,7 @@ fn build_subtitle_filter_composited(
                     let group_time_start = if group_start == 0 {
                         seg.start_ns
                     } else {
-                        group_slice[0]
-                            .start_ns
-                            .max(seg.start_ns)
-                            .min(seg.end_ns)
+                        group_slice[0].start_ns.max(seg.start_ns).min(seg.end_ns)
                     };
                     let group_time_end = if group_end == total_words {
                         seg.end_ns
@@ -4024,10 +4058,7 @@ fn build_subtitle_filter_composited(
                         let ev_local_end = if wi_in_group + 1 == group_slice.len() {
                             group_time_end
                         } else {
-                            seg.words[wi]
-                                .end_ns
-                                .max(ev_local_start)
-                                .min(group_time_end)
+                            seg.words[wi].end_ns.max(ev_local_start).min(group_time_end)
                         };
                         if ev_local_end <= ev_local_start {
                             continue;
@@ -4056,8 +4087,7 @@ fn build_subtitle_filter_composited(
                                     overrides.push_str("\\u1");
                                 }
                                 if flags.color {
-                                    overrides
-                                        .push_str(&format!("\\c&H{hb:02X}{hg:02X}{hr:02X}&"));
+                                    overrides.push_str(&format!("\\c&H{hb:02X}{hg:02X}{hr:02X}&"));
                                 }
                                 if flags.stroke {
                                     // Stroke colour is independent from
@@ -5071,9 +5101,7 @@ fn resolve_stem_position(
         },
         SurroundPositionOverride::FrontLR => SurroundPosition::FrontLR,
         SurroundPositionOverride::FrontCenter => SurroundPosition::FrontCenter,
-        SurroundPositionOverride::FrontLRPlusSurroundLR => {
-            SurroundPosition::FrontLRPlusSurroundLR
-        }
+        SurroundPositionOverride::FrontLRPlusSurroundLR => SurroundPosition::FrontLRPlusSurroundLR,
         SurroundPositionOverride::SurroundLR => SurroundPosition::SurroundLR,
         SurroundPositionOverride::Lfe => SurroundPosition::Lfe,
         SurroundPositionOverride::FrontLeft => SurroundPosition::FrontLeft,
@@ -6044,11 +6072,7 @@ pub(crate) fn parse_loudness_report(stderr: &str) -> Result<LoudnessReport> {
 fn extract_ebur128_metric(line: &str, key: &str) -> Option<f64> {
     let idx = line.find(key)?;
     let rest = &line[idx + key.len()..];
-    let token = rest
-        .trim_start()
-        .split_whitespace()
-        .next()
-        .unwrap_or("");
+    let token = rest.trim_start().split_whitespace().next().unwrap_or("");
     if token.is_empty() || token.contains("inf") || token.contains("nan") {
         return None;
     }
@@ -6139,8 +6163,10 @@ pub(crate) fn analyze_loudness_lufs_with_prefilter(
     source_out_ns: u64,
     prefilter: Option<String>,
 ) -> Result<f64> {
-    Ok(analyze_loudness_full_with_prefilter(source_path, source_in_ns, source_out_ns, prefilter)?
-        .integrated_lufs)
+    Ok(
+        analyze_loudness_full_with_prefilter(source_path, source_in_ns, source_out_ns, prefilter)?
+            .integrated_lufs,
+    )
 }
 
 /// Measure peak amplitude (dB) of a clip's audio via FFmpeg `volumedetect` filter.
@@ -6236,10 +6262,8 @@ pub fn analyze_project_loudness(project: &Project) -> Result<LoudnessReport> {
     };
 
     let (tx, _rx) = mpsc::channel();
-    let empty_bg: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
-    let empty_fi: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
+    let empty_bg: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let empty_fi: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     export_project(
         &analysis_project,
         &path,
@@ -6344,13 +6368,21 @@ fn write_chapter_metadata(
 pub(crate) fn flatten_compound_tracks(
     tracks: &[crate::model::track::Track],
 ) -> Vec<crate::model::track::Track> {
+    flatten_compound_tracks_with_fps(tracks, 30, 1)
+}
+
+pub(crate) fn flatten_compound_tracks_with_fps(
+    tracks: &[crate::model::track::Track],
+    project_fps_num: u32,
+    project_fps_den: u32,
+) -> Vec<crate::model::track::Track> {
     let mut result: Vec<crate::model::track::Track> = Vec::new();
     // Collect audio clips extracted from compound/multicam clips on video tracks.
     // These need to go on audio tracks so the export pipeline picks them up.
     let mut extracted_audio_clips: Vec<Clip> = Vec::new();
 
     for track in tracks {
-        let flat = flatten_clips(&track.clips, 0, 0);
+        let flat = flatten_clips(&track.clips, 0, 0, project_fps_num, project_fps_den);
         // Separate audio clips that landed on a video track (from compound/multicam expansion)
         if track.is_video() {
             let mut video_clips = Vec::new();
@@ -6389,7 +6421,13 @@ pub(crate) fn flatten_compound_tracks(
     result
 }
 
-fn flatten_clips(clips: &[Clip], timeline_offset: u64, depth: usize) -> Vec<Clip> {
+fn flatten_clips(
+    clips: &[Clip],
+    timeline_offset: u64,
+    depth: usize,
+    project_fps_num: u32,
+    project_fps_den: u32,
+) -> Vec<Clip> {
     if depth > 16 {
         return Vec::new();
     }
@@ -6420,7 +6458,13 @@ fn flatten_clips(clips: &[Clip], timeline_offset: u64, depth: usize) -> Vec<Clip
                             .saturating_add(rebased.timeline_start.saturating_sub(window_start));
                         if rebased.kind == ClipKind::Compound || rebased.kind == ClipKind::Multicam
                         {
-                            result.extend(flatten_clips(&[rebased], 0, depth + 1));
+                            result.extend(flatten_clips(
+                                &[rebased],
+                                0,
+                                depth + 1,
+                                project_fps_num,
+                                project_fps_den,
+                            ));
                         } else {
                             result.push(rebased);
                         }
@@ -6461,6 +6505,53 @@ fn flatten_clips(clips: &[Clip], timeline_offset: u64, depth: usize) -> Vec<Clip
                         .saturating_add(*seg_end)
                         .min(angle.source_out);
                     seg.id = uuid::Uuid::new_v4().to_string();
+                    // Inherit color from the multicam clip, overridden by per-angle
+                    // grade when the angle's field is non-neutral.
+                    seg.brightness = if angle.brightness != 0.0 {
+                        angle.brightness
+                    } else {
+                        clip.brightness
+                    };
+                    seg.contrast = if (angle.contrast - 1.0).abs() > f32::EPSILON {
+                        angle.contrast
+                    } else {
+                        clip.contrast
+                    };
+                    seg.saturation = if (angle.saturation - 1.0).abs() > f32::EPSILON {
+                        angle.saturation
+                    } else {
+                        clip.saturation
+                    };
+                    seg.temperature = if (angle.temperature - 6500.0).abs() > 1.0 {
+                        angle.temperature
+                    } else {
+                        clip.temperature
+                    };
+                    seg.tint = if angle.tint.abs() > f32::EPSILON {
+                        angle.tint
+                    } else {
+                        clip.tint
+                    };
+                    // Inherit all remaining visual fields from the multicam clip.
+                    // Per-angle LUT overrides clip-level LUT when non-empty.
+                    seg.lut_paths = if !angle.lut_paths.is_empty() {
+                        angle.lut_paths.clone()
+                    } else {
+                        clip.lut_paths.clone()
+                    };
+                    seg.denoise = clip.denoise;
+                    seg.sharpness = clip.sharpness;
+                    seg.shadows = clip.shadows;
+                    seg.midtones = clip.midtones;
+                    seg.highlights = clip.highlights;
+                    seg.exposure = clip.exposure;
+                    seg.black_point = clip.black_point;
+                    seg.highlights_warmth = clip.highlights_warmth;
+                    seg.highlights_tint = clip.highlights_tint;
+                    seg.midtones_warmth = clip.midtones_warmth;
+                    seg.midtones_tint = clip.midtones_tint;
+                    seg.shadows_warmth = clip.shadows_warmth;
+                    seg.shadows_tint = clip.shadows_tint;
                     result.push(seg);
                 }
             }
@@ -6491,6 +6582,65 @@ fn flatten_clips(clips: &[Clip], timeline_offset: u64, depth: usize) -> Vec<Clip
                     result.push(audio_clip);
                 }
             }
+        } else if clip.kind == ClipKind::Drawing {
+            // Rasterize vector items to a PNG and feed the export pipeline
+            // an image-backed clip. Mirrors the preview path in
+            // window.rs::clip_to_program_clips.
+            const DRAW_W: i32 = 1920;
+            const DRAW_H: i32 = 1080;
+            // Every drawing — static or animated — is baked to a
+            // qtrle-argb MOV. Static drawings use `reveal_ns = 0`
+            // where `item_reveal_progress` returns 1.0 for every
+            // frame, producing a flat all-visible video. This
+            // avoids the image/imagefreeze pipeline that hit
+            // persistent `pngparse not-negotiated` errors on some
+            // systems.
+            let clip_duration_ns = clip.duration().max(1);
+            match crate::media::drawing_render::ensure_drawing_animation_webm(
+                &clip.id,
+                &clip.drawing_items,
+                DRAW_W,
+                DRAW_H,
+                project_fps_num.max(1),
+                project_fps_den.max(1),
+                clip_duration_ns,
+                clip.drawing_animation_reveal_ns,
+                clip.drawing_reveal_style,
+            ) {
+                Ok(webm_path) => {
+                    let mut c = clip.clone();
+                    c.source_path = webm_path.to_string_lossy().into_owned();
+                    // Keep `kind = Drawing` so `has_audio` stays
+                    // false — the MOV has no audio track.
+                    c.source_in = 0;
+                    c.source_out = clip_duration_ns;
+                    c.timeline_start = timeline_offset.saturating_add(c.timeline_start);
+                    result.push(c);
+                    continue;
+                }
+                Err(e) => {
+                    log::warn!("export: drawing clip {}: {e}", clip.id);
+                }
+            }
+            // MOV encode failed — last-ditch fall through to a
+            // static PNG via the existing image pipeline.
+            match crate::media::drawing_render::ensure_drawing_png(
+                &clip.id,
+                &clip.drawing_items,
+                DRAW_W,
+                DRAW_H,
+            ) {
+                Ok(png_path) => {
+                    let mut c = clip.clone();
+                    c.source_path = png_path.to_string_lossy().into_owned();
+                    c.kind = ClipKind::Image;
+                    c.timeline_start = timeline_offset.saturating_add(c.timeline_start);
+                    result.push(c);
+                }
+                Err(e) => {
+                    log::warn!("export: failed to rasterize drawing clip {}: {e}", clip.id);
+                }
+            }
         } else {
             let mut c = clip.clone();
             c.timeline_start = timeline_offset.saturating_add(c.timeline_start);
@@ -6508,25 +6658,25 @@ mod tests {
         build_adjustment_export_roi, build_adjustment_layer_filter_graph,
         build_adjustment_scope_alpha_expression, build_audio_crossfade_filters, build_color_filter,
         build_crop_filter, build_grading_filter, build_hsl_qualifier_filter,
-        build_keyframed_property_expression,
-        build_pan_expression, build_rotation_filter, build_scale_position_filter,
-        build_subtitle_filter_composited, build_surround_lfe_tap_filter,
-        build_surround_upmix_filter, build_temperature_tint_filter, build_timing_filter,
-        build_title_filter, build_volume_filter, clamped_primary_transition_timing,
-        clamped_primary_xfade_duration_s, compute_clip_audio_fades, compute_export_coloradj_params,
-        estimate_export_size_bytes, find_ffmpeg, flatten_compound_tracks, has_linked_audio_peer,
-        has_transform_keyframes, parse_loudness_report, parse_progress_line,
-        primary_clip_transition_stop_pad_ns, resolve_stem_position, resolve_subtitle_font_style,
-        split_active_video_tracks_for_export, video_input_seek_and_duration, write_chapter_metadata,
-        AdjustmentExportRoi, AdjustmentMatteInput, AudioChannelLayout, AudioCodec, ClipAudioFade,
+        build_keyframed_property_expression, build_pan_expression, build_rotation_filter,
+        build_scale_position_filter, build_subtitle_filter_composited,
+        build_surround_lfe_tap_filter, build_surround_upmix_filter, build_temperature_tint_filter,
+        build_timing_filter, build_title_filter, build_volume_filter,
+        clamped_primary_transition_timing, clamped_primary_xfade_duration_s,
+        compute_clip_audio_fades, compute_export_coloradj_params, estimate_export_size_bytes,
+        find_ffmpeg, flatten_compound_tracks, has_linked_audio_peer, has_transform_keyframes,
+        parse_loudness_report, parse_progress_line, primary_clip_transition_stop_pad_ns,
+        resolve_stem_position, resolve_subtitle_font_style, split_active_video_tracks_for_export,
+        video_input_seek_and_duration, write_chapter_metadata, AdjustmentExportRoi,
+        AdjustmentMatteInput, AudioChannelLayout, AudioCodec, ClipAudioFade,
         ColorFilterCapabilities, ExportOptions, LoudnessReport, SurroundPosition, VideoCodec,
     };
-    use crate::model::track::{AudioRole, SurroundPositionOverride};
     use crate::media::program_player::ProgramPlayer;
     use crate::model::clip::{
         Clip, ClipKind, KeyframeInterpolation, NumericKeyframe, SubtitleSegment, SubtitleWord,
     };
     use crate::model::project::Project;
+    use crate::model::track::{AudioRole, SurroundPositionOverride};
     use crate::ui_state::CrossfadeCurve;
     use gstreamer as gst;
     use std::process::Command;
@@ -7686,14 +7836,38 @@ mod tests {
     Peak:       -1.2 dBFS
 "#;
         let r = parse_loudness_report(stderr).expect("parse ok");
-        assert!((r.integrated_lufs + 23.0).abs() < 1e-6, "I: {}", r.integrated_lufs);
-        assert!((r.loudness_range_lu - 8.4).abs() < 1e-6, "LRA: {}", r.loudness_range_lu);
-        assert!((r.threshold_lufs + 33.0).abs() < 1e-6, "Thresh: {}", r.threshold_lufs);
-        assert!((r.true_peak_dbtp + 1.2).abs() < 1e-6, "TP: {}", r.true_peak_dbtp);
+        assert!(
+            (r.integrated_lufs + 23.0).abs() < 1e-6,
+            "I: {}",
+            r.integrated_lufs
+        );
+        assert!(
+            (r.loudness_range_lu - 8.4).abs() < 1e-6,
+            "LRA: {}",
+            r.loudness_range_lu
+        );
+        assert!(
+            (r.threshold_lufs + 33.0).abs() < 1e-6,
+            "Thresh: {}",
+            r.threshold_lufs
+        );
+        assert!(
+            (r.true_peak_dbtp + 1.2).abs() < 1e-6,
+            "TP: {}",
+            r.true_peak_dbtp
+        );
         // Max of per-frame M values: -18.7 (largest / loudest).
-        assert!((r.momentary_max_lufs + 18.7).abs() < 1e-6, "M max: {}", r.momentary_max_lufs);
+        assert!(
+            (r.momentary_max_lufs + 18.7).abs() < 1e-6,
+            "M max: {}",
+            r.momentary_max_lufs
+        );
         // Max of per-frame S values (ignoring -inf): -19.9.
-        assert!((r.short_term_max_lufs + 19.9).abs() < 1e-6, "S max: {}", r.short_term_max_lufs);
+        assert!(
+            (r.short_term_max_lufs + 19.9).abs() < 1e-6,
+            "S max: {}",
+            r.short_term_max_lufs
+        );
     }
 
     #[test]
@@ -7715,7 +7889,11 @@ mod tests {
         let r = parse_loudness_report(stderr).expect("parse ok");
         assert!((r.integrated_lufs + 20.0).abs() < 1e-6);
         assert!((r.loudness_range_lu - 3.0).abs() < 1e-6);
-        assert!(r.true_peak_dbtp == 0.0, "TP should default to 0.0, got {}", r.true_peak_dbtp);
+        assert!(
+            r.true_peak_dbtp == 0.0,
+            "TP should default to 0.0, got {}",
+            r.true_peak_dbtp
+        );
     }
 
     #[test]
@@ -8057,6 +8235,37 @@ mod tests {
         assert!(f.contains("fontcolor=ff3366@0.8000"));
         assert!(f.contains("x='(0.250000)*w-text_w/2'"));
         assert!(f.contains("y='(0.750000)*h-text_h/2'"));
+    }
+
+    #[test]
+    fn build_title_filter_fade_emits_time_alpha_expression() {
+        let mut clip = Clip::new("/tmp/test.mp4", 5_000_000_000, 0, ClipKind::Video);
+        clip.title_text = "Hi".to_string();
+        clip.title_animation = crate::model::clip::TitleAnimation::Fade;
+        clip.title_animation_duration_ns = 1_500_000_000; // 1.5 s
+        let f = build_title_filter(&clip, 1080);
+        assert!(f.contains(":alpha='min(1,max(0,t/1.5000))"), "filter: {f}");
+        // Only one drawtext for the primary title (no cascade).
+        assert_eq!(f.matches(",drawtext=").count(), 1, "filter: {f}");
+    }
+
+    #[test]
+    fn build_title_filter_typewriter_emits_cascade_with_enable_windows() {
+        let mut clip = Clip::new("/tmp/test.mp4", 5_000_000_000, 0, ClipKind::Video);
+        clip.title_text = "abc".to_string();
+        clip.title_animation = crate::model::clip::TitleAnimation::Typewriter;
+        clip.title_animation_duration_ns = 600_000_000; // 0.6 s total, 0.2 s/char
+        let f = build_title_filter(&clip, 1080);
+        // One drawtext per character.
+        assert_eq!(f.matches(",drawtext=").count(), 3, "filter: {f}");
+        assert!(f.contains("text='a'"), "filter: {f}");
+        assert!(f.contains("text='ab'"), "filter: {f}");
+        assert!(f.contains("text='abc'"), "filter: {f}");
+        // Exclusive windows for all but the last.
+        assert!(f.contains("between(t\\,0.0000\\,0.2000)"), "filter: {f}");
+        assert!(f.contains("between(t\\,0.2000\\,0.4000)"), "filter: {f}");
+        // Final char stays on until the end of the clip.
+        assert!(f.contains("gte(t\\,0.4000)"), "filter: {f}");
     }
 
     #[test]
@@ -8677,6 +8886,7 @@ mod tests {
                     media_duration_ns: None,
                     volume: 1.0,
                     muted: false,
+                    ..Default::default()
                 },
                 MulticamAngle {
                     id: "a2".into(),
@@ -8689,6 +8899,7 @@ mod tests {
                     media_duration_ns: None,
                     volume: 0.5,
                     muted: false,
+                    ..Default::default()
                 },
             ],
         );
@@ -8747,6 +8958,7 @@ mod tests {
                     media_duration_ns: None,
                     volume: 1.0,
                     muted: false,
+                    ..Default::default()
                 },
                 MulticamAngle {
                     id: "a2".into(),
@@ -8759,6 +8971,7 @@ mod tests {
                     media_duration_ns: None,
                     volume: 0.0,
                     muted: true, // muted
+                    ..Default::default()
                 },
             ],
         );
@@ -8799,6 +9012,7 @@ mod tests {
                 media_duration_ns: None,
                 volume: 1.0,
                 muted: false,
+                ..Default::default()
             }],
         );
 
@@ -8888,11 +9102,7 @@ mod tests {
             SurroundPositionOverride::Lfe,
             SurroundPositionOverride::SideRight,
         ] {
-            let p = resolve_stem_position(
-                AudioRole::Dialogue,
-                ovr,
-                AudioChannelLayout::Stereo,
-            );
+            let p = resolve_stem_position(AudioRole::Dialogue, ovr, AudioChannelLayout::Stereo);
             assert_eq!(p, SurroundPosition::FrontLR);
         }
     }
@@ -8901,35 +9111,19 @@ mod tests {
     fn resolve_stem_position_auto_uses_role_defaults_for_5_1() {
         let layout = AudioChannelLayout::Surround51;
         assert_eq!(
-            resolve_stem_position(
-                AudioRole::Dialogue,
-                SurroundPositionOverride::Auto,
-                layout
-            ),
+            resolve_stem_position(AudioRole::Dialogue, SurroundPositionOverride::Auto, layout),
             SurroundPosition::FrontCenter
         );
         assert_eq!(
-            resolve_stem_position(
-                AudioRole::Music,
-                SurroundPositionOverride::Auto,
-                layout
-            ),
+            resolve_stem_position(AudioRole::Music, SurroundPositionOverride::Auto, layout),
             SurroundPosition::FrontLR
         );
         assert_eq!(
-            resolve_stem_position(
-                AudioRole::Effects,
-                SurroundPositionOverride::Auto,
-                layout
-            ),
+            resolve_stem_position(AudioRole::Effects, SurroundPositionOverride::Auto, layout),
             SurroundPosition::FrontLRPlusSurroundLR
         );
         assert_eq!(
-            resolve_stem_position(
-                AudioRole::None,
-                SurroundPositionOverride::Auto,
-                layout
-            ),
+            resolve_stem_position(AudioRole::None, SurroundPositionOverride::Auto, layout),
             SurroundPosition::FrontLR
         );
     }
@@ -8948,11 +9142,7 @@ mod tests {
             SurroundPosition::SideLeft
         );
         assert_eq!(
-            resolve_stem_position(
-                AudioRole::Music,
-                SurroundPositionOverride::Lfe,
-                layout
-            ),
+            resolve_stem_position(AudioRole::Music, SurroundPositionOverride::Lfe, layout),
             SurroundPosition::Lfe
         );
     }
@@ -9033,11 +9223,7 @@ mod tests {
 
     #[test]
     fn build_surround_lfe_tap_emits_two_lowpass_stages() {
-        let s = build_surround_lfe_tap_filter(
-            "aa4",
-            "aa4_lfe",
-            AudioChannelLayout::Surround51,
-        );
+        let s = build_surround_lfe_tap_filter("aa4", "aa4_lfe", AudioChannelLayout::Surround51);
         assert!(s.starts_with(";[aa4]"));
         assert!(s.ends_with("[aa4_lfe]"));
         // Cascaded lowpass for ~24 dB/oct.
@@ -9069,10 +9255,7 @@ mod tests {
             SurroundPosition::FrontLR,
             AudioChannelLayout::Surround51,
         );
-        let after_pan = s
-            .split_once("pan=5.1|")
-            .map(|(_, rest)| rest)
-            .unwrap_or("");
+        let after_pan = s.split_once("pan=5.1|").map(|(_, rest)| rest).unwrap_or("");
         // Strip the trailing `,aformat=...[y]`
         let body = after_pan.split(',').next().unwrap();
         let order: Vec<&str> = body
@@ -9090,10 +9273,7 @@ mod tests {
             SurroundPosition::FrontLR,
             AudioChannelLayout::Surround71,
         );
-        let after_pan = s
-            .split_once("pan=7.1|")
-            .map(|(_, rest)| rest)
-            .unwrap_or("");
+        let after_pan = s.split_once("pan=7.1|").map(|(_, rest)| rest).unwrap_or("");
         let body = after_pan.split(',').next().unwrap();
         let order: Vec<&str> = body
             .split('|')

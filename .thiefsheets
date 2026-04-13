@@ -8,13 +8,16 @@
     "PROXYPERF.md",
     "SPEEDRAMPCRASH.md",
     "GEMINI.md",
-    "IMPROVEMENT-PLAN.md"
+    "IMPROVEMENT-PLAN.md",
+    "sam-work.md",
+    "animations.md"
   ],
   "hidden-folders" : [
     "target",
     "Sample-Media",
     "src",
-    "flatpak-build"
+    "flatpak-build",
+    "build-dir"
   ],
   "folder-order" : [
     "target",
@@ -23,7 +26,9 @@
     "docs",
     "data",
     "tools",
-    "flatpak-build"
+    "flatpak-build",
+    "scripts",
+    "build-dir"
   ],
   "notes" : "",
   "icon" : ""

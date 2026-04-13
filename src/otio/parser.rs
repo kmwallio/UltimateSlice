@@ -85,6 +85,13 @@ pub fn parse_otio_with_path(json: &str, otio_path: Option<&Path>) -> Result<Proj
                 track.surround_position =
                     crate::model::track::SurroundPositionOverride::from_str(pos);
             }
+            if let Some(hp) = us.height_preset.as_deref() {
+                track.height_preset = match hp {
+                    "small" => crate::model::track::TrackHeightPreset::Small,
+                    "large" => crate::model::track::TrackHeightPreset::Large,
+                    _ => crate::model::track::TrackHeightPreset::Medium,
+                };
+            }
         }
 
         // Walk children: Clips advance cursor, Gaps advance cursor without
@@ -635,6 +642,13 @@ fn otio_clip_to_clip(
         }
         if let Some(v) = us.subtitle_position_y {
             clip.subtitle_position_y = v;
+        }
+        // Script-to-Timeline metadata
+        if let Some(v) = us.scene_id.clone() {
+            clip.scene_id = Some(v);
+        }
+        if let Some(v) = us.script_confidence {
+            clip.script_confidence = Some(v);
         }
     }
 
@@ -1270,12 +1284,7 @@ mod tests {
         p.tracks.clear();
 
         let mut track = Track::new_video("V1");
-        let mut clip = Clip::new(
-            "/footage/test.mov",
-            5_000_000_000,
-            0,
-            ClipKind::Video,
-        );
+        let mut clip = Clip::new("/footage/test.mov", 5_000_000_000, 0, ClipKind::Video);
 
         // Color correction
         clip.temperature = 5200.0;
@@ -1401,12 +1410,7 @@ mod tests {
         p.tracks.clear();
 
         let mut track = Track::new_video("V1");
-        let mut clip = Clip::new(
-            "/footage/test.mov",
-            5_000_000_000,
-            0,
-            ClipKind::Video,
-        );
+        let mut clip = Clip::new("/footage/test.mov", 5_000_000_000, 0, ClipKind::Video);
 
         // Voice enhance (one-knob FFmpeg chain)
         clip.voice_enhance = true;
@@ -1504,19 +1508,14 @@ mod tests {
 
         // Motion blur
         assert_eq!(clip2.motion_blur_enabled, clip.motion_blur_enabled);
-        assert!(
-            (clip2.motion_blur_shutter_angle - clip.motion_blur_shutter_angle).abs() < 1e-9
-        );
+        assert!((clip2.motion_blur_shutter_angle - clip.motion_blur_shutter_angle).abs() < 1e-9);
 
         // Misc
         assert_eq!(clip2.color_label, clip.color_label);
         assert_eq!(clip2.anamorphic_desqueeze, clip.anamorphic_desqueeze);
         assert_eq!(clip2.group_id, clip.group_id);
         assert_eq!(clip2.link_group_id, clip.link_group_id);
-        assert_eq!(
-            clip2.source_timecode_base_ns,
-            clip.source_timecode_base_ns
-        );
+        assert_eq!(clip2.source_timecode_base_ns, clip.source_timecode_base_ns);
         assert_eq!(clip2.animated_svg, clip.animated_svg);
     }
 
@@ -1533,12 +1532,7 @@ mod tests {
         p.tracks.clear();
 
         let mut track = Track::new_video("V1");
-        let mut clip = Clip::new(
-            "/footage/test.mov",
-            5_000_000_000,
-            0,
-            ClipKind::Video,
-        );
+        let mut clip = Clip::new("/footage/test.mov", 5_000_000_000, 0, ClipKind::Video);
 
         clip.subtitle_bold = true;
         clip.subtitle_italic = true;
@@ -1604,12 +1598,7 @@ mod tests {
         // Build internal compound tracks: one video track with two clips
         // (one of which has its own non-trivial transform/color settings).
         let mut inner_v_track = Track::new_video("V1");
-        let mut inner_clip_a = Clip::new(
-            "/footage/inner_a.mov",
-            2_000_000_000,
-            0,
-            ClipKind::Video,
-        );
+        let mut inner_clip_a = Clip::new("/footage/inner_a.mov", 2_000_000_000, 0, ClipKind::Video);
         inner_clip_a.scale = 1.25;
         inner_clip_a.brightness = 0.15;
         inner_v_track.add_clip(inner_clip_a);
@@ -1693,6 +1682,7 @@ mod tests {
                 media_duration_ns: Some(8_000_000_000),
                 volume: 1.0,
                 muted: false,
+                ..Default::default()
             },
             MulticamAngle {
                 id: "angle-1".to_string(),
@@ -1705,6 +1695,7 @@ mod tests {
                 media_duration_ns: Some(8_500_000_000),
                 volume: 0.0,
                 muted: true,
+                ..Default::default()
             },
         ]);
         multicam.multicam_switches = Some(vec![
@@ -1791,7 +1782,11 @@ mod tests {
 
         let json = crate::otio::writer::write_otio(&p).unwrap();
         let p2 = parse_otio(&json).unwrap();
-        assert_eq!(p2.tracks[0].clips.len(), 1, "audition clip should round-trip");
+        assert_eq!(
+            p2.tracks[0].clips.len(),
+            1,
+            "audition clip should round-trip"
+        );
         let clip2 = &p2.tracks[0].clips[0];
         assert_eq!(clip2.kind, ClipKind::Audition);
         assert_eq!(clip2.audition_active_take_index, 1);
@@ -1823,12 +1818,7 @@ mod tests {
         p.tracks.clear();
 
         let mut track = Track::new_video("V1");
-        let mut clip = Clip::new(
-            "/footage/test.mov",
-            5_000_000_000,
-            0,
-            ClipKind::Video,
-        );
+        let mut clip = Clip::new("/footage/test.mov", 5_000_000_000, 0, ClipKind::Video);
 
         // Two frei0r effects with mixed numeric + string params.
         let mut frei0r_a_params = HashMap::new();
@@ -1900,14 +1890,8 @@ mod tests {
         assert_eq!(clip2.frei0r_effects.len(), 2);
         assert_eq!(clip2.frei0r_effects[0].plugin_name, "cartoon");
         assert!(clip2.frei0r_effects[0].enabled);
-        assert_eq!(
-            clip2.frei0r_effects[0].params.get("amount"),
-            Some(&0.75)
-        );
-        assert_eq!(
-            clip2.frei0r_effects[0].params.get("threshold"),
-            Some(&0.42)
-        );
+        assert_eq!(clip2.frei0r_effects[0].params.get("amount"), Some(&0.75));
+        assert_eq!(clip2.frei0r_effects[0].params.get("threshold"), Some(&0.42));
         assert_eq!(
             clip2.frei0r_effects[0]
                 .string_params

@@ -643,6 +643,25 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "generate_sam_mask",
+            "description": "Run Segment Anything 3 on a single frame of a clip and append the resulting bezier-polygon mask. Accepts either a box prompt (drag a rectangle) or a point prompt (click; emulated as a tiny synthetic box since SAM 3's decoder is box-prompt-only). Blocking inference — the MCP call returns when the mask has been added to the project.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id":     { "type": "string", "description": "Clip to add the mask to." },
+                    "frame_ns":    { "type": "integer", "description": "Absolute source-media time in nanoseconds for the frame to segment. Defaults to the clip's source_in." },
+                    "box_x1":      { "type": "number", "description": "Box prompt: top-left X in clip-local 0..1 coordinates. All four box_* fields must be provided together." },
+                    "box_y1":      { "type": "number", "description": "Box prompt: top-left Y in clip-local 0..1 coordinates." },
+                    "box_x2":      { "type": "number", "description": "Box prompt: bottom-right X in clip-local 0..1 coordinates." },
+                    "box_y2":      { "type": "number", "description": "Box prompt: bottom-right Y in clip-local 0..1 coordinates." },
+                    "point_x":     { "type": "number", "description": "Point prompt: X in clip-local 0..1 coordinates. Ignored if box_* fields are also set." },
+                    "point_y":     { "type": "number", "description": "Point prompt: Y in clip-local 0..1 coordinates." },
+                    "tolerance_px": { "type": "number", "description": "Douglas-Peucker polygon simplification tolerance in source-image pixels. Defaults to 2.0. Larger values produce coarser polygons with fewer control points." }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
             "name": "set_clip_mask",
             "description": "Set shape mask on a clip (rectangle, ellipse, or bezier path) to restrict visible area. Creates mask if absent.",
             "inputSchema": {
@@ -2045,6 +2064,24 @@ fn tools_list() -> Value {
                 "required": ["clip_id", "angle_index"]
             }
         },
+        {
+            "name": "set_multicam_angle_color",
+            "description": "Set per-angle color grade and/or LUT for a multicam angle. When set, these override the clip-level values for this angle. Omit a field to keep its current value. Pass an empty lut_paths array to clear the per-angle LUT (falls back to clip-level).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "ID of the multicam clip" },
+                    "angle_index": { "type": "integer", "description": "0-based angle index" },
+                    "brightness": { "type": "number", "description": "Brightness (−1.0 to 1.0, neutral 0.0); omit to keep current" },
+                    "contrast": { "type": "number", "description": "Contrast (0.0 to 2.0, neutral 1.0); omit to keep current" },
+                    "saturation": { "type": "number", "description": "Saturation (0.0 to 2.0, neutral 1.0); omit to keep current" },
+                    "temperature": { "type": "number", "description": "Temperature in Kelvin (2000 to 10000, neutral 6500); omit to keep current" },
+                    "tint": { "type": "number", "description": "Tint (−1.0 to 1.0, neutral 0.0); omit to keep current" },
+                    "lut_paths": { "type": "array", "items": { "type": "string" }, "description": "Per-angle .cube LUT file paths; overrides clip-level LUT. Empty array clears." }
+                },
+                "required": ["clip_id", "angle_index"]
+            }
+        },
         // ── Audition / clip-versions tools ────────────────────────────────
         {
             "name": "create_audition_clip",
@@ -2235,6 +2272,68 @@ fn tools_list() -> Value {
                     "path": { "type": "string", "description": "Output file path for the .srt file" }
                 },
                 "required": ["path"]
+            }
+        },
+        {
+            "name": "load_script",
+            "description": "Parse a screenplay file (Final Draft .fdx or Fountain .fountain) and load it for script-to-timeline alignment. Returns the list of scenes.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path to the screenplay file (.fdx or .fountain)" }
+                },
+                "required": ["path"]
+            }
+        },
+        {
+            "name": "get_script_scenes",
+            "description": "List the scenes from the currently loaded screenplay.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        },
+        {
+            "name": "run_script_alignment",
+            "description": "Run speech-to-text on the specified clips and align transcripts to the loaded screenplay. Returns scene-to-clip mappings with confidence scores.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_paths": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "List of absolute paths to media clips to transcribe and align"
+                    },
+                    "confidence_threshold": {
+                        "type": "number",
+                        "description": "Minimum confidence (0.0-1.0) for a match. Default 0.15"
+                    }
+                },
+                "required": ["clip_paths"]
+            }
+        },
+        {
+            "name": "apply_script_assembly",
+            "description": "Assemble the timeline from the most recent script alignment results. Places clips in screenplay order with optional scene heading title cards.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "include_titles": {
+                        "type": "boolean",
+                        "description": "Whether to add scene heading title cards (default true)"
+                    }
+                }
+            }
+        },
+        {
+            "name": "reorder_by_script",
+            "description": "Re-sort clips on a track by their screenplay scene order. Only affects clips that were placed via script-to-timeline assembly.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string", "description": "ID of the track to reorder" }
+                },
+                "required": ["track_id"]
             }
         }
     ]})
@@ -2564,10 +2663,7 @@ fn dispatch_tool_payload(
 
         "set_clip_hsl_qualifier" => {
             let clip_id = arg_str!(args, "clip_id");
-            let clear = args
-                .get("clear")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
+            let clear = args.get("clear").and_then(|v| v.as_bool()).unwrap_or(false);
             let qualifier = if clear {
                 None
             } else {
@@ -2644,6 +2740,19 @@ fn dispatch_tool_payload(
             clip_id: arg_str!(args, "clip_id"),
             enabled: args.get("enabled").and_then(|v| v.as_bool()),
             shutter_angle: args.get("shutter_angle").and_then(|v| v.as_f64()),
+            reply: tx,
+        },
+
+        "generate_sam_mask" => McpCommand::GenerateSamMask {
+            clip_id: arg_str!(args, "clip_id"),
+            frame_ns: args.get("frame_ns").and_then(|v| v.as_u64()),
+            box_x1: args.get("box_x1").and_then(|v| v.as_f64()),
+            box_y1: args.get("box_y1").and_then(|v| v.as_f64()),
+            box_x2: args.get("box_x2").and_then(|v| v.as_f64()),
+            box_y2: args.get("box_y2").and_then(|v| v.as_f64()),
+            point_x: args.get("point_x").and_then(|v| v.as_f64()),
+            point_y: args.get("point_y").and_then(|v| v.as_f64()),
+            tolerance_px: args.get("tolerance_px").and_then(|v| v.as_f64()),
             reply: tx,
         },
 
@@ -3432,22 +3541,10 @@ fn dispatch_tool_payload(
         },
         "set_clip_auto_crop_track" => McpCommand::SetClipAutoCropTrack {
             clip_id: arg_str!(args, "clip_id"),
-            center_x: args
-                .get("center_x")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.5),
-            center_y: args
-                .get("center_y")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.5),
-            width: args
-                .get("width")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.25),
-            height: args
-                .get("height")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.25),
+            center_x: args.get("center_x").and_then(|v| v.as_f64()).unwrap_or(0.5),
+            center_y: args.get("center_y").and_then(|v| v.as_f64()).unwrap_or(0.5),
+            width: args.get("width").and_then(|v| v.as_f64()).unwrap_or(0.25),
+            height: args.get("height").and_then(|v| v.as_f64()).unwrap_or(0.25),
             padding: args.get("padding").and_then(|v| v.as_f64()),
             reply: tx,
         },
@@ -3639,6 +3736,21 @@ fn dispatch_tool_payload(
             muted: args["muted"].as_bool(),
             reply: tx,
         },
+        "set_multicam_angle_color" => McpCommand::SetMulticamAngleColor {
+            clip_id: arg_str!(args, "clip_id"),
+            angle_index: arg_u64!(args, "angle_index", 0) as usize,
+            brightness: args["brightness"].as_f64().map(|v| v as f32),
+            contrast: args["contrast"].as_f64().map(|v| v as f32),
+            saturation: args["saturation"].as_f64().map(|v| v as f32),
+            temperature: args["temperature"].as_f64().map(|v| v as f32),
+            tint: args["tint"].as_f64().map(|v| v as f32),
+            lut_paths: args["lut_paths"].as_array().map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            }),
+            reply: tx,
+        },
         // ── Audition / clip-versions tools ────────────────────────────────
         "create_audition_clip" => {
             let clip_ids: Vec<String> = args["clip_ids"]
@@ -3736,13 +3848,48 @@ fn dispatch_tool_payload(
             highlight_background: args["highlight_background"].as_bool(),
             highlight_shadow: args["highlight_shadow"].as_bool(),
             bg_highlight_color: args["bg_highlight_color"].as_u64().map(|v| v as u32),
-            highlight_stroke_color: args["highlight_stroke_color"]
-                .as_u64()
-                .map(|v| v as u32),
+            highlight_stroke_color: args["highlight_stroke_color"].as_u64().map(|v| v as u32),
             reply: tx,
         },
         "export_srt" => McpCommand::ExportSrt {
             path: arg_str!(args, "path"),
+            reply: tx,
+        },
+        // ── Script-to-Timeline tools ─────────────────────────────────────
+        "load_script" => McpCommand::LoadScript {
+            path: arg_str!(args, "path"),
+            reply: tx,
+        },
+        "get_script_scenes" => McpCommand::GetScriptScenes { reply: tx },
+        "run_script_alignment" => {
+            let clip_paths: Vec<String> = args
+                .get("clip_paths")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let threshold = args
+                .get("confidence_threshold")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.15);
+            McpCommand::RunScriptAlignment {
+                clip_paths,
+                confidence_threshold: threshold,
+                reply: tx,
+            }
+        }
+        "apply_script_assembly" => McpCommand::ApplyScriptAssembly {
+            include_titles: args
+                .get("include_titles")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            reply: tx,
+        },
+        "reorder_by_script" => McpCommand::ReorderByScript {
+            track_id: arg_str!(args, "track_id"),
             reply: tx,
         },
 

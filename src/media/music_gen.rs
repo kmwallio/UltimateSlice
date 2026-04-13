@@ -285,12 +285,20 @@ fn run_music_gen_inner(job: &MusicGenJob) -> Result<(PathBuf, u64), String> {
     let tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path)
         .map_err(|e| format!("Failed to load tokenizer: {e}"))?;
 
+    // Route every MusicGen session through the shared execution-
+    // provider configuration so GPU acceleration (CUDA / ROCm /
+    // OpenVINO) lights up when selected in Preferences. On a
+    // CPU-only build this collapses to the same behavior as before.
+    use super::ai_providers;
     let load_session = |name: &str| -> Result<Session, String> {
         Session::builder()
             .and_then(|b| {
                 Ok(b.with_optimization_level(
                     ort::session::builder::GraphOptimizationLevel::Level3,
                 )?)
+            })
+            .and_then(|b: ort::session::builder::SessionBuilder| {
+                ai_providers::configure_session_builder(b, ai_providers::current_backend())
             })
             .and_then(|mut b| b.commit_from_file(model_dir.join(name).to_string_lossy().as_ref()))
             .map_err(|e| format!("Failed to load {name}: {e}"))

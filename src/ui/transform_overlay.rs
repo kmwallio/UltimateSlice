@@ -58,6 +58,13 @@ enum Handle {
     TrackingTopRight,
     TrackingBottomLeft,
     TrackingBottomRight,
+    /// Drag to capture a SAM box prompt. Used when the overlay is in
+    /// "SAM prompt mode" (Phase 2b/3). On drag_end the captured
+    /// widget-space rectangle is converted to normalized clip-local
+    /// coordinates and forwarded to the installed `sam_prompt_callback`.
+    SamPromptBox,
+    /// Drag to draw a freehand stroke in a ClipKind::Drawing clip.
+    Drawing,
 }
 
 struct DragState {
@@ -84,10 +91,15 @@ struct DragState {
     start_tracking_cy: f64,
     start_tracking_width: f64,
     start_tracking_height: f64,
+    /// Color for the current drawing stroke (0xRRGGBBAA).
+    pub drawing_color: u32,
+    /// Width for the current drawing stroke.
+    pub drawing_width: f64,
 }
 
 pub struct TransformOverlay {
     pub drawing_area: DrawingArea,
+    pub active_tool: Rc<Cell<crate::ui::timeline::ActiveTool>>,
     scale: Rc<Cell<f64>>,
     position_x: Rc<Cell<f64>>,
     position_y: Rc<Cell<f64>>,
@@ -126,6 +138,40 @@ pub struct TransformOverlay {
     tracking_width: Rc<Cell<f64>>,
     tracking_height: Rc<Cell<f64>>,
     tracking_rotation: Rc<Cell<f64>>,
+    // ── SAM box prompt capture (Phase 2b/3) ──────────────────────────
+    /// When `true` the overlay's gesture suppresses all normal
+    /// hit-testing and instead captures a box prompt drag for SAM.
+    /// Toggled by `enter_sam_prompt_mode` / `exit_sam_prompt_mode`.
+    sam_prompt_mode: Rc<Cell<bool>>,
+    /// Widget-space `(x, y)` where the user pressed the mouse button
+    /// to begin the prompt drag. `None` when not currently dragging.
+    sam_prompt_start: Rc<Cell<Option<(f64, f64)>>>,
+    /// Widget-space `(x, y)` of the current drag position — updated
+    /// continuously by drag_update so the draw function can render
+    /// a live preview rectangle.
+    sam_prompt_current: Rc<Cell<Option<(f64, f64)>>>,
+    /// Callback to invoke with the captured normalized clip-local
+    /// box `(x1, y1, x2, y2)` on drag_end. Cleared after firing or
+    /// on `exit_sam_prompt_mode`. Installed by `enter_sam_prompt_mode`.
+    sam_prompt_callback: Rc<RefCell<Option<Box<dyn Fn(f64, f64, f64, f64)>>>>,
+    // ── Drawing tool state ──────────────────────────────────────────
+    /// Current brush color as 0xRRGGBBAA. Applied to the next stroke/shape.
+    drawing_color: Rc<Cell<u32>>,
+    /// Current brush width in pixels (relative to 1080p height).
+    drawing_width: Rc<Cell<f64>>,
+    /// Which shape kind the Draw tool will commit on mouse-up.
+    drawing_kind: Rc<Cell<crate::model::clip::DrawingKind>>,
+    /// Optional fill color for Rectangle/Ellipse. `None` = stroke only.
+    drawing_fill: Rc<Cell<Option<u32>>>,
+    /// Snapshot of the drawing items under the playhead. The app
+    /// pushes this via `set_current_drawing_items` so the overlay
+    /// can hit-test clicks and paint the selected item's highlight
+    /// without having to round-trip to the project model on every
+    /// frame.
+    drawing_items_snapshot: Rc<RefCell<Vec<crate::model::clip::DrawingItem>>>,
+    /// Index (into `drawing_items_snapshot`) of the currently
+    /// selected item, or `None` when no click-to-select is active.
+    selected_drawing_item: Rc<Cell<Option<usize>>>,
 }
 
 impl TransformOverlay {
@@ -140,7 +186,16 @@ impl TransformOverlay {
         on_mask_path_change: impl Fn(&[crate::model::clip::BezierPoint]) + 'static,
         on_mask_path_dbl_click: impl Fn(&[crate::model::clip::BezierPoint]) + 'static,
         on_tracking_region_change: impl Fn(f64, f64, f64, f64) + 'static,
+        on_drawing_finish: impl Fn(crate::model::clip::DrawingItem) + 'static,
+        // `Some(idx)` = delete the specific item at that index in
+        // the overlay's current drawing snapshot; `None` = the
+        // pre-selection LIFO behaviour (pop the most-recent item
+        // in the drawing clip under the playhead).
+        on_drawing_delete_at: impl Fn(Option<usize>) + 'static,
+        active_tool: crate::ui::timeline::ActiveTool,
     ) -> Self {
+        let active_tool = Rc::new(Cell::new(active_tool));
+        let on_drawing_delete_at = Rc::new(on_drawing_delete_at);
         let scale = Rc::new(Cell::new(1.0_f64));
         let position_x = Rc::new(Cell::new(0.0_f64));
         let position_y = Rc::new(Cell::new(0.0_f64));
@@ -175,6 +230,23 @@ impl TransformOverlay {
         let tracking_width = Rc::new(Cell::new(0.25f64));
         let tracking_height = Rc::new(Cell::new(0.25f64));
         let tracking_rotation = Rc::new(Cell::new(0.0f64));
+        // SAM box-prompt capture state (Phase 2b/3).
+        let sam_prompt_mode = Rc::new(Cell::new(false));
+        let sam_prompt_start: Rc<Cell<Option<(f64, f64)>>> = Rc::new(Cell::new(None));
+        let sam_prompt_current: Rc<Cell<Option<(f64, f64)>>> = Rc::new(Cell::new(None));
+        let sam_prompt_callback: Rc<RefCell<Option<Box<dyn Fn(f64, f64, f64, f64)>>>> =
+            Rc::new(RefCell::new(None));
+
+        let current_drawing_points: Rc<RefCell<Vec<(f64, f64)>>> =
+            Rc::new(RefCell::new(Vec::new()));
+        let drawing_color = Rc::new(Cell::new(0xFF0000FF)); // Default red
+        let drawing_width = Rc::new(Cell::new(5.0)); // Default 5px
+        let drawing_kind = Rc::new(Cell::new(crate::model::clip::DrawingKind::Stroke));
+        let drawing_fill: Rc<Cell<Option<u32>>> = Rc::new(Cell::new(None));
+        let drawing_items_snapshot: Rc<RefCell<Vec<crate::model::clip::DrawingItem>>> =
+            Rc::new(RefCell::new(Vec::new()));
+        let selected_drawing_item: Rc<Cell<Option<usize>>> = Rc::new(Cell::new(None));
+        let on_drawing_finish = Rc::new(on_drawing_finish);
 
         let da = DrawingArea::new();
         da.set_hexpand(true);
@@ -215,9 +287,23 @@ impl TransformOverlay {
             let tracking_width = tracking_width.clone();
             let tracking_height = tracking_height.clone();
             let tracking_rotation_d = tracking_rotation.clone();
+            let sam_prompt_mode_draw = sam_prompt_mode.clone();
+            let sam_prompt_start_draw = sam_prompt_start.clone();
+            let sam_prompt_current_draw = sam_prompt_current.clone();
+
+            let drawing_points = current_drawing_points.clone();
+            let drawing_color_d = drawing_color.clone();
+            let drawing_width_d = drawing_width.clone();
+            let drawing_kind_draw = drawing_kind.clone();
+            let drawing_fill_draw = drawing_fill.clone();
+            let active_tool_draw = active_tool.clone();
+            let drawing_items_draw = drawing_items_snapshot.clone();
+            let selected_drawing_draw = selected_drawing_item.clone();
 
             da.set_draw_func(move |da, cr, ww, wh| {
-                if !selected.get() {
+                let draw_active =
+                    active_tool_draw.get() == crate::ui::timeline::ActiveTool::Draw;
+                if !selected.get() && !draw_active {
                     return;
                 }
                 // Always use project dimensions for the canvas boundary.
@@ -225,9 +311,251 @@ impl TransformOverlay {
                 let _ = &picture; // kept for potential future use
                 let (vx, vy, vw, vh) =
                     canvas_video_rect(da, &canvas_widget, ww, wh, proj_w.get(), proj_h.get());
+
+                // ── Live Drawing preview ────────────────────────
+                let pts = drawing_points.borrow();
+                if !pts.is_empty() {
+                    use crate::model::clip::DrawingKind;
+                    let color = drawing_color_d.get();
+                    let (cr_r, cr_g, cr_b, cr_a) = (
+                        ((color >> 24) & 0xFF) as f64 / 255.0,
+                        ((color >> 16) & 0xFF) as f64 / 255.0,
+                        ((color >> 8) & 0xFF) as f64 / 255.0,
+                        (color & 0xFF) as f64 / 255.0,
+                    );
+                    cr.set_source_rgba(cr_r, cr_g, cr_b, cr_a);
+                    cr.set_line_width(drawing_width_d.get());
+                    cr.set_line_cap(gtk4::cairo::LineCap::Round);
+                    cr.set_line_join(gtk4::cairo::LineJoin::Round);
+                    let kind = drawing_kind_draw.get();
+                    let p0 = pts[0];
+                    let p1 = *pts.last().unwrap();
+                    match kind {
+                        DrawingKind::Stroke => {
+                            for (i, (wx, wy)) in pts.iter().enumerate() {
+                                if i == 0 {
+                                    cr.move_to(*wx, *wy);
+                                } else {
+                                    cr.line_to(*wx, *wy);
+                                }
+                            }
+                            let _ = cr.stroke();
+                        }
+                        DrawingKind::Rectangle => {
+                            let x = p0.0.min(p1.0);
+                            let y = p0.1.min(p1.1);
+                            let rw = (p0.0 - p1.0).abs();
+                            let rh = (p0.1 - p1.1).abs();
+                            cr.rectangle(x, y, rw, rh);
+                            if let Some(fc) = drawing_fill_draw.get() {
+                                let (fr, fg, fb, fa) = (
+                                    ((fc >> 24) & 0xFF) as f64 / 255.0,
+                                    ((fc >> 16) & 0xFF) as f64 / 255.0,
+                                    ((fc >> 8) & 0xFF) as f64 / 255.0,
+                                    (fc & 0xFF) as f64 / 255.0,
+                                );
+                                cr.set_source_rgba(fr, fg, fb, fa);
+                                let _ = cr.fill_preserve();
+                                cr.set_source_rgba(cr_r, cr_g, cr_b, cr_a);
+                            }
+                            let _ = cr.stroke();
+                        }
+                        DrawingKind::Ellipse => {
+                            let x0 = p0.0.min(p1.0);
+                            let y0 = p0.1.min(p1.1);
+                            let rw = (p0.0 - p1.0).abs().max(1.0);
+                            let rh = (p0.1 - p1.1).abs().max(1.0);
+                            let cx = x0 + rw * 0.5;
+                            let cy = y0 + rh * 0.5;
+                            cr.save().ok();
+                            cr.translate(cx, cy);
+                            cr.scale(rw * 0.5, rh * 0.5);
+                            cr.arc(0.0, 0.0, 1.0, 0.0, std::f64::consts::TAU);
+                            cr.restore().ok();
+                            if let Some(fc) = drawing_fill_draw.get() {
+                                let (fr, fg, fb, fa) = (
+                                    ((fc >> 24) & 0xFF) as f64 / 255.0,
+                                    ((fc >> 16) & 0xFF) as f64 / 255.0,
+                                    ((fc >> 8) & 0xFF) as f64 / 255.0,
+                                    (fc & 0xFF) as f64 / 255.0,
+                                );
+                                cr.set_source_rgba(fr, fg, fb, fa);
+                                let _ = cr.fill_preserve();
+                                cr.set_source_rgba(cr_r, cr_g, cr_b, cr_a);
+                            }
+                            let _ = cr.stroke();
+                        }
+                        DrawingKind::Arrow => {
+                            cr.move_to(p0.0, p0.1);
+                            cr.line_to(p1.0, p1.1);
+                            let _ = cr.stroke();
+                            let dx = p1.0 - p0.0;
+                            let dy = p1.1 - p0.1;
+                            let len = (dx * dx + dy * dy).sqrt().max(1.0);
+                            let ux = dx / len;
+                            let uy = dy / len;
+                            let head = (drawing_width_d.get() * 6.0).max(10.0);
+                            let (ca, sa) =
+                                (25f64.to_radians().cos(), 25f64.to_radians().sin());
+                            let lxa = p1.0 - head * (ux * ca - uy * sa);
+                            let lya = p1.1 - head * (uy * ca + ux * sa);
+                            let rxa = p1.0 - head * (ux * ca + uy * sa);
+                            let rya = p1.1 - head * (uy * ca - ux * sa);
+                            cr.move_to(p1.0, p1.1);
+                            cr.line_to(lxa, lya);
+                            cr.line_to(rxa, rya);
+                            cr.close_path();
+                            let _ = cr.fill();
+                        }
+                    }
+                }
+
+                // ── Selected drawing item highlight ─────────────
+                if let Some(sel_idx) = selected_drawing_draw.get() {
+                    let items = drawing_items_draw.borrow();
+                    if let Some(item) = items.get(sel_idx) {
+                        use crate::model::clip::DrawingKind;
+                        let (cx0, cy0, cx1, cy1) = match item.kind {
+                            DrawingKind::Stroke => {
+                                let mut min_x = f64::MAX;
+                                let mut min_y = f64::MAX;
+                                let mut max_x = f64::MIN;
+                                let mut max_y = f64::MIN;
+                                for (nx, ny) in &item.points {
+                                    let x = vx + nx * vw;
+                                    let y = vy + ny * vh;
+                                    min_x = min_x.min(x);
+                                    min_y = min_y.min(y);
+                                    max_x = max_x.max(x);
+                                    max_y = max_y.max(y);
+                                }
+                                (min_x, min_y, max_x, max_y)
+                            }
+                            _ => {
+                                let p0 = item.points[0];
+                                let p1 = *item.points.last().unwrap();
+                                let a = (vx + p0.0 * vw, vy + p0.1 * vh);
+                                let b = (vx + p1.0 * vw, vy + p1.1 * vh);
+                                (a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1))
+                            }
+                        };
+                        let pad = 4.0;
+                        cr.save().ok();
+                        cr.set_source_rgba(0.2, 0.8, 1.0, 0.9);
+                        cr.set_line_width(1.5);
+                        cr.set_dash(&[6.0, 4.0], 0.0);
+                        cr.rectangle(
+                            cx0 - pad,
+                            cy0 - pad,
+                            (cx1 - cx0) + pad * 2.0,
+                            (cy1 - cy0) + pad * 2.0,
+                        );
+                        let _ = cr.stroke();
+                        cr.restore().ok();
+                    }
+                }
+
                 // Always draw: dark vignette + canvas border
                 draw_outside_vignette(cr, ww as f64, wh as f64, vx, vy, vw, vh);
                 draw_frame_border(cr, vx, vy, vw, vh);
+
+                // ── Background-encode feedback ──────────────────
+                // Visible in *any* tool while a drawing animation
+                // WebM is baking; keeps users from thinking the
+                // static PNG they see is the final render.
+                if !draw_active
+                    && crate::media::drawing_render::drawing_encode_is_pending()
+                {
+                    let note = "Baking drawing animation…";
+                    cr.select_font_face(
+                        "Sans",
+                        gtk4::cairo::FontSlant::Normal,
+                        gtk4::cairo::FontWeight::Bold,
+                    );
+                    cr.set_font_size(12.0);
+                    let ext = cr.text_extents(note).unwrap_or(
+                        gtk4::cairo::TextExtents::new(0.0, 0.0, 180.0, 12.0, 0.0, 0.0),
+                    );
+                    let pill_w = ext.width() + 24.0;
+                    let pill_h = ext.height() + 12.0;
+                    let px = vx + 12.0;
+                    let py = vy + 12.0;
+                    cr.set_source_rgba(0.0, 0.0, 0.0, 0.72);
+                    cr.rectangle(px, py, pill_w, pill_h);
+                    let _ = cr.fill();
+                    cr.set_source_rgba(0.2, 0.8, 1.0, 0.95);
+                    cr.move_to(px + 12.0, py + 6.0 + ext.height());
+                    let _ = cr.show_text(note);
+                }
+
+                // ── Draw-tool HUD: show current brush state ─────
+                if draw_active {
+                    use crate::model::clip::DrawingKind;
+                    let kind_label = match drawing_kind_draw.get() {
+                        DrawingKind::Stroke => "Stroke",
+                        DrawingKind::Rectangle => "Rectangle",
+                        DrawingKind::Ellipse => "Ellipse",
+                        DrawingKind::Arrow => "Arrow",
+                    };
+                    let color = drawing_color_d.get();
+                    let w = drawing_width_d.get();
+                    let fill_text = match drawing_fill_draw.get() {
+                        Some(_) => " +fill",
+                        None => "",
+                    };
+                    // Signal a background WebM bake in flight so the
+                    // user knows the static PNG they're seeing isn't
+                    // the final state.
+                    let baking_text =
+                        if crate::media::drawing_render::drawing_encode_is_pending() {
+                            "   • baking animation…"
+                        } else {
+                            ""
+                        };
+                    let label = format!(
+                        "Draw [{kind_label}]  •  #{:06X}  •  {w:.0}px{fill_text}{baking_text}   (1/2/3/4 pick shape · click to select · Del removes)",
+                        color >> 8
+                    );
+                    // Dark pill in the canvas top-left.
+                    let pad_x = 12.0;
+                    let pad_y = 6.0;
+                    cr.select_font_face(
+                        "Sans",
+                        gtk4::cairo::FontSlant::Normal,
+                        gtk4::cairo::FontWeight::Bold,
+                    );
+                    cr.set_font_size(12.0);
+                    let extents = cr
+                        .text_extents(&label)
+                        .unwrap_or(gtk4::cairo::TextExtents::new(
+                            0.0, 0.0, 200.0, 12.0, 0.0, 0.0,
+                        ));
+                    let pill_w = extents.width() + pad_x * 2.0;
+                    let pill_h = extents.height() + pad_y * 2.0;
+                    let pill_x = vx + 12.0;
+                    let pill_y = vy + 12.0;
+                    cr.set_source_rgba(0.0, 0.0, 0.0, 0.72);
+                    cr.rectangle(pill_x, pill_y, pill_w, pill_h);
+                    let _ = cr.fill();
+                    // Color chip.
+                    let chip = (pill_h - pad_y * 2.0).max(8.0);
+                    let chip_x = pill_x + pad_x * 0.4;
+                    let chip_y = pill_y + (pill_h - chip) * 0.5;
+                    cr.set_source_rgba(
+                        ((color >> 24) & 0xFF) as f64 / 255.0,
+                        ((color >> 16) & 0xFF) as f64 / 255.0,
+                        ((color >> 8) & 0xFF) as f64 / 255.0,
+                        (color & 0xFF) as f64 / 255.0,
+                    );
+                    cr.rectangle(chip_x, chip_y, chip, chip);
+                    let _ = cr.fill();
+                    cr.set_source_rgba(1.0, 1.0, 1.0, 0.95);
+                    cr.move_to(
+                        pill_x + pad_x + chip + 6.0,
+                        pill_y + pad_y + extents.height(),
+                    );
+                    let _ = cr.show_text(&label);
+                }
                 // Only draw clip handles when clip doesn't fill the canvas exactly
                 let s = scale.get();
                 let px = position_x.get();
@@ -293,6 +621,30 @@ impl TransformOverlay {
                         tracking_region_editing.get(),
                     );
                 }
+                // ── SAM prompt box live preview ─────────────────
+                // Draw a semi-transparent blue rectangle between
+                // the drag start and the current cursor position
+                // while the user is drawing a SAM prompt box.
+                if sam_prompt_mode_draw.get() {
+                    if let (Some((sx, sy)), Some((cx, cy))) = (
+                        sam_prompt_start_draw.get(),
+                        sam_prompt_current_draw.get(),
+                    ) {
+                        let rx = sx.min(cx);
+                        let ry = sy.min(cy);
+                        let rw = (cx - sx).abs();
+                        let rh = (cy - sy).abs();
+                        // Semi-transparent blue fill.
+                        cr.set_source_rgba(0.2, 0.5, 1.0, 0.25);
+                        cr.rectangle(rx, ry, rw, rh);
+                        let _ = cr.fill();
+                        // Blue outline.
+                        cr.set_source_rgba(0.2, 0.5, 1.0, 0.85);
+                        cr.set_line_width(1.5);
+                        cr.rectangle(rx, ry, rw, rh);
+                        let _ = cr.stroke();
+                    }
+                }
             });
         }
 
@@ -339,12 +691,141 @@ impl TransformOverlay {
             let tracking_width_d = tracking_width.clone();
             let tracking_height_d = tracking_height.clone();
             let tracking_rotation_d = tracking_rotation.clone();
+            let sam_prompt_mode_d = sam_prompt_mode.clone();
+            let sam_prompt_start_d = sam_prompt_start.clone();
+            let sam_prompt_current_d = sam_prompt_current.clone();
+
+            let active_tool_d = active_tool.clone();
+            let drawing_points_d = current_drawing_points.clone();
+            let drawing_color_d = drawing_color.clone();
+            let drawing_width_d = drawing_width.clone();
 
             gesture.connect_drag_begin(move |_g, sx, sy| {
-                if !selected.get() {
+                // Draw tool always captures — no clip selection
+                // required because drawing can create a new clip at
+                // the playhead if none exists.
+                let draw_active = active_tool_d.get() == crate::ui::timeline::ActiveTool::Draw;
+                if !draw_active && !selected.get() {
                     return;
                 }
                 da_ref.grab_focus();
+
+                // ── Draw Tool handling ──────────────────────────
+                if draw_active {
+                    drawing_points_d.borrow_mut().clear();
+                    drawing_points_d.borrow_mut().push((sx, sy));
+                    on_drag_begin();
+                    *drag_state.borrow_mut() = Some(DragState {
+                        handle: Handle::Drawing,
+                        start_wx: sx,
+                        start_wy: sy,
+                        start_scale: scale.get(),
+                        start_px: position_x.get(),
+                        start_py: position_y.get(),
+                        start_crop_left: crop_left.get(),
+                        start_crop_right: crop_right.get(),
+                        start_crop_top: crop_top.get(),
+                        start_crop_bottom: crop_bottom.get(),
+                        proj_w: proj_w.get(),
+                        proj_h: proj_h.get(),
+                        vx: 0.0,
+                        vy: 0.0,
+                        vw: 0.0,
+                        vh: 0.0,
+                        start_path_point: None,
+                        start_tracking_cx: 0.0,
+                        start_tracking_cy: 0.0,
+                        start_tracking_width: 0.0,
+                        start_tracking_height: 0.0,
+                        drawing_color: drawing_color_d.get(),
+                        drawing_width: drawing_width_d.get(),
+                    });
+                    // Need video rect for normalized coords later
+                    let ww = da_ref.width();
+                    let wh = da_ref.height();
+                    let (vx_full, vy_full, vw_full, vh_full) = canvas_video_rect(
+                        &da_ref,
+                        &canvas_widget,
+                        ww,
+                        wh,
+                        proj_w.get(),
+                        proj_h.get(),
+                    );
+                    let ix = content_inset_x.get();
+                    let iy = content_inset_y.get();
+                    if let Some(ds) = drag_state.borrow_mut().as_mut() {
+                        ds.vx = vx_full + vw_full * ix;
+                        ds.vy = vy_full + vh_full * iy;
+                        ds.vw = vw_full * (1.0 - 2.0 * ix);
+                        ds.vh = vh_full * (1.0 - 2.0 * iy);
+                    }
+                    da_ref.queue_draw();
+                    return;
+                }
+
+                // SAM prompt mode short-circuits the whole hit-test
+                // chain. The user wants to draw a rectangle anywhere
+                // over the clip — we don't care about existing
+                // handles. Capture (sx, sy) as the drag start, seed
+                // the current drag position, and install a minimal
+                // DragState with `Handle::SamPromptBox` so
+                // drag_update/drag_end can dispatch on it.
+                if sam_prompt_mode_d.get() {
+                    sam_prompt_start_d.set(Some((sx, sy)));
+                    sam_prompt_current_d.set(Some((sx, sy)));
+                    on_drag_begin();
+                    *drag_state.borrow_mut() = Some(DragState {
+                        handle: Handle::SamPromptBox,
+                        start_wx: sx,
+                        start_wy: sy,
+                        start_scale: scale.get(),
+                        start_px: position_x.get(),
+                        start_py: position_y.get(),
+                        start_crop_left: crop_left.get(),
+                        start_crop_right: crop_right.get(),
+                        start_crop_top: crop_top.get(),
+                        start_crop_bottom: crop_bottom.get(),
+                        proj_w: proj_w.get(),
+                        proj_h: proj_h.get(),
+                        // Video-rect is needed in drag_end for the
+                        // widget → normalized coord conversion, so
+                        // cache it here the same way the normal
+                        // path below does.
+                        vx: 0.0,
+                        vy: 0.0,
+                        vw: 0.0,
+                        vh: 0.0,
+                        start_path_point: None,
+                        start_tracking_cx: 0.0,
+                        start_tracking_cy: 0.0,
+                        start_tracking_width: 0.0,
+                        start_tracking_height: 0.0,
+                        drawing_color: drawing_color_d.get(),
+                        drawing_width: drawing_width_d.get(),
+                    });
+                    // Fill in the cached video rect now — it'll be
+                    // read by drag_end to build the normalized box.
+                    let ww = da_ref.width();
+                    let wh = da_ref.height();
+                    let (vx_full, vy_full, vw_full, vh_full) = canvas_video_rect(
+                        &da_ref,
+                        &canvas_widget,
+                        ww,
+                        wh,
+                        proj_w.get(),
+                        proj_h.get(),
+                    );
+                    let ix = content_inset_x.get();
+                    let iy = content_inset_y.get();
+                    if let Some(ds) = drag_state.borrow_mut().as_mut() {
+                        ds.vx = vx_full + vw_full * ix;
+                        ds.vy = vy_full + vh_full * iy;
+                        ds.vw = vw_full * (1.0 - 2.0 * ix);
+                        ds.vh = vh_full * (1.0 - 2.0 * iy);
+                    }
+                    da_ref.queue_draw();
+                    return;
+                }
                 let ww = da_ref.width();
                 let wh = da_ref.height();
                 let _ = &picture; // kept for potential future use
@@ -659,6 +1140,8 @@ impl TransformOverlay {
                         start_tracking_cy,
                         start_tracking_width,
                         start_tracking_height,
+                        drawing_color: drawing_color_d.get(),
+                        drawing_width: drawing_width_d.get(),
                     });
                 }
             });
@@ -685,6 +1168,7 @@ impl TransformOverlay {
             let adjustment_mode = adjustment_mode.clone();
             let tracking_region_enabled_drag = tracking_region_enabled.clone();
             let tracking_region_editing_drag = tracking_region_editing.clone();
+            let sam_prompt_current_drag = sam_prompt_current.clone();
             let tracking_center_x_drag = tracking_center_x.clone();
             let tracking_center_y_drag = tracking_center_y.clone();
             let tracking_width_drag = tracking_width.clone();
@@ -692,16 +1176,31 @@ impl TransformOverlay {
             let tracking_rotation_drag = tracking_rotation.clone();
             let da_ref = da.clone();
 
+            let drawing_points_drag = current_drawing_points.clone();
+
             gesture.connect_drag_update(move |g, off_x, off_y| {
                 let ds_borrow = drag_state.borrow_mut();
                 let Some(ref ds) = *ds_borrow else {
                     return;
                 };
+
+                // ── Draw Tool handling ──────────────────────────
+                if ds.handle == Handle::Drawing {
+                    let cur_x = ds.start_wx + off_x;
+                    let cur_y = ds.start_wy + off_y;
+                    drawing_points_drag.borrow_mut().push((cur_x, cur_y));
+                    da_ref.queue_draw();
+                    return;
+                }
+
                 let rot_rad = (-rotation_for_drag.get()).to_radians();
                 let local_dx = off_x * rot_rad.cos() + off_y * rot_rad.sin();
                 let local_dy = -off_x * rot_rad.sin() + off_y * rot_rad.cos();
 
                 match ds.handle {
+                    Handle::Drawing => {
+                        // Drawing drag is handled separately above via drag_update_drawing.
+                    }
                     Handle::Rotate => {
                         let (clip_cx, clip_cy, _, _, _, _) = clip_canvas_geometry(
                             ds.vx,
@@ -958,6 +1457,15 @@ impl TransformOverlay {
                             }
                         }
                     }
+                    Handle::SamPromptBox => {
+                        // Track the current drag position so the draw
+                        // function can render a live preview rectangle.
+                        // The actual conversion to a normalized box
+                        // and the callback invocation happen in
+                        // drag_end.
+                        sam_prompt_current_drag
+                            .set(Some((ds.start_wx + off_x, ds.start_wy + off_y)));
+                    }
                     Handle::None => {}
                 }
                 drop(ds_borrow);
@@ -969,8 +1477,207 @@ impl TransformOverlay {
         {
             let drag_state = drag_state.clone();
             let on_drag_end = Rc::new(on_drag_end);
+            let sam_prompt_mode_end = sam_prompt_mode.clone();
+            let sam_prompt_start_end = sam_prompt_start.clone();
+            let sam_prompt_current_end = sam_prompt_current.clone();
+            let sam_prompt_callback_end = sam_prompt_callback.clone();
+            let scale_end = scale.clone();
+            let position_x_end = position_x.clone();
+            let position_y_end = position_y.clone();
+            let rotation_end = rotation.clone();
+            let adjustment_mode_end = adjustment_mode.clone();
+            let da_end = da.clone();
+            let drawing_points_end = current_drawing_points.clone();
+            let on_drawing_finish_end = on_drawing_finish.clone();
+            let drawing_kind_end = drawing_kind.clone();
+            let drawing_fill_end = drawing_fill.clone();
+            let drawing_items_snapshot_end = drawing_items_snapshot.clone();
+            let selected_drawing_item_end = selected_drawing_item.clone();
+
             gesture.connect_drag_end(move |_g, _ox, _oy| {
-                *drag_state.borrow_mut() = None;
+                // Capture the completed handle BEFORE clearing
+                // drag_state so the SAM branch below can read the
+                // cached video rect out of it.
+                let completed = drag_state.borrow_mut().take();
+
+                if let Some(ds) = completed.as_ref() {
+                    // ── Draw Tool handling ──────────────────────
+                    if ds.handle == Handle::Drawing {
+                        // Take the collected points out of the cell so
+                        // we never hold an immutable borrow at the
+                        // same time as the clear() below (RefCell
+                        // would panic — see past bug).
+                        let collected: Vec<(f64, f64)> =
+                            std::mem::take(&mut *drawing_points_end.borrow_mut());
+                        // A press-release without measurable motion is
+                        // a click, not a stroke — route it through
+                        // hit-testing so the user can select an
+                        // existing drawing item for per-item Delete.
+                        let moved = collected.len() > 1
+                            || collected
+                                .last()
+                                .map(|last| {
+                                    (last.0 - ds.start_wx).abs() > 3.0
+                                        || (last.1 - ds.start_wy).abs() > 3.0
+                                })
+                                .unwrap_or(false);
+                        if !moved {
+                            let click_wx = collected.first().map(|p| p.0).unwrap_or(ds.start_wx);
+                            let click_wy = collected.first().map(|p| p.1).unwrap_or(ds.start_wy);
+                            let items = drawing_items_snapshot_end.borrow();
+                            // Iterate in reverse so the top-most
+                            // (last-drawn) hit wins.
+                            let hit = items.iter().enumerate().rev().find_map(|(i, it)| {
+                                drawing_item_hit(it, click_wx, click_wy, ds.vx, ds.vy, ds.vw, ds.vh)
+                                    .then_some(i)
+                            });
+                            selected_drawing_item_end.set(hit);
+                            drop(items);
+                            da_end.queue_draw();
+                            on_drag_end();
+                            return;
+                        }
+                        if collected.len() >= 2 {
+                            use crate::model::clip::DrawingKind;
+                            let kind = drawing_kind_end.get();
+                            // Shapes only need the first and last point.
+                            // Freehand strokes keep the full path.
+                            let norm_pts: Vec<(f64, f64)> = match kind {
+                                DrawingKind::Stroke => collected
+                                    .iter()
+                                    .map(|(wx, wy)| ((wx - ds.vx) / ds.vw, (wy - ds.vy) / ds.vh))
+                                    .collect(),
+                                DrawingKind::Rectangle
+                                | DrawingKind::Ellipse
+                                | DrawingKind::Arrow => {
+                                    let first = collected.first().copied().unwrap_or((0.0, 0.0));
+                                    let last = collected.last().copied().unwrap_or(first);
+                                    vec![
+                                        ((first.0 - ds.vx) / ds.vw, (first.1 - ds.vy) / ds.vh),
+                                        ((last.0 - ds.vx) / ds.vw, (last.1 - ds.vy) / ds.vh),
+                                    ]
+                                }
+                            };
+                            let fill = match kind {
+                                DrawingKind::Rectangle | DrawingKind::Ellipse => {
+                                    drawing_fill_end.get()
+                                }
+                                _ => None,
+                            };
+                            on_drawing_finish_end(crate::model::clip::DrawingItem {
+                                kind,
+                                points: norm_pts,
+                                color: ds.drawing_color,
+                                width: ds.drawing_width,
+                                fill_color: fill,
+                            });
+                        }
+                        da_end.queue_draw();
+                        on_drag_end();
+                        return;
+                    }
+
+                    if ds.handle == Handle::SamPromptBox {
+                        // Widget-space start and end positions for
+                        // the captured prompt. `start` comes from the
+                        // cached sam_prompt_start cell, and `end` is
+                        // computed from start + gesture offset (the
+                        // drag_update path kept sam_prompt_current in
+                        // sync, but we also have _ox/_oy from GTK
+                        // here — prefer sam_prompt_current since it's
+                        // what's on screen).
+                        let start = sam_prompt_start_end.get();
+                        let end = sam_prompt_current_end.get();
+                        if let (Some((sx, sy)), Some((ex, ey))) = (start, end) {
+                            // Click-vs-drag threshold. A tiny drag
+                            // becomes a point prompt — emulated as a
+                            // small tight box around the click point,
+                            // since SAM 3's decoder prefers tight
+                            // exemplars (see Phase 2a constraint #1).
+                            let dx = ex - sx;
+                            let dy = ey - sy;
+                            let click_threshold_px = 4.0;
+                            let (wx1, wy1, wx2, wy2) =
+                                if (dx * dx + dy * dy).sqrt() < click_threshold_px {
+                                    // Point click → small 8 px
+                                    // square centred on (sx, sy). At
+                                    // source scale this is the
+                                    // equivalent of a point prompt.
+                                    (sx - 4.0, sy - 4.0, sx + 4.0, sy + 4.0)
+                                } else {
+                                    // Normalize corners so x1 < x2
+                                    // and y1 < y2.
+                                    (sx.min(ex), sy.min(ey), sx.max(ex), sy.max(ey))
+                                };
+
+                            // Widget-space → normalized clip-local
+                            // coordinates using the cached video
+                            // rect + current clip transform.
+                            let (clip_cx_w, clip_cy_w, clip_w, clip_h, clip_left_w, clip_top_w) =
+                                clip_canvas_geometry(
+                                    ds.vx,
+                                    ds.vy,
+                                    ds.vw,
+                                    ds.vh,
+                                    scale_end.get(),
+                                    position_x_end.get(),
+                                    position_y_end.get(),
+                                    adjustment_mode_end.get(),
+                                );
+                            let clip_rot = (-rotation_end.get()).to_radians();
+                            let to_norm = |wx: f64, wy: f64| -> (f64, f64) {
+                                let (ux, uy) =
+                                    unrotate_point_about(wx, wy, clip_cx_w, clip_cy_w, clip_rot);
+                                let nx = if clip_w > 0.5 {
+                                    (ux - clip_left_w) / clip_w
+                                } else {
+                                    0.5
+                                };
+                                let ny = if clip_h > 0.5 {
+                                    (uy - clip_top_w) / clip_h
+                                } else {
+                                    0.5
+                                };
+                                (nx.clamp(0.0, 1.0), ny.clamp(0.0, 1.0))
+                            };
+                            // Unrotating the corners individually can
+                            // produce a box that's not axis-aligned
+                            // in normalized space if the clip is
+                            // rotated — compute all four corners,
+                            // then take the axis-aligned bounding
+                            // box of them.
+                            let (n_tl_x, n_tl_y) = to_norm(wx1, wy1);
+                            let (n_tr_x, n_tr_y) = to_norm(wx2, wy1);
+                            let (n_bl_x, n_bl_y) = to_norm(wx1, wy2);
+                            let (n_br_x, n_br_y) = to_norm(wx2, wy2);
+                            let nx1 = n_tl_x.min(n_tr_x).min(n_bl_x).min(n_br_x);
+                            let ny1 = n_tl_y.min(n_tr_y).min(n_bl_y).min(n_br_y);
+                            let nx2 = n_tl_x.max(n_tr_x).max(n_bl_x).max(n_br_x);
+                            let ny2 = n_tl_y.max(n_tr_y).max(n_bl_y).max(n_br_y);
+
+                            // Fire the one-shot callback. Take it
+                            // out so the same callback can't run
+                            // twice. The Inspector's closure handles
+                            // the rest (job spawn, button state).
+                            let cb = sam_prompt_callback_end.borrow_mut().take();
+                            if let Some(cb) = cb {
+                                cb(nx1, ny1, nx2, ny2);
+                            }
+                        }
+                        // Always exit prompt mode on drag_end, even
+                        // if the callback never fired (e.g. zero-area
+                        // box). The Inspector re-enters it on the
+                        // next button click.
+                        sam_prompt_mode_end.set(false);
+                        sam_prompt_start_end.set(None);
+                        sam_prompt_current_end.set(None);
+                        da_end.set_cursor_from_name(None);
+                        da_end.queue_draw();
+                        on_drag_end();
+                        return;
+                    }
+                }
+
                 on_drag_end();
             });
         }
@@ -1128,9 +1835,62 @@ impl TransformOverlay {
             let selected = selected.clone();
             let on_change = on_change.clone();
             let da_ref = da.clone();
+            let sam_prompt_mode_key = sam_prompt_mode.clone();
+            let sam_prompt_start_key = sam_prompt_start.clone();
+            let sam_prompt_current_key = sam_prompt_current.clone();
+            let sam_prompt_callback_key = sam_prompt_callback.clone();
+            let active_tool_key = active_tool.clone();
+            let drawing_kind_key = drawing_kind.clone();
+            let da_redraw_key = da.clone();
+            let on_drawing_delete_at_key = on_drawing_delete_at.clone();
+            let selected_item_key = selected_drawing_item.clone();
             let key_ctrl = gtk::EventControllerKey::new();
             key_ctrl.connect_key_pressed(move |_, key, _, mods| {
                 use gtk::gdk::{Key, ModifierType};
+
+                // Draw-tool shape kind selection: 1/2/3/4 pick
+                // Stroke/Rectangle/Ellipse/Arrow. Delete removes the
+                // last-committed drawing item (Undo is still available
+                // for finer-grained reverts).
+                if active_tool_key.get() == crate::ui::timeline::ActiveTool::Draw {
+                    use crate::model::clip::DrawingKind;
+                    let new_kind = match key {
+                        Key::_1 | Key::KP_1 => Some(DrawingKind::Stroke),
+                        Key::_2 | Key::KP_2 => Some(DrawingKind::Rectangle),
+                        Key::_3 | Key::KP_3 => Some(DrawingKind::Ellipse),
+                        Key::_4 | Key::KP_4 => Some(DrawingKind::Arrow),
+                        _ => None,
+                    };
+                    if let Some(k) = new_kind {
+                        drawing_kind_key.set(k);
+                        da_redraw_key.queue_draw();
+                        return glib::Propagation::Stop;
+                    }
+                    if matches!(key, Key::Delete | Key::BackSpace | Key::KP_Delete) {
+                        // Selected-item delete if the user picked one
+                        // via click; otherwise fall through to LIFO
+                        // (the `None` arm on the callback).
+                        let target = selected_item_key.get();
+                        on_drawing_delete_at_key(target);
+                        selected_item_key.set(None);
+                        da_redraw_key.queue_draw();
+                        return glib::Propagation::Stop;
+                    }
+                }
+
+                // Escape cancels SAM prompt mode regardless of clip
+                // selection state — the user may press Escape before
+                // selecting anything.
+                if key == Key::Escape && sam_prompt_mode_key.get() {
+                    sam_prompt_mode_key.set(false);
+                    sam_prompt_start_key.set(None);
+                    sam_prompt_current_key.set(None);
+                    sam_prompt_callback_key.borrow_mut().take();
+                    da_ref.set_cursor_from_name(None);
+                    da_ref.queue_draw();
+                    return glib::Propagation::Stop;
+                }
+
                 if !selected.get() {
                     return glib::Propagation::Proceed;
                 }
@@ -1197,6 +1957,7 @@ impl TransformOverlay {
 
         TransformOverlay {
             drawing_area: da,
+            active_tool,
             scale,
             position_x,
             position_y,
@@ -1228,7 +1989,81 @@ impl TransformOverlay {
             tracking_width,
             tracking_height,
             tracking_rotation,
+            sam_prompt_mode,
+            sam_prompt_start,
+            sam_prompt_current,
+            sam_prompt_callback,
+            drawing_color,
+            drawing_width,
+            drawing_kind,
+            drawing_fill,
+            drawing_items_snapshot,
+            selected_drawing_item,
         }
+    }
+
+    /// Push the current drawing clip's items into the overlay so
+    /// hit-test clicks and the selected-item highlight have something
+    /// to reference. The app calls this after each project change /
+    /// playhead move; an empty Vec clears the selection as a side
+    /// effect.
+    pub fn set_current_drawing_items(&self, items: &[crate::model::clip::DrawingItem]) {
+        let mut slot = self.drawing_items_snapshot.borrow_mut();
+        if *slot != items {
+            *slot = items.to_vec();
+            // Clear a stale selection when the backing list changes
+            // out from under us.
+            if let Some(idx) = self.selected_drawing_item.get() {
+                if idx >= slot.len() {
+                    self.selected_drawing_item.set(None);
+                }
+            }
+            drop(slot);
+            self.drawing_area.queue_draw();
+        }
+    }
+
+    /// Current per-item selection (`None` when nothing is selected).
+    pub fn selected_drawing_item(&self) -> Option<usize> {
+        self.selected_drawing_item.get()
+    }
+
+    /// Set the Draw tool's brush color (0xRRGGBBAA). Applied to
+    /// subsequent strokes/shapes.
+    pub fn set_drawing_color(&self, color: u32) {
+        self.drawing_color.set(color);
+    }
+
+    /// Set the Draw tool's brush width in pixels (relative to 1080p).
+    pub fn set_drawing_width(&self, width: f64) {
+        self.drawing_width.set(width.max(0.5));
+    }
+
+    /// Set which shape kind the Draw tool commits on mouse-up.
+    pub fn set_drawing_kind(&self, kind: crate::model::clip::DrawingKind) {
+        self.drawing_kind.set(kind);
+    }
+
+    /// Set the optional fill color for Rectangle/Ellipse shapes.
+    /// `None` means stroke-only.
+    pub fn set_drawing_fill(&self, color: Option<u32>) {
+        self.drawing_fill.set(color);
+    }
+
+    /// Update the currently-active tool so the overlay's gesture
+    /// router knows whether to enter Draw capture mode. Must be
+    /// called whenever `TimelineState.active_tool` changes.
+    pub fn set_active_tool(&self, tool: crate::ui::timeline::ActiveTool) {
+        self.active_tool.set(tool);
+        // Crosshair cursor in Draw mode is the clearest user-visible
+        // signal that the tool toggled; default arrow otherwise.
+        let cursor_name = if tool == crate::ui::timeline::ActiveTool::Draw {
+            Some("crosshair")
+        } else {
+            None
+        };
+        self.drawing_area.set_cursor_from_name(cursor_name);
+        self.drawing_area.queue_draw();
     }
 
     /// Give the overlay access to the AspectFrame that constrains the canvas area.
@@ -1345,6 +2180,43 @@ impl TransformOverlay {
     pub fn is_tracking_editing(&self) -> bool {
         self.tracking_region_editing.get()
     }
+
+    // ── SAM box-prompt mode (Phase 2b/3) ────────────────────────
+
+    /// Enter SAM box-prompt capture mode. All normal handle
+    /// interactions are suspended; the next drag gesture captures a
+    /// rectangle that is converted to normalized clip-local
+    /// coordinates and passed to `on_captured(x1, y1, x2, y2)`.
+    ///
+    /// The mode auto-clears after one completed drag or on Escape.
+    /// Single clicks (< 4 px drag) produce a small point-emulated
+    /// box (see Phase 2a constraint #3 in sam-work.md).
+    pub fn enter_sam_prompt_mode(&self, on_captured: impl Fn(f64, f64, f64, f64) + 'static) {
+        self.sam_prompt_mode.set(true);
+        self.sam_prompt_start.set(None);
+        self.sam_prompt_current.set(None);
+        *self.sam_prompt_callback.borrow_mut() = Some(Box::new(on_captured));
+        self.drawing_area.set_cursor_from_name(Some("crosshair"));
+        self.drawing_area.queue_draw();
+    }
+
+    /// Cancel SAM prompt mode without firing the callback. Used by
+    /// the Inspector to restore the button when the user navigates
+    /// away or the clip selection changes mid-prompt.
+    pub fn exit_sam_prompt_mode(&self) {
+        self.sam_prompt_mode.set(false);
+        self.sam_prompt_start.set(None);
+        self.sam_prompt_current.set(None);
+        self.sam_prompt_callback.borrow_mut().take();
+        self.drawing_area.set_cursor_from_name(None);
+        self.drawing_area.queue_draw();
+    }
+
+    /// Returns `true` if the overlay is currently in SAM prompt
+    /// capture mode (waiting for a drag or Escape).
+    pub fn is_sam_prompt_active(&self) -> bool {
+        self.sam_prompt_mode.get()
+    }
 }
 
 // ── Helper functions ──────────────────────────────────────────────────────────
@@ -1378,6 +2250,98 @@ fn paintable_dims(
 /// fills the full scroll viewport and the canvas_frame is smaller due to zoom < 1.0).
 ///
 /// Falls back to `video_rect()` on the full DA if compute_bounds() fails.
+/// Distance from `(px, py)` to the line segment `(x0, y0)-(x1, y1)`.
+fn point_to_segment_distance(px: f64, py: f64, x0: f64, y0: f64, x1: f64, y1: f64) -> f64 {
+    let dx = x1 - x0;
+    let dy = y1 - y0;
+    let len2 = dx * dx + dy * dy;
+    if len2 < 1e-6 {
+        let ex = px - x0;
+        let ey = py - y0;
+        return (ex * ex + ey * ey).sqrt();
+    }
+    let t = (((px - x0) * dx + (py - y0) * dy) / len2).clamp(0.0, 1.0);
+    let fx = x0 + t * dx;
+    let fy = y0 + t * dy;
+    let ex = px - fx;
+    let ey = py - fy;
+    (ex * ex + ey * ey).sqrt()
+}
+
+/// Hit-test a single drawing item against a widget-space click.
+/// Normalized item points are scaled to the video rect
+/// `(vx, vy, vw, vh)` so the test matches what the user sees.
+/// `tol` is the widget-pixel tolerance for stroke-only hits.
+fn drawing_item_hit(
+    item: &crate::model::clip::DrawingItem,
+    click_wx: f64,
+    click_wy: f64,
+    vx: f64,
+    vy: f64,
+    vw: f64,
+    vh: f64,
+) -> bool {
+    use crate::model::clip::DrawingKind;
+    let scale_ref = (vh / 1080.0).max(1e-3);
+    let tol = (item.width * scale_ref).max(4.0) * 1.8;
+    let to_widget = |(nx, ny): (f64, f64)| (vx + nx * vw, vy + ny * vh);
+    match item.kind {
+        DrawingKind::Stroke => {
+            if item.points.len() < 2 {
+                return false;
+            }
+            item.points.windows(2).any(|pair| {
+                let a = to_widget(pair[0]);
+                let b = to_widget(pair[1]);
+                point_to_segment_distance(click_wx, click_wy, a.0, a.1, b.0, b.1) <= tol
+            })
+        }
+        DrawingKind::Rectangle => {
+            let p0 = to_widget(item.points[0]);
+            let p1 = to_widget(*item.points.last().unwrap());
+            let x0 = p0.0.min(p1.0);
+            let y0 = p0.1.min(p1.1);
+            let x1 = p0.0.max(p1.0);
+            let y1 = p0.1.max(p1.1);
+            if item.fill_color.is_some() {
+                click_wx >= x0 && click_wx <= x1 && click_wy >= y0 && click_wy <= y1
+            } else {
+                let on_top =
+                    (click_wy - y0).abs() <= tol && click_wx >= x0 - tol && click_wx <= x1 + tol;
+                let on_bot =
+                    (click_wy - y1).abs() <= tol && click_wx >= x0 - tol && click_wx <= x1 + tol;
+                let on_left =
+                    (click_wx - x0).abs() <= tol && click_wy >= y0 - tol && click_wy <= y1 + tol;
+                let on_right =
+                    (click_wx - x1).abs() <= tol && click_wy >= y0 - tol && click_wy <= y1 + tol;
+                on_top || on_bot || on_left || on_right
+            }
+        }
+        DrawingKind::Ellipse => {
+            let p0 = to_widget(item.points[0]);
+            let p1 = to_widget(*item.points.last().unwrap());
+            let cx = (p0.0 + p1.0) * 0.5;
+            let cy = (p0.1 + p1.1) * 0.5;
+            let rx = ((p1.0 - p0.0).abs() * 0.5).max(1.0);
+            let ry = ((p1.1 - p0.1).abs() * 0.5).max(1.0);
+            let dx = (click_wx - cx) / rx;
+            let dy = (click_wy - cy) / ry;
+            let d = (dx * dx + dy * dy).sqrt();
+            let rel_tol = tol / rx.min(ry).max(1.0);
+            if item.fill_color.is_some() {
+                d <= 1.0 + rel_tol
+            } else {
+                (d - 1.0).abs() <= rel_tol
+            }
+        }
+        DrawingKind::Arrow => {
+            let a = to_widget(item.points[0]);
+            let b = to_widget(*item.points.last().unwrap());
+            point_to_segment_distance(click_wx, click_wy, a.0, a.1, b.0, b.1) <= tol
+        }
+    }
+}
+
 fn canvas_video_rect(
     da: &DrawingArea,
     canvas_widget: &Rc<RefCell<Option<gtk4::Widget>>>,

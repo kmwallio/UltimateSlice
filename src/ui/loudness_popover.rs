@@ -85,8 +85,7 @@ impl LoudnessPopoverView {
 
     /// Update the current-gain label from the project state.
     pub fn set_current_gain(&self, db: f64) {
-        self.current_gain_label
-            .set_text(&format!("{:+.2} dB", db));
+        self.current_gain_label.set_text(&format!("{:+.2} dB", db));
         self.update_delta_and_warning(db);
     }
 

@@ -79,6 +79,19 @@ use crate::model::project::{FrameRate, MotionTrackerReference, Project};
 use gdk4;
 use gio;
 use gtk4::prelude::*;
+
+/// State for an in-flight SAM background inference job. Stored in
+/// `InspectorView::sam_job_handle` and drained by a polling tick that
+/// runs on the GTK main thread. The `clip_id` is captured at spawn
+/// time so the result is applied to the same clip the user clicked
+/// on, even if they switched the Inspector's selection during the
+/// ~6 s inference window.
+#[cfg(feature = "ai-inference")]
+pub struct SamJobInFlight {
+    pub handle: crate::media::sam_job::SamJobHandle,
+    pub clip_id: String,
+    pub track_id: String,
+}
 use gtk4::{
     self as gtk, Box as GBox, Button, CheckButton, DropDown, Entry, Expander, Label, Orientation,
     Scale, Separator, StringList,
@@ -385,7 +398,9 @@ pub struct InspectorView {
     pub title_bg_box_check: CheckButton,
     pub title_bg_box_color_btn: gtk4::ColorDialogButton,
     pub title_bg_box_padding_slider: Scale,
-    // Speed
+    pub title_animation_dropdown: gtk4::DropDown,
+    pub title_animation_duration_slider: Scale,
+    // Transitions
     pub speed_slider: Scale,
     pub reverse_check: CheckButton,
     pub slow_motion_dropdown: DropDown,
@@ -510,6 +525,15 @@ pub struct InspectorView {
     pub mask_invert_check: CheckButton,
     pub mask_path_editor_box: GBox,
     pub mask_rect_ellipse_controls: GBox,
+    /// "Generate with SAM" button in the shape-mask panel. Always created so
+    /// downstream populate code can touch it unconditionally; the click
+    /// handler + visibility are gated on `feature = "ai-inference"`.
+    pub sam_generate_btn: Button,
+    /// In-flight SAM job state, `Some` while a background thread is still
+    /// running and `None` once the result has been applied or dropped.
+    /// The polling tick installed in `build_inspector` drains this.
+    #[cfg(feature = "ai-inference")]
+    pub sam_job_handle: Rc<RefCell<Option<SamJobInFlight>>>,
     // HSL Qualifier (secondary color correction)
     pub hsl_section: GBox,
     pub hsl_enable: CheckButton,
@@ -616,10 +640,7 @@ impl InspectorView {
                 title_lbl.add_css_class("heading");
             }
             label_box.append(&title_lbl);
-            let dur_secs = take
-                .source_out
-                .saturating_sub(take.source_in) as f64
-                / 1_000_000_000.0;
+            let dur_secs = take.source_out.saturating_sub(take.source_in) as f64 / 1_000_000_000.0;
             let stem = std::path::Path::new(&take.source_path)
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -1860,21 +1881,29 @@ impl InspectorView {
                     || is_compound
                     || is_multicam
                     || is_audition;
-                self.color_section
-                    .set_visible(is_video || is_image || is_adjustment || is_audition);
-                self.audio_section.set_visible(is_video || is_audio || is_audition);
+                self.color_section.set_visible(
+                    is_video || is_image || is_adjustment || is_audition || is_multicam,
+                );
+                self.audio_section
+                    .set_visible(is_video || is_audio || is_audition);
                 self.transform_section.set_visible(is_visual);
-                self.title_section_box
-                    .set_visible(is_visual && !is_adjustment && !is_compound && !is_multicam && !is_audition);
-                self.speed_section_box
-                    .set_visible(!is_title_clip && !is_adjustment && !is_compound && !is_multicam && !is_audition);
+                self.title_section_box.set_visible(
+                    is_visual && !is_adjustment && !is_compound && !is_multicam && !is_audition,
+                );
+                self.speed_section_box.set_visible(
+                    !is_title_clip
+                        && !is_adjustment
+                        && !is_compound
+                        && !is_multicam
+                        && !is_audition,
+                );
                 // Audition section is visible only for audition clips. Repopulate the takes list.
                 self.audition_section_box.set_visible(is_audition);
                 if is_audition {
                     self.refresh_audition_takes_list(c);
                 }
                 self.lut_section_box
-                    .set_visible(is_video || is_image || is_adjustment);
+                    .set_visible(is_video || is_image || is_adjustment || is_multicam);
                 self.chroma_key_section.set_visible(is_video || is_image);
                 self.bg_removal_section
                     .set_visible((is_video || is_image) && self.bg_removal_model_available.get());
@@ -2207,9 +2236,8 @@ impl InspectorView {
                         .set_rgba(&gdk4::RGBA::new(hr, hg, hb, ha));
                 }
                 if flags.stroke {
-                    let (sr, sg, sb, sa) = crate::ui::colors::rgba_u32_to_f32(
-                        c.subtitle_highlight_stroke_color,
-                    );
+                    let (sr, sg, sb, sa) =
+                        crate::ui::colors::rgba_u32_to_f32(c.subtitle_highlight_stroke_color);
                     self.subtitle_highlight_stroke_color_btn
                         .set_rgba(&gdk4::RGBA::new(sr, sg, sb, sa));
                 }
@@ -2223,6 +2251,18 @@ impl InspectorView {
                     .set_visible(is_video || is_image || is_title_clip || is_adjustment);
                 self.frei0r_effects_section
                     .set_visible(is_visual && !is_compound && !is_multicam);
+
+                // SAM button sensitivity: only enable on clip kinds
+                // the pipeline can decode a frame from, when SAM is
+                // installed, and when no SAM job is currently
+                // running on this Inspector instance.
+                #[cfg(feature = "ai-inference")]
+                {
+                    let sam_ready = crate::media::sam_cache::find_sam_model_paths().is_some();
+                    let job_busy = self.sam_job_handle.borrow().is_some();
+                    self.sam_generate_btn
+                        .set_sensitive(sam_ready && !job_busy && (is_video || is_image));
+                }
 
                 // Populate mask section from masks[0].
                 if let Some(mask) = c.masks.first() {
@@ -2880,6 +2920,15 @@ impl InspectorView {
                 }
                 self.title_bg_box_padding_slider
                     .set_value(c.title_bg_box_padding);
+                self.title_animation_dropdown
+                    .set_selected(match c.title_animation {
+                        crate::model::clip::TitleAnimation::None => 0,
+                        crate::model::clip::TitleAnimation::Typewriter => 1,
+                        crate::model::clip::TitleAnimation::Fade => 2,
+                        crate::model::clip::TitleAnimation::Pop => 3,
+                    });
+                self.title_animation_duration_slider
+                    .set_value(c.title_animation_duration_ns as f64 / 1_000_000_000.0);
                 // When speed keyframes are present, don't auto-update the slider —
                 // the user sets it to the desired value before clicking
                 // "Set Speed Keyframe". Auto-resetting would clobber their input.
@@ -2968,6 +3017,8 @@ impl InspectorView {
                 log::debug!(
                     "inspector subtitle: update called with clip=None → hiding content_box"
                 );
+                #[cfg(feature = "ai-inference")]
+                self.sam_generate_btn.set_sensitive(false);
                 self.name_entry.set_text("");
                 self.clip_color_label_combo
                     .set_selected(clip_color_label_index(ClipColorLabel::None));
@@ -3075,6 +3126,8 @@ impl InspectorView {
                 self.title_bg_box_color_btn
                     .set_rgba(&gdk4::RGBA::new(0.0, 0.0, 0.0, 0.53));
                 self.title_bg_box_padding_slider.set_value(8.0);
+                self.title_animation_dropdown.set_selected(0);
+                self.title_animation_duration_slider.set_value(1.0);
                 self.speed_slider.set_value(1.0);
                 self.reverse_check.set_active(false);
                 self.slow_motion_dropdown.set_selected(0);
@@ -3346,6 +3399,7 @@ pub fn build_inspector(
     on_surround_position_changed: impl Fn(&str, &str) + 'static,
     on_execute_command: impl Fn(Box<dyn crate::undo::EditCommand>) + 'static,
     on_clear_match_eq: impl Fn(&str) + 'static,
+    on_request_sam_prompt: impl Fn(Box<dyn Fn(f64, f64, f64, f64) + 'static>) + 'static,
 ) -> (GBox, Rc<InspectorView>) {
     // Bring transform-bound constants into scope so the slider/range/clamp
     // sites below can use them by short name instead of literal magic
@@ -3376,6 +3430,8 @@ pub fn build_inspector(
     let on_surround_position_changed: Rc<dyn Fn(&str, &str)> =
         Rc::new(on_surround_position_changed);
     let on_clear_match_eq: Rc<dyn Fn(&str)> = Rc::new(on_clear_match_eq);
+    let on_request_sam_prompt: Rc<dyn Fn(Box<dyn Fn(f64, f64, f64, f64) + 'static>)> =
+        Rc::new(on_request_sam_prompt);
     let on_execute_command: Rc<dyn Fn(Box<dyn crate::undo::EditCommand>)> =
         Rc::new(on_execute_command);
     let on_vidstab_changed: Rc<dyn Fn()> = Rc::new(on_vidstab_changed);
@@ -4085,7 +4141,10 @@ pub fn build_inspector(
     // visible when the Stroke highlight flag is enabled. Defaults to the
     // same value as the highlight colour for legacy projects.
     let subtitle_highlight_stroke_color_row = GBox::new(Orientation::Vertical, 4);
-    row_label(&subtitle_highlight_stroke_color_row, "Highlight Stroke Color");
+    row_label(
+        &subtitle_highlight_stroke_color_row,
+        "Highlight Stroke Color",
+    );
     let sub_hl_stroke_color_dialog = gtk4::ColorDialog::new();
     sub_hl_stroke_color_dialog.set_with_alpha(true);
     let subtitle_highlight_stroke_color_btn =
@@ -4294,6 +4353,31 @@ pub fn build_inspector(
 
     let add_point_btn = Button::with_label("Add Point");
     mask_path_editor_box.append(&add_point_btn);
+
+    // ── "Generate with SAM" button (Phase 2b/2) ──────────────────────
+    //
+    // A separator + button row at the bottom of the Shape Mask panel.
+    // Runs SAM 3 against a hardcoded centre-region box prompt and
+    // replaces `masks[0]` with the resulting bezier polygon. Real
+    // drag-to-box UI on the Program Monitor lands in Phase 2b/3.
+    //
+    // The button is always created so populate code can touch it
+    // without cfg gates, but the click handler + visibility are only
+    // wired when the `ai-inference` feature is enabled. Without the
+    // feature the button stays hidden.
+    mask_inner.append(&Separator::new(Orientation::Horizontal));
+    let sam_generate_btn = Button::with_label("Generate with SAM");
+    sam_generate_btn.set_tooltip_text(Some(
+        "Run SAM 3 on the centre of the clip's first visible frame \
+         and replace the existing mask.",
+    ));
+    // Disabled until the populate path sees a compatible clip AND the
+    // SAM model is installed. Phase 2b/3 will switch this to enable
+    // only after the user has drawn a box on the Program Monitor.
+    sam_generate_btn.set_sensitive(false);
+    #[cfg(not(feature = "ai-inference"))]
+    sam_generate_btn.set_visible(false);
+    mask_inner.append(&sam_generate_btn);
 
     // ── HSL Qualifier section (secondary color correction) ────────────
     let hsl_section = GBox::new(Orientation::Vertical, 8);
@@ -4728,8 +4812,7 @@ pub fn build_inspector(
     audio_inner.append(&voice_enhance_check);
 
     row_label(&audio_inner, "  Strength");
-    let voice_enhance_strength_slider =
-        Scale::with_range(Orientation::Horizontal, 0.0, 100.0, 1.0);
+    let voice_enhance_strength_slider = Scale::with_range(Orientation::Horizontal, 0.0, 100.0, 1.0);
     voice_enhance_strength_slider.set_value(50.0);
     voice_enhance_strength_slider.set_draw_value(true);
     voice_enhance_strength_slider.set_digits(0);
@@ -4753,9 +4836,8 @@ pub fn build_inspector(
     voice_enhance_status_label.add_css_class("dim-label");
     voice_enhance_status_label.set_visible(false);
     let voice_enhance_retry_btn = Button::with_label("Retry");
-    voice_enhance_retry_btn.set_tooltip_text(Some(
-        "Re-queue the voice enhance ffmpeg job for this clip.",
-    ));
+    voice_enhance_retry_btn
+        .set_tooltip_text(Some("Re-queue the voice enhance ffmpeg job for this clip."));
     voice_enhance_retry_btn.set_visible(false);
     voice_enhance_status_row.append(&voice_enhance_status_label);
     voice_enhance_status_row.append(&voice_enhance_retry_btn);
@@ -5264,16 +5346,16 @@ pub fn build_inspector(
     transform_inner.append(&motion_blur_row);
 
     row_label(&transform_inner, "Shutter Angle");
-    let motion_blur_shutter_slider =
-        Scale::with_range(Orientation::Horizontal, 0.0, 720.0, 1.0);
+    let motion_blur_shutter_slider = Scale::with_range(Orientation::Horizontal, 0.0, 720.0, 1.0);
     motion_blur_shutter_slider.set_value(180.0);
     motion_blur_shutter_slider.set_draw_value(true);
     motion_blur_shutter_slider.set_digits(0);
     motion_blur_shutter_slider.add_mark(180.0, gtk4::PositionType::Bottom, Some("180°"));
     motion_blur_shutter_slider.add_mark(360.0, gtk4::PositionType::Bottom, Some("360°"));
     motion_blur_shutter_slider.set_hexpand(true);
-    motion_blur_shutter_slider
-        .set_tooltip_text(Some("Shutter angle in degrees: 180° = cinematic, 360° = full natural blur"));
+    motion_blur_shutter_slider.set_tooltip_text(Some(
+        "Shutter angle in degrees: 180° = cinematic, 360° = full natural blur",
+    ));
     transform_inner.append(&motion_blur_shutter_slider);
 
     row_label(&transform_inner, "Scale");
@@ -5644,6 +5726,19 @@ pub fn build_inspector(
     title_bg_box_padding_slider.set_digits(0);
     title_bg_box_padding_slider.set_hexpand(true);
     title_inner.append(&title_bg_box_padding_slider);
+
+    title_inner.append(&Separator::new(Orientation::Horizontal));
+    row_label(&title_inner, "Animation");
+    let title_animation_dropdown =
+        gtk4::DropDown::from_strings(&["None", "Typewriter", "Fade", "Pop"]);
+    title_inner.append(&title_animation_dropdown);
+
+    row_label(&title_inner, "  Duration (s)");
+    let title_animation_duration_slider = Scale::with_range(Orientation::Horizontal, 0.1, 5.0, 0.1);
+    title_animation_duration_slider.set_value(1.0);
+    title_animation_duration_slider.set_draw_value(true);
+    title_animation_duration_slider.set_hexpand(true);
+    title_inner.append(&title_animation_duration_slider);
 
     // ── Speed section (all clip types) ───────────────────────────────────────
     let speed_section_box = GBox::new(Orientation::Vertical, 8);
@@ -9063,6 +9158,61 @@ pub fn build_inspector(
         });
     }
 
+    // Title animation dropdown
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_title_style_changed = on_title_style_changed.clone();
+        title_animation_dropdown.connect_selected_notify(move |dd| {
+            if *updating.borrow() {
+                return;
+            }
+            let anim = match dd.selected() {
+                1 => crate::model::clip::TitleAnimation::Typewriter,
+                2 => crate::model::clip::TitleAnimation::Fade,
+                3 => crate::model::clip::TitleAnimation::Pop,
+                _ => crate::model::clip::TitleAnimation::None,
+            };
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.title_animation = anim;
+                    }
+                    proj.dirty = true;
+                }
+                on_title_style_changed();
+            }
+        });
+    }
+
+    // Title animation duration slider
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_title_style_changed = on_title_style_changed.clone();
+        title_animation_duration_slider.connect_value_changed(move |sl| {
+            if *updating.borrow() {
+                return;
+            }
+            let duration_ns = (sl.value() * 1_000_000_000.0) as u64;
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.title_animation_duration_ns = duration_ns;
+                    }
+                    proj.dirty = true;
+                }
+                on_title_style_changed();
+            }
+        });
+    }
+
     // Title outline color button
     {
         let project = project.clone();
@@ -10378,6 +10528,280 @@ pub fn build_inspector(
         });
     }
 
+    // ── "Generate with SAM" wiring (Phase 2b/2) ───────────────────────
+    //
+    // Declared unconditionally so the struct-literal at the end of
+    // `build_inspector` can list it. Under `ai-inference` it's a
+    // live `Rc<RefCell<Option<SamJobInFlight>>>`; without the feature
+    // we skip the whole block and the struct field never exists.
+    #[cfg(feature = "ai-inference")]
+    let sam_job_handle: Rc<RefCell<Option<SamJobInFlight>>> = Rc::new(RefCell::new(None));
+
+    #[cfg(feature = "ai-inference")]
+    {
+        // Click handler: confirm-if-existing-mask → resolve clip →
+        // build hardcoded centre-region BoxPrompt → spawn_sam_job.
+        //
+        // The button label flips to "Generating…" and goes insensitive
+        // until the polling tick drains the result. The polling tick
+        // (installed just below) handles the success + error paths.
+        let project_click = project.clone();
+        let selected_clip_id_click = selected_clip_id.clone();
+        let sam_job_handle_click = sam_job_handle.clone();
+        let button_click = sam_generate_btn.clone();
+        let on_request_sam_prompt_click = on_request_sam_prompt.clone();
+        sam_generate_btn.connect_clicked(move |_| {
+            // Short-circuit if another SAM job is already in flight.
+            // The button is normally set insensitive while a job runs,
+            // but the guard defends against signal re-entry.
+            if sam_job_handle_click.borrow().is_some() {
+                return;
+            }
+
+            // Resolve the selected clip: capture id + source path +
+            // source_in + source_out in a brief borrow so the worker
+            // thread doesn't touch the project.
+            let Some(clip_id) = selected_clip_id_click.borrow().clone() else {
+                return;
+            };
+            let clip_info = {
+                let proj = project_click.borrow();
+                proj.tracks.iter().find_map(|t| {
+                    t.clips.iter().find(|c| c.id == clip_id).map(|c| {
+                        (
+                            t.id.clone(),
+                            c.source_path.clone(),
+                            c.source_in,
+                            c.source_out,
+                            // "Does masks[0] look non-default?" — used
+                            // by the confirmation dialog gate below.
+                            !c.masks.is_empty()
+                                && (c
+                                    .masks
+                                    .first()
+                                    .map(|m| {
+                                        m.path.is_some()
+                                            || !matches!(
+                                                m.shape,
+                                                crate::model::clip::MaskShape::Rectangle
+                                            )
+                                            || (m.center_x - 0.5).abs() > f64::EPSILON
+                                            || (m.center_y - 0.5).abs() > f64::EPSILON
+                                            || (m.width - 0.25).abs() > f64::EPSILON
+                                            || (m.height - 0.25).abs() > f64::EPSILON
+                                            || m.rotation != 0.0
+                                            || m.feather != 0.0
+                                            || m.expansion != 0.0
+                                            || m.invert
+                                    })
+                                    .unwrap_or(false)),
+                        )
+                    })
+                })
+            };
+            let Some((track_id, source_path, source_in, _source_out, has_existing_mask)) =
+                clip_info
+            else {
+                return;
+            };
+
+            // Helper: enter SAM prompt mode on the Program Monitor and,
+            // once the user has drawn a box (or clicked a point),
+            // spawn the SAM job with the captured normalized prompt.
+            //
+            // This replaces the Phase 2b/2 hardcoded centre box with
+            // a real user-drawn box.
+            let enter_prompt = {
+                let clip_id = clip_id.clone();
+                let track_id = track_id.clone();
+                let source_path = source_path.clone();
+                let sam_job_handle_click = sam_job_handle_click.clone();
+                let button_click = button_click.clone();
+                let on_request_sam_prompt_click = on_request_sam_prompt_click.clone();
+                move || {
+                    button_click.set_label("Draw box on clip…");
+                    button_click.set_sensitive(false);
+
+                    let clip_id = clip_id.clone();
+                    let track_id = track_id.clone();
+                    let source_path = source_path.clone();
+                    let sam_job_handle_click = sam_job_handle_click.clone();
+                    let button_click = button_click.clone();
+
+                    on_request_sam_prompt_click(Box::new(
+                        move |nx1: f64, ny1: f64, nx2: f64, ny2: f64| {
+                            // The overlay fires this with normalized
+                            // clip-local coords. Build a prompt and
+                            // dispatch the background SAM job.
+                            log::info!(
+                                "SAM prompt: normalized box ({:.4},{:.4})–({:.4},{:.4})",
+                                nx1,
+                                ny1,
+                                nx2,
+                                ny2,
+                            );
+                            let normalized_box = (nx1 as f32, ny1 as f32, nx2 as f32, ny2 as f32);
+                            let prompt = crate::media::sam_cache::BoxPrompt::from_corners(
+                                0.0, 0.0, 1.0, 1.0,
+                            );
+                            let input = crate::media::sam_job::SamJobInput {
+                                source_path: std::path::PathBuf::from(&source_path),
+                                frame_ns: source_in,
+                                prompt,
+                                normalized_box: Some(normalized_box),
+                                tolerance_px: 2.0,
+                            };
+                            let handle = crate::media::sam_job::spawn_sam_job(input);
+                            *sam_job_handle_click.borrow_mut() = Some(SamJobInFlight {
+                                handle,
+                                clip_id: clip_id.clone(),
+                                track_id: track_id.clone(),
+                            });
+                            button_click.set_label("Generating… (~6s)");
+                            // Button stays insensitive (already set above).
+                        },
+                    ));
+                }
+            };
+
+            if has_existing_mask {
+                // Confirmation dialog. Use gtk::AlertDialog::choose so
+                // the click handler doesn't block; the callback
+                // dispatches the spawn path only if the user picks
+                // "Replace".
+                let parent = button_click
+                    .root()
+                    .and_then(|r| r.downcast::<gtk::Window>().ok());
+                let alert = gtk::AlertDialog::builder()
+                    .message("Replace existing mask?")
+                    .detail(
+                        "This will overwrite the current mask on this \
+                         clip with a new SAM-generated mask. Continue?",
+                    )
+                    .buttons(["Cancel", "Replace"])
+                    .cancel_button(0)
+                    .default_button(1)
+                    .modal(true)
+                    .build();
+                let enter_prompt = enter_prompt.clone();
+                alert.choose(parent.as_ref(), gio::Cancellable::NONE, move |res| {
+                    if matches!(res, Ok(1)) {
+                        enter_prompt();
+                    }
+                });
+            } else {
+                enter_prompt();
+            }
+        });
+
+        // Poll tick: drain the in-flight job once per 100 ms on the
+        // GTK main thread. On Success, replace masks[0] with the
+        // bezier polygon, mark the project dirty, and fire
+        // on_frei0r_changed so the pipeline picks up the new shape.
+        // On Error, pop a gtk::AlertDialog with the error text.
+        // In either case, restore the button state.
+        let project_tick = project.clone();
+        let sam_job_handle_tick = sam_job_handle.clone();
+        let button_tick = sam_generate_btn.clone();
+        let on_frei0r_changed_tick = on_frei0r_changed.clone();
+        let on_execute_command_tick = on_execute_command.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+            use crate::media::sam_job::SamJobResult;
+
+            // Fast path: no job in flight, nothing to do. Use a
+            // nested borrow so we can free it before taking the
+            // job result out.
+            let has_result = {
+                let borrow = sam_job_handle_tick.borrow();
+                match borrow.as_ref() {
+                    Some(inflight) => inflight.handle.try_recv(),
+                    None => None,
+                }
+            };
+            let Some(result) = has_result else {
+                return glib::ControlFlow::Continue;
+            };
+
+            // Take the in-flight state out so follow-up clicks
+            // can spawn a fresh job.
+            let inflight = sam_job_handle_tick.borrow_mut().take();
+            let Some(inflight) = inflight else {
+                // Should never happen since we just observed a
+                // Some above, but defend against races anyway.
+                return glib::ControlFlow::Continue;
+            };
+            let clip_id = inflight.clip_id;
+            let track_id = inflight.track_id;
+
+            // Restore the button regardless of outcome.
+            button_tick.set_label("Generate with SAM");
+            button_tick.set_sensitive(true);
+
+            match result {
+                SamJobResult::Success { mask_points, score } => {
+                    log::info!(
+                        "SAM: clip={} points={} score={:.3}",
+                        clip_id,
+                        mask_points.len(),
+                        score
+                    );
+                    // Snapshot the old mask state and build the
+                    // new one, then push a SetClipMaskCommand
+                    // through the undo history so Ctrl+Z reverts
+                    // the SAM mask replacement in one step.
+                    let old_mask = {
+                        let proj = project_tick.borrow();
+                        proj.tracks.iter().find_map(|t| {
+                            t.clips
+                                .iter()
+                                .find(|c| c.id == clip_id)
+                                .map(|c| crate::undo::ClipMaskSnapshot::from_clip(c))
+                        })
+                    };
+                    let Some(old_mask) = old_mask else {
+                        log::warn!("SAM: clip {} no longer exists; mask discarded", clip_id);
+                        return glib::ControlFlow::Continue;
+                    };
+                    // Build new mask state: replace masks[0]
+                    // (or create it if the clip had none).
+                    let new_mask = {
+                        let mut masks = old_mask.masks.clone();
+                        let sam_mask = crate::model::clip::ClipMask::new_path(mask_points);
+                        if masks.is_empty() {
+                            masks.push(sam_mask);
+                        } else {
+                            masks[0] = sam_mask;
+                        }
+                        crate::undo::ClipMaskSnapshot { masks }
+                    };
+                    let cmd = crate::undo::SetClipMaskCommand {
+                        clip_id,
+                        track_id,
+                        old_mask,
+                        new_mask,
+                    };
+                    on_execute_command_tick(Box::new(cmd));
+                    on_frei0r_changed_tick();
+                }
+                SamJobResult::Error(msg) => {
+                    log::warn!("SAM: clip={} error={}", clip_id, msg);
+                    let parent = button_tick
+                        .root()
+                        .and_then(|r| r.downcast::<gtk::Window>().ok());
+                    let alert = gtk::AlertDialog::builder()
+                        .message("SAM mask generation failed")
+                        .detail(&msg)
+                        .buttons(["OK"])
+                        .modal(true)
+                        .build();
+                    alert.show(parent.as_ref());
+                }
+            }
+
+            glib::ControlFlow::Continue
+        });
+    }
+
     // ── HSL Qualifier wiring ──────────────────────────────────────────
     // The HSL pad probe is always present in the effects chain; it reads
     // the clip's Option<HslQualifier> from the shared slot state. Live
@@ -10398,8 +10822,7 @@ pub fn build_inspector(
                     let mut proj = project.borrow_mut();
                     if let Some(clip) = proj.clip_mut(clip_id) {
                         if clip.hsl_qualifier.is_none() {
-                            clip.hsl_qualifier =
-                                Some(crate::model::clip::HslQualifier::default());
+                            clip.hsl_qualifier = Some(crate::model::clip::HslQualifier::default());
                         }
                         if let Some(ref mut q) = clip.hsl_qualifier {
                             q.enabled = enabled;
@@ -10601,6 +11024,8 @@ pub fn build_inspector(
         title_bg_box_check,
         title_bg_box_color_btn,
         title_bg_box_padding_slider,
+        title_animation_dropdown,
+        title_animation_duration_slider,
         speed_slider,
         reverse_check,
         slow_motion_dropdown,
@@ -10705,6 +11130,9 @@ pub fn build_inspector(
         mask_invert_check,
         mask_path_editor_box,
         mask_rect_ellipse_controls,
+        sam_generate_btn,
+        #[cfg(feature = "ai-inference")]
+        sam_job_handle,
         hsl_section,
         hsl_enable,
         hsl_invert,
@@ -10769,7 +11197,9 @@ pub fn build_inspector(
         let view_weak = Rc::downgrade(&view);
         view.audition_takes_list
             .connect_row_activated(move |_list, row| {
-                let Some(view) = view_weak.upgrade() else { return };
+                let Some(view) = view_weak.upgrade() else {
+                    return;
+                };
                 let cid = view.selected_clip_id.borrow().clone();
                 let Some(cid) = cid else { return };
                 let name = row.widget_name();
@@ -10782,11 +11212,7 @@ pub fn build_inspector(
                 // Snapshot the clip before mutation so undo restores any
                 // host-field tweaks the user made while the previous take
                 // was active.
-                let snapshot = view
-                    .project
-                    .borrow()
-                    .clip_ref(&cid)
-                    .cloned();
+                let snapshot = view.project.borrow().clip_ref(&cid).cloned();
                 if snapshot.is_none() {
                     return;
                 }
@@ -10796,13 +11222,11 @@ pub fn build_inspector(
                     view.audition_remove_take_btn.set_sensitive(false);
                     return;
                 }
-                (view.on_execute_command)(Box::new(
-                    crate::undo::SetActiveAuditionTakeCommand {
-                        clip_id: cid,
-                        new_index,
-                        before_snapshot: snapshot,
-                    },
-                ));
+                (view.on_execute_command)(Box::new(crate::undo::SetActiveAuditionTakeCommand {
+                    clip_id: cid,
+                    new_index,
+                    before_snapshot: snapshot,
+                }));
                 (view.on_frei0r_changed)();
             });
     }
@@ -10812,7 +11236,9 @@ pub fn build_inspector(
         let view_weak = Rc::downgrade(&view);
         view.audition_takes_list
             .connect_row_selected(move |_list, row| {
-                let Some(view) = view_weak.upgrade() else { return };
+                let Some(view) = view_weak.upgrade() else {
+                    return;
+                };
                 let Some(row) = row else {
                     view.audition_remove_take_btn.set_sensitive(false);
                     return;
@@ -10842,28 +11268,29 @@ pub fn build_inspector(
     // Remove the currently selected (non-active) take.
     {
         let view_weak = Rc::downgrade(&view);
-        view.audition_remove_take_btn
-            .connect_clicked(move |_| {
-                let Some(view) = view_weak.upgrade() else { return };
-                let cid = view.selected_clip_id.borrow().clone();
-                let Some(cid) = cid else { return };
-                let Some(row) = view.audition_takes_list.selected_row() else {
-                    return;
-                };
-                let name = row.widget_name();
-                let Some(idx_str) = name.strip_prefix("audition-take-") else {
-                    return;
-                };
-                let Ok(take_index) = idx_str.parse::<usize>() else {
-                    return;
-                };
-                (view.on_execute_command)(Box::new(crate::undo::RemoveAuditionTakeCommand {
-                    clip_id: cid,
-                    take_index,
-                    removed: std::cell::RefCell::new(None),
-                }));
-                (view.on_frei0r_changed)();
-            });
+        view.audition_remove_take_btn.connect_clicked(move |_| {
+            let Some(view) = view_weak.upgrade() else {
+                return;
+            };
+            let cid = view.selected_clip_id.borrow().clone();
+            let Some(cid) = cid else { return };
+            let Some(row) = view.audition_takes_list.selected_row() else {
+                return;
+            };
+            let name = row.widget_name();
+            let Some(idx_str) = name.strip_prefix("audition-take-") else {
+                return;
+            };
+            let Ok(take_index) = idx_str.parse::<usize>() else {
+                return;
+            };
+            (view.on_execute_command)(Box::new(crate::undo::RemoveAuditionTakeCommand {
+                clip_id: cid,
+                take_index,
+                removed: std::cell::RefCell::new(None),
+            }));
+            (view.on_frei0r_changed)();
+        });
     }
     // Add Take From Source — pulls the source monitor's currently loaded
     // clip + In/Out marks via the `selected_clip_id`'s source path. Without
@@ -10876,13 +11303,17 @@ pub fn build_inspector(
     {
         let view_weak = Rc::downgrade(&view);
         view.audition_add_take_btn.connect_clicked(move |_| {
-            let Some(view) = view_weak.upgrade() else { return };
+            let Some(view) = view_weak.upgrade() else {
+                return;
+            };
             let cid = view.selected_clip_id.borrow().clone();
             let Some(cid) = cid else { return };
             // Build a new take from the active take as a starting point.
             let take = {
                 let proj = view.project.borrow();
-                let Some(clip) = proj.clip_ref(&cid) else { return };
+                let Some(clip) = proj.clip_ref(&cid) else {
+                    return;
+                };
                 let active = clip.audition_active_take_index;
                 let label_n = clip
                     .audition_takes
@@ -10917,7 +11348,9 @@ pub fn build_inspector(
     {
         let view_weak = Rc::downgrade(&view);
         view.audition_finalize_btn.connect_clicked(move |_| {
-            let Some(view) = view_weak.upgrade() else { return };
+            let Some(view) = view_weak.upgrade() else {
+                return;
+            };
             let cid = view.selected_clip_id.borrow().clone();
             let Some(cid) = cid else { return };
             let snapshot = view.project.borrow().clip_ref(&cid).cloned();

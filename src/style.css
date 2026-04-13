@@ -381,6 +381,11 @@ entry:focus {
     font-size: 12px;
 }
 
+/* Multicam angle button dimmed when no source footage at the current playhead */
+.multicam-angle-unavailable {
+    opacity: 0.35;
+}
+
 .panel-empty-state {
     color: #b8b8c0;
     font-size: 12px;

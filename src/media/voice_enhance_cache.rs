@@ -108,11 +108,8 @@ impl VoiceEnhanceCache {
             };
             match job {
                 Ok(job) => {
-                    let success = run_voice_enhance(
-                        &job.source_path,
-                        &job.output_path,
-                        job.strength,
-                    );
+                    let success =
+                        run_voice_enhance(&job.source_path, &job.output_path, job.strength);
                     let _ = tx.send(WorkerUpdate::Done(WorkerResult {
                         cache_key: job.cache_key,
                         output_path: job.output_path,
@@ -160,10 +157,7 @@ impl VoiceEnhanceCache {
         // Pre-existing on-disk result from a previous session.
         let output_path = self.output_path_for_key(&key);
         if Path::new(&output_path).exists() && file_is_ready(&output_path) {
-            log::info!(
-                "VoiceEnhanceCache: found existing file for key={}",
-                key
-            );
+            log::info!("VoiceEnhanceCache: found existing file for key={}", key);
             touch_mtime(&output_path);
             self.paths.insert(key, output_path);
             return;
@@ -282,10 +276,7 @@ impl VoiceEnhanceCache {
                             .insert(result.cache_key.clone(), result.output_path);
                         resolved.push(result.cache_key);
                     } else {
-                        log::warn!(
-                            "VoiceEnhanceCache: failed key={}",
-                            result.cache_key
-                        );
+                        log::warn!("VoiceEnhanceCache: failed key={}", result.cache_key);
                         self.failed.insert(result.cache_key);
                     }
                 }

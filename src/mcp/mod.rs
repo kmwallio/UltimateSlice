@@ -232,6 +232,32 @@ pub enum McpCommand {
         path: Option<serde_json::Value>,
         reply: SyncSender<Value>,
     },
+    /// Generate a new bezier-path ClipMask from a SAM 3 segmentation.
+    /// Takes either a box prompt (drag a rectangle) or a point
+    /// prompt (single click; emulated via a tiny synthetic box).
+    /// Inference is blocking — the MCP caller waits for the full
+    /// SAM pipeline (decode frame → image encoder → decoder →
+    /// contour extraction) before the reply comes back.
+    GenerateSamMask {
+        clip_id: String,
+        /// Absolute source-media time in ns for the frame to
+        /// segment. When `None`, defaults to the clip's `source_in`.
+        frame_ns: Option<u64>,
+        /// Box prompt in clip-local normalized 0..1 coordinates.
+        /// Takes precedence over `point` when both are provided.
+        box_x1: Option<f64>,
+        box_y1: Option<f64>,
+        box_x2: Option<f64>,
+        box_y2: Option<f64>,
+        /// Point prompt in clip-local normalized 0..1 coordinates.
+        /// Emulated as a small synthetic box centered on the click.
+        point_x: Option<f64>,
+        point_y: Option<f64>,
+        /// Douglas-Peucker simplification tolerance in source-image
+        /// pixels. `None` uses a sensible default (~2.0).
+        tolerance_px: Option<f64>,
+        reply: SyncSender<Value>,
+    },
     SetTitle {
         title: String,
         reply: SyncSender<Value>,
@@ -834,6 +860,17 @@ pub enum McpCommand {
         muted: Option<bool>,
         reply: SyncSender<Value>,
     },
+    SetMulticamAngleColor {
+        clip_id: String,
+        angle_index: usize,
+        brightness: Option<f32>,
+        contrast: Option<f32>,
+        saturation: Option<f32>,
+        temperature: Option<f32>,
+        tint: Option<f32>,
+        lut_paths: Option<Vec<String>>,
+        reply: SyncSender<Value>,
+    },
     // ── Audition / clip-versions commands ─────────────────────────────
     CreateAuditionClip {
         clip_ids: Vec<String>,
@@ -928,6 +965,27 @@ pub enum McpCommand {
     },
     ExportSrt {
         path: String,
+        reply: SyncSender<Value>,
+    },
+    // ── Script-to-Timeline ──────────────────────────────────────────
+    LoadScript {
+        path: String,
+        reply: SyncSender<Value>,
+    },
+    GetScriptScenes {
+        reply: SyncSender<Value>,
+    },
+    RunScriptAlignment {
+        clip_paths: Vec<String>,
+        confidence_threshold: f64,
+        reply: SyncSender<Value>,
+    },
+    ApplyScriptAssembly {
+        include_titles: bool,
+        reply: SyncSender<Value>,
+    },
+    ReorderByScript {
+        track_id: String,
         reply: SyncSender<Value>,
     },
 }

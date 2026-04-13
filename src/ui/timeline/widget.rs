@@ -58,14 +58,44 @@ fn track_row_height(track: &crate::model::track::Track) -> f64 {
     }
 }
 
+/// Returns logical track indices in top-to-bottom visual order.
+///
+/// The professional NLE convention: video tracks stack upward (higher-numbered
+/// video tracks visually above lower-numbered), and audio tracks stack downward
+/// (higher-numbered audio tracks visually below). The boundary between video
+/// and audio sits in the middle of the timeline.
+///
+/// Concretely: video tracks are emitted in *reverse* of their logical order,
+/// then audio tracks in their normal logical order. Relative order within
+/// each kind is preserved, even when the underlying vector is interleaved.
+fn visual_order(tracks: &[crate::model::track::Track]) -> Vec<usize> {
+    let mut video: Vec<usize> = tracks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.is_video())
+        .map(|(i, _)| i)
+        .collect();
+    video.reverse();
+    let audio: Vec<usize> = tracks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.is_audio())
+        .map(|(i, _)| i)
+        .collect();
+    let mut out = Vec::with_capacity(tracks.len());
+    out.extend(video);
+    out.extend(audio);
+    out
+}
+
+/// Position of `logical_idx` in the visual (top-to-bottom) stack, or `None`
+/// if `logical_idx` is out of bounds.
+fn logical_to_visual(tracks: &[crate::model::track::Track], logical_idx: usize) -> Option<usize> {
+    visual_order(tracks).iter().position(|&i| i == logical_idx)
+}
+
 fn track_row_top(project: &crate::model::project::Project, track_idx: usize) -> f64 {
-    RULER_HEIGHT
-        + project
-            .tracks
-            .iter()
-            .take(track_idx)
-            .map(track_row_height)
-            .sum::<f64>()
+    track_row_top_in_tracks(&project.tracks, track_idx)
 }
 
 fn timeline_content_height(project: &crate::model::project::Project) -> f64 {
@@ -77,12 +107,15 @@ fn timeline_content_height_for_tracks(tracks: &[crate::model::track::Track]) -> 
 }
 
 fn track_row_top_in_tracks(tracks: &[crate::model::track::Track], track_idx: usize) -> f64 {
-    RULER_HEIGHT
-        + tracks
-            .iter()
-            .take(track_idx)
-            .map(track_row_height)
-            .sum::<f64>()
+    let order = visual_order(tracks);
+    let visual_pos = order.iter().position(|&i| i == track_idx);
+    let mut y = RULER_HEIGHT;
+    if let Some(vp) = visual_pos {
+        for &i in order.iter().take(vp) {
+            y += track_row_height(&tracks[i]);
+        }
+    }
+    y
 }
 
 fn track_index_at_y_in_tracks(tracks: &[crate::model::track::Track], y: f64) -> Option<usize> {
@@ -90,10 +123,10 @@ fn track_index_at_y_in_tracks(tracks: &[crate::model::track::Track], y: f64) -> 
         return None;
     }
     let mut row_top = RULER_HEIGHT;
-    for (idx, track) in tracks.iter().enumerate() {
-        let h = track_row_height(track);
+    for &logical_idx in &visual_order(tracks) {
+        let h = track_row_height(&tracks[logical_idx]);
         if y >= row_top && y < row_top + h {
-            return Some(idx);
+            return Some(logical_idx);
         }
         row_top += h;
     }
@@ -101,21 +134,10 @@ fn track_index_at_y_in_tracks(tracks: &[crate::model::track::Track], y: f64) -> 
 }
 
 fn track_index_at_y_in_project(project: &crate::model::project::Project, y: f64) -> Option<usize> {
-    if y <= RULER_HEIGHT {
-        return None;
-    }
-    let mut row_top = RULER_HEIGHT;
-    for (idx, track) in project.tracks.iter().enumerate() {
-        let row_bottom = row_top + track_row_height(track);
-        if y < row_bottom {
-            return Some(idx);
-        }
-        row_top = row_bottom;
-    }
-    None
+    track_index_at_y_in_tracks(&project.tracks, y)
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveTool {
     Select,
     Razor,
@@ -123,6 +145,8 @@ pub enum ActiveTool {
     Roll,
     Slip,
     Slide,
+    /// Vector drawing tool for ClipKind::Drawing.
+    Draw,
 }
 
 /// What a drag gesture is currently doing
@@ -344,6 +368,46 @@ struct MusicGenerationOverlay {
     error: Option<String>,
 }
 
+/// Where an in-progress drag or trim is currently snapping to. Rendered as a
+/// vertical guideline + badge in `draw_timeline`.
+#[derive(Clone, Debug)]
+pub struct SnapHit {
+    /// Timeline position of the snap line, in root-timeline ns (matches the
+    /// coordinate space `ns_to_x` expects).
+    pub position_ns: u64,
+    /// Short label rendered in the badge.
+    pub label: &'static str,
+}
+
+/// Pick the nearest candidate to `desired_ns` within `snap_ns` tolerance.
+/// Returns the (possibly adjusted) ns value and the snap hit when one fired.
+fn snap_to_candidates(
+    desired_ns: i64,
+    snap_ns: i64,
+    candidates: &[(u64, &'static str)],
+) -> (i64, Option<SnapHit>) {
+    let mut best: Option<(u64, &'static str, i64)> = None;
+    for &(cand, label) in candidates {
+        let delta = (cand as i64 - desired_ns).abs();
+        if delta < snap_ns {
+            match best {
+                Some((_, _, best_abs)) if best_abs <= delta => {}
+                _ => best = Some((cand, label, delta)),
+            }
+        }
+    }
+    match best {
+        Some((cand, label, _)) => (
+            cand as i64,
+            Some(SnapHit {
+                position_ns: cand,
+                label,
+            }),
+        ),
+        None => (desired_ns, None),
+    }
+}
+
 /// Shared state for the timeline widget
 pub struct TimelineState {
     pub project: Rc<RefCell<Project>>,
@@ -436,6 +500,15 @@ pub struct TimelineState {
     pub compound_nav_stack: Vec<String>,
     /// Saved scroll offset from root level, restored on exit_compound.
     pub compound_saved_scroll: Option<f64>,
+    /// Current snap target while a drag/trim is active. Cleared on drag end
+    /// and on any motion frame that did not produce a snap. Drives the snap
+    /// guideline + badge overlay in `draw_timeline`.
+    pub active_snap_hit: Option<SnapHit>,
+    /// How the timeline view follows the playhead during playback.
+    pub timeline_autoscroll: crate::ui_state::AutoScrollMode,
+    /// While set to a future `Instant`, auto-scroll is suspended so the user's
+    /// manual scroll/pan wins. Bumped whenever the user scrolls or pan-drags.
+    pub user_scroll_cooldown_until: Option<std::time::Instant>,
 }
 
 impl TimelineState {
@@ -489,6 +562,56 @@ impl TimelineState {
             on_create_multicam: None,
             compound_nav_stack: Vec::new(),
             compound_saved_scroll: None,
+            timeline_autoscroll: crate::ui_state::AutoScrollMode::default(),
+            user_scroll_cooldown_until: None,
+            active_snap_hit: None,
+        }
+    }
+
+    /// Adjust `scroll_offset` so the playhead stays visible during playback.
+    ///
+    /// Call from the playback tick with the widget's allocated width. Suppressed
+    /// while the user is mid-drag or inside the short cooldown after a manual
+    /// scroll/pan so the view does not fight user input.
+    pub fn apply_playhead_autoscroll(&mut self, viewport_width: f64) {
+        use crate::ui_state::AutoScrollMode;
+        if self.timeline_autoscroll == AutoScrollMode::Off {
+            return;
+        }
+        if !matches!(self.drag_op, DragOp::None) {
+            return;
+        }
+        if let Some(t) = self.user_scroll_cooldown_until {
+            if std::time::Instant::now() < t {
+                return;
+            }
+            self.user_scroll_cooldown_until = None;
+        }
+        let usable_w = (viewport_width - TRACK_LABEL_WIDTH).max(100.0);
+        let ph_abs =
+            (self.playhead_ns as f64 / NS_PER_SECOND) * self.pixels_per_second + TRACK_LABEL_WIDTH;
+        let ph_x = ph_abs - self.scroll_offset;
+        match self.timeline_autoscroll {
+            AutoScrollMode::Page => {
+                let right_edge = TRACK_LABEL_WIDTH + usable_w;
+                let margin = 40.0;
+                if ph_x > right_edge - margin || ph_x < TRACK_LABEL_WIDTH {
+                    let target_local_x = TRACK_LABEL_WIDTH + usable_w * 0.125;
+                    self.scroll_offset = (ph_abs - target_local_x).max(0.0);
+                }
+            }
+            AutoScrollMode::Smooth => {
+                let target_local_x = TRACK_LABEL_WIDTH + usable_w * 0.75;
+                let delta = ph_x - target_local_x;
+                if delta > 0.0 {
+                    let step = delta.min(usable_w * 0.5);
+                    self.scroll_offset = (self.scroll_offset + step).max(0.0);
+                } else if ph_x < TRACK_LABEL_WIDTH {
+                    let target_local_x = TRACK_LABEL_WIDTH + usable_w * 0.125;
+                    self.scroll_offset = (ph_abs - target_local_x).max(0.0);
+                }
+            }
+            AutoScrollMode::Off => {}
         }
     }
 
@@ -788,6 +911,37 @@ impl TimelineState {
         true
     }
 
+    /// Rename a track by ID. Returns true if the label actually changed
+    /// (after trimming whitespace). Pushed through the undo history so
+    /// Ctrl+Z reverts the rename.
+    fn rename_track(&mut self, track_id: &str, new_label: String) -> bool {
+        let new_label = new_label.trim().to_string();
+        if new_label.is_empty() {
+            return false;
+        }
+        let old_label = {
+            let proj = self.project.borrow();
+            let Some(track) = proj.track_ref(track_id) else {
+                return false;
+            };
+            track.label.clone()
+        };
+        if old_label == new_label {
+            return false;
+        }
+        self.selected_track_id = Some(track_id.to_string());
+        let mut proj = self.project.borrow_mut();
+        self.history.execute(
+            Box::new(crate::undo::set_track_label_cmd(
+                track_id.to_string(),
+                old_label,
+                new_label,
+            )),
+            &mut proj,
+        );
+        true
+    }
+
     fn set_track_height_preset_by_index(
         &mut self,
         track_idx: usize,
@@ -886,9 +1040,7 @@ impl TimelineState {
         };
 
         // Local 1× duration (the upper bound of subtitle/keyframe times).
-        let original_local_duration = original
-            .source_out
-            .saturating_sub(original.source_in);
+        let original_local_duration = original.source_out.saturating_sub(original.source_in);
         // Clamp the requested word range to the clip's actual local duration.
         let word_start_ns = word_start_ns.min(original_local_duration);
         let word_end_ns = word_end_ns.min(original_local_duration);
@@ -900,7 +1052,11 @@ impl TimelineState {
         // us, but we need the offsets of arbitrary local times, not just the
         // full duration, so we apply the same `/ speed` ourselves. Guard
         // against zero/negative speed (shouldn't happen but stay defensive).
-        let speed = if original.speed > 0.0 { original.speed } else { 1.0 };
+        let speed = if original.speed > 0.0 {
+            original.speed
+        } else {
+            1.0
+        };
         let cut_a_local_timeline = (word_start_ns as f64 / speed as f64) as u64;
         let cut_b_local_timeline = (word_end_ns as f64 / speed as f64) as u64;
         let deleted_timeline_span = cut_b_local_timeline.saturating_sub(cut_a_local_timeline);
@@ -3072,11 +3228,7 @@ impl TimelineState {
         let cid = self.selected_clip_id.clone();
         let Some(cid) = cid else { return false };
         let snapshot = self.project.borrow().clip_ref(&cid).cloned();
-        if !snapshot
-            .as_ref()
-            .map(|c| c.is_audition())
-            .unwrap_or(false)
-        {
+        if !snapshot.as_ref().map(|c| c.is_audition()).unwrap_or(false) {
             return false;
         }
         let cmd = Box::new(crate::undo::FinalizeAuditionCommand {
@@ -3668,7 +3820,8 @@ fn clip_kind_to_track_kind(kind: &ClipKind) -> TrackKind {
         | ClipKind::Adjustment
         | ClipKind::Compound
         | ClipKind::Multicam
-        | ClipKind::Audition => TrackKind::Video,
+        | ClipKind::Audition
+        | ClipKind::Drawing => TrackKind::Video,
     }
 }
 
@@ -4445,6 +4598,14 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         "Collapse this audition to a normal clip using only the active take",
     ));
     clip_context_box.append(&btn_finalize_audition);
+    // Script-to-Timeline: Re-order by Script
+    let btn_reorder_by_script = gtk::Button::with_label("Re-order by Script");
+    btn_reorder_by_script.add_css_class("flat");
+    btn_reorder_by_script.set_tooltip_text(Some(
+        "Re-sort clips on this track by screenplay scene order",
+    ));
+    clip_context_box.append(&btn_reorder_by_script);
+
     clip_context_pop.set_child(Some(&clip_context_box));
 
     let track_context_pop = gtk::Popover::new();
@@ -4467,6 +4628,9 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         btn.add_css_class("flat");
         track_context_box.append(btn);
     }
+    let btn_rename_track = gtk::Button::with_label("Rename\u{2026}");
+    btn_rename_track.add_css_class("flat");
+    track_context_box.append(&btn_rename_track);
     btn_add_adjustment_layer.add_css_class("flat");
     track_context_box.append(&btn_add_adjustment_layer);
     let btn_generate_music = gtk::Button::with_label("Generate Music\u{2026}");
@@ -4483,6 +4647,107 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
     track_context_box.append(&btn_generate_music_region);
     track_context_pop.set_child(Some(&track_context_box));
     let track_context_track_idx: Rc<RefCell<Option<usize>>> = Rc::new(RefCell::new(None));
+
+    // Track rename popover (text Entry + Done button). Opened from the
+    // "Rename…" item in the track context menu, or from a double-click on
+    // the track label area. The track ID is held in `rename_target_track_id`
+    // for the duration the popover is open.
+    let rename_pop = gtk::Popover::new();
+    rename_pop.set_parent(&area);
+    rename_pop.set_autohide(true);
+    let rename_box = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    rename_box.set_margin_start(4);
+    rename_box.set_margin_end(4);
+    rename_box.set_margin_top(4);
+    rename_box.set_margin_bottom(4);
+    let rename_entry = gtk::Entry::new();
+    rename_entry.set_width_chars(16);
+    rename_entry.set_activates_default(true);
+    let rename_done_btn = gtk::Button::with_label("Done");
+    rename_done_btn.add_css_class("suggested-action");
+    rename_done_btn.set_receives_default(true);
+    rename_box.append(&rename_entry);
+    rename_box.append(&rename_done_btn);
+    rename_pop.set_child(Some(&rename_box));
+    rename_pop.set_default_widget(Some(&rename_done_btn));
+    let rename_target_track_id: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+
+    // Clear pending state if the popover is dismissed without committing.
+    {
+        let rename_target_track_id = rename_target_track_id.clone();
+        rename_pop.connect_closed(move |_| {
+            rename_target_track_id.borrow_mut().take();
+        });
+    }
+
+    // Commit handler — used by both the Done button and Entry activation.
+    let commit_rename: Rc<dyn Fn()> = {
+        let state = state.clone();
+        let area_weak = area.downgrade();
+        let rename_pop_weak = rename_pop.downgrade();
+        let rename_entry = rename_entry.clone();
+        let rename_target_track_id = rename_target_track_id.clone();
+        Rc::new(move || {
+            let new_label = rename_entry.text().to_string();
+            let track_id = rename_target_track_id.borrow_mut().take();
+            if let Some(track_id) = track_id {
+                let mut st = state.borrow_mut();
+                let changed = st.rename_track(&track_id, new_label);
+                drop(st);
+                if changed {
+                    TimelineState::notify_project_changed(&state);
+                    if let Some(a) = area_weak.upgrade() {
+                        a.queue_draw();
+                    }
+                }
+            }
+            if let Some(pop) = rename_pop_weak.upgrade() {
+                pop.popdown();
+            }
+        })
+    };
+
+    {
+        let commit_rename = commit_rename.clone();
+        rename_done_btn.connect_clicked(move |_| commit_rename());
+    }
+    {
+        let commit_rename = commit_rename.clone();
+        rename_entry.connect_activate(move |_| commit_rename());
+    }
+
+    // Helper closure: open the rename popover for a given track id, anchored
+    // at a screen-space rectangle on the timeline drawing area.
+    let open_rename_popover: Rc<dyn Fn(String, gtk::gdk::Rectangle)> = {
+        let state = state.clone();
+        let rename_pop = rename_pop.clone();
+        let rename_entry = rename_entry.clone();
+        let rename_target_track_id = rename_target_track_id.clone();
+        Rc::new(move |track_id: String, anchor: gtk::gdk::Rectangle| {
+            let current_label = {
+                let st = state.borrow();
+                let proj = st.project.borrow();
+                proj.track_ref(&track_id).map(|t| t.label.clone())
+            };
+            let Some(current_label) = current_label else {
+                return;
+            };
+            *rename_target_track_id.borrow_mut() = Some(track_id);
+            rename_entry.set_text(&current_label);
+            rename_entry.select_region(0, -1);
+            rename_pop.set_pointing_to(Some(&anchor));
+            rename_pop.popup();
+            // Defer focus until the popover is realized so the entry actually
+            // receives the cursor.
+            let entry_weak = rename_entry.downgrade();
+            glib::idle_add_local_once(move || {
+                if let Some(entry) = entry_weak.upgrade() {
+                    entry.grab_focus();
+                    entry.select_region(0, -1);
+                }
+            });
+        })
+    };
 
     {
         let state = state.clone();
@@ -4815,6 +5080,25 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         });
     }
 
+    // Script-to-Timeline: Re-order by Script handler
+    {
+        let state = state.clone();
+        let area_weak = area.downgrade();
+        let pop_weak = clip_context_pop.downgrade();
+        btn_reorder_by_script.connect_clicked(move |_| {
+            if let Some(pop) = pop_weak.upgrade() {
+                pop.popdown();
+            }
+            let changed = reorder_track_by_script(&state);
+            if changed {
+                TimelineState::notify_project_changed(&state);
+            }
+            if let Some(a) = area_weak.upgrade() {
+                a.queue_draw();
+            }
+        });
+    }
+
     for (btn, preset) in [
         (
             btn_track_height_small.clone(),
@@ -4848,6 +5132,46 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 if let Some(a) = area_weak.upgrade() {
                     a.queue_draw();
                 }
+            }
+        });
+    }
+
+    // Rename Track button handler — closes the context menu and opens the
+    // rename popover, anchored at the track's left-side label area.
+    {
+        let state = state.clone();
+        let pop_weak = track_context_pop.downgrade();
+        let track_context_track_idx = track_context_track_idx.clone();
+        let open_rename_popover = open_rename_popover.clone();
+        btn_rename_track.connect_clicked(move |_| {
+            let track_idx = *track_context_track_idx.borrow();
+            if let Some(pop) = pop_weak.upgrade() {
+                pop.popdown();
+            }
+            let Some(idx) = track_idx else {
+                return;
+            };
+            let anchor = {
+                let st = state.borrow();
+                let proj = st.project.borrow();
+                let editing_tracks = st.resolve_editing_tracks(&proj);
+                let Some(track) = editing_tracks.get(idx) else {
+                    return;
+                };
+                let track_id = track.id.clone();
+                let row_top =
+                    track_row_top_in_tracks(editing_tracks, idx) + st.breadcrumb_bar_height();
+                let row_height = track_row_height(track);
+                let rect = gtk::gdk::Rectangle::new(
+                    0,
+                    row_top as i32,
+                    TRACK_LABEL_WIDTH as i32,
+                    row_height as i32,
+                );
+                Some((track_id, rect))
+            };
+            if let Some((track_id, rect)) = anchor {
+                open_rename_popover(track_id, rect);
             }
         });
     }
@@ -5029,6 +5353,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         let btn_track_height_large = btn_track_height_large.clone();
         let btn_add_adjustment_layer = btn_add_adjustment_layer.clone();
         let btn_generate_music = btn_generate_music.clone();
+        let open_rename_popover = open_rename_popover.clone();
         click.connect_pressed(move |gesture, n_press, x, y| {
             // Grab keyboard focus so Delete/Backspace etc. work immediately
             if let Some(a) = area_weak.upgrade() {
@@ -5072,7 +5397,43 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     }
                 }
             } else if button == 1 {
-                match st.active_tool.clone() {
+                // Double-click on the track label area → open rename popover.
+                // Must run before any other left-click handling so it doesn't
+                // also seek/scrub or trigger compound drill-down.
+                if n_press == 2
+                    && x < TRACK_LABEL_WIDTH
+                    && st.solo_badge_hit_track_index(x, y).is_none()
+                    && st.duck_badge_hit_track_index(x, y).is_none()
+                {
+                    let resolved = st.track_index_at_y(y).and_then(|track_idx| {
+                        let proj = st.project.borrow();
+                        let editing_tracks = st.resolve_editing_tracks(&proj);
+                        editing_tracks.get(track_idx).map(|track| {
+                            let row_top = track_row_top_in_tracks(editing_tracks, track_idx)
+                                + st.breadcrumb_bar_height();
+                            let row_height = track_row_height(track);
+                            (
+                                track.id.clone(),
+                                gtk::gdk::Rectangle::new(
+                                    0,
+                                    row_top as i32,
+                                    TRACK_LABEL_WIDTH as i32,
+                                    row_height as i32,
+                                ),
+                            )
+                        })
+                    });
+                    if let Some((track_id, anchor)) = resolved {
+                        drop(st);
+                        open_rename_popover(track_id, anchor);
+                        return;
+                    }
+                }
+                match st.active_tool {
+                    ActiveTool::Draw => {
+                        // Drawing happens on the program monitor overlay,
+                        // not the timeline — ignore timeline clicks.
+                    }
                     ActiveTool::Razor => {
                         // Razor cut at click position on the clicked track
                         let ns = st.x_to_ns(x);
@@ -5636,6 +5997,8 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         // Middle/right drag on ruler = pan timeline.
                         let mut st = state.borrow_mut();
                         st.scroll_offset = (st.ruler_pan_start_offset - offset_x).max(0.0);
+                        st.user_scroll_cooldown_until =
+                            Some(std::time::Instant::now() + std::time::Duration::from_millis(600));
                         if let Some(a) = area_weak.upgrade() {
                             a.queue_draw();
                         }
@@ -5685,56 +6048,57 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         if grouped_move {
                             let move_set: HashSet<String> = move_clip_ids.iter().cloned().collect();
                             let snap_ns =
-                                (SNAP_TOLERANCE_PX / st.pixels_per_second * NS_PER_SECOND) as u64;
-                            let snap_start = {
+                                (SNAP_TOLERANCE_PX / st.pixels_per_second * NS_PER_SECOND) as i64;
+                            let eph = st.editing_playhead_ns();
+                            let at_root = st.compound_nav_stack.is_empty();
+                            let (snap_start, hit) = {
                                 let proj = st.project.borrow();
                                 let editing_tracks = st.resolve_editing_tracks(&proj);
-                                let edges: Vec<u64> = editing_tracks
-                                    .iter()
-                                    .flat_map(|t| t.clips.iter())
-                                    .filter(|c| !move_set.contains(&c.id))
-                                    .flat_map(|c| [c.timeline_start, c.timeline_end()])
-                                    .collect();
                                 let this_dur = editing_tracks
                                     .iter()
                                     .flat_map(|t| t.clips.iter())
                                     .find(|c| &c.id == clip_id)
                                     .map(|c| c.duration())
                                     .unwrap_or(0);
-                                let by_start = edges
-                                    .iter()
-                                    .copied()
-                                    .filter(|&e| {
-                                        (e as i64 - raw_start as i64).unsigned_abs() < snap_ns
-                                    })
-                                    .min_by_key(|&e| (e as i64 - raw_start as i64).unsigned_abs());
-                                let by_end = edges
-                                    .iter()
-                                    .copied()
-                                    .filter(|&e| {
-                                        let end = raw_start + this_dur;
-                                        (e as i64 - end as i64).unsigned_abs() < snap_ns
-                                    })
-                                    .min_by_key(|&e| {
-                                        let end = raw_start + this_dur;
-                                        (e as i64 - end as i64).unsigned_abs()
-                                    })
-                                    .map(|e| e.saturating_sub(this_dur));
-                                match (by_start, by_end) {
-                                    (Some(a), Some(b)) => {
-                                        let da = (a as i64 - raw_start as i64).unsigned_abs();
-                                        let db = (b as i64 - raw_start as i64).unsigned_abs();
-                                        if da <= db {
-                                            a
+                                let mut cands: Vec<(u64, &'static str)> = Vec::new();
+                                cands.push((0, "start"));
+                                cands.push((eph, "playhead"));
+                                if at_root {
+                                    for m in &proj.markers {
+                                        cands.push((m.position_ns, "marker"));
+                                    }
+                                }
+                                for t in editing_tracks.iter() {
+                                    for c in &t.clips {
+                                        if move_set.contains(&c.id) {
+                                            continue;
+                                        }
+                                        cands.push((c.timeline_start, "clip start"));
+                                        cands.push((c.timeline_end(), "clip end"));
+                                    }
+                                }
+                                let (s_start, h_start) =
+                                    snap_to_candidates(raw_start as i64, snap_ns, &cands);
+                                let desired_end = raw_start as i64 + this_dur as i64;
+                                let (s_end_target, h_end) =
+                                    snap_to_candidates(desired_end, snap_ns, &cands);
+                                let s_end = s_end_target - this_dur as i64;
+                                let d_start = (s_start - raw_start as i64).abs();
+                                let d_end = (s_end - raw_start as i64).abs();
+                                match (h_start, h_end) {
+                                    (Some(hs), Some(he)) => {
+                                        if d_start <= d_end {
+                                            (s_start.max(0) as u64, Some(hs))
                                         } else {
-                                            b
+                                            (s_end.max(0) as u64, Some(he))
                                         }
                                     }
-                                    (Some(a), None) => a,
-                                    (None, Some(b)) => b,
-                                    (None, None) => raw_start,
+                                    (Some(hs), None) => (s_start.max(0) as u64, Some(hs)),
+                                    (None, Some(he)) => (s_end.max(0) as u64, Some(he)),
+                                    (None, None) => (raw_start, None),
                                 }
                             };
+                            st.active_snap_hit = hit;
                             let delta = snap_start as i64 - original_start as i64;
                             let mut proj = st.project.borrow_mut();
                             for (member_id, member_start) in original_member_starts {
@@ -5812,57 +6176,57 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                             };
 
                             let snap_ns =
-                                (SNAP_TOLERANCE_PX / st.pixels_per_second * NS_PER_SECOND) as u64;
-                            let (_clip_dur, snap_start) = {
+                                (SNAP_TOLERANCE_PX / st.pixels_per_second * NS_PER_SECOND) as i64;
+                            let eph = st.editing_playhead_ns();
+                            let at_root = st.compound_nav_stack.is_empty();
+                            let (snap_start, hit) = {
                                 let proj = st.project.borrow();
                                 let editing_tracks = st.resolve_editing_tracks(&proj);
-                                let edges: Vec<u64> = editing_tracks
-                                    .iter()
-                                    .flat_map(|t| t.clips.iter())
-                                    .filter(|c| &c.id != clip_id)
-                                    .flat_map(|c| [c.timeline_start, c.timeline_end()])
-                                    .collect();
                                 let this_dur = editing_tracks
                                     .iter()
                                     .flat_map(|t| t.clips.iter())
                                     .find(|c| &c.id == clip_id)
                                     .map(|c| c.duration())
                                     .unwrap_or(0);
-                                let by_start = edges
-                                    .iter()
-                                    .copied()
-                                    .filter(|&e| {
-                                        (e as i64 - raw_start as i64).unsigned_abs() < snap_ns
-                                    })
-                                    .min_by_key(|&e| (e as i64 - raw_start as i64).unsigned_abs());
-                                let by_end = edges
-                                    .iter()
-                                    .copied()
-                                    .filter(|&e| {
-                                        let end = raw_start + this_dur;
-                                        (e as i64 - end as i64).unsigned_abs() < snap_ns
-                                    })
-                                    .min_by_key(|&e| {
-                                        let end = raw_start + this_dur;
-                                        (e as i64 - end as i64).unsigned_abs()
-                                    })
-                                    .map(|e| e.saturating_sub(this_dur));
-                                let snapped = match (by_start, by_end) {
-                                    (Some(a), Some(b)) => {
-                                        let da = (a as i64 - raw_start as i64).unsigned_abs();
-                                        let db = (b as i64 - raw_start as i64).unsigned_abs();
-                                        if da <= db {
-                                            a
+                                let mut cands: Vec<(u64, &'static str)> = Vec::new();
+                                cands.push((0, "start"));
+                                cands.push((eph, "playhead"));
+                                if at_root {
+                                    for m in &proj.markers {
+                                        cands.push((m.position_ns, "marker"));
+                                    }
+                                }
+                                for t in editing_tracks.iter() {
+                                    for c in &t.clips {
+                                        if &c.id == clip_id {
+                                            continue;
+                                        }
+                                        cands.push((c.timeline_start, "clip start"));
+                                        cands.push((c.timeline_end(), "clip end"));
+                                    }
+                                }
+                                let (s_start, h_start) =
+                                    snap_to_candidates(raw_start as i64, snap_ns, &cands);
+                                let desired_end = raw_start as i64 + this_dur as i64;
+                                let (s_end_target, h_end) =
+                                    snap_to_candidates(desired_end, snap_ns, &cands);
+                                let s_end = s_end_target - this_dur as i64;
+                                let d_start = (s_start - raw_start as i64).abs();
+                                let d_end = (s_end - raw_start as i64).abs();
+                                match (h_start, h_end) {
+                                    (Some(hs), Some(he)) => {
+                                        if d_start <= d_end {
+                                            (s_start.max(0) as u64, Some(hs))
                                         } else {
-                                            b
+                                            (s_end.max(0) as u64, Some(he))
                                         }
                                     }
-                                    (Some(a), None) => a,
-                                    (None, Some(b)) => b,
-                                    (None, None) => raw_start,
-                                };
-                                (this_dur, snapped)
+                                    (Some(hs), None) => (s_start.max(0) as u64, Some(hs)),
+                                    (None, Some(he)) => (s_end.max(0) as u64, Some(he)),
+                                    (None, None) => (raw_start, None),
+                                }
                             };
+                            st.active_snap_hit = hit;
                             let mut proj = st.project.borrow_mut();
                             if let Some(track) = proj.track_mut(&active_track_id) {
                                 if let Some(clip) =
@@ -5887,42 +6251,32 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         let new_start_raw =
                             (original_timeline_start as i64 + drag_ns).max(0) as u64;
 
-                        let snapped_start = if st.active_tool == ActiveTool::Ripple {
-                            // Ripple mode: we can push clips, but let's still snap to edges for precision
-                            // We shouldn't snap to OURSELF or clips we are pushing?
-                            // For simplicity, snap to anything but self.
+                        let eph = st.editing_playhead_ns();
+                        let at_root = st.compound_nav_stack.is_empty();
+                        let (snapped_start, hit) = {
                             let proj = st.project.borrow();
                             let editing_tracks = st.resolve_editing_tracks(&proj);
-                            let edges: Vec<u64> = editing_tracks
-                                .iter()
-                                .flat_map(|t| t.clips.iter())
-                                .filter(|c| &c.id != clip_id)
-                                .flat_map(|c| [c.timeline_start, c.timeline_end()])
-                                .collect();
-                            edges
-                                .iter()
-                                .copied()
-                                .filter(|&e| (e as i64 - new_start_raw as i64).abs() < snap_ns)
-                                .min_by_key(|&e| (e as i64 - new_start_raw as i64).abs())
-                                .unwrap_or(new_start_raw)
-                        } else {
-                            // Standard TrimIn: constrained by adjacent clips?
-                            // Current logic didn't constrain, just snapped.
-                            let proj = st.project.borrow();
-                            let editing_tracks = st.resolve_editing_tracks(&proj);
-                            let edges: Vec<u64> = editing_tracks
-                                .iter()
-                                .flat_map(|t| t.clips.iter())
-                                .filter(|c| &c.id != clip_id)
-                                .flat_map(|c| [c.timeline_start, c.timeline_end()])
-                                .collect();
-                            edges
-                                .iter()
-                                .copied()
-                                .filter(|&e| (e as i64 - new_start_raw as i64).abs() < snap_ns)
-                                .min_by_key(|&e| (e as i64 - new_start_raw as i64).abs())
-                                .unwrap_or(new_start_raw)
+                            let mut cands: Vec<(u64, &'static str)> = Vec::new();
+                            cands.push((0, "start"));
+                            cands.push((eph, "playhead"));
+                            if at_root {
+                                for m in &proj.markers {
+                                    cands.push((m.position_ns, "marker"));
+                                }
+                            }
+                            for t in editing_tracks.iter() {
+                                for c in &t.clips {
+                                    if &c.id == clip_id {
+                                        continue;
+                                    }
+                                    cands.push((c.timeline_start, "clip start"));
+                                    cands.push((c.timeline_end(), "clip end"));
+                                }
+                            }
+                            let (s, h) = snap_to_candidates(new_start_raw as i64, snap_ns, &cands);
+                            (s.max(0) as u64, h)
                         };
+                        st.active_snap_hit = hit;
 
                         let snapped_drag = snapped_start as i64 - original_timeline_start as i64;
 
@@ -5974,27 +6328,34 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         original_source_out: _,
                         ref original_track_clips,
                     } => {
-                        // Snap the out-point to nearby clip edges
+                        // Snap the out-point to nearby clip edges, playhead, markers, or 0.
                         let snap_ns =
-                            (SNAP_TOLERANCE_PX / st.pixels_per_second * NS_PER_SECOND) as u64;
-                        let snapped_ns = {
+                            (SNAP_TOLERANCE_PX / st.pixels_per_second * NS_PER_SECOND) as i64;
+                        let eph = st.editing_playhead_ns();
+                        let at_root = st.compound_nav_stack.is_empty();
+                        let (snapped_ns, hit) = {
                             let proj = st.project.borrow();
-                            let edges: Vec<u64> = proj
-                                .tracks
-                                .iter()
-                                .flat_map(|t| t.clips.iter())
-                                .filter(|c| &c.id != clip_id)
-                                .flat_map(|c| [c.timeline_start, c.timeline_end()])
-                                .collect();
-                            edges
-                                .iter()
-                                .copied()
-                                .filter(|&e| {
-                                    (e as i64 - current_ns as i64).unsigned_abs() < snap_ns
-                                })
-                                .min_by_key(|&e| (e as i64 - current_ns as i64).unsigned_abs())
-                                .unwrap_or(current_ns)
+                            let editing_tracks = st.resolve_editing_tracks(&proj);
+                            let mut cands: Vec<(u64, &'static str)> = Vec::new();
+                            cands.push((eph, "playhead"));
+                            if at_root {
+                                for m in &proj.markers {
+                                    cands.push((m.position_ns, "marker"));
+                                }
+                            }
+                            for t in editing_tracks.iter() {
+                                for c in &t.clips {
+                                    if &c.id == clip_id {
+                                        continue;
+                                    }
+                                    cands.push((c.timeline_start, "clip start"));
+                                    cands.push((c.timeline_end(), "clip end"));
+                                }
+                            }
+                            let (s, h) = snap_to_candidates(current_ns as i64, snap_ns, &cands);
+                            (s.max(0) as u64, h)
                         };
+                        st.active_snap_hit = hit;
                         let mut proj = st.project.borrow_mut();
                         if let Some(track) = proj.track_mut(track_id) {
                             // Find original clip data to compute stable delta
@@ -6304,6 +6665,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 let mut st = state.borrow_mut();
                 let music_generation_outcome = st.finish_music_generation_region_drag();
                 let drag_op = std::mem::replace(&mut st.drag_op, DragOp::None);
+                st.active_snap_hit = None;
                 let should_notify_project = !matches!(&drag_op, DragOp::None);
                 let had_marquee = st.marquee_selection.is_some();
                 if had_marquee {
@@ -7158,6 +7520,16 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     notify_tool = Some(st.active_tool.clone());
                     true
                 }
+                Key::d | Key::D if !ctrl => {
+                    // D = Draw
+                    st.active_tool = if st.active_tool == ActiveTool::Draw {
+                        ActiveTool::Select
+                    } else {
+                        ActiveTool::Draw
+                    };
+                    notify_tool = Some(st.active_tool.clone());
+                    true
+                }
                 Key::Escape => {
                     if st.cancel_music_generation_region() {
                         true
@@ -7235,6 +7607,8 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             if dx.abs() > dy.abs() {
                 // Horizontal pan
                 st.scroll_offset = (st.scroll_offset + dx * 20.0).max(0.0);
+                st.user_scroll_cooldown_until =
+                    Some(std::time::Instant::now() + std::time::Duration::from_millis(600));
             } else if ctrl_held || dy.abs() > 0.0 {
                 // Zoom (Ctrl+scroll or plain vertical scroll)
                 let factor = if dy < 0.0 { 1.1 } else { 0.9 };
@@ -7502,14 +7876,15 @@ fn draw_timeline(
     let proj = st.project.borrow();
     let editing_tracks = st.resolve_editing_tracks(&proj);
     let mut y = RULER_HEIGHT + breadcrumb_height;
-    for (i, track) in editing_tracks.iter().enumerate() {
+    for &logical_idx in &visual_order(editing_tracks) {
+        let track = &editing_tracks[logical_idx];
         let track_height = track_row_height(track);
         draw_track_row(
             cr,
             w,
             y,
             track_height,
-            i,
+            logical_idx,
             track,
             st,
             &grouped_peer_highlight_ids,
@@ -7543,6 +7918,47 @@ fn draw_timeline(
         cr.fill().ok();
     }
 
+    // Snap indicator — dashed vertical guideline + badge at the active snap target.
+    if !matches!(st.drag_op, DragOp::None) {
+        if let Some(hit) = st.active_snap_hit.clone() {
+            let sx = st.ns_to_x(hit.position_ns);
+            if sx >= TRACK_LABEL_WIDTH - 1.0 {
+                cr.save().ok();
+                cr.rectangle(TRACK_LABEL_WIDTH, 0.0, w - TRACK_LABEL_WIDTH, h);
+                cr.clip();
+                cr.set_source_rgba(1.0, 0.82, 0.2, 0.9);
+                cr.set_line_width(1.5);
+                cr.set_dash(&[4.0, 3.0], 0.0);
+                cr.move_to(sx, RULER_HEIGHT);
+                cr.line_to(sx, h);
+                cr.stroke().ok();
+                cr.set_dash(&[], 0.0);
+
+                cr.select_font_face(
+                    "sans",
+                    gtk::cairo::FontSlant::Normal,
+                    gtk::cairo::FontWeight::Bold,
+                );
+                cr.set_font_size(10.0);
+                let te = cr
+                    .text_extents(hit.label)
+                    .unwrap_or_else(|_| cr.text_extents("X").unwrap());
+                let pad = 5.0;
+                let bh = 16.0;
+                let bw = te.width() + pad * 2.0;
+                let bx = sx + 4.0;
+                let by = RULER_HEIGHT + 4.0;
+                rounded_rect(cr, bx, by, bw, bh, 3.0);
+                cr.set_source_rgba(1.0, 0.82, 0.2, 0.95);
+                cr.fill().ok();
+                cr.set_source_rgb(0.0, 0.0, 0.0);
+                cr.move_to(bx + pad, by + bh - 5.0);
+                let _ = cr.show_text(hit.label);
+                cr.restore().ok();
+            }
+        }
+    }
+
     // Tool indicator
     let tool_label = match st.active_tool {
         ActiveTool::Razor => Some("✂ Razor (B to toggle)"),
@@ -7574,15 +7990,8 @@ fn draw_timeline(
         );
     }
 
-    let track_row_y = |track_idx: usize| {
-        RULER_HEIGHT
-            + breadcrumb_height
-            + editing_tracks
-                .iter()
-                .take(track_idx)
-                .map(track_row_height)
-                .sum::<f64>()
-    };
+    let track_row_y =
+        |track_idx: usize| track_row_top_in_tracks(editing_tracks, track_idx) + breadcrumb_height;
     if let Some(armed_track_id) = &st.music_generation_armed_track_id {
         if let Some((track_idx, track)) = editing_tracks
             .iter()
@@ -7697,8 +8106,16 @@ fn draw_timeline(
                 .get(*target_idx)
                 .map(track_row_height)
                 .unwrap_or(0.0);
+            // Decide above/below based on *visual* position, not logical index,
+            // since video tracks are visually reversed.
+            let source_visual = logical_to_visual(editing_tracks, *track_idx);
+            let target_visual = logical_to_visual(editing_tracks, *target_idx);
+            let target_below_source = match (source_visual, target_visual) {
+                (Some(s), Some(t)) => t > s,
+                _ => target_idx > track_idx,
+            };
             let indicator_y = target_top
-                + if target_idx > track_idx {
+                + if target_below_source {
                     target_height
                 } else {
                     0.0
@@ -8466,11 +8883,7 @@ fn draw_clip(
         if let Some(takes) = clip.audition_takes.as_ref() {
             if !takes.is_empty() && cw > 60.0 {
                 cr.save().ok();
-                let indicator = format!(
-                    "{}/{}",
-                    clip.audition_active_take_index + 1,
-                    takes.len()
-                );
+                let indicator = format!("{}/{}", clip.audition_active_take_index + 1, takes.len());
                 let fs2 = (ch * 0.32).clamp(8.0, 12.0);
                 cr.set_font_size(fs2);
                 cr.set_source_rgba(1.0, 1.0, 1.0, 0.85);
@@ -9495,6 +9908,99 @@ pub fn show_shortcuts_dialog(parent: &gtk::Window) {
 
     dialog.connect_response(|d, _| d.destroy());
     dialog.present();
+}
+
+/// Re-order clips on the selected track by their `scene_id`, matching the
+/// screenplay scene order stored in the project's `parsed_script_path`.
+///
+/// Only affects clips that have a `scene_id` set (from script-to-timeline
+/// assembly). Clips without a `scene_id` are left at the end.
+fn reorder_track_by_script(state: &std::rc::Rc<std::cell::RefCell<TimelineState>>) -> bool {
+    // First, gather the info we need without holding borrows.
+    let (track_id, old_clips, script_path) = {
+        let st = state.borrow();
+        let proj = st.project.borrow();
+        let track_id = match st.selected_track_id.as_ref() {
+            Some(id) => id.clone(),
+            None => return false,
+        };
+        let track = match proj.tracks.iter().find(|t| t.id == track_id) {
+            Some(t) => t,
+            None => return false,
+        };
+        if !track.clips.iter().any(|c| c.scene_id.is_some()) {
+            return false;
+        }
+        (
+            track_id,
+            track.clips.clone(),
+            proj.parsed_script_path.clone(),
+        )
+    };
+
+    // Try to load the script for scene ordering.
+    // Since scene IDs are UUIDs generated at parse time, we use the
+    // clip scene_id values directly for relative ordering (alphabetical
+    // as a fallback when the script can't be re-parsed).
+    let scene_order: std::collections::HashMap<String, usize> =
+        if let Some(ref script_path) = script_path {
+            match crate::media::script::parse_script(script_path) {
+                Ok(script) => script
+                    .scenes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| (s.id.clone(), i))
+                    .collect(),
+                Err(_) => std::collections::HashMap::new(),
+            }
+        } else {
+            std::collections::HashMap::new()
+        };
+
+    // Sort clips: by scene order for those with scene_id, rest at the end.
+    let mut new_clips = old_clips.clone();
+    new_clips.sort_by(|a, b| {
+        let a_order = a
+            .scene_id
+            .as_ref()
+            .and_then(|id| scene_order.get(id))
+            .copied()
+            .unwrap_or(usize::MAX);
+        let b_order = b
+            .scene_id
+            .as_ref()
+            .and_then(|id| scene_order.get(id))
+            .copied()
+            .unwrap_or(usize::MAX);
+        a_order.cmp(&b_order)
+    });
+
+    // Reassign timeline_start values gap-free.
+    let mut cursor: u64 = 0;
+    for clip in &mut new_clips {
+        clip.timeline_start = cursor;
+        cursor += clip.duration() as u64;
+    }
+
+    // Check if anything actually changed.
+    let changed = new_clips
+        .iter()
+        .zip(old_clips.iter())
+        .any(|(a, b)| a.id != b.id || a.timeline_start != b.timeline_start);
+
+    if changed {
+        let cmd = crate::undo::SetTrackClipsCommand {
+            track_id,
+            old_clips,
+            new_clips,
+            label: "Re-order by Script".into(),
+        };
+        let project_rc = state.borrow().project.clone();
+        let mut proj = project_rc.borrow_mut();
+        state.borrow_mut().history.execute(Box::new(cmd), &mut proj);
+    }
+
+    changed
 }
 
 #[cfg(test)]
@@ -11244,9 +11750,7 @@ mod tests {
         // Attach a transcript to clip A.
         {
             let mut proj = project.borrow_mut();
-            let clip_a = proj
-                .clip_mut(&ids[0])
-                .expect("clip A should exist");
+            let clip_a = proj.clip_mut(&ids[0]).expect("clip A should exist");
             clip_a.subtitle_segments = vec![make_segment_with_words(&[
                 (2 * s, 3 * s, "alpha"),
                 (4 * s, 5 * s, "beta"),
@@ -11303,11 +11807,7 @@ mod tests {
         assert_eq!(right.subtitle_segments[0].words[0].end_ns, 2 * s);
 
         // Downstream clip B: shifted left by the deleted span (1s).
-        let b = track
-            .clips
-            .iter()
-            .find(|c| c.id == ids[1])
-            .expect("clip B");
+        let b = track.clips.iter().find(|c| c.id == ids[1]).expect("clip B");
         assert_eq!(b.timeline_start, 9 * s);
         assert_eq!(b.duration(), 10 * s);
     }
@@ -11342,10 +11842,7 @@ mod tests {
                 assert_eq!(gc.timeline_start, wc.timeline_start);
                 assert_eq!(gc.source_in, wc.source_in);
                 assert_eq!(gc.source_out, wc.source_out);
-                assert_eq!(
-                    gc.subtitle_segments.len(),
-                    wc.subtitle_segments.len()
-                );
+                assert_eq!(gc.subtitle_segments.len(), wc.subtitle_segments.len());
             }
         }
     }
@@ -11423,11 +11920,7 @@ mod tests {
 
         let proj = project.borrow();
         // Outer track unchanged: still one compound clip.
-        let outer = proj
-            .tracks
-            .iter()
-            .find(|t| t.id == outer_track_id)
-            .unwrap();
+        let outer = proj.tracks.iter().find(|t| t.id == outer_track_id).unwrap();
         assert_eq!(outer.clips.len(), 1);
         assert_eq!(outer.clips[0].id, "COMPOUND");
         // Inner track was mutated: now two clips (left + right halves).

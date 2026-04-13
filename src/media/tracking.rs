@@ -714,10 +714,10 @@ pub fn compute_auto_crop_binding_values(inputs: &AutoCropInputs) -> AutoCropBind
     let scale = s_fill.max(s_tight).max(1.0).clamp(SCALE_MIN, SCALE_MAX);
 
     // Centering offsets in pos_x/y direct-canvas space.
-    let offset_x = (cw_frac * scale * (1.0 - 2.0 * inputs.region.center_x))
-        .clamp(POSITION_MIN, POSITION_MAX);
-    let offset_y = (ch_frac * scale * (1.0 - 2.0 * inputs.region.center_y))
-        .clamp(POSITION_MIN, POSITION_MAX);
+    let offset_x =
+        (cw_frac * scale * (1.0 - 2.0 * inputs.region.center_x)).clamp(POSITION_MIN, POSITION_MAX);
+    let offset_y =
+        (ch_frac * scale * (1.0 - 2.0 * inputs.region.center_y)).clamp(POSITION_MIN, POSITION_MAX);
 
     AutoCropBindingValues {
         scale_multiplier: scale,
@@ -1176,7 +1176,6 @@ struct TemplatePatch {
     v_energy: f64,
 }
 
-
 #[derive(Debug, Clone)]
 struct FrameSequence {
     width: usize,
@@ -1376,10 +1375,8 @@ where
         let dy = matched_rect.y - current_rect.y;
         if dx.abs() > MAX_SINGLE_FRAME_JUMP_PX || dy.abs() > MAX_SINGLE_FRAME_JUMP_PX {
             matched_rect = PixelRect {
-                x: current_rect.x
-                    + dx.clamp(-MAX_SINGLE_FRAME_JUMP_PX, MAX_SINGLE_FRAME_JUMP_PX),
-                y: current_rect.y
-                    + dy.clamp(-MAX_SINGLE_FRAME_JUMP_PX, MAX_SINGLE_FRAME_JUMP_PX),
+                x: current_rect.x + dx.clamp(-MAX_SINGLE_FRAME_JUMP_PX, MAX_SINGLE_FRAME_JUMP_PX),
+                y: current_rect.y + dy.clamp(-MAX_SINGLE_FRAME_JUMP_PX, MAX_SINGLE_FRAME_JUMP_PX),
                 width: matched_rect.width,
                 height: matched_rect.height,
             };

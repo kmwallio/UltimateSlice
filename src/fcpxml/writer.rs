@@ -232,6 +232,17 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                 event.push_attribute(("us:media-annotations", annotations_json.as_str()));
             }
         }
+        // Script-to-Timeline metadata
+        if let Some(ref script_path) = project.parsed_script_path {
+            if !script_path.is_empty() {
+                event.push_attribute(("us:script-path", script_path.as_str()));
+            }
+        }
+        if let Some(ref transcript_cache) = project.parsed_transcript_cache_json {
+            if transcript_cache != "{}" {
+                event.push_attribute(("us:transcript-cache", transcript_cache.as_str()));
+            }
+        }
     }
     writer.write_event(Event::Start(event))?;
 
@@ -276,9 +287,7 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
             None | Some(crate::media::export::AudioChannelLayout::Stereo) => "stereo",
             Some(crate::media::export::AudioChannelLayout::Surround51) => "5.1",
             Some(crate::media::export::AudioChannelLayout::Surround71) => {
-                log::warn!(
-                    "FCPXML strict DTD has no 7.1 audioLayout — falling back to 5.1"
-                );
+                log::warn!("FCPXML strict DTD has no 7.1 audioLayout — falling back to 5.1");
                 "5.1"
             }
         };
@@ -1175,13 +1184,33 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                                     .push_attribute(("us:multicam-switches", escaped.as_str()));
                             }
                         }
+                    } else if clip.kind == crate::model::clip::ClipKind::Drawing {
+                        asset_clip.push_attribute(("us:clip-kind", "drawing"));
+                        if !clip.drawing_items.is_empty() {
+                            if let Ok(json) = serde_json::to_string(&clip.drawing_items) {
+                                let escaped = json.replace('"', "&quot;");
+                                asset_clip.push_attribute(("us:drawing-items", escaped.as_str()));
+                            }
+                        }
+                        if clip.drawing_animation_reveal_ns != 0 {
+                            asset_clip.push_attribute((
+                                "us:drawing-animation-reveal-ns",
+                                clip.drawing_animation_reveal_ns.to_string().as_str(),
+                            ));
+                        }
+                        if !matches!(
+                            clip.drawing_reveal_style,
+                            crate::model::clip::DrawingRevealStyle::Fade
+                        ) {
+                            asset_clip
+                                .push_attribute(("us:drawing-reveal-style", "grow_from_corner"));
+                        }
                     } else if clip.kind == crate::model::clip::ClipKind::Audition {
                         asset_clip.push_attribute(("us:clip-kind", "audition"));
                         if let Some(ref takes) = clip.audition_takes {
                             if let Ok(json) = serde_json::to_string(takes) {
                                 let escaped = json.replace('"', "&quot;");
-                                asset_clip
-                                    .push_attribute(("us:audition-takes", escaped.as_str()));
+                                asset_clip.push_attribute(("us:audition-takes", escaped.as_str()));
                             }
                         }
                         asset_clip.push_attribute((
@@ -1189,6 +1218,17 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                             clip.audition_active_take_index.to_string().as_str(),
                         ));
                     }
+                    // Script-to-Timeline metadata
+                    if let Some(ref scene_id) = clip.scene_id {
+                        asset_clip.push_attribute(("us:scene-id", scene_id.as_str()));
+                    }
+                    if let Some(confidence) = clip.script_confidence {
+                        asset_clip.push_attribute((
+                            "us:script-confidence",
+                            format!("{confidence:.3}").as_str(),
+                        ));
+                    }
+
                     asset_clip.push_attribute(("us:speed", clip.speed.to_string().as_str()));
                     let speed_keyframes_json = if clip.speed_keyframes.is_empty() {
                         None
@@ -1267,9 +1307,10 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                         "us:shadows-tint",
                         clip.shadows_tint.to_string().as_str(),
                     ));
-                    let hsl_json = clip.hsl_qualifier.as_ref().and_then(|q| {
-                        serde_json::to_string(q).ok()
-                    });
+                    let hsl_json = clip
+                        .hsl_qualifier
+                        .as_ref()
+                        .and_then(|q| serde_json::to_string(q).ok());
                     if let Some(ref json) = hsl_json {
                         asset_clip.push_attribute(("us:hsl-qualifier", json.as_str()));
                     }
@@ -3026,7 +3067,29 @@ fn patch_asset_clip_block_transform(
                 crate::model::clip::ClipKind::Compound => Some("compound".to_string()),
                 crate::model::clip::ClipKind::Multicam => Some("multicam".to_string()),
                 crate::model::clip::ClipKind::Audition => Some("audition".to_string()),
+                crate::model::clip::ClipKind::Drawing => Some("drawing".to_string()),
                 _ => None,
+            },
+        ),
+        (
+            "us:drawing-items",
+            if clip.kind == crate::model::clip::ClipKind::Drawing && !clip.drawing_items.is_empty()
+            {
+                serde_json::to_string(&clip.drawing_items)
+                    .ok()
+                    .map(|j| j.replace('"', "&quot;"))
+            } else {
+                None
+            },
+        ),
+        (
+            "us:drawing-animation-reveal-ns",
+            if clip.kind == crate::model::clip::ClipKind::Drawing
+                && clip.drawing_animation_reveal_ns != 0
+            {
+                Some(clip.drawing_animation_reveal_ns.to_string())
+            } else {
+                None
             },
         ),
         (
@@ -4295,6 +4358,8 @@ fn is_writer_managed_event_attr(_key: &str) -> bool {
             | "us:smart-collections"
             | "us:library-items"
             | "us:media-annotations"
+            | "us:script-path"
+            | "us:transcript-cache"
     )
 }
 
@@ -4305,12 +4370,7 @@ fn is_writer_managed_project_attr(key: &str) -> bool {
 fn is_writer_managed_sequence_attr(key: &str) -> bool {
     matches!(
         key,
-        "duration"
-            | "format"
-            | "tcFormat"
-            | "audioLayout"
-            | "audioRate"
-            | "us:master-gain-db"
+        "duration" | "format" | "tcFormat" | "audioLayout" | "audioRate" | "us:master-gain-db"
     )
 }
 
@@ -4442,6 +4502,9 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:title-clip-bg-color"
             | "us:title-secondary-text"
             | "us:clip-kind"
+            | "us:drawing-items"
+            | "us:drawing-animation-reveal-ns"
+            | "us:drawing-reveal-style"
             | "us:eq-bands"
             | "us:eq-low-gain-keyframes"
             | "us:eq-mid-gain-keyframes"
@@ -7562,10 +7625,7 @@ mod tests {
             .expect("audition clip preserved");
         assert_eq!(restored.kind, ClipKind::Audition);
         assert_eq!(restored.audition_active_take_index, 1);
-        let takes = restored
-            .audition_takes
-            .as_ref()
-            .expect("takes preserved");
+        let takes = restored.audition_takes.as_ref().expect("takes preserved");
         assert_eq!(takes.len(), 2);
         assert_eq!(takes[0].label, "Wide");
         assert_eq!(takes[1].label, "Close");
@@ -7573,5 +7633,70 @@ mod tests {
         assert_eq!(restored.source_path, "/tmp/close.mov");
         assert_eq!(restored.source_in, 1_000_000_000);
         assert_eq!(restored.source_out, 4_000_000_000);
+    }
+
+    #[test]
+    fn test_write_fcpxml_drawing_round_trip() {
+        use crate::model::clip::{DrawingItem, DrawingKind};
+        let mut project = Project::new("DrawingTest");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut drawing = Clip::new("", 4_000_000_000, 0, ClipKind::Drawing);
+        drawing.label = "Drawing".to_string();
+        drawing.drawing_items = vec![
+            DrawingItem {
+                kind: DrawingKind::Stroke,
+                points: vec![(0.1, 0.1), (0.5, 0.5), (0.9, 0.1)],
+                color: 0xFF0000FF,
+                width: 6.0,
+                fill_color: None,
+            },
+            DrawingItem {
+                kind: DrawingKind::Rectangle,
+                points: vec![(0.2, 0.2), (0.8, 0.8)],
+                color: 0x00FF00FF,
+                width: 4.0,
+                fill_color: Some(0xFFFF0080),
+            },
+        ];
+        drawing.drawing_animation_reveal_ns = 600_000_000;
+        drawing.drawing_reveal_style = crate::model::clip::DrawingRevealStyle::GrowFromCorner;
+        let drawing_id = drawing.id.clone();
+        track.add_clip(drawing);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(
+            xml.contains("us:clip-kind=\"drawing\""),
+            "expected us:clip-kind=drawing in writer output:\n{}",
+            xml
+        );
+        assert!(xml.contains("us:drawing-items="));
+        assert!(xml.contains("us:drawing-animation-reveal-ns=\"600000000\""));
+        assert!(xml.contains("us:drawing-reveal-style=\"grow_from_corner\""));
+
+        let parsed = parse_fcpxml(&xml).expect("parse written xml");
+        let restored = parsed
+            .video_tracks()
+            .next()
+            .expect("video track")
+            .clips
+            .iter()
+            .find(|c| c.id == drawing_id)
+            .expect("drawing clip preserved");
+        assert_eq!(restored.kind, ClipKind::Drawing);
+        assert_eq!(restored.drawing_items.len(), 2);
+        assert_eq!(restored.drawing_items[0].kind, DrawingKind::Stroke);
+        assert_eq!(restored.drawing_items[0].color, 0xFF0000FF);
+        assert_eq!(restored.drawing_items[1].kind, DrawingKind::Rectangle);
+        assert_eq!(restored.drawing_items[1].fill_color, Some(0xFFFF0080));
+        assert_eq!(restored.drawing_animation_reveal_ns, 600_000_000);
+        assert_eq!(
+            restored.drawing_reveal_style,
+            crate::model::clip::DrawingRevealStyle::GrowFromCorner
+        );
+        // Drawings render from vector data; source_path stays empty so
+        // stale preview-cache paths don't persist across save/load.
+        assert_eq!(restored.source_path, "");
     }
 }

@@ -231,6 +231,68 @@ pub enum ClipKind {
     /// playback/export see a normal clip. Inactive takes live in
     /// [`Clip::audition_takes`].
     Audition,
+    /// A vector-based drawing overlay. Stores freehand brush strokes
+    /// that are rendered over the video track.
+    Drawing,
+}
+
+/// Type of vector item in a [`ClipKind::Drawing`] clip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum DrawingKind {
+    #[default]
+    /// Freehand brush stroke.
+    Stroke,
+    /// Vector rectangle (defined by 2 points: top-left, bottom-right).
+    Rectangle,
+    /// Vector ellipse (defined by 2 points: bounding box corners).
+    Ellipse,
+    /// Vector arrow (defined by 2 points: start, end/head).
+    Arrow,
+}
+
+/// A single vector item in a [`ClipKind::Drawing`] clip.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DrawingItem {
+    pub kind: DrawingKind,
+    /// Sequence of normalized coordinates (0.0 to 1.0) relative to the project canvas.
+    pub points: Vec<(f64, f64)>,
+    /// Stroke color as 0xRRGGBBAA.
+    pub color: u32,
+    /// Stroke width in pixels (relative to 1080p height).
+    pub width: f64,
+    /// Optional fill color as 0xRRGGBBAA.
+    #[serde(default)]
+    pub fill_color: Option<u32>,
+}
+
+/// How `ClipKind::Drawing` items enter the frame when reveal
+/// animation is enabled. Applies per-clip, not per-item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DrawingRevealStyle {
+    /// Shapes fade in via alpha (strokes and arrows still dash-draw
+    /// along their path length). The default — matches the SVG
+    /// export's SMIL behaviour exactly.
+    #[default]
+    Fade,
+    /// Rectangles and ellipses grow from their starting corner
+    /// outward (geometry interpolated as progress advances).
+    /// Strokes and arrows still dash-draw along their path length
+    /// — this flag only changes the shape family.
+    GrowFromCorner,
+}
+
+/// Type of procedural animation applied to a title clip's entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TitleAnimation {
+    #[default]
+    None,
+    /// Reveals text character-by-character over the animation duration.
+    Typewriter,
+    /// Fades the title's opacity from 0 to 1 over the animation duration.
+    Fade,
+    /// Scales the title from 0 to 1 over the animation duration.
+    Pop,
 }
 
 /// A single alternate take inside an [`ClipKind::Audition`] clip.
@@ -268,10 +330,59 @@ pub struct MulticamAngle {
     /// When true, this angle's audio is excluded from the mix.
     #[serde(default)]
     pub muted: bool,
+    // ── Per-angle color grade (applied when this angle is the active video segment) ──
+    // These use the SAME neutral defaults and ranges as the Clip-level fields:
+    //   brightness  0.0  (−1.0 … 1.0)
+    //   contrast    1.0  ( 0.0 … 2.0)   ← multiplier, NOT offset!
+    //   saturation  1.0  ( 0.0 … 2.0)   ← multiplier, NOT offset!
+    //   temperature 6500 (2000 … 10000)  ← Kelvin, NOT offset!
+    //   tint        0.0  (−1.0 … 1.0)
+    /// Brightness adjustment: −1.0 (dark) to 1.0 (bright), 0.0 = no change.
+    #[serde(default)]
+    pub brightness: f32,
+    /// Contrast multiplier: 0.0 to 2.0, 1.0 = no change.
+    #[serde(default = "default_contrast")]
+    pub contrast: f32,
+    /// Saturation multiplier: 0.0 (greyscale) to 2.0 (vivid), 1.0 = no change.
+    #[serde(default = "default_saturation")]
+    pub saturation: f32,
+    /// Color temperature in Kelvin: 2000 (warm) to 10000 (cool), 6500 = daylight neutral.
+    #[serde(default = "default_temperature")]
+    pub temperature: f32,
+    /// Tint on green–magenta axis: −1.0 (green) to 1.0 (magenta), 0.0 = no change.
+    #[serde(default)]
+    pub tint: f32,
+    /// Per-angle LUT paths (.cube files). When non-empty, overrides the clip-level
+    /// `lut_paths` for this angle — lets each camera use its own colour transform.
+    #[serde(default)]
+    pub lut_paths: Vec<String>,
 }
 
 fn default_multicam_angle_volume() -> f32 {
     1.0
+}
+
+impl Default for MulticamAngle {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            label: String::new(),
+            source_path: String::new(),
+            source_in: 0,
+            source_out: 0,
+            sync_offset_ns: 0,
+            source_timecode_base_ns: None,
+            media_duration_ns: None,
+            volume: default_multicam_angle_volume(),
+            muted: false,
+            brightness: 0.0,
+            contrast: default_contrast(),
+            saturation: default_saturation(),
+            temperature: default_temperature(),
+            tint: 0.0,
+            lut_paths: Vec::new(),
+        }
+    }
 }
 
 /// An angle switch point within a multicam clip.
@@ -1476,6 +1587,10 @@ impl Frei0rEffect {
     }
 }
 
+fn default_animation_duration() -> u64 {
+    1_000_000_000 // 1 second
+}
+
 /// A single clip placed on the timeline
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Clip {
@@ -1492,6 +1607,32 @@ pub struct Clip {
     /// Human-readable label (defaults to filename)
     pub label: String,
     pub kind: ClipKind,
+    /// Animation to apply to a title clip.
+    #[serde(default)]
+    pub title_animation: TitleAnimation,
+    /// Duration of the title animation (procedural part).
+    #[serde(default = "default_animation_duration")]
+    pub title_animation_duration_ns: u64,
+    /// Vector items for drawing clips.
+    #[serde(default)]
+    pub drawing_items: Vec<DrawingItem>,
+    /// Reveal style for `ClipKind::Drawing` animations — controls
+    /// how Rectangle/Ellipse items enter the frame (opacity fade
+    /// vs. grow-from-corner geometry interpolation). Strokes and
+    /// arrows always dash-draw along path length regardless.
+    #[serde(default)]
+    pub drawing_reveal_style: DrawingRevealStyle,
+    /// Per-item reveal duration for drawing clips, in nanoseconds.
+    /// `0` (default) renders the drawing statically — all items
+    /// visible from t=0. Non-zero values enable a progressive reveal
+    /// animation: each item takes this long to fully appear, and
+    /// items are staggered by 70% of this value so consecutive
+    /// strokes overlap slightly. The reveal is rendered by
+    /// `drawing_render::rasterize_drawing_surface_at_time` and
+    /// baked into a cached MP4 that the preview + export pipelines
+    /// consume as a normal video source.
+    #[serde(default)]
+    pub drawing_animation_reveal_ns: u64,
     /// Semantic clip color label used for timeline tinting.
     #[serde(default)]
     pub color_label: ClipColorLabel,
@@ -1995,6 +2136,14 @@ pub struct Clip {
     /// meaningful when `kind == ClipKind::Audition`.
     #[serde(default)]
     pub audition_active_take_index: usize,
+
+    // ── Script-to-Timeline metadata ─────────────────────────────────
+    /// Script scene identifier linking this clip to a screenplay scene.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene_id: Option<String>,
+    /// Script-to-clip alignment confidence (0.0..1.0). None if not script-aligned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script_confidence: Option<f64>,
 }
 
 fn default_anamorphic_desqueeze() -> f64 {
@@ -2258,6 +2407,11 @@ impl Clip {
             timeline_start,
             label,
             kind,
+            title_animation: TitleAnimation::None,
+            title_animation_duration_ns: default_animation_duration(),
+            drawing_items: Vec::new(),
+            drawing_reveal_style: DrawingRevealStyle::default(),
+            drawing_animation_reveal_ns: 0,
             color_label: ClipColorLabel::None,
             brightness: 0.0,
             contrast: 1.0,
@@ -2410,6 +2564,8 @@ impl Clip {
             multicam_switches: None,
             audition_takes: None,
             audition_active_take_index: 0,
+            scene_id: None,
+            script_confidence: None,
         }
     }
 
@@ -2536,6 +2692,20 @@ impl Clip {
         self.multicam_angles.as_ref().and_then(|a| a.get(idx))
     }
 
+    /// Returns true if the given multicam angle has source footage at the
+    /// given local position (relative to the clip's visible start, i.e.
+    /// accounting for `source_in` after a razor cut).
+    pub fn multicam_angle_available_at(&self, angle_index: usize, local_pos_ns: u64) -> bool {
+        self.multicam_angles
+            .as_ref()
+            .and_then(|a| a.get(angle_index))
+            .map_or(false, |angle| {
+                // Position within the multicam's internal timeline.
+                let internal_pos = self.source_in.saturating_add(local_pos_ns);
+                angle.source_in.saturating_add(internal_pos) < angle.source_out
+            })
+    }
+
     /// Insert an angle switch, keeping the list sorted by position.
     /// If a switch already exists at the same position, update its angle.
     pub fn insert_angle_switch(&mut self, position_ns: u64, angle_index: usize) {
@@ -2647,27 +2817,18 @@ impl Clip {
     /// `active` index designates which take's fields populate the host
     /// clip (and therefore drive playback/export). Duration follows the
     /// active take's source range.
-    pub fn new_audition(
-        timeline_start: u64,
-        takes: Vec<AuditionTake>,
-        active: usize,
-    ) -> Self {
+    pub fn new_audition(timeline_start: u64, takes: Vec<AuditionTake>, active: usize) -> Self {
         let active = active.min(takes.len().saturating_sub(1));
-        let active_take = takes
-            .get(active)
-            .cloned()
-            .unwrap_or_else(|| AuditionTake {
-                id: String::new(),
-                label: String::new(),
-                source_path: String::new(),
-                source_in: 0,
-                source_out: 0,
-                source_timecode_base_ns: None,
-                media_duration_ns: None,
-            });
-        let duration = active_take
-            .source_out
-            .saturating_sub(active_take.source_in);
+        let active_take = takes.get(active).cloned().unwrap_or_else(|| AuditionTake {
+            id: String::new(),
+            label: String::new(),
+            source_path: String::new(),
+            source_in: 0,
+            source_out: 0,
+            source_timecode_base_ns: None,
+            media_duration_ns: None,
+        });
+        let duration = active_take.source_out.saturating_sub(active_take.source_in);
         let mut c = Self::new(
             &active_take.source_path,
             duration,
@@ -2743,9 +2904,7 @@ impl Clip {
         if self.kind != ClipKind::Audition {
             return;
         }
-        self.audition_takes
-            .get_or_insert_with(Vec::new)
-            .push(take);
+        self.audition_takes.get_or_insert_with(Vec::new).push(take);
     }
 
     /// Remove an audition take by index. Refuses to remove the currently
@@ -2804,8 +2963,9 @@ impl Clip {
             .map(|s| s.to_ascii_lowercase())
             .unwrap_or_default();
         match ext.as_str() {
-            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "tif" | "tiff" | "webp" | "heic"
-            | "svg" => ClipKind::Image,
+            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "tif" | "tiff" | "webp" | "heic" | "svg" => {
+                ClipKind::Image
+            }
             "wav" | "mp3" | "aac" | "flac" | "ogg" | "m4a" | "opus" => ClipKind::Audio,
             _ => ClipKind::Video,
         }
@@ -5064,6 +5224,7 @@ mod tests {
                 media_duration_ns: None,
                 volume: 1.0,
                 muted: false,
+                ..Default::default()
             },
             MulticamAngle {
                 id: "a2".into(),
@@ -5076,6 +5237,7 @@ mod tests {
                 media_duration_ns: None,
                 volume: 1.0,
                 muted: false,
+                ..Default::default()
             },
         ];
         let mc = Clip::new_multicam(1_000_000_000, angles);
@@ -5109,6 +5271,7 @@ mod tests {
                     media_duration_ns: None,
                     volume: 1.0,
                     muted: false,
+                    ..Default::default()
                 },
                 MulticamAngle {
                     id: "a2".into(),
@@ -5121,6 +5284,7 @@ mod tests {
                     media_duration_ns: None,
                     volume: 1.0,
                     muted: false,
+                    ..Default::default()
                 },
             ],
         );
@@ -5157,6 +5321,7 @@ mod tests {
                     media_duration_ns: None,
                     volume: 1.0,
                     muted: false,
+                    ..Default::default()
                 },
                 MulticamAngle {
                     id: "a2".into(),
@@ -5169,6 +5334,7 @@ mod tests {
                     media_duration_ns: None,
                     volume: 1.0,
                     muted: false,
+                    ..Default::default()
                 },
             ],
         );
@@ -5204,6 +5370,7 @@ mod tests {
                     media_duration_ns: None,
                     volume: 1.0,
                     muted: false,
+                    ..Default::default()
                 },
                 MulticamAngle {
                     id: "a2".into(),
@@ -5216,6 +5383,7 @@ mod tests {
                     media_duration_ns: None,
                     volume: 1.0,
                     muted: false,
+                    ..Default::default()
                 },
             ],
         );
@@ -5250,6 +5418,7 @@ mod tests {
                     media_duration_ns: None,
                     volume: 1.0,
                     muted: false,
+                    ..Default::default()
                 },
                 MulticamAngle {
                     id: "a2".into(),
@@ -5262,6 +5431,7 @@ mod tests {
                     media_duration_ns: None,
                     volume: 1.0,
                     muted: false,
+                    ..Default::default()
                 },
             ],
         );
@@ -5289,6 +5459,7 @@ mod tests {
                 media_duration_ns: Some(15_000),
                 volume: 1.0,
                 muted: false,
+                ..Default::default()
             }],
         );
         mc.insert_angle_switch(5_000, 0);
@@ -5330,6 +5501,7 @@ mod tests {
                     media_duration_ns: None,
                     volume: 0.75,
                     muted: false,
+                    ..Default::default()
                 },
                 MulticamAngle {
                     id: "a2".into(),
@@ -5342,6 +5514,7 @@ mod tests {
                     media_duration_ns: None,
                     volume: 0.0,
                     muted: true,
+                    ..Default::default()
                 },
             ],
         );

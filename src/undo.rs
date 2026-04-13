@@ -1,5 +1,6 @@
 use crate::model::clip::{AuditionTake, Clip, VoiceIsolationSource};
 use crate::model::project::Project;
+use crate::model::track::Track;
 use crate::model::transition::OutgoingTransition;
 
 /// A reversible edit operation on the project.
@@ -1216,6 +1217,23 @@ pub fn set_track_duck_cmd(
     }
 }
 
+/// Rename a track. Construct via `set_track_label_cmd()`.
+pub fn set_track_label_cmd(
+    track_id: String,
+    old_label: String,
+    new_label: String,
+) -> TrackMutateCommand<String> {
+    TrackMutateCommand {
+        track_id,
+        old_state: old_label,
+        new_state: new_label,
+        apply: |track, v| {
+            track.label = v;
+        },
+        label: "Rename track",
+    }
+}
+
 /// Match one clip's color to another — stores all color parameters before/after.
 pub struct MatchColorCommand {
     pub clip_id: String,
@@ -1790,6 +1808,105 @@ impl EditCommand for AddAdjustmentLayerCommand {
     }
 }
 
+/// Add a clip to a track (undo removes it).
+pub struct AddClipCommand {
+    pub clip: Clip,
+    pub track_id: String,
+}
+
+impl EditCommand for AddClipCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            track.add_clip(self.clip.clone());
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(track) = project.track_mut(&self.track_id) {
+            track.remove_clip(&self.clip.id);
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Add clip"
+    }
+}
+
+/// Set drawing items on a clip.
+pub struct SetDrawingItemsCommand {
+    pub clip_id: String,
+    pub old_items: Vec<crate::model::clip::DrawingItem>,
+    pub new_items: Vec<crate::model::clip::DrawingItem>,
+}
+
+impl EditCommand for SetDrawingItemsCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            clip.drawing_items = self.new_items.clone();
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            clip.drawing_items = self.old_items.clone();
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Draw item"
+    }
+}
+
+/// Set title animation on a clip.
+pub struct SetTitleAnimationCommand {
+    pub clip_id: String,
+    pub old_animation: crate::model::clip::TitleAnimation,
+    pub new_animation: crate::model::clip::TitleAnimation,
+}
+
+impl EditCommand for SetTitleAnimationCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            clip.title_animation = self.new_animation;
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            clip.title_animation = self.old_animation;
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set title animation"
+    }
+}
+
+/// Set title animation duration on a clip.
+pub struct SetTitleAnimationDurationCommand {
+    pub clip_id: String,
+    pub old_duration_ns: u64,
+    pub new_duration_ns: u64,
+}
+
+impl EditCommand for SetTitleAnimationDurationCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            clip.title_animation_duration_ns = self.new_duration_ns;
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            clip.title_animation_duration_ns = self.old_duration_ns;
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set animation duration"
+    }
+}
+
 /// Snapshot of a clip's mask state for undo/redo.
 #[derive(Clone, Debug)]
 pub struct ClipMaskSnapshot {
@@ -2145,9 +2262,10 @@ impl EditCommand for SetActiveAuditionTakeCommand {
         project.dirty = true;
     }
     fn undo(&self, project: &mut Project) {
-        if let (Some(clip), Some(snap)) =
-            (project.clip_mut(&self.clip_id), self.before_snapshot.as_ref())
-        {
+        if let (Some(clip), Some(snap)) = (
+            project.clip_mut(&self.clip_id),
+            self.before_snapshot.as_ref(),
+        ) {
             *clip = snap.clone();
         }
         project.dirty = true;
@@ -2233,15 +2351,42 @@ impl EditCommand for FinalizeAuditionCommand {
         project.dirty = true;
     }
     fn undo(&self, project: &mut Project) {
-        if let (Some(clip), Some(snap)) =
-            (project.clip_mut(&self.clip_id), self.before_snapshot.as_ref())
-        {
+        if let (Some(clip), Some(snap)) = (
+            project.clip_mut(&self.clip_id),
+            self.before_snapshot.as_ref(),
+        ) {
             *clip = snap.clone();
         }
         project.dirty = true;
     }
     fn description(&self) -> &str {
         "Finalize audition"
+    }
+}
+
+/// Undo command for script-to-timeline assembly.
+///
+/// Captures the full track state before and after assembly so the
+/// entire operation can be reverted atomically.
+pub struct ScriptAssemblyCommand {
+    /// All tracks before assembly.
+    pub old_tracks: Vec<Track>,
+    /// All tracks after assembly.
+    pub new_tracks: Vec<Track>,
+    pub label: String,
+}
+
+impl EditCommand for ScriptAssemblyCommand {
+    fn execute(&self, project: &mut Project) {
+        project.tracks = self.new_tracks.clone();
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        project.tracks = self.old_tracks.clone();
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        &self.label
     }
 }
 
@@ -2307,9 +2452,7 @@ mod tests {
         cmd.execute(&mut project);
         let applied = project.clip_ref("clip-1").unwrap();
         assert!(applied.tracking_binding.is_some());
-        assert!(
-            (applied.tracking_binding.as_ref().unwrap().scale_multiplier - 1.818).abs() < 1e-9
-        );
+        assert!((applied.tracking_binding.as_ref().unwrap().scale_multiplier - 1.818).abs() < 1e-9);
         assert!(project.dirty);
 
         project.dirty = false;
@@ -2325,7 +2468,10 @@ mod tests {
         let mut project = Project::new("Loudness Test");
         assert_eq!(project.master_gain_db, 0.0);
 
-        let cmd = SetProjectMasterGainCommand { old_db: 0.0, new_db: -3.5 };
+        let cmd = SetProjectMasterGainCommand {
+            old_db: 0.0,
+            new_db: -3.5,
+        };
         cmd.execute(&mut project);
         assert!((project.master_gain_db + 3.5).abs() < 1e-9);
         assert!(project.dirty);
@@ -2339,11 +2485,17 @@ mod tests {
     #[test]
     fn master_gain_command_clamps_to_plus_minus_24() {
         let mut project = Project::new("Loudness Test");
-        let cmd = SetProjectMasterGainCommand { old_db: 0.0, new_db: 99.0 };
+        let cmd = SetProjectMasterGainCommand {
+            old_db: 0.0,
+            new_db: 99.0,
+        };
         cmd.execute(&mut project);
         assert_eq!(project.master_gain_db, 24.0, "upper clamp");
 
-        let cmd2 = SetProjectMasterGainCommand { old_db: 0.0, new_db: -99.0 };
+        let cmd2 = SetProjectMasterGainCommand {
+            old_db: 0.0,
+            new_db: -99.0,
+        };
         cmd2.execute(&mut project);
         assert_eq!(project.master_gain_db, -24.0, "lower clamp");
     }

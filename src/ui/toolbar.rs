@@ -1676,11 +1676,7 @@ pub fn build_toolbar(
             // Hidden for GIF (no audio).
             let cl_label = gtk::Label::new(Some("Audio Channels:"));
             cl_label.set_halign(gtk::Align::End);
-            let cl_combo = gtk::DropDown::from_strings(&[
-                "Stereo",
-                "5.1 Surround",
-                "7.1 Surround",
-            ]);
+            let cl_combo = gtk::DropDown::from_strings(&["Stereo", "5.1 Surround", "7.1 Surround"]);
             cl_combo.set_selected(0);
             cl_combo.set_tooltip_text(Some(
                 "Output audio channel layout. Surround uses role-based auto-routing \
@@ -2857,11 +2853,38 @@ pub fn build_toolbar(
     btn_slide.set_tooltip_text(Some("Slide edit tool (U)"));
     btn_slide.set_group(Some(&btn_select));
 
+    let btn_draw = ToggleButton::with_label("✎ Draw");
+    btn_draw.set_tooltip_text(Some(
+        "Vector drawing tool (D)\n\
+         While active, on the program monitor:\n\
+         • 1 / 2 / 3 / 4 — pick Stroke / Rectangle / Ellipse / Arrow\n\
+         • drag to draw on the playhead's drawing clip (creates one if needed)\n\
+         • Delete / Backspace — remove the most recent item",
+    ));
+    btn_draw.set_group(Some(&btn_select));
+
+    // Set the active tool and fire any installed `on_tool_changed`
+    // listener (the TransformOverlay's draw-mode subscriber lives
+    // there). Idempotent: calling with the already-active tool is a
+    // no-op for listeners via GTK's set_active short-circuit.
+    fn apply_tool(timeline_state: &Rc<RefCell<TimelineState>>, tool: ActiveTool) {
+        let cb = {
+            let mut st = timeline_state.borrow_mut();
+            if st.active_tool == tool {
+                return;
+            }
+            st.active_tool = tool;
+            st.on_tool_changed.clone()
+        };
+        if let Some(cb) = cb {
+            cb(tool);
+        }
+    }
     {
         let timeline_state = timeline_state.clone();
         btn_select.connect_toggled(move |btn| {
             if btn.is_active() {
-                timeline_state.borrow_mut().active_tool = ActiveTool::Select;
+                apply_tool(&timeline_state, ActiveTool::Select);
             }
         });
     }
@@ -2869,7 +2892,7 @@ pub fn build_toolbar(
         let timeline_state = timeline_state.clone();
         btn_razor.connect_toggled(move |btn| {
             if btn.is_active() {
-                timeline_state.borrow_mut().active_tool = ActiveTool::Razor;
+                apply_tool(&timeline_state, ActiveTool::Razor);
             }
         });
     }
@@ -2877,7 +2900,7 @@ pub fn build_toolbar(
         let timeline_state = timeline_state.clone();
         btn_ripple.connect_toggled(move |btn| {
             if btn.is_active() {
-                timeline_state.borrow_mut().active_tool = ActiveTool::Ripple;
+                apply_tool(&timeline_state, ActiveTool::Ripple);
             }
         });
     }
@@ -2885,7 +2908,7 @@ pub fn build_toolbar(
         let timeline_state = timeline_state.clone();
         btn_roll.connect_toggled(move |btn| {
             if btn.is_active() {
-                timeline_state.borrow_mut().active_tool = ActiveTool::Roll;
+                apply_tool(&timeline_state, ActiveTool::Roll);
             }
         });
     }
@@ -2893,7 +2916,7 @@ pub fn build_toolbar(
         let timeline_state = timeline_state.clone();
         btn_slip.connect_toggled(move |btn| {
             if btn.is_active() {
-                timeline_state.borrow_mut().active_tool = ActiveTool::Slip;
+                apply_tool(&timeline_state, ActiveTool::Slip);
             }
         });
     }
@@ -2901,7 +2924,15 @@ pub fn build_toolbar(
         let timeline_state = timeline_state.clone();
         btn_slide.connect_toggled(move |btn| {
             if btn.is_active() {
-                timeline_state.borrow_mut().active_tool = ActiveTool::Slide;
+                apply_tool(&timeline_state, ActiveTool::Slide);
+            }
+        });
+    }
+    {
+        let timeline_state = timeline_state.clone();
+        btn_draw.connect_toggled(move |btn| {
+            if btn.is_active() {
+                apply_tool(&timeline_state, ActiveTool::Draw);
             }
         });
     }
@@ -2923,6 +2954,7 @@ pub fn build_toolbar(
     header.pack_start(&btn_roll);
     header.pack_start(&btn_slip);
     header.pack_start(&btn_slide);
+    header.pack_start(&btn_draw);
     header.pack_start(&btn_magnetic);
 
     // Wire on_tool_changed so keyboard shortcuts sync toolbar buttons
@@ -2933,6 +2965,7 @@ pub fn build_toolbar(
         let btn_roll = btn_roll.clone();
         let btn_slip = btn_slip.clone();
         let btn_slide = btn_slide.clone();
+        let btn_draw = btn_draw.clone();
         timeline_state.borrow_mut().on_tool_changed =
             Some(Rc::new(move |tool: ActiveTool| match tool {
                 ActiveTool::Select => btn_select.set_active(true),
@@ -2941,6 +2974,7 @@ pub fn build_toolbar(
                 ActiveTool::Roll => btn_roll.set_active(true),
                 ActiveTool::Slip => btn_slip.set_active(true),
                 ActiveTool::Slide => btn_slide.set_active(true),
+                ActiveTool::Draw => btn_draw.set_active(true),
             }));
     }
 
