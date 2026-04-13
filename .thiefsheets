@@ -25,7 +25,8 @@
     "docs",
     "data",
     "tools",
-    "flatpak-build"
+    "flatpak-build",
+    "scripts"
   ],
   "notes" : "",
   "icon" : ""
