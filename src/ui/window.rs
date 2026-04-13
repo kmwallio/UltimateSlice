@@ -2453,6 +2453,50 @@ fn overwrite_clip_range_on_track(
 mod tests {
     use super::*;
 
+    #[test]
+    fn auto_preview_keeps_full_when_canvas_matches_project() {
+        // 1080p project in a 1080p widget → no reason to downscale.
+        assert_eq!(auto_preview_divisor(1920, 1080, 1920, 1080, 1, 1), 1);
+    }
+
+    #[test]
+    fn auto_preview_downscales_when_canvas_much_smaller() {
+        // 1080p project in a 640-wide thumbnail → ratio = 3.0, hit
+        // the 1.9 threshold.
+        assert_eq!(auto_preview_divisor(1920, 1080, 640, 360, 1, 1), 2);
+    }
+
+    #[test]
+    fn auto_preview_clamps_canvas_above_project() {
+        // (A) 1080p project in a 4K widget: ratio saturates at 1 so
+        //     divisor stays 1 (no detail past 1080p anyway — widget
+        //     upscale is GTK's job).
+        assert_eq!(auto_preview_divisor(1920, 1080, 3840, 2160, 1, 1), 1);
+    }
+
+    #[test]
+    fn auto_preview_halves_high_res_projects() {
+        // (B) 4K project + 4K canvas → ratio=1 → widget says divisor
+        //     1, but 2160 > AUTO_MAX_PROCESSING_HEIGHT so we bump
+        //     to 2 and process at 1080p.
+        assert_eq!(auto_preview_divisor(3840, 2160, 3840, 2160, 1, 1), 2);
+        // 8K project at 4K widget: bumps twice — 1 → 2 → 4 (2160p).
+        assert_eq!(auto_preview_divisor(7680, 4320, 3840, 2160, 1, 1), 4);
+    }
+
+    #[test]
+    fn auto_preview_proxy_floor() {
+        // (C) Proxy active at half-res → the decoded source is
+        //     540p for a 1080p project; processing below proxy
+        //     divisor would just upscale 540p data.
+        assert_eq!(auto_preview_divisor(1920, 1080, 1920, 1080, 1, 2), 2);
+        // Quarter proxies floor everything at divisor 4, even when
+        // the widget would normally justify a fine divisor.
+        assert_eq!(auto_preview_divisor(1920, 1080, 1920, 1080, 1, 4), 4);
+        // Proxy floor of 1 is a no-op.
+        assert_eq!(auto_preview_divisor(1920, 1080, 1920, 1080, 1, 1), 1);
+    }
+
     fn audio_match_clip_info_with_regions(
         duration_ns: u64,
         speech_regions: Vec<crate::media::audio_match::AnalysisRegionNs>,
@@ -4220,23 +4264,37 @@ fn export_displayed_frame_to_image(
     Ok(if ext == "png" { "png" } else { "jpeg" })
 }
 
+/// Processing height above which Auto starts downgrading even when
+/// the canvas would otherwise justify full resolution. Picked to
+/// keep fullscreen 4K playback smooth on integrated GPUs: ≥ 1440p
+/// projects get halved to process at 1080p-ish.
+const AUTO_MAX_PROCESSING_HEIGHT: u32 = 1440;
+
 fn auto_preview_divisor(
     project_width: u32,
     project_height: u32,
     canvas_width: i32,
     canvas_height: i32,
     current_divisor: u32,
+    proxy_divisor: u32,
 ) -> u32 {
     let cw = canvas_width.max(1) as f64;
     let ch = canvas_height.max(1) as f64;
     let pw = project_width.max(2) as f64;
     let ph = project_height.max(2) as f64;
-    let ratio = (pw / cw).max(ph / ch);
+    // (A) Cap canvas at project dims for the ratio calc. A widget
+    // larger than the project never has additional detail to
+    // render — upscale happens downstream in GTK regardless — so
+    // the "how much bigger than canvas is project" ratio should
+    // saturate at 1 rather than flipping to < 1.
+    let effective_cw = cw.min(pw);
+    let effective_ch = ch.min(ph);
+    let ratio = (pw / effective_cw).max(ph / effective_ch);
     let cur = match current_divisor {
         1 | 2 | 4 => current_divisor,
         _ => 1,
     };
-    match cur {
+    let widget_choice = match cur {
         1 => {
             if ratio >= 1.9 {
                 2
@@ -4261,7 +4319,24 @@ fn auto_preview_divisor(
             }
         }
         _ => 1,
+    };
+    // (B) Don't exceed a sensible processing-height budget: when
+    // the project is ≥ 1440p AND the widget would otherwise let us
+    // render at 1, step up one divisor so compositor + effects
+    // work fits in a playback frame even on integrated GPUs.
+    let mut bounded = widget_choice;
+    while bounded < 4 && (project_height / bounded) > AUTO_MAX_PROCESSING_HEIGHT {
+        bounded *= 2;
     }
+    // (C) Proxy-aware floor: when proxies are active at half- or
+    // quarter-resolution, the decoded source already comes in at
+    // that scale. Processing any finer just upscales proxy data
+    // for no gain, so the divisor is clamped to `proxy_divisor`.
+    let proxy = match proxy_divisor {
+        1 | 2 | 4 => proxy_divisor,
+        _ => 1,
+    };
+    bounded.max(proxy)
 }
 
 pub(crate) fn proxy_scale_for_mode(
@@ -12096,12 +12171,23 @@ pub fn build_window(
                                 let proj = project.borrow();
                                 (proj.width, proj.height)
                             };
+                            // Proxy floor: when proxies are active
+                            // the source can't supply finer data, so
+                            // processing at a smaller divisor would
+                            // just upscale. Pass 1 when proxies are
+                            // off so the floor is a no-op.
+                            let proxy_floor = if effective_proxy_enabled.get() {
+                                effective_proxy_scale_divisor.get().max(1)
+                            } else {
+                                1
+                            };
                             auto_preview_divisor(
                                 pw,
                                 ph,
                                 prog_canvas_frame.width(),
                                 prog_canvas_frame.height(),
                                 player.preview_divisor(),
+                                proxy_floor,
                             )
                         }
                         _ => preview_quality.divisor(),
