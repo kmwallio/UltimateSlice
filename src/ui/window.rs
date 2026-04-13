@@ -4643,56 +4643,42 @@ fn clip_to_program_clips(
     let mut drawing_redirect: Option<crate::model::clip::Clip> = None;
     if c.kind == ClipKind::Drawing {
         // Fixed rendering resolution matches 1080p reference used by
-        // `DrawingItem::width`. The downstream pipeline will scale to the
-        // project canvas via its normal image / video path.
+        // `DrawingItem::width`. The downstream pipeline will scale to
+        // the project canvas during compositing.
         const DRAW_W: i32 = 1920;
         const DRAW_H: i32 = 1080;
-        if c.drawing_animation_reveal_ns > 0 {
-            // Animated: bake a WebM (VP9 / alpha) in a background
-            // thread. If the cache hit, use it immediately. Otherwise
-            // the non-blocking helper schedules the encode and we fall
-            // back to the static PNG for this render pass — the
-            // installed completion callback will re-trigger
-            // `on_project_changed` once the WebM is ready so the
-            // animated version takes over on the next pass.
-            let clip_duration_ns = c.duration();
-            if let Some(webm_path) = crate::media::drawing_render::
-                ensure_drawing_animation_webm_nonblocking(
-                    &c.id,
-                    &c.drawing_items,
-                    DRAW_W,
-                    DRAW_H,
-                    project_fps_num.max(1),
-                    project_fps_den.max(1),
-                    clip_duration_ns,
-                    c.drawing_animation_reveal_ns,
-                )
-            {
-                let mut redirected = c.clone();
-                redirected.source_path = webm_path.to_string_lossy().into_owned();
-                redirected.source_in = 0;
-                redirected.source_out = clip_duration_ns;
-                drawing_redirect = Some(redirected);
-            }
-        }
-        if drawing_redirect.is_none() {
-            match crate::media::drawing_render::ensure_drawing_png(
+        // Every drawing — static or animated — is baked into a
+        // qtrle-argb MOV and played through the normal video
+        // pipeline. The older image-backed (imagefreeze + pngdec)
+        // fallback hit persistent `pngparse not-negotiated` errors
+        // on some systems, and there's no other path that preserves
+        // alpha. Static drawings simply use `reveal_ns = 0`, where
+        // `item_reveal_progress` returns 1.0 and every frame shows
+        // the full drawing.
+        let clip_duration_ns = c.duration().max(1);
+        if let Some(webm_path) =
+            crate::media::drawing_render::ensure_drawing_animation_webm_nonblocking(
                 &c.id,
                 &c.drawing_items,
                 DRAW_W,
                 DRAW_H,
-            ) {
-                Ok(png_path) => {
-                    let mut redirected = c.clone();
-                    redirected.source_path = png_path.to_string_lossy().into_owned();
-                    redirected.kind = ClipKind::Image;
-                    drawing_redirect = Some(redirected);
-                }
-                Err(e) => {
-                    log::warn!("drawing clip {}: failed to rasterize PNG: {e}", c.id);
-                    return Vec::new();
-                }
-            }
+                project_fps_num.max(1),
+                project_fps_den.max(1),
+                clip_duration_ns,
+                c.drawing_animation_reveal_ns,
+            )
+        {
+            let mut redirected = c.clone();
+            redirected.source_path = webm_path.to_string_lossy().into_owned();
+            redirected.source_in = 0;
+            redirected.source_out = clip_duration_ns;
+            drawing_redirect = Some(redirected);
+        } else {
+            // Bake still in flight (cache miss, worker spawned) or
+            // encode previously failed. Drop the clip from this
+            // preview pass — the installed completion callback will
+            // re-trigger `on_project_changed` once the MOV is ready.
+            return Vec::new();
         }
     }
     let c = drawing_redirect.as_ref().unwrap_or(c);

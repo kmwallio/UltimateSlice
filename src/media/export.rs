@@ -6616,46 +6616,41 @@ fn flatten_clips(
             // window.rs::clip_to_program_clips.
             const DRAW_W: i32 = 1920;
             const DRAW_H: i32 = 1080;
-            // Animated drawings are baked to WebM (VP9 / alpha) so the
-            // export filter graph can consume them as a normal video
-            // source with the existing overlay path. Static drawings
-            // keep using the PNG cache.
-            let mut handled = false;
-            if clip.drawing_animation_reveal_ns > 0 {
-                let clip_duration_ns = clip.duration();
-                match crate::media::drawing_render::ensure_drawing_animation_webm(
-                    &clip.id,
-                    &clip.drawing_items,
-                    DRAW_W,
-                    DRAW_H,
-                    project_fps_num.max(1),
-                    project_fps_den.max(1),
-                    clip_duration_ns,
-                    clip.drawing_animation_reveal_ns,
-                ) {
-                    Ok(webm_path) => {
-                        let mut c = clip.clone();
-                        c.source_path = webm_path.to_string_lossy().into_owned();
-                        // Keep `kind = Drawing` so `has_audio` stays
-                        // false — the WebM has no audio track, and
-                        // spawning an audio branch triggers
-                        // "not-linked" inside matroskademux.
-                        c.source_in = 0;
-                        c.source_out = clip_duration_ns;
-                        c.timeline_start = timeline_offset.saturating_add(c.timeline_start);
-                        result.push(c);
-                        handled = true;
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "export: animated drawing render failed, falling back to static PNG: {e}"
-                        );
-                    }
+            // Every drawing — static or animated — is baked to a
+            // qtrle-argb MOV. Static drawings use `reveal_ns = 0`
+            // where `item_reveal_progress` returns 1.0 for every
+            // frame, producing a flat all-visible video. This
+            // avoids the image/imagefreeze pipeline that hit
+            // persistent `pngparse not-negotiated` errors on some
+            // systems.
+            let clip_duration_ns = clip.duration().max(1);
+            match crate::media::drawing_render::ensure_drawing_animation_webm(
+                &clip.id,
+                &clip.drawing_items,
+                DRAW_W,
+                DRAW_H,
+                project_fps_num.max(1),
+                project_fps_den.max(1),
+                clip_duration_ns,
+                clip.drawing_animation_reveal_ns,
+            ) {
+                Ok(webm_path) => {
+                    let mut c = clip.clone();
+                    c.source_path = webm_path.to_string_lossy().into_owned();
+                    // Keep `kind = Drawing` so `has_audio` stays
+                    // false — the MOV has no audio track.
+                    c.source_in = 0;
+                    c.source_out = clip_duration_ns;
+                    c.timeline_start = timeline_offset.saturating_add(c.timeline_start);
+                    result.push(c);
+                    continue;
+                }
+                Err(e) => {
+                    log::warn!("export: drawing clip {}: {e}", clip.id);
                 }
             }
-            if handled {
-                continue;
-            }
+            // MOV encode failed — last-ditch fall through to a
+            // static PNG via the existing image pipeline.
             match crate::media::drawing_render::ensure_drawing_png(
                 &clip.id,
                 &clip.drawing_items,
