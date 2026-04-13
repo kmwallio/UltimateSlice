@@ -10846,6 +10846,37 @@ pub fn build_window(
         prog_frame_updater,
         prog_subtitle_text_setter,
     ) = {
+        // Drawing edits (shape commits, per-item deletes) each fire
+        // `on_project_changed`, which runs a two-phase program-player
+        // reload. The reload has a visible flicker window (the
+        // scrubber briefly flashes to 0 during the GStreamer teardown
+        // before the phase-2 seek settles). Drawing five shapes
+        // in quick succession would trigger five such flickers —
+        // noticeable enough that users can't focus on what they're
+        // drawing. Coalesce rapid drawing commits into a single
+        // trailing rebuild ~220 ms after the last edit.
+        let drawing_commit_timer: Rc<Cell<Option<gtk4::glib::SourceId>>> =
+            Rc::new(Cell::new(None));
+        let schedule_drawing_commit_rebuild: Rc<dyn Fn()> = {
+            let on_project_changed = on_project_changed.clone();
+            let timer = drawing_commit_timer.clone();
+            Rc::new(move || {
+                if let Some(prev) = timer.take() {
+                    prev.remove();
+                }
+                let cb = on_project_changed.clone();
+                let timer_inner = timer.clone();
+                let id = gtk4::glib::timeout_add_local_once(
+                    std::time::Duration::from_millis(220),
+                    move || {
+                        timer_inner.set(None);
+                        cb();
+                    },
+                );
+                timer.set(Some(id));
+            })
+        };
+
         // Build the interactive transform overlay and wire its drag callback.
         let transform_overlay = Rc::new(crate::ui::transform_overlay::TransformOverlay::new(
             {
@@ -11240,7 +11271,7 @@ pub fn build_window(
             {
                 let project = project.clone();
                 let timeline_state = timeline_state.clone();
-                let on_project_changed = on_project_changed.clone();
+                let schedule_rebuild = schedule_drawing_commit_rebuild.clone();
                 move |stroke| {
                     let mut proj = project.borrow_mut();
                     let playhead = timeline_state.borrow().playhead_ns;
@@ -11291,9 +11322,12 @@ pub fn build_window(
                     // `on_project_changed` re-borrows the project for
                     // window-title + preview rebuild; drop our mutable
                     // borrow first to avoid a `RefCell already
-                    // mutably borrowed` panic mid-drag_end.
+                    // mutably borrowed` panic mid-drag_end. The
+                    // rebuild itself is debounced so a burst of
+                    // shape commits coalesces into one reload at
+                    // the end of the burst.
                     drop(proj);
-                    on_project_changed();
+                    schedule_rebuild();
                 }
             },
             {
@@ -11303,7 +11337,7 @@ pub fn build_window(
                 // recent item in the drawing clip under the playhead).
                 let project = project.clone();
                 let timeline_state = timeline_state.clone();
-                let on_project_changed = on_project_changed.clone();
+                let schedule_rebuild = schedule_drawing_commit_rebuild.clone();
                 move |target_idx: Option<usize>| {
                     let mut proj = project.borrow_mut();
                     let playhead = timeline_state.borrow().playhead_ns;
@@ -11349,7 +11383,7 @@ pub fn build_window(
                             &mut proj,
                         );
                         drop(proj);
-                        on_project_changed();
+                        schedule_rebuild();
                     }
                 }
             },
