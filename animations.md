@@ -230,10 +230,28 @@ and export. What remains is UI polish.
 
 ## Remaining polish (not blocking use)
 
-- **Hit-test-based shape selection**: currently `Delete` removes the
-  most-recent item (LIFO). Click-to-select on an existing stroke,
-  with a highlight + per-item Delete, would let users edit
-  mid-history. Data supports it via `SetDrawingItemsCommand`.
+All of the items below are listed in ROADMAP.md under "Drawings &
+Procedural Animations" — the feature itself is usable end-to-end
+today (draw → animate → preview → export → save/load round-trip
+→ SVG sidecar → re-import → animate again).
+
+- **Option B — minimal SMIL interpreter for third-party animated
+  SVGs.** Today only our own exports (stamped or pre-stamp, caught
+  via the structural heuristic) round-trip into `ClipKind::Drawing`.
+  A ~150-line SMIL evaluator over `usvg::Tree` handling
+  `stroke-dashoffset` + `opacity` would cover arbitrary "draw-on"
+  SVGs from the wider ecosystem; full SMIL (motion paths,
+  keyframe splines, `animateColor`) stays out of scope.
+- **Cache janitor.** `/tmp/ultimate-slice-drawing-*.{png,mov}` files
+  accumulate indefinitely across sessions (content-hashed, never
+  cleaned). An LRU / age-based sweep at startup would keep it
+  under control.
+- **Rectangle / ellipse "grow from corner" reveal style** as an
+  alternative to the current alpha fade (per-clip setting).
+- **Live cursor-follow ghost preview** for freehand strokes —
+  today they commit on mouse-up only.
+- **Drawing presets** (named `(color, width, fill)` combos in the
+  brush popover).
 
 ## Testing what's wired
 
