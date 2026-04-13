@@ -368,6 +368,46 @@ struct MusicGenerationOverlay {
     error: Option<String>,
 }
 
+/// Where an in-progress drag or trim is currently snapping to. Rendered as a
+/// vertical guideline + badge in `draw_timeline`.
+#[derive(Clone, Debug)]
+pub struct SnapHit {
+    /// Timeline position of the snap line, in root-timeline ns (matches the
+    /// coordinate space `ns_to_x` expects).
+    pub position_ns: u64,
+    /// Short label rendered in the badge.
+    pub label: &'static str,
+}
+
+/// Pick the nearest candidate to `desired_ns` within `snap_ns` tolerance.
+/// Returns the (possibly adjusted) ns value and the snap hit when one fired.
+fn snap_to_candidates(
+    desired_ns: i64,
+    snap_ns: i64,
+    candidates: &[(u64, &'static str)],
+) -> (i64, Option<SnapHit>) {
+    let mut best: Option<(u64, &'static str, i64)> = None;
+    for &(cand, label) in candidates {
+        let delta = (cand as i64 - desired_ns).abs();
+        if delta < snap_ns {
+            match best {
+                Some((_, _, best_abs)) if best_abs <= delta => {}
+                _ => best = Some((cand, label, delta)),
+            }
+        }
+    }
+    match best {
+        Some((cand, label, _)) => (
+            cand as i64,
+            Some(SnapHit {
+                position_ns: cand,
+                label,
+            }),
+        ),
+        None => (desired_ns, None),
+    }
+}
+
 /// Shared state for the timeline widget
 pub struct TimelineState {
     pub project: Rc<RefCell<Project>>,
@@ -460,6 +500,10 @@ pub struct TimelineState {
     pub compound_nav_stack: Vec<String>,
     /// Saved scroll offset from root level, restored on exit_compound.
     pub compound_saved_scroll: Option<f64>,
+    /// Current snap target while a drag/trim is active. Cleared on drag end
+    /// and on any motion frame that did not produce a snap. Drives the snap
+    /// guideline + badge overlay in `draw_timeline`.
+    pub active_snap_hit: Option<SnapHit>,
     /// How the timeline view follows the playhead during playback.
     pub timeline_autoscroll: crate::ui_state::AutoScrollMode,
     /// While set to a future `Instant`, auto-scroll is suspended so the user's
@@ -520,6 +564,7 @@ impl TimelineState {
             compound_saved_scroll: None,
             timeline_autoscroll: crate::ui_state::AutoScrollMode::default(),
             user_scroll_cooldown_until: None,
+            active_snap_hit: None,
         }
     }
 
@@ -6007,56 +6052,57 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         if grouped_move {
                             let move_set: HashSet<String> = move_clip_ids.iter().cloned().collect();
                             let snap_ns =
-                                (SNAP_TOLERANCE_PX / st.pixels_per_second * NS_PER_SECOND) as u64;
-                            let snap_start = {
+                                (SNAP_TOLERANCE_PX / st.pixels_per_second * NS_PER_SECOND) as i64;
+                            let eph = st.editing_playhead_ns();
+                            let at_root = st.compound_nav_stack.is_empty();
+                            let (snap_start, hit) = {
                                 let proj = st.project.borrow();
                                 let editing_tracks = st.resolve_editing_tracks(&proj);
-                                let edges: Vec<u64> = editing_tracks
-                                    .iter()
-                                    .flat_map(|t| t.clips.iter())
-                                    .filter(|c| !move_set.contains(&c.id))
-                                    .flat_map(|c| [c.timeline_start, c.timeline_end()])
-                                    .collect();
                                 let this_dur = editing_tracks
                                     .iter()
                                     .flat_map(|t| t.clips.iter())
                                     .find(|c| &c.id == clip_id)
                                     .map(|c| c.duration())
                                     .unwrap_or(0);
-                                let by_start = edges
-                                    .iter()
-                                    .copied()
-                                    .filter(|&e| {
-                                        (e as i64 - raw_start as i64).unsigned_abs() < snap_ns
-                                    })
-                                    .min_by_key(|&e| (e as i64 - raw_start as i64).unsigned_abs());
-                                let by_end = edges
-                                    .iter()
-                                    .copied()
-                                    .filter(|&e| {
-                                        let end = raw_start + this_dur;
-                                        (e as i64 - end as i64).unsigned_abs() < snap_ns
-                                    })
-                                    .min_by_key(|&e| {
-                                        let end = raw_start + this_dur;
-                                        (e as i64 - end as i64).unsigned_abs()
-                                    })
-                                    .map(|e| e.saturating_sub(this_dur));
-                                match (by_start, by_end) {
-                                    (Some(a), Some(b)) => {
-                                        let da = (a as i64 - raw_start as i64).unsigned_abs();
-                                        let db = (b as i64 - raw_start as i64).unsigned_abs();
-                                        if da <= db {
-                                            a
+                                let mut cands: Vec<(u64, &'static str)> = Vec::new();
+                                cands.push((0, "start"));
+                                cands.push((eph, "playhead"));
+                                if at_root {
+                                    for m in &proj.markers {
+                                        cands.push((m.position_ns, "marker"));
+                                    }
+                                }
+                                for t in editing_tracks.iter() {
+                                    for c in &t.clips {
+                                        if move_set.contains(&c.id) {
+                                            continue;
+                                        }
+                                        cands.push((c.timeline_start, "clip start"));
+                                        cands.push((c.timeline_end(), "clip end"));
+                                    }
+                                }
+                                let (s_start, h_start) =
+                                    snap_to_candidates(raw_start as i64, snap_ns, &cands);
+                                let desired_end = raw_start as i64 + this_dur as i64;
+                                let (s_end_target, h_end) =
+                                    snap_to_candidates(desired_end, snap_ns, &cands);
+                                let s_end = s_end_target - this_dur as i64;
+                                let d_start = (s_start - raw_start as i64).abs();
+                                let d_end = (s_end - raw_start as i64).abs();
+                                match (h_start, h_end) {
+                                    (Some(hs), Some(he)) => {
+                                        if d_start <= d_end {
+                                            (s_start.max(0) as u64, Some(hs))
                                         } else {
-                                            b
+                                            (s_end.max(0) as u64, Some(he))
                                         }
                                     }
-                                    (Some(a), None) => a,
-                                    (None, Some(b)) => b,
-                                    (None, None) => raw_start,
+                                    (Some(hs), None) => (s_start.max(0) as u64, Some(hs)),
+                                    (None, Some(he)) => (s_end.max(0) as u64, Some(he)),
+                                    (None, None) => (raw_start, None),
                                 }
                             };
+                            st.active_snap_hit = hit;
                             let delta = snap_start as i64 - original_start as i64;
                             let mut proj = st.project.borrow_mut();
                             for (member_id, member_start) in original_member_starts {
@@ -6134,57 +6180,57 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                             };
 
                             let snap_ns =
-                                (SNAP_TOLERANCE_PX / st.pixels_per_second * NS_PER_SECOND) as u64;
-                            let (_clip_dur, snap_start) = {
+                                (SNAP_TOLERANCE_PX / st.pixels_per_second * NS_PER_SECOND) as i64;
+                            let eph = st.editing_playhead_ns();
+                            let at_root = st.compound_nav_stack.is_empty();
+                            let (snap_start, hit) = {
                                 let proj = st.project.borrow();
                                 let editing_tracks = st.resolve_editing_tracks(&proj);
-                                let edges: Vec<u64> = editing_tracks
-                                    .iter()
-                                    .flat_map(|t| t.clips.iter())
-                                    .filter(|c| &c.id != clip_id)
-                                    .flat_map(|c| [c.timeline_start, c.timeline_end()])
-                                    .collect();
                                 let this_dur = editing_tracks
                                     .iter()
                                     .flat_map(|t| t.clips.iter())
                                     .find(|c| &c.id == clip_id)
                                     .map(|c| c.duration())
                                     .unwrap_or(0);
-                                let by_start = edges
-                                    .iter()
-                                    .copied()
-                                    .filter(|&e| {
-                                        (e as i64 - raw_start as i64).unsigned_abs() < snap_ns
-                                    })
-                                    .min_by_key(|&e| (e as i64 - raw_start as i64).unsigned_abs());
-                                let by_end = edges
-                                    .iter()
-                                    .copied()
-                                    .filter(|&e| {
-                                        let end = raw_start + this_dur;
-                                        (e as i64 - end as i64).unsigned_abs() < snap_ns
-                                    })
-                                    .min_by_key(|&e| {
-                                        let end = raw_start + this_dur;
-                                        (e as i64 - end as i64).unsigned_abs()
-                                    })
-                                    .map(|e| e.saturating_sub(this_dur));
-                                let snapped = match (by_start, by_end) {
-                                    (Some(a), Some(b)) => {
-                                        let da = (a as i64 - raw_start as i64).unsigned_abs();
-                                        let db = (b as i64 - raw_start as i64).unsigned_abs();
-                                        if da <= db {
-                                            a
+                                let mut cands: Vec<(u64, &'static str)> = Vec::new();
+                                cands.push((0, "start"));
+                                cands.push((eph, "playhead"));
+                                if at_root {
+                                    for m in &proj.markers {
+                                        cands.push((m.position_ns, "marker"));
+                                    }
+                                }
+                                for t in editing_tracks.iter() {
+                                    for c in &t.clips {
+                                        if &c.id == clip_id {
+                                            continue;
+                                        }
+                                        cands.push((c.timeline_start, "clip start"));
+                                        cands.push((c.timeline_end(), "clip end"));
+                                    }
+                                }
+                                let (s_start, h_start) =
+                                    snap_to_candidates(raw_start as i64, snap_ns, &cands);
+                                let desired_end = raw_start as i64 + this_dur as i64;
+                                let (s_end_target, h_end) =
+                                    snap_to_candidates(desired_end, snap_ns, &cands);
+                                let s_end = s_end_target - this_dur as i64;
+                                let d_start = (s_start - raw_start as i64).abs();
+                                let d_end = (s_end - raw_start as i64).abs();
+                                match (h_start, h_end) {
+                                    (Some(hs), Some(he)) => {
+                                        if d_start <= d_end {
+                                            (s_start.max(0) as u64, Some(hs))
                                         } else {
-                                            b
+                                            (s_end.max(0) as u64, Some(he))
                                         }
                                     }
-                                    (Some(a), None) => a,
-                                    (None, Some(b)) => b,
-                                    (None, None) => raw_start,
-                                };
-                                (this_dur, snapped)
+                                    (Some(hs), None) => (s_start.max(0) as u64, Some(hs)),
+                                    (None, Some(he)) => (s_end.max(0) as u64, Some(he)),
+                                    (None, None) => (raw_start, None),
+                                }
                             };
+                            st.active_snap_hit = hit;
                             let mut proj = st.project.borrow_mut();
                             if let Some(track) = proj.track_mut(&active_track_id) {
                                 if let Some(clip) =
@@ -6209,42 +6255,33 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         let new_start_raw =
                             (original_timeline_start as i64 + drag_ns).max(0) as u64;
 
-                        let snapped_start = if st.active_tool == ActiveTool::Ripple {
-                            // Ripple mode: we can push clips, but let's still snap to edges for precision
-                            // We shouldn't snap to OURSELF or clips we are pushing?
-                            // For simplicity, snap to anything but self.
+                        let eph = st.editing_playhead_ns();
+                        let at_root = st.compound_nav_stack.is_empty();
+                        let (snapped_start, hit) = {
                             let proj = st.project.borrow();
                             let editing_tracks = st.resolve_editing_tracks(&proj);
-                            let edges: Vec<u64> = editing_tracks
-                                .iter()
-                                .flat_map(|t| t.clips.iter())
-                                .filter(|c| &c.id != clip_id)
-                                .flat_map(|c| [c.timeline_start, c.timeline_end()])
-                                .collect();
-                            edges
-                                .iter()
-                                .copied()
-                                .filter(|&e| (e as i64 - new_start_raw as i64).abs() < snap_ns)
-                                .min_by_key(|&e| (e as i64 - new_start_raw as i64).abs())
-                                .unwrap_or(new_start_raw)
-                        } else {
-                            // Standard TrimIn: constrained by adjacent clips?
-                            // Current logic didn't constrain, just snapped.
-                            let proj = st.project.borrow();
-                            let editing_tracks = st.resolve_editing_tracks(&proj);
-                            let edges: Vec<u64> = editing_tracks
-                                .iter()
-                                .flat_map(|t| t.clips.iter())
-                                .filter(|c| &c.id != clip_id)
-                                .flat_map(|c| [c.timeline_start, c.timeline_end()])
-                                .collect();
-                            edges
-                                .iter()
-                                .copied()
-                                .filter(|&e| (e as i64 - new_start_raw as i64).abs() < snap_ns)
-                                .min_by_key(|&e| (e as i64 - new_start_raw as i64).abs())
-                                .unwrap_or(new_start_raw)
+                            let mut cands: Vec<(u64, &'static str)> = Vec::new();
+                            cands.push((0, "start"));
+                            cands.push((eph, "playhead"));
+                            if at_root {
+                                for m in &proj.markers {
+                                    cands.push((m.position_ns, "marker"));
+                                }
+                            }
+                            for t in editing_tracks.iter() {
+                                for c in &t.clips {
+                                    if &c.id == clip_id {
+                                        continue;
+                                    }
+                                    cands.push((c.timeline_start, "clip start"));
+                                    cands.push((c.timeline_end(), "clip end"));
+                                }
+                            }
+                            let (s, h) =
+                                snap_to_candidates(new_start_raw as i64, snap_ns, &cands);
+                            (s.max(0) as u64, h)
                         };
+                        st.active_snap_hit = hit;
 
                         let snapped_drag = snapped_start as i64 - original_timeline_start as i64;
 
@@ -6296,27 +6333,35 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         original_source_out: _,
                         ref original_track_clips,
                     } => {
-                        // Snap the out-point to nearby clip edges
+                        // Snap the out-point to nearby clip edges, playhead, markers, or 0.
                         let snap_ns =
-                            (SNAP_TOLERANCE_PX / st.pixels_per_second * NS_PER_SECOND) as u64;
-                        let snapped_ns = {
+                            (SNAP_TOLERANCE_PX / st.pixels_per_second * NS_PER_SECOND) as i64;
+                        let eph = st.editing_playhead_ns();
+                        let at_root = st.compound_nav_stack.is_empty();
+                        let (snapped_ns, hit) = {
                             let proj = st.project.borrow();
-                            let edges: Vec<u64> = proj
-                                .tracks
-                                .iter()
-                                .flat_map(|t| t.clips.iter())
-                                .filter(|c| &c.id != clip_id)
-                                .flat_map(|c| [c.timeline_start, c.timeline_end()])
-                                .collect();
-                            edges
-                                .iter()
-                                .copied()
-                                .filter(|&e| {
-                                    (e as i64 - current_ns as i64).unsigned_abs() < snap_ns
-                                })
-                                .min_by_key(|&e| (e as i64 - current_ns as i64).unsigned_abs())
-                                .unwrap_or(current_ns)
+                            let editing_tracks = st.resolve_editing_tracks(&proj);
+                            let mut cands: Vec<(u64, &'static str)> = Vec::new();
+                            cands.push((eph, "playhead"));
+                            if at_root {
+                                for m in &proj.markers {
+                                    cands.push((m.position_ns, "marker"));
+                                }
+                            }
+                            for t in editing_tracks.iter() {
+                                for c in &t.clips {
+                                    if &c.id == clip_id {
+                                        continue;
+                                    }
+                                    cands.push((c.timeline_start, "clip start"));
+                                    cands.push((c.timeline_end(), "clip end"));
+                                }
+                            }
+                            let (s, h) =
+                                snap_to_candidates(current_ns as i64, snap_ns, &cands);
+                            (s.max(0) as u64, h)
                         };
+                        st.active_snap_hit = hit;
                         let mut proj = st.project.borrow_mut();
                         if let Some(track) = proj.track_mut(track_id) {
                             // Find original clip data to compute stable delta
@@ -6626,6 +6671,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 let mut st = state.borrow_mut();
                 let music_generation_outcome = st.finish_music_generation_region_drag();
                 let drag_op = std::mem::replace(&mut st.drag_op, DragOp::None);
+                st.active_snap_hit = None;
                 let should_notify_project = !matches!(&drag_op, DragOp::None);
                 let had_marquee = st.marquee_selection.is_some();
                 if had_marquee {
@@ -7877,6 +7923,47 @@ fn draw_timeline(
         cr.line_to(ph_x + 6.0, 0.0);
         cr.line_to(ph_x, 12.0);
         cr.fill().ok();
+    }
+
+    // Snap indicator — dashed vertical guideline + badge at the active snap target.
+    if !matches!(st.drag_op, DragOp::None) {
+        if let Some(hit) = st.active_snap_hit.clone() {
+            let sx = st.ns_to_x(hit.position_ns);
+            if sx >= TRACK_LABEL_WIDTH - 1.0 {
+                cr.save().ok();
+                cr.rectangle(TRACK_LABEL_WIDTH, 0.0, w - TRACK_LABEL_WIDTH, h);
+                cr.clip();
+                cr.set_source_rgba(1.0, 0.82, 0.2, 0.9);
+                cr.set_line_width(1.5);
+                cr.set_dash(&[4.0, 3.0], 0.0);
+                cr.move_to(sx, RULER_HEIGHT);
+                cr.line_to(sx, h);
+                cr.stroke().ok();
+                cr.set_dash(&[], 0.0);
+
+                cr.select_font_face(
+                    "sans",
+                    gtk::cairo::FontSlant::Normal,
+                    gtk::cairo::FontWeight::Bold,
+                );
+                cr.set_font_size(10.0);
+                let te = cr
+                    .text_extents(hit.label)
+                    .unwrap_or_else(|_| cr.text_extents("X").unwrap());
+                let pad = 5.0;
+                let bh = 16.0;
+                let bw = te.width() + pad * 2.0;
+                let bx = sx + 4.0;
+                let by = RULER_HEIGHT + 4.0;
+                rounded_rect(cr, bx, by, bw, bh, 3.0);
+                cr.set_source_rgba(1.0, 0.82, 0.2, 0.95);
+                cr.fill().ok();
+                cr.set_source_rgb(0.0, 0.0, 0.0);
+                cr.move_to(bx + pad, by + bh - 5.0);
+                let _ = cr.show_text(hit.label);
+                cr.restore().ok();
+            }
+        }
     }
 
     // Tool indicator

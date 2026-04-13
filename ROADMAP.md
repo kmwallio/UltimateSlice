@@ -706,7 +706,7 @@ FCPXML persistence).
 - [ ] Hover Scrubbing (Scrubbable Tooltips) in the Media Library and timeline
 - [ ] Two-Up / Four-Up Trim Displays in the Program Monitor for precision edits (Slip/Slide/Roll)
 - [ ] Kinetic Scrolling & Playhead Elasticity
-- [ ] Snap indicator visual — when snapping to a clip edge, marker, or playhead, draw a vertical guideline + small badge ("clip end", "marker", "playhead") at the snap point
+- [x] Snap indicator visual — when snapping to a clip edge, marker, playhead, or sequence start, draw a dashed vertical guideline + small badge ("clip start" / "clip end" / "marker" / "playhead" / "start") at the snap point; snap targets now include the playhead, timeline markers, and time 0 in addition to other clip edges
 - [ ] Drag preview ghosting — translucent ghost of the clip at the drop target with the new in/out timecode floating above it during move/trim
 - [ ] Mini-map / timeline overview strip — thin strip above the ruler showing the whole project at a glance with a viewport rectangle for the visible region
 - [ ] Track header redesign — per-track color swatch, clearer Solo/Mute/Lock button states, drag handle for reorder, double-click to rename inline
