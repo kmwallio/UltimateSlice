@@ -11427,6 +11427,124 @@ pub fn build_window(
             fill_btn.set_sensitive(false);
             vbox.append(&fill_btn);
 
+            // ── Preset row — one-click (color, width, fill) combos ─
+            // Each preset fills in the color button + width spin +
+            // fill toggle/color above. The existing signal handlers
+            // then propagate to the overlay's brush state via the
+            // same `connect_rgba_notify` / `connect_value_changed`
+            // paths used by manual tweaks. Swatches render the
+            // preset's stroke colour plus a corner triangle for the
+            // optional fill, so users can pick by eye.
+            struct BrushPreset {
+                name: &'static str,
+                color: gdk4::RGBA,
+                width: f64,
+                fill: Option<gdk4::RGBA>,
+            }
+            let presets: [BrushPreset; 6] = [
+                BrushPreset {
+                    name: "Red marker",
+                    color: gdk4::RGBA::new(0.95, 0.15, 0.15, 1.0),
+                    width: 5.0,
+                    fill: None,
+                },
+                BrushPreset {
+                    name: "Black pen",
+                    color: gdk4::RGBA::new(0.1, 0.1, 0.1, 1.0),
+                    width: 3.0,
+                    fill: None,
+                },
+                BrushPreset {
+                    name: "Yellow highlighter",
+                    color: gdk4::RGBA::new(1.0, 0.85, 0.1, 0.55),
+                    width: 18.0,
+                    fill: None,
+                },
+                BrushPreset {
+                    name: "Cyan thin",
+                    color: gdk4::RGBA::new(0.1, 0.8, 0.95, 1.0),
+                    width: 2.0,
+                    fill: None,
+                },
+                BrushPreset {
+                    name: "White callout (filled)",
+                    color: gdk4::RGBA::new(1.0, 1.0, 1.0, 1.0),
+                    width: 4.0,
+                    fill: Some(gdk4::RGBA::new(0.0, 0.0, 0.0, 0.55)),
+                },
+                BrushPreset {
+                    name: "Lime bold",
+                    color: gdk4::RGBA::new(0.4, 0.95, 0.3, 1.0),
+                    width: 8.0,
+                    fill: None,
+                },
+            ];
+            vbox.append(
+                &gtk::Label::builder().label("Presets").xalign(0.0).build(),
+            );
+            let preset_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+            for preset in &presets {
+                let swatch = gtk::DrawingArea::new();
+                swatch.set_size_request(28, 28);
+                let color = preset.color;
+                let fill = preset.fill;
+                swatch.set_draw_func(move |_, cr, w, h| {
+                    cr.rectangle(0.0, 0.0, w as f64, h as f64);
+                    cr.set_source_rgba(
+                        color.red() as f64,
+                        color.green() as f64,
+                        color.blue() as f64,
+                        color.alpha() as f64,
+                    );
+                    let _ = cr.fill();
+                    if let Some(f) = fill {
+                        cr.move_to(w as f64, 0.0);
+                        cr.line_to(w as f64, h as f64 * 0.5);
+                        cr.line_to(w as f64 * 0.5, 0.0);
+                        cr.close_path();
+                        cr.set_source_rgba(
+                            f.red() as f64,
+                            f.green() as f64,
+                            f.blue() as f64,
+                            f.alpha() as f64,
+                        );
+                        let _ = cr.fill();
+                    }
+                    cr.rectangle(0.5, 0.5, w as f64 - 1.0, h as f64 - 1.0);
+                    cr.set_source_rgba(1.0, 1.0, 1.0, 0.25);
+                    cr.set_line_width(1.0);
+                    let _ = cr.stroke();
+                });
+                let btn = gtk::Button::new();
+                btn.set_child(Some(&swatch));
+                btn.set_tooltip_text(Some(preset.name));
+                btn.add_css_class("flat");
+                {
+                    let color_btn = color_btn.clone();
+                    let width_spin = width_spin.clone();
+                    let fill_toggle = fill_toggle.clone();
+                    let fill_btn = fill_btn.clone();
+                    let preset_color = preset.color;
+                    let preset_width = preset.width;
+                    let preset_fill = preset.fill;
+                    btn.connect_clicked(move |_| {
+                        color_btn.set_rgba(&preset_color);
+                        width_spin.set_value(preset_width);
+                        match preset_fill {
+                            Some(f) => {
+                                fill_btn.set_rgba(&f);
+                                fill_toggle.set_active(true);
+                            }
+                            None => {
+                                fill_toggle.set_active(false);
+                            }
+                        }
+                    });
+                }
+                preset_row.append(&btn);
+            }
+            vbox.append(&preset_row);
+
             // In-video reveal animation for the drawing clip under the
             // playhead: toggle + per-item duration slider. 0 = static.
             vbox.append(&gtk::Separator::new(gtk::Orientation::Horizontal));

@@ -246,16 +246,9 @@ today (draw → animate → preview → export → save/load round-trip
   `.mov`, matching `drawing_render.rs`. Third-party animated SVGs
   from Inkscape / Figma / hand-written SMIL should now preview
   and export with alpha intact.
-- **Cache janitor.** `/tmp/ultimate-slice-drawing-*.{png,mov}` files
-  accumulate indefinitely across sessions (content-hashed, never
-  cleaned). An LRU / age-based sweep at startup would keep it
-  under control.
 - **Rectangle / ellipse "grow from corner" reveal style** as an
-  alternative to the current alpha fade (per-clip setting).
-- **Live cursor-follow ghost preview** for freehand strokes —
-  today they commit on mouse-up only.
-- **Drawing presets** (named `(color, width, fill)` combos in the
-  brush popover).
+  alternative to the current alpha fade (per-clip setting). Only
+  remaining item — everything else from this list shipped.
 
 ## Testing what's wired
 

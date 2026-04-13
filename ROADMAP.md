@@ -609,8 +609,12 @@ FCPXML persistence).
 - [ ] **Background-encode progress feedback.** Show a spinner (or
   HUD text) while the first MOV bake is in flight so users know
   the static PNG they see isn't the final state.
-- [ ] **Cache janitor.** LRU or age-based sweep for
-  `/tmp/ultimate-slice-drawing-{png,mov}` at startup.
+- [x] **Cache janitor.** Age-based sweep
+  (`crate::media::drawing_render::sweep_drawing_cache`) runs at
+  startup and removes cached `ultimate-slice-drawing-*.{png,mov,webm}`
+  files older than 30 days. Content-hashed cache paths are stable
+  across sessions so anything unreached for that long is orphaned;
+  legacy `.webm` bakes from before the qtrle swap get collected too.
 - [x] **Option B — third-party animated SVGs in preview + export.**
   Discovered mid-implementation that `media/animated_svg.rs`
   already has the SMIL detector (`analyze_svg_str`), the
@@ -624,10 +628,20 @@ FCPXML persistence).
   keyframe splines, `animateColor`) remains out of scope.
 - [ ] Rectangle / ellipse "grow from corner" reveal as an alternative
   to the current alpha fade (per-clip setting).
-- [ ] Live cursor-follow ghost preview for freehand strokes (today
-  commits on mouse-up only).
-- [ ] Drawing presets (named `(color, width, fill)` combos) in the
-  brush popover.
+- [x] Live cursor-follow ghost preview for freehand strokes —
+  already shipped in the original ghost-preview pass. Each
+  `drag_update` pushes the new point into `current_drawing_points`
+  and queues a redraw, so strokes follow the cursor during drag
+  and commit on release via `SetDrawingItemsCommand`. Earlier
+  roadmap entry was stale.
+- [x] Drawing presets — six built-in `(color, width, fill)` combos
+  (Red marker, Black pen, Yellow highlighter, Cyan thin, White
+  callout with fill, Lime bold) render as swatch buttons in the
+  brush popover. Clicking a preset populates the color / width /
+  fill controls; the existing signal handlers propagate to the
+  overlay's brush state so the next stroke picks them up. Preset
+  swatches show the stroke color with a corner triangle for
+  optional fill so the palette is readable by eye.
 
 ### Canvas / Sequence Settings
 - [x] Canvas size dialog (project resolution: 1080p, 4K, custom W×H)

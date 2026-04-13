@@ -7,6 +7,61 @@
 use crate::model::clip::{DrawingItem, DrawingKind};
 use gtk4::cairo;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
+
+/// Age at which cached drawing artifacts are eligible for cleanup.
+/// Content-hashed cache paths are stable across sessions, so a
+/// file older than this hasn't been hit in ~a month and is almost
+/// certainly orphaned (user deleted the drawing, changed the clip,
+/// or abandoned the project).
+const DRAWING_CACHE_MAX_AGE: Duration = Duration::from_secs(60 * 60 * 24 * 30);
+
+/// One-shot startup sweep of the OS temp dir — deletes cached
+/// `ultimate-slice-drawing-*` PNG/MOV files older than
+/// `DRAWING_CACHE_MAX_AGE`. Best-effort: ignores anything it
+/// can't stat / remove. Returns `(removed_files, freed_bytes)`
+/// for logging.
+pub fn sweep_drawing_cache() -> (usize, u64) {
+    let root = std::env::temp_dir();
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return (0, 0);
+    };
+    let now = SystemTime::now();
+    let mut removed = 0usize;
+    let mut freed: u64 = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        // Cover both the static drawing PNGs and the animated MOVs
+        // (present + legacy `.webm` bakes from before the qtrle
+        // swap, which are now unreachable and worth collecting).
+        let is_drawing_artifact = name.starts_with("ultimate-slice-drawing-")
+            && (name.ends_with(".png")
+                || name.ends_with(".mov")
+                || name.ends_with(".webm"));
+        if !is_drawing_artifact {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        let age = now.duration_since(modified).unwrap_or(Duration::ZERO);
+        if age < DRAWING_CACHE_MAX_AGE {
+            continue;
+        }
+        let size = metadata.len();
+        if std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+            freed += size;
+        }
+    }
+    (removed, freed)
+}
 
 /// Stagger between consecutive items as a fraction of the reveal
 /// duration. 0.7 means each item starts after 70% of the previous
