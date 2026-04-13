@@ -14730,6 +14730,20 @@ pub fn build_window(
                     pp.set_project_dimensions(proj_w, proj_h);
                     pp.set_frame_rate(fr_num, fr_den);
                     pp.load_clips(clips);
+                    // `load_clips` resets `timeline_pos_ns` to 0. The
+                    // real seek runs in phase 2 (deferred 16 ms), but
+                    // the 33 ms program-monitor tick reads
+                    // `player.timeline_pos_ns` and writes it through
+                    // to `timeline_state.playhead_ns`. A tick that
+                    // fires in the gap between phase 1 and phase 2
+                    // would otherwise propagate a spurious zero
+                    // position — noticeable whenever
+                    // `on_project_changed` fires often (each drawing
+                    // edit, typing in a title, …). Pre-seed the field
+                    // with `prev_pos` so that gap reads the intended
+                    // position. Phase 2's real seek then reconciles
+                    // the pipeline state.
+                    pp.timeline_pos_ns = prev_pos.min(pp.timeline_dur_ns);
                     // Apply the project's Loudness Radar master gain so
                     // playback reflects the normalized mix.
                     pp.set_master_gain_db(master_gain_db);
