@@ -4,9 +4,10 @@ use crate::media::thumb_cache::ThumbnailCache;
 use crate::model::clip::ClipKind;
 use crate::model::media_library::{
     media_display_name, media_frame_rate_value, media_keyword_summary, media_matches_filters,
-    media_rating_text, non_file_clip_kind_text, normalized_media_text, FrameRateFilter,
-    MediaCollection, MediaFilterCriteria, MediaItem, MediaKindFilter, MediaLibrary, MediaRating,
-    MediaRatingFilter, ResolutionFilter,
+    media_rating_text, media_search_match, media_transcript_state_key, non_file_clip_kind_text,
+    normalized_media_text, FrameRateFilter, MediaCollection, MediaFilterCriteria, MediaItem,
+    MediaKindFilter, MediaLibrary, MediaRating, MediaRatingFilter, MediaSearchField,
+    ResolutionFilter,
 };
 use crate::ui_state::PreferencesState;
 use gdk4;
@@ -1782,7 +1783,11 @@ pub fn build_media_browser(
 }
 
 /// Build a single thumbnail grid cell.
-fn make_grid_item(item: &MediaItem, thumb_cache: &Rc<RefCell<ThumbnailCache>>) -> FlowBoxChild {
+fn make_grid_item(
+    item: &MediaItem,
+    thumb_cache: &Rc<RefCell<ThumbnailCache>>,
+    search_text: &str,
+) -> FlowBoxChild {
     let path = item.source_path.clone();
     let duration_ns = item.duration_ns;
     let is_missing = item.is_missing;
@@ -1926,6 +1931,15 @@ fn make_grid_item(item: &MediaItem, thumb_cache: &Rc<RefCell<ThumbnailCache>>) -
         cell.append(&keyword_label);
     }
 
+    if let Some(search_hint) = media_search_hint(item, search_text) {
+        let search_label = Label::new(Some(&search_hint));
+        search_label.set_halign(gtk::Align::Center);
+        search_label.set_max_width_chars(26);
+        search_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        search_label.add_css_class("media-meta-secondary");
+        cell.append(&search_label);
+    }
+
     let offline_label = Label::new(Some("OFFLINE"));
     offline_label.set_halign(gtk::Align::Center);
     offline_label.add_css_class("media-offline-badge");
@@ -1934,7 +1948,7 @@ fn make_grid_item(item: &MediaItem, thumb_cache: &Rc<RefCell<ThumbnailCache>>) -
 
     let child = FlowBoxChild::new();
     child.set_child(Some(&cell));
-    let tooltip = media_tooltip_text(item);
+    let tooltip = media_tooltip_text(item, Some(search_text));
     child.set_tooltip_text(Some(&tooltip));
     if is_missing {
         child.add_css_class("media-missing-item");
@@ -2038,11 +2052,13 @@ fn build_expected_entries(
     let mut entries = Vec::new();
     if show_all {
         // All Media mode: show all items flat, no bins
-        for item in lib
+        let mut items: Vec<&MediaItem> = lib
             .items
             .iter()
             .filter(|item| media_matches_filters(item, filters))
-        {
+            .collect();
+        sort_media_items(items.as_mut_slice(), filters.search_text.as_str());
+        for item in items {
             entries.push(FlowBoxEntry::Media {
                 item_id: item.id.clone(),
                 display_key: media_display_key(item),
@@ -2058,11 +2074,13 @@ fn build_expected_entries(
                 name: bin.name.clone(),
             });
         }
-        let items = lib.items_in_bin(current_bin_id.as_deref());
-        for item in items
+        let mut items: Vec<&MediaItem> = lib
+            .items_in_bin(current_bin_id.as_deref())
             .into_iter()
             .filter(|item| media_matches_filters(item, filters))
-        {
+            .collect();
+        sort_media_items(items.as_mut_slice(), filters.search_text.as_str());
+        for item in items {
             entries.push(FlowBoxEntry::Media {
                 item_id: item.id.clone(),
                 display_key: media_display_key(item),
@@ -2074,7 +2092,7 @@ fn build_expected_entries(
 
 fn media_display_key(item: &MediaItem) -> String {
     format!(
-        "{}|{}|{}|{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}|{}|{}",
         item.id,
         item.source_path,
         item.is_missing,
@@ -2083,6 +2101,7 @@ fn media_display_key(item: &MediaItem) -> String {
         media_secondary_text(item).unwrap_or_default(),
         media_rating_text(item.rating).unwrap_or_default(),
         media_keyword_state_key(item),
+        media_transcript_state_key(item),
     )
 }
 
@@ -2174,6 +2193,23 @@ fn media_keyword_state_key(item: &MediaItem) -> String {
         .join("|")
 }
 
+fn sort_media_items(items: &mut [&MediaItem], search_text: &str) {
+    if search_text.trim().is_empty() {
+        return;
+    }
+    items.sort_by(|a, b| {
+        let a_match = media_search_match(a, search_text);
+        let b_match = media_search_match(b, search_text);
+        b_match
+            .as_ref()
+            .map(|m| m.score)
+            .unwrap_or_default()
+            .cmp(&a_match.as_ref().map(|m| m.score).unwrap_or_default())
+            .then_with(|| media_display_name(a).cmp(&media_display_name(b)))
+            .then_with(|| a.source_path.cmp(&b.source_path))
+    });
+}
+
 fn media_keyword_detail_lines(item: &MediaItem) -> Vec<String> {
     item.keyword_ranges
         .iter()
@@ -2192,7 +2228,13 @@ fn media_keyword_detail_lines(item: &MediaItem) -> Vec<String> {
         .collect()
 }
 
-fn media_tooltip_text(item: &MediaItem) -> String {
+fn media_search_hint(item: &MediaItem, search_text: &str) -> Option<String> {
+    let search_match = media_search_match(item, search_text)?;
+    (search_match.field == MediaSearchField::Transcript)
+        .then(|| format!("Spoken: {}", search_match.excerpt.unwrap_or_default()))
+}
+
+fn media_tooltip_text(item: &MediaItem, search_text: Option<&str>) -> String {
     if let Some(kind) = item.clip_kind.as_ref() {
         let mut lines = vec![non_file_clip_kind_text(kind).to_string()];
         if let Some(title_text) = normalized_media_text(item.title_text.as_deref()) {
@@ -2219,6 +2261,17 @@ fn media_tooltip_text(item: &MediaItem) -> String {
             lines.push(format!("Rating: {rating_text}"));
         }
         lines.extend(media_keyword_detail_lines(item));
+        if let Some(search_text) = search_text.filter(|text| !text.trim().is_empty()) {
+            if let Some(search_match) = media_search_match(item, search_text) {
+                lines.push(format!(
+                    "Search hit: {}",
+                    media_search_field_label(search_match.field)
+                ));
+                if let Some(excerpt) = search_match.excerpt {
+                    lines.push(format!("Match: {excerpt}"));
+                }
+            }
+        }
         return lines.join("\n");
     }
 
@@ -2248,7 +2301,38 @@ fn media_tooltip_text(item: &MediaItem) -> String {
         lines.push(format!("Rating: {rating_text}"));
     }
     lines.extend(media_keyword_detail_lines(item));
+    let transcript_segments = item
+        .transcript_windows
+        .iter()
+        .map(|window| window.segments.len())
+        .sum::<usize>();
+    if transcript_segments > 0 {
+        lines.push(format!("Transcript segments: {transcript_segments}"));
+    }
+    if let Some(search_text) = search_text.filter(|text| !text.trim().is_empty()) {
+        if let Some(search_match) = media_search_match(item, search_text) {
+            lines.push(format!(
+                "Search hit: {}",
+                media_search_field_label(search_match.field)
+            ));
+            if let Some(excerpt) = search_match.excerpt {
+                lines.push(format!("Match: {excerpt}"));
+            }
+        }
+    }
     lines.join("\n")
+}
+
+fn media_search_field_label(field: MediaSearchField) -> &'static str {
+    match field {
+        MediaSearchField::DisplayName => "name",
+        MediaSearchField::Label => "label",
+        MediaSearchField::TitleText => "title text",
+        MediaSearchField::SourcePath => "file path",
+        MediaSearchField::Codec => "codec",
+        MediaSearchField::Keyword => "keyword",
+        MediaSearchField::Transcript => "spoken content",
+    }
 }
 
 fn media_resolution_text(item: &MediaItem) -> Option<String> {
@@ -2330,7 +2414,7 @@ fn import_path_into_library(
     let mut item = MediaItem::new(path_str.clone(), duration_ns);
     item.bin_id = current_bin_id.clone();
     let display_key = media_display_key(&item);
-    let child = make_grid_item(&item, thumb_cache);
+    let child = make_grid_item(&item, thumb_cache, "");
     let item_id = item.id.clone();
     library.borrow_mut().items.push(item);
     flow_box.insert(&child, -1);
@@ -2409,7 +2493,7 @@ fn rebuild_flowbox_binned(
             FlowBoxEntry::Media { item_id, .. } => {
                 let item = lib.items.iter().find(|i| &i.id == item_id);
                 if let Some(item) = item {
-                    let child = make_grid_item(item, thumb_cache);
+                    let child = make_grid_item(item, thumb_cache, filters.search_text.as_str());
                     fb.insert(&child, -1);
                 }
             }
@@ -3194,6 +3278,7 @@ fn delete_collection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::clip::SubtitleSegment;
     use crate::model::media_library::{MediaBin, MediaKeywordRange};
 
     fn make_video_item(path: &str) -> MediaItem {
@@ -3217,6 +3302,20 @@ mod tests {
         item.clip_kind = Some(ClipKind::Title);
         item.title_text = Some(title_text.to_string());
         item
+    }
+
+    fn add_transcript(item: &mut MediaItem, text: &str) {
+        item.upsert_transcript_window(
+            0,
+            item.duration_ns,
+            vec![SubtitleSegment {
+                id: "seg-1".to_string(),
+                start_ns: 0,
+                end_ns: 1_000_000_000,
+                text: text.to_string(),
+                words: Vec::new(),
+            }],
+        );
     }
 
     #[test]
@@ -3244,6 +3343,10 @@ mod tests {
         item.keyword_ranges
             .push(MediaKeywordRange::new("B-roll", 250_000_000, 750_000_000));
         assert_ne!(media_display_key(&item), base_key);
+
+        let keyword_key = media_display_key(&item);
+        add_transcript(&mut item, "Find the sticker");
+        assert_ne!(media_display_key(&item), keyword_key);
     }
 
     #[test]
@@ -3256,7 +3359,7 @@ mod tests {
             1_250_000_000,
         ));
 
-        let tooltip = media_tooltip_text(&item);
+        let tooltip = media_tooltip_text(&item, None);
         assert!(tooltip.contains("Rating: Favorite"));
         assert!(tooltip.contains("Keyword: Close Up"));
     }
@@ -3290,7 +3393,7 @@ mod tests {
             Some("Title clip • Lower Third")
         );
         assert_eq!(media_secondary_text(&item).as_deref(), Some("0:04"));
-        assert!(media_tooltip_text(&item).contains("Text: Jane Doe"));
+        assert!(media_tooltip_text(&item, None).contains("Text: Jane Doe"));
 
         let filters = MediaFilterCriteria {
             search_text: "jane".to_string(),
@@ -3299,6 +3402,51 @@ mod tests {
             ..Default::default()
         };
         assert!(media_matches_filters(&item, &filters));
+    }
+
+    #[test]
+    fn transcript_search_hint_and_tooltip_show_spoken_match() {
+        let mut item = make_video_item("/tmp/dialog.mov");
+        add_transcript(&mut item, "Find the sticker on the table");
+
+        let hint = media_search_hint(&item, "sticker").expect("expected spoken search hint");
+        assert!(hint.contains("Spoken:"));
+        assert!(hint.contains("[sticker]"));
+
+        let tooltip = media_tooltip_text(&item, Some("sticker"));
+        assert!(tooltip.contains("Search hit: spoken content"));
+        assert!(tooltip.contains("Match: Find the [sticker]"));
+    }
+
+    #[test]
+    fn build_expected_entries_sorts_search_results_by_relevance() {
+        let mut lib = MediaLibrary::new();
+
+        let mut exact = make_video_item("/tmp/sticker.mov");
+        exact.label = "Sticker Interview".to_string();
+        add_transcript(&mut exact, "Find the sticker on the table");
+        let exact_id = exact.id.clone();
+        lib.items.push(exact);
+
+        let mut transcript_only = make_video_item("/tmp/alt.mov");
+        transcript_only.label = "Alternate take".to_string();
+        add_transcript(&mut transcript_only, "A sticker is hidden in frame");
+        let transcript_id = transcript_only.id.clone();
+        lib.items.push(transcript_only);
+
+        let filters = MediaFilterCriteria {
+            search_text: "sticker".to_string(),
+            ..Default::default()
+        };
+        let entries = build_expected_entries(&lib, &None, true, &filters);
+        assert!(matches!(
+            entries.first(),
+            Some(FlowBoxEntry::Media { item_id, .. }) if item_id == &exact_id
+        ));
+        assert!(matches!(
+            entries.get(1),
+            Some(FlowBoxEntry::Media { item_id, .. }) if item_id == &transcript_id
+        ));
     }
 
     #[test]

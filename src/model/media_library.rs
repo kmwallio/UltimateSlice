@@ -1,4 +1,4 @@
-use crate::model::clip::{AudioChannelMode, ClipKind};
+use crate::model::clip::{AudioChannelMode, ClipKind, SubtitleSegment};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -213,6 +213,51 @@ impl MediaCollection {
     }
 }
 
+/// Speech-to-text transcript captured for a specific source window.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MediaTranscriptWindow {
+    #[serde(default)]
+    pub source_in_ns: u64,
+    #[serde(default)]
+    pub source_out_ns: u64,
+    #[serde(default)]
+    pub segments: Vec<SubtitleSegment>,
+}
+
+impl MediaTranscriptWindow {
+    pub fn new(source_in_ns: u64, source_out_ns: u64, segments: Vec<SubtitleSegment>) -> Self {
+        Self {
+            source_in_ns,
+            source_out_ns,
+            segments,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaSearchField {
+    DisplayName,
+    Label,
+    TitleText,
+    SourcePath,
+    Codec,
+    Keyword,
+    Transcript,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaSearchMatch {
+    pub field: MediaSearchField,
+    pub score: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excerpt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_in_ns: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_out_ns: Option<u64>,
+}
+
 /// A media item in the project library.
 ///
 /// Most entries are imported source files, but the browser can also surface
@@ -259,6 +304,8 @@ pub struct MediaItem {
     pub rating: MediaRating,
     /// Named sub-ranges within the source media for browser triage.
     pub keyword_ranges: Vec<MediaKeywordRange>,
+    /// Library-keyed transcript windows generated from speech-to-text runs.
+    pub transcript_windows: Vec<MediaTranscriptWindow>,
 }
 
 impl MediaItem {
@@ -292,6 +339,7 @@ impl MediaItem {
             bin_id: None,
             rating: MediaRating::None,
             keyword_ranges: Vec::new(),
+            transcript_windows: Vec::new(),
         }
     }
 
@@ -311,6 +359,37 @@ impl MediaItem {
         key.strip_prefix("clip:")
             .map(|clip_id| !self.has_backing_file() && self.id == clip_id)
             .unwrap_or_else(|| self.source_path == key)
+    }
+
+    pub fn upsert_transcript_window(
+        &mut self,
+        source_in_ns: u64,
+        source_out_ns: u64,
+        mut segments: Vec<SubtitleSegment>,
+    ) -> bool {
+        if segments.is_empty() {
+            return false;
+        }
+        segments.sort_by_key(|segment| (segment.start_ns, segment.end_ns));
+        let normalized_out =
+            normalize_transcript_window_end(source_in_ns, source_out_ns, &segments);
+        if let Some(existing) = self.transcript_windows.iter_mut().find(|window| {
+            window.source_in_ns == source_in_ns && window.source_out_ns == normalized_out
+        }) {
+            if existing.segments == segments {
+                return false;
+            }
+            existing.segments = segments;
+            return true;
+        }
+        self.transcript_windows.push(MediaTranscriptWindow::new(
+            source_in_ns,
+            normalized_out,
+            segments,
+        ));
+        self.transcript_windows
+            .sort_by_key(|window| (window.source_in_ns, window.source_out_ns));
+        true
     }
 }
 
@@ -403,6 +482,170 @@ pub fn media_keyword_summary(item: &MediaItem, max_labels: usize) -> Option<Stri
     Some(labels.join(" • "))
 }
 
+pub fn media_transcript_state_key(item: &MediaItem) -> String {
+    item.transcript_windows
+        .iter()
+        .map(|window| {
+            let segments = window
+                .segments
+                .iter()
+                .map(|segment| {
+                    format!(
+                        "{}:{}:{}:{}",
+                        segment.id, segment.start_ns, segment.end_ns, segment.text
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("~");
+            format!(
+                "{}:{}:{}",
+                window.source_in_ns, window.source_out_ns, segments
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+/// Return the request window for the current transcript-first background AI
+/// indexing phase, or `None` when this media item should be skipped.
+pub fn media_background_ai_index_request(item: &MediaItem) -> Option<(u64, u64)> {
+    if !item.has_backing_file()
+        || item.is_missing
+        || item.is_image
+        || !item.has_audio
+        || item.duration_ns == 0
+        || !item.transcript_windows.is_empty()
+    {
+        return None;
+    }
+    Some((0, item.duration_ns))
+}
+
+pub fn media_search_match(item: &MediaItem, query: &str) -> Option<MediaSearchMatch> {
+    let query = SearchQuery::new(query)?;
+    let mut best = None;
+
+    consider_text_search(
+        &mut best,
+        MediaSearchField::DisplayName,
+        &media_display_name(item),
+        &query,
+        920,
+        760,
+        None,
+        None,
+        None,
+    );
+    consider_text_search(
+        &mut best,
+        MediaSearchField::Label,
+        item.label.as_str(),
+        &query,
+        900,
+        740,
+        None,
+        None,
+        None,
+    );
+    if let Some(title_text) = item.title_text.as_deref() {
+        consider_text_search(
+            &mut best,
+            MediaSearchField::TitleText,
+            title_text,
+            &query,
+            910,
+            750,
+            None,
+            None,
+            None,
+        );
+    }
+    if !item.source_path.is_empty() {
+        consider_text_search(
+            &mut best,
+            MediaSearchField::SourcePath,
+            item.source_path.as_str(),
+            &query,
+            760,
+            620,
+            None,
+            None,
+            None,
+        );
+    }
+    if let Some(codec) = item.codec_summary.as_deref() {
+        consider_text_search(
+            &mut best,
+            MediaSearchField::Codec,
+            codec,
+            &query,
+            680,
+            560,
+            None,
+            None,
+            None,
+        );
+    }
+    for range in &item.keyword_ranges {
+        let label = range.label.trim();
+        if label.is_empty() {
+            continue;
+        }
+        consider_text_search(
+            &mut best,
+            MediaSearchField::Keyword,
+            label,
+            &query,
+            860,
+            700,
+            Some(label.to_string()),
+            None,
+            None,
+        );
+    }
+    for window in &item.transcript_windows {
+        let joined_text = window
+            .segments
+            .iter()
+            .map(|segment| segment.text.trim())
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !joined_text.is_empty() {
+            consider_text_search(
+                &mut best,
+                MediaSearchField::Transcript,
+                joined_text.as_str(),
+                &query,
+                780,
+                650,
+                Some(highlight_search_excerpt(joined_text.as_str(), &query)),
+                Some(window.source_in_ns),
+                Some(window.source_out_ns),
+            );
+        }
+        for segment in &window.segments {
+            let text = segment.text.trim();
+            if text.is_empty() {
+                continue;
+            }
+            consider_text_search(
+                &mut best,
+                MediaSearchField::Transcript,
+                text,
+                &query,
+                820,
+                690,
+                Some(highlight_search_excerpt(text, &query)),
+                Some(window.source_in_ns.saturating_add(segment.start_ns)),
+                Some(window.source_in_ns.saturating_add(segment.end_ns)),
+            );
+        }
+    }
+
+    best
+}
+
 pub fn media_matches_filters(item: &MediaItem, filters: &MediaFilterCriteria) -> bool {
     if !matches_media_kind_filter(item, filters.kind) {
         return false;
@@ -419,25 +662,173 @@ pub fn media_matches_filters(item: &MediaItem, filters: &MediaFilterCriteria) ->
     if filters.search_text.trim().is_empty() {
         return true;
     }
+    media_search_match(item, filters.search_text.as_str()).is_some()
+}
 
-    let needle = filters.search_text.trim().to_ascii_lowercase();
-    media_display_name(item)
-        .to_ascii_lowercase()
-        .contains(&needle)
-        || item.label.to_ascii_lowercase().contains(&needle)
-        || item
-            .title_text
-            .as_ref()
-            .is_some_and(|text| text.to_ascii_lowercase().contains(&needle))
-        || item.source_path.to_ascii_lowercase().contains(&needle)
-        || item
-            .codec_summary
-            .as_ref()
-            .is_some_and(|codec| codec.to_ascii_lowercase().contains(&needle))
-        || item
-            .keyword_ranges
-            .iter()
-            .any(|range| range.label.trim().to_ascii_lowercase().contains(&needle))
+pub fn upsert_media_transcript(
+    lib: &mut MediaLibrary,
+    source_path: &str,
+    source_in_ns: u64,
+    source_out_ns: u64,
+    segments: Vec<SubtitleSegment>,
+) -> bool {
+    if source_path.trim().is_empty() || segments.is_empty() {
+        return false;
+    }
+    if let Some(item) = lib
+        .items
+        .iter_mut()
+        .find(|item| item.source_path == source_path)
+    {
+        return item.upsert_transcript_window(source_in_ns, source_out_ns, segments);
+    }
+    let mut item = MediaItem::new(source_path.to_string(), 0);
+    let changed = item.upsert_transcript_window(source_in_ns, source_out_ns, segments);
+    lib.items.push(item);
+    changed
+}
+
+#[derive(Debug, Clone)]
+struct SearchQuery {
+    raw_lower: String,
+    folded: String,
+    tokens: Vec<String>,
+}
+
+impl SearchQuery {
+    fn new(query: &str) -> Option<Self> {
+        let raw_lower = query.trim().to_ascii_lowercase();
+        if raw_lower.is_empty() {
+            return None;
+        }
+        let folded = fold_search_text(query);
+        let mut tokens: Vec<String> = if folded.is_empty() {
+            raw_lower
+                .split_whitespace()
+                .map(ToOwned::to_owned)
+                .collect()
+        } else {
+            folded.split_whitespace().map(ToOwned::to_owned).collect()
+        };
+        tokens.retain(|token| !token.is_empty());
+        if tokens.is_empty() {
+            tokens.push(raw_lower.clone());
+        }
+        Some(Self {
+            raw_lower,
+            folded,
+            tokens,
+        })
+    }
+}
+
+fn normalize_transcript_window_end(
+    source_in_ns: u64,
+    source_out_ns: u64,
+    segments: &[SubtitleSegment],
+) -> u64 {
+    if source_out_ns != u64::MAX {
+        return source_out_ns.max(source_in_ns);
+    }
+    segments
+        .iter()
+        .map(|segment| source_in_ns.saturating_add(segment.end_ns))
+        .max()
+        .unwrap_or(source_in_ns)
+        .max(source_in_ns)
+}
+
+fn fold_search_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut pending_space = false;
+    for ch in text.chars() {
+        if ch.is_alphanumeric() {
+            if pending_space && !out.is_empty() {
+                out.push(' ');
+            }
+            for lower in ch.to_lowercase() {
+                out.push(lower);
+            }
+            pending_space = false;
+        } else {
+            pending_space = true;
+        }
+    }
+    out
+}
+
+fn score_search_text(
+    text: &str,
+    query: &SearchQuery,
+    exact_base: i32,
+    token_base: i32,
+) -> Option<i32> {
+    let lower = text.to_ascii_lowercase();
+    if lower.contains(&query.raw_lower) {
+        return Some(exact_base - lower.split_whitespace().count().min(48) as i32);
+    }
+    let folded = fold_search_text(text);
+    if !query.folded.is_empty() && folded.contains(&query.folded) {
+        return Some(exact_base - folded.split_whitespace().count().min(48) as i32);
+    }
+    let token_hits = query
+        .tokens
+        .iter()
+        .filter(|token| folded.contains(token.as_str()))
+        .count();
+    if token_hits == 0 {
+        return None;
+    }
+    let all_tokens = token_hits == query.tokens.len();
+    Some(
+        token_base + token_hits as i32 * 18 + if all_tokens { 48 } else { 0 }
+            - folded.split_whitespace().count().min(48) as i32,
+    )
+}
+
+fn highlight_search_excerpt(text: &str, query: &SearchQuery) -> String {
+    let lower = text.to_ascii_lowercase();
+    if let Some(start) = lower.find(&query.raw_lower) {
+        let end = start + query.raw_lower.len();
+        return format!("{}[{}]{}", &text[..start], &text[start..end], &text[end..]);
+    }
+    for token in &query.tokens {
+        if let Some(start) = lower.find(token) {
+            let end = start + token.len();
+            return format!("{}[{}]{}", &text[..start], &text[start..end], &text[end..]);
+        }
+    }
+    text.to_string()
+}
+
+fn consider_text_search(
+    best: &mut Option<MediaSearchMatch>,
+    field: MediaSearchField,
+    text: &str,
+    query: &SearchQuery,
+    exact_base: i32,
+    token_base: i32,
+    excerpt: Option<String>,
+    source_in_ns: Option<u64>,
+    source_out_ns: Option<u64>,
+) {
+    let Some(score) = score_search_text(text, query, exact_base, token_base) else {
+        return;
+    };
+    let candidate = MediaSearchMatch {
+        field,
+        score,
+        excerpt,
+        source_in_ns,
+        source_out_ns,
+    };
+    let replace = best
+        .as_ref()
+        .map(|current| candidate.score > current.score)
+        .unwrap_or(true);
+    if replace {
+        *best = Some(candidate);
+    }
 }
 
 pub fn matches_media_kind_filter(item: &MediaItem, filter: MediaKindFilter) -> bool {
@@ -639,6 +1030,19 @@ pub fn sync_bins_to_project(lib: &MediaLibrary, project: &mut crate::model::proj
     } else {
         project.parsed_media_annotations_json = serde_json::to_string(&annotations).ok();
     }
+    let transcript_cache: std::collections::HashMap<String, Vec<MediaTranscriptWindow>> = lib
+        .items
+        .iter()
+        .filter_map(|item| {
+            (!item.transcript_windows.is_empty())
+                .then(|| (item.library_key(), item.transcript_windows.clone()))
+        })
+        .collect();
+    if transcript_cache.is_empty() {
+        project.parsed_transcript_cache_json = None;
+    } else {
+        project.parsed_transcript_cache_json = serde_json::to_string(&transcript_cache).ok();
+    }
 }
 
 /// Restore media-browser state from the project's transient fields into the library
@@ -707,12 +1111,29 @@ pub fn apply_bins_from_project(
             }
         }
     }
+    if let Some(ref transcript_cache_json) = project.parsed_transcript_cache_json {
+        if let Ok(map) = serde_json::from_str::<
+            std::collections::HashMap<String, Vec<MediaTranscriptWindow>>,
+        >(transcript_cache_json)
+        {
+            for item in lib.items.iter_mut() {
+                let windows = map.get(&item.library_key()).or_else(|| {
+                    map.iter()
+                        .find_map(|(key, value)| item.matches_library_key(key).then_some(value))
+                });
+                if let Some(windows) = windows {
+                    item.transcript_windows = windows.clone();
+                }
+            }
+        }
+    }
     // Clear transient fields
     project.parsed_bins_json = None;
     project.parsed_media_bins_json = None;
     project.parsed_collections_json = None;
     project.parsed_library_items_json = None;
     project.parsed_media_annotations_json = None;
+    project.parsed_transcript_cache_json = None;
 }
 
 /// In/out marks and current source for the source preview monitor.
@@ -796,6 +1217,7 @@ mod tests {
             bin_id,
             rating: MediaRating::None,
             keyword_ranges: Vec::new(),
+            transcript_windows: Vec::new(),
         }
     }
 
@@ -1001,6 +1423,96 @@ mod tests {
     }
 
     #[test]
+    fn test_upsert_media_transcript_creates_library_item() {
+        let mut lib = MediaLibrary::new();
+        let segments = vec![SubtitleSegment {
+            id: "seg-1".to_string(),
+            start_ns: 0,
+            end_ns: 1_000_000_000,
+            text: "Hello transcript".to_string(),
+            words: Vec::new(),
+        }];
+        assert!(upsert_media_transcript(
+            &mut lib,
+            "/tmp/transcript.mov",
+            0,
+            u64::MAX,
+            segments.clone()
+        ));
+        assert_eq!(lib.items.len(), 1);
+        assert_eq!(lib.items[0].transcript_windows.len(), 1);
+        assert_eq!(
+            lib.items[0].transcript_windows[0].source_out_ns,
+            1_000_000_000
+        );
+        assert!(!upsert_media_transcript(
+            &mut lib,
+            "/tmp/transcript.mov",
+            0,
+            u64::MAX,
+            segments
+        ));
+    }
+
+    #[test]
+    fn test_media_search_match_finds_spoken_content() {
+        let mut item = MediaItem::new("/tmp/dialog.mov", 10_000_000_000);
+        item.is_missing = false;
+        item.has_audio = true;
+        item.upsert_transcript_window(
+            0,
+            10_000_000_000,
+            vec![SubtitleSegment {
+                id: "seg-1".to_string(),
+                start_ns: 1_000_000_000,
+                end_ns: 2_500_000_000,
+                text: "Find the sticker on the table".to_string(),
+                words: Vec::new(),
+            }],
+        );
+
+        let search_match = media_search_match(&item, "sticker").expect("expected transcript match");
+        assert_eq!(search_match.field, MediaSearchField::Transcript);
+        assert!(search_match
+            .excerpt
+            .as_deref()
+            .is_some_and(|excerpt| excerpt.contains("[sticker]")));
+        assert!(media_matches_filters(
+            &item,
+            &MediaFilterCriteria {
+                search_text: "sticker".to_string(),
+                ..Default::default()
+            }
+        ));
+    }
+
+    #[test]
+    fn test_media_background_ai_index_request_requires_audio_and_transcript_gap() {
+        let mut item = MediaItem::new("/tmp/dialog.mov", 10_000_000_000);
+        item.is_missing = false;
+        assert_eq!(media_background_ai_index_request(&item), None);
+
+        item.has_audio = true;
+        assert_eq!(
+            media_background_ai_index_request(&item),
+            Some((0, 10_000_000_000))
+        );
+
+        item.upsert_transcript_window(
+            0,
+            10_000_000_000,
+            vec![SubtitleSegment {
+                id: "seg-1".to_string(),
+                start_ns: 0,
+                end_ns: 1_000_000_000,
+                text: "Already indexed".to_string(),
+                words: Vec::new(),
+            }],
+        );
+        assert_eq!(media_background_ai_index_request(&item), None);
+    }
+
+    #[test]
     fn test_sync_bins_round_trips_collections() {
         let mut lib = MediaLibrary::new();
         lib.collections.push(MediaCollection::new(
@@ -1037,6 +1549,17 @@ mod tests {
         item.rating = MediaRating::Favorite;
         item.keyword_ranges
             .push(MediaKeywordRange::new("B-roll", 250_000_000, 900_000_000));
+        item.upsert_transcript_window(
+            0,
+            2_000_000_000,
+            vec![SubtitleSegment {
+                id: "seg-1".to_string(),
+                start_ns: 100_000_000,
+                end_ns: 900_000_000,
+                text: "Interview opening line".to_string(),
+                words: Vec::new(),
+            }],
+        );
         lib.items.push(item);
 
         let mut project = crate::model::project::Project::new("Test");
@@ -1050,6 +1573,10 @@ mod tests {
             .parsed_media_annotations_json
             .as_ref()
             .is_some_and(|json| json.contains("B-roll")));
+        assert!(project
+            .parsed_transcript_cache_json
+            .as_ref()
+            .is_some_and(|json| json.contains("Interview opening line")));
 
         let mut restored = MediaLibrary::new();
         apply_bins_from_project(&mut restored, &mut project);
@@ -1059,5 +1586,11 @@ mod tests {
         assert_eq!(restored.items[0].rating, MediaRating::Favorite);
         assert_eq!(restored.items[0].keyword_ranges.len(), 1);
         assert_eq!(restored.items[0].keyword_ranges[0].label, "B-roll");
+        assert_eq!(restored.items[0].transcript_windows.len(), 1);
+        assert_eq!(
+            restored.items[0].transcript_windows[0].segments[0].text,
+            "Interview opening line"
+        );
+        assert!(project.parsed_transcript_cache_json.is_none());
     }
 }

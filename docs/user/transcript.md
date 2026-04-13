@@ -7,7 +7,9 @@ the underlying clip and ripple-deletes the slice for you, in a single undo
 entry.
 
 It builds on the existing Whisper-based subtitle pipeline: any clip you have
-already run **Generate Subtitles** on shows up in the panel automatically.
+already run **Generate Subtitles** on shows up in the panel automatically, and
+that spoken text is also saved back into the Media Library so library search
+and smart collections can find clips by what they say.
 
 ---
 

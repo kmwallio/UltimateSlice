@@ -58,7 +58,9 @@ Bins are saved with your project and restored when you reopen it.
 - Timeline-native cards with no backing file show their clip type instead of file metadata. Title cards use the current title text as the main card label and remain searchable by that text.
 - Favorite/reject ratings appear directly on media cards, and keyword ranges show a compact summary line when the clip has saved ranges.
 - Hover a media card to see the full source path plus expanded metadata details in the tooltip, including rating and individual keyword ranges when present.
-- Use the **filter search** field to match clip names, title text, file paths, codec text, or keyword labels.
+- Use the **filter search** field to match clip names, title text, file paths, codec text, keyword labels, or stored spoken transcript text from subtitle-generation workflows.
+- When the current query matches spoken content, matching clips show a short **Spoken:** hint on the card and the tooltip includes the matched transcript excerpt plus the clip's transcript-segment count.
+- If **Preferences → Models → AI index in background** is enabled, eligible audio-backed library items with no transcript cache are queued automatically after import/open so older projects can backfill spoken-content search without manually regenerating subtitles for every clip. The preference is disabled by default.
 - Use the **type** dropdown to focus on video, audio, images, or offline clips.
 - Use the **size** dropdown to narrow the current browser scope to SD-or-smaller, HD, Full HD, or 4K+ media.
 - Use the **FPS** dropdown to narrow the current browser scope to 24 fps-or-less, 25-30 fps, 31-59 fps, or 60+ fps clips.
@@ -78,11 +80,11 @@ Bins are saved with your project and restored when you reopen it.
 ## Smart Collections
 
 - Use the **Collections** picker in the filter bar to recall saved project-wide media queries.
-- Click the **save** button next to the picker to store the current search/type/size/FPS/rating filter combination as a smart collection.
+- Click the **save** button next to the picker to store the current search/type/size/FPS/rating filter combination as a smart collection, including transcript-aware search text.
 - Selecting a smart collection switches the browser to a flat **All Media**-style view across the whole project, even if you were previously inside a bin.
 - Use the **rename** and **delete** buttons next to the picker to manage the selected collection.
 - Smart collections are saved with your project, round-trip through UltimateSlice's FCPXML vendor metadata, and are available to automation through the MCP `list_collections`, `create_collection`, `update_collection`, and `delete_collection` tools.
-- MCP `list_library` now includes each item's stable `library_key`, rating, and keyword ranges, and browser annotations can be automated with `set_media_rating`, `add_media_keyword_range`, `update_media_keyword_range`, and `delete_media_keyword_range`.
+- MCP `list_library` now includes each item's stable `library_key`, rating, keyword ranges, transcript metadata, and optional `search_match` details when called with `search_text`; browser annotations can be automated with `set_media_rating`, `add_media_keyword_range`, `update_media_keyword_range`, and `delete_media_keyword_range`.
 
 ## Adding Clips to the Timeline
 

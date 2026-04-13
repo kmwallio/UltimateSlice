@@ -248,6 +248,18 @@ The **Models** category lists every AI model UltimateSlice can use, with an inst
 
 The MODNet entry includes an in-app **Download Model** button. Whisper, MusicGen, and RIFE link out to download instructions on Hugging Face — paste the model file(s) into the listed directory and the status badge updates next time the Preferences pane is opened.
 
+## AI Index in Background (Models)
+
+- **AI index in background** automatically builds Media Library transcript-search data for eligible audio-backed library items after import/open.
+- It is **disabled by default**.
+- Current scope: this is the transcript-first indexing phase, so it uses Whisper speech-to-text data rather than visual embeddings or auto-tagging.
+- Jobs run **one clip at a time** in the background so automatic indexing does not flood the STT queue.
+- It only runs when speech-to-text support is available and a Whisper model is installed.
+- Existing projects can use it to backfill library search data over time without manually regenerating subtitles for every clip.
+- MCP automation:
+  - `get_preferences` returns `background_ai_indexing`.
+  - `set_background_ai_indexing` toggles the setting.
+
 For the RIFE model specifically: use any RIFE ONNX export with the standard 6-channel input + timestep convention. The upstream project ([`github.com/hzwer/Practical-RIFE`](https://github.com/hzwer/Practical-RIFE)) hosts the model and a PyTorch → ONNX export script; pre-built ONNX exports are also published periodically by the community on Hugging Face. Place the file at `~/.local/share/ultimateslice/models/rife.onnx` (the filename `model.onnx` is also accepted in the same directory, so community downloads under that upstream filename work without renaming). The dropdown entry in the Inspector appears automatically once the file is present — no restart required. See [inspector.md](inspector.md#slow-motion-interpolation) for the Inspector workflow.
 
 ## MCP Socket Server (Integration)

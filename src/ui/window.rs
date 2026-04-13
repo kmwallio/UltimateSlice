@@ -2,9 +2,9 @@ use crate::media::player::Player;
 use crate::media::program_player::{ProgramClip, ProgramPlayer};
 use crate::model::clip::{AudioChannelMode, Clip, ClipKind, Phase1KeyframeProperty};
 use crate::model::media_library::{
-    media_keyword_summary, FrameRateFilter, MediaCollection, MediaFilterCriteria, MediaItem,
-    MediaKeywordRange, MediaKindFilter, MediaLibrary, MediaRating, MediaRatingFilter,
-    ResolutionFilter, SourceMarks,
+    media_background_ai_index_request, media_keyword_summary, FrameRateFilter, MediaCollection,
+    MediaFilterCriteria, MediaItem, MediaKeywordRange, MediaKindFilter, MediaLibrary, MediaRating,
+    MediaRatingFilter, ResolutionFilter, SourceMarks,
 };
 use crate::model::project::{FrameRate, Project};
 use crate::model::track::TrackKind;
@@ -13574,7 +13574,7 @@ pub fn build_window(
             on_source_selected.clone(),
             on_relink_media_gui.clone(),
             on_create_multicam_from_browser,
-            on_library_changed,
+            on_library_changed.clone(),
             proxy_cache.clone(),
             preferences_state.clone(),
         );
@@ -16156,6 +16156,7 @@ pub fn build_window(
         let tracking_cache = tracking_cache.clone();
         let project_for_stt = project.clone();
         let project_for_tracking = project.clone();
+        let library_for_stt = library.clone();
         let prog_player = prog_player.clone();
         let effective_proxy_enabled = effective_proxy_enabled.clone();
         let status_label = status_label.clone();
@@ -16177,6 +16178,7 @@ pub fn build_window(
         let inspector_view = inspector_view.clone();
         let preferences_state = preferences_state.clone();
         let timeline_state_stt = timeline_state.clone();
+        let on_library_changed_stt = on_library_changed.clone();
         let tracking_job_owner_by_key = tracking_job_owner_by_key.clone();
         let tracking_job_key_by_clip = tracking_job_key_by_clip.clone();
         let tracking_status_by_clip = tracking_status_by_clip.clone();
@@ -16357,8 +16359,18 @@ pub fn build_window(
             // Poll STT cache — apply generated subtitles via undo system.
             {
                 let stt_results = stt_cache.borrow_mut().poll();
+                let mut transcript_cache_changed = false;
                 if !stt_results.is_empty() {
                     for result in stt_results {
+                        if crate::model::media_library::upsert_media_transcript(
+                            &mut library_for_stt.borrow_mut(),
+                            &result.source_path,
+                            result.source_in_ns,
+                            result.source_out_ns,
+                            result.segments.clone(),
+                        ) {
+                            transcript_cache_changed = true;
+                        }
                         // Find the matching clip (recursively, including inside compounds).
                         let proj = project_for_stt.borrow();
                         fn find_stt_clip(
@@ -16450,9 +16462,36 @@ pub fn build_window(
                         .borrow_mut()
                         .clear();
                 }
+                if transcript_cache_changed {
+                    on_library_changed_stt();
+                }
                 // Also clear if no jobs are pending (handles edge cases like failure).
                 if !stt_cache.borrow().progress().in_flight {
                     inspector_view.stt_generating.set(false);
+                    if preferences_state.borrow().background_ai_indexing
+                        && stt_cache.borrow().feature_enabled()
+                        && stt_cache.borrow().is_available()
+                    {
+                        let candidates: Vec<(String, u64, u64)> = {
+                            let lib = library_for_stt.borrow();
+                            lib.items
+                                .iter()
+                                .filter_map(|item| {
+                                    media_background_ai_index_request(item).map(
+                                        |(source_in_ns, source_out_ns)| {
+                                            (item.source_path.clone(), source_in_ns, source_out_ns)
+                                        },
+                                    )
+                                })
+                                .collect()
+                        };
+                        let mut cache = stt_cache.borrow_mut();
+                        for (source_path, source_in_ns, source_out_ns) in candidates {
+                            if cache.request(&source_path, source_in_ns, source_out_ns, "auto") {
+                                break;
+                            }
+                        }
+                    }
                 }
                 // Show/hide error label from last STT result.
                 let stt_err = stt_cache.borrow().last_error.clone();
@@ -17145,8 +17184,7 @@ pub fn build_window(
     // ── Window-level Ctrl+Shift+P: command palette ─────────────────────────
     {
         use crate::ui::command_palette::{show_palette, CommandRegistry};
-        let registry: Rc<RefCell<CommandRegistry>> =
-            Rc::new(RefCell::new(CommandRegistry::new()));
+        let registry: Rc<RefCell<CommandRegistry>> = Rc::new(RefCell::new(CommandRegistry::new()));
         collect_header_commands(&header, &registry);
 
         let key_ctrl = gtk4::EventControllerKey::new();
@@ -17168,7 +17206,10 @@ pub fn build_window(
                     }
                 }
             }
-            show_palette(window_for_key.upcast_ref::<gtk::Window>(), registry_for_key.clone());
+            show_palette(
+                window_for_key.upcast_ref::<gtk::Window>(),
+                registry_for_key.clone(),
+            );
             glib::Propagation::Stop
         });
         window.add_controller(key_ctrl);
@@ -17921,6 +17962,7 @@ fn handle_mcp_command(
                     "experimental_preview_optimizations": prefs.experimental_preview_optimizations,
                     "realtime_preview": prefs.realtime_preview,
                     "background_prerender": prefs.background_prerender,
+                    "background_ai_indexing": prefs.background_ai_indexing,
                     "prerender_preset": prefs.prerender_preset.as_str(),
                     "prerender_crf": prefs.prerender_crf,
                     "persist_prerenders_next_to_project_file": prefs.persist_prerenders_next_to_project_file,
@@ -18152,6 +18194,18 @@ fn handle_mcp_command(
                 .send(json!({
                     "success": true,
                     "background_prerender": enabled
+                }))
+                .ok();
+        }
+
+        McpCommand::SetBackgroundAiIndexing { enabled, reply } => {
+            let mut new_state = preferences_state.borrow().clone();
+            new_state.background_ai_indexing = enabled;
+            apply_preferences_state(new_state.clone());
+            reply
+                .send(json!({
+                    "success": true,
+                    "background_ai_indexing": enabled
                 }))
                 .ok();
         }
@@ -21282,7 +21336,7 @@ fn handle_mcp_command(
             });
         }
 
-        McpCommand::ListLibrary { reply } => {
+        McpCommand::ListLibrary { search_text, reply } => {
             fn library_clip_kind_id(kind: &ClipKind) -> &'static str {
                 match kind {
                     ClipKind::Video => "video",
@@ -21298,10 +21352,40 @@ fn handle_mcp_command(
             }
 
             let lib = library.borrow();
-            let items: Vec<_> = lib
-                .items
-                .iter()
+            let query = search_text
+                .as_deref()
+                .filter(|text| !text.trim().is_empty());
+            let mut filtered_items: Vec<_> = lib.items.iter().collect();
+            if let Some(query) = query {
+                filtered_items.retain(|item| {
+                    crate::model::media_library::media_search_match(item, query).is_some()
+                });
+                filtered_items.sort_by(|a, b| {
+                    let a_match = crate::model::media_library::media_search_match(a, query);
+                    let b_match = crate::model::media_library::media_search_match(b, query);
+                    b_match
+                        .as_ref()
+                        .map(|m| m.score)
+                        .unwrap_or_default()
+                        .cmp(&a_match.as_ref().map(|m| m.score).unwrap_or_default())
+                        .then_with(|| {
+                            crate::model::media_library::media_display_name(a)
+                                .cmp(&crate::model::media_library::media_display_name(b))
+                        })
+                        .then_with(|| a.source_path.cmp(&b.source_path))
+                });
+            }
+            let items: Vec<_> = filtered_items
+                .into_iter()
                 .map(|item| {
+                    let transcript_segment_count = item
+                        .transcript_windows
+                        .iter()
+                        .map(|window| window.segments.len())
+                        .sum::<usize>();
+                    let search_match = query.and_then(|query| {
+                        crate::model::media_library::media_search_match(item, query)
+                    });
                     json!({
                         "id":          item.id,
                         "library_key": item.library_key(),
@@ -21332,6 +21416,17 @@ fn handle_mcp_command(
                             "start_s": range.start_ns as f64 / 1_000_000_000.0,
                             "end_s": range.end_ns as f64 / 1_000_000_000.0,
                         })).collect::<Vec<_>>(),
+                        "transcript_window_count": item.transcript_windows.len(),
+                        "transcript_segment_count": transcript_segment_count,
+                        "search_match": search_match.as_ref().map(|m| json!({
+                            "field": m.field,
+                            "score": m.score,
+                            "excerpt": m.excerpt,
+                            "source_in_ns": m.source_in_ns,
+                            "source_out_ns": m.source_out_ns,
+                            "source_in_s": m.source_in_ns.map(|v| v as f64 / 1_000_000_000.0),
+                            "source_out_s": m.source_out_ns.map(|v| v as f64 / 1_000_000_000.0),
+                        })),
                     })
                 })
                 .collect();

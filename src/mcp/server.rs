@@ -909,8 +909,13 @@ fn tools_list() -> Value {
         },
         {
             "name": "list_library",
-            "description": "List all items currently in the media library, including stable library keys plus resolved browser metadata such as duration, codec, resolution, frame rate, file size, rating, keyword ranges, and non-file clip kind/title text when available.",
-            "inputSchema": { "type": "object", "properties": {} }
+            "description": "List media-library items, or filter them by optional search text. Search text matches browser metadata plus any stored speech-to-text transcript content, and filtered results are returned in browser-style relevance order with match metadata.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "search_text": { "type": "string", "description": "Optional metadata + transcript search query. When provided, only matching items are returned and each result includes search_match metadata." }
+                }
+            }
         },
         {
             "name": "import_media",
@@ -1005,7 +1010,7 @@ fn tools_list() -> Value {
                 "type": "object",
                 "properties": {
                     "name": { "type": "string", "description": "Collection name." },
-                    "search_text": { "type": "string", "description": "Optional text match against clip name, title text, path, or codec." },
+                    "search_text": { "type": "string", "description": "Optional text match against browser metadata or stored transcript content." },
                     "kind": { "type": "string", "enum": ["all", "video", "audio", "image", "offline"], "description": "Optional media kind filter." },
                     "resolution": { "type": "string", "enum": ["all", "sd", "hd", "fhd", "uhd"], "description": "Optional resolution bucket." },
                     "frame_rate": { "type": "string", "enum": ["all", "fps24", "fps25_30", "fps31_59", "fps60"], "description": "Optional frame-rate bucket." },
@@ -1022,7 +1027,7 @@ fn tools_list() -> Value {
                 "properties": {
                     "collection_id": { "type": "string", "description": "Collection id from list_collections." },
                     "name": { "type": "string", "description": "Optional new collection name." },
-                    "search_text": { "type": "string", "description": "Optional replacement search text." },
+                    "search_text": { "type": "string", "description": "Optional replacement search text against browser metadata or stored transcript content." },
                     "kind": { "type": "string", "enum": ["all", "video", "audio", "image", "offline"], "description": "Optional replacement media kind filter." },
                     "resolution": { "type": "string", "enum": ["all", "sd", "hd", "fhd", "uhd"], "description": "Optional replacement resolution bucket." },
                     "frame_rate": { "type": "string", "enum": ["all", "fps24", "fps25_30", "fps31_59", "fps60"], "description": "Optional replacement frame-rate bucket." },
@@ -1500,6 +1505,17 @@ fn tools_list() -> Value {
         {
             "name": "set_background_prerender",
             "description": "Enable or disable background disk prerender for upcoming complex overlap playback sections.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "enabled": { "type": "boolean", "description": "true to enable, false to disable." }
+                },
+                "required": ["enabled"]
+            }
+        },
+        {
+            "name": "set_background_ai_indexing",
+            "description": "Enable or disable automatic background AI indexing for Media Library transcript search. When enabled, eligible audio-backed library items are queued one at a time for speech-to-text indexing when Whisper is available.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2901,7 +2917,14 @@ fn dispatch_tool_payload(
             reply: tx,
         },
 
-        "list_library" => McpCommand::ListLibrary { reply: tx },
+        "list_library" => McpCommand::ListLibrary {
+            search_text: args
+                .get("search_text")
+                .and_then(|value| value.as_str())
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            reply: tx,
+        },
 
         "import_media" => McpCommand::ImportMedia {
             path: arg_str!(args, "path"),
@@ -3441,6 +3464,10 @@ fn dispatch_tool_payload(
         }
 
         "set_background_prerender" => McpCommand::SetBackgroundPrerender {
+            enabled: arg_bool!(args, "enabled"),
+            reply: tx,
+        },
+        "set_background_ai_indexing" => McpCommand::SetBackgroundAiIndexing {
             enabled: arg_bool!(args, "enabled"),
             reply: tx,
         },
@@ -4362,6 +4389,56 @@ mod tests {
         let params = json!({
             "name": "get_performance_snapshot",
             "arguments": {}
+        });
+        let mut cache = std::collections::HashMap::new();
+        let response = call_tool(&id, &params, &sender, &mut cache);
+        assert_eq!(response["id"], id);
+        assert_eq!(response["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn call_tool_dispatches_list_library_with_search_text() {
+        let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
+        std::thread::spawn(move || {
+            let cmd = receiver.recv().expect("expected command");
+            match cmd {
+                McpCommand::ListLibrary { search_text, reply } => {
+                    assert_eq!(search_text.as_deref(), Some("sticker"));
+                    reply.send(json!([{"library_key": "/tmp/clip.mov"}])).ok();
+                }
+                _ => panic!("unexpected MCP command"),
+            }
+        });
+        let id = json!(9);
+        let params = json!({
+            "name": "list_library",
+            "arguments": { "search_text": "sticker" }
+        });
+        let mut cache = std::collections::HashMap::new();
+        let response = call_tool(&id, &params, &sender, &mut cache);
+        assert_eq!(response["id"], id);
+        assert_eq!(response["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn call_tool_dispatches_set_background_ai_indexing() {
+        let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
+        std::thread::spawn(move || {
+            let cmd = receiver.recv().expect("expected command");
+            match cmd {
+                McpCommand::SetBackgroundAiIndexing { enabled, reply } => {
+                    assert!(enabled);
+                    reply
+                        .send(json!({"success": true, "background_ai_indexing": enabled}))
+                        .ok();
+                }
+                _ => panic!("unexpected MCP command"),
+            }
+        });
+        let id = json!(10);
+        let params = json!({
+            "name": "set_background_ai_indexing",
+            "arguments": { "enabled": true }
         });
         let mut cache = std::collections::HashMap::new();
         let response = call_tool(&id, &params, &sender, &mut cache);
