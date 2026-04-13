@@ -1,6 +1,7 @@
 use crate::ui_state::{
-    clamp_prerender_crf, CrossfadeCurve, GskRenderer, PlaybackPriority, PreferencesState,
-    PrerenderEncodingPreset, PreviewQuality, ProxyMode, MAX_PRERENDER_CRF, MIN_PRERENDER_CRF,
+    clamp_prerender_crf, AutoScrollMode, CrossfadeCurve, GskRenderer, PlaybackPriority,
+    PreferencesState, PrerenderEncodingPreset, PreviewQuality, ProxyMode, MAX_PRERENDER_CRF,
+    MIN_PRERENDER_CRF,
 };
 use gtk4::prelude::*;
 use gtk4::{
@@ -476,6 +477,26 @@ pub fn show_preferences_dialog(
     timeline_preview_hint.set_max_width_chars(60);
     timeline_box.append(&timeline_preview_check);
     timeline_box.append(&timeline_preview_hint);
+    let autoscroll_row = GBox::new(Orientation::Horizontal, 8);
+    let autoscroll_label = Label::new(Some("Follow playhead during playback:"));
+    autoscroll_label.set_halign(gtk::Align::Start);
+    let autoscroll_combo = gtk4::ComboBoxText::new();
+    autoscroll_combo.append(Some("page"), "Page");
+    autoscroll_combo.append(Some("smooth"), "Smooth");
+    autoscroll_combo.append(Some("off"), "Off");
+    autoscroll_combo.set_active_id(Some(current.timeline_autoscroll.as_str()));
+    autoscroll_combo.set_halign(gtk::Align::Start);
+    autoscroll_row.append(&autoscroll_label);
+    autoscroll_row.append(&autoscroll_combo);
+    let autoscroll_hint = Label::new(Some(
+        "Page jumps the view forward when the playhead reaches the right edge. Smooth slides the view to keep the playhead near the right. Off never moves the view automatically. In all modes, auto-scroll is paused briefly while you scroll or drag.",
+    ));
+    autoscroll_hint.set_halign(gtk::Align::Start);
+    autoscroll_hint.add_css_class("dim-label");
+    autoscroll_hint.set_wrap(true);
+    autoscroll_hint.set_max_width_chars(60);
+    timeline_box.append(&autoscroll_row);
+    timeline_box.append(&autoscroll_hint);
     let source_monitor_auto_link_av_check =
         CheckButton::with_label("Auto-link source monitor A/V placements");
     source_monitor_auto_link_av_check.set_active(current.source_monitor_auto_link_av);
@@ -1384,6 +1405,9 @@ pub fn show_preferences_dialog(
                 persist_proxies_next_to_original_media: persist_proxies_check.is_active(),
                 show_waveform_on_video: waveform_video_check.is_active(),
                 show_timeline_preview: timeline_preview_check.is_active(),
+                timeline_autoscroll: AutoScrollMode::from_str(
+                    autoscroll_combo.active_id().as_deref().unwrap_or("page"),
+                ),
                 source_monitor_auto_link_av: source_monitor_auto_link_av_check.is_active(),
                 show_track_audio_levels: current.show_track_audio_levels,
                 mcp_socket_enabled: mcp_socket_check.is_active(),

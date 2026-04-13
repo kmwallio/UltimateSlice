@@ -460,6 +460,11 @@ pub struct TimelineState {
     pub compound_nav_stack: Vec<String>,
     /// Saved scroll offset from root level, restored on exit_compound.
     pub compound_saved_scroll: Option<f64>,
+    /// How the timeline view follows the playhead during playback.
+    pub timeline_autoscroll: crate::ui_state::AutoScrollMode,
+    /// While set to a future `Instant`, auto-scroll is suspended so the user's
+    /// manual scroll/pan wins. Bumped whenever the user scrolls or pan-drags.
+    pub user_scroll_cooldown_until: Option<std::time::Instant>,
 }
 
 impl TimelineState {
@@ -513,6 +518,55 @@ impl TimelineState {
             on_create_multicam: None,
             compound_nav_stack: Vec::new(),
             compound_saved_scroll: None,
+            timeline_autoscroll: crate::ui_state::AutoScrollMode::default(),
+            user_scroll_cooldown_until: None,
+        }
+    }
+
+    /// Adjust `scroll_offset` so the playhead stays visible during playback.
+    ///
+    /// Call from the playback tick with the widget's allocated width. Suppressed
+    /// while the user is mid-drag or inside the short cooldown after a manual
+    /// scroll/pan so the view does not fight user input.
+    pub fn apply_playhead_autoscroll(&mut self, viewport_width: f64) {
+        use crate::ui_state::AutoScrollMode;
+        if self.timeline_autoscroll == AutoScrollMode::Off {
+            return;
+        }
+        if !matches!(self.drag_op, DragOp::None) {
+            return;
+        }
+        if let Some(t) = self.user_scroll_cooldown_until {
+            if std::time::Instant::now() < t {
+                return;
+            }
+            self.user_scroll_cooldown_until = None;
+        }
+        let usable_w = (viewport_width - TRACK_LABEL_WIDTH).max(100.0);
+        let ph_abs = (self.playhead_ns as f64 / NS_PER_SECOND) * self.pixels_per_second
+            + TRACK_LABEL_WIDTH;
+        let ph_x = ph_abs - self.scroll_offset;
+        match self.timeline_autoscroll {
+            AutoScrollMode::Page => {
+                let right_edge = TRACK_LABEL_WIDTH + usable_w;
+                let margin = 40.0;
+                if ph_x > right_edge - margin || ph_x < TRACK_LABEL_WIDTH {
+                    let target_local_x = TRACK_LABEL_WIDTH + usable_w * 0.125;
+                    self.scroll_offset = (ph_abs - target_local_x).max(0.0);
+                }
+            }
+            AutoScrollMode::Smooth => {
+                let target_local_x = TRACK_LABEL_WIDTH + usable_w * 0.75;
+                let delta = ph_x - target_local_x;
+                if delta > 0.0 {
+                    let step = delta.min(usable_w * 0.5);
+                    self.scroll_offset = (self.scroll_offset + step).max(0.0);
+                } else if ph_x < TRACK_LABEL_WIDTH {
+                    let target_local_x = TRACK_LABEL_WIDTH + usable_w * 0.125;
+                    self.scroll_offset = (ph_abs - target_local_x).max(0.0);
+                }
+            }
+            AutoScrollMode::Off => {}
         }
     }
 
@@ -5900,6 +5954,10 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         // Middle/right drag on ruler = pan timeline.
                         let mut st = state.borrow_mut();
                         st.scroll_offset = (st.ruler_pan_start_offset - offset_x).max(0.0);
+                        st.user_scroll_cooldown_until = Some(
+                            std::time::Instant::now()
+                                + std::time::Duration::from_millis(600),
+                        );
                         if let Some(a) = area_weak.upgrade() {
                             a.queue_draw();
                         }
@@ -7509,6 +7567,9 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             if dx.abs() > dy.abs() {
                 // Horizontal pan
                 st.scroll_offset = (st.scroll_offset + dx * 20.0).max(0.0);
+                st.user_scroll_cooldown_until = Some(
+                    std::time::Instant::now() + std::time::Duration::from_millis(600),
+                );
             } else if ctrl_held || dy.abs() > 0.0 {
                 // Zoom (Ctrl+scroll or plain vertical scroll)
                 let factor = if dy < 0.0 { 1.1 } else { 0.9 };

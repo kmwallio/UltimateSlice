@@ -5213,6 +5213,7 @@ pub fn build_window(
     let initial_preview_quality = preferences_state.borrow().preview_quality.clone();
     let initial_show_waveform_on_video = preferences_state.borrow().show_waveform_on_video;
     let initial_show_timeline_preview = preferences_state.borrow().show_timeline_preview;
+    let initial_timeline_autoscroll = preferences_state.borrow().timeline_autoscroll;
     let initial_show_track_audio_levels = preferences_state.borrow().show_track_audio_levels;
     let (player_obj, paintable) =
         Player::new(initial_hw_accel).expect("Failed to create GStreamer player");
@@ -5399,6 +5400,7 @@ pub fn build_window(
     let timeline_state = Rc::new(RefCell::new(TimelineState::new(project.clone())));
     timeline_state.borrow_mut().show_waveform_on_video = initial_show_waveform_on_video;
     timeline_state.borrow_mut().show_timeline_preview = initial_show_timeline_preview;
+    timeline_state.borrow_mut().timeline_autoscroll = initial_timeline_autoscroll;
     timeline_state.borrow_mut().show_track_audio_levels = initial_show_track_audio_levels;
     let pending_program_seek_ticket = Rc::new(Cell::new(0u64));
     let pending_reload_ticket = Rc::new(Cell::new(0u64));
@@ -5573,6 +5575,7 @@ pub fn build_window(
             }
             timeline_state.borrow_mut().show_waveform_on_video = new_state.show_waveform_on_video;
             timeline_state.borrow_mut().show_timeline_preview = new_state.show_timeline_preview;
+            timeline_state.borrow_mut().timeline_autoscroll = new_state.timeline_autoscroll;
             timeline_state.borrow_mut().show_track_audio_levels = new_state.show_track_audio_levels;
             // Start/stop MCP socket server based on preference change.
             if new_state.mcp_socket_enabled && mcp_socket_stop.borrow().is_none() {
@@ -11989,7 +11992,12 @@ pub fn build_window(
                         let st = ts.borrow();
                         st.root_playhead_from_internal_ns(0)
                     };
-                    ts.borrow_mut().playhead_ns = root_pos;
+                    {
+                        let mut st = ts.borrow_mut();
+                        st.playhead_ns = root_pos;
+                        st.scroll_offset = 0.0;
+                        st.user_scroll_cooldown_until = None;
+                    }
                     if let Some(ref w) = *cell.borrow() {
                         w.queue_draw();
                     }
@@ -12558,6 +12566,12 @@ pub fn build_window(
                 };
                 if should_draw {
                     if let Some(ref w) = *cell.borrow() {
+                        if playing {
+                            let vw = w.allocated_width() as f64;
+                            if vw > 0.0 {
+                                ts.borrow_mut().apply_playhead_autoscroll(vw);
+                            }
+                        }
                         w.queue_draw();
                     }
                     last_draw_ns_c.set(pos_ns);
@@ -17913,6 +17927,7 @@ fn handle_mcp_command(
                     "last_non_off_proxy_mode": prefs.remembered_proxy_mode().as_str(),
                     "persist_proxies_next_to_original_media": prefs.persist_proxies_next_to_original_media,
                     "show_timeline_preview": prefs.show_timeline_preview,
+                    "timeline_autoscroll": prefs.timeline_autoscroll.as_str(),
                     "show_track_audio_levels": prefs.show_track_audio_levels,
                     "gsk_renderer": prefs.gsk_renderer.as_str(),
                     "preview_quality": prefs.preview_quality.as_str(),

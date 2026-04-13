@@ -508,6 +508,37 @@ impl PreviewQuality {
     }
 }
 
+/// Behavior for keeping the playhead visible in the timeline during playback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoScrollMode {
+    /// Jump the view forward one page when the playhead passes the right edge.
+    #[default]
+    Page,
+    /// Slide the view so the playhead stays near the right side of the viewport.
+    Smooth,
+    /// Do not move the view automatically.
+    Off,
+}
+
+impl AutoScrollMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Page => "page",
+            Self::Smooth => "smooth",
+            Self::Off => "off",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "smooth" => Self::Smooth,
+            "off" => Self::Off,
+            _ => Self::Page,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PrerenderEncodingPreset {
@@ -1081,6 +1112,9 @@ pub struct PreferencesState {
     /// Show thumbnail preview strips on timeline video clips.
     #[serde(default = "default_show_timeline_preview")]
     pub show_timeline_preview: bool,
+    /// How the timeline view follows the playhead during playback.
+    #[serde(default)]
+    pub timeline_autoscroll: AutoScrollMode,
     /// Auto-link source placements and timeline drops into paired video+audio clips when possible.
     #[serde(default = "default_source_monitor_auto_link_av")]
     pub source_monitor_auto_link_av: bool,
@@ -1184,6 +1218,7 @@ impl Default for PreferencesState {
             ),
             show_waveform_on_video: false,
             show_timeline_preview: default_show_timeline_preview(),
+            timeline_autoscroll: AutoScrollMode::default(),
             source_monitor_auto_link_av: default_source_monitor_auto_link_av(),
             show_track_audio_levels: default_show_track_audio_levels(),
             mcp_socket_enabled: false,
