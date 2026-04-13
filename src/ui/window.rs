@@ -4750,11 +4750,38 @@ fn clip_to_program_clips(
             redirected.source_out = clip_duration_ns;
             drawing_redirect = Some(redirected);
         } else {
-            // Bake still in flight (cache miss, worker spawned) or
-            // encode previously failed. Drop the clip from this
-            // preview pass — the installed completion callback will
-            // re-trigger `on_project_changed` once the MOV is ready.
-            return Vec::new();
+            // Animated bake still in flight (or previously failed).
+            // Synchronously produce a static qtrle MOV from the
+            // current drawing items so the clip stays visible in
+            // preview right through the edit — *never* drop to
+            // `Vec::new()`, because that would snap the playhead
+            // to 0 on a single-drawing-clip timeline and hide the
+            // user's in-progress work. The completion callback
+            // replaces this with the animated version on the next
+            // rebuild.
+            match crate::media::drawing_render::ensure_static_drawing_mov(
+                &c.id,
+                &c.drawing_items,
+                DRAW_W,
+                DRAW_H,
+                clip_duration_ns,
+            ) {
+                Ok(static_mov) => {
+                    let mut redirected = c.clone();
+                    redirected.source_path =
+                        static_mov.to_string_lossy().into_owned();
+                    redirected.source_in = 0;
+                    redirected.source_out = clip_duration_ns;
+                    drawing_redirect = Some(redirected);
+                }
+                Err(e) => {
+                    log::warn!(
+                        "drawing clip {}: static-MOV fallback failed: {e}",
+                        c.id
+                    );
+                    return Vec::new();
+                }
+            }
         }
     }
     let c = drawing_redirect.as_ref().unwrap_or(c);

@@ -37,6 +37,11 @@ pub fn sweep_drawing_cache() -> (usize, u64) {
         // Cover both the static drawing PNGs and the animated MOVs
         // (present + legacy `.webm` bakes from before the qtrle
         // swap, which are now unreachable and worth collecting).
+        // Covers: static PNG (`ultimate-slice-drawing-<hash>.png`),
+        // animated MOV bakes (`-anim-`), synchronous static-MOV
+        // fallbacks (`-static-`), and legacy `.webm` bakes from
+        // before the qtrle swap — all share the
+        // `ultimate-slice-drawing-` prefix.
         let is_drawing_artifact = name.starts_with("ultimate-slice-drawing-")
             && (name.ends_with(".png")
                 || name.ends_with(".mov")
@@ -718,6 +723,91 @@ pub fn drawing_png_cache_path(clip_id: &str, items: &[DrawingItem], width: i32, 
     let mut p = std::env::temp_dir();
     p.push(format!("ultimate-slice-drawing-{hash:016x}.png"));
     p
+}
+
+/// Cache path for a synchronous "static MOV" — a short qtrle/argb
+/// clip whose body is a single PNG frame looped for the clip's full
+/// duration. Used as the immediate fallback while an animated bake
+/// is still running in the background.
+fn static_drawing_mov_cache_path(
+    clip_id: &str,
+    items: &[DrawingItem],
+    width: i32,
+    height: i32,
+    duration_ns: u64,
+) -> PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    clip_id.hash(&mut h);
+    width.hash(&mut h);
+    height.hash(&mut h);
+    duration_ns.hash(&mut h);
+    for it in items {
+        (it.kind as u8).hash(&mut h);
+        it.color.hash(&mut h);
+        it.fill_color.hash(&mut h);
+        it.width.to_bits().hash(&mut h);
+        for (x, y) in &it.points {
+            x.to_bits().hash(&mut h);
+            y.to_bits().hash(&mut h);
+        }
+    }
+    let hash = h.finish();
+    let mut p = std::env::temp_dir();
+    p.push(format!("ultimate-slice-drawing-static-{hash:016x}.mov"));
+    p
+}
+
+/// Synchronously bake a static qtrle/argb MOV of the drawing by
+/// running `ensure_drawing_png` once and then using FFmpeg's
+/// `-loop 1 -t` to stream-copy that single frame for the clip's
+/// duration. Cached by content hash + duration. Used as the
+/// immediate fallback so drawing edits stay visible in preview
+/// while the full animated MOV is still baking in the background.
+///
+/// Never returns a clip with empty output — callers rely on this
+/// to avoid returning `Vec::new()` from `clip_to_program_clips`
+/// (which would drop the clip and snap the playhead to 0 on a
+/// single-clip timeline).
+pub fn ensure_static_drawing_mov(
+    clip_id: &str,
+    items: &[DrawingItem],
+    width: i32,
+    height: i32,
+    duration_ns: u64,
+) -> std::io::Result<PathBuf> {
+    let path = static_drawing_mov_cache_path(clip_id, items, width, height, duration_ns);
+    if path.exists() {
+        return Ok(path);
+    }
+    let png_path = ensure_drawing_png(clip_id, items, width, height)?;
+    let duration_s = (duration_ns as f64 / 1_000_000_000.0).max(1.0 / 60.0);
+    let status = std::process::Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-loop",
+            "1",
+            "-t",
+            &format!("{duration_s:.6}"),
+            "-i",
+        ])
+        .arg(&png_path)
+        .args(["-c:v", "qtrle", "-pix_fmt", "argb", "-f", "mov"])
+        .arg(&path)
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("ffmpeg spawn: {e}")))?;
+    if !status.success() {
+        let _ = std::fs::remove_file(&path);
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("ffmpeg static-mov encode exited with status {status}"),
+        ));
+    }
+    Ok(path)
 }
 
 /// Render and return the path, reusing the cached file if it exists.
