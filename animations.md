@@ -235,13 +235,17 @@ Procedural Animations" — the feature itself is usable end-to-end
 today (draw → animate → preview → export → save/load round-trip
 → SVG sidecar → re-import → animate again).
 
-- **Option B — minimal SMIL interpreter for third-party animated
-  SVGs.** Today only our own exports (stamped or pre-stamp, caught
-  via the structural heuristic) round-trip into `ClipKind::Drawing`.
-  A ~150-line SMIL evaluator over `usvg::Tree` handling
-  `stroke-dashoffset` + `opacity` would cover arbitrary "draw-on"
-  SVGs from the wider ecosystem; full SMIL (motion paths,
-  keyframe splines, `animateColor`) stays out of scope.
+- ~~**Option B — minimal SMIL interpreter for third-party animated
+  SVGs.**~~ Turned out already implemented — `media/animated_svg.rs`
+  detects SMIL via `analyze_svg_str`, rasterises per-frame with
+  `resvg`, and bakes to a cached video consumed by both preview
+  and export. The only remaining gap was that it baked VP9/alpha
+  in `.webm` — same format that silently stripped alpha on the
+  export side for drawings before we switched to QuickTime RLE.
+  Now fixed: `render_animated_svg_clip` emits `qtrle / argb` in
+  `.mov`, matching `drawing_render.rs`. Third-party animated SVGs
+  from Inkscape / Figma / hand-written SMIL should now preview
+  and export with alpha intact.
 - **Cache janitor.** `/tmp/ultimate-slice-drawing-*.{png,mov}` files
   accumulate indefinitely across sessions (content-hashed, never
   cleaned). An LRU / age-based sweep at startup would keep it

@@ -359,18 +359,16 @@ fn render_animated_svg_clip(
             &format!("{}/{}", fps_num.max(1), fps_den.max(1)),
             "-i",
             "pipe:0",
+            // QuickTime RLE in .mov: argb is decoded as argb by both
+            // GStreamer (qtdemux ! avdec_qtrle) and FFmpeg, so alpha
+            // survives the preview + export round-trip. VP9/alpha in
+            // Matroska used to work for preview only.
             "-c:v",
-            "libvpx-vp9",
+            "qtrle",
             "-pix_fmt",
-            "yuva420p",
-            "-crf",
-            "30",
-            "-b:v",
-            "0",
-            "-auto-alt-ref",
-            "0",
+            "argb",
             "-f",
-            "webm",
+            "mov",
             &temp_path,
         ])
         .stdin(Stdio::piped())
@@ -579,7 +577,16 @@ fn animated_svg_cache_root() -> PathBuf {
 }
 
 fn render_output_path_for(key: &str, root: &Path) -> String {
-    root.join(format!("{key}.webm"))
+    // QuickTime RLE in `.mov` preserves alpha end-to-end across
+    // both GStreamer (preview) and FFmpeg (export) decoders. The
+    // earlier VP9/alpha in `.webm` looked correct in GStreamer but
+    // FFmpeg's matroska decoder reported frames as `yuv420p` — the
+    // alpha `BlockAdditions` were silently dropped, so exported
+    // animated-SVG overlays landed on a fully opaque black matte.
+    // Same fix we applied to drawing-clip bakes in
+    // `drawing_render.rs`. `.webm` caches from before this change
+    // are stale and can be deleted; new bakes will be `.mov`.
+    root.join(format!("{key}.mov"))
         .to_string_lossy()
         .into_owned()
 }

@@ -611,15 +611,17 @@ FCPXML persistence).
   the static PNG they see isn't the final state.
 - [ ] **Cache janitor.** LRU or age-based sweep for
   `/tmp/ultimate-slice-drawing-{png,mov}` at startup.
-- [ ] **Option B — minimal SMIL interpreter for third-party SVGs.**
-  Today only our own SVG exports round-trip (and older pre-stamp
-  exports via a structural heuristic). A ~150-line evaluator on
-  top of `usvg::Tree` that handles `stroke-dashoffset` + `opacity`
-  animations would let any "draw-on" SVG from the wider ecosystem
-  play inside preview + export using the same frame-time Cairo
-  rasterisation + MOV bake path. Full SMIL (motion paths, keyframe
-  splines, `animateColor`) is out of scope — too large for the
-  value.
+- [x] **Option B — third-party animated SVGs in preview + export.**
+  Discovered mid-implementation that `media/animated_svg.rs`
+  already has the SMIL detector (`analyze_svg_str`), the
+  per-frame `resvg` rasteriser, and the cached-video pipeline
+  baked into both preview and export. The gap was the encoder
+  container: it baked VP9/alpha in `.webm`, same format that
+  stripped alpha on export for drawings before we switched. Now
+  fixed — `render_animated_svg_clip` emits `qtrle / argb` in
+  `.mov`, so third-party animated SVGs (Inkscape / Figma / hand
+  SMIL) round-trip with alpha intact. Full SMIL (motion paths,
+  keyframe splines, `animateColor`) remains out of scope.
 - [ ] Rectangle / ellipse "grow from corner" reveal as an alternative
   to the current alpha fade (per-clip setting).
 - [ ] Live cursor-follow ghost preview for freehand strokes (today
