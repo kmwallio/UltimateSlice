@@ -520,6 +520,18 @@ button.round {
     border-bottom-right-radius: 6px;
 }
 
+.linked > button.toolbar-split-toggle {
+    border-left-width: 0;
+}
+
+button.toolbar-split-toggle {
+    min-width: 0;
+    padding-top: 4px;
+    padding-bottom: 4px;
+    padding-left: 8px;
+    padding-right: 8px;
+}
+
 /* Export split control in toolbar */
 .export-split > button.suggested-action,
 .export-split > menubutton.suggested-action,

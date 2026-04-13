@@ -103,7 +103,8 @@ Tracking docs:
 - [x] New / Open / Save / Export MP4 buttons
 - [x] Recent projects menu limits to 10 entries and omits missing files
 - [x] Undo / Redo buttons
-- [x] Select / Razor tool toggle buttons
+- [x] Active tool dropdown for **Select / Razor / Ripple / Roll / Slip / Slide**
+- [x] Linked **Draw | tools** split control so entering draw mode and opening brush options stay together in the toolbar
 - [x] Export Project with Media action in **Export ▼** menu (`Export Project with Media…`) that writes XML plus colocated `ProjectName.Library` packaged media
 
 ### Append to Timeline

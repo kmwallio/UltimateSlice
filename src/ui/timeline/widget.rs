@@ -106,6 +106,15 @@ fn timeline_content_height_for_tracks(tracks: &[crate::model::track::Track]) -> 
     RULER_HEIGHT + tracks.iter().map(track_row_height).sum::<f64>()
 }
 
+fn pinned_ruler_top(st: &TimelineState) -> f64 {
+    st.vertical_scroll_offset.max(0.0)
+}
+
+fn ruler_hit_test(st: &TimelineState, y: f64) -> bool {
+    let top = pinned_ruler_top(st);
+    y >= top && y < top + RULER_HEIGHT
+}
+
 fn track_row_top_in_tracks(tracks: &[crate::model::track::Track], track_idx: usize) -> f64 {
     let order = visual_order(tracks);
     let visual_pos = order.iter().position(|&i| i == track_idx);
@@ -415,6 +424,7 @@ pub struct TimelineState {
     pub active_tool: ActiveTool,
     pub pixels_per_second: f64,
     pub scroll_offset: f64,
+    pub vertical_scroll_offset: f64,
     pub playhead_ns: u64,
     pub selected_clip_id: Option<String>,
     pub selected_track_id: Option<String>,
@@ -519,6 +529,7 @@ impl TimelineState {
             active_tool: ActiveTool::Select,
             pixels_per_second: PIXELS_PER_SECOND_DEFAULT,
             scroll_offset: 0.0,
+            vertical_scroll_offset: 0.0,
             playhead_ns: 0,
             selected_clip_id: None,
             selected_track_id: None,
@@ -5368,7 +5379,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             clip_context_pop.popdown();
             track_context_pop.popdown();
 
-            if y < RULER_HEIGHT {
+            if ruler_hit_test(&st, y) {
                 if button == 3 {
                     // Right-click in ruler → remove nearest marker within 8px
                     let ns = st.x_to_ns(x);
@@ -5728,7 +5739,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     return;
                 }
                 let mut st = state.borrow_mut();
-                if y < RULER_HEIGHT {
+                if ruler_hit_test(&st, y) {
                     // On drag-begin in ruler: record start offset for panning;
                     // also seek playhead to clicked position.
                     let ns = st.x_to_ns(x);
@@ -5963,7 +5974,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         }
                     }
                 } else if x < TRACK_LABEL_WIDTH
-                    && y > RULER_HEIGHT
+                    && !ruler_hit_test(&st, y)
                     && st.solo_badge_hit_track_index(x, y).is_none()
                     && st.duck_badge_hit_track_index(x, y).is_none()
                 {
@@ -5974,7 +5985,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                             target_idx: track_idx,
                         };
                     }
-                } else if st.active_tool == ActiveTool::Select && y > RULER_HEIGHT {
+                } else if st.active_tool == ActiveTool::Select && !ruler_hit_test(&st, y) {
                     let mods = gesture.current_event_state();
                     let additive = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK)
                         || mods.contains(gtk::gdk::ModifierType::META_MASK);
@@ -5992,7 +6003,11 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 let current_y = start_y + offset_y;
                 let button = gesture.current_button();
 
-                if start_y < RULER_HEIGHT {
+                let ruler_drag = {
+                    let st = state.borrow();
+                    ruler_hit_test(&st, start_y)
+                };
+                if ruler_drag {
                     if button == 2 || button == 3 {
                         // Middle/right drag on ruler = pan timeline.
                         let mut st = state.borrow_mut();
@@ -7848,9 +7863,6 @@ fn draw_timeline(
     cr.set_source_rgb(bg_r, bg_g, bg_b);
     cr.paint().ok();
 
-    // Ruler
-    draw_ruler(cr, w, st);
-
     // Compound breadcrumb bar (when drilled into a compound clip)
     let breadcrumb_height = if st.is_editing_compound() {
         let bar_h = 22.0;
@@ -7875,6 +7887,8 @@ fn draw_timeline(
     let linked_peer_highlight_ids = st.linked_peer_highlight_ids();
     let proj = st.project.borrow();
     let editing_tracks = st.resolve_editing_tracks(&proj);
+    let ruler_top = pinned_ruler_top(st);
+    let ruler_bottom = ruler_top + RULER_HEIGHT;
     let mut y = RULER_HEIGHT + breadcrumb_height;
     for &logical_idx in &visual_order(editing_tracks) {
         let track = &editing_tracks[logical_idx];
@@ -7899,23 +7913,21 @@ fn draw_timeline(
     // When inside a compound, translate the main-timeline playhead to the
     // compound's internal time so it aligns with the internal clips.
     let ph_x = st.ns_to_x(st.editing_playhead_ns());
-    cr.save().ok();
-    cr.rectangle(TRACK_LABEL_WIDTH, 0.0, w - TRACK_LABEL_WIDTH, h);
-    cr.clip();
-    cr.set_source_rgb(1.0, 0.3, 0.3);
-    cr.set_line_width(2.0);
-    cr.move_to(ph_x, 0.0);
-    cr.line_to(ph_x, h);
-    cr.stroke().ok();
-    cr.restore().ok();
-
-    // Playhead triangle at top (also clipped)
-    if ph_x >= TRACK_LABEL_WIDTH {
+    if ruler_bottom < h {
+        cr.save().ok();
+        cr.rectangle(
+            TRACK_LABEL_WIDTH,
+            ruler_bottom,
+            w - TRACK_LABEL_WIDTH,
+            h - ruler_bottom,
+        );
+        cr.clip();
         cr.set_source_rgb(1.0, 0.3, 0.3);
-        cr.move_to(ph_x - 6.0, 0.0);
-        cr.line_to(ph_x + 6.0, 0.0);
-        cr.line_to(ph_x, 12.0);
-        cr.fill().ok();
+        cr.set_line_width(2.0);
+        cr.move_to(ph_x, ruler_bottom);
+        cr.line_to(ph_x, h);
+        cr.stroke().ok();
+        cr.restore().ok();
     }
 
     // Snap indicator — dashed vertical guideline + badge at the active snap target.
@@ -7929,7 +7941,7 @@ fn draw_timeline(
                 cr.set_source_rgba(1.0, 0.82, 0.2, 0.9);
                 cr.set_line_width(1.5);
                 cr.set_dash(&[4.0, 3.0], 0.0);
-                cr.move_to(sx, RULER_HEIGHT);
+                cr.move_to(sx, ruler_bottom);
                 cr.line_to(sx, h);
                 cr.stroke().ok();
                 cr.set_dash(&[], 0.0);
@@ -7947,7 +7959,7 @@ fn draw_timeline(
                 let bh = 16.0;
                 let bw = te.width() + pad * 2.0;
                 let bx = sx + 4.0;
-                let by = RULER_HEIGHT + 4.0;
+                let by = ruler_bottom + 4.0;
                 rounded_rect(cr, bx, by, bw, bh, 3.0);
                 cr.set_source_rgba(1.0, 0.82, 0.2, 0.95);
                 cr.fill().ok();
@@ -7966,7 +7978,7 @@ fn draw_timeline(
         ActiveTool::Slide => Some("⇔ Slide (U to toggle)"),
         _ => None,
     };
-    let mut indicator_y = RULER_HEIGHT + 16.0;
+    let mut indicator_y = ruler_bottom + 16.0;
     if let Some(label) = tool_label {
         cr.set_source_rgb(1.0, 0.8, 0.0);
         cr.set_font_size(12.0);
@@ -8176,6 +8188,9 @@ fn draw_timeline(
             }
         }
     }
+
+    draw_ruler(cr, w, st, ruler_top);
+    draw_ruler_playhead_marker(cr, ph_x, ruler_top);
 }
 
 fn clamp_slide_delta(
@@ -8222,7 +8237,9 @@ fn compact_gap_free_clips(clips: &mut Vec<Clip>) {
     }
 }
 
-fn draw_ruler(cr: &gtk::cairo::Context, width: f64, st: &TimelineState) {
+fn draw_ruler(cr: &gtk::cairo::Context, width: f64, st: &TimelineState, top_y: f64) {
+    cr.save().ok();
+    cr.translate(0.0, top_y);
     cr.set_source_rgb(0.2, 0.2, 0.22);
     cr.rectangle(0.0, 0.0, width, RULER_HEIGHT);
     cr.fill().ok();
@@ -8308,6 +8325,22 @@ fn draw_ruler(cr: &gtk::cairo::Context, width: f64, st: &TimelineState) {
     let (lbl_r, lbl_g, lbl_b) = crate::ui::colors::COLOR_TRACK_LABEL_BG;
     cr.set_source_rgb(lbl_r, lbl_g, lbl_b);
     cr.rectangle(0.0, 0.0, TRACK_LABEL_WIDTH, RULER_HEIGHT);
+    cr.fill().ok();
+    cr.restore().ok();
+}
+
+fn draw_ruler_playhead_marker(cr: &gtk::cairo::Context, playhead_x: f64, top_y: f64) {
+    if playhead_x < TRACK_LABEL_WIDTH {
+        return;
+    }
+    cr.set_source_rgb(1.0, 0.3, 0.3);
+    cr.set_line_width(2.0);
+    cr.move_to(playhead_x, top_y);
+    cr.line_to(playhead_x, top_y + RULER_HEIGHT);
+    cr.stroke().ok();
+    cr.move_to(playhead_x - 6.0, top_y);
+    cr.line_to(playhead_x + 6.0, top_y);
+    cr.line_to(playhead_x, top_y + 12.0);
     cr.fill().ok();
 }
 
@@ -10098,6 +10131,21 @@ mod tests {
             track_id,
             ids,
         )
+    }
+
+    #[test]
+    fn ruler_hit_test_tracks_vertical_scroll_offset() {
+        let mut state = TimelineState::new(Rc::new(RefCell::new(Project::new("Ruler tests"))));
+        assert!(ruler_hit_test(&state, 0.0));
+        assert!(ruler_hit_test(&state, RULER_HEIGHT - 0.5));
+        assert!(!ruler_hit_test(&state, RULER_HEIGHT));
+
+        state.vertical_scroll_offset = 180.0;
+        assert_eq!(pinned_ruler_top(&state), 180.0);
+        assert!(!ruler_hit_test(&state, 179.9));
+        assert!(ruler_hit_test(&state, 180.0));
+        assert!(ruler_hit_test(&state, 203.9));
+        assert!(!ruler_hit_test(&state, 204.0));
     }
 
     fn timeline_state_with_through_edit_track() -> (TimelineState, String) {

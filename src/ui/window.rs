@@ -8846,7 +8846,7 @@ pub fn build_window(
         })
     };
 
-    let (header, btn_record) = toolbar::build_toolbar(
+    let (header, btn_record, btn_draw_tools) = toolbar::build_toolbar(
         project.clone(),
         library.clone(),
         timeline_state.clone(),
@@ -11390,15 +11390,12 @@ pub fn build_window(
         }
 
         // ── Draw-tool brush popover (color / width / fill / shape) ──
-        // Attaches a MenuButton into the header next to the existing
-        // tool buttons. Changes route through the TransformOverlay
-        // setters, so the HUD updates immediately.
+        // Reuses the linked Draw split-button from the main toolbar so
+        // the mode toggle and brush options stay grouped together.
         {
             use gtk::prelude::*;
             let overlay_cell = transform_overlay_cell.clone();
-            let menu_btn = gtk::MenuButton::new();
-            menu_btn.set_icon_name("applications-graphics-symbolic");
-            menu_btn.set_tooltip_text(Some("Draw-tool brush options"));
+            let btn_draw_tools = btn_draw_tools.clone();
             let pop = gtk::Popover::new();
             // Click-outside and Escape dismiss the popover. Without the
             // explicit cascade flag, nested modal dialogs (the color
@@ -11622,8 +11619,17 @@ pub fn build_window(
             vbox.append(&svg_row);
 
             pop.set_child(Some(&vbox));
-            menu_btn.set_popover(Some(&pop));
-            header.pack_start(&menu_btn);
+            pop.set_parent(&btn_draw_tools);
+            {
+                let pop = pop.clone();
+                btn_draw_tools.connect_clicked(move |_| {
+                    if pop.is_visible() {
+                        pop.popdown();
+                    } else {
+                        pop.popup();
+                    }
+                });
+            }
 
             // Helper: convert RGBA → 0xRRGGBBAA u32.
             fn rgba_to_u32(c: &gdk4::RGBA) -> u32 {
@@ -14275,6 +14281,16 @@ pub fn build_window(
         timeline_panel.remove(bar);
     }
     timeline_scroll.set_child(Some(&timeline_panel));
+    {
+        let timeline_state = timeline_state.clone();
+        let timeline_area = timeline_area.clone();
+        let timeline_vadjustment = timeline_scroll.vadjustment();
+        timeline_state.borrow_mut().vertical_scroll_offset = timeline_vadjustment.value();
+        timeline_vadjustment.connect_value_changed(move |adj| {
+            timeline_state.borrow_mut().vertical_scroll_offset = adj.value();
+            timeline_area.queue_draw();
+        });
+    }
 
     // Vertical Paned: top = timeline scroll, bottom = keyframe dopesheet.
     // The dopesheet is added later (see keyframe editor section below).

@@ -10,6 +10,8 @@ The **Timeline** panel (bottom) is where you arrange, trim, and edit clips into 
 - **Track header** — shows the track name, a per-track **S** solo badge, and a compact per-track stereo level meter (L/R) on the right.
 - **Status bar** — bottom-left includes a **Track Audio Levels** eye toggle to show/hide track-header meters. Proxy queue label/progress appear only while proxies are actively generating.
 
+When the track stack is taller than the viewport, the ruler stays pinned at the visible top edge so seeking, scrubbing, and marker clicks remain available while you scroll tracks vertically.
+
 ## Navigation
 
 | Action | How |
@@ -31,6 +33,13 @@ There are several ways to get clips onto the timeline:
 - **Source Monitor drag** — drag from the source monitor preview directly onto a timeline track.
 
 ## Tools
+
+The main toolbar collapses **Select**, **Razor**, **Ripple**, **Roll**,
+**Slip**, and **Slide** into one active-tool dropdown. The button always shows
+the currently selected one of those edit tools, and it updates immediately when
+you switch tools with the mouse or the keyboard shortcuts below. That dropdown
+also stays visibly pressed whenever one of those edit tools is active, while
+**Draw** uses its own separate button state.
 
 ### Select Tool (`Escape`)
 
@@ -77,6 +86,12 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 - The left neighbor's out-point extends/shrinks and the right neighbor's in-point shrinks/extends — overall timeline duration stays the same.
 - On edge clips (only one neighbor), slide remains available but movement is clamped and only the available-side neighbor is adjusted.
 - Press **U** to toggle Slide mode on/off.
+
+### Draw Tool (`D`)
+
+- Click **Draw** in the linked toolbar control to enter vector-drawing mode on the Program Monitor.
+- Click the adjacent **tools** icon in that same control to open brush options such as shape, color, width, fill, presets, reveal animation, and SVG export.
+- Drag in the Program Monitor to draw on the drawing clip under the playhead; if none exists yet, UltimateSlice creates one automatically.
 
 ### Insert at Playhead (`,`)
 
