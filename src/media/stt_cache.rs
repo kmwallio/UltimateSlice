@@ -220,14 +220,12 @@ impl Drop for SttCache {
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 fn cache_key(source_path: &str, source_in_ns: u64, source_out_ns: u64, language: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    source_path.hash(&mut hasher);
-    source_in_ns.hash(&mut hasher);
-    source_out_ns.hash(&mut hasher);
-    language.hash(&mut hasher);
-    format!("stt_{}", hasher.finish())
+    crate::media::cache_key::hashed_key("stt", |key| {
+        key.add_source_fingerprint(source_path)
+            .add(source_in_ns)
+            .add(source_out_ns)
+            .add(language);
+    })
 }
 
 /// Search standard locations for any whisper GGML model file (`ggml-*.bin`).

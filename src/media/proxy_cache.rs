@@ -881,8 +881,8 @@ fn normalized_vidstab_smoothing_hundredths(vidstab_enabled: bool, vidstab_smooth
 }
 
 fn source_path_hash(source_path: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    source_path.hash(&mut hasher);
+    let mut hasher = crate::media::cache_key::CacheKeyHasher::new();
+    hasher.add_source_path(source_path);
     hasher.finish()
 }
 
@@ -899,12 +899,16 @@ fn source_variant_hash(
     vidstab_enabled: bool,
     vidstab_smoothing: f32,
 ) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    source_path.hash(&mut hasher);
-    scale.hash(&mut hasher);
-    lut_path.unwrap_or("").hash(&mut hasher);
-    vidstab_enabled.hash(&mut hasher);
-    normalized_vidstab_smoothing_hundredths(vidstab_enabled, vidstab_smoothing).hash(&mut hasher);
+    let mut hasher = crate::media::cache_key::CacheKeyHasher::new();
+    hasher
+        .add_source_path(source_path)
+        .add(scale)
+        .add(lut_path.unwrap_or(""))
+        .add(vidstab_enabled)
+        .add(normalized_vidstab_smoothing_hundredths(
+            vidstab_enabled,
+            vidstab_smoothing,
+        ));
     hasher.finish()
 }
 

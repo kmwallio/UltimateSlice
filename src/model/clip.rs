@@ -3675,7 +3675,6 @@ impl Clip {
             && peer.kind == ClipKind::Audio
             && self.link_group_id.is_some()
             && self.link_group_id == peer.link_group_id
-            && self.source_path == peer.source_path
     }
 
     pub fn is_freeze_frame(&self) -> bool {
@@ -4096,12 +4095,23 @@ mod tests {
     }
 
     #[test]
-    fn test_unlinked_or_different_source_peer_does_not_suppress_embedded_audio() {
+    fn test_linked_external_audio_peer_suppresses_embedded_audio() {
         let mut video = make_test_clip(5_000_000_000, 0);
         video.link_group_id = Some("link-1".to_string());
 
         let mut audio = Clip::new("/path/to/other.wav", 5_000_000_000, 0, ClipKind::Audio);
         audio.link_group_id = Some("link-1".to_string());
+
+        assert!(video.suppresses_embedded_audio_for_linked_peer(&audio));
+    }
+
+    #[test]
+    fn test_unlinked_or_different_group_peer_does_not_suppress_embedded_audio() {
+        let mut video = make_test_clip(5_000_000_000, 0);
+        video.link_group_id = Some("link-1".to_string());
+
+        let mut audio = Clip::new("/path/to/other.wav", 5_000_000_000, 0, ClipKind::Audio);
+        audio.link_group_id = Some("link-2".to_string());
 
         assert!(!video.suppresses_embedded_audio_for_linked_peer(&audio));
     }

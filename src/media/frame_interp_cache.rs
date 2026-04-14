@@ -8,10 +8,10 @@
 //! source fps.  Both Program Monitor preview and FFmpeg export consume the
 //! sidecar so the visible frames match exactly.
 //!
-//! The cache is *clip-aware* — the cache key includes the source path **and**
-//! the desired multiplier (derived from the slowest segment of the clip), so
-//! two clips that share a source but request different multipliers each get
-//! their own sidecar.
+//! The cache is *clip-aware* — the cache key includes a source fingerprint
+//! (path + source mtime) **and** the desired multiplier (derived from the
+//! slowest segment of the clip), so two clips that share a source but request
+//! different multipliers each get their own sidecar.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -341,21 +341,13 @@ pub fn recommended_multiplier(clip: &Clip) -> u32 {
 }
 
 fn cache_key(source_path: &str, multiplier: u32) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    source_path.hash(&mut hasher);
-    format!("rife_{}_{}x", hasher.finish(), multiplier)
+    let mut hasher = crate::media::cache_key::CacheKeyHasher::new();
+    hasher.add_source_fingerprint(source_path).add(multiplier);
+    format!("rife_{:016x}_{}x", hasher.finish(), multiplier)
 }
 
 fn dirs_cache_root() -> PathBuf {
-    let base = std::env::var("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-            PathBuf::from(home).join(".cache")
-        });
-    base.join("ultimateslice").join("frame_interp")
+    crate::media::cache_support::cache_root_dir("frame_interp")
 }
 
 pub const MODEL_FILENAME: &str = "rife.onnx";
@@ -417,9 +409,7 @@ pub fn find_model_path() -> Option<String> {
 }
 
 fn sidecar_file_is_ready(path: &str) -> bool {
-    std::fs::metadata(path)
-        .map(|m| m.len() > 0)
-        .unwrap_or(false)
+    crate::media::cache_support::file_has_content(path)
 }
 
 // ── Worker: pairwise RIFE inference ────────────────────────────────────────

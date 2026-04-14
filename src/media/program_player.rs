@@ -9914,6 +9914,7 @@ impl ProgramPlayer {
 
             // Seek new decoders to their source positions.
             let seek_flags = gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE;
+            let mut seek_ok = true;
             for slot in &self.slots {
                 if !added_clip_idxs.contains(&slot.clip_idx) {
                     continue;
@@ -9933,7 +9934,29 @@ impl ProgramPlayer {
                     if let Some(ref pad) = slot.audio_mixer_pad {
                         let _ = pad.send_event(gst::event::Eos::new());
                     }
+                    seek_ok = false;
+                    break;
                 }
+            }
+
+            if !seek_ok {
+                // Don't keep a boundary update that never produced valid decoder
+                // output; fall back to the full rebuild path instead.
+                let mut j = 0usize;
+                while j < self.slots.len() {
+                    if added_clip_idxs.contains(&self.slots[j].clip_idx) {
+                        let slot = self.slots.remove(j);
+                        self.teardown_single_slot(slot);
+                    } else {
+                        j += 1;
+                    }
+                }
+                for slot in self.slots.iter_mut() {
+                    if removed.contains(&slot.clip_idx) {
+                        slot.hidden = false;
+                    }
+                }
+                return false;
             }
 
             // Brief preroll wait for new decoders only.

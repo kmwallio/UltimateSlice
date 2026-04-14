@@ -195,6 +195,11 @@ The same windowing logic must be applied in all three consumer paths:
 | `flatten_clips()` | `src/media/export.rs` | MP4/ffmpeg export |
 | `break_apart_compound()` | `src/ui/timeline/widget.rs` | Restore clips to parent |
 
+The shared trim/rebase math now lives in
+`src/model/compound_flattening.rs`. Keep these three call sites wired
+through that helper layer so compound windowing, keyframe rebasing, and
+subtitle rebasing do not drift again.
+
 ### Drill-down editing
 
 Double-clicking a compound enters drill-down mode via `compound_nav_stack`.
@@ -414,9 +419,11 @@ Module: `src/media/voice_enhance_cache.rs`. Modeled directly after
   "<voice_enhance_filter>" -c:a aac out.mp4`. Video is **stream-copied**,
   so generation is dominated by audio re-encode time (typically a few
   seconds for short clips, scales linearly with duration).
-- Cache key: `ve_<source_path_hash>_<strength*100 as u32>`. Strength is
-  rounded to 1% so slider micro-wobbles don't thrash the cache, and
-  bouncing the strength back to a previous value is an instant hit.
+- Cache key: `ve_<source_fingerprint_hash>_<strength*100 as u32>`. The
+  fingerprint folds the source path plus source mtime into the hash.
+  Strength is rounded to 1% so slider micro-wobbles don't thrash the
+  cache, and bouncing the strength back to a previous value is an
+  instant hit.
 - Cache root: `$XDG_CACHE_HOME/ultimateslice/voice_enhance/<key>.mp4`.
   Files persist across sessions.
 - **Disk cost**: bounded by `MAX_CACHE_BYTES` (currently 2 GiB). Each
@@ -508,12 +515,11 @@ don't burn the same hours:
 - **Cache disk cap is hard-coded.** `MAX_CACHE_BYTES` in
   `voice_enhance_cache.rs` is 2 GiB. There's no UI to change it. Move
   it to preferences if users need to tune it for very long projects.
-- **Source-file mutation.** The cache key is
-  `hash(source_path) + strength`. If the user replaces the file at
-  `source_path` with different content, the cached enhanced version
-  becomes silently wrong (the old audio plays under the new video).
-  No mtime/content check yet — matches `bg_removal_cache`'s behavior.
-  Fix would be to fold source mtime into the cache key.
+- **Source-file mutation.** Source-derived media caches now fold source
+  mtime into their hashed keys, so ordinary in-place source replacement
+  invalidates the stale entry automatically. They still do **not**
+  content-hash files, so preserved mtimes or same-second rewrites can
+  theoretically reuse stale results.
 - **Compound clips.** The walker in the on-project-changed handler
   recurses into `clip.compound_tracks`, but the
   `resolve_source_path_for_clip` lookup is keyed on the leaf clip's

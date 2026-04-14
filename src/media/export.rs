@@ -6434,41 +6434,20 @@ fn flatten_clips(
     let mut result = Vec::new();
     for clip in clips {
         if clip.kind == ClipKind::Compound {
-            if let Some(ref internal_tracks) = clip.compound_tracks {
-                // Map internal clip positions into the parent timeline.
-                // After windowing, each clip's timeline_start >= source_in,
-                // so subtracting source_in gives the offset from the visible
-                // start. Adding the compound's parent position avoids u64
-                // underflow that saturating_sub would cause.
-                let compound_offset = timeline_offset.saturating_add(clip.timeline_start);
-                let window_start = clip.source_in;
-                let window_end = clip.source_out;
-                for inner_track in internal_tracks {
-                    for inner_clip in &inner_track.clips {
-                        // Window the clip to the compound's [source_in, source_out)
-                        // range. Skip / trim / rebase keyframes & subtitles all
-                        // happen inside the helper.
-                        let Some(mut rebased) =
-                            inner_clip.rebase_to_window(window_start, window_end)
-                        else {
-                            continue;
-                        };
-                        // Rebase: offset from window start + compound parent pos
-                        rebased.timeline_start = compound_offset
-                            .saturating_add(rebased.timeline_start.saturating_sub(window_start));
-                        if rebased.kind == ClipKind::Compound || rebased.kind == ClipKind::Multicam
-                        {
-                            result.extend(flatten_clips(
-                                &[rebased],
-                                0,
-                                depth + 1,
-                                project_fps_num,
-                                project_fps_den,
-                            ));
-                        } else {
-                            result.push(rebased);
-                        }
-                    }
+            for child in
+                crate::model::compound_flattening::flatten_compound_children(clip, timeline_offset)
+            {
+                let rebased = child.clip;
+                if rebased.kind == ClipKind::Compound || rebased.kind == ClipKind::Multicam {
+                    result.extend(flatten_clips(
+                        &[rebased],
+                        0,
+                        depth + 1,
+                        project_fps_num,
+                        project_fps_den,
+                    ));
+                } else {
+                    result.push(rebased);
                 }
             }
         } else if clip.kind == ClipKind::Multicam {

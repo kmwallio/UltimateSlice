@@ -3038,29 +3038,11 @@ impl TimelineState {
         };
         let compound_track_id = compound_track_id.unwrap();
         let _compound_track_idx = compound_track_idx.unwrap();
-        let compound_start = compound.timeline_start;
-        let compound_source_in = compound.source_in;
-        let compound_source_out = compound.source_out;
-        let internal_tracks = match compound.compound_tracks {
-            Some(ref t) => t.clone(),
-            None => return false,
-        };
-
-        // Helper: rebase an internal clip to the parent timeline, accounting
-        // for source_in (non-zero after a razor cut) and clipping to the
-        // visible [source_in, source_out] window. Skip / trim / keyframe and
-        // subtitle rebasing all happen inside `Clip::rebase_to_window`.
-        let rebase_clip = |clip: Clip| -> Option<Clip> {
-            let mut clip = clip.rebase_to_window(compound_source_in, compound_source_out)?;
-            // After windowing, timeline_start >= source_in, so this
-            // subtraction is safe. Add compound's parent position to get
-            // the absolute timeline position without u64 underflow.
-            clip.timeline_start = clip
-                .timeline_start
-                .saturating_sub(compound_source_in)
-                .saturating_add(compound_start);
-            Some(clip)
-        };
+        if compound.compound_tracks.is_none() {
+            return false;
+        }
+        let flattened_children =
+            crate::model::compound_flattening::flatten_compound_children(&compound, 0);
 
         // Build changes: remove compound from its track, add internal clips back
         let mut changes = Vec::new();
@@ -3079,13 +3061,9 @@ impl TimelineState {
             .collect();
 
         // Add rebased internal video clips to compound's track
-        for int_track in &internal_tracks {
-            if int_track.is_video() {
-                for clip in int_track.clips.clone() {
-                    if let Some(rebased) = rebase_clip(clip) {
-                        new_clips.push(rebased);
-                    }
-                }
+        for child in &flattened_children {
+            if !child.is_audio_track {
+                new_clips.push(child.clip.clone());
             }
         }
         new_clips.sort_by_key(|c| c.timeline_start);
@@ -3096,11 +3074,10 @@ impl TimelineState {
         });
 
         // Handle internal audio clips — find first audio track or skip
-        let audio_clips: Vec<Clip> = internal_tracks
-            .iter()
-            .filter(|t| t.is_audio())
-            .flat_map(|t| t.clips.clone())
-            .filter_map(|c| rebase_clip(c))
+        let audio_clips: Vec<Clip> = flattened_children
+            .into_iter()
+            .filter(|child| child.is_audio_track)
+            .map(|child| child.clip)
             .collect();
 
         if !audio_clips.is_empty() {

@@ -6,6 +6,8 @@ pub mod audio_features;
 pub mod audio_match;
 pub mod audio_sync;
 pub mod bg_removal_cache;
+pub mod cache_key;
+pub mod cache_support;
 pub mod color_match;
 pub mod cube_lut;
 pub mod drawing_render;

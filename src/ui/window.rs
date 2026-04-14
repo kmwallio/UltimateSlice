@@ -2485,6 +2485,35 @@ mod tests {
         assert_eq!(auto_preview_divisor(1920, 1080, 1920, 1080, 1, 1), 1);
     }
 
+    #[test]
+    fn collect_embedded_audio_suppression_ids_recurses_into_compounds() {
+        let mut project = Project::new("Test");
+        project.tracks.clear();
+
+        let mut inner_video = Clip::new("/tmp/camera.mp4", 6_000_000_000, 0, ClipKind::Video);
+        inner_video.id = "inner-video".to_string();
+        inner_video.link_group_id = Some("link-1".to_string());
+
+        let mut inner_audio = Clip::new("/tmp/lav.wav", 6_000_000_000, 0, ClipKind::Audio);
+        inner_audio.id = "inner-audio".to_string();
+        inner_audio.link_group_id = Some("link-1".to_string());
+
+        let mut video_track = crate::model::track::Track::new_video("Video 1");
+        video_track.clips.push(inner_video);
+        let mut audio_track = crate::model::track::Track::new_audio("Audio 1");
+        audio_track.clips.push(inner_audio);
+
+        let mut compound = Clip::new_compound(0, vec![video_track, audio_track]);
+        compound.id = "compound".to_string();
+
+        let mut root_track = crate::model::track::Track::new_video("Root Video");
+        root_track.clips.push(compound);
+        project.tracks.push(root_track);
+
+        let suppressed = collect_embedded_audio_suppression_ids(&project.tracks);
+        assert!(suppressed.contains("inner-video"));
+    }
+
     fn audio_match_clip_info_with_regions(
         duration_ns: u64,
         speech_regions: Vec<crate::media::audio_match::AnalysisRegionNs>,
@@ -4682,6 +4711,26 @@ fn schedule_title_flush(
     timer_raw.set(new_id.as_raw());
 }
 
+fn collect_embedded_audio_suppression_ids(
+    tracks: &[crate::model::track::Track],
+) -> HashSet<String> {
+    let clips: Vec<&Clip> = tracks.iter().flat_map(|track| track.clips.iter()).collect();
+    let mut suppressed = HashSet::new();
+    for clip in &clips {
+        if clip.kind == ClipKind::Video
+            && clips
+                .iter()
+                .any(|peer| clip.suppresses_embedded_audio_for_linked_peer(peer))
+        {
+            suppressed.insert(clip.id.clone());
+        }
+        if let Some(compound_tracks) = clip.compound_tracks.as_ref() {
+            suppressed.extend(collect_embedded_audio_suppression_ids(compound_tracks));
+        }
+    }
+    suppressed
+}
+
 /// Convert a single `Clip` into one or more `ProgramClip` entries.
 /// For regular clips this returns a single-element Vec; for compound clips it
 /// recursively flattens internal tracks into program clips with adjusted
@@ -4772,42 +4821,24 @@ fn clip_to_program_clips(
 
     // Compound clips: recursively flatten internal clips
     if c.kind == ClipKind::Compound && depth < 16 {
-        if let Some(ref internal_tracks) = c.compound_tracks {
-            // Map internal clip positions into the parent timeline.
-            // After windowing, each clip's timeline_start is >= source_in,
-            // so subtracting source_in gives the offset from the compound's
-            // visible start. Adding the compound's parent position gives the
-            // absolute position without any u64 underflow risk.
-            let compound_offset = timeline_offset.saturating_add(c.timeline_start);
-            let window_start = c.source_in;
-            let window_end = c.source_out;
+        if c.compound_tracks.is_some() {
             let mut result = Vec::new();
-            for (inner_idx, inner_track) in internal_tracks.iter().enumerate() {
-                let inner_audio = inner_track.is_audio();
-                for inner_clip in &inner_track.clips {
-                    // Window the clip to the compound's [source_in, source_out)
-                    // range. Skip / trim / rebase keyframes & subtitles all
-                    // happen inside the helper.
-                    let Some(mut windowed) = inner_clip.rebase_to_window(window_start, window_end)
-                    else {
-                        continue;
-                    };
-                    let inner_track_idx = track_index + inner_idx;
-                    // Rebase: offset from window start + compound parent pos
-                    windowed.timeline_start = windowed.timeline_start.saturating_sub(window_start);
-                    result.extend(clip_to_program_clips(
-                        &windowed,
-                        inner_audio,
-                        inner_track.duck,
-                        inner_track.duck_amount_db,
-                        inner_track_idx,
-                        suppress_embedded_audio_ids,
-                        compound_offset,
-                        depth + 1,
-                        project_fps_num,
-                        project_fps_den,
-                    ));
-                }
+            for child in
+                crate::model::compound_flattening::flatten_compound_children(c, timeline_offset)
+            {
+                let inner_track_idx = track_index + child.relative_track_index;
+                result.extend(clip_to_program_clips(
+                    &child.clip,
+                    child.is_audio_track,
+                    child.duck,
+                    child.duck_amount_db,
+                    inner_track_idx,
+                    suppress_embedded_audio_ids,
+                    0,
+                    depth + 1,
+                    project_fps_num,
+                    project_fps_den,
+                ));
             }
             return result;
         }
@@ -14414,20 +14445,8 @@ pub fn build_window(
                     to.set_content_inset(ix, iy);
                 }
 
-                let suppress_embedded_audio_ids: HashSet<String> = proj
-                    .tracks
-                    .iter()
-                    .flat_map(|track| track.clips.iter())
-                    .filter(|clip| {
-                        clip.kind == ClipKind::Video
-                            && proj
-                                .tracks
-                                .iter()
-                                .flat_map(|peer_track| peer_track.clips.iter())
-                                .any(|peer| clip.suppresses_embedded_audio_for_linked_peer(peer))
-                    })
-                    .map(|clip| clip.id.clone())
-                    .collect();
+                let suppress_embedded_audio_ids =
+                    collect_embedded_audio_suppression_ids(&proj.tracks);
 
                 // When inside a compound deep-dive, play only the
                 // compound's internal tracks instead of the full root

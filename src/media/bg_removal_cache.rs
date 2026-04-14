@@ -266,21 +266,16 @@ impl Drop for BgRemovalCache {
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 fn cache_key(source_path: &str, threshold: f64) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    source_path.hash(&mut hasher);
-    format!("bgr_{}_{:.2}", hasher.finish(), threshold)
+    let threshold_key = format!("{threshold:.2}");
+    let mut hasher = crate::media::cache_key::CacheKeyHasher::new();
+    hasher
+        .add_source_fingerprint(source_path)
+        .add(threshold_key.as_str());
+    format!("bgr_{:016x}_{threshold_key}", hasher.finish())
 }
 
 fn dirs_cache_root() -> PathBuf {
-    let base = std::env::var("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-            PathBuf::from(home).join(".cache")
-        });
-    base.join("ultimateslice").join("bg_removal")
+    crate::media::cache_support::cache_root_dir("bg_removal")
 }
 
 pub const MODEL_FILENAME: &str = "modnet_photographic_portrait_matting.onnx";
@@ -333,9 +328,7 @@ pub fn find_model_path() -> Option<String> {
 }
 
 fn bg_removal_file_is_ready(path: &str) -> bool {
-    std::fs::metadata(path)
-        .map(|m| m.len() > 0)
-        .unwrap_or(false)
+    crate::media::cache_support::file_has_content(path)
 }
 
 // ── Worker: frame-by-frame background removal ──────────────────────────────

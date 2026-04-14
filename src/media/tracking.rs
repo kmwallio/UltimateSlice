@@ -14,9 +14,7 @@ use crate::model::clip::{
 };
 use crate::model::track::Track;
 use serde::{Deserialize, Serialize};
-use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -197,20 +195,20 @@ impl TrackingJob {
     }
 
     pub fn cache_key(&self) -> String {
-        let mut hasher = DefaultHasher::new();
-        CACHE_VERSION.hash(&mut hasher);
-        self.source_path.hash(&mut hasher);
-        self.clip_source_in_ns.hash(&mut hasher);
-        self.analysis_start_ns.hash(&mut hasher);
-        self.analysis_end_ns.hash(&mut hasher);
-        self.effective_frame_step_ns().hash(&mut hasher);
-        self.effective_search_radius_px().hash(&mut hasher);
-        quantize_norm(self.analysis_region.center_x).hash(&mut hasher);
-        quantize_norm(self.analysis_region.center_y).hash(&mut hasher);
-        quantize_norm(self.analysis_region.width).hash(&mut hasher);
-        quantize_norm(self.analysis_region.height).hash(&mut hasher);
-        quantize_norm(self.analysis_region.rotation_deg).hash(&mut hasher);
-        format!("tracking_{:016x}", hasher.finish())
+        crate::media::cache_key::hashed_key("tracking", |key| {
+            key.add(CACHE_VERSION)
+                .add_source_fingerprint(&self.source_path)
+                .add(self.clip_source_in_ns)
+                .add(self.analysis_start_ns)
+                .add(self.analysis_end_ns)
+                .add(self.effective_frame_step_ns())
+                .add(self.effective_search_radius_px())
+                .add(quantize_norm(self.analysis_region.center_x))
+                .add(quantize_norm(self.analysis_region.center_y))
+                .add(quantize_norm(self.analysis_region.width))
+                .add(quantize_norm(self.analysis_region.height))
+                .add(quantize_norm(self.analysis_region.rotation_deg));
+        })
     }
 }
 

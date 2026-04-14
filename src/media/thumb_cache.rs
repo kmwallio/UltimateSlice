@@ -189,7 +189,9 @@ impl ThumbnailCache {
 fn cache_key(source_path: &str, time_ns: u64) -> String {
     let sec = time_ns / 1_000_000_000;
     let sec = (sec / 2) * 2;
-    format!("{source_path}@{sec}s")
+    crate::media::cache_key::hashed_key("thumb", |key| {
+        key.add_source_fingerprint(source_path).add(sec);
+    })
 }
 
 /// Extract a single RGBA frame from `source_path` at `time_ns` in a background thread.
