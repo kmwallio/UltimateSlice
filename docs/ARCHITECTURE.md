@@ -40,6 +40,7 @@ src/
     media_library.rs        MediaItem (library entry), MediaBin (folder), MediaLibrary (items + bins) + SourceMarks (source in/out state)
 
   media/
+    audio_analysis.rs       Audio analysis utilities: loudness (EBU R128), silence detection, scene cuts, FFmpeg binary resolution
     audio_sync.rs           FFT cross-correlation audio sync (rustfft, GStreamer raw audio extraction)
     color_math.rs           Pure colour/audio math: videobalance calibration, coloradj, 3-point grading, export parity, EQ bandwidth, ducking floor
     player.rs               GStreamer playbin wrapper (load/play/pause/stop/seek/position/duration)
@@ -434,6 +435,28 @@ export path (`export.rs`):
 `ProgramPlayer` exposes thin delegator wrappers so existing `Self::` and
 `ProgramPlayer::` call sites remain valid. New code should import
 `color_math` directly.
+
+### Audio analysis utilities
+
+Module: `src/media/audio_analysis.rs`. Subprocess-based FFmpeg utilities
+shared by the export pipeline, preview engine, UI actions, and MCP server:
+
+- **FFmpeg resolution** (`find_ffmpeg`, `probe_has_audio`): locate the
+  ffmpeg/ffprobe binary and check whether a source file has an audio stream.
+- **Silence detection** (`detect_silence`, `invert_silences_to_speech`,
+  `suggest_silence_threshold_db`): FFmpeg `silencedetect` / `astats` based
+  silence analysis with automatic noise-floor threshold suggestion.
+- **Scene detection** (`detect_scene_cuts`): FFmpeg `scdet` filter for
+  shot-change timestamps.
+- **Loudness measurement** (`analyze_loudness_full`, `analyze_loudness_lufs`,
+  `analyze_peak_db`, `LoudnessReport`, `parse_loudness_report`): EBU R128
+  integrated/short-term/momentary loudness and true-peak measurement.
+- **Gain computation** (`compute_lufs_gain`, `compute_peak_gain`): linear
+  gain multipliers for loudness normalization.
+
+`export.rs` re-exports these symbols so existing import paths remain valid.
+`analyze_project_loudness` stays in `export.rs` because it depends on
+`export_project`.
 
 ### Voice enhance prerender cache
 
