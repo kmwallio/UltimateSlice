@@ -78,9 +78,8 @@ impl CommandRegistry {
             b.0.cmp(&a.0).then_with(|| {
                 let ca = self.commands[a.1].category;
                 let cb = self.commands[b.1].category;
-                ca.cmp(cb).then_with(|| {
-                    self.commands[a.1].title.cmp(&self.commands[b.1].title)
-                })
+                ca.cmp(cb)
+                    .then_with(|| self.commands[a.1].title.cmp(&self.commands[b.1].title))
             })
         });
         scored.into_iter().map(|(_, i)| i).collect()
@@ -216,10 +215,7 @@ pub fn show_palette(parent: &gtk::Window, registry: Rc<RefCell<CommandRegistry>>
                 glib::Propagation::Stop
             }
             Key::Down => {
-                let next = list
-                    .selected_row()
-                    .map(|r| r.index() + 1)
-                    .unwrap_or(0);
+                let next = list.selected_row().map(|r| r.index() + 1).unwrap_or(0);
                 if let Some(row) = list.row_at_index(next) {
                     list.select_row(Some(&row));
                     row.grab_focus();

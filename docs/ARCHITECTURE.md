@@ -41,6 +41,7 @@ src/
 
   media/
     audio_sync.rs           FFT cross-correlation audio sync (rustfft, GStreamer raw audio extraction)
+    color_math.rs           Pure colour/audio math: videobalance calibration, coloradj, 3-point grading, export parity, EQ bandwidth, ducking floor
     player.rs               GStreamer playbin wrapper (load/play/pause/stop/seek/position/duration)
     thumbnail.rs            Frame extraction via GStreamer AppSink pipeline (unused in UI yet)
     export.rs               MP4 export via ffmpeg subprocess: filter_complex concat (video) + adelay/amix (audio) → libx264 + aac
@@ -409,6 +410,30 @@ across all clips; per-clip gated chain still produced pops). The
 prerender path uses the same FFmpeg filter chain that the export side
 uses, so once the cached file is ready, preview and export are
 byte-identical for the audio.
+
+### Colour math and preview/export parity
+
+Module: `src/media/color_math.rs`. Pure-computation functions shared by
+both the GStreamer preview path (`program_player.rs`) and the FFmpeg
+export path (`export.rs`):
+
+- **Videobalance calibration** (`compute_videobalance_params`): degree-4
+  polynomial mapping from UI sliders to GStreamer videobalance knobs.
+- **Frei0r coloradj_RGB** (`compute_coloradj_params`): temperature/tint
+  Kelvin → per-channel RGB gains for the frei0r element.
+- **3-point colour balance** (`compute_3point_params`,
+  `compute_export_3point_params`): shadows/midtones/highlights with
+  per-zone warmth/tint → parabolic transfer curve control points.
+- **Export parity helpers**: `export_temperature_parity_gain`,
+  `export_temperature_channel_offsets`, `export_tonal_parity_inputs`,
+  `apply_export_tonal_parity_gains` — env-overridable gain/offset tuning
+  for cross-runtime bridge compensation.
+- **Audio helpers**: `eq_bandwidth` (EQ band Hz width), `voice_ducking_floor`
+  (voice isolation volume floor).
+
+`ProgramPlayer` exposes thin delegator wrappers so existing `Self::` and
+`ProgramPlayer::` call sites remain valid. New code should import
+`color_math` directly.
 
 ### Voice enhance prerender cache
 

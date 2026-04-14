@@ -1,4 +1,5 @@
 use crate::media::adjustment_scope::AdjustmentScopeShape;
+use crate::media::color_math;
 use crate::media::cube_lut::CubeLut;
 use crate::media::player::PlayerState;
 use crate::model::clip::{Clip as ModelClip, ClipMask, MaskShape, NumericKeyframe};
@@ -46,15 +47,16 @@ fn child_proxy_get_child(element: &gst::Element, index: u32) -> Option<glib::Obj
 fn eq_set_band(element: &gst::Element, band_idx: u32, freq: f64, gain: f64, q: f64) {
     if let Some(band) = child_proxy_get_child(element, band_idx) {
         let gain_clamped = gain.clamp(-24.0, 12.0);
+        let bw = color_math::eq_bandwidth(freq, q);
         band.set_property("freq", freq);
         band.set_property("gain", gain_clamped);
-        band.set_property("bandwidth", freq / q.max(0.1));
+        band.set_property("bandwidth", bw);
         log::debug!(
             "eq_set_band: band={} freq={:.0} gain={:.1} bw={:.0}",
             band_idx,
             freq,
             gain_clamped,
-            freq / q.max(0.1)
+            bw
         );
     } else {
         log::warn!(
@@ -472,114 +474,11 @@ impl ShortFrameCache {
     }
 }
 
-/// Calibrated videobalance output parameters (brightness, contrast,
-/// saturation, hue) computed from clip colour settings by
-/// `ProgramPlayer::compute_videobalance_params`.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct VBParams {
-    pub(crate) brightness: f64,
-    pub(crate) contrast: f64,
-    pub(crate) saturation: f64,
-    pub(crate) hue: f64,
-}
-
-/// Per-channel RGB gains for frei0r `coloradj_RGB` element.
-/// Values are in frei0r's [0,1] range where 0.5 = neutral (gain 1.0).
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ColorAdjRGBParams {
-    pub(crate) r: f64,
-    pub(crate) g: f64,
-    pub(crate) b: f64,
-}
-
-/// Parameters for frei0r `3-point-color-balance` element.
-/// Maps shadows/midtones/highlights to the black/gray/white reference
-/// points of a piecewise-linear transfer curve.
-#[derive(Clone)]
-pub(crate) struct ThreePointParams {
-    pub(crate) black_r: f64,
-    pub(crate) black_g: f64,
-    pub(crate) black_b: f64,
-    pub(crate) gray_r: f64,
-    pub(crate) gray_g: f64,
-    pub(crate) gray_b: f64,
-    pub(crate) white_r: f64,
-    pub(crate) white_g: f64,
-    pub(crate) white_b: f64,
-}
-
-/// Quadratic (parabola) coefficients for one channel of the frei0r
-/// 3-point-color-balance transfer curve.  The plugin fits y = a·x² + b·x + c
-/// through (black_c, 0), (gray_c, 0.5), (white_c, 1.0) where x is the
-/// normalised input pixel value and y is the output (both 0–1).
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ThreePointParabolaCoeffs {
-    pub(crate) a: f64,
-    pub(crate) b: f64,
-    pub(crate) c: f64,
-}
-
-impl ThreePointParabolaCoeffs {
-    /// Solve the quadratic passing through (x1, 0), (x2, 0.5), (x3, 1.0).
-    pub(crate) fn from_control_points(x1: f64, x2: f64, x3: f64) -> Self {
-        // System: a·x1² + b·x1 + c = 0
-        //         a·x2² + b·x2 + c = 0.5
-        //         a·x3² + b·x3 + c = 1.0
-        let d1 = x2 - x1;
-        let d2 = x3 - x1;
-        let d3 = x3 - x2;
-        // Guard against degenerate/nearly-coincident control points.
-        if d1.abs() < 1e-9 || d2.abs() < 1e-9 || d3.abs() < 1e-9 {
-            // Fall back to identity.
-            return Self {
-                a: 0.0,
-                b: 1.0,
-                c: 0.0,
-            };
-        }
-        let a = (1.0 / d2 - 0.5 / d1) / d3;
-        let b = 0.5 / d1 - a * (x2 + x1);
-        let c = -(a * x1 * x1 + b * x1);
-        Self { a, b, c }
-    }
-}
-
-/// Per-channel parabola coefficients matching the frei0r 3-point plugin.
-#[derive(Debug, Clone)]
-pub(crate) struct ThreePointParabola {
-    pub(crate) r: ThreePointParabolaCoeffs,
-    pub(crate) g: ThreePointParabolaCoeffs,
-    pub(crate) b: ThreePointParabolaCoeffs,
-}
-
-impl ThreePointParabola {
-    pub(crate) fn from_params(p: &ThreePointParams) -> Self {
-        Self {
-            r: ThreePointParabolaCoeffs::from_control_points(p.black_r, p.gray_r, p.white_r),
-            g: ThreePointParabolaCoeffs::from_control_points(p.black_g, p.gray_g, p.white_g),
-            b: ThreePointParabolaCoeffs::from_control_points(p.black_b, p.gray_b, p.white_b),
-        }
-    }
-
-    /// Format as an FFmpeg `lutrgb` filter expression.  `val` is 0–255 integer.
-    /// output = clamp(a·(val/255)² + b·(val/255) + c, 0, 1) · 255
-    ///        = clamp(A·val² + B·val + C, 0, 255)
-    /// where A = a/255, B = b, C = c·255.
-    pub(crate) fn to_lutrgb_filter(&self) -> String {
-        fn chan_expr(tag: &str, c: &ThreePointParabolaCoeffs) -> String {
-            let a = c.a / 255.0;
-            let b = c.b;
-            let cv = c.c * 255.0;
-            format!("{tag}='clip({a:.6}*val*val+{b:.6}*val+{cv:.4},0,255)'")
-        }
-        format!(
-            ",lutrgb={}:{}:{}",
-            chan_expr("r", &self.r),
-            chan_expr("g", &self.g),
-            chan_expr("b", &self.b),
-        )
-    }
-}
+// Re-export colour math types from the shared module so existing
+// `use crate::media::program_player::{VBParams, ...}` paths still work.
+pub(crate) use crate::media::color_math::{
+    ColorAdjRGBParams, ThreePointParabola, ThreePointParabolaCoeffs, ThreePointParams, VBParams,
+};
 
 /// Role of a clip within a transition overlap region.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1627,28 +1526,7 @@ fn blend_pixel(
     }
 }
 
-#[inline]
-fn coloradj_param_to_gain(param: f64) -> f64 {
-    (param.clamp(0.0, 1.0) * 2.0).clamp(0.0, 2.0)
-}
-
-#[inline]
-fn apply_videobalance_rgb(r: f64, g: f64, b: f64, params: VBParams) -> (f64, f64, f64) {
-    let y = 0.299 * r + 0.587 * g + 0.114 * b;
-    let mut u = 0.492 * (b - y);
-    let mut v = 0.877 * (r - y);
-    let y = ((y - 0.5) * params.contrast + 0.5 + params.brightness).clamp(0.0, 1.0);
-    let hue_rad = params.hue * std::f64::consts::PI;
-    let (sin_h, cos_h) = hue_rad.sin_cos();
-    let rot_u = u * cos_h - v * sin_h;
-    let rot_v = u * sin_h + v * cos_h;
-    u = rot_u * params.saturation;
-    v = rot_v * params.saturation;
-    let r = (y + v / 0.877).clamp(0.0, 1.0);
-    let b = (y + u / 0.492).clamp(0.0, 1.0);
-    let g = ((y - 0.299 * r - 0.114 * b) / 0.587).clamp(0.0, 1.0);
-    (r, g, b)
-}
+use color_math::{apply_videobalance_rgb, coloradj_param_to_gain};
 
 #[inline]
 fn apply_three_point_channel(v: f64, coeffs: &ThreePointParabolaCoeffs) -> f64 {
@@ -14091,33 +13969,13 @@ impl ProgramPlayer {
 
     // ── Continuing decoders (fast-path boundary crossing) ────────────────
 
-    // ── Calibrated videobalance mapping ──────────────────────────────────
+    // ── Colour math delegators ──────────────────────────────────────────
     //
-    // GStreamer `videobalance` operates in RGB/HSV with 4 knobs (brightness,
-    // contrast, saturation, hue) while the FFmpeg export pipeline uses
-    // dedicated per-domain filters (eq, colortemperature, colorbalance,
-    // hqdn3d, unsharp).  These polynomial coefficients were derived from
-    // empirical calibration (tools/calibrate_color.py) by sweeping each
-    // slider across its range, generating FFmpeg reference frames, and using
-    // L-BFGS-B optimisation to find the videobalance params that minimise
-    // per-pixel RMSE against the FFmpeg output.
+    // Pure colour computation now lives in `crate::media::color_math`.
+    // These thin wrappers keep `Self::compute_*` / `ProgramPlayer::compute_*`
+    // call sites working without touching every caller.
 
-    /// Evaluate degree-4 polynomial: c₀ + c₁t + c₂t² + c₃t³ + c₄t⁴
-    #[inline]
-    fn poly4(t: f64, c: &[f64; 5]) -> f64 {
-        c[0] + t * (c[1] + t * (c[2] + t * (c[3] + t * c[4])))
-    }
-
-    /// Compute calibrated videobalance parameters that best approximate the
-    /// FFmpeg export filter chain.  Each slider contributes a *delta* from
-    /// neutral (0, 1, 1, 0) based on fitted polynomials.  When multiple
-    /// sliders are active, deltas are summed (linear superposition — an
-    /// approximation that works well for moderate adjustments).
-    ///
-    /// When `has_coloradj` is true, temperature/tint are handled by the
-    /// frei0r `coloradj_RGB` element and excluded from videobalance.
-    /// When `has_3point` is true, shadows/midtones/highlights are handled
-    /// by the frei0r `3-point-color-balance` element.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn compute_videobalance_params(
         brightness: f64,
         contrast: f64,
@@ -14138,206 +13996,37 @@ impl ProgramPlayer {
         has_coloradj: bool,
         has_3point: bool,
     ) -> VBParams {
-        let mut b = 0.0_f64;
-        let mut c = 1.0_f64;
-        let mut s = 1.0_f64;
-        let mut h = 0.0_f64;
-
-        // ── Brightness (default 0.0) ────────────────────────────────────
-        // Calibration: FFmpeg eq brightness (YUV additive) maps to ~1.15×
-        // GStreamer videobalance brightness (RGB additive) with a slight
-        // contrast compensation.
-        {
-            const B_B: [f64; 5] = [0.005156, 1.260891, 0.002010, -0.217226, -0.009772];
-            const B_C: [f64; 5] = [1.025037, 0.023633, -0.205914, -0.132415, 0.120400];
-            // B_S omitted: high residual (0.48), noisy at extremes
-            let t = brightness;
-            b += Self::poly4(t, &B_B) - B_B[0]; // delta from neutral (poly(0) = c[0])
-            c += Self::poly4(t, &B_C) - B_C[0];
-        }
-
-        // ── Exposure (default 0.0, range −1..1) ─────────────────────────
-        // Approximated as a brightness lift with contrast compensation.
-        // Exposure is fundamentally multiplicative (gamma-like) but
-        // videobalance only has additive brightness; this linear
-        // approximation matches well for |exposure| ≤ 0.5 and degrades
-        // gracefully at extremes.  FFmpeg export uses `eq=gamma=` for
-        // a more accurate curve.
-        {
-            let e = exposure.clamp(-1.0, 1.0);
-            b += e * 0.55;
-            c += e * 0.12;
-        }
-
-        // ── Contrast (default 1.0) ──────────────────────────────────────
-        // Calibrated contrast + saturation compensation (YUV↔RGB).
-        // Brightness cross-effect removed: RMSE-optimal but perceptually
-        // jarring (Δb ≈ +0.5 at contrast=0).
-        {
-            const C_C: [f64; 5] = [0.294574, 0.666291, 0.242201, -0.290659, 0.071964];
-            const C_S: [f64; 5] = [2.423564, -3.689165, 3.643393, -1.624246, 0.272677];
-            let t = contrast;
-            let t0 = 1.0;
-            c += Self::poly4(t, &C_C) - Self::poly4(t0, &C_C);
-            s += Self::poly4(t, &C_S) - Self::poly4(t0, &C_S);
-        }
-
-        // ── Saturation (default 1.0) ────────────────────────────────────
-        // Primary saturation polynomial only.  Brightness and contrast
-        // cross-effects removed: optimizer found them RMSE-helpful but
-        // users expect the saturation slider to change color, not luminance.
-        {
-            const S_S: [f64; 5] = [0.364002, 1.024258, -0.843067, 0.625649, -0.135496];
-            let t = saturation;
-            let t0 = 1.0;
-            s += Self::poly4(t, &S_S) - Self::poly4(t0, &S_S);
-        }
-
-        // ── Temperature (default 6500K, normalised to [-1, 0.78]) ───────
-        // When frei0r coloradj_RGB is available, temperature is handled
-        // there via per-channel RGB gains.  Otherwise, fall back to a
-        // hue-rotation approximation.
-        if !has_coloradj {
-            let t_norm = (temperature - 6500.0) / 6500.0;
-            h += (t_norm * -0.15).clamp(-0.25, 0.25);
-        }
-
-        // ── Tint (default 0.0) ──────────────────────────────────────────
-        // When frei0r coloradj_RGB is available, tint is handled there.
-        // Otherwise, keep the perceptual hue shift.
-        if !has_coloradj {
-            h += (tint * 0.08).clamp(-0.15, 0.15);
-        }
-
-        // ── Shadows (default 0.0) ───────────────────────────────────────
-        // When frei0r 3-point-color-balance is available, shadows/midtones/
-        // highlights are handled there with proper per-luminance-range control.
-        // Otherwise, fall back to polynomial approximation via videobalance.
-        if !has_3point {
-            // Calibration: 74-94% RMSE improvement over current coefficients.
-            // FFmpeg colorbalance shadows apply per-luminance-range shifts that
-            // are poorly approximated by global brightness alone; adding
-            // contrast and saturation compensation dramatically improves match.
-            const SH_B: [f64; 5] = [-0.004654, 0.217915, 0.503318, 0.095557, -0.208157];
-            const SH_C: [f64; 5] = [0.967806, -0.569223, -0.773125, 0.208067, 0.503863];
-            let t = shadows;
-            b += Self::poly4(t, &SH_B) - SH_B[0];
-            c += Self::poly4(t, &SH_C) - SH_C[0];
-        }
-
-        // ── Midtones (default 0.0) ──────────────────────────────────────
-        if !has_3point {
-            // Calibration: moderate improvement; brightness weight close to
-            // original (0.13 vs 0.20) but contrast compensation is significant.
-            const M_B: [f64; 5] = [-0.009292, 0.130927, -0.050035, -0.039406, 0.044492];
-            const M_C: [f64; 5] = [1.049000, -0.302024, 0.407251, 0.214717, -0.319686];
-            let t = midtones;
-            b += Self::poly4(t, &M_B) - M_B[0];
-            c += Self::poly4(t, &M_C) - M_C[0];
-        }
-
-        // ── Highlights (default 0.0) ────────────────────────────────────
-        if !has_3point {
-            // Calibration: 78-88% RMSE improvement.  Current coefficients
-            // (b×0.15, c×0.15) dramatically undershoot; optimal mapping uses
-            // ~3× stronger brightness and aggressive contrast boost.
-            const H_B: [f64; 5] = [-0.002545, 0.500927, -0.437295, -0.060255, 0.152945];
-            const H_C: [f64; 5] = [0.918940, 1.420073, 1.848961, -0.254895, -0.846390];
-            const H_S: [f64; 5] = [1.031708, -1.145010, 0.783173, 0.699344, -0.956279];
-            let t = highlights;
-            b += Self::poly4(t, &H_B) - H_B[0];
-            c += Self::poly4(t, &H_C) - H_C[0];
-            s += Self::poly4(t, &H_S) - H_S[0];
-        }
-
-        if !has_3point {
-            // Fallback approximation when frei0r 3-point-color-balance is
-            // unavailable.  videobalance cannot target luminance zones, so we
-            // map these controls to a small global lift/hue response.
-            let bp = black_point.clamp(-1.0, 1.0);
-            b += bp * 0.18;
-            c += bp * 0.10;
-
-            let warmth_avg =
-                (highlights_warmth + midtones_warmth + shadows_warmth).clamp(-3.0, 3.0) / 3.0;
-            let tint_avg = (highlights_tint + midtones_tint + shadows_tint).clamp(-3.0, 3.0) / 3.0;
-            h += (tint_avg * 0.08 - warmth_avg * 0.06).clamp(-0.20, 0.20);
-        }
-
-        VBParams {
-            brightness: b.clamp(-1.0, 1.0),
-            contrast: c.clamp(0.0, 2.0),
-            saturation: s.clamp(0.0, 2.0),
-            hue: h.clamp(-1.0, 1.0),
-        }
+        color_math::compute_videobalance_params(
+            brightness,
+            contrast,
+            saturation,
+            temperature,
+            tint,
+            shadows,
+            midtones,
+            highlights,
+            exposure,
+            black_point,
+            highlights_warmth,
+            highlights_tint,
+            midtones_warmth,
+            midtones_tint,
+            shadows_warmth,
+            shadows_tint,
+            has_coloradj,
+            has_3point,
+        )
     }
 
-    /// Compute frei0r `coloradj_RGB` parameters for temperature and tint.
-    ///
-    /// Uses the Tanner Helland algorithm (same as FFmpeg's `colortemperature`
-    /// filter) to convert a Kelvin value into per-channel RGB gains, then
-    /// maps those gains into frei0r's [0,1] parameter space where 0.5 is
-    /// neutral (gain 1.0).
-    ///
-    /// Tint is applied as a green-channel shift with complementary R/B
-    /// boost, matching FFmpeg's `colorbalance` midtones approach.
     pub(crate) fn compute_coloradj_params(temperature: f64, tint: f64) -> ColorAdjRGBParams {
-        // Calibrated polynomial mapping: frei0r coloradj_RGB params that best
-        // approximate the FFmpeg colortemperature + colorbalance tint export.
-        // Coefficients derived from empirical calibration (tools/calibrate_frei0r.py).
-        //
-        // Temperature is normalised: t = (K − 6500) / 4500.
-        // Tint is passed directly (range −1..1).
-        // Each polynomial gives the absolute param value; tint contributes a
-        // delta from its neutral (poly(0) = coeffs[0]).
-
-        // ── Temperature (normalised Kelvin) ─────────────────────────────
-        const TEMP_R: [f64; 5] = [0.484425, -0.096376, -0.113860, 0.040888, 0.074672];
-        const TEMP_G: [f64; 5] = [0.477346, 0.003212, -0.205499, 0.074971, 0.075272];
-        const TEMP_B: [f64; 5] = [0.481896, 0.123688, -0.212512, 0.107891, -0.001538];
-
-        // ── Tint ────────────────────────────────────────────────────────
-        const TINT_R: [f64; 5] = [0.501907, 0.059414, 0.031477, 0.020843, -0.014643];
-        const TINT_G: [f64; 5] = [0.493519, -0.073231, 0.227645, -0.178444, -0.126107];
-        const TINT_B: [f64; 5] = [0.505304, 0.055597, -0.003110, 0.025954, -0.016120];
-
-        let t_temp = ((temperature.clamp(1000.0, 15000.0) - 6500.0) / 4500.0).clamp(-1.0, 1.0);
-        let t_tint = tint.clamp(-1.0, 1.0);
-
-        let mut r = Self::poly4(t_temp, &TEMP_R);
-        let mut g = Self::poly4(t_temp, &TEMP_G);
-        let mut b = Self::poly4(t_temp, &TEMP_B);
-
-        // Tint: add delta from neutral.
-        r += Self::poly4(t_tint, &TINT_R) - TINT_R[0];
-        g += Self::poly4(t_tint, &TINT_G) - TINT_G[0];
-        b += Self::poly4(t_tint, &TINT_B) - TINT_B[0];
-
-        ColorAdjRGBParams {
-            r: r.clamp(0.0, 1.0),
-            g: g.clamp(0.0, 1.0),
-            b: b.clamp(0.0, 1.0),
-        }
+        color_math::compute_coloradj_params(temperature, tint)
     }
 
-    /// Non-linear response used by tonal warmth/tint controls.
-    ///
-    /// Keeps precision near 0.0 while boosting creative range near slider ends.
     pub(crate) fn compute_tonal_axis_response(value: f64) -> f64 {
-        let v = value.clamp(-1.0, 1.0);
-        v * (1.0 + 0.35 * v * v)
+        color_math::compute_tonal_axis_response(value)
     }
 
-    /// Compute frei0r `3-point-color-balance` parameters from
-    /// shadows/midtones/highlights sliders.
-    ///
-    /// The 3-point element fits a parabola through three control points
-    /// (black, 0), (gray, 0.5), (white, 1.0) per channel and applies it
-    /// as the transfer curve.  Coefficients derived from empirical
-    /// calibration against FFmpeg's `colorbalance` export filter
-    /// (tools/calibrate_frei0r.py).
-    ///
-    /// Each slider contributes a delta from neutral via fitted polynomials.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn compute_3point_params(
         shadows: f64,
         midtones: f64,
@@ -14350,106 +14039,21 @@ impl ProgramPlayer {
         shadows_warmth: f64,
         shadows_tint: f64,
     ) -> ThreePointParams {
-        // ── Shadows ─────────────────────────────────────────────────────
-        const SH_BLACK: [f64; 5] = [0.065817, 0.157626, 0.002710, -0.194674, -0.055835];
-        const SH_GRAY: [f64; 5] = [0.513596, 0.081446, -0.041960, 0.017848, 0.117598];
-        const SH_WHITE: [f64; 5] = [0.999118, -0.037826, -0.087347, -0.046390, -0.004455];
-
-        // ── Midtones ────────────────────────────────────────────────────
-        const M_BLACK: [f64; 5] = [0.006185, -0.024554, -0.070816, 0.093034, 0.159694];
-        const M_GRAY: [f64; 5] = [0.499145, -0.111600, -0.219452, 0.010107, 0.285960];
-        const M_WHITE: [f64; 5] = [0.988180, -0.000025, 0.125044, 0.017842, -0.230026];
-
-        // ── Highlights ──────────────────────────────────────────────────
-        const H_BLACK: [f64; 5] = [0.039231, 0.056431, -0.027366, 0.018788, 0.094133];
-        const H_GRAY: [f64; 5] = [0.519445, -0.494215, 0.275317, 0.483889, -0.277072];
-        const H_WHITE: [f64; 5] = [0.957496, -0.356602, -0.543984, 0.462982, 0.266763];
-
-        let sh = shadows.clamp(-1.0, 1.0);
-        let mid = midtones.clamp(-1.0, 1.0);
-        let hi = highlights.clamp(-1.0, 1.0);
-
-        // Start from neutral, accumulate deltas from each slider.
-        let mut black = 0.0_f64;
-        let mut gray = 0.5_f64;
-        let mut white = 1.0_f64;
-
-        black += Self::poly4(sh, &SH_BLACK) - SH_BLACK[0];
-        gray += Self::poly4(sh, &SH_GRAY) - SH_GRAY[0];
-        white += Self::poly4(sh, &SH_WHITE) - SH_WHITE[0];
-
-        black += Self::poly4(mid, &M_BLACK) - M_BLACK[0];
-        gray += Self::poly4(mid, &M_GRAY) - M_GRAY[0];
-        white += Self::poly4(mid, &M_WHITE) - M_WHITE[0];
-
-        black += Self::poly4(hi, &H_BLACK) - H_BLACK[0];
-        gray += Self::poly4(hi, &H_GRAY) - H_GRAY[0];
-        white += Self::poly4(hi, &H_WHITE) - H_WHITE[0];
-
-        // Clamp to valid frei0r ranges and ensure ordering.
-        let black = black.clamp(0.0, 0.95);
-        let white = white.clamp(0.05, 1.0);
-        let gray = gray.clamp(black + 0.01, white - 0.01);
-
-        // ── Black point (default 0.0, range −1..1) ─────────────────────
-        // Positive lifts blacks (raises floor), negative crushes them.
-        // Applied as uniform shift to the black reference point.
-        let bp = black_point.clamp(-1.0, 1.0) * 0.15;
-
-        // ── Per-tone warmth/tint → per-channel RGB offsets ──────────────
-        // Warmth: positive = warm (red boost, blue cut), negative = cool.
-        // Tint: positive = magenta (green cut, R+B boost), negative = green.
-        // Scale factor chosen for visible creative shifts at slider extremes
-        // while keeping the 3-point curve within usable bounds.
-        // At ±1.0 slider: response=1.35, shift=±0.47 warmth / ±0.38 tint.
-        let warmth_scale = 0.35;
-        let tint_scale = 0.28;
-        let shadows_endpoint_boost = 1.30;
-
-        // Warmth positive = warm (red boost, blue cut in 3-point curve space).
-        // Tint positive = magenta (green cut); negated because 3-point
-        // adds tint directly to green channel.
-        let sw = Self::compute_tonal_axis_response(shadows_warmth)
-            * warmth_scale
-            * shadows_endpoint_boost;
-        let st =
-            -Self::compute_tonal_axis_response(shadows_tint) * tint_scale * shadows_endpoint_boost;
-        let mw = Self::compute_tonal_axis_response(midtones_warmth) * warmth_scale;
-        let mt = -Self::compute_tonal_axis_response(midtones_tint) * tint_scale;
-        let hw = Self::compute_tonal_axis_response(highlights_warmth) * warmth_scale;
-        let ht = -Self::compute_tonal_axis_response(highlights_tint) * tint_scale;
-
-        // Per-channel: warmth shifts R↔B, tint shifts G↔(R+B).
-        // In frei0r 3-point space a LOWER control point value means
-        // BRIGHTER channel output (the curve shifts left), so we
-        // subtract warmth from red and add it to blue for a warm look.
-        let black_r = (black + bp - sw + st * 0.5).clamp(0.0, 0.95);
-        let black_g = (black + bp - st).clamp(0.0, 0.95);
-        let black_b = (black + bp + sw + st * 0.5).clamp(0.0, 0.95);
-
-        let gray_r = (gray - mw + mt * 0.5).clamp(0.01, 0.99);
-        let gray_g = (gray - mt).clamp(0.01, 0.99);
-        let gray_b = (gray + mw + mt * 0.5).clamp(0.01, 0.99);
-
-        let white_r = (white - hw + ht * 0.5).clamp(0.05, 1.0);
-        let white_g = (white - ht).clamp(0.05, 1.0);
-        let white_b = (white + hw + ht * 0.5).clamp(0.05, 1.0);
-
-        ThreePointParams {
-            black_r,
-            black_g,
-            black_b,
-            gray_r,
-            gray_g,
-            gray_b,
-            white_r,
-            white_g,
-            white_b,
-        }
+        color_math::compute_3point_params(
+            shadows,
+            midtones,
+            highlights,
+            black_point,
+            highlights_warmth,
+            highlights_tint,
+            midtones_warmth,
+            midtones_tint,
+            shadows_warmth,
+            shadows_tint,
+        )
     }
 
-    /// Compute export-focused 3-point parameters with small luma harmonization
-    /// terms tuned to reduce known preview/export endpoint drift.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn compute_export_3point_params(
         shadows: f64,
         midtones: f64,
@@ -14462,9 +14066,7 @@ impl ProgramPlayer {
         shadows_warmth: f64,
         shadows_tint: f64,
     ) -> ThreePointParams {
-        let (shadows, midtones, highlights) =
-            Self::export_tonal_parity_inputs(shadows, midtones, highlights);
-        let mut p = Self::compute_3point_params(
+        color_math::compute_export_3point_params(
             shadows,
             midtones,
             highlights,
@@ -14475,32 +14077,20 @@ impl ProgramPlayer {
             midtones_tint,
             shadows_warmth,
             shadows_tint,
-        );
-        p
+        )
     }
 
-    /// Per-zone additive corrections for the export frei0r 3-point-color-balance
-    /// path.  Reserved for future per-zone compensation once a reliable model
-    /// is found.  Previous polynomial offsets regressed midtones parity
-    /// (3-point curve reshaping has undesirable cross-zone side effects),
-    /// so the body is intentionally empty.
     pub(crate) fn apply_export_3point_parity_offsets(
-        _p: &mut ThreePointParams,
-        _shadows: f64,
-        _midtones: f64,
-        _highlights: f64,
+        p: &mut ThreePointParams,
+        shadows: f64,
+        midtones: f64,
+        highlights: f64,
     ) {
-        // Intentionally empty — tonal 3-point offsets reverted after
-        // MCP cross-runtime validation showed midtones regression.
+        color_math::apply_export_3point_parity_offsets(p, shadows, midtones, highlights);
     }
 
-    /// Cool-side export temperature gain (env-overridable for parity fitting).
-    /// Uses a piecewise curve in cool range with unity at/above 6500K.
     pub(crate) fn export_temperature_parity_gain(temperature: f64) -> f64 {
-        let legacy_gain = Self::export_gain_env("US_EXPORT_COOL_TEMP_GAIN", 1.0);
-        let far_gain = Self::export_gain_env("US_EXPORT_COOL_TEMP_GAIN_FAR", legacy_gain);
-        let near_gain = Self::export_gain_env("US_EXPORT_COOL_TEMP_GAIN_NEAR", legacy_gain);
-        Self::piecewise_cool_temperature_gain(temperature, far_gain, near_gain)
+        color_math::export_temperature_parity_gain(temperature)
     }
 
     pub(crate) fn piecewise_cool_temperature_gain(
@@ -14508,53 +14098,11 @@ impl ProgramPlayer {
         far_gain: f64,
         near_gain: f64,
     ) -> f64 {
-        const FAR_K: f64 = 2000.0;
-        const NEAR_K: f64 = 5000.0;
-        const NEUTRAL_K: f64 = 6500.0;
-
-        if temperature >= NEUTRAL_K {
-            return 1.0;
-        }
-        if temperature <= FAR_K {
-            return far_gain;
-        }
-        if temperature <= NEAR_K {
-            let t = (temperature - FAR_K) / (NEAR_K - FAR_K);
-            return far_gain + (near_gain - far_gain) * t;
-        }
-        let t = (temperature - NEAR_K) / (NEUTRAL_K - NEAR_K);
-        near_gain + (1.0 - near_gain) * t
+        color_math::piecewise_cool_temperature_gain(temperature, far_gain, near_gain)
     }
 
-    fn export_gain_env(key: &str, default: f64) -> f64 {
-        std::env::var(key)
-            .ok()
-            .and_then(|raw| raw.trim().parse::<f64>().ok())
-            .filter(|v| *v >= 0.80 && *v <= 1.20)
-            .unwrap_or(default)
-    }
-
-    /// Per-channel additive offsets for the export coloradj temperature path.
-    /// Compensates for FFmpeg/GStreamer frei0r bridge differences in color
-    /// temperature rendering.  All offsets taper to zero at neutral (6500K).
     pub(crate) fn export_temperature_channel_offsets(temperature: f64) -> (f64, f64, f64) {
-        let deviation = (temperature - 6500.0) / 4500.0;
-        if deviation.abs() < 0.01 {
-            return (0.0, 0.0, 0.0);
-        }
-        let abs_dev = deviation.abs().min(1.0);
-
-        if deviation < 0.0 {
-            // Below neutral (warm effect: low Kelvin = orange).
-            // Warm-side offsets intentionally zeroed — chart showed small
-            // improvement but natural footage showed small regression,
-            // indicating content-dependent behaviour.
-            (0.0, 0.0, 0.0)
-        } else {
-            // Above neutral (cool effect: high Kelvin = blue).
-            // FFmpeg bridge doesn't cool enough → excess B and moderate R.
-            (-abs_dev * 0.012, -abs_dev * 0.008, -abs_dev * 0.022)
-        }
+        color_math::export_temperature_channel_offsets(temperature)
     }
 
     pub(crate) fn export_tonal_parity_inputs(
@@ -14562,17 +14110,7 @@ impl ProgramPlayer {
         midtones: f64,
         highlights: f64,
     ) -> (f64, f64, f64) {
-        let shadows_pos_gain = Self::export_gain_env("US_EXPORT_SHADOWS_POS_GAIN", 1.0);
-        let midtones_neg_gain = Self::export_gain_env("US_EXPORT_MIDTONES_NEG_GAIN", 1.0);
-        let highlights_neg_gain = Self::export_gain_env("US_EXPORT_HIGHLIGHTS_NEG_GAIN", 1.0);
-        Self::apply_export_tonal_parity_gains(
-            shadows,
-            midtones,
-            highlights,
-            shadows_pos_gain,
-            midtones_neg_gain,
-            highlights_neg_gain,
-        )
+        color_math::export_tonal_parity_inputs(shadows, midtones, highlights)
     }
 
     fn prerender_build_mask_alpha(
@@ -14636,26 +14174,14 @@ impl ProgramPlayer {
         midtones_neg_gain: f64,
         highlights_neg_gain: f64,
     ) -> (f64, f64, f64) {
-        let sh = shadows.clamp(-1.0, 1.0);
-        let mid = midtones.clamp(-1.0, 1.0);
-        let hi = highlights.clamp(-1.0, 1.0);
-
-        let sh = if sh > 0.0 {
-            (sh * shadows_pos_gain).clamp(-1.0, 1.0)
-        } else {
-            sh
-        };
-        let mid = if mid < 0.0 {
-            (mid * midtones_neg_gain).clamp(-1.0, 1.0)
-        } else {
-            mid
-        };
-        let hi = if hi < 0.0 {
-            (hi * highlights_neg_gain).clamp(-1.0, 1.0)
-        } else {
-            hi
-        };
-        (sh, mid, hi)
+        color_math::apply_export_tonal_parity_gains(
+            shadows,
+            midtones,
+            highlights,
+            shadows_pos_gain,
+            midtones_neg_gain,
+            highlights_neg_gain,
+        )
     }
 
     /// Returns true if two clips would produce effects bins with the same
@@ -16853,6 +16379,7 @@ mod tests {
         ThreePointParabola, TransitionPrerenderSpec, TransitionRole, VBParams, VideoSlot,
     };
     use crate::media::adjustment_scope::AdjustmentScopeShape;
+    use crate::media::color_math;
     use crate::model::clip::{KeyframeInterpolation, MaskShape, NumericKeyframe};
     use crate::model::transition::TransitionAlignment;
     use crate::ui_state::{PrerenderEncodingPreset, DEFAULT_PRERENDER_CRF};
@@ -19536,10 +19063,10 @@ mod tests {
     fn vb_poly4_evaluates_correctly() {
         let c = [1.0, 2.0, 3.0, 4.0, 5.0];
         // poly4(2.0) = 1 + 2*2 + 3*4 + 4*8 + 5*16 = 1 + 4 + 12 + 32 + 80 = 129
-        let v = ProgramPlayer::poly4(2.0, &c);
+        let v = color_math::poly4(2.0, &c);
         assert!((v - 129.0).abs() < 1e-9, "poly4(2.0) = {}", v);
         // poly4(0.0) = 1.0
-        let v0 = ProgramPlayer::poly4(0.0, &c);
+        let v0 = color_math::poly4(0.0, &c);
         assert!((v0 - 1.0).abs() < 1e-9, "poly4(0.0) = {}", v0);
     }
 

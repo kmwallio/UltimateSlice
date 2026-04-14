@@ -1,6 +1,5 @@
 use crate::media::{
-    adjustment_scope::AdjustmentScopeShape, mask_alpha::prepare_adjustment_canvas_masks,
-    program_player::ProgramPlayer,
+    adjustment_scope::AdjustmentScopeShape, color_math, mask_alpha::prepare_adjustment_canvas_masks,
 };
 use crate::model::clip::{Clip, ClipKind, MaskShape, NumericKeyframe, SlowMotionInterp};
 use crate::model::project::Project;
@@ -1679,7 +1678,7 @@ fn build_color_filter(clip: &crate::model::clip::Clip) -> String {
         // by reusing the calibrated videobalance mapping used in preview.
         // Temperature/tint and tonal grading are excluded here because export
         // applies them through dedicated filters later in the chain.
-        let preview_params = ProgramPlayer::compute_videobalance_params(
+        let preview_params = color_math::compute_videobalance_params(
             clip.brightness as f64,
             clip.contrast as f64,
             clip.saturation as f64,
@@ -2894,8 +2893,10 @@ fn build_volume_filter(clip: &Clip) -> String {
         let pad_ns = (clip.voice_isolation_pad_ms as f64 * 1_000_000.0) as u64;
         let merged_ns = clip.voice_isolation_speech_intervals_ns(pad_ns);
         // Duck towards floor instead of silence.
-        let duck_ratio = (1.0 - clip.voice_isolation) * (1.0 - clip.voice_isolation_floor)
-            + clip.voice_isolation_floor;
+        let duck_ratio = color_math::voice_ducking_floor(
+            clip.voice_isolation as f64,
+            clip.voice_isolation_floor as f64,
+        );
         if !merged_ns.is_empty() {
             let condition: String = merged_ns
                 .iter()
@@ -2934,7 +2935,7 @@ fn build_match_eq_filter(clip: &Clip) -> String {
         .iter()
         .filter(|band| band.gain.abs() >= 0.001)
         .map(|band| {
-            let bw = band.freq / band.q.max(0.1);
+            let bw = color_math::eq_bandwidth(band.freq, band.q);
             format!(
                 "equalizer=f={:.1}:t=h:w={:.1}:g={:.2}",
                 band.freq, bw, band.gain
@@ -2959,7 +2960,7 @@ fn build_eq_filter(clip: &Clip) -> String {
         if band.gain.abs() < 0.001 && !has_kfs {
             continue;
         }
-        let bw = band.freq / band.q.max(0.1);
+        let bw = color_math::eq_bandwidth(band.freq, band.q);
         if has_kfs {
             let gain_expr =
                 build_keyframed_property_expression(band_kfs[i], band.gain, -24.0, 24.0, "t");
@@ -4335,7 +4336,7 @@ fn build_grading_filter_with_caps(
         // (white_c, 1.0) per channel.  Using the identical quadratic in
         // `lutrgb` avoids frei0r cross-runtime parameter-passing issues
         // and cubic-spline overshoot from `curves`.
-        let p = ProgramPlayer::compute_export_3point_params(
+        let p = color_math::compute_export_3point_params(
             clip.shadows as f64,
             clip.midtones as f64,
             clip.highlights as f64,
@@ -4347,7 +4348,7 @@ fn build_grading_filter_with_caps(
             clip.shadows_warmth as f64,
             clip.shadows_tint as f64,
         );
-        let parabola = crate::media::program_player::ThreePointParabola::from_params(&p);
+        let parabola = color_math::ThreePointParabola::from_params(&p);
         parabola.to_lutrgb_filter()
     } else {
         String::new()
@@ -4357,15 +4358,15 @@ fn build_grading_filter_with_caps(
 pub(crate) fn compute_export_coloradj_params(
     temperature: f64,
     tint: f64,
-) -> crate::media::program_player::ColorAdjRGBParams {
-    let neutral = ProgramPlayer::compute_coloradj_params(6500.0, 0.0);
-    let temp_only = ProgramPlayer::compute_coloradj_params(temperature, 0.0);
-    let tint_only = ProgramPlayer::compute_coloradj_params(6500.0, tint);
+) -> color_math::ColorAdjRGBParams {
+    let neutral = color_math::compute_coloradj_params(6500.0, 0.0);
+    let temp_only = color_math::compute_coloradj_params(temperature, 0.0);
+    let tint_only = color_math::compute_coloradj_params(6500.0, tint);
 
     // FFmpeg frei0r implementations can diverge from preview at stronger
     // temperature/tint settings; apply a conservative attenuation of deltas
     // from neutral to better align cross-runtime behavior.
-    let temp_gain = ProgramPlayer::export_temperature_parity_gain(temperature);
+    let temp_gain = color_math::export_temperature_parity_gain(temperature);
     let tint_gain = if tint < 0.0 {
         0.60
     } else if tint > 0.0 {
@@ -4375,9 +4376,9 @@ pub(crate) fn compute_export_coloradj_params(
     };
 
     // Per-channel additive offsets for cross-runtime bridge compensation.
-    let (off_r, off_g, off_b) = ProgramPlayer::export_temperature_channel_offsets(temperature);
+    let (off_r, off_g, off_b) = color_math::export_temperature_channel_offsets(temperature);
 
-    crate::media::program_player::ColorAdjRGBParams {
+    color_math::ColorAdjRGBParams {
         r: (neutral.r
             + (temp_only.r - neutral.r) * temp_gain
             + (tint_only.r - neutral.r) * tint_gain
@@ -6650,7 +6651,7 @@ mod tests {
         AdjustmentMatteInput, AudioChannelLayout, AudioCodec, ClipAudioFade,
         ColorFilterCapabilities, ExportOptions, LoudnessReport, SurroundPosition, VideoCodec,
     };
-    use crate::media::program_player::ProgramPlayer;
+    use crate::media::color_math;
     use crate::model::clip::{
         Clip, ClipKind, KeyframeInterpolation, NumericKeyframe, SubtitleSegment, SubtitleWord,
     };
@@ -8027,10 +8028,10 @@ mod tests {
         // stronger than midtones due to shadows_endpoint_boost.
         // In 3-point space: positive warmth lowers the R control point
         // (brighter red output) and raises the B control point (darker blue).
-        let sh_p = ProgramPlayer::compute_export_3point_params(
+        let sh_p = color_math::compute_export_3point_params(
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
         );
-        let mid_p = ProgramPlayer::compute_export_3point_params(
+        let mid_p = color_math::compute_export_3point_params(
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
         );
         // Positive warmth: red control lowered (more red output)
@@ -8059,10 +8060,10 @@ mod tests {
     #[test]
     fn build_grading_filter_boosts_shadows_tint_at_slider_extremes() {
         // Validate that shadows tint is stronger than midtones tint.
-        let sh_p = ProgramPlayer::compute_export_3point_params(
+        let sh_p = color_math::compute_export_3point_params(
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         );
-        let mid_p = ProgramPlayer::compute_export_3point_params(
+        let mid_p = color_math::compute_export_3point_params(
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
         );
         // Positive tint = magenta: green channel lowered (or stays at floor)
@@ -8102,18 +8103,16 @@ mod tests {
 
     #[test]
     fn export_coloradj_compensation_preserves_neutral_and_tunes_tint_delta() {
-        let neutral = ProgramPlayer::compute_coloradj_params(6500.0, 0.0);
-        let preview_temp = ProgramPlayer::compute_coloradj_params(2000.0, 0.0);
+        let neutral = color_math::compute_coloradj_params(6500.0, 0.0);
+        let preview_temp = color_math::compute_coloradj_params(2000.0, 0.0);
         let export_temp = compute_export_coloradj_params(2000.0, 0.0);
-        let preview_tint = ProgramPlayer::compute_coloradj_params(6500.0, -1.0);
+        let preview_tint = color_math::compute_coloradj_params(6500.0, -1.0);
         let export_tint = compute_export_coloradj_params(6500.0, -1.0);
         let export_neutral = compute_export_coloradj_params(6500.0, 0.0);
 
-        let magnitude =
-            |a: &crate::media::program_player::ColorAdjRGBParams,
-             b: &crate::media::program_player::ColorAdjRGBParams| {
-                (a.r - b.r).abs() + (a.g - b.g).abs() + (a.b - b.b).abs()
-            };
+        let magnitude = |a: &color_math::ColorAdjRGBParams, b: &color_math::ColorAdjRGBParams| {
+            (a.r - b.r).abs() + (a.g - b.g).abs() + (a.b - b.b).abs()
+        };
         assert!(
             (export_neutral.r - neutral.r).abs() < 1e-9
                 && (export_neutral.g - neutral.g).abs() < 1e-9
@@ -8137,7 +8136,7 @@ mod tests {
     fn build_grading_filter_warmth_direction_is_consistent_per_tonal_region() {
         // Positive warmth = warm (lower R control point = brighter red output,
         // higher B control point = darker blue output) in ALL zones.
-        let sh = ProgramPlayer::compute_export_3point_params(
+        let sh = color_math::compute_export_3point_params(
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
         );
         assert!(
@@ -8145,7 +8144,7 @@ mod tests {
             "shadows warmth: red control < blue control at black point"
         );
 
-        let mid = ProgramPlayer::compute_export_3point_params(
+        let mid = color_math::compute_export_3point_params(
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
         );
         assert!(
@@ -8153,7 +8152,7 @@ mod tests {
             "midtones warmth: red control < blue control at gray point"
         );
 
-        let hi = ProgramPlayer::compute_export_3point_params(
+        let hi = color_math::compute_export_3point_params(
             0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         );
         assert!(
@@ -8165,7 +8164,7 @@ mod tests {
     #[test]
     fn build_grading_filter_tint_direction_is_consistent_per_tonal_region() {
         // Positive tint = magenta (higher G control = less green output) in ALL zones.
-        let sh = ProgramPlayer::compute_export_3point_params(
+        let sh = color_math::compute_export_3point_params(
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         );
         assert!(
@@ -8173,7 +8172,7 @@ mod tests {
             "shadows tint +1: green control should be higher than red (less green output)"
         );
 
-        let mid = ProgramPlayer::compute_export_3point_params(
+        let mid = color_math::compute_export_3point_params(
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
         );
         assert!(
@@ -8181,7 +8180,7 @@ mod tests {
             "midtones tint +1: green control > red at gray point"
         );
 
-        let hi = ProgramPlayer::compute_export_3point_params(
+        let hi = color_math::compute_export_3point_params(
             0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
         );
         assert!(

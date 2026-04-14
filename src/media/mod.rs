@@ -9,6 +9,7 @@ pub mod bg_removal_cache;
 pub mod cache_key;
 pub mod cache_support;
 pub mod color_match;
+pub mod color_math;
 pub mod cube_lut;
 pub mod drawing_render;
 pub mod drawing_svg;
