@@ -1,6 +1,7 @@
 pub mod widget;
 pub use widget::{
-    build_timeline, build_timeline_ruler, ActiveTool, MusicGenerationTarget, TimelineState,
+    build_timeline, build_timeline_minimap, build_timeline_ruler, ActiveTool,
+    MusicGenerationTarget, TimelineState,
 };
 
 /// Build the full timeline panel: fixed ruler + scrollable track area + track bar.

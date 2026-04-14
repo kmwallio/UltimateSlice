@@ -11,7 +11,9 @@ use crate::model::track::TrackKind;
 use crate::model::transition::supported_transition_definitions;
 use crate::recent;
 use crate::ui::timecode;
-use crate::ui::timeline::{build_timeline_panel, MusicGenerationTarget, TimelineState};
+use crate::ui::timeline::{
+    build_timeline_minimap, build_timeline_panel, MusicGenerationTarget, TimelineState,
+};
 use crate::ui::{
     audio_effects_browser, effects_browser, inspector, keyframe_editor, media_browser, preferences,
     preview, program_monitor, title_templates, titles_browser, toolbar,
@@ -14304,7 +14306,7 @@ pub fn build_window(
     root_vpaned.set_start_child(Some(&top_paned));
 
     // ── Timeline ──────────────────────────────────────────────────────────
-    let (timeline_panel, _timeline_ruler, timeline_area) =
+    let (timeline_panel, timeline_ruler, timeline_area) =
         build_timeline_panel(timeline_state.clone(), on_project_changed.clone());
 
     // Extract the track-management bar from timeline_panel so we can place
@@ -14317,6 +14319,18 @@ pub fn build_window(
     // into the paned so we handle vertical scrolling manually (no
     // ScrolledWindow viewport gaps / "black bars").
     timeline_panel.remove(&timeline_area);
+
+    // Mini-map overview strip (between ruler and track canvas).
+    let minimap_area = build_timeline_minimap(
+        timeline_state.clone(),
+        timeline_area.clone(),
+        timeline_ruler.clone(),
+    );
+    minimap_area.set_visible(preferences_state.borrow().show_timeline_minimap);
+    {
+        let weak = glib::object::ObjectExt::downgrade(&minimap_area);
+        timeline_state.borrow_mut().minimap_widget = Some(weak);
+    }
 
     // Vertical Paned: top = track canvas, bottom = keyframe dopesheet.
     // The dopesheet is added later (see keyframe editor section below).
@@ -14334,6 +14348,7 @@ pub fn build_window(
     timeline_outer_vbox.set_vexpand(true);
     timeline_outer_vbox.set_hexpand(true);
     timeline_outer_vbox.append(&timeline_panel);
+    timeline_outer_vbox.append(&minimap_area);
     timeline_outer_vbox.append(&timeline_paned);
     if let Some(ref bar) = timeline_bar_widget {
         timeline_outer_vbox.append(bar);
@@ -14375,6 +14390,7 @@ pub fn build_window(
         let clear_media_browser_on_next_reload = clear_media_browser_on_next_reload.clone();
         let force_rebuild_media_browser = force_rebuild_media_browser.clone();
         let sync_tracking_controls = sync_tracking_controls.clone();
+        let minimap_weak = minimap_area.downgrade();
 
         *on_project_changed_impl.borrow_mut() = Some(Box::new(move || {
             // Sync compound clip duration when editing inside a compound.
@@ -14848,6 +14864,9 @@ pub fn build_window(
                     p.queue_draw();
                 }
             }
+            if let Some(m) = minimap_weak.upgrade() {
+                m.queue_draw();
+            }
         }));
     }
 
@@ -15023,14 +15042,43 @@ pub fn build_window(
     keyframes_toggle.add_css_class("small-btn");
     let transcript_toggle = gtk::Button::with_label("Show Transcript");
     transcript_toggle.add_css_class("small-btn");
+    let minimap_toggle =
+        gtk::Button::with_label(if preferences_state.borrow().show_timeline_minimap {
+            "Hide Mini-Map"
+        } else {
+            "Show Mini-Map"
+        });
+    minimap_toggle.add_css_class("small-btn");
     if let Some(ref bar_widget) = timeline_bar_widget {
         if let Ok(bar) = bar_widget.clone().downcast::<gtk::Box>() {
             let spacer = gtk::Box::new(Orientation::Horizontal, 0);
             spacer.set_hexpand(true);
             bar.append(&spacer);
+            bar.append(&minimap_toggle);
             bar.append(&keyframes_toggle);
             bar.append(&transcript_toggle);
         }
+    }
+
+    {
+        let minimap_clone = minimap_area.clone();
+        let prefs = preferences_state.clone();
+        minimap_toggle.connect_clicked(move |btn| {
+            let show = !minimap_clone.is_visible();
+            minimap_clone.set_visible(show);
+            {
+                let mut p = prefs.borrow_mut();
+                p.show_timeline_minimap = show;
+            }
+            btn.set_label(if show {
+                "Hide Mini-Map"
+            } else {
+                "Show Mini-Map"
+            });
+            if show {
+                minimap_clone.queue_draw();
+            }
+        });
     }
 
     {

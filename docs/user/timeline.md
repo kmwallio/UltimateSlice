@@ -5,6 +5,10 @@ The **Timeline** panel (bottom) is where you arrange, trim, and edit clips into 
 ## Layout
 
 - **Ruler** — shows time positions with adaptive major/mid/minor tick marks; higher zoom levels add more marks and intermediate labels, while lower zoom levels reduce clutter. Click to seek the playhead.
+- **Mini-map** — a thin overview strip (hidden by default) between the ruler and the tracks that shows the entire project at a glance. Each clip is drawn as a tiny coloured rectangle matching its colour label. A white viewport rectangle shows the currently visible portion. Toggle via the **Show Mini-Map** button on the track-management bar, or in Preferences → Timeline. Interactions:
+  - **Click** — centre the viewport on the clicked time position.
+  - **Drag** — pan the viewport continuously.
+  - **Ctrl+Click** — seek the playhead to the clicked position.
 - **Track rows** — each track (Video or Audio) shows clips as coloured rectangles.
 - **Playhead** — the red vertical line indicates the current playback position.
 - **Track header** — shows the track name, a per-track **S** solo badge, and a compact per-track stereo level meter (L/R) on the right.

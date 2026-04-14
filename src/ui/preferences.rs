@@ -478,6 +478,16 @@ pub fn show_preferences_dialog(
     timeline_preview_hint.set_max_width_chars(60);
     timeline_box.append(&timeline_preview_check);
     timeline_box.append(&timeline_preview_hint);
+    let minimap_check = CheckButton::with_label("Show timeline mini-map");
+    minimap_check.set_active(current.show_timeline_minimap);
+    minimap_check.set_halign(gtk::Align::Start);
+    let minimap_hint = Label::new(Some("A thin overview strip above the tracks showing the entire project at a glance. Click to pan, Ctrl+Click to seek."));
+    minimap_hint.set_halign(gtk::Align::Start);
+    minimap_hint.add_css_class("dim-label");
+    minimap_hint.set_wrap(true);
+    minimap_hint.set_max_width_chars(60);
+    timeline_box.append(&minimap_check);
+    timeline_box.append(&minimap_hint);
     let autoscroll_row = GBox::new(Orientation::Horizontal, 8);
     let autoscroll_label = Label::new(Some("Follow playhead during playback:"));
     autoscroll_label.set_halign(gtk::Align::Start);
@@ -1441,6 +1451,7 @@ pub fn show_preferences_dialog(
                 ),
                 source_monitor_auto_link_av: source_monitor_auto_link_av_check.is_active(),
                 show_track_audio_levels: current.show_track_audio_levels,
+                show_timeline_minimap: minimap_check.is_active(),
                 mcp_socket_enabled: mcp_socket_check.is_active(),
                 gsk_renderer: GskRenderer::from_str(
                     gsk_renderer.active_id().as_deref().unwrap_or("auto"),

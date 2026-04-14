@@ -515,6 +515,9 @@ pub struct TimelineState {
     /// While set to a future `Instant`, auto-scroll is suspended so the user's
     /// manual scroll/pan wins. Bumped whenever the user scrolls or pan-drags.
     pub user_scroll_cooldown_until: Option<std::time::Instant>,
+    /// Weak reference to the minimap DrawingArea (if wired).
+    /// Used to queue_draw the minimap whenever the main timeline repaints.
+    pub minimap_widget: Option<glib::object::WeakRef<DrawingArea>>,
 }
 
 impl TimelineState {
@@ -572,6 +575,7 @@ impl TimelineState {
             timeline_autoscroll: crate::ui_state::AutoScrollMode::default(),
             user_scroll_cooldown_until: None,
             active_snap_hit: None,
+            minimap_widget: None,
         }
     }
 
@@ -5291,6 +5295,11 @@ pub fn build_timeline(
             if let Some(ruler) = ruler_area.borrow().as_ref() {
                 ruler.queue_draw();
             }
+            if let Some(ref weak) = st.minimap_widget {
+                if let Some(m) = weak.upgrade() {
+                    m.queue_draw();
+                }
+            }
         });
     }
 
@@ -7944,6 +7953,235 @@ pub fn build_timeline_ruler(
     }
 
     ruler
+}
+
+// ── Mini-map / overview strip ──────────────────────────────────────────
+
+/// Height of the mini-map strip in logical pixels.
+const MINIMAP_HEIGHT: f64 = 28.0;
+/// Horizontal left gutter in the mini-map (mirrors track label width at
+/// a reduced size for visual alignment).
+const MINIMAP_GUTTER: f64 = 24.0;
+
+/// Compute the total duration in nanoseconds across the currently-editing
+/// tracks (respecting compound drill-down).
+fn total_duration_ns(st: &TimelineState) -> u64 {
+    let proj = st.project.borrow();
+    let tracks = st.resolve_editing_tracks(&proj);
+    tracks
+        .iter()
+        .flat_map(|t| t.clips.iter())
+        .map(|c| c.timeline_start + c.duration())
+        .max()
+        .unwrap_or(0)
+}
+
+/// Cairo paint for the mini-map overview strip.
+fn draw_minimap(cr: &gtk::cairo::Context, width: f64, height: f64, st: &TimelineState) {
+    // Background
+    cr.set_source_rgb(0.10, 0.10, 0.12);
+    cr.paint().ok();
+
+    let total_ns = total_duration_ns(st);
+    if total_ns == 0 {
+        return;
+    }
+
+    let usable_w = (width - MINIMAP_GUTTER).max(1.0);
+    let minimap_pps = usable_w / (total_ns as f64 / NS_PER_SECOND);
+
+    let proj = st.project.borrow();
+    let tracks = st.resolve_editing_tracks(&proj);
+    let order = visual_order(tracks);
+    let track_count = order.len().max(1);
+    let lane_h = ((height - 2.0) / track_count as f64).clamp(1.0, 6.0);
+    let total_lanes_h = lane_h * track_count as f64;
+    let lanes_top = (height - total_lanes_h) / 2.0;
+
+    // Draw clip rectangles
+    for (vis_idx, &logical_idx) in order.iter().enumerate() {
+        let track = &tracks[logical_idx];
+        let lane_y = lanes_top + vis_idx as f64 * lane_h;
+        for clip in &track.clips {
+            let cx = MINIMAP_GUTTER + (clip.timeline_start as f64 / NS_PER_SECOND) * minimap_pps;
+            let cw = ((clip.duration() as f64 / NS_PER_SECOND) * minimap_pps).max(1.0);
+            let (r, g, b) = clip_fill_color(clip, track.kind.clone());
+            cr.set_source_rgba(r, g, b, 0.85);
+            cr.rectangle(cx, lane_y, cw, (lane_h - 0.5).max(1.0));
+            cr.fill().ok();
+        }
+    }
+
+    // Viewport rectangle
+    let visible_width = width; // the main timeline viewport width
+    let view_left_ns = (st.scroll_offset / st.pixels_per_second) * NS_PER_SECOND;
+    let view_right_ns = ((st.scroll_offset + visible_width) / st.pixels_per_second) * NS_PER_SECOND;
+    let vp_x = MINIMAP_GUTTER + (view_left_ns / NS_PER_SECOND) * minimap_pps;
+    let vp_w = ((view_right_ns - view_left_ns) / NS_PER_SECOND) * minimap_pps;
+    let vp_x = vp_x.max(MINIMAP_GUTTER);
+    let vp_w = vp_w.min(usable_w);
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.12);
+    cr.rectangle(vp_x, 0.0, vp_w, height);
+    cr.fill().ok();
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.45);
+    cr.set_line_width(1.0);
+    cr.rectangle(vp_x + 0.5, 0.5, vp_w - 1.0, height - 1.0);
+    cr.stroke().ok();
+
+    // Playhead
+    let ph_ns = st.editing_playhead_ns();
+    let ph_x = MINIMAP_GUTTER + (ph_ns as f64 / NS_PER_SECOND) * minimap_pps;
+    if ph_x >= MINIMAP_GUTTER && ph_x <= width {
+        cr.set_source_rgba(1.0, 0.3, 0.3, 0.9);
+        cr.set_line_width(1.5);
+        cr.move_to(ph_x, 0.0);
+        cr.line_to(ph_x, height);
+        cr.stroke().ok();
+    }
+
+    // Subtle top/bottom border
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.06);
+    cr.set_line_width(1.0);
+    cr.move_to(0.0, height - 0.5);
+    cr.line_to(width, height - 0.5);
+    cr.stroke().ok();
+}
+
+/// Build the mini-map DrawingArea with click-to-pan and drag-to-scroll
+/// gesture controllers. Returns the DrawingArea (initially hidden).
+pub fn build_timeline_minimap(
+    state: Rc<RefCell<TimelineState>>,
+    timeline_area: DrawingArea,
+    ruler: DrawingArea,
+) -> DrawingArea {
+    let minimap = DrawingArea::new();
+    minimap.set_content_height(MINIMAP_HEIGHT.ceil() as i32);
+    minimap.set_vexpand(false);
+    minimap.set_hexpand(true);
+    minimap.set_visible(false);
+
+    // Draw function
+    {
+        let state = state.clone();
+        minimap.set_draw_func(move |_area, cr, width, height| {
+            let st = state.borrow();
+            draw_minimap(cr, width as f64, height as f64, &st);
+        });
+    }
+
+    // Helper: convert an x-coordinate in the minimap to a timeline ns position.
+    let minimap_x_to_ns = {
+        let state = state.clone();
+        move |x: f64, minimap_width: f64| -> u64 {
+            let st = state.borrow();
+            let total_ns = total_duration_ns(&st);
+            if total_ns == 0 {
+                return 0;
+            }
+            let usable_w = (minimap_width - MINIMAP_GUTTER).max(1.0);
+            let frac = ((x - MINIMAP_GUTTER) / usable_w).clamp(0.0, 1.0);
+            (frac * total_ns as f64) as u64
+        }
+    };
+
+    // Click: center viewport on clicked position. Ctrl+Click: seek playhead.
+    {
+        let state = state.clone();
+        let timeline_area = timeline_area.clone();
+        let ruler = ruler.clone();
+        let minimap_weak = minimap.downgrade();
+        let x_to_ns = minimap_x_to_ns.clone();
+        let click = GestureClick::new();
+        click.connect_pressed(move |gesture, _n_press, x, _y| {
+            let minimap_width = minimap_weak
+                .upgrade()
+                .map(|m| m.width() as f64)
+                .unwrap_or(800.0);
+            let ns = x_to_ns(x, minimap_width);
+            let modifiers = gesture.current_event_state();
+            let ctrl = modifiers.contains(gdk4::ModifierType::CONTROL_MASK);
+
+            let mut st = state.borrow_mut();
+            if ctrl {
+                // Seek playhead
+                st.set_playhead_visual(ns);
+                let seek_cb = st.on_seek.clone();
+                drop(st);
+                if let Some(cb) = seek_cb {
+                    cb(ns);
+                }
+            } else {
+                // Center viewport on clicked position
+                let visible_secs = minimap_width / st.pixels_per_second;
+                let target_secs = ns as f64 / NS_PER_SECOND;
+                let new_offset = (target_secs - visible_secs / 2.0) * st.pixels_per_second;
+                st.scroll_offset = new_offset.max(0.0);
+                st.user_scroll_cooldown_until =
+                    Some(std::time::Instant::now() + std::time::Duration::from_millis(600));
+                drop(st);
+            }
+            timeline_area.queue_draw();
+            ruler.queue_draw();
+            if let Some(m) = minimap_weak.upgrade() {
+                m.queue_draw();
+            }
+        });
+        minimap.add_controller(click);
+    }
+
+    // Drag: pan viewport by dragging on the minimap.
+    {
+        let state = state.clone();
+        let timeline_area = timeline_area.clone();
+        let ruler = ruler.clone();
+        let minimap_weak = minimap.downgrade();
+        let drag = GestureDrag::new();
+        let drag_start_offset: Rc<std::cell::Cell<f64>> = Rc::new(std::cell::Cell::new(0.0));
+        {
+            let state = state.clone();
+            let drag_start_offset = drag_start_offset.clone();
+            drag.connect_drag_begin(move |_gesture, _x, _y| {
+                let st = state.borrow();
+                drag_start_offset.set(st.scroll_offset);
+            });
+        }
+        {
+            let state = state.clone();
+            let drag_start_offset = drag_start_offset.clone();
+            let timeline_area = timeline_area.clone();
+            let ruler = ruler.clone();
+            let minimap_weak = minimap_weak.clone();
+            drag.connect_drag_update(move |_gesture, offset_x, _offset_y| {
+                let minimap_width = minimap_weak
+                    .upgrade()
+                    .map(|m| m.width() as f64)
+                    .unwrap_or(800.0);
+                let st_ref = state.borrow();
+                let total_ns = total_duration_ns(&st_ref);
+                drop(st_ref);
+                if total_ns == 0 {
+                    return;
+                }
+                let usable_w = (minimap_width - MINIMAP_GUTTER).max(1.0);
+                let minimap_pps = usable_w / (total_ns as f64 / NS_PER_SECOND);
+                let mut st = state.borrow_mut();
+                // Convert minimap pixel offset to main-timeline pixel offset
+                let main_offset_px = offset_x * (st.pixels_per_second / minimap_pps);
+                st.scroll_offset = (drag_start_offset.get() + main_offset_px).max(0.0);
+                st.user_scroll_cooldown_until =
+                    Some(std::time::Instant::now() + std::time::Duration::from_millis(600));
+                drop(st);
+                timeline_area.queue_draw();
+                ruler.queue_draw();
+                if let Some(m) = minimap_weak.upgrade() {
+                    m.queue_draw();
+                }
+            });
+        }
+        minimap.add_controller(drag);
+    }
+
+    minimap
 }
 
 pub fn export_timeline_snapshot_png(

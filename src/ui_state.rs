@@ -1202,6 +1202,9 @@ pub struct PreferencesState {
     /// type-migration churn.
     #[serde(default = "default_ai_backend")]
     pub ai_backend: String,
+    /// Show the timeline mini-map overview strip above the track canvas.
+    #[serde(default)]
+    pub show_timeline_minimap: bool,
 }
 
 fn default_ai_backend() -> String {
@@ -1246,6 +1249,7 @@ impl Default for PreferencesState {
             loudness_target_lufs: default_loudness_target_lufs(),
             voice_enhance_cache_cap_gib: default_voice_enhance_cache_cap_gib(),
             ai_backend: default_ai_backend(),
+            show_timeline_minimap: false,
         }
     }
 }
