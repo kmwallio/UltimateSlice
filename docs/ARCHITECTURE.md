@@ -63,6 +63,7 @@ src/
 
   ui/
     window.rs               Root window builder — wires all panels together, owns shared state
+    mcp_handler.rs          MCP command dispatcher — extracted from window.rs to reduce file size
     toolbar.rs              HeaderBar — New/Open/Save/Export + Undo/Redo + Select/Razor toggles
     media_browser.rs        Media Library panel — import, list, select, Append to Timeline
     preview.rs              Source Monitor — video display, scrubber, in/out marks, transport
@@ -897,7 +898,7 @@ For automation-heavy loops, MCP keeps a short-lived per-session read cache for r
 1. Add a variant to `McpCommand` in `src/mcp/mod.rs`
 2. Add a matching entry to the `tools_list()` function in `src/mcp/server.rs`
 3. Add a dispatch arm in `call_tool()` in `src/mcp/server.rs`
-4. Add a handler arm in `handle_mcp_command()` in `src/ui/window.rs`
+4. Add a handler arm in `handle_mcp_command()` in `src/ui/mcp_handler.rs`
 
 Required system packages (Debian/Ubuntu):
 ```
