@@ -10,7 +10,7 @@ The **Timeline** panel (bottom) is where you arrange, trim, and edit clips into 
 - **Track header** — shows the track name, a per-track **S** solo badge, and a compact per-track stereo level meter (L/R) on the right.
 - **Status bar** — bottom-left includes a **Track Audio Levels** eye toggle to show/hide track-header meters. Proxy queue label/progress appear only while proxies are actively generating.
 
-When the track stack is taller than the viewport, the ruler stays pinned at the visible top edge so seeking, scrubbing, and marker clicks remain available while you scroll tracks vertically.
+When the track stack is taller than the viewport, the ruler stays in a fixed header above the scrolled tracks so seeking, scrubbing, and marker clicks remain available while you scroll vertically. Only the track rows scroll: the ruler remains visible without adding empty spacer bars above or below the visible timeline content.
 
 ## Navigation
 

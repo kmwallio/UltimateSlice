@@ -109,6 +109,13 @@ fn workspace_target_paned_position(
     Some(clamp_workspace_paned_position(paned, scaled))
 }
 
+fn collapse_workspace_paned_end_child(paned: &Paned) {
+    let total = workspace_paned_extent(paned);
+    if total > 0 {
+        paned.set_position(clamp_workspace_paned_position(paned, total));
+    }
+}
+
 fn schedule_workspace_layout_apply_completion(
     apply_generation: u64,
     workspace_layout_apply_generation: Rc<Cell<u64>>,
@@ -14297,12 +14304,7 @@ pub fn build_window(
     root_vpaned.set_start_child(Some(&top_paned));
 
     // ── Timeline ──────────────────────────────────────────────────────────
-    let timeline_scroll = ScrolledWindow::new();
-    timeline_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-    timeline_scroll.set_vexpand(true);
-    timeline_scroll.set_hexpand(true);
-
-    let (timeline_panel, timeline_area) =
+    let (timeline_panel, _timeline_ruler, timeline_area) =
         build_timeline_panel(timeline_state.clone(), on_project_changed.clone());
 
     // Extract the track-management bar from timeline_panel so we can place
@@ -14311,24 +14313,17 @@ pub fn build_window(
     if let Some(ref bar) = timeline_bar_widget {
         timeline_panel.remove(bar);
     }
-    timeline_scroll.set_child(Some(&timeline_panel));
-    {
-        let timeline_state = timeline_state.clone();
-        let timeline_area = timeline_area.clone();
-        let timeline_vadjustment = timeline_scroll.vadjustment();
-        timeline_state.borrow_mut().vertical_scroll_offset = timeline_vadjustment.value();
-        timeline_vadjustment.connect_value_changed(move |adj| {
-            timeline_state.borrow_mut().vertical_scroll_offset = adj.value();
-            timeline_area.queue_draw();
-        });
-    }
+    // Leave the fixed ruler in timeline_panel; track canvas goes directly
+    // into the paned so we handle vertical scrolling manually (no
+    // ScrolledWindow viewport gaps / "black bars").
+    timeline_panel.remove(&timeline_area);
 
-    // Vertical Paned: top = timeline scroll, bottom = keyframe dopesheet.
+    // Vertical Paned: top = track canvas, bottom = keyframe dopesheet.
     // The dopesheet is added later (see keyframe editor section below).
     let timeline_paned = Paned::new(Orientation::Vertical);
     timeline_paned.set_vexpand(true);
     timeline_paned.set_hexpand(true);
-    timeline_paned.set_start_child(Some(&timeline_scroll));
+    timeline_paned.set_start_child(Some(&timeline_area));
     timeline_paned.set_resize_start_child(true);
     timeline_paned.set_shrink_start_child(false);
     timeline_paned.set_resize_end_child(true);
@@ -14338,13 +14333,16 @@ pub fn build_window(
     let timeline_outer_vbox = gtk::Box::new(Orientation::Vertical, 0);
     timeline_outer_vbox.set_vexpand(true);
     timeline_outer_vbox.set_hexpand(true);
+    timeline_outer_vbox.append(&timeline_panel);
     timeline_outer_vbox.append(&timeline_paned);
     if let Some(ref bar) = timeline_bar_widget {
         timeline_outer_vbox.append(bar);
     }
     root_vpaned.set_end_child(Some(&timeline_outer_vbox));
 
-    // Fill in the timeline area cell so the poll timer + stop button can redraw it.
+    // Keep the shared redraw cell pointed at the actual track DrawingArea so
+    // playback/status-driven queue_draw() calls repaint the timeline again.
+    // The DrawingArea draw func queues the fixed ruler header as needed.
     *timeline_panel_cell.borrow_mut() = Some(timeline_area.clone().upcast::<gtk4::Widget>());
 
     // Now that timeline_panel exists, fill in the real on_project_changed implementation.
@@ -15002,10 +15000,15 @@ pub fn build_window(
     // We'll set a reasonable initial position after the first allocation.
     {
         let paned = timeline_paned.clone();
+        let stack = bottom_panel_stack.clone();
         paned.connect_map(move |p| {
             let total = p.allocation().height();
             if total > 0 && p.position() == 0 {
-                p.set_position((total as f64 * 0.7) as i32);
+                if stack.is_visible() {
+                    p.set_position((total as f64 * 0.7) as i32);
+                } else {
+                    collapse_workspace_paned_end_child(p);
+                }
             }
         });
     }
@@ -15100,6 +15103,7 @@ pub fn build_window(
             let active = stack.visible_child_name();
             if stack.is_visible() && active.as_deref() == Some("keyframes") {
                 stack.set_visible(false);
+                collapse_workspace_paned_end_child(&paned);
             } else {
                 stack.set_visible_child_name("keyframes");
                 if !stack.is_visible() {
@@ -15126,6 +15130,7 @@ pub fn build_window(
             let active = stack.visible_child_name();
             if stack.is_visible() && active.as_deref() == Some("transcript") {
                 stack.set_visible(false);
+                collapse_workspace_paned_end_child(&paned);
             } else {
                 stack.set_visible_child_name("transcript");
                 if !stack.is_visible() {
@@ -15483,7 +15488,7 @@ pub fn build_window(
         let timeline_paned = timeline_paned.clone();
         let media_browser_toggle = media_browser_toggle.clone();
         let inspector_toggle = inspector_toggle.clone();
-        let keyframe_scroller = keyframe_scroller.clone();
+        let bottom_panel_stack = bottom_panel_stack.clone();
         let scopes_btn = scopes_btn.clone();
         let docked_scopes_paned = docked_scopes_paned.clone();
         let monitor_state = monitor_state.clone();
@@ -15590,7 +15595,7 @@ pub fn build_window(
                 right_sidebar_paned_ratio_permille,
                 media_browser_visible: media_browser_toggle.is_active(),
                 inspector_visible: inspector_toggle.is_active(),
-                keyframe_editor_visible: keyframe_scroller.is_visible(),
+                keyframe_editor_visible: bottom_panel_stack.is_visible(),
                 left_panel_tab,
                 program_monitor: crate::ui_state::ProgramMonitorWorkspaceState {
                     popped: monitor_popped.get(),
@@ -15646,8 +15651,8 @@ pub fn build_window(
         let timeline_paned = timeline_paned.clone();
         let media_browser_toggle = media_browser_toggle.clone();
         let inspector_toggle = inspector_toggle.clone();
-        let keyframe_scroller = keyframe_scroller.clone();
-        let keyframes_toggle = keyframes_toggle.clone();
+        let bottom_panel_stack = bottom_panel_stack.clone();
+        let refresh_bottom_toggle_labels = refresh_bottom_toggle_labels.clone();
         let scopes_btn = scopes_btn.clone();
         let docked_scopes_paned = docked_scopes_paned.clone();
         let monitor_state = monitor_state.clone();
@@ -15689,14 +15694,10 @@ pub fn build_window(
                 }
                 crate::ui_state::WorkspaceLeftPanelTab::Titles => tb_titles.set_active(true),
             }
-            if keyframe_scroller.is_visible() != arrangement.keyframe_editor_visible {
-                keyframe_scroller.set_visible(arrangement.keyframe_editor_visible);
+            if bottom_panel_stack.is_visible() != arrangement.keyframe_editor_visible {
+                bottom_panel_stack.set_visible(arrangement.keyframe_editor_visible);
             }
-            keyframes_toggle.set_label(if arrangement.keyframe_editor_visible {
-                "Hide Keyframes"
-            } else {
-                "Show Keyframes"
-            });
+            refresh_bottom_toggle_labels();
             if scopes_btn.is_active() != arrangement.program_monitor.scopes_visible {
                 scopes_btn.set_active(arrangement.program_monitor.scopes_visible);
             }
@@ -15762,6 +15763,8 @@ pub fn build_window(
                                 timeline_paned.set_position((total as f64 * 0.7) as i32);
                             }
                         }
+                    } else {
+                        collapse_workspace_paned_end_child(&timeline_paned);
                     }
                     if arrangement.inspector_visible {
                         if let Some(pos) = workspace_target_paned_position(

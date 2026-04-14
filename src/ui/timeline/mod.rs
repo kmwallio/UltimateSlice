@@ -1,18 +1,24 @@
 pub mod widget;
-pub use widget::{build_timeline, ActiveTool, MusicGenerationTarget, TimelineState};
+pub use widget::{
+    build_timeline, build_timeline_ruler, ActiveTool, MusicGenerationTarget, TimelineState,
+};
 
-/// Build the full timeline panel: timeline DrawingArea + track management bar.
-/// Returns `(panel_box, drawing_area)` — call `drawing_area.queue_draw()` to repaint.
+/// Build the full timeline panel: fixed ruler + scrollable track area + track bar.
+/// Returns `(panel_box, ruler_area, drawing_area)` — call `drawing_area.queue_draw()` to repaint.
 pub fn build_timeline_panel(
     state: std::rc::Rc<std::cell::RefCell<TimelineState>>,
     on_project_changed: std::rc::Rc<dyn Fn()>,
-) -> (gtk4::Box, gtk4::DrawingArea) {
+) -> (gtk4::Box, gtk4::DrawingArea, gtk4::DrawingArea) {
     use gtk4::prelude::*;
     use gtk4::{Box as GBox, Button, Orientation};
 
     let vbox = GBox::new(Orientation::Vertical, 0);
 
-    let area = build_timeline(state.clone());
+    let ruler_redraw = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let area = build_timeline(state.clone(), ruler_redraw.clone());
+    let ruler = build_timeline_ruler(state.clone(), area.clone());
+    *ruler_redraw.borrow_mut() = Some(ruler.clone());
+    vbox.append(&ruler);
     vbox.append(&area);
 
     // ── Track management bar ─────────────────────────────────────────────
@@ -53,7 +59,7 @@ pub fn build_timeline_panel(
                 st.history.execute(Box::new(cmd), &mut proj);
             }
             area.set_content_height(
-                (24.0 + 60.0 * state.borrow().project.borrow().tracks.len() as f64) as i32,
+                (60.0 * state.borrow().project.borrow().tracks.len() as f64) as i32,
             );
             on_project_changed();
             area.queue_draw();
@@ -78,7 +84,7 @@ pub fn build_timeline_panel(
                 st.history.execute(Box::new(cmd), &mut proj);
             }
             area.set_content_height(
-                (24.0 + 60.0 * state.borrow().project.borrow().tracks.len() as f64) as i32,
+                (60.0 * state.borrow().project.borrow().tracks.len() as f64) as i32,
             );
             on_project_changed();
             area.queue_draw();
@@ -120,7 +126,7 @@ pub fn build_timeline_panel(
             state.borrow_mut().selected_track_id = None;
             state.borrow_mut().selected_clip_id = None;
             let n = state.borrow().project.borrow().tracks.len();
-            area.set_content_height((24.0 + 60.0 * n as f64) as i32);
+            area.set_content_height((60.0 * n as f64) as i32);
             on_project_changed();
             area.queue_draw();
         });
@@ -132,5 +138,5 @@ pub fn build_timeline_panel(
     bar.append(&btn_remove);
     vbox.append(&bar);
 
-    (vbox, area)
+    (vbox, ruler, area)
 }

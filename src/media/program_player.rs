@@ -4260,9 +4260,15 @@ impl ProgramPlayer {
             let _ = self.audio_pipeline.set_state(gst::State::Playing);
         }
         if let Some(ref mp) = self.audio_multi_pipeline {
-            if let Some(base) = self.pipeline.base_time() {
-                mp.set_base_time(base);
-            }
+            // Don't copy the main pipeline's base_time here.  The audio multi
+            // pipeline gets a fresh base_time from GStreamer whenever it
+            // transitions to Playing (base_time = clock_time - start_time).
+            // Overriding with the main pipeline's (potentially stale) base_time
+            // causes a running-time mismatch: FLUSH-seeked audio decoders
+            // produce buffers from running_time 0, but a stale base_time makes
+            // the audio sink compute a running_time that is minutes ahead,
+            // causing it to drop all "late" buffers.  Clock sharing (set in
+            // rebuild_audio_multi_pipeline) is sufficient for long-term sync.
             let _ = mp.set_state(gst::State::Playing);
         }
     }
@@ -11713,6 +11719,7 @@ impl ProgramPlayer {
         let prerender_path_for_cb = source_path.to_string();
         let effects_sink_for_cb = effects_bin.static_pad("sink")?;
         let audio_sink_for_cb = audio_sink.clone();
+        let pipeline_for_prerender_cb: gst::Bin = self.pipeline.clone().upcast();
         decoder.connect_pad_added(move |_dec, pad| {
             let caps = pad.current_caps().or_else(|| Some(pad.query_caps(None)));
             if let Some(caps) = caps {
@@ -11741,6 +11748,7 @@ impl ProgramPlayer {
                             }
                         }
                     } else if name.starts_with("audio/") {
+                        let mut linked = false;
                         if let Some(ref sink) = audio_sink_for_cb {
                             if !sink.is_linked() && pad.link(sink).is_ok() {
                                 log::info!(
@@ -11748,6 +11756,24 @@ impl ProgramPlayer {
                                     prerender_path_for_cb
                                 );
                                 audio_linked_for_cb.store(true, Ordering::Relaxed);
+                                linked = true;
+                            }
+                        }
+                        // Drain unwanted audio to a fakesink so qtdemux's
+                        // streaming loop doesn't get NOT_LINKED and stall
+                        // the video track.
+                        if !linked {
+                            if let Ok(fs) = gst::ElementFactory::make("fakesink")
+                                .property("sync", false)
+                                .property("async", false)
+                                .build()
+                            {
+                                if pipeline_for_prerender_cb.add(&fs).is_ok() {
+                                    let _ = fs.sync_state_with_parent();
+                                    if let Some(fs_sink) = fs.static_pad("sink") {
+                                        let _ = pad.link(&fs_sink);
+                                    }
+                                }
                             }
                         }
                     } else {
@@ -13825,6 +13851,7 @@ impl ProgramPlayer {
         let video_linked_for_cb = video_linked.clone();
         let audio_linked_for_cb = audio_linked.clone();
         let clip_id_for_cb = clip.id.clone();
+        let pipeline_for_cb: gst::Bin = self.pipeline.clone().upcast();
         decoder.connect_pad_added(move |_dec, pad| {
             let caps = pad.current_caps().or_else(|| Some(pad.query_caps(None)));
             if let Some(caps) = caps {
@@ -13855,9 +13882,28 @@ impl ProgramPlayer {
                             }
                         }
                     } else if name.starts_with("audio/") {
+                        let mut linked = false;
                         if let Some(ref sink) = audio_sink {
                             if pad.link(sink).is_ok() {
                                 audio_linked_for_cb.store(true, Ordering::Relaxed);
+                                linked = true;
+                            }
+                        }
+                        // Drain unwanted audio to a fakesink so qtdemux's
+                        // streaming loop doesn't get NOT_LINKED and stall the
+                        // video track.
+                        if !linked {
+                            if let Ok(fs) = gst::ElementFactory::make("fakesink")
+                                .property("sync", false)
+                                .property("async", false)
+                                .build()
+                            {
+                                if pipeline_for_cb.add(&fs).is_ok() {
+                                    let _ = fs.sync_state_with_parent();
+                                    if let Some(fs_sink) = fs.static_pad("sink") {
+                                        let _ = pad.link(&fs_sink);
+                                    }
+                                }
                             }
                         }
                     }
@@ -15760,6 +15806,20 @@ impl ProgramPlayer {
             .unwrap_or(false)
     }
 
+    /// Detect GStreamer NOT_LINKED errors (qtdemux streaming loop stall).
+    /// These occur when a demuxer pad (typically audio) has no downstream
+    /// consumer inside the decode bin, causing the pull-mode loop to abort.
+    fn should_recover_not_linked(error: &str, debug: Option<&str>) -> bool {
+        if let Some(d) = debug {
+            let d_lower = d.to_ascii_lowercase();
+            if d_lower.contains("not-linked") || d_lower.contains("reason not-linked") {
+                return true;
+            }
+        }
+        let err_lower = error.to_ascii_lowercase();
+        err_lower.contains("not-linked")
+    }
+
     fn recover_main_pipeline_not_negotiated(&mut self) {
         const RECOVERY_DEBOUNCE_MS: u64 = 250;
         let now = Instant::now();
@@ -15799,6 +15859,7 @@ impl ProgramPlayer {
     fn poll_bus(&mut self) -> bool {
         let mut eos = false;
         let mut main_not_negotiated = false;
+        let mut main_not_linked = false;
         if let Some(bus) = self.pipeline.bus() {
             while let Some(msg) = bus.pop() {
                 match msg.view() {
@@ -15882,6 +15943,8 @@ impl ProgramPlayer {
                         log::error!("poll_bus: main pipeline error: {} ({:?})", err, debug);
                         if Self::should_recover_not_negotiated(&err, debug.as_deref()) {
                             main_not_negotiated = true;
+                        } else if Self::should_recover_not_linked(&err, debug.as_deref()) {
+                            main_not_linked = true;
                         }
                     }
                     _ => {}
@@ -15889,6 +15952,12 @@ impl ProgramPlayer {
             }
         }
         if main_not_negotiated {
+            self.recover_main_pipeline_not_negotiated();
+        } else if main_not_linked {
+            // NOT_LINKED errors (qtdemux streaming stall) are recovered the
+            // same way as not-negotiated: full teardown + rebuild.  The
+            // debounce logic prevents rapid-fire rebuilds when the bus has
+            // queued multiple error messages from the same incident.
             self.recover_main_pipeline_not_negotiated();
         }
         if let Some(abus) = self.audio_pipeline.bus() {
@@ -16033,9 +16102,11 @@ impl ProgramPlayer {
             );
         }
         if was_playing {
-            if let Some(base) = self.pipeline.base_time() {
-                pipeline.set_base_time(base);
-            }
+            // Reset start_time so the Paused→Playing transition computes a
+            // fresh base_time = clock_time, giving running_time = 0.  This
+            // keeps the audiomixer aligned with FLUSH-seeked decoder buffers
+            // that also start from running_time 0.
+            pipeline.set_start_time(gst::ClockTime::ZERO);
             let _ = pipeline.set_state(gst::State::Playing);
         }
         true
@@ -16398,11 +16469,12 @@ impl ProgramPlayer {
         // Preroll the pipeline, then seek each decoder to its correct source position.
         // Slave the multi-audio pipeline to the main pipeline's clock so
         // audio and video stay in sync over long playback sessions.
+        // Don't copy base_time — the Playing transition below (or a later
+        // resume_synced_audio_playback call) auto-computes a fresh
+        // base_time = clock_time, keeping running_time aligned with the
+        // FLUSH-seeked decoders' buffer timestamps.
         if let Some(clock) = self.pipeline.clock() {
             pipeline.use_clock(Some(&clock));
-        }
-        if let Some(base) = self.pipeline.base_time() {
-            pipeline.set_base_time(base);
         }
 
         let _ = pipeline.set_state(gst::State::Paused);
