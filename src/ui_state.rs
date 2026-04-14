@@ -1139,6 +1139,10 @@ pub struct PreferencesState {
     /// Uses more CPU and memory during playback.
     #[serde(default)]
     pub background_prerender: bool,
+    /// Automatically build transcript search data for eligible library items
+    /// in the background when speech-to-text support is available.
+    #[serde(default)]
+    pub background_ai_indexing: bool,
     /// FFmpeg x264 preset used for background prerender video segments.
     #[serde(default)]
     pub prerender_preset: PrerenderEncodingPreset,
@@ -1225,6 +1229,7 @@ impl Default for PreferencesState {
             experimental_preview_optimizations: false,
             realtime_preview: true,
             background_prerender: false,
+            background_ai_indexing: false,
             prerender_preset: PrerenderEncodingPreset::default(),
             prerender_crf: default_prerender_crf(),
             persist_prerenders_next_to_project_file:
@@ -1598,6 +1603,7 @@ mod tests {
                 .unwrap();
         assert!(!parsed.preferences.source_monitor_auto_link_av);
         assert!(!parsed.preferences.crossfade_enabled);
+        assert!(!parsed.preferences.background_ai_indexing);
         assert_eq!(
             parsed.preferences.crossfade_curve,
             CrossfadeCurve::EqualPower
@@ -1639,6 +1645,17 @@ mod tests {
         let json = serde_json::to_string(&prefs).unwrap();
         let decoded: PreferencesState = serde_json::from_str(&json).unwrap();
         assert!(!decoded.source_monitor_auto_link_av);
+    }
+
+    #[test]
+    fn preferences_background_ai_indexing_round_trip() {
+        let prefs = PreferencesState {
+            background_ai_indexing: true,
+            ..PreferencesState::default()
+        };
+        let json = serde_json::to_string(&prefs).unwrap();
+        let decoded: PreferencesState = serde_json::from_str(&json).unwrap();
+        assert!(decoded.background_ai_indexing);
     }
 
     #[test]

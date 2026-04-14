@@ -115,7 +115,9 @@ impl SttCache {
         self.model_path = find_stt_model_path();
     }
 
-    /// Request STT for a clip region. Returns immediately.
+    /// Request STT for a clip region. Returns `true` when a new background job
+    /// was queued, or `false` if the request was skipped because the model is
+    /// unavailable or the same key is already pending/completed/failed.
     /// Call [`poll()`] periodically to collect results.
     pub fn request(
         &mut self,
@@ -123,36 +125,39 @@ impl SttCache {
         source_in_ns: u64,
         source_out_ns: u64,
         language: &str,
-    ) {
+    ) -> bool {
         let Some(ref model_path) = self.model_path else {
-            return;
+            return false;
         };
         let key = cache_key(source_path, source_in_ns, source_out_ns, language);
         if self.pending.contains(&key)
             || self.failed.contains(&key)
             || self.results.contains_key(&key)
         {
-            return;
+            return false;
         }
 
-        self.last_error = None;
-        self.total_requested += 1;
-        self.pending.insert(key.clone());
-        self.key_to_info.insert(
-            key.clone(),
-            (source_path.to_string(), source_in_ns, source_out_ns),
-        );
-
+        let info = (source_path.to_string(), source_in_ns, source_out_ns);
         if let Some(ref tx) = self.work_tx {
-            let _ = tx.send(SttJob {
-                cache_key: key,
-                source_path: source_path.to_string(),
-                source_in_ns,
-                source_out_ns,
-                model_path: model_path.clone(),
-                language: language.to_string(),
-            });
+            if tx
+                .send(SttJob {
+                    cache_key: key.clone(),
+                    source_path: source_path.to_string(),
+                    source_in_ns,
+                    source_out_ns,
+                    model_path: model_path.clone(),
+                    language: language.to_string(),
+                })
+                .is_ok()
+            {
+                self.last_error = None;
+                self.total_requested += 1;
+                self.pending.insert(key.clone());
+                self.key_to_info.insert(key, info);
+                return true;
+            }
         }
+        false
     }
 
     /// Non-blocking poll for completed jobs.

@@ -12,7 +12,7 @@ use gio;
 use glib;
 use gtk4::prelude::*;
 use gtk4::{self as gtk, Button, HeaderBar, Label, Separator, ToggleButton};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 // -----------------------------------------------------------------------
@@ -72,6 +72,42 @@ const FRAMERATE_OPTIONS: &[FramerateOption] = &[
 /// Default frame-rate index used when the current project's frame rate
 /// doesn't match any preset (24 fps).
 const DEFAULT_FRAMERATE_INDEX: usize = 1;
+
+fn is_primary_toolbar_tool(tool: ActiveTool) -> bool {
+    matches!(
+        tool,
+        ActiveTool::Select
+            | ActiveTool::Razor
+            | ActiveTool::Ripple
+            | ActiveTool::Roll
+            | ActiveTool::Slip
+            | ActiveTool::Slide
+    )
+}
+
+fn toolbar_tool_label(tool: ActiveTool) -> &'static str {
+    match tool {
+        ActiveTool::Select => "↖ Select",
+        ActiveTool::Razor => "✂ Razor",
+        ActiveTool::Ripple => "⇤ Ripple",
+        ActiveTool::Roll => "⇋ Roll",
+        ActiveTool::Slip => "↔ Slip",
+        ActiveTool::Slide => "⇔ Slide",
+        ActiveTool::Draw => "✎ Draw",
+    }
+}
+
+fn toolbar_tool_tooltip(tool: ActiveTool) -> &'static str {
+    match tool {
+        ActiveTool::Select => "Selection tool (Escape)",
+        ActiveTool::Razor => "Razor/blade tool (B)",
+        ActiveTool::Ripple => "Ripple edit tool (R)",
+        ActiveTool::Roll => "Roll edit tool (E)",
+        ActiveTool::Slip => "Slip edit tool (Y)",
+        ActiveTool::Slide => "Slide edit tool (U)",
+        ActiveTool::Draw => "Vector drawing tool (D)",
+    }
+}
 
 /// One canvas-resolution preset within an aspect-ratio group.
 struct ResolutionPreset {
@@ -976,7 +1012,7 @@ pub fn build_toolbar(
     on_use_collected_locations: impl Fn(fcpxml::writer::CollectFilesManifest) + 'static + Clone,
     on_export_frame: impl Fn() + 'static + Clone,
     on_record_voiceover: impl Fn() + 'static + Clone,
-) -> (HeaderBar, Button) {
+) -> (HeaderBar, Button, Button) {
     let header = HeaderBar::new();
 
     let title = Label::new(Some("UltimateSlice"));
@@ -2828,30 +2864,72 @@ pub fn build_toolbar(
     sep_tools.add_css_class("toolbar-separator");
     header.pack_start(&sep_tools);
 
-    // ── Tool selector: Select / Razor ───────────────────────────────────
-    let btn_select = ToggleButton::with_label("↖ Select");
-    btn_select.set_tooltip_text(Some("Selection tool (Escape)"));
-    btn_select.set_active(true);
+    // ── Tool selector ───────────────────────────────────────────────────
+    let current_tool = timeline_state.borrow().active_tool;
+    let initial_primary_tool = if is_primary_toolbar_tool(current_tool) {
+        current_tool
+    } else {
+        ActiveTool::Select
+    };
+    let last_primary_tool = Rc::new(Cell::new(initial_primary_tool));
+    let btn_tool_menu = ToggleButton::new();
+    btn_tool_menu.set_label("Tool Menu");
+    btn_tool_menu.set_tooltip_text(Some("Choose Select, Razor, Ripple, Roll, Slip, or Slide"));
+    btn_tool_menu.set_active(is_primary_toolbar_tool(current_tool));
+    let tool_menu_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let tool_menu_label = gtk::Label::new(Some(toolbar_tool_label(initial_primary_tool)));
+    tool_menu_label.set_width_chars(9);
+    tool_menu_label.set_xalign(0.0);
+    let tool_menu_arrow = gtk::Image::from_icon_name("pan-down-symbolic");
+    tool_menu_row.append(&tool_menu_label);
+    tool_menu_row.append(&tool_menu_arrow);
+    btn_tool_menu.set_child(Some(&tool_menu_row));
 
-    let btn_razor = ToggleButton::with_label("✂ Razor");
-    btn_razor.set_tooltip_text(Some("Razor/blade tool (B)"));
-    btn_razor.set_group(Some(&btn_select));
-
-    let btn_ripple = ToggleButton::with_label("⇤ Ripple");
-    btn_ripple.set_tooltip_text(Some("Ripple edit tool (R)"));
-    btn_ripple.set_group(Some(&btn_select));
-
-    let btn_roll = ToggleButton::with_label("⇋ Roll");
-    btn_roll.set_tooltip_text(Some("Roll edit tool (E)"));
-    btn_roll.set_group(Some(&btn_select));
-
-    let btn_slip = ToggleButton::with_label("↔ Slip");
-    btn_slip.set_tooltip_text(Some("Slip edit tool (Y)"));
-    btn_slip.set_group(Some(&btn_select));
-
-    let btn_slide = ToggleButton::with_label("⇔ Slide");
-    btn_slide.set_tooltip_text(Some("Slide edit tool (U)"));
-    btn_slide.set_group(Some(&btn_select));
+    let tool_pop = gtk::Popover::new();
+    tool_pop.set_autohide(true);
+    tool_pop.set_cascade_popdown(true);
+    let tool_pop_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    tool_pop_box.set_margin_start(4);
+    tool_pop_box.set_margin_end(4);
+    tool_pop_box.set_margin_top(4);
+    tool_pop_box.set_margin_bottom(4);
+    let build_tool_button = |tool: ActiveTool| {
+        let btn = Button::with_label(toolbar_tool_label(tool));
+        btn.add_css_class("flat");
+        btn.set_tooltip_text(Some(toolbar_tool_tooltip(tool)));
+        btn.set_halign(gtk::Align::Fill);
+        btn.set_hexpand(true);
+        btn
+    };
+    let btn_select = build_tool_button(ActiveTool::Select);
+    let btn_razor = build_tool_button(ActiveTool::Razor);
+    let btn_ripple = build_tool_button(ActiveTool::Ripple);
+    let btn_roll = build_tool_button(ActiveTool::Roll);
+    let btn_slip = build_tool_button(ActiveTool::Slip);
+    let btn_slide = build_tool_button(ActiveTool::Slide);
+    tool_pop_box.append(&btn_select);
+    tool_pop_box.append(&btn_razor);
+    tool_pop_box.append(&btn_ripple);
+    tool_pop_box.append(&btn_roll);
+    tool_pop_box.append(&btn_slip);
+    tool_pop_box.append(&btn_slide);
+    tool_pop.set_child(Some(&tool_pop_box));
+    tool_pop.set_parent(&btn_tool_menu);
+    {
+        let tool_pop = tool_pop.clone();
+        let timeline_state = timeline_state.clone();
+        btn_tool_menu.connect_clicked(move |btn| {
+            if tool_pop.is_visible() {
+                tool_pop.popdown();
+            } else {
+                tool_pop.popup();
+            }
+            let should_be_active = is_primary_toolbar_tool(timeline_state.borrow().active_tool);
+            if btn.is_active() != should_be_active {
+                btn.set_active(should_be_active);
+            }
+        });
+    }
 
     let btn_draw = ToggleButton::with_label("✎ Draw");
     btn_draw.set_tooltip_text(Some(
@@ -2861,7 +2939,18 @@ pub fn build_toolbar(
          • drag to draw on the playhead's drawing clip (creates one if needed)\n\
          • Delete / Backspace — remove the most recent item",
     ));
-    btn_draw.set_group(Some(&btn_select));
+    btn_draw.set_active(current_tool == ActiveTool::Draw);
+    let btn_draw_tools = Button::new();
+    let draw_tools_icon = gtk::Image::from_icon_name("applications-graphics-symbolic");
+    btn_draw_tools.set_child(Some(&draw_tools_icon));
+    btn_draw_tools.set_tooltip_text(Some("Draw tool options"));
+    btn_draw_tools.add_css_class("toolbar-split-toggle");
+    btn_draw_tools.set_valign(gtk::Align::Center);
+    let draw_group = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    draw_group.add_css_class("linked");
+    draw_group.set_valign(gtk::Align::Center);
+    draw_group.append(&btn_draw);
+    draw_group.append(&btn_draw_tools);
 
     // Set the active tool and fire any installed `on_tool_changed`
     // listener (the TransformOverlay's draw-mode subscriber lives
@@ -2882,50 +2971,62 @@ pub fn build_toolbar(
     }
     {
         let timeline_state = timeline_state.clone();
-        btn_select.connect_toggled(move |btn| {
-            if btn.is_active() {
-                apply_tool(&timeline_state, ActiveTool::Select);
+        let tool_pop = tool_pop.downgrade();
+        btn_select.connect_clicked(move |_| {
+            if let Some(tool_pop) = tool_pop.upgrade() {
+                tool_pop.popdown();
             }
+            apply_tool(&timeline_state, ActiveTool::Select);
         });
     }
     {
         let timeline_state = timeline_state.clone();
-        btn_razor.connect_toggled(move |btn| {
-            if btn.is_active() {
-                apply_tool(&timeline_state, ActiveTool::Razor);
+        let tool_pop = tool_pop.downgrade();
+        btn_razor.connect_clicked(move |_| {
+            if let Some(tool_pop) = tool_pop.upgrade() {
+                tool_pop.popdown();
             }
+            apply_tool(&timeline_state, ActiveTool::Razor);
         });
     }
     {
         let timeline_state = timeline_state.clone();
-        btn_ripple.connect_toggled(move |btn| {
-            if btn.is_active() {
-                apply_tool(&timeline_state, ActiveTool::Ripple);
+        let tool_pop = tool_pop.downgrade();
+        btn_ripple.connect_clicked(move |_| {
+            if let Some(tool_pop) = tool_pop.upgrade() {
+                tool_pop.popdown();
             }
+            apply_tool(&timeline_state, ActiveTool::Ripple);
         });
     }
     {
         let timeline_state = timeline_state.clone();
-        btn_roll.connect_toggled(move |btn| {
-            if btn.is_active() {
-                apply_tool(&timeline_state, ActiveTool::Roll);
+        let tool_pop = tool_pop.downgrade();
+        btn_roll.connect_clicked(move |_| {
+            if let Some(tool_pop) = tool_pop.upgrade() {
+                tool_pop.popdown();
             }
+            apply_tool(&timeline_state, ActiveTool::Roll);
         });
     }
     {
         let timeline_state = timeline_state.clone();
-        btn_slip.connect_toggled(move |btn| {
-            if btn.is_active() {
-                apply_tool(&timeline_state, ActiveTool::Slip);
+        let tool_pop = tool_pop.downgrade();
+        btn_slip.connect_clicked(move |_| {
+            if let Some(tool_pop) = tool_pop.upgrade() {
+                tool_pop.popdown();
             }
+            apply_tool(&timeline_state, ActiveTool::Slip);
         });
     }
     {
         let timeline_state = timeline_state.clone();
-        btn_slide.connect_toggled(move |btn| {
-            if btn.is_active() {
-                apply_tool(&timeline_state, ActiveTool::Slide);
+        let tool_pop = tool_pop.downgrade();
+        btn_slide.connect_clicked(move |_| {
+            if let Some(tool_pop) = tool_pop.upgrade() {
+                tool_pop.popdown();
             }
+            apply_tool(&timeline_state, ActiveTool::Slide);
         });
     }
     {
@@ -2933,6 +3034,8 @@ pub fn build_toolbar(
         btn_draw.connect_toggled(move |btn| {
             if btn.is_active() {
                 apply_tool(&timeline_state, ActiveTool::Draw);
+            } else if timeline_state.borrow().active_tool == ActiveTool::Draw {
+                btn.set_active(true);
             }
         });
     }
@@ -2948,35 +3051,65 @@ pub fn build_toolbar(
         });
     }
 
-    header.pack_start(&btn_select);
-    header.pack_start(&btn_razor);
-    header.pack_start(&btn_ripple);
-    header.pack_start(&btn_roll);
-    header.pack_start(&btn_slip);
-    header.pack_start(&btn_slide);
-    header.pack_start(&btn_draw);
+    header.pack_start(&btn_tool_menu);
+    header.pack_start(&draw_group);
     header.pack_start(&btn_magnetic);
 
-    // Wire on_tool_changed so keyboard shortcuts sync toolbar buttons
-    {
+    let sync_tool_menu_ui: Rc<dyn Fn(ActiveTool)> = Rc::new({
+        let btn_tool_menu = btn_tool_menu.clone();
+        let tool_menu_label = tool_menu_label.clone();
         let btn_select = btn_select.clone();
         let btn_razor = btn_razor.clone();
         let btn_ripple = btn_ripple.clone();
         let btn_roll = btn_roll.clone();
         let btn_slip = btn_slip.clone();
         let btn_slide = btn_slide.clone();
+        let last_primary_tool = last_primary_tool.clone();
+        move |tool: ActiveTool| {
+            if is_primary_toolbar_tool(tool) {
+                last_primary_tool.set(tool);
+            }
+            let shown_tool = last_primary_tool.get();
+            tool_menu_label.set_text(toolbar_tool_label(shown_tool));
+            let active_primary = is_primary_toolbar_tool(tool).then_some(tool);
+            btn_tool_menu.set_active(active_primary.is_some());
+            btn_select.set_sensitive(active_primary != Some(ActiveTool::Select));
+            btn_razor.set_sensitive(active_primary != Some(ActiveTool::Razor));
+            btn_ripple.set_sensitive(active_primary != Some(ActiveTool::Ripple));
+            btn_roll.set_sensitive(active_primary != Some(ActiveTool::Roll));
+            btn_slip.set_sensitive(active_primary != Some(ActiveTool::Slip));
+            btn_slide.set_sensitive(active_primary != Some(ActiveTool::Slide));
+        }
+    });
+    sync_tool_menu_ui(current_tool);
+
+    // Wire on_tool_changed so keyboard shortcuts sync toolbar controls
+    {
         let btn_draw = btn_draw.clone();
-        timeline_state.borrow_mut().on_tool_changed =
-            Some(Rc::new(move |tool: ActiveTool| match tool {
-                ActiveTool::Select => btn_select.set_active(true),
-                ActiveTool::Razor => btn_razor.set_active(true),
-                ActiveTool::Ripple => btn_ripple.set_active(true),
-                ActiveTool::Roll => btn_roll.set_active(true),
-                ActiveTool::Slip => btn_slip.set_active(true),
-                ActiveTool::Slide => btn_slide.set_active(true),
-                ActiveTool::Draw => btn_draw.set_active(true),
-            }));
+        let sync_tool_menu_ui = sync_tool_menu_ui.clone();
+        timeline_state.borrow_mut().on_tool_changed = Some(Rc::new(move |tool: ActiveTool| {
+            sync_tool_menu_ui(tool);
+            btn_draw.set_active(tool == ActiveTool::Draw);
+        }));
     }
 
-    (header, btn_record)
+    (header, btn_record, btn_draw_tools)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn primary_toolbar_tools_exclude_draw() {
+        assert!(is_primary_toolbar_tool(ActiveTool::Select));
+        assert!(is_primary_toolbar_tool(ActiveTool::Slide));
+        assert!(!is_primary_toolbar_tool(ActiveTool::Draw));
+    }
+
+    #[test]
+    fn toolbar_tool_metadata_matches_expected_labels() {
+        assert_eq!(toolbar_tool_label(ActiveTool::Razor), "✂ Razor");
+        assert_eq!(toolbar_tool_tooltip(ActiveTool::Slip), "Slip edit tool (Y)");
+    }
 }

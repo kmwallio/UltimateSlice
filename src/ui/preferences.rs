@@ -20,6 +20,7 @@ Third-party crates and libraries:\n\
 • uuid — MIT OR Apache-2.0\n\
 • anyhow / thiserror / log / env_logger — MIT OR Apache-2.0\n\
 • rustfft — MIT OR Apache-2.0\n\
+• fuzzy-matcher — MIT\n\
 • whisper-rs — Unlicense\n\
 • ort (ONNX Runtime) — MIT OR Apache-2.0\n\
 • ndarray — MIT OR Apache-2.0\n\
@@ -642,6 +643,9 @@ pub fn show_preferences_dialog(
     #[allow(deprecated)]
     let ai_backend_combo_handle: Rc<RefCell<Option<gtk::ComboBoxText>>> =
         Rc::new(RefCell::new(None));
+    let background_ai_indexing_check = CheckButton::with_label("AI index in background");
+    background_ai_indexing_check.set_active(current.background_ai_indexing);
+    background_ai_indexing_check.set_halign(gtk::Align::Start);
 
     // ── Models section (only when ai-inference feature is enabled) ─────────
     #[cfg(feature = "ai-inference")]
@@ -918,6 +922,17 @@ pub fn show_preferences_dialog(
         stt_path_label.set_halign(gtk::Align::Start);
         stt_path_label.add_css_class("monospace");
         models_box.append(&stt_path_label);
+
+        models_box.append(&background_ai_indexing_check);
+
+        let background_ai_indexing_hint = Label::new(Some(
+            "Automatically builds transcript-search data for audio-backed library items after import/open when Whisper is available. Runs one clip at a time in the background and stays off by default.",
+        ));
+        background_ai_indexing_hint.set_halign(gtk::Align::Start);
+        background_ai_indexing_hint.add_css_class("dim-label");
+        background_ai_indexing_hint.set_wrap(true);
+        background_ai_indexing_hint.set_max_width_chars(60);
+        models_box.append(&background_ai_indexing_hint);
 
         // ── MusicGen model status ─────────────────────────────────────
         models_box.append(&Separator::new(Orientation::Horizontal));
@@ -1326,6 +1341,17 @@ pub fn show_preferences_dialog(
         stt_path_label.add_css_class("monospace");
         models_box.append(&stt_path_label);
 
+        models_box.append(&background_ai_indexing_check);
+
+        let background_ai_indexing_hint = Label::new(Some(
+            "Automatically builds transcript-search data for audio-backed library items after import/open when Whisper is available. Runs one clip at a time in the background and stays off by default.",
+        ));
+        background_ai_indexing_hint.set_halign(gtk::Align::Start);
+        background_ai_indexing_hint.add_css_class("dim-label");
+        background_ai_indexing_hint.set_wrap(true);
+        background_ai_indexing_hint.set_max_width_chars(60);
+        models_box.append(&background_ai_indexing_hint);
+
         // ── MusicGen model status ─────────────────────────────────────
         models_box.append(&Separator::new(Orientation::Horizontal));
 
@@ -1425,6 +1451,7 @@ pub fn show_preferences_dialog(
                 experimental_preview_optimizations: experimental_check.is_active(),
                 realtime_preview: realtime_check.is_active(),
                 background_prerender: background_prerender_check.is_active(),
+                background_ai_indexing: background_ai_indexing_check.is_active(),
                 prerender_preset: current.prerender_preset.clone(),
                 prerender_crf: current.prerender_crf,
                 persist_prerenders_next_to_project_file: persist_prerenders_check.is_active(),

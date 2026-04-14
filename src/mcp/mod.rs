@@ -104,6 +104,10 @@ pub enum McpCommand {
         enabled: bool,
         reply: SyncSender<Value>,
     },
+    SetBackgroundAiIndexing {
+        enabled: bool,
+        reply: SyncSender<Value>,
+    },
     SetPrerenderQuality {
         preset: String,
         crf: u32,
@@ -350,6 +354,7 @@ pub enum McpCommand {
         reply: SyncSender<Value>,
     },
     ListLibrary {
+        search_text: Option<String>,
         reply: SyncSender<Value>,
     },
     ImportMedia {

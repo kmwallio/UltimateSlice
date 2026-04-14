@@ -57,6 +57,8 @@ pub fn show_script_wizard(
     let parsed_script: Rc<RefCell<Option<Script>>> = Rc::new(RefCell::new(None));
     let selected_paths: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     let alignment_result: Rc<RefCell<Option<AlignmentResult>>> = Rc::new(RefCell::new(None));
+    let collected_transcripts: Rc<RefCell<Vec<(String, Vec<SubtitleSegment>)>>> =
+        Rc::new(RefCell::new(Vec::new()));
     let include_titles: Rc<RefCell<bool>> = Rc::new(RefCell::new(true));
     // User overrides from review step: vec of (clip_source_path, scene_id).
     let user_overrides: Rc<RefCell<Vec<(String, String)>>> = Rc::new(RefCell::new(Vec::new()));
@@ -194,6 +196,7 @@ pub fn show_script_wizard(
         let library = library.clone();
         let timeline_state = timeline_state.clone();
         let on_project_changed = on_project_changed.clone();
+        let collected_transcripts = collected_transcripts.clone();
         let step3_progress = step3_progress.clone();
         let step3_detail = step3_detail.clone();
         let step3_label = step3_label.clone();
@@ -227,6 +230,7 @@ pub fn show_script_wizard(
                         parsed_script.clone(),
                         selected_paths.clone(),
                         alignment_result.clone(),
+                        collected_transcripts.clone(),
                         step3_progress.clone(),
                         step3_detail.clone(),
                         step3_label.clone(),
@@ -266,6 +270,7 @@ pub fn show_script_wizard(
                         timeline_state.clone(),
                         parsed_script.clone(),
                         alignment_result.clone(),
+                        collected_transcripts.clone(),
                         *include_titles.borrow(),
                         on_project_changed.clone(),
                     );
@@ -463,6 +468,7 @@ fn start_stt_and_align(
     parsed_script: Rc<RefCell<Option<Script>>>,
     selected_paths: Rc<RefCell<Vec<String>>>,
     alignment_result: Rc<RefCell<Option<AlignmentResult>>>,
+    transcripts: Rc<RefCell<Vec<(String, Vec<SubtitleSegment>)>>>,
     progress_bar: gtk::ProgressBar,
     detail_label: gtk::Label,
     phase_label: gtk::Label,
@@ -478,9 +484,7 @@ fn start_stt_and_align(
         }
     }
 
-    // Collected transcripts as they complete.
-    let transcripts: Rc<RefCell<Vec<(String, Vec<SubtitleSegment>)>>> =
-        Rc::new(RefCell::new(Vec::new()));
+    transcripts.borrow_mut().clear();
     let total = paths.len();
 
     // Poll STT progress.
@@ -647,6 +651,7 @@ fn execute_assembly(
     timeline_state: Rc<RefCell<TimelineState>>,
     parsed_script: Rc<RefCell<Option<Script>>>,
     alignment_result: Rc<RefCell<Option<AlignmentResult>>>,
+    collected_transcripts: Rc<RefCell<Vec<(String, Vec<SubtitleSegment>)>>>,
     include_titles: bool,
     on_project_changed: Rc<dyn Fn()>,
 ) {
@@ -667,10 +672,21 @@ fn execute_assembly(
         include_titles,
     );
 
+    let transcripts = collected_transcripts.borrow().clone();
     let old_tracks = {
         let mut proj = project.borrow_mut();
         let mut lib = library.borrow_mut();
-        script_assembly::apply_assembly_plan(&mut proj, &mut lib, &plan)
+        let old_tracks = script_assembly::apply_assembly_plan(&mut proj, &mut lib, &plan);
+        for (source_path, segments) in transcripts.iter() {
+            crate::model::media_library::upsert_media_transcript(
+                &mut lib,
+                source_path,
+                0,
+                u64::MAX,
+                segments.clone(),
+            );
+        }
+        old_tracks
     };
 
     // Store script path for FCPXML persistence.

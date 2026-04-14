@@ -34,6 +34,7 @@ UltimateSlice uses open-source crates and runtime libraries, including:
 - `uuid` — MIT OR Apache-2.0
 - `anyhow` / `thiserror` / `log` / `env_logger` — MIT OR Apache-2.0
 - `rustfft` — MIT OR Apache-2.0
+- `fuzzy-matcher` — MIT
 - `whisper-rs` — Unlicense
 - `ort` (ONNX Runtime) / `ndarray` — MIT OR Apache-2.0
 - `tokenizers` (Hugging Face) — Apache-2.0

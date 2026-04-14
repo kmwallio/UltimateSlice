@@ -520,6 +520,18 @@ button.round {
     border-bottom-right-radius: 6px;
 }
 
+.linked > button.toolbar-split-toggle {
+    border-left-width: 0;
+}
+
+button.toolbar-split-toggle {
+    min-width: 0;
+    padding-top: 4px;
+    padding-bottom: 4px;
+    padding-left: 8px;
+    padding-right: 8px;
+}
+
 /* Export split control in toolbar */
 .export-split > button.suggested-action,
 .export-split > menubutton.suggested-action,
@@ -781,4 +793,35 @@ expander > title {
     font-size: 12px;
     font-weight: 600;
     color: #e0e0e0;
+}
+
+/* Command palette (Ctrl+Shift+P) */
+.command-palette {
+    background: #1a1a1d;
+    border: 1px solid #2a2a2e;
+    border-radius: 8px;
+}
+.command-palette entry {
+    margin: 10px;
+    padding: 6px 8px;
+    font-size: 14px;
+}
+.command-palette row {
+    padding: 6px 12px;
+    border-radius: 4px;
+}
+.command-palette row:selected {
+    background: #1565c0;
+}
+.command-palette .cmd-category {
+    color: #888;
+    font-size: 0.85em;
+}
+.command-palette .cmd-shortcut {
+    color: #aaa;
+    font-family: monospace;
+    font-size: 0.85em;
+    background: #2a2a2e;
+    padding: 1px 6px;
+    border-radius: 4px;
 }
