@@ -428,7 +428,6 @@ fn run_frame_interp(
     multiplier: u32,
 ) -> bool {
     use ort::session::Session;
-    use ort::value::TensorRef;
 
     let temp_path = format!("{output_path}.partial");
 

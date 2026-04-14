@@ -269,7 +269,6 @@ impl Drop for VoiceoverRecorder {
 
 /// Probe WAV file duration using GStreamer Discoverer.
 fn probe_wav_duration(path: &str) -> Option<u64> {
-    use gstreamer_pbutils::prelude::*;
     let discoverer = gstreamer_pbutils::Discoverer::new(gst::ClockTime::from_seconds(5)).ok()?;
     let uri = format!("file://{path}");
     let info = discoverer.discover_uri(&uri).ok()?;

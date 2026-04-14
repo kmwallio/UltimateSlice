@@ -1,4 +1,4 @@
-use gtk4::{self as gtk, prelude::*};
+use gtk4::prelude::*;
 use gtk4::{Align, Box as GBox, Button, Label, Orientation};
 use std::rc::Rc;
 
