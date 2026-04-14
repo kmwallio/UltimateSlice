@@ -44,6 +44,7 @@ src/
     audio_sync.rs           FFT cross-correlation audio sync (rustfft, GStreamer raw audio extraction)
     color_math.rs           Pure colour/audio math: videobalance calibration, coloradj, 3-point grading, export parity, EQ bandwidth, ducking floor
     player.rs               GStreamer playbin wrapper (load/play/pause/stop/seek/position/duration)
+    prerender_filters.rs    Prerender FFmpeg filter-string builders: pure functions mapping ProgramClip properties to lavfi fragments
     thumbnail.rs            Frame extraction via GStreamer AppSink pipeline (unused in UI yet)
     export.rs               MP4 export via ffmpeg subprocess: filter_complex concat (video) + adelay/amix (audio) → libx264 + aac
     proxy_cache.rs          Background proxy transcoding (half/quarter-res H.264 via ffmpeg) for preview playback

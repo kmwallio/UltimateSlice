@@ -24,6 +24,7 @@ pub mod mask_alpha;
 pub mod mask_contour;
 pub mod music_gen;
 pub mod player;
+pub(crate) mod prerender_filters;
 pub mod probe_cache;
 pub mod program_player;
 pub mod proxy_cache;
