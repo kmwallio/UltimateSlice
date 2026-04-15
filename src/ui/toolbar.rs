@@ -1345,6 +1345,20 @@ pub fn build_toolbar(
         let library = library.clone();
         let on_project_changed = on_project_changed.clone();
         btn_save.connect_clicked(move |btn| {
+            // If the project already has a save path, save directly without a dialog.
+            let existing_path = project.borrow().file_path.clone();
+            if let Some(ref path_str) = existing_path {
+                let path = std::path::Path::new(path_str);
+                match save_project_to_path(&project, &library, path) {
+                    Ok(()) => {
+                        println!("Saved to {}", path.display());
+                        on_project_changed();
+                    }
+                    Err(e) => log::error!("{e}"),
+                }
+                return;
+            }
+
             let dialog = gtk::FileDialog::new();
             dialog.set_title("Save Project XML");
             dialog.set_initial_name(Some("project.uspxml"));
