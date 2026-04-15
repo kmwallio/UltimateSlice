@@ -8711,8 +8711,10 @@ impl ProgramPlayer {
     /// pipeline to reach Playing (the GTK main loop has been running since
     /// `start_playing_pulse` returned), then restore Paused and unlock audio.
     pub fn complete_playing_pulse(&self) {
-        // Check if the pipeline reached Playing.
-        let (res, cur, pend) = self.pipeline.state(gst::ClockTime::from_mseconds(10));
+        // Non-blocking check — never call pipeline.state(timeout) from the
+        // main thread because gtk4paintablesink needs the main loop for GL
+        // preroll; any positive timeout can deadlock.
+        let (res, cur, pend) = self.pipeline.state(gst::ClockTime::ZERO);
         log::info!(
             "complete_playing_pulse: state_result={:?} cur={:?} pend={:?} seq={}",
             res,
@@ -9979,12 +9981,41 @@ impl ProgramPlayer {
                 overlays.remove(&slot.clip_idx);
             }
         }
+        // 0. Comprehensive FlushStart: flush every stage in the processing
+        // chain, not just the aggregator pads.  Streaming threads can block
+        // pushing into a full queue or inside effects_bin — a FlushStart
+        // only on the compositor/audiomixer pad doesn't propagate back
+        // upstream, leaving those threads stuck and causing set_state(Null)
+        // to deadlock later.
+        //
+        // Video chain: decoder → effects_bin → slot_queue → compositor_pad
+        // Audio chain: decoder → audio_conv → ... → audio_level → mixer_pad
+        //
+        // Flush effects_bin sink (propagates through effects_bin → queue).
+        if let Some(sink_pad) = slot.effects_bin.static_pad("sink") {
+            let _ = sink_pad.send_event(gst::event::FlushStart::new());
+        }
+        // Flush queue sink directly as belt-and-suspenders.
+        if let Some(ref q) = slot.slot_queue {
+            if let Some(sink_pad) = q.static_pad("sink") {
+                let _ = sink_pad.send_event(gst::event::FlushStart::new());
+            }
+        }
         if let Some(ref pad) = slot.compositor_pad {
             let _ = pad.send_event(gst::event::FlushStart::new());
+        }
+        // Audio chain: flush from the entry point (audioconvert sink).
+        if let Some(ref ac) = slot.audio_conv {
+            if let Some(sink_pad) = ac.static_pad("sink") {
+                let _ = sink_pad.send_event(gst::event::FlushStart::new());
+            }
         }
         if let Some(ref pad) = slot.audio_mixer_pad {
             let _ = pad.send_event(gst::event::FlushStart::new());
         }
+        // Flush the decoder itself so its internal streaming threads stop.
+        let _ = slot.decoder.send_event(gst::event::FlushStart::new());
+
         // 1. Detach branch elements from the pipeline.
         self.pipeline.remove(&slot.decoder).ok();
         self.pipeline
@@ -10015,44 +10046,35 @@ impl ProgramPlayer {
             self.pipeline.remove(lv).ok();
         }
         // 2. Stop any residual streaming work on removed elements.
-        // Use short timeouts (10ms) — after FlushStart, Null transitions are
-        // near-instant.  The previous 100ms timeout per element caused up to
-        // 700ms blocking on the main thread during boundary crossings.
+        // After comprehensive FlushStart, Null transitions should be
+        // near-instant.  Skip blocking state() confirmation waits —
+        // they added up to ~110ms per slot and can deadlock if an
+        // internal streaming thread is still shutting down.
         let _ = slot.decoder.set_state(gst::State::Null);
-        let _ = slot.decoder.state(gst::ClockTime::from_mseconds(10));
         let _ = slot.effects_bin.set_state(gst::State::Null);
-        let _ = slot.effects_bin.state(gst::ClockTime::from_mseconds(10));
         if let Some(ref q) = slot.slot_queue {
             let _ = q.set_state(gst::State::Null);
-            let _ = q.state(gst::ClockTime::from_mseconds(10));
         }
         if let Some(ref ac) = slot.audio_conv {
             let _ = ac.set_state(gst::State::Null);
-            let _ = ac.state(gst::ClockTime::from_mseconds(10));
         }
         if let Some(ref ar) = slot.audio_resample {
             let _ = ar.set_state(gst::State::Null);
-            let _ = ar.state(gst::ClockTime::from_mseconds(10));
         }
         if let Some(ref cf) = slot.audio_capsfilter {
             let _ = cf.set_state(gst::State::Null);
-            let _ = cf.state(gst::ClockTime::from_mseconds(10));
         }
         if let Some(ref eq_elem) = slot.audio_equalizer {
             let _ = eq_elem.set_state(gst::State::Null);
-            let _ = eq_elem.state(gst::ClockTime::from_mseconds(10));
         }
         if let Some(ref meq_elem) = slot.audio_match_equalizer {
             let _ = meq_elem.set_state(gst::State::Null);
-            let _ = meq_elem.state(gst::ClockTime::from_mseconds(10));
         }
         if let Some(ref ap) = slot.audio_panorama {
             let _ = ap.set_state(gst::State::Null);
-            let _ = ap.state(gst::ClockTime::from_mseconds(10));
         }
         if let Some(ref lv) = slot.audio_level {
             let _ = lv.set_state(gst::State::Null);
-            let _ = lv.state(gst::ClockTime::from_mseconds(10));
         }
         // 3. Release aggregator request pads after branch shutdown.
         if let Some(ref pad) = slot.compositor_pad {
@@ -10071,19 +10093,36 @@ impl ProgramPlayer {
     /// 2. Transition removed elements to Null to stop residual streaming work.
     /// 3. Release compositor/audiomixer request pads after branch shutdown.
     fn teardown_slots(&mut self) {
-        // Pre-flush: send FlushStart to all compositor/audiomixer sink pads
-        // to unblock aggregation.  Streaming threads may be blocked in
-        // downstream pushes, holding STREAM_LOCKs that set_state(Null) needs
-        // for pad deactivation.  Flushing releases those locks first.
-        // (We cannot simply reverse the remove/Null order — setting Null while
-        // branches are still attached caused a different hang; see CHANGELOG.)
+        // Pre-flush: send FlushStart to the ENTIRE processing chain of each
+        // slot, not just the aggregator pads.  Streaming threads can block
+        // pushing into a full queue between effects_bin and compositor, or
+        // inside the audio processing chain.  A FlushStart on the compositor
+        // pad alone doesn't propagate back upstream, so those threads stay
+        // stuck — and the later set_state(Null) deadlocks on STREAM_LOCK.
         for slot in &self.slots {
+            // Video chain: effects_bin sink → queue → compositor pad
+            if let Some(sink_pad) = slot.effects_bin.static_pad("sink") {
+                let _ = sink_pad.send_event(gst::event::FlushStart::new());
+            }
+            if let Some(ref q) = slot.slot_queue {
+                if let Some(sink_pad) = q.static_pad("sink") {
+                    let _ = sink_pad.send_event(gst::event::FlushStart::new());
+                }
+            }
             if let Some(ref pad) = slot.compositor_pad {
                 let _ = pad.send_event(gst::event::FlushStart::new());
+            }
+            // Audio chain: audio_conv sink → ... → audiomixer pad
+            if let Some(ref ac) = slot.audio_conv {
+                if let Some(sink_pad) = ac.static_pad("sink") {
+                    let _ = sink_pad.send_event(gst::event::FlushStart::new());
+                }
             }
             if let Some(ref pad) = slot.audio_mixer_pad {
                 let _ = pad.send_event(gst::event::FlushStart::new());
             }
+            // Flush the decoder itself so its internal streaming threads stop.
+            let _ = slot.decoder.send_event(gst::event::FlushStart::new());
         }
 
         let drained: Vec<VideoSlot> = self.slots.drain(..).collect();
@@ -15269,7 +15308,10 @@ impl ProgramPlayer {
     fn teardown_audio_multi_pipeline(&mut self) {
         if let Some(ref pipeline) = self.audio_multi_pipeline {
             let _ = pipeline.set_state(gst::State::Null);
-            let _ = pipeline.state(Some(gst::ClockTime::from_seconds(1)));
+            // Audio-only pipeline has no gtk4paintablesink so this won't
+            // deadlock, but keep the timeout short to avoid blocking the
+            // GTK main thread.
+            let _ = pipeline.state(Some(gst::ClockTime::from_mseconds(100)));
         }
         self.audio_multi_pipeline = None;
         self.audio_multi_active.clear();
