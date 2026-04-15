@@ -4755,6 +4755,7 @@ fn clip_to_program_clips(
     depth: usize,
     project_fps_num: u32,
     project_fps_den: u32,
+    track_muted: bool,
 ) -> Vec<ProgramClip> {
     use crate::model::clip::ClipKind;
 
@@ -4847,6 +4848,7 @@ fn clip_to_program_clips(
                     depth + 1,
                     project_fps_num,
                     project_fps_den,
+                    track_muted,
                 ));
             }
             return result;
@@ -4946,6 +4948,7 @@ fn clip_to_program_clips(
                     depth + 1,
                     project_fps_num,
                     project_fps_den,
+                    track_muted,
                 );
                 // Video segments have no embedded audio (audio comes from the mix below)
                 for pc in &mut seg_results {
@@ -4989,6 +4992,7 @@ fn clip_to_program_clips(
                     depth + 1,
                     project_fps_num,
                     project_fps_den,
+                    track_muted,
                 );
                 result.extend(audio_results);
             }
@@ -5155,6 +5159,7 @@ fn clip_to_program_clips(
         tracking_binding: c.tracking_binding.clone(),
         masks: c.masks.clone(),
         hsl_qualifier: c.hsl_qualifier.clone(),
+        track_muted,
     }]
 }
 
@@ -14474,13 +14479,14 @@ pub fn build_window(
                 let editing_tracks: &[crate::model::track::Track] = unsafe { &*editing_tracks };
                 let proj_fps_num = proj.frame_rate.numerator;
                 let proj_fps_den = proj.frame_rate.denominator;
+                let has_solo = proj.has_solo_tracks();
                 let mut clips: Vec<ProgramClip> = editing_tracks
                     .iter()
                     .enumerate()
-                    .filter(|(_, t)| proj.track_is_active_for_output(t))
                     .flat_map(|(t_idx, t)| {
                         let audio_only = t.is_audio();
                         let suppress = suppress_embedded_audio_ids.clone();
+                        let muted = t.muted || (has_solo && !t.soloed);
                         t.clips.iter().flat_map(move |c| {
                             clip_to_program_clips(
                                 c,
@@ -14493,6 +14499,7 @@ pub fn build_window(
                                 0,
                                 proj_fps_num,
                                 proj_fps_den,
+                                muted,
                             )
                         })
                     })

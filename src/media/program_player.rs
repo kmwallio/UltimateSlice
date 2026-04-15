@@ -860,6 +860,10 @@ pub struct ProgramClip {
     pub masks: Vec<crate::model::clip::ClipMask>,
     /// Optional HSL Qualifier (secondary color correction).
     pub hsl_qualifier: Option<crate::model::clip::HslQualifier>,
+    /// True when this clip's track is muted or excluded by solo.
+    /// The clip stays in the pipeline to preserve topology, but
+    /// volume and opacity are forced to zero during preview.
+    pub track_muted: bool,
 }
 
 impl ProgramClip {
@@ -882,6 +886,9 @@ impl ProgramClip {
     }
 
     pub fn opacity_at_timeline_ns(&self, timeline_pos_ns: u64) -> f64 {
+        if self.track_muted {
+            return 0.0;
+        }
         ModelClip::evaluate_keyframed_value(
             &self.opacity_keyframes,
             self.local_timeline_position_ns(timeline_pos_ns),
@@ -960,6 +967,9 @@ impl ProgramClip {
     }
 
     pub fn volume_at_timeline_ns(&self, timeline_pos_ns: u64) -> f64 {
+        if self.track_muted {
+            return 0.0;
+        }
         let local_ns = self.local_timeline_position_ns(timeline_pos_ns);
         let base_vol =
             ModelClip::evaluate_keyframed_value(&self.volume_keyframes, local_ns, self.volume);
@@ -15895,6 +15905,7 @@ mod tests {
             title_animation: crate::model::clip::TitleAnimation::None,
             title_animation_duration_ns: 1_000_000_000,
             drawing_items: Vec::new(),
+            track_muted: false,
         }
     }
 
