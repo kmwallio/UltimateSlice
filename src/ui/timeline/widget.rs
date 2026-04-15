@@ -3899,6 +3899,22 @@ impl TimelineState {
         ))
     }
 
+    fn badge_tooltip_text(&self, x: f64, y: f64) -> Option<&'static str> {
+        if self.solo_badge_hit_track_index(x, y).is_some() {
+            return Some("Solo (S)");
+        }
+        if self.duck_badge_hit_track_index(x, y).is_some() {
+            return Some("Duck — auto-lower volume when dialogue is present");
+        }
+        if self.mute_badge_hit_track_index(x, y).is_some() {
+            return Some("Mute (M) — silence this track in playback and export");
+        }
+        if self.lock_badge_hit_track_index(x, y).is_some() {
+            return Some("Lock (Shift+L) — prevent edits on this track");
+        }
+        None
+    }
+
     /// Find which clip and track are at a given (x, y) coordinate.
     /// Also returns whether x is near the in-edge or out-edge (for trimming).
     fn hit_test(&self, x: f64, y: f64) -> Option<HitResult> {
@@ -4623,15 +4639,16 @@ pub fn build_timeline(
     {
         let state = state.clone();
         area.connect_query_tooltip(move |_area, x, y, _keyboard_mode, tooltip| {
-            let text = state
-                .borrow()
-                .keyframe_marker_tooltip_text(x as f64, y as f64);
-            if let Some(text) = text {
-                tooltip.set_text(Some(&text));
-                true
-            } else {
-                false
+            let st = state.borrow();
+            if let Some(text) = st.badge_tooltip_text(x as f64, y as f64) {
+                tooltip.set_text(Some(text));
+                return true;
             }
+            if let Some(text) = st.keyframe_marker_tooltip_text(x as f64, y as f64) {
+                tooltip.set_text(Some(&text));
+                return true;
+            }
+            false
         });
     }
 
