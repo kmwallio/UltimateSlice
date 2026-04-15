@@ -3495,6 +3495,85 @@ impl ProgramPlayer {
 
     // ── Clip loading ───────────────────────────────────────────────────────
 
+    /// Check whether the new clip set has the same pipeline topology as the
+    /// currently loaded clips.  "Topology" means same clip IDs in the same
+    /// order with the same source paths and timing — i.e. the GStreamer
+    /// pipeline wouldn't need to be rebuilt.
+    pub fn clips_topology_matches(&self, new_clips: &[ProgramClip]) -> bool {
+        // Quick reject: if slots are empty we need a full load to build them.
+        if self.slots.is_empty() && !self.clips.is_empty() {
+            return false;
+        }
+        let mut sorted: Vec<&ProgramClip> = new_clips.iter().collect();
+        sorted.sort_by_key(|c| c.timeline_start_ns);
+        let (new_audio, new_video): (Vec<_>, Vec<_>) =
+            sorted.into_iter().partition(|c| c.is_audio_only);
+
+        if new_video.len() != self.clips.len() || new_audio.len() != self.audio_clips.len() {
+            return false;
+        }
+        let video_ok = new_video.iter().zip(self.clips.iter()).all(|(a, b)| {
+            a.id == b.id
+                && a.source_path == b.source_path
+                && a.source_in_ns == b.source_in_ns
+                && a.source_out_ns == b.source_out_ns
+                && a.timeline_start_ns == b.timeline_start_ns
+                && a.track_index == b.track_index
+        });
+        let audio_ok = new_audio.iter().zip(self.audio_clips.iter()).all(|(a, b)| {
+            a.id == b.id
+                && a.source_path == b.source_path
+                && a.source_in_ns == b.source_in_ns
+                && a.source_out_ns == b.source_out_ns
+                && a.timeline_start_ns == b.timeline_start_ns
+                && a.track_index == b.track_index
+        });
+        video_ok && audio_ok
+    }
+
+    /// Update clip data in-place without tearing down the GStreamer pipeline.
+    /// Use this when `clips_topology_matches` returned true — the pipeline
+    /// topology is unchanged and only "soft" properties (volume, color
+    /// correction, keyframes, etc.) may have been modified.
+    pub fn soft_reload_clips(&mut self, mut clips: Vec<ProgramClip>) {
+        self.invalidate_short_frame_cache("soft-reload-clips");
+        clips.sort_by_key(|c| c.timeline_start_ns);
+        let (audio, video): (Vec<_>, Vec<_>) = clips.into_iter().partition(|c| c.is_audio_only);
+        self.audio_clips = audio;
+        self.clips = video;
+        let max_track_index = self
+            .clips
+            .iter()
+            .chain(self.audio_clips.iter())
+            .map(|c| c.track_index)
+            .max();
+        self.audio_track_peak_db = max_track_index
+            .map(|idx| vec![[-60.0, -60.0]; idx + 1])
+            .unwrap_or_default();
+        let vdur = self
+            .clips
+            .iter()
+            .map(|c| c.timeline_end_ns())
+            .max()
+            .unwrap_or(0);
+        let adur = self
+            .audio_clips
+            .iter()
+            .map(|c| c.timeline_end_ns())
+            .max()
+            .unwrap_or(0);
+        self.timeline_dur_ns = vdur.max(adur);
+        // Clear cached frame position so the next seek re-renders with
+        // updated property values (color correction, volume, etc.).
+        self.last_seeked_frame_pos = None;
+        self.rebuild_adjustment_overlays();
+        log::info!(
+            "soft_reload_clips: updated {} video + {} audio clips in-place (pipeline intact)",
+            self.clips.len(),
+            self.audio_clips.len()
+        );
+    }
+
     pub fn load_clips(&mut self, mut clips: Vec<ProgramClip>) {
         self.invalidate_short_frame_cache("project-clips-reloaded");
         clips.sort_by_key(|c| c.timeline_start_ns);
@@ -14722,7 +14801,8 @@ impl ProgramPlayer {
         };
         let was_playing = self.state == PlayerState::Playing;
         let _ = pipeline.set_state(gst::State::Paused);
-        let _ = pipeline.state(Some(gst::ClockTime::from_seconds(1)));
+        let audio_reseek_ms: u64 = if was_playing { 500 } else { 200 };
+        let _ = pipeline.state(Some(gst::ClockTime::from_mseconds(audio_reseek_ms)));
         // Reset the separate audio pipeline's segment/running-time before the
         // per-decoder reseeks. Without this flush, the audiomixer can keep the
         // old running-time and drop freshly reseeked external-audio buffers as
@@ -15122,7 +15202,16 @@ impl ProgramPlayer {
         }
 
         let _ = pipeline.set_state(gst::State::Paused);
-        let _ = pipeline.state(Some(gst::ClockTime::from_seconds(2)));
+        // Cap the blocking wait to avoid freezing the GTK main thread.
+        // Audio decoders don't need GL context and preroll quickly; the
+        // old 2-second timeout caused multi-second freezes when combined
+        // with the video pipeline rebuild (especially with compound clips).
+        let audio_preroll_ms: u64 = if self.state == PlayerState::Playing {
+            1000
+        } else {
+            300
+        };
+        let _ = pipeline.state(Some(gst::ClockTime::from_mseconds(audio_preroll_ms)));
 
         for (decoder, branch) in &decoders {
             // Compute the source position this clip should play from.

@@ -14775,6 +14775,10 @@ pub fn build_window(
 
                 let project_file_path = { project_reload.borrow().file_path.clone() };
                 let master_gain_db = { project_reload.borrow().master_gain_db };
+                let topology_matches = {
+                    let pp = prog_player_reload.borrow();
+                    pp.clips_topology_matches(&clips)
+                };
                 {
                     let mut pp = prog_player_reload.borrow_mut();
                     pp.set_prerender_project_path(
@@ -14785,7 +14789,16 @@ pub fn build_window(
                     );
                     pp.set_project_dimensions(proj_w, proj_h);
                     pp.set_frame_rate(fr_num, fr_den);
-                    pp.load_clips(clips);
+                    if topology_matches && !use_light_refresh {
+                        // Pipeline topology unchanged — update clip data
+                        // in-place without tearing down decoders.  This
+                        // avoids the multi-second blocking pipeline rebuild
+                        // that caused UI freezes on mute/solo toggles
+                        // (especially with compound clips under the playhead).
+                        pp.soft_reload_clips(clips);
+                    } else {
+                        pp.load_clips(clips);
+                    }
                     // `load_clips` resets `timeline_pos_ns` to 0. The
                     // real seek runs in phase 2 (deferred 16 ms), but
                     // the 33 ms program-monitor tick reads
