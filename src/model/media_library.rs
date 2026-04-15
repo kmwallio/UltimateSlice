@@ -1593,4 +1593,46 @@ mod tests {
         );
         assert!(project.parsed_transcript_cache_json.is_none());
     }
+
+    #[test]
+    fn library_item_roundtrip_through_fcpxml() {
+        let mut project = crate::model::project::Project::new("Test");
+        let mut lib = MediaLibrary::new();
+
+        // Add an off-timeline item to the library.
+        let mut item = MediaItem::new("/tmp/video.mp4", 5_000_000_000);
+        item.label = "My Clip".to_string();
+        item.has_audio = true;
+        lib.items.push(item);
+
+        // Sync library → project transient fields.
+        sync_bins_to_project(&lib, &mut project);
+        assert!(
+            project.parsed_library_items_json.is_some(),
+            "parsed_library_items_json should be populated"
+        );
+
+        // Write FCPXML.
+        let xml = crate::fcpxml::writer::write_fcpxml(&project).expect("write_fcpxml");
+        assert!(
+            xml.contains("us:library-items"),
+            "FCPXML should contain us:library-items vendor attr"
+        );
+
+        // Parse FCPXML back.
+        let mut loaded = crate::fcpxml::parser::parse_fcpxml(&xml).expect("parse_fcpxml");
+        assert!(
+            loaded.parsed_library_items_json.is_some(),
+            "loaded project should carry parsed_library_items_json"
+        );
+
+        // Apply to a fresh library (simulates clear-on-reload).
+        let mut new_lib = MediaLibrary::new();
+        apply_bins_from_project(&mut new_lib, &mut loaded);
+        assert_eq!(new_lib.items.len(), 1);
+        assert_eq!(new_lib.items[0].source_path, "/tmp/video.mp4");
+        assert_eq!(new_lib.items[0].duration_ns, 5_000_000_000);
+        assert_eq!(new_lib.items[0].label, "My Clip");
+        assert!(new_lib.items[0].has_audio);
+    }
 }

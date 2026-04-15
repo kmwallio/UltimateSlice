@@ -218,13 +218,19 @@ fn save_project_to_path(
         fcpxml::writer::write_fcpxml_for_path(&proj, path)
             .map_err(|e| format!("FCPXML write error: {e}"))?
     };
-    std::fs::write(path, xml).map_err(|e| format!("Save error: {e}"))?;
+    std::fs::write(path, &xml).map_err(|e| format!("Save error: {e}"))?;
     if let Some(p) = path.to_str() {
         recent::push(p);
     }
     {
         let mut proj = project.borrow_mut();
         proj.file_path = Some(path.to_string_lossy().to_string());
+        // Keep source_fcpxml in sync with what was written to disk so that
+        // subsequent clean-save passthroughs return the correct content
+        // (including up-to-date us:library-items, us:bins, etc.).
+        if !fcpxml::writer::use_strict_fcpxml_for_path(path) {
+            proj.source_fcpxml = Some(xml);
+        }
         proj.dirty = false;
     }
     Ok(())
