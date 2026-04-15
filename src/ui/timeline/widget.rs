@@ -24,10 +24,13 @@ use std::rc::Rc;
 const TRACK_HEIGHT: f64 = 60.0;
 const TRACK_HEIGHT_SMALL: f64 = 44.0;
 const TRACK_HEIGHT_LARGE: f64 = 84.0;
-const TRACK_LABEL_WIDTH: f64 = 110.0;
+const TRACK_LABEL_WIDTH: f64 = 140.0;
 const TRACK_LABEL_METER_WIDTH: f64 = 18.0;
 const TRACK_LABEL_SOLO_BADGE_WIDTH: f64 = 16.0;
 const TRACK_LABEL_SOLO_BADGE_HEIGHT: f64 = 14.0;
+/// Badge constants reused for Mute and Lock badges (same size as Solo/Duck).
+const TRACK_LABEL_BADGE_WIDTH: f64 = 16.0;
+const TRACK_LABEL_BADGE_HEIGHT: f64 = 14.0;
 const RULER_HEIGHT: f64 = 24.0;
 const PIXELS_PER_SECOND_DEFAULT: f64 = 100.0;
 use crate::units::NS_PER_SECOND_F as NS_PER_SECOND;
@@ -854,14 +857,13 @@ impl TimelineState {
         }
         let row_y =
             track_row_top_in_tracks(editing_tracks, track_idx) + self.breadcrumb_bar_height();
-        let solo_x = track_label_solo_badge_x(self.show_track_audio_levels);
-        let badge_x = solo_x - TRACK_LABEL_SOLO_BADGE_WIDTH - 2.0;
+        let badge_x = track_label_duck_badge_x(self.show_track_audio_levels);
         let badge_y = row_y + 6.0;
         let content_y = y + self.vertical_scroll_offset;
         if x >= badge_x
-            && x <= badge_x + TRACK_LABEL_SOLO_BADGE_WIDTH
+            && x <= badge_x + TRACK_LABEL_BADGE_WIDTH
             && content_y >= badge_y
-            && content_y <= badge_y + TRACK_LABEL_SOLO_BADGE_HEIGHT
+            && content_y <= badge_y + TRACK_LABEL_BADGE_HEIGHT
         {
             Some(track_idx)
         } else {
@@ -881,6 +883,153 @@ impl TimelineState {
         self.history.execute(
             Box::new(crate::undo::set_track_duck_cmd(
                 track_id, old_duck, !old_duck,
+            )),
+            &mut proj,
+        );
+        true
+    }
+
+    fn mute_badge_hit_track_index(&self, x: f64, y: f64) -> Option<usize> {
+        let track_idx = self.track_index_at_y(y)?;
+        let project = self.project.borrow();
+        let editing_tracks = self.resolve_editing_tracks(&project);
+        let row_y =
+            track_row_top_in_tracks(editing_tracks, track_idx) + self.breadcrumb_bar_height();
+        let badge_x = track_label_mute_badge_x(self.show_track_audio_levels);
+        let badge_y = row_y + 6.0;
+        let content_y = y + self.vertical_scroll_offset;
+        if x >= badge_x
+            && x <= badge_x + TRACK_LABEL_BADGE_WIDTH
+            && content_y >= badge_y
+            && content_y <= badge_y + TRACK_LABEL_BADGE_HEIGHT
+        {
+            Some(track_idx)
+        } else {
+            None
+        }
+    }
+
+    fn lock_badge_hit_track_index(&self, x: f64, y: f64) -> Option<usize> {
+        let track_idx = self.track_index_at_y(y)?;
+        let project = self.project.borrow();
+        let editing_tracks = self.resolve_editing_tracks(&project);
+        let row_y =
+            track_row_top_in_tracks(editing_tracks, track_idx) + self.breadcrumb_bar_height();
+        let badge_x = track_label_lock_badge_x(self.show_track_audio_levels);
+        let badge_y = row_y + 6.0;
+        let content_y = y + self.vertical_scroll_offset;
+        if x >= badge_x
+            && x <= badge_x + TRACK_LABEL_BADGE_WIDTH
+            && content_y >= badge_y
+            && content_y <= badge_y + TRACK_LABEL_BADGE_HEIGHT
+        {
+            Some(track_idx)
+        } else {
+            None
+        }
+    }
+
+    fn toggle_track_mute_by_index(&mut self, track_idx: usize) -> bool {
+        let (track_id, old_muted) = {
+            let proj = self.project.borrow();
+            let Some(track) = proj.tracks.get(track_idx) else {
+                return false;
+            };
+            (track.id.clone(), track.muted)
+        };
+        let mut proj = self.project.borrow_mut();
+        self.history.execute(
+            Box::new(crate::undo::set_track_muted_cmd(
+                track_id, old_muted, !old_muted,
+            )),
+            &mut proj,
+        );
+        true
+    }
+
+    fn toggle_track_lock_by_index(&mut self, track_idx: usize) -> bool {
+        let (track_id, old_locked) = {
+            let proj = self.project.borrow();
+            let Some(track) = proj.tracks.get(track_idx) else {
+                return false;
+            };
+            (track.id.clone(), track.locked)
+        };
+        let mut proj = self.project.borrow_mut();
+        self.history.execute(
+            Box::new(crate::undo::set_track_locked_cmd(
+                track_id,
+                old_locked,
+                !old_locked,
+            )),
+            &mut proj,
+        );
+        true
+    }
+
+    fn toggle_selected_track_mute(&mut self) -> bool {
+        let Some(track_id) = self.selected_track_id.clone() else {
+            return false;
+        };
+        let old_muted = {
+            let proj = self.project.borrow();
+            let Some(track) = proj.tracks.iter().find(|t| t.id == track_id) else {
+                return false;
+            };
+            track.muted
+        };
+        let mut proj = self.project.borrow_mut();
+        self.history.execute(
+            Box::new(crate::undo::set_track_muted_cmd(
+                track_id, old_muted, !old_muted,
+            )),
+            &mut proj,
+        );
+        true
+    }
+
+    fn toggle_selected_track_lock(&mut self) -> bool {
+        let Some(track_id) = self.selected_track_id.clone() else {
+            return false;
+        };
+        let old_locked = {
+            let proj = self.project.borrow();
+            let Some(track) = proj.tracks.iter().find(|t| t.id == track_id) else {
+                return false;
+            };
+            track.locked
+        };
+        let mut proj = self.project.borrow_mut();
+        self.history.execute(
+            Box::new(crate::undo::set_track_locked_cmd(
+                track_id,
+                old_locked,
+                !old_locked,
+            )),
+            &mut proj,
+        );
+        true
+    }
+
+    fn set_track_color_label_by_index(
+        &mut self,
+        track_idx: usize,
+        color: crate::model::track::TrackColorLabel,
+    ) -> bool {
+        let (track_id, old_color) = {
+            let proj = self.project.borrow();
+            let Some(track) = proj.tracks.get(track_idx) else {
+                return false;
+            };
+            (track.id.clone(), track.color_label)
+        };
+        if old_color == color {
+            return false;
+        }
+        let mut proj = self.project.borrow_mut();
+        self.history.execute(
+            Box::new(crate::undo::set_track_color_label_cmd(
+                track_id, old_color, color,
             )),
             &mut proj,
         );
@@ -4639,6 +4788,43 @@ pub fn build_timeline(
         "Arm a one-shot drag on empty audio-track space to define a MusicGen region (1–30s)",
     ));
     track_context_box.append(&btn_generate_music_region);
+
+    // --- Track Color submenu ---
+    let color_label_section = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let color_separator = gtk::Separator::new(gtk::Orientation::Horizontal);
+    color_separator.set_margin_top(4);
+    color_separator.set_margin_bottom(2);
+    color_label_section.append(&color_separator);
+    let color_header = gtk::Label::new(Some("Track Color"));
+    color_header.set_halign(gtk::Align::Start);
+    color_header.add_css_class("dim-label");
+    color_header.set_margin_start(6);
+    color_label_section.append(&color_header);
+    let color_row = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+    color_row.set_margin_start(4);
+    color_row.set_margin_top(2);
+    color_row.set_margin_bottom(2);
+    let track_color_buttons: Vec<(gtk::Button, crate::model::track::TrackColorLabel)> =
+        crate::model::track::TrackColorLabel::ALL
+            .iter()
+            .map(|&color| {
+                let btn = gtk::Button::new();
+                btn.set_size_request(18, 18);
+                btn.add_css_class("flat");
+                if color == crate::model::track::TrackColorLabel::None {
+                    btn.set_label("⊘");
+                    btn.set_tooltip_text(Some("None"));
+                } else {
+                    btn.set_label("●");
+                    btn.set_tooltip_text(Some(color.label()));
+                }
+                color_row.append(&btn);
+                (btn, color)
+            })
+            .collect();
+    color_label_section.append(&color_row);
+    track_context_box.append(&color_label_section);
+
     track_context_pop.set_child(Some(&track_context_box));
     let track_context_track_idx: Rc<RefCell<Option<usize>>> = Rc::new(RefCell::new(None));
 
@@ -5130,6 +5316,31 @@ pub fn build_timeline(
         });
     }
 
+    // Track color button handlers
+    for (btn, color) in track_color_buttons {
+        let state = state.clone();
+        let area_weak = area.downgrade();
+        let pop_weak = track_context_pop.downgrade();
+        let track_context_track_idx = track_context_track_idx.clone();
+        btn.connect_clicked(move |_| {
+            let track_idx = *track_context_track_idx.borrow();
+            let mut st = state.borrow_mut();
+            let changed = track_idx
+                .map(|idx| st.set_track_color_label_by_index(idx, color))
+                .unwrap_or(false);
+            drop(st);
+            if let Some(pop) = pop_weak.upgrade() {
+                pop.popdown();
+            }
+            if changed {
+                TimelineState::notify_project_changed(&state);
+                if let Some(a) = area_weak.upgrade() {
+                    a.queue_draw();
+                }
+            }
+        });
+    }
+
     // Rename Track button handler — closes the context menu and opens the
     // rename popover, anchored at the track's left-side label area.
     {
@@ -5401,6 +5612,8 @@ pub fn build_timeline(
                     && x < TRACK_LABEL_WIDTH
                     && st.solo_badge_hit_track_index(x, y).is_none()
                     && st.duck_badge_hit_track_index(x, y).is_none()
+                    && st.mute_badge_hit_track_index(x, y).is_none()
+                    && st.lock_badge_hit_track_index(x, y).is_none()
                 {
                     let resolved = st.track_index_at_y(y).and_then(|track_idx| {
                         let proj = st.project.borrow();
@@ -5468,6 +5681,34 @@ pub fn build_timeline(
                             let changed = st
                                 .duck_badge_hit_track_index(x, y)
                                 .map(|track_idx| st.toggle_track_duck_by_index(track_idx))
+                                .unwrap_or(false);
+                            drop(st);
+                            if changed {
+                                TimelineState::notify_project_changed(&state);
+                            }
+                            if let Some(a) = area_weak.upgrade() {
+                                a.queue_draw();
+                            }
+                            return;
+                        }
+                        if st.mute_badge_hit_track_index(x, y).is_some() {
+                            let changed = st
+                                .mute_badge_hit_track_index(x, y)
+                                .map(|track_idx| st.toggle_track_mute_by_index(track_idx))
+                                .unwrap_or(false);
+                            drop(st);
+                            if changed {
+                                TimelineState::notify_project_changed(&state);
+                            }
+                            if let Some(a) = area_weak.upgrade() {
+                                a.queue_draw();
+                            }
+                            return;
+                        }
+                        if st.lock_badge_hit_track_index(x, y).is_some() {
+                            let changed = st
+                                .lock_badge_hit_track_index(x, y)
+                                .map(|track_idx| st.toggle_track_lock_by_index(track_idx))
                                 .unwrap_or(false);
                             drop(st);
                             if changed {
@@ -5624,6 +5865,8 @@ pub fn build_timeline(
                     if x < TRACK_LABEL_WIDTH
                         && st.solo_badge_hit_track_index(x, y).is_none()
                         && st.duck_badge_hit_track_index(x, y).is_none()
+                        && st.mute_badge_hit_track_index(x, y).is_none()
+                        && st.lock_badge_hit_track_index(x, y).is_none()
                     {
                         if let Some(track_idx) = st.track_index_at_y(y) {
                             let selected = {
@@ -5964,6 +6207,8 @@ pub fn build_timeline(
                     && !ruler_hit_test(&st, y)
                     && st.solo_badge_hit_track_index(x, y).is_none()
                     && st.duck_badge_hit_track_index(x, y).is_none()
+                    && st.mute_badge_hit_track_index(x, y).is_none()
+                    && st.lock_badge_hit_track_index(x, y).is_none()
                 {
                     // Drag started in track label area → track reorder
                     if let Some(track_idx) = st.track_index_at_y(y) {
@@ -7472,6 +7717,22 @@ pub fn build_timeline(
                     }
                     changed
                 }
+                Key::m | Key::M if !ctrl && !alt => {
+                    // M = toggle mute on selected track
+                    let changed = st.toggle_selected_track_mute();
+                    if changed {
+                        notify_project = true;
+                    }
+                    changed
+                }
+                Key::l | Key::L if shift && !ctrl && !alt => {
+                    // Shift+L = toggle lock on selected track
+                    let changed = st.toggle_selected_track_lock();
+                    if changed {
+                        notify_project = true;
+                    }
+                    changed
+                }
                 Key::b | Key::B => {
                     // B = Blade/Razor
                     st.active_tool = if st.active_tool == ActiveTool::Razor {
@@ -8829,6 +9090,48 @@ fn draw_track_row(
         }
     }
 
+    // Muted-track dimming overlay on clip content area
+    if track.muted {
+        cr.set_source_rgba(0.0, 0.0, 0.0, 0.35);
+        cr.rectangle(
+            TRACK_LABEL_WIDTH,
+            y,
+            width - TRACK_LABEL_WIDTH,
+            track_height,
+        );
+        cr.fill().ok();
+    }
+
+    // Locked-track hatch overlay on clip content area
+    if track.locked {
+        cr.save().ok();
+        cr.rectangle(
+            TRACK_LABEL_WIDTH,
+            y,
+            width - TRACK_LABEL_WIDTH,
+            track_height,
+        );
+        cr.clip();
+        cr.set_source_rgba(0.6, 0.4, 0.1, 0.12);
+        cr.set_line_width(1.0);
+        let step = 8.0;
+        let x0 = TRACK_LABEL_WIDTH;
+        let x1 = width;
+        let y0 = y;
+        let y1 = y + track_height;
+        let mut d = x0 - track_height;
+        while d < x1 {
+            cr.move_to(d.max(x0), y0.max(y0 + (d - x0).min(0.0)));
+            cr.line_to(
+                (d + track_height).min(x1),
+                y1.min(y0 + (d + track_height - x0).max(0.0)),
+            );
+            d += step;
+        }
+        cr.stroke().ok();
+        cr.restore().ok();
+    }
+
     // Draw label column on top so it stays visible when timeline is scrolled
     let is_active = st.selected_track_id.as_deref() == Some(&track.id);
     if is_active {
@@ -8839,16 +9142,37 @@ fn draw_track_row(
     cr.rectangle(0.0, y, TRACK_LABEL_WIDTH, track_height);
     cr.fill().ok();
 
-    // Active track accent bar
+    // Active track accent bar (uses track color when set)
     if is_active {
-        cr.set_source_rgb(0.3, 0.55, 0.95);
+        let (ar, ag, ab) = track.color_label.rgb().unwrap_or((0.3, 0.55, 0.95));
+        cr.set_source_rgb(ar, ag, ab);
         cr.rectangle(0.0, y, 3.0, track_height);
         cr.fill().ok();
     }
 
+    // Drag handle glyph
+    cr.set_source_rgb(0.45, 0.45, 0.5);
+    cr.set_font_size(10.0);
+    let _ = cr.move_to(5.0, y + track_height / 2.0 + 3.0);
+    let _ = cr.show_text("⠿");
+
+    // Per-track color swatch (10×10 dot left of track name)
+    let name_x;
+    if let Some((cr_r, cr_g, cr_b)) = track.color_label.rgb() {
+        let dot_x = 18.0;
+        let dot_y = y + track_height / 2.0 - 1.0;
+        let dot_r = 5.0;
+        cr.set_source_rgb(cr_r, cr_g, cr_b);
+        cr.arc(dot_x, dot_y, dot_r, 0.0, 2.0 * std::f64::consts::PI);
+        cr.fill().ok();
+        name_x = 28.0;
+    } else {
+        name_x = 18.0;
+    }
+
     cr.set_source_rgb(0.8, 0.8, 0.8);
     cr.set_font_size(11.0);
-    let _ = cr.move_to(6.0, y + track_height / 2.0 + 4.0);
+    let _ = cr.move_to(name_x, y + track_height / 2.0 + 4.0);
     let _ = cr.show_text(&track.label);
 
     // Audio role label (below track name, dimmed).
@@ -8862,12 +9186,34 @@ fn draw_track_row(
         };
         cr.set_source_rgb(role_r, role_g, role_b);
         cr.set_font_size(9.0);
-        let _ = cr.move_to(6.0, y + track_height / 2.0 + 15.0);
+        let _ = cr.move_to(name_x, y + track_height / 2.0 + 15.0);
         let _ = cr.show_text(role_label);
     }
 
+    // --- Badge row: [D] [M] [S] [L] from left to right ---
+    let badge_y = y + 6.0;
+
+    // Lock badge (rightmost)
+    let lock_x = track_label_lock_badge_x(st.show_track_audio_levels);
+    if track.locked {
+        cr.set_source_rgb(0.85, 0.5, 0.15);
+    } else {
+        cr.set_source_rgb(0.35, 0.35, 0.4);
+    }
+    cr.rectangle(
+        lock_x,
+        badge_y,
+        TRACK_LABEL_BADGE_WIDTH,
+        TRACK_LABEL_BADGE_HEIGHT,
+    );
+    cr.fill().ok();
+    cr.set_source_rgb(0.1, 0.1, 0.12);
+    cr.set_font_size(10.0);
+    let _ = cr.move_to(lock_x + 4.5, badge_y + TRACK_LABEL_BADGE_HEIGHT - 3.0);
+    let _ = cr.show_text("L");
+
+    // Solo badge (second from right)
     let solo_x = track_label_solo_badge_x(st.show_track_audio_levels);
-    let solo_y = y + 6.0;
     if track.soloed {
         cr.set_source_rgb(0.9, 0.75, 0.2);
     } else {
@@ -8875,20 +9221,38 @@ fn draw_track_row(
     }
     cr.rectangle(
         solo_x,
-        solo_y,
-        TRACK_LABEL_SOLO_BADGE_WIDTH,
-        TRACK_LABEL_SOLO_BADGE_HEIGHT,
+        badge_y,
+        TRACK_LABEL_BADGE_WIDTH,
+        TRACK_LABEL_BADGE_HEIGHT,
     );
     cr.fill().ok();
     cr.set_source_rgb(0.1, 0.1, 0.12);
     cr.set_font_size(10.0);
-    let _ = cr.move_to(solo_x + 4.5, solo_y + TRACK_LABEL_SOLO_BADGE_HEIGHT - 3.0);
+    let _ = cr.move_to(solo_x + 4.5, badge_y + TRACK_LABEL_BADGE_HEIGHT - 3.0);
     let _ = cr.show_text("S");
+
+    // Mute badge
+    let mute_x = track_label_mute_badge_x(st.show_track_audio_levels);
+    if track.muted {
+        cr.set_source_rgb(0.85, 0.25, 0.25);
+    } else {
+        cr.set_source_rgb(0.35, 0.35, 0.4);
+    }
+    cr.rectangle(
+        mute_x,
+        badge_y,
+        TRACK_LABEL_BADGE_WIDTH,
+        TRACK_LABEL_BADGE_HEIGHT,
+    );
+    cr.fill().ok();
+    cr.set_source_rgb(0.1, 0.1, 0.12);
+    cr.set_font_size(10.0);
+    let _ = cr.move_to(mute_x + 4.0, badge_y + TRACK_LABEL_BADGE_HEIGHT - 3.0);
+    let _ = cr.show_text("M");
 
     // Duck badge (only for audio tracks).
     if track.is_audio() {
-        let duck_x = solo_x - TRACK_LABEL_SOLO_BADGE_WIDTH - 2.0;
-        let duck_y = solo_y;
+        let duck_x = track_label_duck_badge_x(st.show_track_audio_levels);
         if track.duck {
             cr.set_source_rgb(0.2, 0.7, 0.9);
         } else {
@@ -8896,14 +9260,14 @@ fn draw_track_row(
         }
         cr.rectangle(
             duck_x,
-            duck_y,
-            TRACK_LABEL_SOLO_BADGE_WIDTH,
-            TRACK_LABEL_SOLO_BADGE_HEIGHT,
+            badge_y,
+            TRACK_LABEL_BADGE_WIDTH,
+            TRACK_LABEL_BADGE_HEIGHT,
         );
         cr.fill().ok();
         cr.set_source_rgb(0.1, 0.1, 0.12);
         cr.set_font_size(10.0);
-        let _ = cr.move_to(duck_x + 4.5, duck_y + TRACK_LABEL_SOLO_BADGE_HEIGHT - 3.0);
+        let _ = cr.move_to(duck_x + 4.5, badge_y + TRACK_LABEL_BADGE_HEIGHT - 3.0);
         let _ = cr.show_text("D");
     }
 
@@ -8997,11 +9361,25 @@ fn draw_through_edit_boundary_indicators(
 }
 
 fn track_label_solo_badge_x(show_track_audio_levels: bool) -> f64 {
+    // Badge layout right-to-left: [D] [M] [S] [L]
+    // Lock is rightmost, solo is second from right
+    track_label_lock_badge_x(show_track_audio_levels) - TRACK_LABEL_BADGE_WIDTH - 2.0
+}
+
+fn track_label_lock_badge_x(show_track_audio_levels: bool) -> f64 {
     if show_track_audio_levels {
-        TRACK_LABEL_WIDTH - TRACK_LABEL_METER_WIDTH - TRACK_LABEL_SOLO_BADGE_WIDTH - 12.0
+        TRACK_LABEL_WIDTH - TRACK_LABEL_METER_WIDTH - TRACK_LABEL_BADGE_WIDTH - 12.0
     } else {
-        TRACK_LABEL_WIDTH - TRACK_LABEL_SOLO_BADGE_WIDTH - 8.0
+        TRACK_LABEL_WIDTH - TRACK_LABEL_BADGE_WIDTH - 8.0
     }
+}
+
+fn track_label_mute_badge_x(show_track_audio_levels: bool) -> f64 {
+    track_label_solo_badge_x(show_track_audio_levels) - TRACK_LABEL_BADGE_WIDTH - 2.0
+}
+
+fn track_label_duck_badge_x(show_track_audio_levels: bool) -> f64 {
+    track_label_mute_badge_x(show_track_audio_levels) - TRACK_LABEL_BADGE_WIDTH - 2.0
 }
 
 fn draw_track_label_meter(

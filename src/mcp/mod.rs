@@ -67,6 +67,21 @@ pub enum McpCommand {
         duck: bool,
         reply: SyncSender<Value>,
     },
+    SetTrackMuted {
+        track_id: String,
+        muted: bool,
+        reply: SyncSender<Value>,
+    },
+    SetTrackLocked {
+        track_id: String,
+        locked: bool,
+        reply: SyncSender<Value>,
+    },
+    SetTrackColor {
+        track_id: String,
+        color: String,
+        reply: SyncSender<Value>,
+    },
     SetTrackHeightPreset {
         track_id: String,
         height_preset: String,

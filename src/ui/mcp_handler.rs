@@ -493,6 +493,91 @@ pub(crate) fn handle_mcp_command(
             }
         }
 
+        McpCommand::SetTrackMuted {
+            track_id,
+            muted,
+            reply,
+        } => {
+            let result = {
+                let mut proj = project.borrow_mut();
+                if let Some(track) = proj.track_mut(&track_id) {
+                    track.muted = muted;
+                    proj.dirty = true;
+                    Ok(())
+                } else {
+                    Err(format!("Track id not found: {track_id}"))
+                }
+            };
+            match result {
+                Ok(()) => {
+                    reply
+                        .send(json!({"success": true, "track_id": track_id, "muted": muted}))
+                        .ok();
+                    on_project_changed();
+                }
+                Err(message) => {
+                    reply.send(json!({"success": false, "error": message})).ok();
+                }
+            }
+        }
+
+        McpCommand::SetTrackLocked {
+            track_id,
+            locked,
+            reply,
+        } => {
+            let result = {
+                let mut proj = project.borrow_mut();
+                if let Some(track) = proj.track_mut(&track_id) {
+                    track.locked = locked;
+                    proj.dirty = true;
+                    Ok(())
+                } else {
+                    Err(format!("Track id not found: {track_id}"))
+                }
+            };
+            match result {
+                Ok(()) => {
+                    reply
+                        .send(json!({"success": true, "track_id": track_id, "locked": locked}))
+                        .ok();
+                    on_project_changed();
+                }
+                Err(message) => {
+                    reply.send(json!({"success": false, "error": message})).ok();
+                }
+            }
+        }
+
+        McpCommand::SetTrackColor {
+            track_id,
+            color,
+            reply,
+        } => {
+            let parsed = crate::model::track::TrackColorLabel::from_str(&color);
+            let result = {
+                let mut proj = project.borrow_mut();
+                if let Some(track) = proj.track_mut(&track_id) {
+                    track.color_label = parsed;
+                    proj.dirty = true;
+                    Ok(())
+                } else {
+                    Err(format!("Track id not found: {track_id}"))
+                }
+            };
+            match result {
+                Ok(()) => {
+                    reply
+                        .send(json!({"success": true, "track_id": track_id, "color": color}))
+                        .ok();
+                    on_project_changed();
+                }
+                Err(message) => {
+                    reply.send(json!({"success": false, "error": message})).ok();
+                }
+            }
+        }
+
         McpCommand::SetTrackHeightPreset {
             track_id,
             height_preset,

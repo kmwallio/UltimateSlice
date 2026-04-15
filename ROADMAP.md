@@ -712,7 +712,7 @@ FCPXML persistence).
 - [x] Snap indicator visual — when snapping to a clip edge, marker, playhead, or sequence start, draw a dashed vertical guideline + small badge ("clip start" / "clip end" / "marker" / "playhead" / "start") at the snap point; snap targets now include the playhead, timeline markers, and time 0 in addition to other clip edges
 - [ ] Drag preview ghosting — translucent ghost of the clip at the drop target with the new in/out timecode floating above it during move/trim
 - [x] Mini-map / timeline overview strip — thin strip above the ruler showing the whole project at a glance with a viewport rectangle for the visible region
-- [ ] Track header redesign — per-track color swatch, clearer Solo/Mute/Lock button states, drag handle for reorder, double-click to rename inline
+- [x] Track header redesign — per-track color swatch, clearer Solo/Mute/Lock button states, drag handle for reorder, double-click to rename inline
 - [ ] Marker list panel — a sortable list of timeline markers with name, time, color, and notes; double-click to seek
 - [ ] Configurable timeline row heights — preset (Compact / Normal / Tall) plus drag-to-resize per track (uses existing `height_preset` field)
 - [ ] Color-tag legend — a small persistent legend showing what each clip color means in this project, editable

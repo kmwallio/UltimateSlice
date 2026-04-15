@@ -12,7 +12,7 @@ The **Timeline** panel (bottom) is where you arrange, trim, and edit clips into 
   - **Double-click** — zoom the timeline to fit the entire project.
 - **Track rows** — each track (Video or Audio) shows clips as coloured rectangles.
 - **Playhead** — the red vertical line indicates the current playback position.
-- **Track header** — shows the track name, a per-track **S** solo badge, and a compact per-track stereo level meter (L/R) on the right.
+- **Track header** — shows a drag handle (⠿), optional per-track color swatch dot, track name, and a badge row **[D] [M] [S] [L]** (Duck, Mute, Solo, Lock). A compact per-track stereo level meter (L/R) appears on the right when enabled.
 - **Status bar** — bottom-left includes a **Track Audio Levels** eye toggle to show/hide track-header meters. Proxy queue label/progress appear only while proxies are actively generating.
 
 When the track stack is taller than the viewport, the ruler stays in a fixed header above the scrolled tracks so seeking, scrubbing, and marker clicks remain available while you scroll vertically. Only the track rows scroll: the ruler remains visible without adding empty spacer bars above or below the visible timeline content.
@@ -319,6 +319,8 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC, SVG) can be placed on the t
 | `Y` | Toggle Slip edit tool |
 | `U` | Toggle Slide edit tool |
 | `S` | Toggle solo for selected track |
+| `M` | Toggle mute for selected track |
+| `Shift+L` | Toggle lock for selected track |
 | `F` | Match Frame — load selected clip's source in Source Monitor and seek to matching frame |
 | `Shift+F` | Create freeze-frame clip from selected video clip at playhead |
 | `Ctrl+Shift+B` | Join selected through-edit boundary into one clip |
@@ -368,11 +370,14 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC, SVG) can be placed on the t
 - **Add Track** buttons below the timeline add a new Video or Audio track.
 - **Remove Track** removes the currently active (highlighted) track, or the last track if none is selected. At least one track is always kept.
 - **Reorder tracks** by dragging a track's label vertically; a blue indicator line shows the drop target. Release to confirm.
-- **Active track** — click anywhere in a track row (including empty space) to highlight it. The active track shows a blue accent bar on its label. The active track is used as the target for the Append button and the Remove Track button.
+- **Active track** — click anywhere in a track row (including empty space) to highlight it. The active track shows a coloured accent bar on its label (uses the track colour label when set, otherwise blue). The active track is used as the target for the Append button and the Remove Track button.
 - **Track height presets** — right-click a track header and choose **Track Height: Small / Medium / Large** to resize that track row independently.
 - Audio tracks show a waveform visualisation (decoded in the background after import).
-- Muting an audio track excludes it from both preview and export.
+- **Mute track** — click the **M** badge on a track header (or press **M** with that track active) to mute it. Muted tracks are silenced in playback and export; a dimming overlay appears on the track content area.
+- **Lock track** — click the **L** badge on a track header (or press **Shift+L** with that track active) to lock it. Locked tracks cannot be edited; a hatch overlay appears on the track content area.
 - **Solo track** — click the **S** badge on a track header (or press **S** with that track active) to solo it. When one or more tracks are soloed, only soloed non-muted tracks are active for Program Monitor playback and export.
+- **Duck track** — click the **D** badge on an audio track header to toggle automatic ducking.
+- **Track colour** — right-click a track header and use the **Track Color** swatch row to assign a colour label. A 10-pixel colour dot appears to the left of the track name, and the active-track accent bar adopts the colour.
 
 ## Automatic Audio Crossfades
 

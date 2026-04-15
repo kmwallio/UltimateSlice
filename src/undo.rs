@@ -1217,6 +1217,57 @@ pub fn set_track_duck_cmd(
     }
 }
 
+/// Toggle a track's muted state. Construct via `set_track_muted_cmd()`.
+pub fn set_track_muted_cmd(
+    track_id: String,
+    old_muted: bool,
+    new_muted: bool,
+) -> TrackMutateCommand<bool> {
+    TrackMutateCommand {
+        track_id,
+        old_state: old_muted,
+        new_state: new_muted,
+        apply: |track, v| {
+            track.muted = v;
+        },
+        label: "Toggle track mute",
+    }
+}
+
+/// Toggle a track's locked state. Construct via `set_track_locked_cmd()`.
+pub fn set_track_locked_cmd(
+    track_id: String,
+    old_locked: bool,
+    new_locked: bool,
+) -> TrackMutateCommand<bool> {
+    TrackMutateCommand {
+        track_id,
+        old_state: old_locked,
+        new_state: new_locked,
+        apply: |track, v| {
+            track.locked = v;
+        },
+        label: "Toggle track lock",
+    }
+}
+
+/// Change a track's color label. Construct via `set_track_color_label_cmd()`.
+pub fn set_track_color_label_cmd(
+    track_id: String,
+    old_color: crate::model::track::TrackColorLabel,
+    new_color: crate::model::track::TrackColorLabel,
+) -> TrackMutateCommand<crate::model::track::TrackColorLabel> {
+    TrackMutateCommand {
+        track_id,
+        old_state: old_color,
+        new_state: new_color,
+        apply: |track, v| {
+            track.color_label = v;
+        },
+        label: "Set track color",
+    }
+}
+
 /// Rename a track. Construct via `set_track_label_cmd()`.
 pub fn set_track_label_cmd(
     track_id: String,

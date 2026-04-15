@@ -1017,6 +1017,9 @@ fn parse_asset_clip(
         if attrs.contains_key("us:track-height") {
             track.height_preset = track_height_preset;
         }
+        if let Some(v) = attrs.get("us:track-color") {
+            track.color_label = crate::model::track::TrackColorLabel::from_str(v);
+        }
 
         let mut clip = Clip::new(
             &resolved_source_path,
@@ -2809,6 +2812,7 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:track-duck"
             | "us:track-duck-amount-db"
             | "us:track-height"
+            | "us:track-color"
             | "us:clip-id"
             | "us:color-label"
             | "us:brightness"

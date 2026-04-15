@@ -52,6 +52,9 @@ The same **I / O** Source Monitor marks are also used by the keyword-range contr
 | `Y` | Toggle Slip edit tool |
 | `U` | Toggle Slide edit tool |
 | `D` | Toggle Draw tool |
+| `S` | Toggle solo for selected track |
+| `M` | Toggle mute for selected track |
+| `Shift+L` | Toggle lock for selected track |
 | `F` | Match Frame — load selected clip's source in Source Monitor at matching timecode |
 | `Shift+F` | Create freeze-frame clip from selected video clip at playhead |
 | `Ctrl+Shift+B` | Join selected through-edit boundary into one clip |

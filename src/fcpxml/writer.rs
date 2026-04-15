@@ -693,6 +693,12 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                             crate::model::track::TrackHeightPreset::Large => "large",
                         },
                     ));
+                    if track.color_label != crate::model::track::TrackColorLabel::None {
+                        asset_clip.push_attribute((
+                            "us:track-color",
+                            track.color_label.label().to_lowercase().as_str(),
+                        ));
+                    }
                     asset_clip.push_attribute((
                         "us:color-label",
                         match clip.color_label {

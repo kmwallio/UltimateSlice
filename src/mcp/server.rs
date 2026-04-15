@@ -306,6 +306,42 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_track_muted",
+            "description": "Mute or unmute a track. Muted tracks are silenced in playback and export.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string", "description": "Target track id from list_tracks." },
+                    "muted": { "type": "boolean", "description": "Whether the track should be muted." }
+                },
+                "required": ["track_id", "muted"]
+            }
+        },
+        {
+            "name": "set_track_locked",
+            "description": "Lock or unlock a track. Locked tracks cannot be edited.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string", "description": "Target track id from list_tracks." },
+                    "locked": { "type": "boolean", "description": "Whether the track should be locked." }
+                },
+                "required": ["track_id", "locked"]
+            }
+        },
+        {
+            "name": "set_track_color",
+            "description": "Set or clear the color label on a track. The accent bar and optional color swatch reflect this color.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string", "description": "Target track id from list_tracks." },
+                    "color": { "type": "string", "enum": ["none", "red", "orange", "yellow", "green", "teal", "blue", "purple", "magenta"], "description": "Color label name." }
+                },
+                "required": ["track_id", "color"]
+            }
+        },
+        {
             "name": "set_track_height_preset",
             "description": "Set timeline display height preset for a track by id ('small', 'medium', or 'large').",
             "inputSchema": {
@@ -2505,6 +2541,21 @@ fn dispatch_tool_payload(
         "set_track_duck" => McpCommand::SetTrackDuck {
             track_id: arg_str!(args, "track_id"),
             duck: arg_bool!(args, "duck"),
+            reply: tx,
+        },
+        "set_track_muted" => McpCommand::SetTrackMuted {
+            track_id: arg_str!(args, "track_id"),
+            muted: arg_bool!(args, "muted"),
+            reply: tx,
+        },
+        "set_track_locked" => McpCommand::SetTrackLocked {
+            track_id: arg_str!(args, "track_id"),
+            locked: arg_bool!(args, "locked"),
+            reply: tx,
+        },
+        "set_track_color" => McpCommand::SetTrackColor {
+            track_id: arg_str!(args, "track_id"),
+            color: args["color"].as_str().unwrap_or("none").to_string(),
             reply: tx,
         },
         "set_track_height_preset" => McpCommand::SetTrackHeightPreset {

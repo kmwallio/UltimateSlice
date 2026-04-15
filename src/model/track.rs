@@ -187,6 +187,85 @@ impl Default for TrackHeightPreset {
     }
 }
 
+/// Per-track color swatch — same palette as `ClipColorLabel` for visual
+/// consistency. Used for the accent bar and label-area dot in the track header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackColorLabel {
+    None,
+    Red,
+    Orange,
+    Yellow,
+    Green,
+    Teal,
+    Blue,
+    Purple,
+    Magenta,
+}
+
+impl Default for TrackColorLabel {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl TrackColorLabel {
+    /// RGB tuple for this color swatch. Returns `None` when the label is unset.
+    pub fn rgb(self) -> Option<(f64, f64, f64)> {
+        match self {
+            Self::None => Option::None,
+            Self::Red => Some((0.78, 0.27, 0.27)),
+            Self::Orange => Some((0.83, 0.49, 0.20)),
+            Self::Yellow => Some((0.78, 0.68, 0.20)),
+            Self::Green => Some((0.28, 0.66, 0.33)),
+            Self::Teal => Some((0.20, 0.63, 0.60)),
+            Self::Blue => Some((0.22, 0.48, 0.85)),
+            Self::Purple => Some((0.53, 0.38, 0.80)),
+            Self::Magenta => Some((0.78, 0.35, 0.68)),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Red => "Red",
+            Self::Orange => "Orange",
+            Self::Yellow => "Yellow",
+            Self::Green => "Green",
+            Self::Teal => "Teal",
+            Self::Blue => "Blue",
+            Self::Purple => "Purple",
+            Self::Magenta => "Magenta",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "red" => Self::Red,
+            "orange" => Self::Orange,
+            "yellow" => Self::Yellow,
+            "green" => Self::Green,
+            "teal" => Self::Teal,
+            "blue" => Self::Blue,
+            "purple" => Self::Purple,
+            "magenta" => Self::Magenta,
+            _ => Self::None,
+        }
+    }
+
+    pub const ALL: [TrackColorLabel; 9] = [
+        Self::None,
+        Self::Red,
+        Self::Orange,
+        Self::Yellow,
+        Self::Green,
+        Self::Teal,
+        Self::Blue,
+        Self::Purple,
+        Self::Magenta,
+    ];
+}
+
 /// A single horizontal lane in the timeline
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Track {
@@ -217,6 +296,9 @@ pub struct Track {
     /// export. Has no effect when the export channel layout is Stereo.
     #[serde(default)]
     pub surround_position: SurroundPositionOverride,
+    /// Per-track color swatch for the accent bar and label dot.
+    #[serde(default)]
+    pub color_label: TrackColorLabel,
 }
 
 impl Track {
@@ -234,6 +316,7 @@ impl Track {
             duck: false,
             duck_amount_db: default_duck_amount_db(),
             surround_position: SurroundPositionOverride::default(),
+            color_label: TrackColorLabel::None,
         }
     }
 
@@ -251,6 +334,7 @@ impl Track {
             duck: false,
             duck_amount_db: default_duck_amount_db(),
             surround_position: SurroundPositionOverride::default(),
+            color_label: TrackColorLabel::None,
         }
     }
 
