@@ -4116,7 +4116,18 @@ impl ProgramPlayer {
         }
         // Seek to 0 while keeping slots alive, then pause.
         self.state = PlayerState::Paused;
-        let _ = self.seek(0);
+        let needs_async = self.seek(0);
+        // seek() may have started a playing pulse (start_playing_pulse) that
+        // left the video pipeline in Playing state.  Force it back to Paused
+        // so video doesn't keep rendering after stop.  Unlock the audio sink
+        // in case start_playing_pulse locked it.
+        if needs_async {
+            let _ = self.pipeline.set_state(gst::State::Paused);
+            if self.audio_sink.is_locked_state() {
+                self.audio_sink.set_locked_state(false);
+                let _ = self.audio_sink.sync_state_with_parent();
+            }
+        }
         self.state = PlayerState::Stopped;
         self.timeline_pos_ns = 0;
         self.base_timeline_ns = 0;
@@ -11557,7 +11568,17 @@ impl ProgramPlayer {
         if self.pipeline.add(&decoder).is_err() {
             return None;
         }
-        let comp_pad = self.compositor.request_pad_simple("sink_%u")?;
+        let comp_pad = match self.compositor.request_pad_simple("sink_%u") {
+            Some(p) => p,
+            None => {
+                log::warn!(
+                    "build_prerender_video_slot: compositor pad request failed for source={}",
+                    source_path
+                );
+                self.pipeline.remove(&decoder).ok();
+                return None;
+            }
+        };
         comp_pad.set_property("zorder", (zorder_offset + 1) as u32);
         comp_pad.set_property("alpha", 1.0_f64);
 
@@ -12528,6 +12549,11 @@ impl ProgramPlayer {
             let comp_pad = match self.compositor.request_pad_simple("sink_%u") {
                 Some(p) => p,
                 None => {
+                    log::warn!(
+                        "build_slot_for_clip: compositor pad request failed for title clip {} (idx={})",
+                        clip.id,
+                        clip_idx
+                    );
                     self.pipeline.remove(&src).ok();
                     self.pipeline.remove(&capsfilter).ok();
                     self.pipeline
@@ -12744,6 +12770,11 @@ impl ProgramPlayer {
         let comp_pad = match self.compositor.request_pad_simple("sink_%u") {
             Some(p) => p,
             None => {
+                log::warn!(
+                    "build_slot_for_clip: compositor pad request failed for clip {} (idx={})",
+                    clip.id,
+                    clip_idx
+                );
                 self.pipeline.remove(&decoder).ok();
                 self.pipeline
                     .remove(effects_bin.upcast_ref::<gst::Element>())
@@ -14154,6 +14185,13 @@ impl ProgramPlayer {
             {
                 slot.transition_enter_offset_ns = trans_offset;
                 self.slots.push(slot);
+            } else {
+                log::warn!(
+                    "build_live_video_slots_for_active: failed to build slot for clip {} (idx={} zorder={})",
+                    self.clips[clip_idx].id,
+                    clip_idx,
+                    zorder_offset
+                );
             }
         }
     }
