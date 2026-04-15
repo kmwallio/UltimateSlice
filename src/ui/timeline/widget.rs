@@ -874,7 +874,8 @@ impl TimelineState {
     fn toggle_track_duck_by_index(&mut self, track_idx: usize) -> bool {
         let (track_id, old_duck) = {
             let proj = self.project.borrow();
-            let Some(track) = proj.tracks.get(track_idx) else {
+            let editing_tracks = self.resolve_editing_tracks(&proj);
+            let Some(track) = editing_tracks.get(track_idx) else {
                 return false;
             };
             (track.id.clone(), track.duck)
@@ -932,7 +933,8 @@ impl TimelineState {
     fn toggle_track_mute_by_index(&mut self, track_idx: usize) -> bool {
         let (track_id, old_muted) = {
             let proj = self.project.borrow();
-            let Some(track) = proj.tracks.get(track_idx) else {
+            let editing_tracks = self.resolve_editing_tracks(&proj);
+            let Some(track) = editing_tracks.get(track_idx) else {
                 return false;
             };
             (track.id.clone(), track.muted)
@@ -950,7 +952,8 @@ impl TimelineState {
     fn toggle_track_lock_by_index(&mut self, track_idx: usize) -> bool {
         let (track_id, old_locked) = {
             let proj = self.project.borrow();
-            let Some(track) = proj.tracks.get(track_idx) else {
+            let editing_tracks = self.resolve_editing_tracks(&proj);
+            let Some(track) = editing_tracks.get(track_idx) else {
                 return false;
             };
             (track.id.clone(), track.locked)
@@ -973,7 +976,8 @@ impl TimelineState {
         };
         let old_muted = {
             let proj = self.project.borrow();
-            let Some(track) = proj.tracks.iter().find(|t| t.id == track_id) else {
+            let editing_tracks = self.resolve_editing_tracks(&proj);
+            let Some(track) = editing_tracks.iter().find(|t| t.id == track_id) else {
                 return false;
             };
             track.muted
@@ -994,7 +998,8 @@ impl TimelineState {
         };
         let old_locked = {
             let proj = self.project.borrow();
-            let Some(track) = proj.tracks.iter().find(|t| t.id == track_id) else {
+            let editing_tracks = self.resolve_editing_tracks(&proj);
+            let Some(track) = editing_tracks.iter().find(|t| t.id == track_id) else {
                 return false;
             };
             track.locked
@@ -1018,7 +1023,8 @@ impl TimelineState {
     ) -> bool {
         let (track_id, old_color) = {
             let proj = self.project.borrow();
-            let Some(track) = proj.tracks.get(track_idx) else {
+            let editing_tracks = self.resolve_editing_tracks(&proj);
+            let Some(track) = editing_tracks.get(track_idx) else {
                 return false;
             };
             (track.id.clone(), track.color_label)
@@ -1039,7 +1045,8 @@ impl TimelineState {
     fn toggle_track_solo_by_index(&mut self, track_idx: usize) -> bool {
         let (track_id, old_solo) = {
             let proj = self.project.borrow();
-            let Some(track) = proj.tracks.get(track_idx) else {
+            let editing_tracks = self.resolve_editing_tracks(&proj);
+            let Some(track) = editing_tracks.get(track_idx) else {
                 return false;
             };
             (track.id.clone(), track.soloed)
@@ -1061,7 +1068,8 @@ impl TimelineState {
         };
         let old_solo = {
             let proj = self.project.borrow();
-            let Some(track) = proj.tracks.iter().find(|t| t.id == track_id) else {
+            let editing_tracks = self.resolve_editing_tracks(&proj);
+            let Some(track) = editing_tracks.iter().find(|t| t.id == track_id) else {
                 return false;
             };
             track.soloed
@@ -1112,15 +1120,22 @@ impl TimelineState {
         track_idx: usize,
         preset: crate::model::track::TrackHeightPreset,
     ) -> bool {
-        let mut proj = self.project.borrow_mut();
-        let Some(track) = proj.tracks.get_mut(track_idx) else {
-            return false;
+        let track_id = {
+            let proj = self.project.borrow();
+            let editing_tracks = self.resolve_editing_tracks(&proj);
+            let Some(track) = editing_tracks.get(track_idx) else {
+                return false;
+            };
+            if track.height_preset == preset {
+                return false;
+            }
+            track.id.clone()
         };
-        if track.height_preset == preset {
-            return false;
+        let mut proj = self.project.borrow_mut();
+        if let Some(track) = proj.track_mut(&track_id) {
+            track.height_preset = preset;
         }
-        track.height_preset = preset;
-        self.selected_track_id = Some(track.id.clone());
+        self.selected_track_id = Some(track_id);
         proj.dirty = true;
         true
     }
