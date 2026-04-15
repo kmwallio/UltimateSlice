@@ -65,6 +65,25 @@ fn sanitize_backup_filename(title: &str) -> String {
     }
 }
 
+/// Derive a display-friendly project title.
+///
+/// When the title is a generic default ("Untitled", "Imported Project") and a
+/// `file_path` is available, use the filename stem instead so that backups and
+/// autosave metadata are easily identifiable.
+pub fn effective_project_title(project: &Project) -> String {
+    let generic = matches!(project.title.as_str(), "Untitled" | "Imported Project");
+    if generic {
+        if let Some(ref fp) = project.file_path {
+            let stem = std::path::Path::new(fp)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&project.title);
+            return stem.to_string();
+        }
+    }
+    project.title.clone()
+}
+
 pub fn now_unix_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -401,7 +420,7 @@ pub fn write_autosave(xml: &str, project: &Project) -> Result<PathBuf, String> {
     let meta_path = dir.join(format!("{stem}{AUTOSAVE_META_EXTENSION}"));
 
     let metadata = AutosaveMetadata {
-        project_title: project.title.clone(),
+        project_title: effective_project_title(project),
         project_file_path: project.file_path.clone(),
         saved_at_unix_secs: now_unix_secs(),
     };
@@ -423,7 +442,7 @@ fn write_autosave_in_dir(dir: &Path, xml: &str, project: &Project) -> Result<Pat
     let meta_path = dir.join(format!("{stem}{AUTOSAVE_META_EXTENSION}"));
 
     let metadata = AutosaveMetadata {
-        project_title: project.title.clone(),
+        project_title: effective_project_title(project),
         project_file_path: project.file_path.clone(),
         saved_at_unix_secs: now_unix_secs(),
     };
@@ -703,5 +722,46 @@ mod tests {
         let path = write_autosave_in_dir(root, &xml, &project).expect("write autosave");
         let loaded = load_fcpxml_project(&path).expect("load autosave");
         assert_eq!(loaded.title, "Loadable");
+    }
+
+    #[test]
+    fn effective_title_uses_filename_for_untitled() {
+        let mut p = Project::new("Untitled");
+        p.file_path = Some("/home/user/My Cool Edit.uspxml".to_string());
+        assert_eq!(effective_project_title(&p), "My Cool Edit");
+    }
+
+    #[test]
+    fn effective_title_uses_filename_for_imported() {
+        let mut p = Project::new("Imported Project");
+        p.file_path = Some("/home/user/wedding-final.uspxml".to_string());
+        assert_eq!(effective_project_title(&p), "wedding-final");
+    }
+
+    #[test]
+    fn effective_title_keeps_custom_title() {
+        let mut p = Project::new("My Documentary");
+        p.file_path = Some("/tmp/doc.uspxml".to_string());
+        assert_eq!(effective_project_title(&p), "My Documentary");
+    }
+
+    #[test]
+    fn effective_title_fallback_without_file_path() {
+        let p = Project::new("Untitled");
+        assert_eq!(effective_project_title(&p), "Untitled");
+    }
+
+    #[test]
+    fn autosave_metadata_uses_effective_title() {
+        let dir = tempdir().expect("temp dir");
+        let root = dir.path();
+        let mut project = Project::new("Untitled");
+        project.file_path = Some("/home/user/vacation-edit.uspxml".to_string());
+        let xml = "<fcpxml />";
+
+        let _ = write_autosave_in_dir(root, xml, &project).expect("write autosave");
+        let list = list_recoverable_autosaves_in_dir(root);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].metadata.project_title, "vacation-edit");
     }
 }

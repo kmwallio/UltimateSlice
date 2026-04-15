@@ -17169,7 +17169,10 @@ pub fn build_window(
                     // Versioned backup
                     let prefs = preferences_state.borrow();
                     if prefs.backup_enabled {
-                        let proj_title = project.borrow().title.clone();
+                        let proj_title = {
+                            let proj = project.borrow();
+                            crate::project_versions::effective_project_title(&proj)
+                        };
                         if let Err(e) = crate::project_versions::create_versioned_backup(
                             xml,
                             &proj_title,
