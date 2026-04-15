@@ -211,6 +211,8 @@ pub struct WorkspaceArrangement {
     #[serde(default)]
     pub left_panel_tab: WorkspaceLeftPanelTab,
     #[serde(default)]
+    pub minimap_visible: bool,
+    #[serde(default)]
     pub program_monitor: ProgramMonitorWorkspaceState,
 }
 
@@ -233,6 +235,7 @@ impl Default for WorkspaceArrangement {
             inspector_visible: default_workspace_panel_visible(),
             keyframe_editor_visible: false,
             left_panel_tab: WorkspaceLeftPanelTab::default(),
+            minimap_visible: false,
             program_monitor: ProgramMonitorWorkspaceState::default(),
         }
     }

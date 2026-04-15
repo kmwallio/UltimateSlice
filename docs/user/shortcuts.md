@@ -90,6 +90,8 @@ The same **I / O** Source Monitor marks are also used by the keyword-range contr
 | Click (mini-map) | Centre viewport on clicked position |
 | Drag (mini-map) | Pan viewport continuously |
 | `Ctrl`/`Cmd` + Click (mini-map) | Seek playhead to clicked position |
+| Double-click (mini-map) | Zoom timeline to fit entire project |
+| `Shift+M` | Toggle timeline mini-map |
 | `?` / `/` | Show keyboard shortcut reference |
 
 Right-click an audio track header and choose **Generate Music Region…** to arm the one-shot MusicGen draw gesture; `Escape` cancels it before you drag.

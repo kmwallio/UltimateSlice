@@ -15550,6 +15550,7 @@ pub fn build_window(
         let right_sidebar_paned = right_sidebar_paned.clone();
         let transitions_revealer = transitions_revealer.clone();
         let transitions_last_visible_split_pos = transitions_last_visible_split_pos.clone();
+        let minimap_area_capture = minimap_area.clone();
         Rc::new(move || {
             let previous_arrangement = workspace_layouts_state.borrow().current.clone();
             let left_panel_tab = if tb_effects.is_active() {
@@ -15645,6 +15646,7 @@ pub fn build_window(
                 inspector_visible: inspector_toggle.is_active(),
                 keyframe_editor_visible: bottom_panel_stack.is_visible(),
                 left_panel_tab,
+                minimap_visible: minimap_area_capture.is_visible(),
                 program_monitor: crate::ui_state::ProgramMonitorWorkspaceState {
                     popped: monitor_popped.get(),
                     width,
@@ -15717,6 +15719,9 @@ pub fn build_window(
         let sync_workspace_layout_state = sync_workspace_layout_state.clone();
         let right_sidebar_paned = right_sidebar_paned.clone();
         let transitions_last_visible_split_pos = transitions_last_visible_split_pos.clone();
+        let minimap_area_apply = minimap_area.clone();
+        let minimap_toggle_apply = minimap_toggle.clone();
+        let preferences_state_apply = preferences_state.clone();
         Rc::new(move |arrangement: crate::ui_state::WorkspaceArrangement| {
             workspace_layouts_applying.set(true);
             let apply_generation = workspace_layout_apply_generation.get().wrapping_add(1);
@@ -15746,6 +15751,19 @@ pub fn build_window(
                 bottom_panel_stack.set_visible(arrangement.keyframe_editor_visible);
             }
             refresh_bottom_toggle_labels();
+            if minimap_area_apply.is_visible() != arrangement.minimap_visible {
+                minimap_area_apply.set_visible(arrangement.minimap_visible);
+                minimap_toggle_apply.set_label(if arrangement.minimap_visible {
+                    "Hide Mini-Map"
+                } else {
+                    "Show Mini-Map"
+                });
+                preferences_state_apply.borrow_mut().show_timeline_minimap =
+                    arrangement.minimap_visible;
+                if arrangement.minimap_visible {
+                    minimap_area_apply.queue_draw();
+                }
+            }
             if scopes_btn.is_active() != arrangement.program_monitor.scopes_visible {
                 scopes_btn.set_active(arrangement.program_monitor.scopes_visible);
             }
@@ -17104,9 +17122,13 @@ pub fn build_window(
         let on_project_changed = on_project_changed.clone();
         let key_ctrl = gtk4::EventControllerKey::new();
         key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
-        key_ctrl.connect_key_pressed(move |ctrl, key, _, _mods| {
+        key_ctrl.connect_key_pressed(move |ctrl, key, _, mods| {
             use gtk4::gdk::Key;
             if key != Key::m && key != Key::M {
+                return glib::Propagation::Proceed;
+            }
+            // Let Shift+M fall through to the mini-map toggle handler
+            if mods.contains(gtk4::gdk::ModifierType::SHIFT_MASK) {
                 return glib::Propagation::Proceed;
             }
             // Don't intercept M when a text entry or similar has focus
@@ -17120,6 +17142,43 @@ pub fn build_window(
             let pos = prog_player.borrow().timeline_pos_ns;
             project.borrow_mut().add_marker(pos, "Marker");
             on_project_changed();
+            glib::Propagation::Stop
+        });
+        window.add_controller(key_ctrl);
+    }
+    // ── Window-level Shift+M: toggle timeline mini-map ───────────────────
+    {
+        let minimap_area = minimap_area.clone();
+        let minimap_toggle = minimap_toggle.clone();
+        let preferences_state = preferences_state.clone();
+        let key_ctrl = gtk4::EventControllerKey::new();
+        key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        key_ctrl.connect_key_pressed(move |ctrl, key, _, mods| {
+            use gtk4::gdk::{Key, ModifierType};
+            if !mods.contains(ModifierType::SHIFT_MASK) {
+                return glib::Propagation::Proceed;
+            }
+            if key != Key::M && key != Key::m {
+                return glib::Propagation::Proceed;
+            }
+            if let Some(widget) = ctrl.widget() {
+                if let Some(focused) = widget.root().and_then(|r| r.focus()) {
+                    if is_text_input_focused(&focused) {
+                        return glib::Propagation::Proceed;
+                    }
+                }
+            }
+            let show = !minimap_area.is_visible();
+            minimap_area.set_visible(show);
+            minimap_toggle.set_label(if show {
+                "Hide Mini-Map"
+            } else {
+                "Show Mini-Map"
+            });
+            preferences_state.borrow_mut().show_timeline_minimap = show;
+            if show {
+                minimap_area.queue_draw();
+            }
             glib::Propagation::Stop
         });
         window.add_controller(key_ctrl);

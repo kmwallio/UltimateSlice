@@ -8012,6 +8012,18 @@ fn draw_minimap(cr: &gtk::cairo::Context, width: f64, height: f64, st: &Timeline
         }
     }
 
+    // Track lane separator lines
+    if track_count > 1 {
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.08);
+        cr.set_line_width(0.5);
+        for vis_idx in 1..track_count {
+            let y = (lanes_top + vis_idx as f64 * lane_h).round() + 0.25;
+            cr.move_to(MINIMAP_GUTTER, y);
+            cr.line_to(width, y);
+        }
+        cr.stroke().ok();
+    }
+
     // Viewport rectangle
     let visible_width = width; // the main timeline viewport width
     let view_left_ns = (st.scroll_offset / st.pixels_per_second) * NS_PER_SECOND;
@@ -8085,6 +8097,7 @@ pub fn build_timeline_minimap(
     };
 
     // Click: center viewport on clicked position. Ctrl+Click: seek playhead.
+    // Double-click: zoom to fit entire project.
     {
         let state = state.clone();
         let timeline_area = timeline_area.clone();
@@ -8092,33 +8105,55 @@ pub fn build_timeline_minimap(
         let minimap_weak = minimap.downgrade();
         let x_to_ns = minimap_x_to_ns.clone();
         let click = GestureClick::new();
-        click.connect_pressed(move |gesture, _n_press, x, _y| {
+        click.connect_pressed(move |gesture, n_press, x, _y| {
             let minimap_width = minimap_weak
                 .upgrade()
                 .map(|m| m.width() as f64)
                 .unwrap_or(800.0);
-            let ns = x_to_ns(x, minimap_width);
-            let modifiers = gesture.current_event_state();
-            let ctrl = modifiers.contains(gdk4::ModifierType::CONTROL_MASK);
 
-            let mut st = state.borrow_mut();
-            if ctrl {
-                // Seek playhead
-                st.set_playhead_visual(ns);
-                let seek_cb = st.on_seek.clone();
-                drop(st);
-                if let Some(cb) = seek_cb {
-                    cb(ns);
+            if n_press == 2 {
+                // Double-click: zoom to fit entire project
+                let st_ref = state.borrow();
+                let total_ns = total_duration_ns(&st_ref);
+                drop(st_ref);
+                if total_ns == 0 {
+                    return;
                 }
-            } else {
-                // Center viewport on clicked position
-                let visible_secs = minimap_width / st.pixels_per_second;
-                let target_secs = ns as f64 / NS_PER_SECOND;
-                let new_offset = (target_secs - visible_secs / 2.0) * st.pixels_per_second;
-                st.scroll_offset = new_offset.max(0.0);
+                let total_secs = total_ns as f64 / NS_PER_SECOND;
+                let viewport_w = timeline_area.width() as f64;
+                let usable_viewport = (viewport_w - TRACK_LABEL_WIDTH).max(100.0);
+                // Add 5% padding so clips don't touch the right edge
+                let pps = (usable_viewport / (total_secs * 1.05)).clamp(10.0, 2000.0);
+                let mut st = state.borrow_mut();
+                st.pixels_per_second = pps;
+                st.scroll_offset = 0.0;
                 st.user_scroll_cooldown_until =
                     Some(std::time::Instant::now() + std::time::Duration::from_millis(600));
                 drop(st);
+            } else {
+                let ns = x_to_ns(x, minimap_width);
+                let modifiers = gesture.current_event_state();
+                let ctrl = modifiers.contains(gdk4::ModifierType::CONTROL_MASK);
+
+                let mut st = state.borrow_mut();
+                if ctrl {
+                    // Seek playhead
+                    st.set_playhead_visual(ns);
+                    let seek_cb = st.on_seek.clone();
+                    drop(st);
+                    if let Some(cb) = seek_cb {
+                        cb(ns);
+                    }
+                } else {
+                    // Center viewport on clicked position
+                    let visible_secs = minimap_width / st.pixels_per_second;
+                    let target_secs = ns as f64 / NS_PER_SECOND;
+                    let new_offset = (target_secs - visible_secs / 2.0) * st.pixels_per_second;
+                    st.scroll_offset = new_offset.max(0.0);
+                    st.user_scroll_cooldown_until =
+                        Some(std::time::Instant::now() + std::time::Duration::from_millis(600));
+                    drop(st);
+                }
             }
             timeline_area.queue_draw();
             ruler.queue_draw();
