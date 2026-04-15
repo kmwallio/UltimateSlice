@@ -3940,17 +3940,12 @@ impl ProgramPlayer {
             self.state = PlayerState::Paused;
             false
         } else if self.current_idx.is_some() {
-            if self.slots.len() >= 3 {
-                // For 3+ tracks, start a non-blocking Playing pulse so the GTK
-                // main loop can service gtk4paintablesink's preroll.  The caller
-                // must schedule complete_playing_pulse() via idle/timeout.
-                self.start_playing_pulse();
-                true
-            } else {
-                // ≤2 tracks: synchronous pulse works fine.
-                self.playing_pulse();
-                false
-            }
+            // Always use the non-blocking Playing pulse after a full rebuild.
+            // pipeline.state(timeout) in the synchronous playing_pulse() can
+            // deadlock with gtk4paintablesink even with ≤2 tracks when the
+            // sink hasn't finished its GL preroll on the main thread.
+            self.start_playing_pulse();
+            true
         } else {
             false
         };
@@ -9092,16 +9087,10 @@ impl ProgramPlayer {
         // Reset the pipeline's start_time so running_time begins at 0 in the
         // next Playing transition.
         self.pipeline.set_start_time(gst::ClockTime::ZERO);
-        if self.slots.len() >= 3 {
-            // For 3+ tracks, start a non-blocking Playing pulse so the GTK
-            // main loop can service gtk4paintablesink's preroll.
-            self.start_playing_pulse();
-            true
-        } else {
-            // ≤2 tracks: synchronous pulse works fine.
-            self.playing_pulse();
-            false
-        }
+        // Always use the non-blocking Playing pulse to avoid deadlocking
+        // with gtk4paintablesink on the GTK main thread.
+        self.start_playing_pulse();
+        true
     }
 
     fn apply_transform_to_slot(
@@ -9568,14 +9557,22 @@ impl ProgramPlayer {
         }
 
         // 3. Wait for NEW decoders to link (discover streams + pad-added).
+        // Use per-decoder waits to avoid blocking on gtk4paintablesink.
         let link_wait_ms = if was_playing {
             self.adaptive_arrival_wait_ms(400)
         } else {
             self.effective_wait_timeout_ms(400)
         };
-        let _ = self
-            .pipeline
-            .state(gst::ClockTime::from_mseconds(link_wait_ms));
+        {
+            let per_slot_ms = (link_wait_ms / self.slots.len().max(1) as u64).max(80);
+            for slot in &self.slots {
+                if added_clip_idxs.contains(&slot.clip_idx) {
+                    let _ = slot
+                        .decoder
+                        .state(gst::ClockTime::from_mseconds(per_slot_ms));
+                }
+            }
+        }
         for slot in &self.slots {
             if !slot.video_linked.load(Ordering::Relaxed) {
                 if added_clip_idxs.contains(&slot.clip_idx) {
@@ -9876,10 +9873,18 @@ impl ProgramPlayer {
             }
 
             // Wait for new decoders to link (stream discovery + pad-added).
+            // Use per-decoder waits to avoid blocking on gtk4paintablesink.
             let link_wait_ms = self.adaptive_arrival_wait_ms(400);
-            let _ = self
-                .pipeline
-                .state(gst::ClockTime::from_mseconds(link_wait_ms));
+            {
+                let per_slot_ms = (link_wait_ms / self.slots.len().max(1) as u64).max(80);
+                for slot in &self.slots {
+                    if added_clip_idxs.contains(&slot.clip_idx) {
+                        let _ = slot
+                            .decoder
+                            .state(gst::ClockTime::from_mseconds(per_slot_ms));
+                    }
+                }
+            }
 
             // Seek new decoders to their source positions.
             let seek_flags = gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE;
@@ -14276,10 +14281,11 @@ impl ProgramPlayer {
         );
         let _ = self.pipeline.set_state(gst::State::Paused);
         log::debug!("rebuild_pipeline_at: waiting for paused preroll...");
-        // Give decoders time to discover streams and link pads (up to 5s).
-        // We cannot do a full wait_for_paused_preroll here because the
-        // compositor might be waiting on an unlinked pad.  Use a short
-        // timeout to let decoders link, then EOS any that didn't.
+        // Give decoders time to discover streams and link pads.
+        // Wait on individual decoders instead of the whole pipeline to
+        // avoid blocking on gtk4paintablesink, which needs the GTK main
+        // loop for GL preroll — calling pipeline.state(timeout) from the
+        // main thread would deadlock.
         let mut link_wait_ms = if was_playing {
             self.adaptive_arrival_wait_ms(400)
         } else {
@@ -14288,9 +14294,14 @@ impl ProgramPlayer {
         if used_prerender {
             link_wait_ms = link_wait_ms.max(3000);
         }
-        let _ = self
-            .pipeline
-            .state(gst::ClockTime::from_mseconds(link_wait_ms));
+        {
+            let per_slot_ms = (link_wait_ms / self.slots.len().max(1) as u64).max(80);
+            for slot in &self.slots {
+                let _ = slot
+                    .decoder
+                    .state(gst::ClockTime::from_mseconds(per_slot_ms));
+            }
+        }
 
         if used_prerender {
             let deadline = Instant::now() + Duration::from_millis(250);
