@@ -233,6 +233,8 @@ fn save_project_to_path(
         }
         proj.dirty = false;
     }
+    // Remove autosave now that the project is safely saved to disk.
+    crate::project_versions::delete_autosave_for_project(&project.borrow());
     Ok(())
 }
 
@@ -863,6 +865,8 @@ pub fn confirm_unsaved_then(
     let on_continue_c = on_continue.clone();
     dialog.connect_response(move |d, resp| match resp {
         gtk::ResponseType::Reject => {
+            // User chose to discard — remove autosave for this project.
+            crate::project_versions::delete_autosave_for_project(&project_c.borrow());
             d.close();
             on_continue_c();
         }
@@ -1045,6 +1049,8 @@ pub fn build_toolbar(
                 let on_project_reloaded = on_project_reloaded.clone();
                 let on_show_editor = on_show_editor.clone();
                 move || {
+                    // Clean up autosave for the project being replaced.
+                    crate::project_versions::delete_autosave_for_project(&project.borrow());
                     *project.borrow_mut() = Project::new("Untitled");
                     {
                         let mut st = timeline_state.borrow_mut();

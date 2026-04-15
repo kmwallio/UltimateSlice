@@ -2,12 +2,18 @@ use gtk4::prelude::*;
 use gtk4::{Align, Box as GBox, Button, Label, Orientation};
 use std::rc::Rc;
 
+use crate::project_versions::RecoverableAutosave;
+
 /// Build the welcome panel shown on fresh launch (no startup project).
-/// Contains branding, New/Open buttons, and a recent projects list.
+/// Contains branding, New/Open buttons, optional crash-recovery section,
+/// and a recent projects list.
 pub fn build_welcome_panel(
     on_new_project: Rc<dyn Fn()>,
     on_open_project: Rc<dyn Fn()>,
     on_open_recent: Rc<dyn Fn(String)>,
+    recoverable: Vec<RecoverableAutosave>,
+    on_recover: Rc<dyn Fn(RecoverableAutosave)>,
+    on_discard_autosave: Rc<dyn Fn(RecoverableAutosave)>,
 ) -> GBox {
     let outer = GBox::new(Orientation::Vertical, 0);
     outer.set_valign(Align::Center);
@@ -59,6 +65,94 @@ pub fn build_welcome_panel(
     btn_row.append(&btn_open);
 
     inner.append(&btn_row);
+
+    // ── Recovery section ─────────────────────────────────────────────
+    if !recoverable.is_empty() {
+        let spacer_r = GBox::new(Orientation::Vertical, 0);
+        spacer_r.set_height_request(12);
+        inner.append(&spacer_r);
+
+        let recovery_frame = GBox::new(Orientation::Vertical, 6);
+        recovery_frame.add_css_class("welcome-recovery-section");
+
+        let recovery_header = Label::new(Some("⚠ Recover Unsaved Work"));
+        recovery_header.add_css_class("welcome-recovery-header");
+        recovery_header.set_halign(Align::Start);
+        recovery_frame.append(&recovery_header);
+
+        for entry in recoverable {
+            let row = GBox::new(Orientation::Horizontal, 8);
+            row.set_hexpand(true);
+
+            // Project title and path info
+            let info_box = GBox::new(Orientation::Vertical, 2);
+            info_box.set_hexpand(true);
+
+            let title_label = Label::new(Some(&entry.metadata.project_title));
+            title_label.set_halign(Align::Start);
+            title_label.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
+            info_box.append(&title_label);
+
+            let detail = if let Some(ref fp) = entry.metadata.project_file_path {
+                let fname = std::path::Path::new(fp)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(fp);
+                format!(
+                    "{} — {}",
+                    format_autosave_age(entry.metadata.saved_at_unix_secs),
+                    fname
+                )
+            } else {
+                format!(
+                    "{} — unsaved project",
+                    format_autosave_age(entry.metadata.saved_at_unix_secs)
+                )
+            };
+            let detail_label = Label::new(Some(&detail));
+            detail_label.add_css_class("dim-label");
+            detail_label.set_halign(Align::Start);
+            detail_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+            info_box.append(&detail_label);
+
+            row.append(&info_box);
+
+            // Recover button
+            let btn_recover = Button::with_label("Recover");
+            btn_recover.add_css_class("suggested-action");
+            {
+                let cb = on_recover.clone();
+                let e = entry.clone();
+                btn_recover.connect_clicked(move |_| cb(e.clone()));
+            }
+            row.append(&btn_recover);
+
+            // Discard button
+            let btn_discard = Button::with_label("Discard");
+            btn_discard.add_css_class("destructive-action");
+            {
+                let cb = on_discard_autosave.clone();
+                let e = entry.clone();
+                let row_weak = row.downgrade();
+                btn_discard.connect_clicked(move |_| {
+                    cb(e.clone());
+                    // Remove this row from the UI
+                    if let Some(r) = row_weak.upgrade() {
+                        if let Some(parent) = r.parent() {
+                            if let Some(bx) = parent.downcast_ref::<GBox>() {
+                                bx.remove(&r);
+                            }
+                        }
+                    }
+                });
+            }
+            row.append(&btn_discard);
+
+            recovery_frame.append(&row);
+        }
+
+        inner.append(&recovery_frame);
+    }
 
     // Recent projects section
     let recent_entries = crate::recent::load();
@@ -142,4 +236,30 @@ pub fn build_welcome_panel(
 
     outer.append(&inner);
     outer
+}
+
+/// Format a unix timestamp as a human-readable age string (e.g. "2 hours ago").
+fn format_autosave_age(saved_at: u64) -> String {
+    let now = crate::project_versions::now_unix_secs();
+    let diff = now.saturating_sub(saved_at);
+    if diff < 60 {
+        "just now".to_string()
+    } else if diff < 3600 {
+        let mins = diff / 60;
+        format!("{mins} min ago")
+    } else if diff < 86400 {
+        let hours = diff / 3600;
+        if hours == 1 {
+            "1 hour ago".to_string()
+        } else {
+            format!("{hours} hours ago")
+        }
+    } else {
+        let days = diff / 86400;
+        if days == 1 {
+            "1 day ago".to_string()
+        } else {
+            format!("{days} days ago")
+        }
+    }
 }

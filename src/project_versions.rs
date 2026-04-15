@@ -65,7 +65,7 @@ fn sanitize_backup_filename(title: &str) -> String {
     }
 }
 
-fn now_unix_secs() -> u64 {
+pub fn now_unix_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -349,6 +349,161 @@ pub fn load_project_snapshot(id: &str) -> Result<(ProjectSnapshotEntry, Project)
     Ok((entry, project))
 }
 
+// ── Autosave + crash recovery ────────────────────────────────────────────────
+
+const AUTOSAVE_EXTENSION: &str = ".uspxml.autosave";
+const AUTOSAVE_META_EXTENSION: &str = ".autosave.json";
+/// Autosave files older than this are considered stale and pruned on listing.
+const AUTOSAVE_MAX_AGE_SECS: u64 = 7 * 24 * 3600; // 7 days
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AutosaveMetadata {
+    pub project_title: String,
+    pub project_file_path: Option<String>,
+    pub saved_at_unix_secs: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoverableAutosave {
+    pub autosave_path: PathBuf,
+    pub metadata_path: PathBuf,
+    pub metadata: AutosaveMetadata,
+    pub size_bytes: u64,
+}
+
+pub fn autosave_dir() -> Option<PathBuf> {
+    app_data_dir().map(|base| base.join("autosave"))
+}
+
+/// Deterministic autosave stem for a project.
+///
+/// If the project has a `file_path`, hash it so each saved project gets a
+/// stable filename.  Otherwise fall back to the sanitised title.
+fn autosave_stem_for_project(project: &Project) -> String {
+    if let Some(ref fp) = project.file_path {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        fp.hash(&mut h);
+        format!("proj_{:016x}", h.finish())
+    } else {
+        let s = sanitize_backup_filename(&project.title);
+        format!("unsaved_{s}")
+    }
+}
+
+pub fn write_autosave(xml: &str, project: &Project) -> Result<PathBuf, String> {
+    let dir = autosave_dir().ok_or_else(|| "Autosave directory unavailable".to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create autosave dir: {e}"))?;
+
+    let stem = autosave_stem_for_project(project);
+    let autosave_path = dir.join(format!("{stem}{AUTOSAVE_EXTENSION}"));
+    let meta_path = dir.join(format!("{stem}{AUTOSAVE_META_EXTENSION}"));
+
+    let metadata = AutosaveMetadata {
+        project_title: project.title.clone(),
+        project_file_path: project.file_path.clone(),
+        saved_at_unix_secs: now_unix_secs(),
+    };
+
+    std::fs::write(&autosave_path, xml).map_err(|e| format!("Failed to write autosave: {e}"))?;
+    let meta_json = serde_json::to_string_pretty(&metadata)
+        .map_err(|e| format!("Failed to encode autosave metadata: {e}"))?;
+    if let Err(e) = std::fs::write(&meta_path, &meta_json) {
+        let _ = std::fs::remove_file(&autosave_path);
+        return Err(format!("Failed to write autosave metadata: {e}"));
+    }
+    Ok(autosave_path)
+}
+
+fn write_autosave_in_dir(dir: &Path, xml: &str, project: &Project) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("Failed to create dir: {e}"))?;
+    let stem = autosave_stem_for_project(project);
+    let autosave_path = dir.join(format!("{stem}{AUTOSAVE_EXTENSION}"));
+    let meta_path = dir.join(format!("{stem}{AUTOSAVE_META_EXTENSION}"));
+
+    let metadata = AutosaveMetadata {
+        project_title: project.title.clone(),
+        project_file_path: project.file_path.clone(),
+        saved_at_unix_secs: now_unix_secs(),
+    };
+
+    std::fs::write(&autosave_path, xml).map_err(|e| format!("Failed to write autosave: {e}"))?;
+    let meta_json = serde_json::to_string_pretty(&metadata)
+        .map_err(|e| format!("Failed to encode autosave metadata: {e}"))?;
+    if let Err(e) = std::fs::write(&meta_path, &meta_json) {
+        let _ = std::fs::remove_file(&autosave_path);
+        return Err(format!("Failed to write autosave metadata: {e}"));
+    }
+    Ok(autosave_path)
+}
+
+fn list_recoverable_autosaves_in_dir(dir: &Path) -> Vec<RecoverableAutosave> {
+    let now = now_unix_secs();
+    let mut entries: Vec<RecoverableAutosave> = std::fs::read_dir(dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .ends_with(AUTOSAVE_EXTENSION)
+        })
+        .filter_map(|e| {
+            let autosave_path = e.path();
+            let fname = e.file_name().to_string_lossy().to_string();
+            let stem = fname.strip_suffix(AUTOSAVE_EXTENSION)?;
+            let meta_path = dir.join(format!("{stem}{AUTOSAVE_META_EXTENSION}"));
+            let meta_json = std::fs::read_to_string(&meta_path).ok()?;
+            let metadata: AutosaveMetadata = serde_json::from_str(&meta_json).ok()?;
+            // Skip stale entries
+            if now.saturating_sub(metadata.saved_at_unix_secs) > AUTOSAVE_MAX_AGE_SECS {
+                let _ = std::fs::remove_file(&autosave_path);
+                let _ = std::fs::remove_file(&meta_path);
+                return None;
+            }
+            let size_bytes = std::fs::metadata(&autosave_path).ok()?.len();
+            Some(RecoverableAutosave {
+                autosave_path,
+                metadata_path: meta_path,
+                metadata,
+                size_bytes,
+            })
+        })
+        .collect();
+    // Most recent first
+    entries.sort_by(|a, b| {
+        b.metadata
+            .saved_at_unix_secs
+            .cmp(&a.metadata.saved_at_unix_secs)
+    });
+    entries
+}
+
+pub fn list_recoverable_autosaves() -> Vec<RecoverableAutosave> {
+    let dir = match autosave_dir() {
+        Some(d) => d,
+        None => return Vec::new(),
+    };
+    list_recoverable_autosaves_in_dir(&dir)
+}
+
+pub fn delete_autosave(entry: &RecoverableAutosave) {
+    let _ = std::fs::remove_file(&entry.autosave_path);
+    let _ = std::fs::remove_file(&entry.metadata_path);
+}
+
+/// Delete the autosave file matching a given project (by file_path or title).
+pub fn delete_autosave_for_project(project: &Project) {
+    let Some(dir) = autosave_dir() else { return };
+    let stem = autosave_stem_for_project(project);
+    let autosave_path = dir.join(format!("{stem}{AUTOSAVE_EXTENSION}"));
+    let meta_path = dir.join(format!("{stem}{AUTOSAVE_META_EXTENSION}"));
+    let _ = std::fs::remove_file(&autosave_path);
+    let _ = std::fs::remove_file(&meta_path);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -461,5 +616,92 @@ mod tests {
 
         let loaded = load_fcpxml_project(&path).expect("load snapshot");
         assert_eq!(loaded.title, "Snapshot Test");
+    }
+
+    // ── Autosave tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn autosave_write_list_delete_round_trip() {
+        let dir = tempdir().expect("temp dir");
+        let root = dir.path();
+        let mut project = Project::new("Crash Recovery Test");
+        project.file_path = Some("/home/user/my-project.uspxml".to_string());
+        let xml =
+            write_fcpxml_for_path(&project, Path::new("/tmp/dummy.uspxml")).expect("write xml");
+
+        let path = write_autosave_in_dir(root, &xml, &project).expect("write autosave");
+        assert!(path.exists());
+        assert!(path.to_string_lossy().ends_with(AUTOSAVE_EXTENSION));
+
+        let list = list_recoverable_autosaves_in_dir(root);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].metadata.project_title, "Crash Recovery Test");
+        assert_eq!(
+            list[0].metadata.project_file_path.as_deref(),
+            Some("/home/user/my-project.uspxml")
+        );
+        assert!(list[0].size_bytes > 0);
+
+        delete_autosave(&list[0]);
+        assert!(list_recoverable_autosaves_in_dir(root).is_empty());
+    }
+
+    #[test]
+    fn autosave_stem_is_stable_for_same_project() {
+        let mut p1 = Project::new("Title A");
+        p1.file_path = Some("/tmp/a.uspxml".to_string());
+        let stem1 = autosave_stem_for_project(&p1);
+        let stem2 = autosave_stem_for_project(&p1);
+        assert_eq!(stem1, stem2);
+    }
+
+    #[test]
+    fn autosave_stem_differs_for_different_paths() {
+        let mut p1 = Project::new("Title");
+        p1.file_path = Some("/tmp/a.uspxml".to_string());
+        let mut p2 = Project::new("Title");
+        p2.file_path = Some("/tmp/b.uspxml".to_string());
+        assert_ne!(
+            autosave_stem_for_project(&p1),
+            autosave_stem_for_project(&p2)
+        );
+    }
+
+    #[test]
+    fn autosave_unsaved_project_uses_title() {
+        let p = Project::new("Untitled 1");
+        let stem = autosave_stem_for_project(&p);
+        assert!(stem.starts_with("unsaved_"));
+    }
+
+    #[test]
+    fn autosave_overwrites_same_project() {
+        let dir = tempdir().expect("temp dir");
+        let root = dir.path();
+        let mut project = Project::new("Overwrite Test");
+        project.file_path = Some("/tmp/overwrite.uspxml".to_string());
+        let xml1 = "<fcpxml>v1</fcpxml>";
+        let xml2 = "<fcpxml>v2</fcpxml>";
+
+        let _ = write_autosave_in_dir(root, xml1, &project).expect("write v1");
+        let _ = write_autosave_in_dir(root, xml2, &project).expect("write v2");
+
+        let list = list_recoverable_autosaves_in_dir(root);
+        assert_eq!(list.len(), 1, "second write should overwrite first");
+        let content = std::fs::read_to_string(&list[0].autosave_path).expect("read");
+        assert_eq!(content, xml2);
+    }
+
+    #[test]
+    fn autosave_loaded_project_round_trips() {
+        let dir = tempdir().expect("temp dir");
+        let root = dir.path();
+        let project = Project::new("Loadable");
+        let xml =
+            write_fcpxml_for_path(&project, Path::new("/tmp/dummy.uspxml")).expect("write xml");
+
+        let path = write_autosave_in_dir(root, &xml, &project).expect("write autosave");
+        let loaded = load_fcpxml_project(&path).expect("load autosave");
+        assert_eq!(loaded.title, "Loadable");
     }
 }

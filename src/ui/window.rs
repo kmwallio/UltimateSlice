@@ -16136,6 +16136,10 @@ pub fn build_window(
         let stack_for_new = main_stack.clone();
         let stack_for_open = main_stack.clone();
         let stack_for_recent = main_stack.clone();
+        let stack_for_recover = main_stack.clone();
+
+        // Detect recoverable autosaves for the welcome screen
+        let recoverable = crate::project_versions::list_recoverable_autosaves();
 
         crate::ui::welcome::build_welcome_panel(
             // on_new_project
@@ -16269,6 +16273,41 @@ pub fn build_window(
                         }
                     });
                 }
+            }),
+            // recoverable autosaves
+            recoverable,
+            // on_recover
+            Rc::new({
+                let project = project.clone();
+                let timeline_state = timeline_state_for_welcome.clone();
+                let on_project_changed = on_project_changed.clone();
+                let stack = stack_for_recover;
+                move |entry: crate::project_versions::RecoverableAutosave| {
+                    match crate::project_versions::load_fcpxml_project(&entry.autosave_path) {
+                        Ok(mut new_proj) => {
+                            // Preserve original file_path so re-saving goes to the right place
+                            new_proj.file_path = entry.metadata.project_file_path.clone();
+                            new_proj.dirty = true;
+                            *project.borrow_mut() = new_proj;
+                            {
+                                let mut st = timeline_state.borrow_mut();
+                                st.playhead_ns = 0;
+                                st.scroll_offset = 0.0;
+                            }
+                            // Delete the autosave file now that it has been loaded
+                            crate::project_versions::delete_autosave(&entry);
+                            on_project_changed();
+                            stack.set_visible_child_name("editor");
+                        }
+                        Err(e) => {
+                            log::error!("Failed to recover autosave: {e}");
+                        }
+                    }
+                }
+            }),
+            // on_discard_autosave
+            Rc::new(|entry: crate::project_versions::RecoverableAutosave| {
+                crate::project_versions::delete_autosave(&entry);
             }),
         )
     };
@@ -17082,8 +17121,8 @@ pub fn build_window(
         });
     }
 
-    // Auto-save: every 60 seconds, write to a temp file if the project is dirty.
-    // Also creates a versioned backup in $XDG_DATA_HOME/ultimateslice/backups/.
+    // Auto-save: every 60 seconds, write a persistent autosave if the project
+    // is dirty.  Also creates a versioned backup if enabled in prefs.
     {
         let project = project.clone();
         let library = library.clone();
@@ -17102,13 +17141,16 @@ pub fn build_window(
                     crate::fcpxml::writer::write_fcpxml(&proj)
                 };
                 if let Ok(ref xml) = xml_result {
-                    let path = "/tmp/ultimateslice-autosave.fcpxml";
-                    if std::fs::write(path, xml).is_ok() {
+                    // Persistent autosave in XDG data dir
+                    let autosave_ok = {
+                        let proj = project.borrow();
+                        crate::project_versions::write_autosave(xml, &proj).is_ok()
+                    };
+                    if autosave_ok {
                         if let Some(win) = window_weak.upgrade() {
                             let proj = project.borrow();
                             let title = format!("UltimateSlice — {} (Auto-saved)", proj.title);
                             win.set_title(Some(&title));
-                            // Restore normal title after 3 seconds
                             let win_w2 = win.downgrade();
                             let proj_title = proj.title.clone();
                             glib::timeout_add_local_once(

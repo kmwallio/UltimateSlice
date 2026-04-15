@@ -414,6 +414,17 @@ entry:focus {
     font-size: 11px;
     color: #888888;
 }
+.welcome-recovery-section {
+    background: alpha(@warning_color, 0.08);
+    border: 1px solid alpha(@warning_color, 0.3);
+    border-radius: 8px;
+    padding: 12px;
+}
+.welcome-recovery-header {
+    font-size: 13px;
+    font-weight: bold;
+    color: @warning_color;
+}
 
 .toolbar-separator {
     margin-left: 6px;

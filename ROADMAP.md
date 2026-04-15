@@ -566,7 +566,7 @@ Tracking docs:
 ### Project Management
 - [x] Project save / load as FCPXML (wired to New/Open/Save buttons in toolbar)
 - [x] Recent projects list
-- [x] Auto-save (60s timer, writes to /tmp/ultimateslice-autosave.fcpxml when project is dirty)
+- [x] Auto-save (60s timer, persistent per-project `.uspxml.autosave` files in XDG data dir with JSON metadata sidecars; replaces old single `/tmp/` file)
 - [x] Proxy media generation and management
 - [ ] Proxy Status Badges on timeline clips indicating Original vs. Proxy resolution
 - [ ] Proxy Watermarks (optional visual burn-in for proxy files)
@@ -756,7 +756,7 @@ FCPXML persistence).
 - [ ] "What's this?" mode — toggle via Shift+F1 that turns the cursor into a help cursor; clicking any UI element opens the relevant docs section
 
 **Project housekeeping**
-- [ ] Autosave + crash recovery with versioned `.uspxml.autosave` files and a "Recover unsaved changes" prompt on next launch
+- [x] Autosave + crash recovery: persistent per-project autosave files in `$XDG_DATA_HOME/ultimateslice/autosave/` with metadata sidecars; "Recover Unsaved Work" section on welcome screen; autosave cleaned up on save/discard/new-project
 - [ ] Project health panel — surface missing media, offline proxies, cache staleness, and disk-usage breakdown (proxy/thumbnail/STT/AI caches) with one-click cleanup
 - [ ] Recent projects with thumbnails in the welcome screen and a File menu submenu (currently text-only in `welcome.rs`)
 
