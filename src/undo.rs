@@ -2441,6 +2441,80 @@ impl EditCommand for ScriptAssemblyCommand {
     }
 }
 
+// -----------------------------------------------------------------------
+// Marker commands
+// -----------------------------------------------------------------------
+
+pub struct AddMarkerCommand {
+    pub marker: crate::model::project::Marker,
+}
+
+impl EditCommand for AddMarkerCommand {
+    fn execute(&self, project: &mut Project) {
+        project.markers.push(self.marker.clone());
+        project.markers.sort_by_key(|m| m.position_ns);
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        project.markers.retain(|m| m.id != self.marker.id);
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Add marker"
+    }
+}
+
+pub struct RemoveMarkerCommand {
+    pub marker: crate::model::project::Marker,
+}
+
+impl EditCommand for RemoveMarkerCommand {
+    fn execute(&self, project: &mut Project) {
+        project.markers.retain(|m| m.id != self.marker.id);
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        project.markers.push(self.marker.clone());
+        project.markers.sort_by_key(|m| m.position_ns);
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Remove marker"
+    }
+}
+
+pub struct EditMarkerCommand {
+    pub marker_id: String,
+    pub old_state: crate::model::project::Marker,
+    pub new_state: crate::model::project::Marker,
+}
+
+impl EditCommand for EditMarkerCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(m) = project.markers.iter_mut().find(|m| m.id == self.marker_id) {
+            m.label = self.new_state.label.clone();
+            m.color = self.new_state.color;
+            m.notes = self.new_state.notes.clone();
+            m.position_ns = self.new_state.position_ns;
+        }
+        project.markers.sort_by_key(|m| m.position_ns);
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(m) = project.markers.iter_mut().find(|m| m.id == self.marker_id) {
+            m.label = self.old_state.label.clone();
+            m.color = self.old_state.color;
+            m.notes = self.old_state.notes.clone();
+            m.position_ns = self.old_state.position_ns;
+        }
+        project.markers.sort_by_key(|m| m.position_ns);
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Edit marker"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3379,5 +3453,66 @@ mod tests {
         cmd.undo(&mut project);
         assert_eq!(project.track_ref(&inner_v_id).unwrap().clips.len(), 1);
         assert_eq!(project.track_ref(&inner_a_id).unwrap().clips.len(), 1);
+    }
+
+    #[test]
+    fn add_marker_command_execute_and_undo() {
+        use crate::model::project::Marker;
+        let mut project = Project::new("Marker Undo");
+        assert!(project.markers.is_empty());
+
+        let marker = Marker::new(1_000_000_000, "M1");
+        let cmd = AddMarkerCommand {
+            marker: marker.clone(),
+        };
+        cmd.execute(&mut project);
+        assert_eq!(project.markers.len(), 1);
+        assert_eq!(project.markers[0].label, "M1");
+
+        cmd.undo(&mut project);
+        assert!(project.markers.is_empty());
+    }
+
+    #[test]
+    fn remove_marker_command_execute_and_undo() {
+        use crate::model::project::Marker;
+        let mut project = Project::new("Marker Undo");
+        let m = Marker::new(2_000_000_000, "M2");
+        project.markers.push(m.clone());
+        assert_eq!(project.markers.len(), 1);
+
+        let cmd = RemoveMarkerCommand { marker: m };
+        cmd.execute(&mut project);
+        assert!(project.markers.is_empty());
+
+        cmd.undo(&mut project);
+        assert_eq!(project.markers.len(), 1);
+        assert_eq!(project.markers[0].label, "M2");
+    }
+
+    #[test]
+    fn edit_marker_command_execute_and_undo() {
+        use crate::model::project::Marker;
+        let mut project = Project::new("Marker Edit");
+        let mut m = Marker::new(0, "Before");
+        m.notes = "old notes".to_string();
+        let marker_id = m.id.clone();
+        project.markers.push(m.clone());
+
+        let mut new_marker = m.clone();
+        new_marker.label = "After".to_string();
+        new_marker.notes = "new notes".to_string();
+        let cmd = EditMarkerCommand {
+            marker_id: marker_id.clone(),
+            old_state: m,
+            new_state: new_marker,
+        };
+        cmd.execute(&mut project);
+        assert_eq!(project.markers[0].label, "After");
+        assert_eq!(project.markers[0].notes, "new notes");
+
+        cmd.undo(&mut project);
+        assert_eq!(project.markers[0].label, "Before");
+        assert_eq!(project.markers[0].notes, "old notes");
     }
 }

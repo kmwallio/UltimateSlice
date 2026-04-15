@@ -149,6 +149,9 @@ pub fn parse_otio_with_path(json: &str, otio_path: Option<&Path>) -> Result<Proj
                 position_ns: pos_ns,
                 label: m.name.clone(),
                 color,
+                notes: marker_metadata_from_root(&m.metadata)
+                    .and_then(|us| us.notes)
+                    .unwrap_or_default(),
             });
         }
 

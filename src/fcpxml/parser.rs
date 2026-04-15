@@ -3335,6 +3335,9 @@ fn parse_sequence_marker(
             use crate::model::project::Marker;
             let mut m = Marker::new(pos_ns, label);
             m.color = color;
+            if let Some(notes) = attrs.get("us:marker-notes") {
+                m.notes = notes.clone();
+            }
             project.markers.push(m);
         }
     }

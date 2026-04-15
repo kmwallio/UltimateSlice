@@ -7462,5 +7462,129 @@ pub(crate) fn handle_mcp_command(
                 }
             }
         }
+        // ── Marker tools ──
+        McpCommand::ListMarkers { reply } => {
+            let proj = project.borrow();
+            let markers: Vec<Value> = proj
+                .markers
+                .iter()
+                .map(|m| {
+                    json!({
+                        "id": m.id,
+                        "label": m.label,
+                        "position_ns": m.position_ns,
+                        "color": format!("{:08X}", m.color),
+                        "notes": m.notes,
+                    })
+                })
+                .collect();
+            reply.send(json!({ "markers": markers })).ok();
+        }
+        McpCommand::AddMarker {
+            position_ns,
+            label,
+            color,
+            notes,
+            reply,
+        } => {
+            let mut marker = crate::model::project::Marker::new(position_ns, label);
+            if let Some(c) = color {
+                marker.color = c;
+            }
+            if let Some(n) = notes {
+                marker.notes = n;
+            }
+            let id = marker.id.clone();
+            {
+                let mut st = timeline_state.borrow_mut();
+                let mut p = project.borrow_mut();
+                st.history
+                    .execute(Box::new(crate::undo::AddMarkerCommand { marker }), &mut p);
+            }
+            on_project_changed();
+            reply.send(json!({ "marker_id": id })).ok();
+        }
+        McpCommand::RemoveMarker { marker_id, reply } => {
+            let marker = {
+                let p = project.borrow();
+                p.markers.iter().find(|m| m.id == marker_id).cloned()
+            };
+            match marker {
+                Some(marker) => {
+                    {
+                        let mut st = timeline_state.borrow_mut();
+                        let mut p = project.borrow_mut();
+                        st.history.execute(
+                            Box::new(crate::undo::RemoveMarkerCommand { marker }),
+                            &mut p,
+                        );
+                    }
+                    on_project_changed();
+                    reply.send(json!({ "success": true })).ok();
+                }
+                None => {
+                    reply
+                        .send(json!({"error": format!("Marker not found: {marker_id}")}))
+                        .ok();
+                }
+            }
+        }
+        McpCommand::EditMarker {
+            marker_id,
+            label,
+            color,
+            notes,
+            position_ns,
+            reply,
+        } => {
+            let old = {
+                let p = project.borrow();
+                p.markers.iter().find(|m| m.id == marker_id).cloned()
+            };
+            match old {
+                Some(old) => {
+                    let mut new_marker = old.clone();
+                    if let Some(l) = label {
+                        new_marker.label = l;
+                    }
+                    if let Some(c) = color {
+                        new_marker.color = c;
+                    }
+                    if let Some(n) = notes {
+                        new_marker.notes = n;
+                    }
+                    if let Some(pos) = position_ns {
+                        new_marker.position_ns = pos;
+                    }
+                    let cmd = crate::undo::EditMarkerCommand {
+                        marker_id: marker_id.clone(),
+                        old_state: old,
+                        new_state: new_marker.clone(),
+                    };
+                    {
+                        let mut st = timeline_state.borrow_mut();
+                        let mut p = project.borrow_mut();
+                        st.history.execute(Box::new(cmd), &mut p);
+                    }
+                    on_project_changed();
+                    reply
+                        .send(json!({
+                            "marker": {
+                                "id": new_marker.id,
+                                "label": new_marker.label,
+                                "position_ns": new_marker.position_ns,
+                                "color": format!("{:08X}", new_marker.color),
+                                "notes": new_marker.notes,
+                            }
+                        }))
+                        .ok();
+                }
+                None => {
+                    reply
+                        .send(json!({"error": format!("Marker not found: {marker_id}")}))
+                        .ok();
+                }
+            }
+        }
     }
 }

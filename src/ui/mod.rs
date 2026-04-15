@@ -10,6 +10,7 @@ pub mod inspector;
 pub mod keyframe_editor;
 pub mod levels_editor;
 pub mod loudness_popover;
+pub mod markers_panel;
 pub mod mcp_handler;
 pub mod media_browser;
 pub mod multicam_viewer;

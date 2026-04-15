@@ -5681,6 +5681,8 @@ pub fn build_window(
     let transcript_panel_cell: Rc<
         RefCell<Option<Rc<crate::ui::transcript_panel::TranscriptPanelView>>>,
     > = Rc::new(RefCell::new(None));
+    let markers_panel_cell: Rc<RefCell<Option<Rc<crate::ui::markers_panel::MarkersPanelView>>>> =
+        Rc::new(RefCell::new(None));
     // transform_overlay_cell holds the TransformOverlay after the program monitor is built.
     let transform_overlay_cell: Rc<
         RefCell<Option<Rc<crate::ui::transform_overlay::TransformOverlay>>>,
@@ -14385,6 +14387,7 @@ pub fn build_window(
         let transform_overlay_cell = transform_overlay_cell.clone();
         let keyframe_editor_cell = keyframe_editor_cell.clone();
         let transcript_panel_cell = transcript_panel_cell.clone();
+        let markers_panel_cell = markers_panel_cell.clone();
         let prog_canvas_frame = prog_canvas_frame.clone();
         let program_empty_hint = program_empty_hint.clone();
         let picture_a = picture_a.clone();
@@ -14447,6 +14450,9 @@ pub fn build_window(
                 }
                 if let Some(ref tp) = *transcript_panel_cell.borrow() {
                     tp.rebuild_from_project(&proj);
+                }
+                if let Some(ref mp) = *markers_panel_cell.borrow() {
+                    mp.rebuild_from_project(&proj);
                 }
 
                 // Sync transform overlay: show handles when a clip is selected,
@@ -15021,17 +15027,31 @@ pub fn build_window(
         project.clone(),
         timeline_state.clone(),
         on_project_changed.clone(),
-        dopesheet_on_seek,
+        dopesheet_on_seek.clone(),
     );
     transcript_widget.set_size_request(-1, 120);
     let transcript_scroller = ScrolledWindow::new();
     transcript_scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     transcript_scroller.set_child(Some(&transcript_widget));
 
+    // Markers panel — scrollable list of all project markers with inline
+    // editing, color swatches, and double-click-to-seek.
+    let (markers_widget, markers_view) = crate::ui::markers_panel::build_markers_panel(
+        project.clone(),
+        timeline_state.clone(),
+        on_project_changed.clone(),
+        dopesheet_on_seek,
+    );
+    markers_widget.set_size_request(-1, 120);
+    let markers_scroller = ScrolledWindow::new();
+    markers_scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    markers_scroller.set_child(Some(&markers_widget));
+
     let bottom_panel_stack = gtk::Stack::new();
     bottom_panel_stack.set_transition_type(gtk::StackTransitionType::None);
     bottom_panel_stack.add_named(&keyframe_scroller, Some("keyframes"));
     bottom_panel_stack.add_named(&transcript_scroller, Some("transcript"));
+    bottom_panel_stack.add_named(&markers_scroller, Some("markers"));
     bottom_panel_stack.set_visible_child_name("keyframes");
     bottom_panel_stack.set_visible(false);
     timeline_paned.set_end_child(Some(&bottom_panel_stack));
@@ -15053,6 +15073,7 @@ pub fn build_window(
     }
     *keyframe_editor_cell.borrow_mut() = Some(keyframe_editor_view);
     *transcript_panel_cell.borrow_mut() = Some(transcript_view);
+    *markers_panel_cell.borrow_mut() = Some(markers_view);
 
     // Add spacer + toggle buttons to the track-management bar. Both toggles
     // share the same `bottom_panel_stack`: clicking one switches the visible
@@ -15062,6 +15083,8 @@ pub fn build_window(
     keyframes_toggle.add_css_class("small-btn");
     let transcript_toggle = gtk::Button::with_label("Show Transcript");
     transcript_toggle.add_css_class("small-btn");
+    let markers_toggle = gtk::Button::with_label("Show Markers");
+    markers_toggle.add_css_class("small-btn");
     let minimap_toggle =
         gtk::Button::with_label(if preferences_state.borrow().show_timeline_minimap {
             "Hide Mini-Map"
@@ -15077,6 +15100,7 @@ pub fn build_window(
             bar.append(&minimap_toggle);
             bar.append(&keyframes_toggle);
             bar.append(&transcript_toggle);
+            bar.append(&markers_toggle);
         }
     }
 
@@ -15134,21 +15158,23 @@ pub fn build_window(
             });
         });
     }
-    // Shared toggle handlers for the two bottom panels (Keyframes /
-    // Transcript). Each toggle either:
+    // Shared toggle handlers for the bottom panels (Keyframes /
+    // Transcript / Markers). Each toggle either:
     //   * activates its panel (and shows the stack if it was hidden), or
     //   * hides the stack entirely (clicking the active panel's toggle).
-    // After mutating the stack, both buttons' labels are refreshed to match
+    // After mutating the stack, all buttons' labels are refreshed to match
     // the new visibility state.
     let refresh_bottom_toggle_labels: Rc<dyn Fn()> = {
         let stack = bottom_panel_stack.clone();
         let kf = keyframes_toggle.clone();
         let tr = transcript_toggle.clone();
+        let mk = markers_toggle.clone();
         Rc::new(move || {
             let visible = stack.is_visible();
             let active = stack.visible_child_name();
             let kf_active = visible && active.as_deref() == Some("keyframes");
             let tr_active = visible && active.as_deref() == Some("transcript");
+            let mk_active = visible && active.as_deref() == Some("markers");
             kf.set_label(if kf_active {
                 "Hide Keyframes"
             } else {
@@ -15158,6 +15184,11 @@ pub fn build_window(
                 "Hide Transcript"
             } else {
                 "Show Transcript"
+            });
+            mk.set_label(if mk_active {
+                "Hide Markers"
+            } else {
+                "Show Markers"
             });
         })
     };
@@ -15201,6 +15232,33 @@ pub fn build_window(
                 collapse_workspace_paned_end_child(&paned);
             } else {
                 stack.set_visible_child_name("transcript");
+                if !stack.is_visible() {
+                    stack.set_visible(true);
+                    let total = paned.allocation().height();
+                    if total > 0 {
+                        paned.set_position((total as f64 * 0.7) as i32);
+                    }
+                }
+            }
+            refresh_labels();
+            if !workspace_layouts_applying.get() {
+                sync_workspace_layout_state();
+            }
+        });
+    }
+    {
+        let stack = bottom_panel_stack.clone();
+        let paned = timeline_paned.clone();
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
+        let refresh_labels = refresh_bottom_toggle_labels.clone();
+        markers_toggle.connect_clicked(move |_| {
+            let active = stack.visible_child_name();
+            if stack.is_visible() && active.as_deref() == Some("markers") {
+                stack.set_visible(false);
+                collapse_workspace_paned_end_child(&paned);
+            } else {
+                stack.set_visible_child_name("markers");
                 if !stack.is_visible() {
                     stack.set_visible(true);
                     let total = paned.allocation().height();
@@ -15665,6 +15723,9 @@ pub fn build_window(
                 media_browser_visible: media_browser_toggle.is_active(),
                 inspector_visible: inspector_toggle.is_active(),
                 keyframe_editor_visible: bottom_panel_stack.is_visible(),
+                bottom_panel_child: bottom_panel_stack
+                    .visible_child_name()
+                    .map_or_else(|| "keyframes".to_string(), |g| g.to_string()),
                 left_panel_tab,
                 minimap_visible: minimap_area_capture.is_visible(),
                 program_monitor: crate::ui_state::ProgramMonitorWorkspaceState {
@@ -15770,6 +15831,7 @@ pub fn build_window(
             if bottom_panel_stack.is_visible() != arrangement.keyframe_editor_visible {
                 bottom_panel_stack.set_visible(arrangement.keyframe_editor_visible);
             }
+            bottom_panel_stack.set_visible_child_name(&arrangement.bottom_panel_child);
             refresh_bottom_toggle_labels();
             if minimap_area_apply.is_visible() != arrangement.minimap_visible {
                 minimap_area_apply.set_visible(arrangement.minimap_visible);
@@ -17139,6 +17201,7 @@ pub fn build_window(
     {
         let project = project.clone();
         let prog_player = prog_player.clone();
+        let timeline_state = timeline_state.clone();
         let on_project_changed = on_project_changed.clone();
         let key_ctrl = gtk4::EventControllerKey::new();
         key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
@@ -17160,7 +17223,15 @@ pub fn build_window(
                 }
             }
             let pos = prog_player.borrow().timeline_pos_ns;
-            project.borrow_mut().add_marker(pos, "Marker");
+            let marker = crate::model::project::Marker::new(pos, "Marker");
+            {
+                let mut st = timeline_state.borrow_mut();
+                let mut proj = project.borrow_mut();
+                st.history.execute(
+                    Box::new(crate::undo::AddMarkerCommand { marker }),
+                    &mut proj,
+                );
+            }
             on_project_changed();
             glib::Propagation::Stop
         });

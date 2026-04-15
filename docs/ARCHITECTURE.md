@@ -72,6 +72,8 @@ src/
     preferences.rs          Preferences dialog — categorized app-level settings UI
     transcript_panel.rs     Transcript-Based Editing panel — flat-word TextView, click-to-seek,
                             range-select + Delete to ripple-cut the underlying clip in one undo
+    markers_panel.rs        Marker List panel — scrollable list of project markers with inline
+                            editing (label, notes, color swatch), delete button, double-click seek
     timeline/
       mod.rs                Re-exports TimelineState and build_timeline()
       widget.rs             Full timeline: Cairo drawing + all gesture/key controllers

@@ -412,6 +412,8 @@ pub(crate) struct UltimateSliceTransitionOtioMetadata {
 pub(crate) struct UltimateSliceMarkerOtioMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) color_rgba: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) notes: Option<String>,
 }
 
 fn wrap_section<T: Serialize>(section: &str, payload: &T) -> Value {

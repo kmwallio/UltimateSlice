@@ -5622,12 +5622,22 @@ pub fn build_timeline(
                             .map(|m| m.id.clone())
                     };
                     if let Some(id) = to_remove {
-                        st.project.borrow_mut().remove_marker(&id);
+                        let marker = {
+                            let proj = st.project.borrow();
+                            proj.markers.iter().find(|m| m.id == id).cloned()
+                        };
+                        if let Some(marker) = marker {
+                            let proj_rc = st.project.clone();
+                            let mut proj = proj_rc.borrow_mut();
+                            st.history.execute(
+                                Box::new(crate::undo::RemoveMarkerCommand { marker }),
+                                &mut proj,
+                            );
+                        }
                         drop(st);
                         TimelineState::notify_project_changed(&state);
                     }
-                } else {
-                    // Left-click in ruler → seek
+                    let mut st = state.borrow_mut();
                     let ns = st.x_to_ns(x);
                     st.set_playhead_visual(ns);
                     let seek_cb = st.on_seek.clone();
@@ -8165,7 +8175,18 @@ pub fn build_timeline_ruler(
                         .map(|m| m.id.clone())
                 };
                 if let Some(id) = to_remove {
-                    st.project.borrow_mut().remove_marker(&id);
+                    let marker = {
+                        let proj = st.project.borrow();
+                        proj.markers.iter().find(|m| m.id == id).cloned()
+                    };
+                    if let Some(marker) = marker {
+                        let proj_rc = st.project.clone();
+                        let mut proj = proj_rc.borrow_mut();
+                        st.history.execute(
+                            Box::new(crate::undo::RemoveMarkerCommand { marker }),
+                            &mut proj,
+                        );
+                    }
                     drop(st);
                     TimelineState::notify_project_changed(&state);
                 } else {

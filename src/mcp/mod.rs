@@ -1008,6 +1008,29 @@ pub enum McpCommand {
         track_id: String,
         reply: SyncSender<Value>,
     },
+    // ── Marker tools ──
+    ListMarkers {
+        reply: SyncSender<Value>,
+    },
+    AddMarker {
+        position_ns: u64,
+        label: String,
+        color: Option<u32>,
+        notes: Option<String>,
+        reply: SyncSender<Value>,
+    },
+    RemoveMarker {
+        marker_id: String,
+        reply: SyncSender<Value>,
+    },
+    EditMarker {
+        marker_id: String,
+        label: Option<String>,
+        color: Option<u32>,
+        notes: Option<String>,
+        position_ns: Option<u64>,
+        reply: SyncSender<Value>,
+    },
 }
 
 /// Spawn the MCP stdio server on a background thread.

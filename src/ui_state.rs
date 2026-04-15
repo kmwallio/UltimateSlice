@@ -71,6 +71,10 @@ fn default_workspace_panel_visible() -> bool {
     true
 }
 
+fn default_bottom_panel_child() -> String {
+    "keyframes".to_string()
+}
+
 pub fn workspace_split_ratio_from_pixels(position: i32, total: i32) -> Option<u16> {
     if total <= 0 {
         return None;
@@ -208,6 +212,10 @@ pub struct WorkspaceArrangement {
     pub inspector_visible: bool,
     #[serde(default)]
     pub keyframe_editor_visible: bool,
+    /// Which child of the bottom panel stack is active ("keyframes",
+    /// "transcript", or "markers"). Defaults to "keyframes".
+    #[serde(default = "default_bottom_panel_child")]
+    pub bottom_panel_child: String,
     #[serde(default)]
     pub left_panel_tab: WorkspaceLeftPanelTab,
     #[serde(default)]
@@ -234,6 +242,7 @@ impl Default for WorkspaceArrangement {
             media_browser_visible: default_workspace_panel_visible(),
             inspector_visible: default_workspace_panel_visible(),
             keyframe_editor_visible: false,
+            bottom_panel_child: default_bottom_panel_child(),
             left_panel_tab: WorkspaceLeftPanelTab::default(),
             minimap_visible: false,
             program_monitor: ProgramMonitorWorkspaceState::default(),

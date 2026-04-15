@@ -555,6 +555,11 @@ fn write_otio_with_mode(
                     color,
                     metadata: wrap_marker_metadata(&UltimateSliceMarkerOtioMetadata {
                         color_rgba: Some(format!("{:08X}", marker.color)),
+                        notes: if marker.notes.is_empty() {
+                            None
+                        } else {
+                            Some(marker.notes.clone())
+                        },
                     }),
                 });
             }
@@ -780,6 +785,7 @@ mod tests {
             position_ns: 2_000_000_000,
             label: "Chapter 1".into(),
             color: 0xFF0000FF, // red
+            notes: String::new(),
         });
 
         let json = write_otio(&p).unwrap();

@@ -2387,6 +2387,51 @@ fn tools_list() -> Value {
                 },
                 "required": ["track_id"]
             }
+        },
+        {
+            "name": "list_markers",
+            "description": "List all project markers with id, label, position_ns, color (hex RGBA), and notes.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "add_marker",
+            "description": "Add a marker at the given position. Returns the new marker.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "position_ns": { "type": "integer", "description": "Timeline position in nanoseconds" },
+                    "label": { "type": "string", "description": "Marker label" },
+                    "color": { "type": "string", "description": "RGBA hex color, e.g. FF8C00FF (optional, default orange)" },
+                    "notes": { "type": "string", "description": "Optional notes text" }
+                },
+                "required": ["position_ns", "label"]
+            }
+        },
+        {
+            "name": "remove_marker",
+            "description": "Remove a marker by its ID.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "marker_id": { "type": "string", "description": "ID of the marker to remove" }
+                },
+                "required": ["marker_id"]
+            }
+        },
+        {
+            "name": "edit_marker",
+            "description": "Edit a marker's label, color, notes, or position. Only provided fields are changed.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "marker_id": { "type": "string", "description": "ID of the marker to edit" },
+                    "label": { "type": "string", "description": "New label (optional)" },
+                    "color": { "type": "string", "description": "New RGBA hex color (optional)" },
+                    "notes": { "type": "string", "description": "New notes text (optional)" },
+                    "position_ns": { "type": "integer", "description": "New position in nanoseconds (optional)" }
+                },
+                "required": ["marker_id"]
+            }
         }
     ]})
 }
@@ -3968,6 +4013,45 @@ fn dispatch_tool_payload(
         },
         "reorder_by_script" => McpCommand::ReorderByScript {
             track_id: arg_str!(args, "track_id"),
+            reply: tx,
+        },
+        // ── Marker tools ─────────────────────────────────────────────────
+        "list_markers" => McpCommand::ListMarkers { reply: tx },
+        "add_marker" => McpCommand::AddMarker {
+            position_ns: args
+                .get("position_ns")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            label: arg_str!(args, "label"),
+            color: args
+                .get("color")
+                .and_then(|v| v.as_str())
+                .and_then(|s| u32::from_str_radix(s, 16).ok()),
+            notes: args
+                .get("notes")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            reply: tx,
+        },
+        "remove_marker" => McpCommand::RemoveMarker {
+            marker_id: arg_str!(args, "marker_id"),
+            reply: tx,
+        },
+        "edit_marker" => McpCommand::EditMarker {
+            marker_id: arg_str!(args, "marker_id"),
+            label: args
+                .get("label")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            color: args
+                .get("color")
+                .and_then(|v| v.as_str())
+                .and_then(|s| u32::from_str_radix(s, 16).ok()),
+            notes: args
+                .get("notes")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            position_ns: args.get("position_ns").and_then(|v| v.as_u64()),
             reply: tx,
         },
 

@@ -364,6 +364,25 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC, SVG) can be placed on the t
 - Markers are exported in the FCPXML file.
 - On FCPXML import, standard markers and chapter markers are read and placed at their correct timeline positions.
 - When exporting to MP4, MOV, or MKV, markers are embedded as **chapter metadata** in the output file (see [export.md](export.md#chapter-markers)).
+- Adding and removing markers is **undoable** (Ctrl+Z / Ctrl+Shift+Z).
+
+### Markers panel
+
+Use the **Show Markers** button on the track-management bar to open the Markers panel (shares the bottom slot with Keyframes and Transcript).
+
+The panel lists every project marker with:
+
+| Column | Description |
+|--------|-------------|
+| **Color** | Click the swatch to choose from 8 preset colours |
+| **Name** | Click to rename via inline popover |
+| **Time** | Timecode at which the marker sits |
+| **Notes** | Click to add or edit free-text notes |
+| **🗑** | Delete the marker (undoable) |
+
+- **Double-click** any row to seek the playhead to that marker's position.
+- Click **+ Add** in the panel header to add a marker at the current playhead.
+- Panel visibility is saved/restored per workspace layout.
 
 ## Tracks
 

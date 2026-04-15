@@ -1590,6 +1590,9 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
             m.push_attribute(("value", marker.label.as_str()));
             if emit_vendor_extensions {
                 m.push_attribute(("us:color", format!("{:08X}", marker.color).as_str()));
+                if !marker.notes.is_empty() {
+                    m.push_attribute(("us:marker-notes", marker.notes.as_str()));
+                }
             }
             writer.write_event(Event::Empty(m))?;
         }
@@ -5263,6 +5266,7 @@ mod tests {
             position_ns: 0,
             label: "Marker".to_string(),
             color: 0xFF00FF00,
+            notes: String::new(),
         });
 
         let xml = write_fcpxml_strict(&project).expect("strict write should succeed");

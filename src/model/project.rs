@@ -13,6 +13,9 @@ pub struct Marker {
     /// RGBA colour packed as 0xRRGGBBAA (default orange = 0xFF8C00FF)
     #[serde(default = "default_marker_color")]
     pub color: u32,
+    /// Optional longer notes for this marker
+    #[serde(default)]
+    pub notes: String,
 }
 
 fn default_marker_color() -> u32 {
@@ -34,6 +37,7 @@ impl Marker {
             position_ns,
             label: label.into(),
             color: default_marker_color(),
+            notes: String::new(),
         }
     }
 }
@@ -803,5 +807,30 @@ mod tests {
         assert!(p.clip_ref("inner-clip-1").unwrap().masks[0]
             .tracking_binding
             .is_none());
+    }
+
+    #[test]
+    fn marker_notes_defaults_empty() {
+        let m = Marker::new(1_000_000_000, "Test");
+        assert_eq!(m.notes, "");
+        assert_eq!(m.color, 0xFF8C00FF);
+    }
+
+    #[test]
+    fn marker_serde_roundtrip_with_notes() {
+        let mut m = Marker::new(500_000_000, "Shot start");
+        m.notes = "Need to re-shoot".to_string();
+        let json = serde_json::to_string(&m).unwrap();
+        let m2: Marker = serde_json::from_str(&json).unwrap();
+        assert_eq!(m2.notes, "Need to re-shoot");
+        assert_eq!(m2.label, "Shot start");
+        assert_eq!(m2.position_ns, 500_000_000);
+    }
+
+    #[test]
+    fn marker_serde_backward_compat_no_notes() {
+        let json = r#"{"id":"abc","position_ns":100,"label":"Old","color":4278190335}"#;
+        let m: Marker = serde_json::from_str(json).unwrap();
+        assert_eq!(m.notes, "");
     }
 }
