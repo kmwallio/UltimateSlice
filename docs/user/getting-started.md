@@ -72,7 +72,9 @@ cargo run -- --mcp
 
 When launched without a project file, UltimateSlice shows a **Welcome screen** with:
 - **New Project** and **Open Project...** buttons
-- A **Recent Projects** list (up to 10 entries with modification dates)
+- A featured **most recent project** card for quickly jumping back in
+- A **Recent Projects** list for additional recent work
+- A collapsed **What's New in UltimateSlice 0.1.0** card with current-version highlights
 - A tip to get started
 
 Clicking any action transitions smoothly to the editor. If you launch with a project file (e.g., `ultimate-slice project.uspxml`), the welcome screen is skipped and the project opens directly.
