@@ -29,9 +29,137 @@ use std::rc::Rc;
 thread_local! {
     static MCP_MAIN_DISPATCH: RefCell<Option<Box<dyn FnMut(crate::mcp::McpCommand)>>> =
         RefCell::new(None);
+    static WINDOW_TOASTS: RefCell<HashMap<usize, WindowToastHandle>> =
+        RefCell::new(HashMap::new());
 }
 
 const SOURCE_KEYWORD_NEW_ID: &str = "__new__";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToastSeverity {
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
+impl ToastSeverity {
+    fn css_class(self) -> &'static str {
+        match self {
+            ToastSeverity::Info => "app-toast-info",
+            ToastSeverity::Success => "app-toast-success",
+            ToastSeverity::Warning => "app-toast-warning",
+            ToastSeverity::Error => "app-toast-error",
+        }
+    }
+
+    fn icon_name(self) -> &'static str {
+        match self {
+            ToastSeverity::Info => "dialog-information-symbolic",
+            ToastSeverity::Success => "emblem-ok-symbolic",
+            ToastSeverity::Warning => "dialog-warning-symbolic",
+            ToastSeverity::Error => "dialog-error-symbolic",
+        }
+    }
+
+    fn dismiss_after(self) -> std::time::Duration {
+        match self {
+            ToastSeverity::Info => std::time::Duration::from_secs(4),
+            ToastSeverity::Success => std::time::Duration::from_secs(3),
+            ToastSeverity::Warning => std::time::Duration::from_secs(5),
+            ToastSeverity::Error => std::time::Duration::from_secs(6),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct WindowToastHandle {
+    revealer: gtk::Revealer,
+    toast_box: gtk::Box,
+    icon: gtk::Image,
+    label: gtk::Label,
+    generation: Rc<Cell<u64>>,
+}
+
+impl WindowToastHandle {
+    fn show(&self, message: &str, severity: ToastSeverity) {
+        self.label.set_text(message);
+        self.icon.set_icon_name(Some(severity.icon_name()));
+        for class in [
+            "app-toast-info",
+            "app-toast-success",
+            "app-toast-warning",
+            "app-toast-error",
+        ] {
+            self.toast_box.remove_css_class(class);
+        }
+        self.toast_box.add_css_class(severity.css_class());
+        self.revealer.set_reveal_child(true);
+        let generation = self.generation.get().wrapping_add(1);
+        self.generation.set(generation);
+        let revealer = self.revealer.clone();
+        let latest_generation = self.generation.clone();
+        glib::timeout_add_local_once(severity.dismiss_after(), move || {
+            if latest_generation.get() == generation {
+                revealer.set_reveal_child(false);
+            }
+        });
+    }
+}
+
+fn register_window_toast(window: &gtk::ApplicationWindow, handle: WindowToastHandle) {
+    WINDOW_TOASTS.with(|toasts| {
+        toasts.borrow_mut().insert(window.as_ptr() as usize, handle);
+    });
+}
+
+fn clear_window_toast(window: &gtk::ApplicationWindow) {
+    WINDOW_TOASTS.with(|toasts| {
+        toasts.borrow_mut().remove(&(window.as_ptr() as usize));
+    });
+}
+
+fn show_window_status_toast(
+    window: &gtk::ApplicationWindow,
+    message: &str,
+    severity: ToastSeverity,
+) {
+    WINDOW_TOASTS.with(|toasts| {
+        if let Some(handle) = toasts.borrow().get(&(window.as_ptr() as usize)).cloned() {
+            handle.show(message, severity);
+        } else {
+            log::info!("Toast unavailable: {message}");
+        }
+    });
+}
+
+fn infer_toast_severity(message: &str) -> ToastSeverity {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("failed") || lower.contains("error") {
+        ToastSeverity::Error
+    } else if lower.contains("cancel") {
+        ToastSeverity::Warning
+    } else if lower.contains("saved")
+        || lower.contains("complete")
+        || lower.contains("ready")
+        || lower.contains("loaded")
+        || lower.contains("added")
+        || lower.contains("relinked")
+    {
+        ToastSeverity::Success
+    } else {
+        ToastSeverity::Info
+    }
+}
+
+fn refresh_window_title(window: &gtk::ApplicationWindow, project: &Rc<RefCell<Project>>) {
+    let proj = project.borrow();
+    if proj.dirty {
+        window.set_title(Some(&format!("UltimateSlice — {} •", proj.title)));
+    } else {
+        window.set_title(Some(&format!("UltimateSlice — {}", proj.title)));
+    }
+}
 
 /// Check whether the focused widget is a text-input widget.
 /// In GTK4, `Entry` delegates keyboard focus to an internal `gtk4::Text`
@@ -292,26 +420,13 @@ fn format_source_keyword_range(range: &MediaKeywordRange) -> String {
     }
 }
 
+// Legacy helper name retained so existing call sites can migrate without churn.
 fn flash_window_status_title(
     window: &gtk::ApplicationWindow,
-    project: &Rc<RefCell<Project>>,
+    _project: &Rc<RefCell<Project>>,
     message: &str,
 ) {
-    let (title, dirty) = {
-        let proj = project.borrow();
-        (proj.title.clone(), proj.dirty)
-    };
-    window.set_title(Some(&format!("UltimateSlice — {title} ({message})")));
-    let window_weak = window.downgrade();
-    glib::timeout_add_local_once(std::time::Duration::from_secs(3), move || {
-        if let Some(win) = window_weak.upgrade() {
-            if dirty {
-                win.set_title(Some(&format!("UltimateSlice — {title} •")));
-            } else {
-                win.set_title(Some(&format!("UltimateSlice — {title}")));
-            }
-        }
-    });
+    show_window_status_toast(window, message, infer_toast_severity(message));
 }
 
 fn clip_kind_supports_audio_match(kind: &ClipKind) -> bool {
@@ -10237,7 +10352,6 @@ pub fn build_window(
         }
         let audio_sync_in_progress_cb = audio_sync_in_progress.clone();
         let sync_rx_for_replace = sync_rx.clone();
-        let project_for_replace = project.clone();
         let window_weak_for_replace = window_weak.clone();
         timeline_state.borrow_mut().on_sync_audio = Some(Rc::new(
             move |clip_infos: Vec<(String, String, u64, u64, u64, String)>| {
@@ -10247,12 +10361,7 @@ pub fn build_window(
                 }
                 audio_sync_in_progress_cb.set(true);
                 if let Some(win) = window_weak.upgrade() {
-                    let proj = project.borrow();
-                    let title = proj.title.clone();
-                    let dirty = proj.dirty;
-                    drop(proj);
-                    win.set_title(Some(&format!("UltimateSlice — {title} (Syncing audio...)")));
-                    let _ = dirty; // title restored by apply function
+                    show_window_status_toast(&win, "Syncing audio…", ToastSeverity::Info);
                 }
                 let (tx, rx) = std::sync::mpsc::channel();
                 *sync_rx.borrow_mut() = Some(rx);
@@ -10279,7 +10388,6 @@ pub fn build_window(
             let sync_rx2 = sync_rx_for_replace;
             let audio_sync_in_progress_cb2 = audio_sync_in_progress.clone();
             let sync_replace_mode_cb = sync_replace_mode.clone();
-            let project = project_for_replace;
             let window_weak = window_weak_for_replace;
             timeline_state.borrow_mut().on_sync_replace_audio = Some(Rc::new(
                 move |clip_infos: Vec<(String, String, u64, u64, u64, String)>| {
@@ -10289,11 +10397,11 @@ pub fn build_window(
                     audio_sync_in_progress_cb2.set(true);
                     sync_replace_mode_cb.set(true);
                     if let Some(win) = window_weak.upgrade() {
-                        let proj = project.borrow();
-                        win.set_title(Some(&format!(
-                            "UltimateSlice \u{2014} {} (Syncing & replacing audio\u{2026})",
-                            proj.title
-                        )));
+                        show_window_status_toast(
+                            &win,
+                            "Syncing and replacing audio…",
+                            ToastSeverity::Info,
+                        );
                     }
                     let (tx, rx) = std::sync::mpsc::channel();
                     *sync_rx2.borrow_mut() = Some(rx);
@@ -10468,9 +10576,7 @@ pub fn build_window(
                         on_project_changed();
                     }
                     if let Some(win) = window_weak.upgrade() {
-                        let proj = project.borrow();
-                        let title = &proj.title;
-                        win.set_title(Some(&format!("UltimateSlice — {title}")));
+                        refresh_window_title(&win, &project);
                     }
                 }
                 glib::ControlFlow::Continue
@@ -10484,11 +10590,7 @@ pub fn build_window(
                 }
                 multicam_sync_in_progress_cb.set(true);
                 if let Some(win) = window_weak.upgrade() {
-                    let proj = project.borrow();
-                    win.set_title(Some(&format!(
-                        "UltimateSlice — {} (Syncing multicam...)",
-                        proj.title
-                    )));
+                    show_window_status_toast(&win, "Syncing multicam angles…", ToastSeverity::Info);
                 }
                 let (tx, rx) = std::sync::mpsc::channel();
                 *multicam_sync_rx.borrow_mut() = Some(rx);
@@ -10568,12 +10670,7 @@ pub fn build_window(
                 }
                 silence_detect_in_progress_cb.set(true);
                 if let Some(win) = window_weak.upgrade() {
-                    let proj = project.borrow();
-                    let title = proj.title.clone();
-                    drop(proj);
-                    win.set_title(Some(&format!(
-                        "UltimateSlice — {title} (Detecting silence...)"
-                    )));
+                    show_window_status_toast(&win, "Detecting silence…", ToastSeverity::Info);
                 }
                 let (tx, rx) = std::sync::mpsc::channel();
                 *silence_rx.borrow_mut() = Some(rx);
@@ -10640,12 +10737,7 @@ pub fn build_window(
                 }
                 scene_detect_in_progress_cb.set(true);
                 if let Some(win) = window_weak.upgrade() {
-                    let proj = project.borrow();
-                    let title = proj.title.clone();
-                    drop(proj);
-                    win.set_title(Some(&format!(
-                        "UltimateSlice \u{2014} {title} (Detecting scene cuts...)"
-                    )));
+                    show_window_status_toast(&win, "Detecting scene cuts…", ToastSeverity::Info);
                 }
                 let (tx, rx) = std::sync::mpsc::channel();
                 *scene_rx.borrow_mut() = Some(rx);
@@ -10748,10 +10840,11 @@ pub fn build_window(
                     }
                 };
                 if let Some(win) = window_weak.upgrade() {
-                    let title = project.borrow().title.clone();
-                    win.set_title(Some(&format!(
-                        "UltimateSlice — {title} (Converting LTC to timecode...)"
-                    )));
+                    show_window_status_toast(
+                        &win,
+                        "Converting LTC to source timecode…",
+                        ToastSeverity::Info,
+                    );
                 }
                 let (tx, rx) = std::sync::mpsc::channel();
                 *ltc_rx.borrow_mut() = Some(rx);
@@ -16768,7 +16861,44 @@ pub fn build_window(
     } else {
         main_stack.set_visible_child_name("welcome");
     }
-    window.set_child(Some(&main_stack));
+    let app_overlay = gtk4::Overlay::new();
+    app_overlay.set_child(Some(&main_stack));
+    let toast_revealer = gtk::Revealer::new();
+    toast_revealer.set_transition_type(gtk::RevealerTransitionType::SlideDown);
+    toast_revealer.set_transition_duration(180);
+    toast_revealer.set_reveal_child(false);
+    toast_revealer.set_halign(gtk::Align::Center);
+    toast_revealer.set_valign(gtk::Align::Start);
+    toast_revealer.set_can_target(false);
+    let toast_box = gtk::Box::new(Orientation::Horizontal, 10);
+    toast_box.add_css_class("app-toast");
+    toast_box.add_css_class("app-toast-info");
+    toast_box.set_margin_start(16);
+    toast_box.set_margin_end(16);
+    toast_box.set_margin_top(18);
+    toast_box.set_margin_bottom(0);
+    toast_box.set_can_target(false);
+    let toast_icon = gtk::Image::from_icon_name("dialog-information-symbolic");
+    toast_box.append(&toast_icon);
+    let toast_label = gtk::Label::new(None);
+    toast_label.set_wrap(true);
+    toast_label.set_xalign(0.0);
+    toast_label.set_max_width_chars(72);
+    toast_label.add_css_class("app-toast-label");
+    toast_box.append(&toast_label);
+    toast_revealer.set_child(Some(&toast_box));
+    app_overlay.add_overlay(&toast_revealer);
+    register_window_toast(
+        &window,
+        WindowToastHandle {
+            revealer: toast_revealer,
+            toast_box,
+            icon: toast_icon,
+            label: toast_label,
+            generation: Rc::new(Cell::new(0)),
+        },
+    );
+    window.set_child(Some(&app_overlay));
 
     // ── Plugin discovery (deferred to avoid blocking startup) ──────────
     glib::idle_add_local_once(move || {
@@ -16858,6 +16988,16 @@ pub fn build_window(
         let sync_tracking_controls = sync_tracking_controls.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
             let resolved = proxy_cache.borrow_mut().poll();
+            if !resolved.is_empty() {
+                if let Some(win) = window_weak_music.upgrade() {
+                    let message = if resolved.len() == 1 {
+                        "Proxy generation complete".to_string()
+                    } else {
+                        format!("{} proxies ready", resolved.len())
+                    };
+                    show_window_status_toast(&win, &message, ToastSeverity::Success);
+                }
+            }
             // Always sync proxy paths when proxies are effectively enabled — disk-cached proxies
             // are added synchronously by request() and never appear in `resolved`.
             if effective_proxy_enabled.get() {
@@ -17032,6 +17172,7 @@ pub fn build_window(
             // Poll STT cache — apply generated subtitles via undo system.
             {
                 let stt_results = stt_cache.borrow_mut().poll();
+                let manual_stt_requested = inspector_view.stt_generating.get();
                 let mut transcript_cache_changed = false;
                 if !stt_results.is_empty() {
                     for result in stt_results {
@@ -17134,6 +17275,15 @@ pub fn build_window(
                         .subtitle_segments_snapshot
                         .borrow_mut()
                         .clear();
+                    if manual_stt_requested {
+                        if let Some(win) = window_weak_music.upgrade() {
+                            show_window_status_toast(
+                                &win,
+                                "Subtitles generated",
+                                ToastSeverity::Success,
+                            );
+                        }
+                    }
                 }
                 if transcript_cache_changed {
                     on_library_changed_stt();
@@ -17192,31 +17342,52 @@ pub fn build_window(
                     if let Some(tracker) = result.tracker {
                         let mut proj = project_for_tracking.borrow_mut();
                         if upsert_motion_tracker_on_clip(&mut proj, &clip_id, tracker.clone()) {
-                            tracking_status_by_clip.borrow_mut().insert(
-                                clip_id.clone(),
-                                (
-                                    format!(
-                                        "Tracking ready: {} samples loaded.",
-                                        tracker.samples.len()
-                                    ),
-                                    false,
-                                ),
+                            let success_message = format!(
+                                "Tracking ready: {} samples loaded.",
+                                tracker.samples.len()
                             );
+                            tracking_status_by_clip
+                                .borrow_mut()
+                                .insert(clip_id.clone(), (success_message.clone(), false));
+                            if let Some(win) = window_weak_music.upgrade() {
+                                show_window_status_toast(
+                                    &win,
+                                    &success_message,
+                                    ToastSeverity::Success,
+                                );
+                            }
                             tracking_changed_project = true;
                         } else {
                             tracking_status_by_clip.borrow_mut().insert(
                                 clip_id.clone(),
                                 ("Tracked clip no longer exists.".to_string(), true),
                             );
+                            if let Some(win) = window_weak_music.upgrade() {
+                                show_window_status_toast(
+                                    &win,
+                                    "Tracked clip no longer exists.",
+                                    ToastSeverity::Warning,
+                                );
+                            }
                         }
                     } else if result.canceled {
                         tracking_status_by_clip
                             .borrow_mut()
                             .insert(clip_id.clone(), ("Tracking canceled.".to_string(), false));
+                        if let Some(win) = window_weak_music.upgrade() {
+                            show_window_status_toast(
+                                &win,
+                                "Tracking canceled.",
+                                ToastSeverity::Warning,
+                            );
+                        }
                     } else if let Some(error) = result.error {
                         tracking_status_by_clip
                             .borrow_mut()
-                            .insert(clip_id.clone(), (error, true));
+                            .insert(clip_id.clone(), (error.clone(), true));
+                        if let Some(win) = window_weak_music.upgrade() {
+                            show_window_status_toast(&win, &error, ToastSeverity::Error);
+                        }
                     }
                 }
                 if tracking_changed_project {
@@ -17283,10 +17454,10 @@ pub fn build_window(
                                 drop(ts);
                                 on_project_changed_music();
                                 if let Some(win) = window_weak_music.upgrade() {
-                                    flash_window_status_title(
+                                    show_window_status_toast(
                                         &win,
-                                        &project_for_music,
                                         "Music generation complete",
+                                        ToastSeverity::Success,
                                     );
                                 }
                             } else {
@@ -17303,10 +17474,10 @@ pub fn build_window(
                             .mark_music_generation_overlay_failed(&result.job_id, err.clone());
                         log::error!("Music generation failed: {err}");
                         if let Some(win) = window_weak_music.upgrade() {
-                            flash_window_status_title(
+                            show_window_status_toast(
                                 &win,
-                                &project_for_music,
                                 &format!("Music generation failed: {err}"),
+                                ToastSeverity::Error,
                             );
                         }
                     }
@@ -18097,6 +18268,7 @@ pub fn build_window(
                 let weak = weak.clone();
                 glib::idle_add_local_once(move || {
                     if let Some(win) = weak.upgrade() {
+                        clear_window_toast(&win);
                         win.close();
                     }
                 });

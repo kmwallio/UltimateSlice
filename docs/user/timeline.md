@@ -158,7 +158,7 @@ Automatically find scene/shot boundaries in a clip using ffmpeg video analysis.
 
 1. Right-click a video or audio clip on the timeline and choose **Detect Scene Cuts…**
 2. Set the **threshold** (1–50, default 10). Lower values detect more cuts, including subtle transitions. Higher values only detect obvious hard cuts.
-3. Click **Detect** — ffmpeg analyzes the video in a background thread (title bar shows progress).
+3. Click **Detect** — ffmpeg analyzes the video in a background thread. The bottom status bar shows ongoing progress, and an in-app toast confirms the result when detection finishes.
 4. The clip is split at each detected cut point into back-to-back sub-clips, preserving the total duration.
 5. **Undo** with `Ctrl+Z` to restore the original clip.
 
@@ -288,7 +288,7 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC, SVG) can be placed on the t
 
 - Select 2 or more clips on the timeline, then right-click → **Sync Selected Clips by Audio**.
 - The first selected clip is the **anchor** — it stays in place. All other clips are repositioned based on matching audio content using FFT cross-correlation.
-- Sync runs on a background thread; the title bar shows "Syncing audio…" while processing.
+- Sync runs on a background thread; the bottom status bar shows ongoing progress and an in-app toast confirms completion or failure.
 - If no reliable audio match is found (low confidence), a status message is shown and no changes are applied.
 - The operation is undoable (`Ctrl+Z`).
 - Clips without audio streams are not eligible for audio sync (the button is insensitive when fewer than 2 clips are selected).

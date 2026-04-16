@@ -45,6 +45,56 @@ headerbar .title {
     font-weight: bold;
 }
 
+/* ── App toasts ──────────────────────────────────────────────────────────── */
+.app-toast {
+    background-color: rgba(24, 24, 28, 0.96);
+    border: 1px solid #3a3a42;
+    border-radius: 12px;
+    padding: 10px 14px;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+}
+
+.app-toast image {
+    min-width: 18px;
+    min-height: 18px;
+}
+
+.app-toast-label {
+    font-weight: 600;
+}
+
+.app-toast-info {
+    border-color: #3f76c1;
+}
+
+.app-toast-info image {
+    color: #6ea8ff;
+}
+
+.app-toast-success {
+    border-color: #2e8b57;
+}
+
+.app-toast-success image {
+    color: #68d391;
+}
+
+.app-toast-warning {
+    border-color: #b7791f;
+}
+
+.app-toast-warning image {
+    color: #f6ad55;
+}
+
+.app-toast-error {
+    border-color: #c53030;
+}
+
+.app-toast-error image {
+    color: #fc8181;
+}
+
 /* ── Buttons (global) ───────────────────────────────────────────────────── */
 button {
     background-color: #333338;

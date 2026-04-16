@@ -702,7 +702,7 @@ FCPXML persistence).
 - [ ] Tooltips audit — one-pass review using `set_tooltip_text` on every icon-only button across `inspector.rs` and `toolbar.rs`
 
 **Notifications & feedback**
-- [ ] Toast/notification system (libadwaita-style `AdwToastOverlay` equivalent or custom GTK4) for non-modal feedback: "Project saved", "Export complete", "Proxy generation finished", "SAM mask ready"
+- [x] Toast/notification system (custom GTK4 overlay) for non-modal feedback. Transient messages now appear as in-app toasts with info/success/warning/error styling, keeping the window title focused on project name + dirty state. Proxy generation, motion tracking, subtitle generation, and MusicGen completion/failure now surface through the toast layer while the bottom status bar continues to show continuous progress.
 - [ ] Background job tray — single dropdown in the header bar showing all active background jobs (proxy transcode, thumbnail extraction, STT, SAM, MusicGen, RIFE, motion tracking, export queue) with per-job progress and cancel
 - [ ] Undo toast with action label — after Ctrl+Z show "Undid: trim clip" briefly, reusing the existing `EditCommand::description()` strings
 
