@@ -83,6 +83,8 @@ Short-lived feedback now appears as an in-app toast near the top of the window i
 
 Hover compact icon, glyph, and swatch controls in the toolbar and Inspector to see descriptive tooltips before clicking; this is especially helpful for reorder buttons, style toggles, and color pickers.
 
+Empty panels now try to tell you what to do next instead of just sitting blank: the Timeline shows a drop target when no clips exist yet, the Media Library centers its import action on a fresh project, and the Inspector explains how to select something to edit.
+
 ### Window Layout
 
 ```

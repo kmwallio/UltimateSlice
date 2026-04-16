@@ -4,7 +4,7 @@ The **Media Library** panel (left side) holds all imported source clips availabl
 
 ## Importing Media
 
-1. When the library is empty, click the **+ Import Media…** button in the library panel.
+1. When the library is empty, use the centered **Import Media…** action in the library panel.
 2. Once media has been imported, use the **+** button next to the **Media Library** title to import more files.
 3. Choose one or more video, audio, or image files from the file chooser.
 4. Imported items appear as thumbnail cards showing the clip name and, once probing completes, compact media metadata.
@@ -14,6 +14,8 @@ The **Media Library** panel (left side) holds all imported source clips availabl
 8. If a source path is unavailable on disk, the media card shows an **OFFLINE** badge and warning outline.
 
 You can also drag files directly from your file manager into the **Media Library** pane to import them.
+
+While the library is empty, the panel keeps that import action centered so the first step stays obvious on a fresh project.
 
 Supported formats depend on your installed GStreamer plugins (any format `playbin` can decode). Still images are supported natively.
 
@@ -111,7 +113,7 @@ Bins are saved with your project and restored when you reopen it.
 - Creating a new project or opening a different project clears the current library view first, then loads that project's media list.
 - Thumbnails are generated asynchronously and refresh automatically as they become available (no manual panel/window resize needed).
 - Source timecode (from camera creation timestamps) is automatically extracted during import and used for timecode-based alignment of grouped clips without manual entry.
-- When the library is empty, the panel shows a short hint reminding you that you can import or drag files to begin.
+- When the library is empty, the panel switches to a centered first-run state with the main **Import Media…** action and a reminder that you can also drag files in directly.
 
 ## Relinking offline media
 

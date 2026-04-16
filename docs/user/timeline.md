@@ -2,6 +2,8 @@
 
 The **Timeline** panel (bottom) is where you arrange, trim, and edit clips into your final sequence.
 
+When the current timeline has no clips yet, the track canvas shows a clear in-place drop target so a new project still has an obvious next action. You can drag clips in from the **Media Library** or drop files straight from your file manager.
+
 ## Layout
 
 - **Ruler** — shows time positions with adaptive major/mid/minor tick marks; higher zoom levels add more marks and intermediate labels, while lower zoom levels reduce clutter. Click to seek the playhead.

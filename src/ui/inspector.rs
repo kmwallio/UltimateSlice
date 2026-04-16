@@ -3451,11 +3451,12 @@ pub fn build_inspector(
     vbox.append(&title);
 
     let empty_state_label = Label::new(Some(
-        "Select a clip in the timeline to edit its properties.",
+        "Select a clip in the Timeline to edit its properties here.\nTip: click a clip once, or press Ctrl+A in the Timeline to inspect the current selection.",
     ));
     empty_state_label.set_halign(gtk::Align::Start);
     empty_state_label.set_xalign(0.0);
     empty_state_label.set_wrap(true);
+    empty_state_label.set_margin_bottom(8);
     empty_state_label.add_css_class("panel-empty-state");
     vbox.append(&empty_state_label);
 

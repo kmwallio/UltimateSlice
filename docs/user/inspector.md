@@ -4,6 +4,8 @@ The **Inspector** panel (right side) shows and edits the properties of the curre
 
 Select a clip in the timeline to populate the Inspector. All changes apply immediately to the program monitor preview. Clips inside compound clips are fully supported -- double-click a compound clip to enter it, then select an internal clip to inspect and edit its properties.
 
+When nothing is selected, the Inspector hides its edit controls and shows a short hint explaining how to get started again. The hint points to real timeline actions: click a clip to inspect it, or use selection commands such as **Ctrl+A** from the Timeline once that panel has focus.
+
 ---
 
 ## Clip Info
@@ -746,5 +748,5 @@ All effect operations are **undoable** (add, remove, reorder, set params, toggle
 - Transform fields (scale/position/rotation), opacity, and crop are now also mapped to standard FCPXML adjustment elements (`adjust-transform`, `adjust-compositing`, `adjust-crop`/`crop-rect`) for improved interoperability.
 - Clip volume now also imports from standard FCPXML `adjust-volume@amount` (including dB values such as `-6dB` and `-96dB`) and is converted to Inspector linear volume.
 - There is no keyboard shortcut to focus the Inspector; use mouse/Tab navigation.
-- When no clip is selected, the Inspector shows an instructional message and hides edit controls.
+- When no clip is selected, the Inspector shows an instructional message and hides edit controls instead of leaving an empty edit surface.
 - To reduce first-use visual density, **Audio**, **Transform**, and **Speed** sections start collapsed by default.

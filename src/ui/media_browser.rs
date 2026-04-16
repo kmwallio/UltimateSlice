@@ -172,6 +172,10 @@ pub fn build_media_browser(
 ) -> (GBox, Rc<dyn Fn()>, Rc<dyn Fn()>) {
     let vbox = GBox::new(Orientation::Vertical, 4);
     vbox.set_width_request(240);
+    let has_library_content = {
+        let lib = library.borrow();
+        !lib.items.is_empty() || !lib.bins.is_empty()
+    };
 
     // Header row: "Media Library" title + compact "+" button (shown when library is non-empty).
     let header_row = GBox::new(Orientation::Horizontal, 0);
@@ -195,7 +199,7 @@ pub fn build_media_browser(
     let header_import_btn = Button::from_icon_name("list-add-symbolic");
     header_import_btn.add_css_class("browser-header-import");
     header_import_btn.set_tooltip_text(Some("Import Media…"));
-    header_import_btn.set_visible(!library.borrow().items.is_empty());
+    header_import_btn.set_visible(has_library_content);
     header_row.append(&header_import_btn);
 
     let header_relink_btn = Button::with_label("Relink…");
@@ -228,7 +232,7 @@ pub fn build_media_browser(
     filter_box.set_margin_end(8);
     filter_box.set_margin_bottom(2);
     filter_box.add_css_class("media-filter-box");
-    filter_box.set_visible(!library.borrow().items.is_empty());
+    filter_box.set_visible(has_library_content);
 
     let filter_search = gtk::SearchEntry::new();
     filter_search.set_placeholder_text(Some("Filter name, path, codec, or keyword"));
@@ -306,22 +310,37 @@ pub fn build_media_browser(
     filter_box.append(&filter_row);
     vbox.append(&filter_box);
 
-    // Big import button — shown only when the library is empty.
-    let import_btn = Button::with_label("+ Import Media…");
-    import_btn.set_margin_start(8);
-    import_btn.set_margin_end(8);
-    import_btn.set_visible(library.borrow().items.is_empty());
-    vbox.append(&import_btn);
+    let content_stack = gtk::Stack::new();
+    content_stack.set_vexpand(true);
+    content_stack.set_hexpand(true);
 
-    let empty_hint = Label::new(Some("Import media or drag files here to start editing."));
-    empty_hint.set_halign(gtk::Align::Start);
-    empty_hint.set_xalign(0.0);
+    let empty_state_box = GBox::new(Orientation::Vertical, 10);
+    empty_state_box.set_vexpand(true);
+    empty_state_box.set_hexpand(true);
+    empty_state_box.set_valign(gtk::Align::Center);
+    empty_state_box.set_halign(gtk::Align::Center);
+    empty_state_box.set_margin_start(24);
+    empty_state_box.set_margin_end(24);
+    empty_state_box.set_margin_top(24);
+    empty_state_box.set_margin_bottom(24);
+
+    let import_btn = Button::with_label("Import Media…");
+    import_btn.add_css_class("suggested-action");
+    import_btn.set_halign(gtk::Align::Center);
+    import_btn.set_width_request(180);
+    empty_state_box.append(&import_btn);
+
+    let empty_hint = Label::new(Some(
+        "Import video, audio, or image files here, or drag files directly into the Media Library to start editing.",
+    ));
+    empty_hint.set_halign(gtk::Align::Center);
+    empty_hint.set_justify(gtk::Justification::Center);
+    empty_hint.set_xalign(0.5);
     empty_hint.set_wrap(true);
-    empty_hint.set_margin_start(8);
-    empty_hint.set_margin_end(8);
+    empty_hint.set_max_width_chars(36);
     empty_hint.add_css_class("panel-empty-state");
-    empty_hint.set_visible(library.borrow().items.is_empty());
-    vbox.append(&empty_hint);
+    empty_state_box.append(&empty_hint);
+    content_stack.add_named(&empty_state_box, Some("empty"));
 
     let scroll = ScrolledWindow::new();
     scroll.set_vexpand(true);
@@ -719,7 +738,13 @@ pub fn build_media_browser(
     }
 
     scroll.set_child(Some(&flow_box));
-    vbox.append(&scroll);
+    content_stack.add_named(&scroll, Some("library"));
+    content_stack.set_visible_child_name(if has_library_content {
+        "library"
+    } else {
+        "empty"
+    });
+    vbox.append(&content_stack);
 
     // "Create Multicam Clip" button — visible when 2+ media items are selected.
     let multicam_btn = Button::with_label("Create Multicam Clip");
@@ -1341,8 +1366,7 @@ pub fn build_media_browser(
         let proxy_cache = proxy_cache.clone();
         let preferences_state = preferences_state.clone();
         let flow_box_paths = flow_box_paths.clone();
-        let empty_hint = empty_hint.clone();
-        let import_btn = import_btn.clone();
+        let content_stack = content_stack.clone();
         let header_import_btn = header_import_btn.clone();
         let thumb_redraw_scheduled = thumb_redraw_scheduled.clone();
         let current_bin_id = current_bin_id.clone();
@@ -1488,8 +1512,7 @@ pub fn build_media_browser(
 
             let lib = library.borrow();
             let has_content = !lib.items.is_empty() || !lib.bins.is_empty();
-            empty_hint.set_visible(!has_content);
-            import_btn.set_visible(!has_content);
+            content_stack.set_visible_child_name(if has_content { "library" } else { "empty" });
             header_import_btn.set_visible(has_content);
             all_media_btn.set_visible(!lib.bins.is_empty());
             filter_box.set_visible(has_content);

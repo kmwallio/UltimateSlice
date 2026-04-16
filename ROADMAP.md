@@ -697,7 +697,7 @@ FCPXML persistence).
 
 **Discoverability & first-run experience**
 - [ ] Welcome screen polish — hero thumbnail strip from the most recent project, a "What's New in this version" expandable card, and a "Sample project" button that loads a bundled demo `.uspxml` so a fresh install has something to click into
-- [ ] Empty-state guidance in every panel — timeline shows a drop-zone hint when empty ("Drag media here or press ⌘O to import"); media browser surfaces the import button at center; inspector shows a keyboard hint to select a clip
+- [x] Empty-state guidance in every panel — timeline now shows a clear empty-project drop target, the Media Library centers its import action when empty, and the Inspector gives a stronger no-selection hint tied to real timeline selection actions instead of leaving blank space.
 - [ ] In-app onboarding tour — first-launch coachmark sequence pointing to the five core regions (browser, source monitor, timeline, program monitor, inspector) with skip/replay from Help menu; persist `seen_onboarding_v1` in preferences
 - [x] Tooltips audit — added and normalized tooltip coverage for low-context controls across `inspector.rs` and `toolbar.rs`, including glyph-style effect reorder/remove buttons, subtitle style toggles, color/swatch pickers, and secondary snapshot/export-preset actions so compact controls no longer rely on guesswork.
 

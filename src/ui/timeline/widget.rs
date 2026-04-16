@@ -8645,6 +8645,7 @@ fn draw_timeline(
     let linked_peer_highlight_ids = st.linked_peer_highlight_ids();
     let proj = st.project.borrow();
     let editing_tracks = st.resolve_editing_tracks(&proj);
+    let has_any_clips = editing_tracks.iter().any(|track| !track.clips.is_empty());
     let ruler_top = 0.0;
     let track_content_top = overlay_top + breadcrumb_height;
     // For screen drawing, apply vertical scroll; for PNG export, don't scroll.
@@ -8683,6 +8684,10 @@ fn draw_timeline(
         y += track_height;
     }
     cr.restore().ok();
+
+    if !has_any_clips {
+        draw_timeline_empty_state(cr, w, h, track_content_top);
+    }
 
     // Playhead (clipped to content area so it doesn't overdraw track labels)
     // When inside a compound, translate the main-timeline playhead to the
@@ -10500,6 +10505,57 @@ fn clip_fill_color(clip: &Clip, track_kind: TrackKind) -> (f64, f64, f64) {
         crate::model::clip::ClipColorLabel::Purple => (0.53, 0.38, 0.80),
         crate::model::clip::ClipColorLabel::Magenta => (0.78, 0.35, 0.68),
     }
+}
+
+fn draw_timeline_empty_state(
+    cr: &gtk::cairo::Context,
+    width: f64,
+    height: f64,
+    track_content_top: f64,
+) {
+    let available_w = (width - TRACK_LABEL_WIDTH - 48.0).max(0.0);
+    let available_h = (height - track_content_top - 32.0).max(0.0);
+    if available_w < 220.0 || available_h < 84.0 {
+        return;
+    }
+
+    let box_w = available_w.min(560.0);
+    let box_h = available_h.clamp(96.0, 132.0);
+    let box_x = TRACK_LABEL_WIDTH + ((available_w - box_w) / 2.0).max(24.0);
+    let box_y = track_content_top + ((available_h - box_h) / 2.0).max(16.0);
+
+    cr.save().ok();
+    rounded_rect(cr, box_x, box_y, box_w, box_h, 10.0);
+    cr.set_source_rgba(0.18, 0.21, 0.28, 0.82);
+    cr.fill_preserve().ok();
+    cr.set_source_rgba(0.55, 0.72, 0.96, 0.88);
+    cr.set_line_width(1.6);
+    cr.set_dash(&[10.0, 7.0], 0.0);
+    cr.stroke().ok();
+    cr.set_dash(&[], 0.0);
+
+    cr.select_font_face(
+        "sans",
+        gtk::cairo::FontSlant::Normal,
+        gtk::cairo::FontWeight::Bold,
+    );
+    cr.set_font_size(18.0);
+    cr.set_source_rgb(0.95, 0.97, 1.0);
+    let _ = cr.move_to(box_x + 22.0, box_y + 32.0);
+    let _ = cr.show_text("Drop media here");
+
+    cr.select_font_face(
+        "sans",
+        gtk::cairo::FontSlant::Normal,
+        gtk::cairo::FontWeight::Normal,
+    );
+    cr.set_font_size(12.0);
+    cr.set_source_rgba(0.83, 0.86, 0.92, 0.96);
+    let _ = cr.move_to(box_x + 22.0, box_y + 58.0);
+    let _ = cr.show_text("Drag clips from Media Library or your file manager onto a track.");
+    let _ = cr.move_to(box_x + 22.0, box_y + 78.0);
+    let _ = cr.show_text("Import video, audio, or images in Media Library to get started.");
+    cr.restore().ok();
 }
 
 fn rounded_rect(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
