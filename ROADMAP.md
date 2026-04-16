@@ -703,7 +703,7 @@ FCPXML persistence).
 
 **Notifications & feedback**
 - [x] Toast/notification system (custom GTK4 overlay) for non-modal feedback. Transient messages now appear as in-app toasts with info/success/warning/error styling, keeping the window title focused on project name + dirty state. Proxy generation, motion tracking, subtitle generation, and MusicGen completion/failure now surface through the toast layer while the bottom status bar continues to show continuous progress.
-- [ ] Background job tray — single dropdown in the header bar showing all active background jobs (proxy transcode, thumbnail extraction, STT, SAM, MusicGen, RIFE, motion tracking, export queue) with per-job progress and cancel
+- [x] Background job tray — the footer now includes a **Jobs** dropdown immediately to the left of **Workspace**, surfacing active proxy generation, background prerender, AI frame interpolation (RIFE), background removal, speech-to-text, MusicGen, motion tracking, export-queue runs, and other long-running analysis tasks in one place. Rows show live progress where the backend already exposes it, and the tray enables **Cancel** only for jobs that have real cancellation support today (currently motion tracking), while the bottom status bar continues to mirror continuous progress.
 - [x] Undo toast with action label — undo and redo now show a brief in-app toast such as **"Undid: trim clip out-point"** or **"Redid: move clip"**, reusing the shared `EditCommand::description()` strings from the edit history and staying silent when history is empty.
 
 **Timeline polish**

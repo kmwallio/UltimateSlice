@@ -95,6 +95,40 @@ headerbar .title {
     color: #fc8181;
 }
 
+/* ── Background job tray ──────────────────────────────────────────────────── */
+.job-tray-button-active {
+    border-color: #3f76c1;
+}
+
+.job-tray-popover {
+    min-width: 360px;
+}
+
+.job-tray-list {
+    min-width: 360px;
+}
+
+.job-tray-row {
+    padding: 8px 0;
+    border-bottom: 1px solid #2a2a2e;
+}
+
+.job-tray-title {
+    font-weight: 600;
+}
+
+.job-tray-detail {
+    font-size: 0.95em;
+}
+
+.job-tray-progress {
+    min-width: 180px;
+}
+
+.job-tray-empty {
+    padding: 12px 0;
+}
+
 /* ── Buttons (global) ───────────────────────────────────────────────────── */
 button {
     background-color: #333338;

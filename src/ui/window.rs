@@ -107,6 +107,46 @@ impl WindowToastHandle {
     }
 }
 
+#[derive(Clone)]
+enum BackgroundJobCancelAction {
+    Tracking { clip_id: String },
+}
+
+#[derive(Clone)]
+struct ActiveBackgroundJob {
+    id: String,
+    title: String,
+    detail: String,
+    progress_text: String,
+    fraction: Option<f64>,
+    pulse: bool,
+    cancel_action: Option<BackgroundJobCancelAction>,
+}
+
+fn clip_display_label(clip: &Clip) -> String {
+    let trimmed = clip.label.trim();
+    if !trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+    std::path::Path::new(&clip.source_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_string())
+        .unwrap_or_else(|| clip.id.clone())
+}
+
+fn background_job_fraction_text(fraction: f64) -> String {
+    format!("{:.0}%", fraction.clamp(0.0, 1.0) * 100.0)
+}
+
+fn background_job_count_fraction(completed: usize, total: usize) -> Option<f64> {
+    if total > 0 {
+        Some((completed as f64 / total as f64).clamp(0.0, 0.99))
+    } else {
+        None
+    }
+}
+
 fn register_window_toast(window: &gtk::ApplicationWindow, handle: WindowToastHandle) {
     WINDOW_TOASTS.with(|toasts| {
         toasts.borrow_mut().insert(window.as_ptr() as usize, handle);
@@ -7864,27 +7904,34 @@ pub fn build_window(
             sync_tracking_controls();
         });
     }
-    {
-        let inspector_view = inspector_view.clone();
+    let cancel_tracking_job_for_clip: Rc<dyn Fn(&str)> = {
         let tracking_cache = tracking_cache.clone();
         let tracking_job_owner_by_key = tracking_job_owner_by_key.clone();
         let tracking_job_key_by_clip = tracking_job_key_by_clip.clone();
         let tracking_status_by_clip = tracking_status_by_clip.clone();
         let sync_tracking_controls = sync_tracking_controls.clone();
+        Rc::new(move |clip_id: &str| {
+            if let Some(cache_key) = tracking_job_key_by_clip.borrow_mut().remove(clip_id) {
+                tracking_job_owner_by_key.borrow_mut().remove(&cache_key);
+                tracking_cache.borrow_mut().cancel(&cache_key);
+                tracking_status_by_clip.borrow_mut().insert(
+                    clip_id.to_string(),
+                    ("Tracking canceled.".to_string(), false),
+                );
+            }
+            sync_tracking_controls();
+        })
+    };
+    {
+        let inspector_view = inspector_view.clone();
+        let cancel_tracking_job_for_clip = cancel_tracking_job_for_clip.clone();
         let tracking_cancel_btn = inspector_view.tracking_cancel_btn.clone();
         tracking_cancel_btn.connect_clicked(move |_| {
             let clip_id = inspector_view.selected_clip_id.borrow().clone();
             let Some(clip_id) = clip_id else {
                 return;
             };
-            if let Some(cache_key) = tracking_job_key_by_clip.borrow_mut().remove(&clip_id) {
-                tracking_job_owner_by_key.borrow_mut().remove(&cache_key);
-                tracking_cache.borrow_mut().cancel(&cache_key);
-                tracking_status_by_clip
-                    .borrow_mut()
-                    .insert(clip_id.clone(), ("Tracking canceled.".to_string(), false));
-            }
-            sync_tracking_controls();
+            cancel_tracking_job_for_clip(&clip_id);
         });
     }
 
@@ -9598,6 +9645,125 @@ pub fn build_window(
         });
         header.pack_end(&btn_script);
     }
+
+    let jobs_popover = gtk::Popover::new();
+    jobs_popover.set_autohide(true);
+    let jobs_popover_box = gtk::Box::new(Orientation::Vertical, 8);
+    jobs_popover_box.set_margin_start(12);
+    jobs_popover_box.set_margin_end(12);
+    jobs_popover_box.set_margin_top(10);
+    jobs_popover_box.set_margin_bottom(10);
+    jobs_popover_box.add_css_class("job-tray-popover");
+    let jobs_title = gtk::Label::new(Some("Active Background Jobs"));
+    jobs_title.set_halign(gtk::Align::Start);
+    jobs_title.add_css_class("dim-label");
+    jobs_popover_box.append(&jobs_title);
+    let jobs_scroll = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vscrollbar_policy(gtk::PolicyType::Automatic)
+        .min_content_width(380)
+        .min_content_height(220)
+        .build();
+    let jobs_list = gtk::Box::new(Orientation::Vertical, 8);
+    jobs_list.add_css_class("job-tray-list");
+    jobs_scroll.set_child(Some(&jobs_list));
+    jobs_popover_box.append(&jobs_scroll);
+    jobs_popover.set_child(Some(&jobs_popover_box));
+    let jobs_menu_btn = gtk::MenuButton::new();
+    jobs_menu_btn.set_label("Jobs");
+    jobs_menu_btn.set_popover(Some(&jobs_popover));
+    jobs_menu_btn.set_tooltip_text(Some("Show active background jobs"));
+    jobs_menu_btn.add_css_class("flat");
+    jobs_menu_btn.add_css_class("job-tray-button");
+
+    let render_job_tray: Rc<dyn Fn(&[ActiveBackgroundJob])> = {
+        let jobs_menu_btn = jobs_menu_btn.clone();
+        let jobs_list = jobs_list.clone();
+        let cancel_tracking_job_for_clip = cancel_tracking_job_for_clip.clone();
+        Rc::new(move |jobs: &[ActiveBackgroundJob]| {
+            let button_label = if jobs.is_empty() {
+                "Jobs".to_string()
+            } else {
+                format!("Jobs ({})", jobs.len())
+            };
+            jobs_menu_btn.set_label(&button_label);
+            if jobs.is_empty() {
+                jobs_menu_btn.remove_css_class("job-tray-button-active");
+                jobs_menu_btn.set_tooltip_text(Some("No active background jobs"));
+            } else {
+                jobs_menu_btn.add_css_class("job-tray-button-active");
+                jobs_menu_btn.set_tooltip_text(Some("Show active background jobs"));
+            }
+            while let Some(child) = jobs_list.first_child() {
+                jobs_list.remove(&child);
+            }
+            if jobs.is_empty() {
+                let empty = gtk::Label::new(Some("No active background jobs."));
+                empty.set_halign(gtk::Align::Start);
+                empty.add_css_class("dim-label");
+                empty.add_css_class("job-tray-empty");
+                jobs_list.append(&empty);
+                return;
+            }
+            for job in jobs {
+                let row = gtk::Box::new(Orientation::Horizontal, 8);
+                row.add_css_class("job-tray-row");
+
+                let info = gtk::Box::new(Orientation::Vertical, 4);
+                info.set_hexpand(true);
+
+                let title = gtk::Label::new(Some(&job.title));
+                title.set_halign(gtk::Align::Start);
+                title.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+                title.add_css_class("job-tray-title");
+                info.append(&title);
+
+                let detail = gtk::Label::new(Some(&job.detail));
+                detail.set_halign(gtk::Align::Start);
+                detail.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
+                detail.add_css_class("dim-label");
+                detail.add_css_class("job-tray-detail");
+                info.append(&detail);
+
+                let progress = gtk::ProgressBar::new();
+                progress.set_hexpand(true);
+                progress.set_show_text(true);
+                progress.set_text(Some(&job.progress_text));
+                progress.add_css_class("job-tray-progress");
+                if let Some(fraction) = job.fraction {
+                    progress.set_fraction(fraction.clamp(0.0, 1.0));
+                } else {
+                    progress.set_fraction(0.0);
+                    if job.pulse {
+                        progress.pulse();
+                    }
+                }
+                info.append(&progress);
+
+                row.append(&info);
+
+                if let Some(cancel_action) = &job.cancel_action {
+                    let cancel_btn = gtk::Button::with_label("Cancel");
+                    cancel_btn.add_css_class("flat");
+                    cancel_btn.set_tooltip_text(Some("Cancel this background job"));
+                    match cancel_action.clone() {
+                        BackgroundJobCancelAction::Tracking { clip_id } => {
+                            let cancel_tracking_job_for_clip = cancel_tracking_job_for_clip.clone();
+                            cancel_btn.connect_clicked(move |_| {
+                                cancel_tracking_job_for_clip(&clip_id);
+                            });
+                        }
+                    }
+                    row.append(&cancel_btn);
+                }
+
+                let row_widget = gtk::Box::new(Orientation::Vertical, 0);
+                row_widget.set_widget_name(&job.id);
+                row_widget.append(&row);
+                jobs_list.append(&row_widget);
+            }
+        })
+    };
 
     window.set_titlebar(Some(&header));
 
@@ -16054,6 +16220,7 @@ pub fn build_window(
     let status_spacer = gtk::Box::new(Orientation::Horizontal, 0);
     status_spacer.set_hexpand(true);
     status_bar.append(&status_spacer);
+    status_bar.append(&jobs_menu_btn);
     status_bar.append(&workspace_menu_btn);
     status_bar.append(&inspector_toggle);
     *sync_background_render_toggle_impl.borrow_mut() = Some({
@@ -16957,6 +17124,318 @@ pub fn build_window(
         });
     }
 
+    let collect_active_background_jobs: Rc<dyn Fn() -> Vec<ActiveBackgroundJob>> = {
+        let project = project.clone();
+        let proxy_cache = proxy_cache.clone();
+        let prog_player = prog_player.clone();
+        let bg_removal_cache = bg_removal_cache.clone();
+        let frame_interp_cache = frame_interp_cache.clone();
+        let stt_cache = stt_cache.clone();
+        let tracking_cache = tracking_cache.clone();
+        let tracking_job_owner_by_key = tracking_job_owner_by_key.clone();
+        let voice_enhance_cache = voice_enhance_cache.clone();
+        let music_gen_cache = music_gen_cache.clone();
+        let audio_sync_in_progress = audio_sync_in_progress.clone();
+        let multicam_sync_in_progress = multicam_sync_in_progress.clone();
+        let silence_detect_in_progress = silence_detect_in_progress.clone();
+        let scene_detect_in_progress = scene_detect_in_progress.clone();
+        let match_audio_in_progress = match_audio_in_progress.clone();
+        Rc::new(move || {
+            let mut jobs = Vec::new();
+
+            if audio_sync_in_progress.get() {
+                jobs.push(ActiveBackgroundJob {
+                    id: "audio-sync".to_string(),
+                    title: "Audio sync".to_string(),
+                    detail: "Aligning the selected clips in the background.".to_string(),
+                    progress_text: "Running…".to_string(),
+                    fraction: None,
+                    pulse: true,
+                    cancel_action: None,
+                });
+            }
+            if multicam_sync_in_progress.get() {
+                jobs.push(ActiveBackgroundJob {
+                    id: "multicam-sync".to_string(),
+                    title: "Multicam sync".to_string(),
+                    detail: "Building a multicam clip from synced angles.".to_string(),
+                    progress_text: "Running…".to_string(),
+                    fraction: None,
+                    pulse: true,
+                    cancel_action: None,
+                });
+            }
+            if silence_detect_in_progress.get() {
+                jobs.push(ActiveBackgroundJob {
+                    id: "silence-detect".to_string(),
+                    title: "Silence detection".to_string(),
+                    detail: "Scanning the selected clip for silent regions.".to_string(),
+                    progress_text: "Running…".to_string(),
+                    fraction: None,
+                    pulse: true,
+                    cancel_action: None,
+                });
+            }
+            if scene_detect_in_progress.get() {
+                jobs.push(ActiveBackgroundJob {
+                    id: "scene-detect".to_string(),
+                    title: "Scene detection".to_string(),
+                    detail: "Analyzing the current clip for scene cuts.".to_string(),
+                    progress_text: "Running…".to_string(),
+                    fraction: None,
+                    pulse: true,
+                    cancel_action: None,
+                });
+            }
+            if match_audio_in_progress.get() {
+                jobs.push(ActiveBackgroundJob {
+                    id: "audio-match".to_string(),
+                    title: "Audio match".to_string(),
+                    detail: "Matching one clip's audio against another.".to_string(),
+                    progress_text: "Running…".to_string(),
+                    fraction: None,
+                    pulse: true,
+                    cancel_action: None,
+                });
+            }
+
+            let proxy_progress = proxy_cache.borrow().progress();
+            if proxy_progress.in_flight {
+                let fraction = proxy_progress.byte_fraction.or_else(|| {
+                    background_job_count_fraction(proxy_progress.completed, proxy_progress.total)
+                });
+                jobs.push(ActiveBackgroundJob {
+                    id: "proxy-generation".to_string(),
+                    title: "Proxy generation".to_string(),
+                    detail: format!(
+                        "{} of {} proxy jobs complete",
+                        proxy_progress.completed, proxy_progress.total
+                    ),
+                    progress_text: fraction
+                        .map(background_job_fraction_text)
+                        .unwrap_or_else(|| "Running…".to_string()),
+                    fraction,
+                    pulse: fraction.is_none(),
+                    cancel_action: None,
+                });
+            }
+
+            let prerender_progress = prog_player.borrow().background_prerender_progress();
+            if prerender_progress.in_flight {
+                let fraction = background_job_count_fraction(
+                    prerender_progress.completed,
+                    prerender_progress.total,
+                );
+                jobs.push(ActiveBackgroundJob {
+                    id: "background-prerender".to_string(),
+                    title: "Background prerender".to_string(),
+                    detail: format!(
+                        "{} of {} prerender jobs complete",
+                        prerender_progress.completed, prerender_progress.total
+                    ),
+                    progress_text: fraction
+                        .map(background_job_fraction_text)
+                        .unwrap_or_else(|| "Running…".to_string()),
+                    fraction,
+                    pulse: fraction.is_none(),
+                    cancel_action: None,
+                });
+            }
+
+            let frame_interp_progress = frame_interp_cache.borrow().progress();
+            if frame_interp_progress.in_flight {
+                let fraction = background_job_count_fraction(
+                    frame_interp_progress.completed,
+                    frame_interp_progress.total,
+                );
+                jobs.push(ActiveBackgroundJob {
+                    id: "frame-interp".to_string(),
+                    title: "AI frame interpolation".to_string(),
+                    detail: format!(
+                        "{} of {} interpolation jobs complete",
+                        frame_interp_progress.completed, frame_interp_progress.total
+                    ),
+                    progress_text: fraction
+                        .map(background_job_fraction_text)
+                        .unwrap_or_else(|| "Running…".to_string()),
+                    fraction,
+                    pulse: fraction.is_none(),
+                    cancel_action: None,
+                });
+            }
+
+            let bg_progress = bg_removal_cache.borrow().progress();
+            if bg_progress.in_flight {
+                let fraction =
+                    background_job_count_fraction(bg_progress.completed, bg_progress.total);
+                jobs.push(ActiveBackgroundJob {
+                    id: "background-removal".to_string(),
+                    title: "Background removal".to_string(),
+                    detail: format!(
+                        "{} of {} background-removal jobs complete",
+                        bg_progress.completed, bg_progress.total
+                    ),
+                    progress_text: fraction
+                        .map(background_job_fraction_text)
+                        .unwrap_or_else(|| "Running…".to_string()),
+                    fraction,
+                    pulse: fraction.is_none(),
+                    cancel_action: None,
+                });
+            }
+
+            let stt_progress = stt_cache.borrow().progress();
+            if stt_progress.in_flight {
+                let fraction =
+                    background_job_count_fraction(stt_progress.completed, stt_progress.total);
+                jobs.push(ActiveBackgroundJob {
+                    id: "subtitle-generation".to_string(),
+                    title: "Subtitle generation".to_string(),
+                    detail: format!(
+                        "{} of {} subtitle jobs complete",
+                        stt_progress.completed, stt_progress.total
+                    ),
+                    progress_text: fraction
+                        .map(background_job_fraction_text)
+                        .unwrap_or_else(|| "Running…".to_string()),
+                    fraction,
+                    pulse: fraction.is_none(),
+                    cancel_action: None,
+                });
+            }
+
+            let tracking_jobs = tracking_job_owner_by_key
+                .borrow()
+                .iter()
+                .map(|(cache_key, clip_id)| (cache_key.clone(), clip_id.clone()))
+                .collect::<Vec<_>>();
+            if tracking_jobs.is_empty() {
+                let tracking_progress = tracking_cache.borrow().progress();
+                if tracking_progress.in_flight {
+                    let fraction = tracking_progress
+                        .sample_fraction
+                        .map(|value| value.clamp(0.0, 0.99));
+                    jobs.push(ActiveBackgroundJob {
+                        id: "motion-tracking".to_string(),
+                        title: "Motion tracking".to_string(),
+                        detail: "Tracking analysis is running.".to_string(),
+                        progress_text: fraction
+                            .map(background_job_fraction_text)
+                            .unwrap_or_else(|| "Running…".to_string()),
+                        fraction,
+                        pulse: fraction.is_none(),
+                        cancel_action: None,
+                    });
+                }
+            } else {
+                for (cache_key, clip_id) in tracking_jobs {
+                    let clip_label = {
+                        let proj = project.borrow();
+                        proj.clip_ref(&clip_id)
+                            .map(clip_display_label)
+                            .unwrap_or_else(|| clip_id.clone())
+                    };
+                    let progress = tracking_cache.borrow().job_progress(&cache_key);
+                    let fraction = progress.as_ref().and_then(|progress| {
+                        if progress.total_samples > 0 {
+                            Some(
+                                (progress.processed_samples as f64 / progress.total_samples as f64)
+                                    .clamp(0.0, 0.99),
+                            )
+                        } else {
+                            None
+                        }
+                    });
+                    let detail = if let Some(progress) = progress {
+                        format!(
+                            "{} / {} samples",
+                            progress.processed_samples, progress.total_samples
+                        )
+                    } else {
+                        "Tracking…".to_string()
+                    };
+                    jobs.push(ActiveBackgroundJob {
+                        id: format!("motion-tracking:{clip_id}"),
+                        title: format!("Motion tracking — {clip_label}"),
+                        detail,
+                        progress_text: fraction
+                            .map(background_job_fraction_text)
+                            .unwrap_or_else(|| "Running…".to_string()),
+                        fraction,
+                        pulse: fraction.is_none(),
+                        cancel_action: Some(BackgroundJobCancelAction::Tracking { clip_id }),
+                    });
+                }
+            }
+
+            let voice_enhance_progress = voice_enhance_cache.borrow().progress();
+            if voice_enhance_progress.in_flight {
+                let fraction = background_job_count_fraction(
+                    voice_enhance_progress.completed,
+                    voice_enhance_progress.total,
+                );
+                jobs.push(ActiveBackgroundJob {
+                    id: "voice-enhance".to_string(),
+                    title: "Voice enhancement".to_string(),
+                    detail: format!(
+                        "{} of {} voice-enhancement jobs complete",
+                        voice_enhance_progress.completed, voice_enhance_progress.total
+                    ),
+                    progress_text: fraction
+                        .map(background_job_fraction_text)
+                        .unwrap_or_else(|| "Running…".to_string()),
+                    fraction,
+                    pulse: fraction.is_none(),
+                    cancel_action: None,
+                });
+            }
+
+            let music_progress = music_gen_cache.borrow().progress();
+            if music_progress.in_flight {
+                let fraction =
+                    background_job_count_fraction(music_progress.completed, music_progress.total);
+                jobs.push(ActiveBackgroundJob {
+                    id: "music-generation".to_string(),
+                    title: "Music generation".to_string(),
+                    detail: format!(
+                        "{} of {} MusicGen jobs complete",
+                        music_progress.completed, music_progress.total
+                    ),
+                    progress_text: fraction
+                        .map(background_job_fraction_text)
+                        .unwrap_or_else(|| "Running…".to_string()),
+                    fraction,
+                    pulse: fraction.is_none(),
+                    cancel_action: None,
+                });
+            }
+
+            let export_queue = crate::ui_state::load_export_queue_state();
+            for job in export_queue
+                .jobs
+                .iter()
+                .filter(|job| job.status == crate::ui_state::ExportQueueJobStatus::Running)
+            {
+                let fraction = crate::ui_state::export_queue_runtime_progress(&job.id)
+                    .map(|value| value.clamp(0.0, 0.99));
+                jobs.push(ActiveBackgroundJob {
+                    id: format!("export:{}", job.id),
+                    title: format!("Export — {}", job.label),
+                    detail: job.output_path.clone(),
+                    progress_text: fraction
+                        .map(background_job_fraction_text)
+                        .unwrap_or_else(|| "Running…".to_string()),
+                    fraction,
+                    pulse: fraction.is_none(),
+                    cancel_action: None,
+                });
+            }
+
+            jobs
+        })
+    };
+    render_job_tray(&collect_active_background_jobs());
+
     {
         let proxy_cache = proxy_cache.clone();
         let bg_removal_cache = bg_removal_cache.clone();
@@ -16994,6 +17473,8 @@ pub fn build_window(
         let tracking_job_key_by_clip = tracking_job_key_by_clip.clone();
         let tracking_status_by_clip = tracking_status_by_clip.clone();
         let sync_tracking_controls = sync_tracking_controls.clone();
+        let collect_active_background_jobs = collect_active_background_jobs.clone();
+        let render_job_tray = render_job_tray.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
             let resolved = proxy_cache.borrow_mut().poll();
             if !resolved.is_empty() {
@@ -17406,12 +17887,14 @@ pub fn build_window(
             let proxy_progress = proxy_cache.borrow().progress();
             let prerender_progress = prog_player.borrow().background_prerender_progress();
             let bg_progress = bg_removal_cache.borrow().progress();
+            let frame_interp_progress = frame_interp_cache.borrow().progress();
             let stt_progress = stt_cache.borrow().progress();
             let tracking_progress = tracking_cache.borrow().progress();
             let voice_enhance_progress = voice_enhance_cache.borrow().progress();
             let proxy_active = proxy_progress.in_flight;
             let prerender_active = prerender_progress.in_flight;
             let bg_active = bg_progress.in_flight;
+            let frame_interp_active = frame_interp_progress.in_flight;
             let stt_active = stt_progress.in_flight;
             let tracking_active = tracking_progress.in_flight;
             let voice_enhance_active = voice_enhance_progress.in_flight;
@@ -17420,6 +17903,18 @@ pub fn build_window(
             let detecting_silence = silence_detect_in_progress.get();
             let detecting_scene_cuts = scene_detect_in_progress.get();
             let matching_audio = match_audio_in_progress.get();
+            let export_queue_state = crate::ui_state::load_export_queue_state();
+            let running_exports = export_queue_state
+                .jobs
+                .iter()
+                .filter(|job| job.status == crate::ui_state::ExportQueueJobStatus::Running)
+                .cloned()
+                .collect::<Vec<_>>();
+            let export_active = !running_exports.is_empty();
+            let export_progress_fraction = running_exports
+                .first()
+                .and_then(|job| crate::ui_state::export_queue_runtime_progress(&job.id))
+                .map(|value| value.clamp(0.0, 0.99));
             // Poll music generation results and place completed clips.
             let music_progress = music_gen_cache.borrow().progress();
             let music_active = music_progress.in_flight;
@@ -17494,6 +17989,8 @@ pub fn build_window(
                     }
                 }
             }
+            let active_jobs = collect_active_background_jobs();
+            render_job_tray(&active_jobs);
             if proxy_active
                 || prerender_active
                 || syncing_audio
@@ -17503,9 +18000,11 @@ pub fn build_window(
                 || matching_audio
                 || music_active
                 || bg_active
+                || frame_interp_active
                 || tracking_active
                 || stt_active
                 || voice_enhance_active
+                || export_active
             {
                 status_label.set_visible(true);
                 let mut parts = Vec::new();
@@ -17545,6 +18044,12 @@ pub fn build_window(
                         bg_progress.completed, bg_progress.total
                     ));
                 }
+                if frame_interp_active {
+                    parts.push(format!(
+                        "Interpolating frames… {}/{}",
+                        frame_interp_progress.completed, frame_interp_progress.total
+                    ));
+                }
                 if tracking_active {
                     parts.push("Tracking motion…".to_string());
                 }
@@ -17556,6 +18061,21 @@ pub fn build_window(
                         "Enhancing voice… {}/{}",
                         voice_enhance_progress.completed, voice_enhance_progress.total
                     ));
+                }
+                if export_active {
+                    if let Some(job) = running_exports.first() {
+                        if let Some(fraction) = export_progress_fraction {
+                            parts.push(format!(
+                                "Exporting {}… {}",
+                                job.label,
+                                background_job_fraction_text(fraction)
+                            ));
+                        } else {
+                            parts.push(format!("Exporting {}…", job.label));
+                        }
+                    } else {
+                        parts.push("Exporting…".to_string());
+                    }
                 }
                 status_label.set_text(&parts.join(" | "));
                 if proxy_active {
@@ -17583,6 +18103,13 @@ pub fn build_window(
                         (bg_progress.completed as f64 / bg_progress.total as f64).clamp(0.0, 0.99);
                     status_progress.set_fraction(fraction);
                     status_progress.set_text(Some(&format!("{:.0}%", fraction * 100.0)));
+                } else if frame_interp_active && frame_interp_progress.total > 0 {
+                    status_progress.set_visible(true);
+                    let fraction = (frame_interp_progress.completed as f64
+                        / frame_interp_progress.total as f64)
+                        .clamp(0.0, 0.99);
+                    status_progress.set_fraction(fraction);
+                    status_progress.set_text(Some(&format!("{:.0}%", fraction * 100.0)));
                 } else if tracking_active {
                     status_progress.set_visible(true);
                     let fraction = tracking_progress
@@ -17591,6 +18118,16 @@ pub fn build_window(
                         .clamp(0.0, 0.99);
                     status_progress.set_fraction(fraction);
                     status_progress.set_text(Some(&format!("{:.0}%", fraction * 100.0)));
+                } else if export_active {
+                    status_progress.set_visible(true);
+                    if let Some(fraction) = export_progress_fraction {
+                        status_progress.set_fraction(fraction);
+                        status_progress.set_text(Some(&background_job_fraction_text(fraction)));
+                    } else {
+                        status_progress.set_fraction(0.0);
+                        status_progress.pulse();
+                        status_progress.set_text(Some("Exporting…"));
+                    }
                 } else if matching_audio {
                     status_progress.set_visible(true);
                     status_progress.set_fraction(0.0);

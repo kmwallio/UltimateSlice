@@ -428,12 +428,15 @@ pub fn build_export_queue_dialog(
                             let mut q = queue_state.borrow_mut();
                             if let Some(job) = q.jobs.iter_mut().find(|j| j.id == id) {
                                 job.status = ExportQueueJobStatus::Running;
+                                job.error = None;
                             }
+                            ui_state::set_export_queue_runtime_progress(&id, None);
                             ui_state::save_export_queue_state(&q);
                             drop(q);
                             rebuild_list_fn(&list_box, &queue_state, &status_label, &btn_run_poll);
                         }
                         QueueMsg::Progress(id, p) => {
+                            ui_state::set_export_queue_runtime_progress(&id, Some(p));
                             status_label.set_text(&format!("Exporting… {:.0}%", p * 100.0));
                         }
                         QueueMsg::JobDone(id) => {
@@ -441,6 +444,7 @@ pub fn build_export_queue_dialog(
                             if let Some(job) = q.jobs.iter_mut().find(|j| j.id == id) {
                                 job.status = ExportQueueJobStatus::Done;
                             }
+                            ui_state::set_export_queue_runtime_progress(&id, None);
                             ui_state::save_export_queue_state(&q);
                             drop(q);
                             rebuild_list_fn(&list_box, &queue_state, &status_label, &btn_run_poll);
@@ -451,6 +455,7 @@ pub fn build_export_queue_dialog(
                                 job.status = ExportQueueJobStatus::Error;
                                 job.error = Some(err);
                             }
+                            ui_state::set_export_queue_runtime_progress(&id, None);
                             ui_state::save_export_queue_state(&q);
                             drop(q);
                             rebuild_list_fn(&list_box, &queue_state, &status_label, &btn_run_poll);

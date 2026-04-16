@@ -1,6 +1,13 @@
 use crate::media::export::{AudioChannelLayout, AudioCodec, Container, ExportOptions, VideoCodec};
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
+
+thread_local! {
+    static EXPORT_QUEUE_RUNTIME_PROGRESS: RefCell<HashMap<String, f64>> =
+        RefCell::new(HashMap::new());
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProgramMonitorState {
@@ -1457,6 +1464,21 @@ pub fn save_export_queue_state(state: &ExportQueueState) {
     let mut ui = load_ui_state();
     ui.export_queue = state.clone();
     save_ui_state(&ui);
+}
+
+pub fn export_queue_runtime_progress(job_id: &str) -> Option<f64> {
+    EXPORT_QUEUE_RUNTIME_PROGRESS.with(|progress| progress.borrow().get(job_id).copied())
+}
+
+pub fn set_export_queue_runtime_progress(job_id: &str, progress: Option<f64>) {
+    EXPORT_QUEUE_RUNTIME_PROGRESS.with(|runtime| {
+        let mut runtime = runtime.borrow_mut();
+        if let Some(progress) = progress {
+            runtime.insert(job_id.to_string(), progress.clamp(0.0, 1.0));
+        } else {
+            runtime.remove(job_id);
+        }
+    });
 }
 
 pub fn load_workspace_layouts_state() -> WorkspaceLayoutsState {
