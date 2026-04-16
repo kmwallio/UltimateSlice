@@ -348,6 +348,22 @@ entry:focus {
     padding: 6px 0;
 }
 
+.source-monitor-controls {
+    margin-left: 8px;
+    margin-right: 8px;
+}
+
+.source-monitor-controls-row {
+    background-color: transparent;
+}
+
+.source-keyword-expander {
+    background-color: #1e1e22;
+    border: 1px solid #333338;
+    border-radius: 4px;
+    padding: 4px 8px;
+}
+
 /* ── Timecode labels ────────────────────────────────────────────────────── */
 .timecode {
     font-family: monospace;

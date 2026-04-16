@@ -3,8 +3,8 @@ use crate::model::media_library::SourceMarks;
 use glib;
 use gtk4::prelude::*;
 use gtk4::{
-    self as gtk, Box as GBox, Button, DrawingArea, EventControllerKey, GestureDrag, Label,
-    Orientation, Picture, Popover, Separator, Stack,
+    self as gtk, Box as GBox, Button, ComboBoxText, DrawingArea, EventControllerKey, GestureDrag,
+    Label, Orientation, Picture, Popover, Separator, Stack,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -12,6 +12,8 @@ use std::rc::Rc;
 use crate::units::NS_PER_SECOND_F as NS_PER_SECOND;
 /// Default frame duration at 24 fps (nanoseconds)
 const DEFAULT_FRAME_NS: u64 = 41_666_667;
+const SOURCE_PATCH_AUTO_ID: &str = "__source_patch_auto__";
+const SOURCE_PATCH_OFF_ID: &str = "__source_patch_off__";
 
 /// Which "add to timeline" action the split button currently performs.
 #[derive(Clone, Copy, PartialEq)]
@@ -21,7 +23,74 @@ enum AddMode {
     Overwrite,
 }
 
-/// Returns `(widget, source_marks, clip_name_label, set_audio_only)`.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum SourcePatchTarget {
+    #[default]
+    Auto,
+    Off,
+    TrackId(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct SourcePatchRouting {
+    pub video: SourcePatchTarget,
+    pub audio: SourcePatchTarget,
+}
+
+#[derive(Clone)]
+pub struct SourcePatchControls {
+    pub state: Rc<RefCell<SourcePatchRouting>>,
+    pub updating: Rc<Cell<bool>>,
+    pub video_combo: ComboBoxText,
+    pub audio_combo: ComboBoxText,
+    pub routing_button: Button,
+}
+
+impl SourcePatchTarget {
+    pub fn combo_id(&self) -> &str {
+        match self {
+            Self::Auto => SOURCE_PATCH_AUTO_ID,
+            Self::Off => SOURCE_PATCH_OFF_ID,
+            Self::TrackId(track_id) => track_id.as_str(),
+        }
+    }
+
+    fn from_combo_id(active_id: Option<glib::GString>) -> Self {
+        match active_id.as_deref() {
+            Some(SOURCE_PATCH_AUTO_ID) | None => Self::Auto,
+            Some(SOURCE_PATCH_OFF_ID) => Self::Off,
+            Some(track_id) => Self::TrackId(track_id.to_string()),
+        }
+    }
+}
+
+fn update_routing_button_summary(
+    routing_button: &Button,
+    video_combo: &ComboBoxText,
+    audio_combo: &ComboBoxText,
+) {
+    let video = video_combo
+        .active_text()
+        .map(|text| text.to_string())
+        .unwrap_or_else(|| "Auto".to_string());
+    let audio = audio_combo
+        .active_text()
+        .map(|text| text.to_string())
+        .unwrap_or_else(|| "Auto".to_string());
+    let is_custom = video != "Auto" || audio != "Auto";
+    routing_button.set_label(if is_custom { "Routing*" } else { "Routing…" });
+    routing_button.set_tooltip_text(Some(&format!(
+        "Choose source routing for Append, Insert, and Overwrite. Video: {video}. Audio: {audio}."
+    )));
+}
+
+impl SourcePatchControls {
+    pub fn sync_routing_button(&self) {
+        update_routing_button_summary(&self.routing_button, &self.video_combo, &self.audio_combo);
+    }
+}
+
+/// Returns `(widget, source_marks, clip_name_label, set_audio_only, source_patch_controls)`.
 /// `set_audio_only(true)` shows the audio-only banner in place of the video display.
 pub fn build_preview(
     player: Rc<RefCell<Player>>,
@@ -30,7 +99,13 @@ pub fn build_preview(
     on_insert: Rc<dyn Fn()>,
     on_overwrite: Rc<dyn Fn()>,
     on_close_preview: Rc<dyn Fn()>,
-) -> (GBox, Rc<RefCell<SourceMarks>>, Label, Rc<dyn Fn(bool)>) {
+) -> (
+    GBox,
+    Rc<RefCell<SourceMarks>>,
+    Label,
+    Rc<dyn Fn(bool)>,
+    SourcePatchControls,
+) {
     let source_marks = Rc::new(RefCell::new(SourceMarks::default()));
 
     let vbox = GBox::new(Orientation::Vertical, 0);
@@ -439,14 +514,26 @@ pub fn build_preview(
     timecode_label.set_margin_top(2);
     vbox.append(&timecode_label);
 
-    // ── Transport bar ─────────────────────────────────────────────────────
-    let controls = GBox::new(Orientation::Horizontal, 4);
-    controls.set_halign(gtk::Align::Center);
+    // ── Transport and edit controls ───────────────────────────────────────
+    let controls = GBox::new(Orientation::Vertical, 4);
+    controls.add_css_class("source-monitor-controls");
+    controls.set_margin_start(8);
+    controls.set_margin_end(8);
     controls.set_margin_top(4);
     controls.set_margin_bottom(4);
 
-    let btn_set_in = Button::with_label("Set In (I)");
-    let btn_set_out = Button::with_label("Set Out (O)");
+    let transport_row = GBox::new(Orientation::Horizontal, 4);
+    transport_row.add_css_class("source-monitor-controls-row");
+    transport_row.set_halign(gtk::Align::Center);
+
+    let edit_row = GBox::new(Orientation::Horizontal, 4);
+    edit_row.add_css_class("source-monitor-controls-row");
+    edit_row.set_halign(gtk::Align::Center);
+
+    let btn_set_in = Button::with_label("In");
+    btn_set_in.set_tooltip_text(Some("Set In (I)"));
+    let btn_set_out = Button::with_label("Out");
+    btn_set_out.set_tooltip_text(Some("Set Out (O)"));
     let btn_prev_frame = Button::with_label("◀▮");
     btn_prev_frame.set_tooltip_text(Some("Step back one frame (←)"));
     let btn_stop = Button::with_label("⏹");
@@ -511,13 +598,129 @@ pub fn build_preview(
     add_group.append(&btn_add);
     add_group.append(&btn_add_more);
 
-    controls.append(&btn_set_in);
-    controls.append(&btn_prev_frame);
-    controls.append(&btn_stop);
-    controls.append(&btn_play_pause);
-    controls.append(&btn_next_frame);
-    controls.append(&btn_set_out);
-    controls.append(&add_group);
+    let routing_button = Button::with_label("Routing…");
+    routing_button.set_tooltip_text(Some(
+        "Choose source video/audio routing for Append, Insert, and Overwrite",
+    ));
+    routing_button.set_sensitive(false);
+
+    let routing_pop = Popover::new();
+    let routing_pop_box = GBox::new(Orientation::Vertical, 6);
+    routing_pop_box.set_margin_start(8);
+    routing_pop_box.set_margin_end(8);
+    routing_pop_box.set_margin_top(8);
+    routing_pop_box.set_margin_bottom(8);
+
+    let routing_title = Label::new(Some("Source Routing"));
+    routing_title.add_css_class("dim-label");
+    routing_title.set_halign(gtk::Align::Start);
+    routing_title.set_xalign(0.0);
+    routing_pop_box.append(&routing_title);
+
+    let video_patch_row = GBox::new(Orientation::Horizontal, 6);
+    let video_patch_label = Label::new(Some("Video"));
+    video_patch_label.add_css_class("dim-label");
+    video_patch_label.set_width_chars(5);
+    video_patch_label.set_xalign(0.0);
+    video_patch_row.append(&video_patch_label);
+
+    let video_patch_combo = ComboBoxText::new();
+    video_patch_combo.append(Some(SOURCE_PATCH_AUTO_ID), "Auto");
+    video_patch_combo.append(Some(SOURCE_PATCH_OFF_ID), "Off");
+    video_patch_combo.set_active_id(Some(SOURCE_PATCH_AUTO_ID));
+    video_patch_combo.set_hexpand(true);
+    video_patch_combo.set_sensitive(false);
+    video_patch_combo.set_tooltip_text(Some(
+        "Route source video to Auto, Off, or a specific video track",
+    ));
+    video_patch_row.append(&video_patch_combo);
+    routing_pop_box.append(&video_patch_row);
+
+    let audio_patch_row = GBox::new(Orientation::Horizontal, 6);
+    let audio_patch_label = Label::new(Some("Audio"));
+    audio_patch_label.add_css_class("dim-label");
+    audio_patch_label.set_width_chars(5);
+    audio_patch_label.set_xalign(0.0);
+    audio_patch_row.append(&audio_patch_label);
+
+    let audio_patch_combo = ComboBoxText::new();
+    audio_patch_combo.append(Some(SOURCE_PATCH_AUTO_ID), "Auto");
+    audio_patch_combo.append(Some(SOURCE_PATCH_OFF_ID), "Off");
+    audio_patch_combo.set_active_id(Some(SOURCE_PATCH_AUTO_ID));
+    audio_patch_combo.set_hexpand(true);
+    audio_patch_combo.set_sensitive(false);
+    audio_patch_combo.set_tooltip_text(Some(
+        "Route source audio to Auto, Off, or a specific audio track",
+    ));
+    audio_patch_row.append(&audio_patch_combo);
+    routing_pop_box.append(&audio_patch_row);
+
+    routing_pop.set_child(Some(&routing_pop_box));
+    routing_pop.set_parent(&routing_button);
+    {
+        let routing_pop = routing_pop.clone();
+        routing_button.connect_clicked(move |_| {
+            if routing_pop.is_visible() {
+                routing_pop.popdown();
+            } else {
+                routing_pop.popup();
+            }
+        });
+    }
+
+    let source_patch_state = Rc::new(RefCell::new(SourcePatchRouting::default()));
+    let source_patch_updating = Rc::new(Cell::new(false));
+    {
+        let source_patch_state = source_patch_state.clone();
+        let source_patch_updating = source_patch_updating.clone();
+        let routing_button = routing_button.clone();
+        let video_patch_combo_for_summary = video_patch_combo.clone();
+        let audio_patch_combo = audio_patch_combo.clone();
+        video_patch_combo.connect_changed(move |combo| {
+            if source_patch_updating.get() {
+                return;
+            }
+            source_patch_state.borrow_mut().video =
+                SourcePatchTarget::from_combo_id(combo.active_id());
+            update_routing_button_summary(
+                &routing_button,
+                &video_patch_combo_for_summary,
+                &audio_patch_combo,
+            );
+        });
+    }
+    {
+        let source_patch_state = source_patch_state.clone();
+        let source_patch_updating = source_patch_updating.clone();
+        let routing_button = routing_button.clone();
+        let video_patch_combo = video_patch_combo.clone();
+        let audio_patch_combo_for_summary = audio_patch_combo.clone();
+        audio_patch_combo.connect_changed(move |combo| {
+            if source_patch_updating.get() {
+                return;
+            }
+            source_patch_state.borrow_mut().audio =
+                SourcePatchTarget::from_combo_id(combo.active_id());
+            update_routing_button_summary(
+                &routing_button,
+                &video_patch_combo,
+                &audio_patch_combo_for_summary,
+            );
+        });
+    }
+
+    transport_row.append(&btn_set_in);
+    transport_row.append(&btn_prev_frame);
+    transport_row.append(&btn_stop);
+    transport_row.append(&btn_play_pause);
+    transport_row.append(&btn_next_frame);
+    transport_row.append(&btn_set_out);
+
+    edit_row.append(&add_group);
+    edit_row.append(&routing_button);
+
+    controls.append(&transport_row);
+    controls.append(&edit_row);
     vbox.append(&controls);
 
     // Shuttle speed state for J/K/L: negative = reverse, 0 = paused, positive = forward.
@@ -835,6 +1038,7 @@ pub fn build_preview(
         let btn_add = btn_add.clone();
         let btn_add_more = btn_add_more.clone();
         let btn_close_preview = btn_close_preview.clone();
+        let routing_button = routing_button.clone();
         let picture_weak = picture.downgrade();
         // Track last prescale size to avoid redundant updates
         let last_prescale_w: Rc<Cell<i32>> = Rc::new(Cell::new(320));
@@ -930,6 +1134,7 @@ pub fn build_preview(
                 btn_add.set_sensitive(!m.path.is_empty());
                 btn_add_more.set_sensitive(!m.path.is_empty());
                 btn_close_preview.set_sensitive(!m.path.is_empty());
+                routing_button.set_sensitive(!m.path.is_empty());
                 update_marks_bar(&m);
             }
             drop(p);
@@ -948,7 +1153,19 @@ pub fn build_preview(
         })
     };
 
-    (vbox, source_marks, clip_name_label, set_audio_only)
+    (
+        vbox,
+        source_marks,
+        clip_name_label,
+        set_audio_only,
+        SourcePatchControls {
+            state: source_patch_state,
+            updating: source_patch_updating,
+            video_combo: video_patch_combo,
+            audio_combo: audio_patch_combo,
+            routing_button,
+        },
+    )
 }
 
 fn draw_scrubber(cr: &gtk::cairo::Context, width: f64, marks: &SourceMarks) {

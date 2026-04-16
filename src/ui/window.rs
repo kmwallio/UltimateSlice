@@ -1900,27 +1900,46 @@ fn find_preferred_track_index_by_id(
         .map(|(idx, _)| idx)
 }
 
-fn find_preferred_track_index_by_index(
+fn find_track_index_by_id_and_kind(
     project: &Project,
-    preferred_index: Option<usize>,
+    track_id: &str,
     kind: TrackKind,
 ) -> Option<usize> {
-    if let Some(idx) = preferred_index {
-        if project
-            .tracks
-            .get(idx)
-            .is_some_and(|track| track.kind == kind)
-        {
-            return Some(idx);
-        }
-    }
-
     project
         .tracks
         .iter()
         .enumerate()
-        .find(|(_, track)| track.kind == kind)
+        .find(|(_, track)| track.id == track_id && track.kind == kind)
         .map(|(idx, _)| idx)
+}
+
+fn default_source_patch_audio_enabled(
+    source_info: SourcePlacementInfo,
+    source_monitor_auto_link_av: bool,
+) -> bool {
+    source_info.is_audio_only
+        || (source_info.has_audio
+            && !source_info.is_audio_only
+            && !source_info.is_image
+            && source_monitor_auto_link_av)
+}
+
+fn resolve_source_patch_track_index(
+    project: &Project,
+    preferred_track_id: Option<&str>,
+    patch_target: &preview::SourcePatchTarget,
+    kind: TrackKind,
+) -> Option<usize> {
+    match patch_target {
+        preview::SourcePatchTarget::Auto => {
+            find_preferred_track_index_by_id(project, preferred_track_id, kind)
+        }
+        preview::SourcePatchTarget::Off => None,
+        preview::SourcePatchTarget::TrackId(track_id) => {
+            find_track_index_by_id_and_kind(project, track_id, kind)
+                .or_else(|| find_preferred_track_index_by_id(project, preferred_track_id, kind))
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1942,91 +1961,118 @@ impl SourcePlacementPlan {
     }
 }
 
+fn build_source_placement_plan_by_track_id_with_patch(
+    project: &Project,
+    preferred_track_id: Option<&str>,
+    source_info: SourcePlacementInfo,
+    source_monitor_auto_link_av: bool,
+    patch_routing: Option<&preview::SourcePatchRouting>,
+) -> SourcePlacementPlan {
+    let default_patch_routing = preview::SourcePatchRouting::default();
+    let patch_routing = patch_routing.unwrap_or(&default_patch_routing);
+    let default_audio_enabled =
+        default_source_patch_audio_enabled(source_info, source_monitor_auto_link_av);
+
+    let video_track_idx = if source_info.is_audio_only {
+        None
+    } else {
+        resolve_source_patch_track_index(
+            project,
+            preferred_track_id,
+            &patch_routing.video,
+            TrackKind::Video,
+        )
+    };
+
+    let audio_track_idx = if !source_info.has_audio {
+        None
+    } else {
+        match &patch_routing.audio {
+            preview::SourcePatchTarget::Auto => {
+                if default_audio_enabled {
+                    find_preferred_track_index_by_id(project, preferred_track_id, TrackKind::Audio)
+                } else {
+                    None
+                }
+            }
+            preview::SourcePatchTarget::Off => None,
+            preview::SourcePatchTarget::TrackId(track_id) => {
+                find_track_index_by_id_and_kind(project, track_id, TrackKind::Audio).or_else(|| {
+                    find_preferred_track_index_by_id(project, preferred_track_id, TrackKind::Audio)
+                })
+            }
+        }
+    };
+
+    let mut targets = Vec::new();
+    if let Some(video_idx) = video_track_idx {
+        targets.push(SourcePlacementTarget {
+            track_index: video_idx,
+            clip_kind: if source_info.is_image {
+                ClipKind::Image
+            } else {
+                ClipKind::Video
+            },
+            mute_embedded_audio: audio_track_idx.is_some(),
+        });
+    }
+    if let Some(audio_idx) = audio_track_idx {
+        targets.push(SourcePlacementTarget {
+            track_index: audio_idx,
+            clip_kind: ClipKind::Audio,
+            mute_embedded_audio: false,
+        });
+    }
+
+    let link_group_id = if video_track_idx.is_some()
+        && audio_track_idx.is_some()
+        && source_monitor_auto_link_av
+        && !source_info.is_audio_only
+        && !source_info.is_image
+    {
+        Some(uuid::Uuid::new_v4().to_string())
+    } else {
+        None
+    };
+
+    SourcePlacementPlan {
+        targets,
+        link_group_id,
+    }
+}
+
 fn build_source_placement_plan_by_track_id(
     project: &Project,
     preferred_track_id: Option<&str>,
     source_info: SourcePlacementInfo,
     source_monitor_auto_link_av: bool,
 ) -> SourcePlacementPlan {
-    let auto_link_pair = source_monitor_auto_link_av
-        && !source_info.is_audio_only
-        && source_info.has_audio
-        && !source_info.is_image;
-    let video_track_idx =
-        find_preferred_track_index_by_id(project, preferred_track_id, TrackKind::Video);
-    let audio_track_idx =
-        find_preferred_track_index_by_id(project, preferred_track_id, TrackKind::Audio);
+    build_source_placement_plan_by_track_id_with_patch(
+        project,
+        preferred_track_id,
+        source_info,
+        source_monitor_auto_link_av,
+        None,
+    )
+}
 
-    if auto_link_pair {
-        if let (Some(video_idx), Some(audio_idx)) = (video_track_idx, audio_track_idx) {
-            return SourcePlacementPlan {
-                targets: vec![
-                    SourcePlacementTarget {
-                        track_index: video_idx,
-                        clip_kind: ClipKind::Video,
-                        mute_embedded_audio: true,
-                    },
-                    SourcePlacementTarget {
-                        track_index: audio_idx,
-                        clip_kind: ClipKind::Audio,
-                        mute_embedded_audio: false,
-                    },
-                ],
-                link_group_id: Some(uuid::Uuid::new_v4().to_string()),
-            };
-        }
-
-        if let Some(video_idx) = video_track_idx {
-            return SourcePlacementPlan {
-                targets: vec![SourcePlacementTarget {
-                    track_index: video_idx,
-                    clip_kind: ClipKind::Video,
-                    mute_embedded_audio: false,
-                }],
-                link_group_id: None,
-            };
-        }
-
-        if let Some(audio_idx) = audio_track_idx {
-            return SourcePlacementPlan {
-                targets: vec![SourcePlacementTarget {
-                    track_index: audio_idx,
-                    clip_kind: ClipKind::Audio,
-                    mute_embedded_audio: false,
-                }],
-                link_group_id: None,
-            };
-        }
-
-        return SourcePlacementPlan::default();
-    }
-
-    let target_kind = if source_info.is_audio_only {
-        TrackKind::Audio
-    } else {
-        TrackKind::Video
-    };
-    let clip_kind = if source_info.is_image {
-        ClipKind::Image
-    } else if target_kind == TrackKind::Audio {
-        ClipKind::Audio
-    } else {
-        ClipKind::Video
-    };
-    if let Some(track_idx) =
-        find_preferred_track_index_by_id(project, preferred_track_id, target_kind)
-    {
-        return SourcePlacementPlan {
-            targets: vec![SourcePlacementTarget {
-                track_index: track_idx,
-                clip_kind,
-                mute_embedded_audio: false,
-            }],
-            link_group_id: None,
-        };
-    }
-
-    SourcePlacementPlan::default()
+fn build_source_placement_plan_by_track_index_with_patch(
+    project: &Project,
+    preferred_track_index: Option<usize>,
+    source_info: SourcePlacementInfo,
+    source_monitor_auto_link_av: bool,
+    patch_routing: Option<&preview::SourcePatchRouting>,
+) -> SourcePlacementPlan {
+    let preferred_track_id = preferred_track_index
+        .and_then(|idx| project.tracks.get(idx))
+        .map(|track| track.id.as_str());
+    build_source_placement_plan_by_track_id_with_patch(
+        project,
+        preferred_track_id,
+        source_info,
+        source_monitor_auto_link_av,
+        patch_routing,
+    )
 }
 
 pub(crate) fn build_source_placement_plan_by_track_index(
@@ -2035,14 +2081,12 @@ pub(crate) fn build_source_placement_plan_by_track_index(
     source_info: SourcePlacementInfo,
     source_monitor_auto_link_av: bool,
 ) -> SourcePlacementPlan {
-    let preferred_track_id = preferred_track_index
-        .and_then(|idx| project.tracks.get(idx))
-        .map(|track| track.id.as_str());
-    build_source_placement_plan_by_track_id(
+    build_source_placement_plan_by_track_index_with_patch(
         project,
-        preferred_track_id,
+        preferred_track_index,
         source_info,
         source_monitor_auto_link_av,
+        None,
     )
 }
 
@@ -2063,6 +2107,47 @@ fn ensure_matching_source_track_exists(
         TrackKind::Audio => project.add_audio_track(),
     }
     true
+}
+
+fn ensure_source_patch_tracks_exist(
+    project: &mut Project,
+    source_info: SourcePlacementInfo,
+    source_monitor_auto_link_av: bool,
+    patch_routing: Option<&preview::SourcePatchRouting>,
+) -> bool {
+    let default_patch_routing = preview::SourcePatchRouting::default();
+    let patch_routing = patch_routing.unwrap_or(&default_patch_routing);
+    let default_audio_enabled =
+        default_source_patch_audio_enabled(source_info, source_monitor_auto_link_av);
+    let need_video = !source_info.is_audio_only
+        && !matches!(patch_routing.video, preview::SourcePatchTarget::Off);
+    let need_audio = source_info.has_audio
+        && match &patch_routing.audio {
+            preview::SourcePatchTarget::Auto => default_audio_enabled,
+            preview::SourcePatchTarget::Off => false,
+            preview::SourcePatchTarget::TrackId(_) => true,
+        };
+
+    let mut changed = false;
+    if need_video
+        && !project
+            .tracks
+            .iter()
+            .any(|track| track.kind == TrackKind::Video)
+    {
+        project.add_video_track();
+        changed = true;
+    }
+    if need_audio
+        && !project
+            .tracks
+            .iter()
+            .any(|track| track.kind == TrackKind::Audio)
+    {
+        project.add_audio_track();
+        changed = true;
+    }
+    changed
 }
 
 pub(crate) fn build_source_clips_for_plan(
@@ -3140,6 +3225,152 @@ mod tests {
         let plan = build_source_placement_plan_by_track_index(&project, Some(0), source_info, true);
         assert!(plan.targets.is_empty());
         assert!(plan.link_group_id.is_none());
+    }
+
+    #[test]
+    fn source_patch_explicit_audio_track_creates_unlinked_split_pair_when_auto_link_disabled() {
+        let project = Project::new("Test");
+        let audio_track_idx = project
+            .tracks
+            .iter()
+            .enumerate()
+            .find(|(_, track)| track.is_audio())
+            .map(|(idx, _)| idx)
+            .expect("audio track should exist");
+        let audio_track_id = project.tracks[audio_track_idx].id.clone();
+        let source_info = SourcePlacementInfo {
+            is_audio_only: false,
+            has_audio: true,
+            is_image: false,
+            is_animated_svg: false,
+            source_timecode_base_ns: None,
+            audio_channel_mode: AudioChannelMode::Stereo,
+        };
+        let patch_routing = preview::SourcePatchRouting {
+            video: preview::SourcePatchTarget::Auto,
+            audio: preview::SourcePatchTarget::TrackId(audio_track_id),
+        };
+
+        let plan = build_source_placement_plan_by_track_id_with_patch(
+            &project,
+            None,
+            source_info,
+            false,
+            Some(&patch_routing),
+        );
+
+        assert_eq!(plan.targets.len(), 2);
+        assert_eq!(plan.targets[0].clip_kind, ClipKind::Video);
+        assert!(plan.targets[0].mute_embedded_audio);
+        assert_eq!(plan.targets[1].track_index, audio_track_idx);
+        assert_eq!(plan.targets[1].clip_kind, ClipKind::Audio);
+        assert!(plan.link_group_id.is_none());
+    }
+
+    #[test]
+    fn source_patch_audio_off_disables_linked_pair_audio_lane() {
+        let project = Project::new("Test");
+        let source_info = SourcePlacementInfo {
+            is_audio_only: false,
+            has_audio: true,
+            is_image: false,
+            is_animated_svg: false,
+            source_timecode_base_ns: None,
+            audio_channel_mode: AudioChannelMode::Stereo,
+        };
+        let patch_routing = preview::SourcePatchRouting {
+            video: preview::SourcePatchTarget::Auto,
+            audio: preview::SourcePatchTarget::Off,
+        };
+
+        let plan = build_source_placement_plan_by_track_id_with_patch(
+            &project,
+            None,
+            source_info,
+            true,
+            Some(&patch_routing),
+        );
+
+        assert_eq!(plan.targets.len(), 1);
+        assert_eq!(plan.targets[0].clip_kind, ClipKind::Video);
+        assert!(!plan.targets[0].mute_embedded_audio);
+        assert!(plan.link_group_id.is_none());
+    }
+
+    #[test]
+    fn source_patch_video_off_can_place_audio_only_from_av_source() {
+        let project = Project::new("Test");
+        let audio_track_idx = project
+            .tracks
+            .iter()
+            .enumerate()
+            .find(|(_, track)| track.is_audio())
+            .map(|(idx, _)| idx)
+            .expect("audio track should exist");
+        let audio_track_id = project.tracks[audio_track_idx].id.clone();
+        let source_info = SourcePlacementInfo {
+            is_audio_only: false,
+            has_audio: true,
+            is_image: false,
+            is_animated_svg: false,
+            source_timecode_base_ns: None,
+            audio_channel_mode: AudioChannelMode::Stereo,
+        };
+        let patch_routing = preview::SourcePatchRouting {
+            video: preview::SourcePatchTarget::Off,
+            audio: preview::SourcePatchTarget::TrackId(audio_track_id),
+        };
+
+        let plan = build_source_placement_plan_by_track_id_with_patch(
+            &project,
+            None,
+            source_info,
+            false,
+            Some(&patch_routing),
+        );
+
+        assert_eq!(plan.targets.len(), 1);
+        assert_eq!(plan.targets[0].track_index, audio_track_idx);
+        assert_eq!(plan.targets[0].clip_kind, ClipKind::Audio);
+        assert!(plan.link_group_id.is_none());
+    }
+
+    #[test]
+    fn ensure_source_patch_tracks_exist_adds_audio_track_for_explicit_audio_patch() {
+        let mut project = Project::new("Test");
+        project.tracks.retain(|track| track.is_video());
+        let source_info = SourcePlacementInfo {
+            is_audio_only: false,
+            has_audio: true,
+            is_image: false,
+            is_animated_svg: false,
+            source_timecode_base_ns: None,
+            audio_channel_mode: AudioChannelMode::Stereo,
+        };
+        let patch_routing = preview::SourcePatchRouting {
+            video: preview::SourcePatchTarget::Auto,
+            audio: preview::SourcePatchTarget::TrackId("missing-audio-track".to_string()),
+        };
+
+        assert!(ensure_source_patch_tracks_exist(
+            &mut project,
+            source_info,
+            false,
+            Some(&patch_routing),
+        ));
+
+        let plan = build_source_placement_plan_by_track_id_with_patch(
+            &project,
+            None,
+            source_info,
+            false,
+            Some(&patch_routing),
+        );
+
+        assert!(project.tracks.iter().any(|track| track.is_audio()));
+        assert_eq!(plan.targets.len(), 2);
+        assert_eq!(plan.targets[0].clip_kind, ClipKind::Video);
+        assert_eq!(plan.targets[1].clip_kind, ClipKind::Audio);
     }
 
     #[test]
@@ -9357,44 +9588,140 @@ pub fn build_window(
             }
         })
     };
-    let (preview_widget, source_marks, clip_name_label, set_audio_only) = preview::build_preview(
-        player.clone(),
-        paintable,
-        on_append.clone(),
-        on_insert.clone(),
-        on_overwrite.clone(),
-        on_close_preview.clone(),
-    );
+    let (preview_widget, source_marks, clip_name_label, set_audio_only, source_patch_controls) =
+        preview::build_preview(
+            player.clone(),
+            paintable,
+            on_append.clone(),
+            on_insert.clone(),
+            on_overwrite.clone(),
+            on_close_preview.clone(),
+        );
     let source_monitor_panel = gtk::Box::new(Orientation::Vertical, 4);
     source_monitor_panel.append(&preview_widget);
 
-    let source_keyword_controls = gtk::Box::new(Orientation::Vertical, 4);
-    source_keyword_controls.set_margin_start(8);
-    source_keyword_controls.set_margin_end(8);
-    source_keyword_controls.set_margin_bottom(8);
+    let refresh_source_patch_controls: Rc<dyn Fn()> = {
+        let project = project.clone();
+        let source_marks = source_marks.clone();
+        let source_patch_controls = source_patch_controls.clone();
+        Rc::new(move || {
+            let (has_source, can_patch_video, can_patch_audio) = {
+                let marks = source_marks.borrow();
+                (
+                    !marks.path.is_empty(),
+                    !marks.path.is_empty() && !marks.is_audio_only,
+                    !marks.path.is_empty() && marks.has_audio,
+                )
+            };
+            let (video_tracks, audio_tracks) = {
+                let proj = project.borrow();
+                let video = proj
+                    .tracks
+                    .iter()
+                    .filter(|track| track.is_video())
+                    .map(|track| (track.id.clone(), track.label.clone()))
+                    .collect::<Vec<_>>();
+                let audio = proj
+                    .tracks
+                    .iter()
+                    .filter(|track| track.is_audio())
+                    .map(|track| (track.id.clone(), track.label.clone()))
+                    .collect::<Vec<_>>();
+                (video, audio)
+            };
 
-    let source_keyword_row = gtk::Box::new(Orientation::Horizontal, 4);
+            let (video_selection, audio_selection) = {
+                let mut state = source_patch_controls.state.borrow_mut();
+                if matches!(&state.video, preview::SourcePatchTarget::TrackId(track_id) if !video_tracks.iter().any(|(id, _)| id == track_id))
+                {
+                    state.video = preview::SourcePatchTarget::Auto;
+                }
+                if matches!(&state.audio, preview::SourcePatchTarget::TrackId(track_id) if !audio_tracks.iter().any(|(id, _)| id == track_id))
+                {
+                    state.audio = preview::SourcePatchTarget::Auto;
+                }
+                (state.video.clone(), state.audio.clone())
+            };
+
+            source_patch_controls.updating.set(true);
+
+            source_patch_controls.video_combo.remove_all();
+            source_patch_controls
+                .video_combo
+                .append(Some("__source_patch_auto__"), "Auto");
+            source_patch_controls
+                .video_combo
+                .append(Some("__source_patch_off__"), "Off");
+            for (track_id, label) in &video_tracks {
+                source_patch_controls
+                    .video_combo
+                    .append(Some(track_id.as_str()), label);
+            }
+
+            source_patch_controls.audio_combo.remove_all();
+            source_patch_controls
+                .audio_combo
+                .append(Some("__source_patch_auto__"), "Auto");
+            source_patch_controls
+                .audio_combo
+                .append(Some("__source_patch_off__"), "Off");
+            for (track_id, label) in &audio_tracks {
+                source_patch_controls
+                    .audio_combo
+                    .append(Some(track_id.as_str()), label);
+            }
+
+            source_patch_controls
+                .video_combo
+                .set_active_id(Some(video_selection.combo_id()));
+            source_patch_controls
+                .audio_combo
+                .set_active_id(Some(audio_selection.combo_id()));
+            source_patch_controls
+                .video_combo
+                .set_sensitive(has_source && can_patch_video);
+            source_patch_controls
+                .audio_combo
+                .set_sensitive(has_source && can_patch_audio);
+            source_patch_controls
+                .routing_button
+                .set_sensitive(has_source && (can_patch_video || can_patch_audio));
+            source_patch_controls.sync_routing_button();
+
+            source_patch_controls.updating.set(false);
+        })
+    };
+    refresh_source_patch_controls();
+
+    let source_keyword_controls = gtk::Box::new(Orientation::Vertical, 4);
+    source_keyword_controls.set_margin_top(6);
+
+    let source_keyword_fields_row = gtk::Box::new(Orientation::Horizontal, 4);
     let source_keyword_combo = gtk::ComboBoxText::new();
     source_keyword_combo.append(Some(SOURCE_KEYWORD_NEW_ID), "New keyword range");
     source_keyword_combo.set_active_id(Some(SOURCE_KEYWORD_NEW_ID));
     source_keyword_combo.set_hexpand(true);
-    source_keyword_row.append(&source_keyword_combo);
+    source_keyword_fields_row.append(&source_keyword_combo);
 
     let source_keyword_entry = gtk::Entry::new();
     source_keyword_entry.set_hexpand(true);
     source_keyword_entry.set_placeholder_text(Some("Keyword label"));
-    source_keyword_row.append(&source_keyword_entry);
+    source_keyword_fields_row.append(&source_keyword_entry);
+
+    let source_keyword_actions_row = gtk::Box::new(Orientation::Horizontal, 4);
+    source_keyword_actions_row.set_halign(gtk::Align::End);
 
     let add_source_keyword_btn = gtk::Button::with_label("Add");
-    source_keyword_row.append(&add_source_keyword_btn);
+    source_keyword_actions_row.append(&add_source_keyword_btn);
 
     let update_source_keyword_btn = gtk::Button::with_label("Update");
-    source_keyword_row.append(&update_source_keyword_btn);
+    source_keyword_actions_row.append(&update_source_keyword_btn);
 
     let remove_source_keyword_btn = gtk::Button::with_label("Remove");
-    source_keyword_row.append(&remove_source_keyword_btn);
+    source_keyword_actions_row.append(&remove_source_keyword_btn);
 
-    source_keyword_controls.append(&source_keyword_row);
+    source_keyword_controls.append(&source_keyword_fields_row);
+    source_keyword_controls.append(&source_keyword_actions_row);
 
     let source_keyword_status_label =
         gtk::Label::new(Some("Use source In/Out marks to define a keyword range."));
@@ -9404,7 +9731,15 @@ pub fn build_window(
     source_keyword_status_label.add_css_class("media-meta-secondary");
     source_keyword_controls.append(&source_keyword_status_label);
 
-    source_monitor_panel.append(&source_keyword_controls);
+    let source_keyword_expander = gtk::Expander::new(Some("Keywords"));
+    source_keyword_expander.add_css_class("source-keyword-expander");
+    source_keyword_expander.set_margin_start(8);
+    source_keyword_expander.set_margin_end(8);
+    source_keyword_expander.set_margin_bottom(8);
+    source_keyword_expander.set_expanded(false);
+    source_keyword_expander.set_child(Some(&source_keyword_controls));
+
+    source_monitor_panel.append(&source_keyword_expander);
 
     let selected_source_keyword_id: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let refresh_source_keyword_actions: Rc<dyn Fn()> = {
@@ -12974,6 +13309,7 @@ pub fn build_window(
         let on_project_changed = on_project_changed.clone();
         let timeline_state = timeline_state.clone();
         let preferences_state = preferences_state.clone();
+        let source_patch_state = source_patch_controls.state.clone();
         Rc::new(move || {
             let marks = source_marks.borrow();
             if marks.path.is_empty() {
@@ -12999,15 +13335,22 @@ pub fn build_window(
             drop(ts);
             let source_monitor_auto_link_av =
                 preferences_state.borrow().source_monitor_auto_link_av;
+            let source_patch_routing = source_patch_state.borrow().clone();
 
             {
                 let mut proj = project.borrow_mut();
-                ensure_matching_source_track_exists(&mut proj, source_info);
-                let placement_plan = build_source_placement_plan_by_track_id(
+                ensure_source_patch_tracks_exist(
+                    &mut proj,
+                    source_info,
+                    source_monitor_auto_link_av,
+                    Some(&source_patch_routing),
+                );
+                let placement_plan = build_source_placement_plan_by_track_id_with_patch(
                     &proj,
                     active_tid.as_deref(),
                     source_info,
                     source_monitor_auto_link_av,
+                    Some(&source_patch_routing),
                 );
                 if let Some(primary_target) = placement_plan.targets.first() {
                     let timeline_start = proj.tracks[primary_target.track_index].duration();
@@ -13053,6 +13396,7 @@ pub fn build_window(
         let on_project_changed = on_project_changed.clone();
         let timeline_state = timeline_state.clone();
         let preferences_state = preferences_state.clone();
+        let source_patch_state = source_patch_controls.state.clone();
         Rc::new(move || {
             let marks = source_marks.borrow();
             if marks.path.is_empty() {
@@ -13079,6 +13423,7 @@ pub fn build_window(
             drop(ts);
             let source_monitor_auto_link_av =
                 preferences_state.borrow().source_monitor_auto_link_av;
+            let source_patch_routing = source_patch_state.borrow().clone();
 
             let clip_duration = out_ns.saturating_sub(in_ns);
             if clip_duration == 0 {
@@ -13087,12 +13432,18 @@ pub fn build_window(
 
             {
                 let mut proj = project.borrow_mut();
-                ensure_matching_source_track_exists(&mut proj, source_info);
-                let placement_plan = build_source_placement_plan_by_track_id(
+                ensure_source_patch_tracks_exist(
+                    &mut proj,
+                    source_info,
+                    source_monitor_auto_link_av,
+                    Some(&source_patch_routing),
+                );
+                let placement_plan = build_source_placement_plan_by_track_id_with_patch(
                     &proj,
                     active_tid.as_deref(),
                     source_info,
                     source_monitor_auto_link_av,
+                    Some(&source_patch_routing),
                 );
                 let mut track_changes: Vec<TrackClipsChange> = Vec::new();
                 let magnetic_mode_for_placement =
@@ -13162,6 +13513,7 @@ pub fn build_window(
         let on_project_changed = on_project_changed.clone();
         let timeline_state = timeline_state.clone();
         let preferences_state = preferences_state.clone();
+        let source_patch_state = source_patch_controls.state.clone();
         Rc::new(move || {
             let marks = source_marks.borrow();
             if marks.path.is_empty() {
@@ -13188,6 +13540,7 @@ pub fn build_window(
             drop(ts);
             let source_monitor_auto_link_av =
                 preferences_state.borrow().source_monitor_auto_link_av;
+            let source_patch_routing = source_patch_state.borrow().clone();
 
             let clip_duration = out_ns.saturating_sub(in_ns);
             if clip_duration == 0 {
@@ -13199,12 +13552,18 @@ pub fn build_window(
 
             {
                 let mut proj = project.borrow_mut();
-                ensure_matching_source_track_exists(&mut proj, source_info);
-                let placement_plan = build_source_placement_plan_by_track_id(
+                ensure_source_patch_tracks_exist(
+                    &mut proj,
+                    source_info,
+                    source_monitor_auto_link_av,
+                    Some(&source_patch_routing),
+                );
+                let placement_plan = build_source_placement_plan_by_track_id_with_patch(
                     &proj,
                     active_tid.as_deref(),
                     source_info,
                     source_monitor_auto_link_av,
+                    Some(&source_patch_routing),
                 );
                 let mut track_changes: Vec<TrackClipsChange> = Vec::new();
                 let magnetic_mode_for_placement =
@@ -13283,6 +13642,7 @@ pub fn build_window(
         let selected_source_keyword_id = selected_source_keyword_id.clone();
         let source_keyword_entry = source_keyword_entry.clone();
         let refresh_source_keyword_picker = refresh_source_keyword_picker.clone();
+        let refresh_source_patch_controls = refresh_source_patch_controls.clone();
         Rc::new(move |path: String, duration_ns: u64| {
             // Show the source preview now that a clip is selected
             source_monitor_panel.set_visible(true);
@@ -13336,6 +13696,7 @@ pub fn build_window(
             *selected_source_keyword_id.borrow_mut() = None;
             source_keyword_entry.set_text("");
             refresh_source_keyword_picker();
+            refresh_source_patch_controls();
         })
     };
     *on_apply_collected_files_impl.borrow_mut() = Some({
@@ -13921,16 +14282,19 @@ pub fn build_window(
     *on_close_preview_impl.borrow_mut() = Some({
         let clear_media_selection = clear_media_selection.clone();
         let source_monitor_panel = source_monitor_panel.clone();
+        let source_keyword_expander = source_keyword_expander.clone();
         let clip_name_label = clip_name_label.clone();
         let source_marks = source_marks.clone();
         let player = player.clone();
         let selected_source_keyword_id = selected_source_keyword_id.clone();
         let source_keyword_entry = source_keyword_entry.clone();
         let refresh_source_keyword_picker = refresh_source_keyword_picker.clone();
+        let refresh_source_patch_controls = refresh_source_patch_controls.clone();
         let source_original_uri_for_proxy_fallback = source_original_uri_for_proxy_fallback.clone();
         Rc::new(move || {
             clear_media_selection();
             source_monitor_panel.set_visible(false);
+            source_keyword_expander.set_expanded(false);
             clip_name_label.set_text("No source loaded");
             {
                 let mut m = source_marks.borrow_mut();
@@ -13939,6 +14303,7 @@ pub fn build_window(
             *selected_source_keyword_id.borrow_mut() = None;
             source_keyword_entry.set_text("");
             refresh_source_keyword_picker();
+            refresh_source_patch_controls();
             if let Ok(mut fallback_uri) = source_original_uri_for_proxy_fallback.lock() {
                 *fallback_uri = None;
             }
@@ -14442,6 +14807,7 @@ pub fn build_window(
                 }
                 prog_player.borrow_mut().update_proxy_paths(HashMap::new());
             }
+            refresh_source_patch_controls();
 
             // Update window title
             if let Some(win) = window_weak.upgrade() {

@@ -60,6 +60,7 @@ Tracking docs:
 - [x] Strict source preview behavior when proxy mode is Off (always load original media; no proxy requests)
 - [x] Adaptive VA-API source decode mode (hardware-first when available and enabled) with automatic software fallback on hardware-path errors
 - [x] Source monitor playback-priority mode (Smooth/Balanced/Accurate) with frame-boundary seek deduplication for paused scrubbing
+- [x] Compact Source Monitor footer: transport split into two rows, Source-Record routing moved into a **Routing…** popover, and keyword editing collapsed behind a **Keywords** expander for better small-display usability
 
 ### Timeline
 - [x] Cairo-rendered `DrawingArea` with ruler (adaptive multi-tier tick/label density while zooming)
@@ -271,7 +272,7 @@ Tracking docs:
 - [x] Right-click clip context menu now shows only currently actionable clip operations (hides unavailable actions)
 - [x] Select clips forward/backward from playhead for bulk operations
 - [x] Clip display options / adjustable per-track height, clip color labels
-- [ ] Source-Record Track Patching (UI to control source channel to timeline track mapping)
+- [x] Source-Record Track Patching (compact Source Monitor **Patch V / A** selectors with Auto / Off / explicit track routing, stable track-ID targeting across reorders, explicit A/V split placement, and stale-selection fallback to Auto)
 - [ ] Dynamic Trim Mode / Precision Editor (Interface for side-by-side fine-tuning of cuts)
 
 ### Motion Tracking Improvements
