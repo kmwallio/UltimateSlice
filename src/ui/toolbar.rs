@@ -451,6 +451,10 @@ fn show_project_snapshots_dialog(
     let action_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     let btn_restore = gtk::Button::with_label("Restore Selected");
     let btn_delete = gtk::Button::with_label("Delete Selected");
+    btn_restore.set_tooltip_text(Some(
+        "Restore the selected snapshot into the current project",
+    ));
+    btn_delete.set_tooltip_text(Some("Delete the selected snapshot from disk"));
     action_row.append(&btn_restore);
     action_row.append(&btn_delete);
 
@@ -1632,6 +1636,11 @@ pub fn build_toolbar(
             let btn_save_preset = gtk::Button::with_label("Save As…");
             let btn_update_preset = gtk::Button::with_label("Update");
             let btn_delete_preset = gtk::Button::with_label("Delete");
+            btn_save_preset
+                .set_tooltip_text(Some("Save the current export settings as a named preset"));
+            btn_update_preset
+                .set_tooltip_text(Some("Update the selected preset with the current settings"));
+            btn_delete_preset.set_tooltip_text(Some("Delete the selected export preset"));
             btn_update_preset.set_sensitive(false);
             btn_delete_preset.set_sensitive(false);
             preset_box.append(&preset_dropdown);

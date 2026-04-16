@@ -699,7 +699,7 @@ FCPXML persistence).
 - [ ] Welcome screen polish — hero thumbnail strip from the most recent project, a "What's New in this version" expandable card, and a "Sample project" button that loads a bundled demo `.uspxml` so a fresh install has something to click into
 - [ ] Empty-state guidance in every panel — timeline shows a drop-zone hint when empty ("Drag media here or press ⌘O to import"); media browser surfaces the import button at center; inspector shows a keyboard hint to select a clip
 - [ ] In-app onboarding tour — first-launch coachmark sequence pointing to the five core regions (browser, source monitor, timeline, program monitor, inspector) with skip/replay from Help menu; persist `seen_onboarding_v1` in preferences
-- [ ] Tooltips audit — one-pass review using `set_tooltip_text` on every icon-only button across `inspector.rs` and `toolbar.rs`
+- [x] Tooltips audit — added and normalized tooltip coverage for low-context controls across `inspector.rs` and `toolbar.rs`, including glyph-style effect reorder/remove buttons, subtitle style toggles, color/swatch pickers, and secondary snapshot/export-preset actions so compact controls no longer rely on guesswork.
 
 **Notifications & feedback**
 - [x] Toast/notification system (custom GTK4 overlay) for non-modal feedback. Transient messages now appear as in-app toasts with info/success/warning/error styling, keeping the window title focused on project name + dirty state. Proxy generation, motion tracking, subtitle generation, and MusicGen completion/failure now surface through the toast layer while the bottom status bar continues to show continuous progress.

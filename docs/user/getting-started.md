@@ -81,6 +81,8 @@ UltimateSlice uses a dark, GTK4/libadwaita-inspired control style so popovers, s
 
 Short-lived feedback now appears as an in-app toast near the top of the window instead of temporarily replacing the window title. Continuous work now has two layers: the bottom status bar gives a compact at-a-glance summary, and the footer **Jobs** dropdown beside **Workspace** expands active background tasks such as proxy generation, render work, exports, subtitle generation, and motion tracking into a detailed live list.
 
+Hover compact icon, glyph, and swatch controls in the toolbar and Inspector to see descriptive tooltips before clicking; this is especially helpful for reorder buttons, style toggles, and color pickers.
+
 ### Window Layout
 
 ```

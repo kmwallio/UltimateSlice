@@ -2630,23 +2630,25 @@ impl InspectorView {
                             let header_row = GBox::new(Orientation::Horizontal, 4);
                             let enable_check = gtk4::CheckButton::new();
                             enable_check.set_active(effect.enabled);
+                            enable_check
+                                .set_tooltip_text(Some("Enable or disable this audio effect"));
                             header_row.append(&enable_check);
                             let name_label = Label::new(Some(&display_name));
                             name_label.set_hexpand(true);
                             name_label.set_halign(gtk4::Align::Start);
                             header_row.append(&name_label);
                             let btn_up = Button::with_label("\u{25b2}");
-                            btn_up.set_tooltip_text(Some("Move up"));
+                            btn_up.set_tooltip_text(Some("Move this audio effect up"));
                             btn_up.add_css_class("flat");
                             btn_up.set_sensitive(effect_idx > 0);
                             header_row.append(&btn_up);
                             let btn_down = Button::with_label("\u{25bc}");
-                            btn_down.set_tooltip_text(Some("Move down"));
+                            btn_down.set_tooltip_text(Some("Move this audio effect down"));
                             btn_down.add_css_class("flat");
                             btn_down.set_sensitive(effect_idx < c.ladspa_effects.len() - 1);
                             header_row.append(&btn_down);
                             let btn_remove = Button::with_label("\u{00d7}");
-                            btn_remove.set_tooltip_text(Some("Remove"));
+                            btn_remove.set_tooltip_text(Some("Remove this audio effect"));
                             btn_remove.add_css_class("flat");
                             header_row.append(&btn_remove);
                             effect_box.append(&header_row);
@@ -3914,6 +3916,7 @@ pub fn build_inspector(
     chroma_color_dialog.set_with_alpha(false);
     let chroma_color_btn = gtk4::ColorDialogButton::new(Some(chroma_color_dialog));
     chroma_color_btn.set_rgba(&gdk4::RGBA::new(0.0, 1.0, 0.0, 1.0));
+    chroma_color_btn.set_tooltip_text(Some("Choose a custom chroma key color"));
     chroma_custom_color_row.append(&chroma_color_btn);
     chroma_key_inner.append(&chroma_custom_color_row);
     chroma_custom_color_row.set_visible(false);
@@ -4079,13 +4082,13 @@ pub fn build_inspector(
     // Base style toggle buttons
     let subtitle_style_row = GBox::new(Orientation::Horizontal, 4);
     let sub_bold_btn = gtk4::ToggleButton::with_label("B");
-    sub_bold_btn.set_tooltip_text(Some("Bold"));
+    sub_bold_btn.set_tooltip_text(Some("Toggle subtitle bold"));
     let sub_italic_btn = gtk4::ToggleButton::with_label("I");
-    sub_italic_btn.set_tooltip_text(Some("Italic"));
+    sub_italic_btn.set_tooltip_text(Some("Toggle subtitle italic"));
     let sub_underline_btn = gtk4::ToggleButton::with_label("U");
-    sub_underline_btn.set_tooltip_text(Some("Underline"));
+    sub_underline_btn.set_tooltip_text(Some("Toggle subtitle underline"));
     let sub_shadow_btn = gtk4::ToggleButton::with_label("S");
-    sub_shadow_btn.set_tooltip_text(Some("Shadow"));
+    sub_shadow_btn.set_tooltip_text(Some("Toggle subtitle shadow"));
     subtitle_style_row.append(&sub_bold_btn);
     subtitle_style_row.append(&sub_italic_btn);
     subtitle_style_row.append(&sub_underline_btn);
@@ -4097,6 +4100,7 @@ pub fn build_inspector(
     sub_color_dialog.set_with_alpha(true);
     let subtitle_color_btn = gtk4::ColorDialogButton::new(Some(sub_color_dialog));
     subtitle_color_btn.set_rgba(&gdk4::RGBA::new(1.0, 1.0, 1.0, 1.0));
+    subtitle_color_btn.set_tooltip_text(Some("Choose the subtitle text color"));
     subtitle_style_box.append(&subtitle_color_btn);
 
     row_label(&subtitle_style_box, "Word Highlight");
@@ -4134,6 +4138,7 @@ pub fn build_inspector(
     sub_hl_color_dialog.set_with_alpha(true);
     let subtitle_highlight_color_btn = gtk4::ColorDialogButton::new(Some(sub_hl_color_dialog));
     subtitle_highlight_color_btn.set_rgba(&gdk4::RGBA::new(1.0, 1.0, 0.0, 1.0));
+    subtitle_highlight_color_btn.set_tooltip_text(Some("Choose the subtitle highlight color"));
     subtitle_highlight_color_row.append(&subtitle_highlight_color_btn);
     subtitle_style_box.append(&subtitle_highlight_color_row);
 
@@ -4150,6 +4155,8 @@ pub fn build_inspector(
     let subtitle_highlight_stroke_color_btn =
         gtk4::ColorDialogButton::new(Some(sub_hl_stroke_color_dialog));
     subtitle_highlight_stroke_color_btn.set_rgba(&gdk4::RGBA::new(0.0, 0.0, 0.0, 1.0));
+    subtitle_highlight_stroke_color_btn
+        .set_tooltip_text(Some("Choose the subtitle highlight stroke color"));
     subtitle_highlight_stroke_color_row.append(&subtitle_highlight_stroke_color_btn);
     subtitle_highlight_stroke_color_row.set_visible(false);
     subtitle_style_box.append(&subtitle_highlight_stroke_color_row);
@@ -4161,6 +4168,8 @@ pub fn build_inspector(
     let subtitle_bg_highlight_color_btn =
         gtk4::ColorDialogButton::new(Some(sub_bg_hl_color_dialog));
     subtitle_bg_highlight_color_btn.set_rgba(&gdk4::RGBA::new(1.0, 1.0, 0.0, 0.5));
+    subtitle_bg_highlight_color_btn
+        .set_tooltip_text(Some("Choose the subtitle background highlight color"));
     subtitle_bg_highlight_color_row.append(&subtitle_bg_highlight_color_btn);
     subtitle_bg_highlight_color_row.set_visible(false);
     subtitle_style_box.append(&subtitle_bg_highlight_color_row);
@@ -4190,6 +4199,7 @@ pub fn build_inspector(
     sub_outline_color_dialog.set_with_alpha(true);
     let subtitle_outline_color_btn = gtk4::ColorDialogButton::new(Some(sub_outline_color_dialog));
     subtitle_outline_color_btn.set_rgba(&gdk4::RGBA::new(0.0, 0.0, 0.0, 1.0));
+    subtitle_outline_color_btn.set_tooltip_text(Some("Choose the subtitle outline color"));
     subtitle_style_box.append(&subtitle_outline_color_btn);
 
     let subtitle_bg_box_check = CheckButton::with_label("Background Box");
@@ -4201,6 +4211,7 @@ pub fn build_inspector(
     sub_bg_color_dialog.set_with_alpha(true);
     let subtitle_bg_color_btn = gtk4::ColorDialogButton::new(Some(sub_bg_color_dialog));
     subtitle_bg_color_btn.set_rgba(&gdk4::RGBA::new(0.0, 0.0, 0.0, 0.6));
+    subtitle_bg_color_btn.set_tooltip_text(Some("Choose the subtitle background box color"));
     subtitle_style_box.append(&subtitle_bg_color_btn);
 
     // Copy/Paste Style buttons
@@ -5644,6 +5655,7 @@ pub fn build_inspector(
     title_color_dialog.set_with_alpha(true);
     let title_color_btn = gtk4::ColorDialogButton::new(Some(title_color_dialog));
     title_color_btn.set_rgba(&gdk4::RGBA::new(1.0, 1.0, 1.0, 1.0));
+    title_color_btn.set_tooltip_text(Some("Choose the title text color"));
     title_inner.append(&title_color_btn);
 
     row_label(&title_inner, "Position X");
@@ -5681,6 +5693,7 @@ pub fn build_inspector(
     title_outline_color_dialog.set_with_alpha(true);
     let title_outline_color_btn = gtk4::ColorDialogButton::new(Some(title_outline_color_dialog));
     title_outline_color_btn.set_rgba(&gdk4::RGBA::new(0.0, 0.0, 0.0, 1.0));
+    title_outline_color_btn.set_tooltip_text(Some("Choose the title outline color"));
     title_inner.append(&title_outline_color_btn);
 
     let title_shadow_check = CheckButton::with_label("Drop Shadow");
@@ -5691,6 +5704,7 @@ pub fn build_inspector(
     title_shadow_color_dialog.set_with_alpha(true);
     let title_shadow_color_btn = gtk4::ColorDialogButton::new(Some(title_shadow_color_dialog));
     title_shadow_color_btn.set_rgba(&gdk4::RGBA::new(0.0, 0.0, 0.0, 0.67));
+    title_shadow_color_btn.set_tooltip_text(Some("Choose the title shadow color"));
     title_inner.append(&title_shadow_color_btn);
 
     row_label(&title_inner, "Shadow Offset X");
@@ -5717,6 +5731,7 @@ pub fn build_inspector(
     title_bg_box_color_dialog.set_with_alpha(true);
     let title_bg_box_color_btn = gtk4::ColorDialogButton::new(Some(title_bg_box_color_dialog));
     title_bg_box_color_btn.set_rgba(&gdk4::RGBA::new(0.0, 0.0, 0.0, 0.53));
+    title_bg_box_color_btn.set_tooltip_text(Some("Choose the title background box color"));
     title_inner.append(&title_bg_box_color_btn);
 
     row_label(&title_inner, "Box Padding");
