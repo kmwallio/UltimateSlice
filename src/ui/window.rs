@@ -14473,7 +14473,7 @@ pub fn build_window(
                     mp.rebuild_from_project(&proj);
                 }
                 if let Some(ref mx) = *mixer_panel_cell.borrow() {
-                    mx.sync_from_project();
+                    mx.rebuild_from_project();
                 }
 
                 // Sync transform overlay: show handles when a clip is selected,

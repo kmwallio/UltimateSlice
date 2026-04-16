@@ -64,6 +64,23 @@ pub struct MixerPanelView {
 impl MixerPanelView {
     /// Rebuild channel strips from the current project tracks.
     pub fn rebuild_from_project(&self) {
+        // Only tear down / recreate strips when the track list actually changed.
+        {
+            let strips = self.strips.borrow();
+            let proj = self.project.borrow();
+            if strips.len() == proj.tracks.len()
+                && strips
+                    .iter()
+                    .zip(proj.tracks.iter())
+                    .all(|(s, t)| s.track_id == t.id)
+            {
+                drop(strips);
+                drop(proj);
+                self.sync_from_project();
+                return;
+            }
+        }
+
         self.updating.set(true);
 
         // Remove old strips.
@@ -97,6 +114,10 @@ impl MixerPanelView {
 
         for strip in self.strips.borrow().iter() {
             if let Some(track) = proj.tracks.iter().find(|t| t.id == strip.track_id) {
+                strip.label.set_text(&track.label);
+                strip
+                    .role_badge
+                    .set_text(role_badge_text(&track.audio_role));
                 strip.gain_scale.set_value(track.gain_db);
                 strip.db_readout.set_text(&format_db(track.gain_db));
                 strip.pan_scale.set_value(track.pan);
@@ -153,13 +174,7 @@ impl MixerPanelView {
         root.append(&label);
 
         // Audio role badge.
-        let role_text = match track.audio_role {
-            AudioRole::None => "",
-            AudioRole::Dialogue => "D",
-            AudioRole::Effects => "E",
-            AudioRole::Music => "M",
-        };
-        let role_badge = Label::new(Some(role_text));
+        let role_badge = Label::new(Some(role_badge_text(&track.audio_role)));
         role_badge.add_css_class("mixer-role-badge");
         role_badge.set_halign(gtk::Align::Center);
         root.append(&role_badge);
@@ -675,6 +690,15 @@ fn draw_vu_meter(cr: &gtk::cairo::Context, width: i32, height: i32, peaks: [f64;
             cr.rectangle(x, h - bar_h, bar_w, red_h);
             let _ = cr.fill();
         }
+    }
+}
+
+fn role_badge_text(role: &AudioRole) -> &'static str {
+    match role {
+        AudioRole::None => "",
+        AudioRole::Dialogue => "D",
+        AudioRole::Effects => "E",
+        AudioRole::Music => "M",
     }
 }
 
