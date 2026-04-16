@@ -78,17 +78,35 @@ pub struct MixerPanelView {
 impl MixerPanelView {
     /// Rebuild channel strips from the current project tracks.
     pub fn rebuild_from_project(&self) {
-        // Only tear down / recreate strips when the track list actually changed.
+        // Only tear down / recreate strips when the track list or bus roles changed.
         {
             let strips = self.strips.borrow();
+            let bus_strips = self.bus_strips.borrow();
             let proj = self.project.borrow();
-            if strips.len() == proj.tracks.len()
+            let tracks_match = strips.len() == proj.tracks.len()
                 && strips
                     .iter()
                     .zip(proj.tracks.iter())
-                    .all(|(s, t)| s.track_id == t.id)
-            {
+                    .all(|(s, t)| s.track_id == t.id);
+            let current_bus_roles: Vec<AudioRole> = {
+                let mut roles: Vec<AudioRole> = proj
+                    .tracks
+                    .iter()
+                    .filter(|t| t.is_audio() && t.audio_role != AudioRole::None)
+                    .map(|t| t.audio_role)
+                    .collect();
+                roles.sort_by_key(|r| *r as u8);
+                roles.dedup();
+                roles
+            };
+            let buses_match = bus_strips.len() == current_bus_roles.len()
+                && bus_strips
+                    .iter()
+                    .zip(current_bus_roles.iter())
+                    .all(|(bs, r)| bs.role == *r);
+            if tracks_match && buses_match {
                 drop(strips);
+                drop(bus_strips);
                 drop(proj);
                 self.sync_from_project();
                 return;
