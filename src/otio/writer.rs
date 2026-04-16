@@ -595,6 +595,51 @@ fn write_otio_with_mode(
             } else {
                 None
             },
+            dialogue_bus_gain_db: if project.dialogue_bus.gain_db.abs() > 1e-9 {
+                Some(project.dialogue_bus.gain_db)
+            } else {
+                None
+            },
+            dialogue_bus_muted: if project.dialogue_bus.muted {
+                Some(true)
+            } else {
+                None
+            },
+            dialogue_bus_soloed: if project.dialogue_bus.soloed {
+                Some(true)
+            } else {
+                None
+            },
+            effects_bus_gain_db: if project.effects_bus.gain_db.abs() > 1e-9 {
+                Some(project.effects_bus.gain_db)
+            } else {
+                None
+            },
+            effects_bus_muted: if project.effects_bus.muted {
+                Some(true)
+            } else {
+                None
+            },
+            effects_bus_soloed: if project.effects_bus.soloed {
+                Some(true)
+            } else {
+                None
+            },
+            music_bus_gain_db: if project.music_bus.gain_db.abs() > 1e-9 {
+                Some(project.music_bus.gain_db)
+            } else {
+                None
+            },
+            music_bus_muted: if project.music_bus.muted {
+                Some(true)
+            } else {
+                None
+            },
+            music_bus_soloed: if project.music_bus.soloed {
+                Some(true)
+            } else {
+                None
+            },
         }),
     };
 

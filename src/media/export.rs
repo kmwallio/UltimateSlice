@@ -1303,17 +1303,35 @@ pub fn export_project(
             if roles_in_use.len() <= 1 {
                 // Single role (or all None) — no submix needed, mix directly.
                 let n = audio_labels.len();
-                filter.push(';');
-                for stem in &audio_labels {
-                    filter.push_str(&format!("[{}]", stem.label));
+                let single_role = roles_in_use.first().copied().unwrap_or(AudioRole::None);
+                let bus_active = project.bus_is_active(&single_role);
+                let bus_gain = project.bus_gain_linear(&single_role);
+                if !bus_active || n == 0 {
+                    // Bus muted/solo-excluded — emit silence placeholder
+                    filter.push_str(&format!(
+                        ";anullsrc=r=48000:cl=stereo,atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
+                    ));
+                } else {
+                    filter.push(';');
+                    for stem in &audio_labels {
+                        filter.push_str(&format!("[{}]", stem.label));
+                    }
+                    let bus_vol = if (bus_gain - 1.0).abs() > 1e-6 {
+                        format!(",volume={bus_gain:.6}")
+                    } else {
+                        String::new()
+                    };
+                    filter.push_str(&format!(
+                        "amix=inputs={n}:normalize=0{bus_vol},atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
+                    ));
                 }
-                filter.push_str(&format!(
-                    "amix=inputs={n}:normalize=0,atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
-                ));
             } else {
                 // Multiple roles — create per-role submixes, then master mix.
                 let mut submix_labels: Vec<String> = Vec::new();
                 for role in &roles_in_use {
+                    if !project.bus_is_active(role) {
+                        continue; // Bus muted or solo-excluded
+                    }
                     let role_labels: Vec<&str> = audio_labels
                         .iter()
                         .filter(|s| s.role == *role)
@@ -1324,32 +1342,46 @@ pub fn export_project(
                     }
                     let submix_name = format!("submix_{}", role.as_str());
                     let n = role_labels.len();
+                    let bus_gain = project.bus_gain_linear(role);
+                    let bus_vol = if (bus_gain - 1.0).abs() > 1e-6 {
+                        format!(",volume={bus_gain:.6}")
+                    } else {
+                        String::new()
+                    };
                     filter.push(';');
                     for l in &role_labels {
                         filter.push_str(&format!("[{l}]"));
                     }
                     if n == 1 {
-                        // Single input — just rename, no amix needed.
-                        filter.push_str(&format!("anull[{submix_name}]"));
+                        filter.push_str(&format!("anull{bus_vol}[{submix_name}]"));
                     } else {
-                        filter.push_str(&format!("amix=inputs={n}:normalize=0[{submix_name}]"));
+                        filter.push_str(&format!(
+                            "amix=inputs={n}:normalize=0{bus_vol}[{submix_name}]"
+                        ));
                     }
                     submix_labels.push(submix_name);
                 }
                 // Master mix from submixes.
-                let n = submix_labels.len();
-                filter.push(';');
-                for l in &submix_labels {
-                    filter.push_str(&format!("[{l}]"));
-                }
-                if n == 1 {
+                if submix_labels.is_empty() {
+                    // All buses muted — emit silence
                     filter.push_str(&format!(
-                        "atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
+                        ";anullsrc=r=48000:cl=stereo,atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
                     ));
                 } else {
-                    filter.push_str(&format!(
-                        "amix=inputs={n}:normalize=0,atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
-                    ));
+                    let n = submix_labels.len();
+                    filter.push(';');
+                    for l in &submix_labels {
+                        filter.push_str(&format!("[{l}]"));
+                    }
+                    if n == 1 {
+                        filter.push_str(&format!(
+                            "atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
+                        ));
+                    } else {
+                        filter.push_str(&format!(
+                            "amix=inputs={n}:normalize=0,atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
+                        ));
+                    }
                 }
             }
         } else {
@@ -1417,41 +1449,54 @@ pub fn export_project(
             // 2. Per-role submix in the target layout.
             let mut submix_labels: Vec<String> = Vec::new();
             for (role, labels) in &role_inputs {
-                if labels.is_empty() {
+                if labels.is_empty() || !project.bus_is_active(role) {
                     continue;
                 }
                 let submix_name = format!("submix_{}", role.as_str());
                 let n = labels.len();
+                let bus_gain = project.bus_gain_linear(role);
+                let bus_vol = if (bus_gain - 1.0).abs() > 1e-6 {
+                    format!(",volume={bus_gain:.6}")
+                } else {
+                    String::new()
+                };
                 filter.push(';');
                 for l in labels {
                     filter.push_str(&format!("[{l}]"));
                 }
                 if n == 1 {
                     filter.push_str(&format!(
-                        "aformat=channel_layouts={layout_token}[{submix_name}]"
+                        "aformat=channel_layouts={layout_token}{bus_vol}[{submix_name}]"
                     ));
                 } else {
                     filter.push_str(&format!(
-                        "amix=inputs={n}:normalize=0,aformat=channel_layouts={layout_token}[{submix_name}]"
+                        "amix=inputs={n}:normalize=0,aformat=channel_layouts={layout_token}{bus_vol}[{submix_name}]"
                     ));
                 }
                 submix_labels.push(submix_name);
             }
 
             // 3. Master mix of submixes → final [aout] in the target layout.
-            let n = submix_labels.len();
-            filter.push(';');
-            for l in &submix_labels {
-                filter.push_str(&format!("[{l}]"));
-            }
-            if n == 1 {
+            if submix_labels.is_empty() {
+                // All buses muted — emit silence in the target layout
                 filter.push_str(&format!(
-                    "aformat=channel_layouts={layout_token},atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
+                    ";anullsrc=r=48000:cl={layout_token},atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
                 ));
             } else {
-                filter.push_str(&format!(
-                    "amix=inputs={n}:normalize=0,aformat=channel_layouts={layout_token},atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
-                ));
+                let n = submix_labels.len();
+                filter.push(';');
+                for l in &submix_labels {
+                    filter.push_str(&format!("[{l}]"));
+                }
+                if n == 1 {
+                    filter.push_str(&format!(
+                        "aformat=channel_layouts={layout_token},atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
+                    ));
+                } else {
+                    filter.push_str(&format!(
+                        "amix=inputs={n}:normalize=0,aformat=channel_layouts={layout_token},atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
+                    ));
+                }
             }
         }
     }

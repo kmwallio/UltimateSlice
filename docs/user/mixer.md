@@ -94,6 +94,42 @@ Both use undo commands, so you can Ctrl+Z to revert.
 
 ---
 
+## Audio Buses
+
+When tracks have an **Audio Role** assigned (Dialogue, Effects, or Music), the
+mixer shows **bus strips** between the track strips and the master strip. Each
+bus aggregates all tracks sharing that role:
+
+```
+┌──────────┐
+│ Dialogue  │   Role name
+│   [D]     │   Role badge
+│  ┌──┬──┐  │
+│  │L │R │  │   Aggregated VU meter (max peak across role tracks)
+│  └──┴──┘  │
+│    ┃      │   Bus gain fader (−∞ to +12 dB)
+│  0.0 dB   │   Current gain readout
+│  [M] [S]  │   Bus Mute / Solo
+└──────────┘
+```
+
+### Signal Flow
+
+```
+Track clips → track gain/pan → Bus gain → Bus mute/solo → Master gain → Output
+```
+
+- **Bus Gain** is a post-track multiplier applied to all tracks in the role.
+- **Bus Mute** silences the entire role group.
+- **Bus Solo** works like track solo but at the bus level — when any bus is
+  soloed, only soloed buses are audible.
+- Tracks with `AudioRole::None` bypass the bus stage entirely.
+
+Bus state is persisted in `.uspxml` (`us:bus-dialogue-gain-db`, etc.) and OTIO
+metadata, and all changes are undoable.
+
+---
+
 ## MCP Automation
 
 The mixer is fully controllable via MCP (Model Context Protocol):
@@ -102,7 +138,10 @@ The mixer is fully controllable via MCP (Model Context Protocol):
 |------|-----------|-------------|
 | `set_track_gain` | `track_id`, `gain_db` | Set a track's gain in dB |
 | `set_track_pan` | `track_id`, `pan` | Set a track's stereo pan (−1 to 1) |
-| `get_mixer_state` | *(none)* | Returns all tracks' gain, pan, muted, soloed, role, and master gain |
+| `set_bus_gain` | `role`, `gain_db` | Set a bus gain in dB (role: Dialogue/Effects/Music) |
+| `set_bus_muted` | `role`, `muted` | Mute/unmute a bus |
+| `set_bus_soloed` | `role`, `soloed` | Solo/unsolo a bus |
+| `get_mixer_state` | *(none)* | Returns all tracks' gain, pan, muted, soloed, role, master gain, and bus state |
 
 See [python-mcp.md](python-mcp.md) for connection examples.
 

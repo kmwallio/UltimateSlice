@@ -277,6 +277,28 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
         let gain_str = format!("{:.6}", project.master_gain_db);
         seq.push_attribute(("us:master-gain-db", gain_str.as_str()));
     }
+    // Bus gain/mute/solo — only emit non-default values.
+    if !options.strict_dtd {
+        for (role, bus) in [
+            ("dialogue", &project.dialogue_bus),
+            ("effects", &project.effects_bus),
+            ("music", &project.music_bus),
+        ] {
+            if bus.gain_db.abs() > 1e-9 {
+                let key = format!("us:bus-{role}-gain-db");
+                let val = format!("{:.6}", bus.gain_db);
+                seq.push_attribute((key.as_str(), val.as_str()));
+            }
+            if bus.muted {
+                let key = format!("us:bus-{role}-muted");
+                seq.push_attribute((key.as_str(), "1"));
+            }
+            if bus.soloed {
+                let key = format!("us:bus-{role}-soloed");
+                seq.push_attribute((key.as_str(), "1"));
+            }
+        }
+    }
     if options.strict_dtd {
         // Resolve the FCPXML audioLayout token. Default behavior (no opt-in)
         // is byte-identical to the pre-surround code: emit `"stereo"`. When a
@@ -4387,10 +4409,17 @@ fn is_writer_managed_project_attr(key: &str) -> bool {
 }
 
 fn is_writer_managed_sequence_attr(key: &str) -> bool {
-    matches!(
+    if matches!(
         key,
         "duration" | "format" | "tcFormat" | "audioLayout" | "audioRate" | "us:master-gain-db"
-    )
+    ) {
+        return true;
+    }
+    // Bus vendor attrs: us:bus-{role}-{field}
+    if key.starts_with("us:bus-") {
+        return true;
+    }
+    false
 }
 
 fn is_writer_managed_spine_attr(_key: &str) -> bool {

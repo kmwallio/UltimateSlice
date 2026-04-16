@@ -14507,14 +14507,23 @@ pub fn build_window(
                 let proj_fps_num = proj.frame_rate.numerator;
                 let proj_fps_den = proj.frame_rate.denominator;
                 let has_solo = proj.has_solo_tracks();
+                let has_solo_buses = proj.has_solo_buses();
                 let mut clips: Vec<ProgramClip> = editing_tracks
                     .iter()
                     .enumerate()
                     .flat_map(|(t_idx, t)| {
                         let audio_only = t.is_audio();
                         let suppress = suppress_embedded_audio_ids.clone();
-                        let muted = t.muted || (has_solo && !t.soloed);
-                        let gain_linear = t.gain_linear();
+                        let track_muted = t.muted || (has_solo && !t.soloed);
+                        // Compose bus mute/solo into the muted flag
+                        let bus_muted = if let Some(bus) = proj.bus_for_role(&t.audio_role) {
+                            bus.muted || (has_solo_buses && !bus.soloed)
+                        } else {
+                            false
+                        };
+                        let muted = track_muted || bus_muted;
+                        // Compose bus gain into track gain
+                        let gain_linear = t.gain_linear() * proj.bus_gain_linear(&t.audio_role);
                         let pan = t.pan;
                         t.clips.iter().flat_map(move |c| {
                             clip_to_program_clips(

@@ -343,11 +343,47 @@ fn tools_list() -> Value {
         },
         {
             "name": "get_mixer_state",
-            "description": "Get the current mixer state for all tracks: gain, pan, muted, soloed, and audio role.",
+            "description": "Get the current mixer state for all tracks: gain, pan, muted, soloed, and audio role. Also includes bus state for each role (Dialogue, Effects, Music).",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
                 "required": []
+            }
+        },
+        {
+            "name": "set_bus_gain",
+            "description": "Set the gain (volume) of an audio bus in decibels. Buses group tracks by audio role (Dialogue, Effects, Music). 0 dB is unity gain.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "role": { "type": "string", "description": "Audio role: 'Dialogue', 'Effects', or 'Music'." },
+                    "gain_db": { "type": "number", "description": "Gain in decibels (-96 to +24)." }
+                },
+                "required": ["role", "gain_db"]
+            }
+        },
+        {
+            "name": "set_bus_muted",
+            "description": "Mute or unmute an audio bus. Muted buses silence all tracks in that role.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "role": { "type": "string", "description": "Audio role: 'Dialogue', 'Effects', or 'Music'." },
+                    "muted": { "type": "boolean", "description": "Whether the bus should be muted." }
+                },
+                "required": ["role", "muted"]
+            }
+        },
+        {
+            "name": "set_bus_soloed",
+            "description": "Solo or unsolo an audio bus. When any bus is soloed, only soloed buses are audible.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "role": { "type": "string", "description": "Audio role: 'Dialogue', 'Effects', or 'Music'." },
+                    "soloed": { "type": "boolean", "description": "Whether the bus should be soloed." }
+                },
+                "required": ["role", "soloed"]
             }
         },
         {
@@ -2637,6 +2673,21 @@ fn dispatch_tool_payload(
             reply: tx,
         },
         "get_mixer_state" => McpCommand::GetMixerState { reply: tx },
+        "set_bus_gain" => McpCommand::SetBusGain {
+            role: arg_str!(args, "role"),
+            gain_db: arg_f64!(args, "gain_db", 0.0),
+            reply: tx,
+        },
+        "set_bus_muted" => McpCommand::SetBusMuted {
+            role: arg_str!(args, "role"),
+            muted: arg_bool!(args, "muted"),
+            reply: tx,
+        },
+        "set_bus_soloed" => McpCommand::SetBusSoloed {
+            role: arg_str!(args, "role"),
+            soloed: arg_bool!(args, "soloed"),
+            reply: tx,
+        },
         "set_track_locked" => McpCommand::SetTrackLocked {
             track_id: arg_str!(args, "track_id"),
             locked: arg_bool!(args, "locked"),

@@ -1,6 +1,6 @@
 use crate::model::clip::{AuditionTake, Clip, VoiceIsolationSource};
 use crate::model::project::Project;
-use crate::model::track::Track;
+use crate::model::track::{AudioRole, Track};
 use crate::model::transition::OutgoingTransition;
 
 /// A reversible edit operation on the project.
@@ -2085,6 +2085,110 @@ impl EditCommand for SetProjectMasterGainCommand {
     }
 }
 
+// ── Audio bus commands ────────────────────────────────────────────────────
+
+/// Set the gain (dB) of a role-based audio bus.
+pub struct SetBusGainCommand {
+    pub role: AudioRole,
+    pub old_db: f64,
+    pub new_db: f64,
+}
+
+impl EditCommand for SetBusGainCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(bus) = project.bus_for_role_mut(&self.role) {
+            bus.gain_db = self.new_db.clamp(-96.0, 24.0);
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(bus) = project.bus_for_role_mut(&self.role) {
+            bus.gain_db = self.old_db.clamp(-96.0, 24.0);
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set bus gain"
+    }
+}
+
+/// Toggle mute on a role-based audio bus.
+pub struct SetBusMuteCommand {
+    pub role: AudioRole,
+    pub old_muted: bool,
+    pub new_muted: bool,
+}
+
+impl EditCommand for SetBusMuteCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(bus) = project.bus_for_role_mut(&self.role) {
+            bus.muted = self.new_muted;
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(bus) = project.bus_for_role_mut(&self.role) {
+            bus.muted = self.old_muted;
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set bus mute"
+    }
+}
+
+/// Toggle solo on a role-based audio bus.
+pub struct SetBusSoloCommand {
+    pub role: AudioRole,
+    pub old_soloed: bool,
+    pub new_soloed: bool,
+}
+
+impl EditCommand for SetBusSoloCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(bus) = project.bus_for_role_mut(&self.role) {
+            bus.soloed = self.new_soloed;
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(bus) = project.bus_for_role_mut(&self.role) {
+            bus.soloed = self.old_soloed;
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set bus solo"
+    }
+}
+
+/// Helper to create a `SetBusGainCommand`.
+pub fn set_bus_gain_cmd(role: AudioRole, old_db: f64, new_db: f64) -> SetBusGainCommand {
+    SetBusGainCommand {
+        role,
+        old_db,
+        new_db,
+    }
+}
+
+/// Helper to create a `SetBusMuteCommand`.
+pub fn set_bus_mute_cmd(role: AudioRole, old_muted: bool, new_muted: bool) -> SetBusMuteCommand {
+    SetBusMuteCommand {
+        role,
+        old_muted,
+        new_muted,
+    }
+}
+
+/// Helper to create a `SetBusSoloCommand`.
+pub fn set_bus_solo_cmd(role: AudioRole, old_soloed: bool, new_soloed: bool) -> SetBusSoloCommand {
+    SetBusSoloCommand {
+        role,
+        old_soloed,
+        new_soloed,
+    }
+}
+
 // ── Subtitle commands ─────────────────────────────────────────────────────
 
 /// Set (or replace) all subtitle segments on a clip (used after STT generation).
@@ -3578,5 +3682,35 @@ mod tests {
         assert_eq!(project.track_ref(&track_id).unwrap().pan, 0.0);
         cmd.execute(&mut project);
         assert_eq!(project.track_ref(&track_id).unwrap().pan, -0.5);
+    }
+
+    #[test]
+    fn test_set_bus_gain_undo() {
+        let mut project = Project::new("Test");
+        let cmd = set_bus_gain_cmd(AudioRole::Dialogue, 0.0, -6.0);
+        cmd.execute(&mut project);
+        assert!((project.dialogue_bus.gain_db - (-6.0)).abs() < f64::EPSILON);
+        cmd.undo(&mut project);
+        assert!((project.dialogue_bus.gain_db - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_set_bus_mute_undo() {
+        let mut project = Project::new("Test");
+        let cmd = set_bus_mute_cmd(AudioRole::Effects, false, true);
+        cmd.execute(&mut project);
+        assert!(project.effects_bus.muted);
+        cmd.undo(&mut project);
+        assert!(!project.effects_bus.muted);
+    }
+
+    #[test]
+    fn test_set_bus_solo_undo() {
+        let mut project = Project::new("Test");
+        let cmd = set_bus_solo_cmd(AudioRole::Music, false, true);
+        cmd.execute(&mut project);
+        assert!(project.music_bus.soloed);
+        cmd.undo(&mut project);
+        assert!(!project.music_bus.soloed);
     }
 }

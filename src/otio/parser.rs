@@ -43,6 +43,34 @@ pub fn parse_otio_with_path(json: &str, otio_path: Option<&Path>) -> Result<Proj
     if let Some(gain) = us_project.master_gain_db {
         project.master_gain_db = gain;
     }
+    // Restore bus state.
+    if let Some(db) = us_project.dialogue_bus_gain_db {
+        project.dialogue_bus.gain_db = db;
+    }
+    if let Some(v) = us_project.dialogue_bus_muted {
+        project.dialogue_bus.muted = v;
+    }
+    if let Some(v) = us_project.dialogue_bus_soloed {
+        project.dialogue_bus.soloed = v;
+    }
+    if let Some(db) = us_project.effects_bus_gain_db {
+        project.effects_bus.gain_db = db;
+    }
+    if let Some(v) = us_project.effects_bus_muted {
+        project.effects_bus.muted = v;
+    }
+    if let Some(v) = us_project.effects_bus_soloed {
+        project.effects_bus.soloed = v;
+    }
+    if let Some(db) = us_project.music_bus_gain_db {
+        project.music_bus.gain_db = db;
+    }
+    if let Some(v) = us_project.music_bus_muted {
+        project.music_bus.muted = v;
+    }
+    if let Some(v) = us_project.music_bus_soloed {
+        project.music_bus.soloed = v;
+    }
     // Clear default tracks that Project::new creates.
     project.tracks.clear();
 

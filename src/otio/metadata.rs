@@ -404,6 +404,27 @@ pub(crate) struct UltimateSliceProjectOtioMetadata {
     /// gain any new bytes on round-trip.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) master_gain_db: Option<f64>,
+    /// Dialogue bus gain in dB.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) dialogue_bus_gain_db: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) dialogue_bus_muted: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) dialogue_bus_soloed: Option<bool>,
+    /// Effects bus gain in dB.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) effects_bus_gain_db: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) effects_bus_muted: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) effects_bus_soloed: Option<bool>,
+    /// Music bus gain in dB.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) music_bus_gain_db: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) music_bus_muted: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) music_bus_soloed: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

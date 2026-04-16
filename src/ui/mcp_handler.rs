@@ -595,12 +595,131 @@ pub(crate) fn handle_mcp_command(
                     })
                 })
                 .collect();
+            let buses = json!({
+                "dialogue": {
+                    "gain_db": proj.dialogue_bus.gain_db,
+                    "muted": proj.dialogue_bus.muted,
+                    "soloed": proj.dialogue_bus.soloed,
+                },
+                "effects": {
+                    "gain_db": proj.effects_bus.gain_db,
+                    "muted": proj.effects_bus.muted,
+                    "soloed": proj.effects_bus.soloed,
+                },
+                "music": {
+                    "gain_db": proj.music_bus.gain_db,
+                    "muted": proj.music_bus.muted,
+                    "soloed": proj.music_bus.soloed,
+                },
+            });
             reply
                 .send(json!({
                     "master_gain_db": proj.master_gain_db,
                     "tracks": tracks,
+                    "buses": buses,
                 }))
                 .ok();
+        }
+
+        McpCommand::SetBusGain {
+            role,
+            gain_db,
+            reply,
+        } => {
+            let result = {
+                let mut proj = project.borrow_mut();
+                match parse_audio_role(&role) {
+                    Some(r) => {
+                        if let Some(bus) = proj.bus_for_role_mut(&r) {
+                            bus.gain_db = gain_db.clamp(-96.0, 24.0);
+                            proj.dirty = true;
+                            Ok(())
+                        } else {
+                            Err(format!("No bus for role: {role}"))
+                        }
+                    }
+                    None => Err(format!(
+                        "Unknown role: {role}. Use 'Dialogue', 'Effects', or 'Music'."
+                    )),
+                }
+            };
+            match result {
+                Ok(()) => {
+                    reply
+                        .send(json!({"success": true, "role": role, "gain_db": gain_db}))
+                        .ok();
+                    on_project_changed();
+                }
+                Err(message) => {
+                    reply.send(json!({"success": false, "error": message})).ok();
+                }
+            }
+        }
+
+        McpCommand::SetBusMuted { role, muted, reply } => {
+            let result = {
+                let mut proj = project.borrow_mut();
+                match parse_audio_role(&role) {
+                    Some(r) => {
+                        if let Some(bus) = proj.bus_for_role_mut(&r) {
+                            bus.muted = muted;
+                            proj.dirty = true;
+                            Ok(())
+                        } else {
+                            Err(format!("No bus for role: {role}"))
+                        }
+                    }
+                    None => Err(format!(
+                        "Unknown role: {role}. Use 'Dialogue', 'Effects', or 'Music'."
+                    )),
+                }
+            };
+            match result {
+                Ok(()) => {
+                    reply
+                        .send(json!({"success": true, "role": role, "muted": muted}))
+                        .ok();
+                    on_project_changed();
+                }
+                Err(message) => {
+                    reply.send(json!({"success": false, "error": message})).ok();
+                }
+            }
+        }
+
+        McpCommand::SetBusSoloed {
+            role,
+            soloed,
+            reply,
+        } => {
+            let result = {
+                let mut proj = project.borrow_mut();
+                match parse_audio_role(&role) {
+                    Some(r) => {
+                        if let Some(bus) = proj.bus_for_role_mut(&r) {
+                            bus.soloed = soloed;
+                            proj.dirty = true;
+                            Ok(())
+                        } else {
+                            Err(format!("No bus for role: {role}"))
+                        }
+                    }
+                    None => Err(format!(
+                        "Unknown role: {role}. Use 'Dialogue', 'Effects', or 'Music'."
+                    )),
+                }
+            };
+            match result {
+                Ok(()) => {
+                    reply
+                        .send(json!({"success": true, "role": role, "soloed": soloed}))
+                        .ok();
+                    on_project_changed();
+                }
+                Err(message) => {
+                    reply.send(json!({"success": false, "error": message})).ok();
+                }
+            }
         }
 
         McpCommand::SetTrackLocked {
@@ -7668,5 +7787,15 @@ pub(crate) fn handle_mcp_command(
                 }
             }
         }
+    }
+}
+
+/// Parse a role string from MCP (case-insensitive) to AudioRole.
+fn parse_audio_role(s: &str) -> Option<crate::model::track::AudioRole> {
+    match s.to_lowercase().as_str() {
+        "dialogue" | "d" => Some(crate::model::track::AudioRole::Dialogue),
+        "effects" | "e" => Some(crate::model::track::AudioRole::Effects),
+        "music" | "m" => Some(crate::model::track::AudioRole::Music),
+        _ => None,
     }
 }

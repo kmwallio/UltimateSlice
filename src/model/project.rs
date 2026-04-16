@@ -1,4 +1,4 @@
-use super::track::Track;
+use super::track::{AudioRole, Track};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -85,6 +85,44 @@ impl FrameRate {
     }
 }
 
+/// An audio submix bus. Each `AudioRole` (Dialogue, Effects, Music) has a
+/// corresponding bus that all tracks with that role feed into before reaching
+/// the master output. Tracks with `AudioRole::None` bypass the bus stage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioBus {
+    /// Bus gain in dB. 0.0 = unity (no change). Range: −60 to +12 dB.
+    #[serde(default)]
+    pub gain_db: f64,
+    /// When true, the entire bus (all tracks with this role) is silenced.
+    #[serde(default)]
+    pub muted: bool,
+    /// When true, only soloed buses produce output (bus-level solo).
+    #[serde(default)]
+    pub soloed: bool,
+}
+
+impl Default for AudioBus {
+    fn default() -> Self {
+        Self {
+            gain_db: 0.0,
+            muted: false,
+            soloed: false,
+        }
+    }
+}
+
+impl AudioBus {
+    /// Convert `gain_db` to a linear volume multiplier.
+    /// Returns 0.0 for ≤−100 dB (silence).
+    pub fn gain_linear(&self) -> f64 {
+        if self.gain_db <= -100.0 {
+            0.0
+        } else {
+            10.0_f64.powf(self.gain_db / 20.0)
+        }
+    }
+}
+
 /// The top-level project, containing all tracks and sequence settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
@@ -102,6 +140,15 @@ pub struct Project {
     /// project metadata. Default 0.0 = no-op. Clamped to ±24 dB on apply.
     #[serde(default)]
     pub master_gain_db: f64,
+    /// Dialogue submix bus (all tracks with `AudioRole::Dialogue`).
+    #[serde(default)]
+    pub dialogue_bus: AudioBus,
+    /// Effects submix bus (all tracks with `AudioRole::Effects`).
+    #[serde(default)]
+    pub effects_bus: AudioBus,
+    /// Music submix bus (all tracks with `AudioRole::Music`).
+    #[serde(default)]
+    pub music_bus: AudioBus,
     /// Dirty flag — true if there are unsaved changes
     #[serde(skip)]
     pub dirty: bool,
@@ -178,6 +225,9 @@ impl Project {
             tracks: Vec::new(),
             markers: Vec::new(),
             master_gain_db: 0.0,
+            dialogue_bus: AudioBus::default(),
+            effects_bus: AudioBus::default(),
+            music_bus: AudioBus::default(),
             dirty: false,
             file_path: None,
             source_fcpxml: None,
@@ -213,6 +263,54 @@ impl Project {
 
     pub fn has_solo_tracks(&self) -> bool {
         self.tracks.iter().any(|t| t.soloed)
+    }
+
+    /// True if any audio bus has its `soloed` flag set.
+    pub fn has_solo_buses(&self) -> bool {
+        self.dialogue_bus.soloed || self.effects_bus.soloed || self.music_bus.soloed
+    }
+
+    /// Get the bus for a given audio role (None role has no bus).
+    pub fn bus_for_role(&self, role: &AudioRole) -> Option<&AudioBus> {
+        match role {
+            AudioRole::Dialogue => Some(&self.dialogue_bus),
+            AudioRole::Effects => Some(&self.effects_bus),
+            AudioRole::Music => Some(&self.music_bus),
+            AudioRole::None => None,
+        }
+    }
+
+    /// Get a mutable reference to the bus for a given audio role.
+    pub fn bus_for_role_mut(&mut self, role: &AudioRole) -> Option<&mut AudioBus> {
+        match role {
+            AudioRole::Dialogue => Some(&mut self.dialogue_bus),
+            AudioRole::Effects => Some(&mut self.effects_bus),
+            AudioRole::Music => Some(&mut self.music_bus),
+            AudioRole::None => None,
+        }
+    }
+
+    /// Linear gain multiplier for the bus of a given role.
+    /// Returns 1.0 (unity) for `AudioRole::None` (no bus).
+    pub fn bus_gain_linear(&self, role: &AudioRole) -> f64 {
+        self.bus_for_role(role)
+            .map(|b| b.gain_linear())
+            .unwrap_or(1.0)
+    }
+
+    /// Whether a track's bus is effectively active (not muted, and not
+    /// excluded by bus-level solo). `AudioRole::None` tracks are always
+    /// active at the bus level.
+    pub fn bus_is_active(&self, role: &AudioRole) -> bool {
+        match self.bus_for_role(role) {
+            None => true, // No bus for None role
+            Some(bus) => {
+                if bus.muted {
+                    return false;
+                }
+                !self.has_solo_buses() || bus.soloed
+            }
+        }
     }
 
     pub fn track_is_active_for_output(&self, track: &Track) -> bool {
@@ -832,5 +930,78 @@ mod tests {
         let json = r#"{"id":"abc","position_ns":100,"label":"Old","color":4278190335}"#;
         let m: Marker = serde_json::from_str(json).unwrap();
         assert_eq!(m.notes, "");
+    }
+
+    // ── AudioBus tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_audio_bus_default() {
+        let bus = AudioBus::default();
+        assert!((bus.gain_db - 0.0).abs() < f64::EPSILON);
+        assert!(!bus.muted);
+        assert!(!bus.soloed);
+        assert!((bus.gain_linear() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_audio_bus_gain_linear() {
+        let mut bus = AudioBus::default();
+        bus.gain_db = 6.0;
+        let linear = bus.gain_linear();
+        // 10^(6/20) ≈ 1.9953
+        assert!((linear - 1.9953).abs() < 0.001);
+        bus.gain_db = -100.0;
+        assert!((bus.gain_linear() - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_project_bus_for_role() {
+        let p = Project::new("Test");
+        assert!(p.bus_for_role(&AudioRole::Dialogue).is_some());
+        assert!(p.bus_for_role(&AudioRole::Effects).is_some());
+        assert!(p.bus_for_role(&AudioRole::Music).is_some());
+        assert!(p.bus_for_role(&AudioRole::None).is_none());
+    }
+
+    #[test]
+    fn test_project_has_solo_buses() {
+        let mut p = Project::new("Test");
+        assert!(!p.has_solo_buses());
+        p.dialogue_bus.soloed = true;
+        assert!(p.has_solo_buses());
+    }
+
+    #[test]
+    fn test_project_bus_is_active() {
+        let mut p = Project::new("Test");
+        // All buses active by default
+        assert!(p.bus_is_active(&AudioRole::Dialogue));
+        assert!(p.bus_is_active(&AudioRole::Effects));
+        assert!(p.bus_is_active(&AudioRole::Music));
+        assert!(p.bus_is_active(&AudioRole::None)); // always active
+
+        // Mute dialogue bus
+        p.dialogue_bus.muted = true;
+        assert!(!p.bus_is_active(&AudioRole::Dialogue));
+        assert!(p.bus_is_active(&AudioRole::Effects));
+
+        // Solo effects bus (while dialogue is muted)
+        p.dialogue_bus.muted = false;
+        p.effects_bus.soloed = true;
+        assert!(!p.bus_is_active(&AudioRole::Dialogue));
+        assert!(p.bus_is_active(&AudioRole::Effects));
+        assert!(!p.bus_is_active(&AudioRole::Music));
+        assert!(p.bus_is_active(&AudioRole::None));
+    }
+
+    #[test]
+    fn test_project_bus_gain_linear() {
+        let mut p = Project::new("Test");
+        assert!((p.bus_gain_linear(&AudioRole::Dialogue) - 1.0).abs() < 1e-9);
+        p.dialogue_bus.gain_db = -6.0;
+        let g = p.bus_gain_linear(&AudioRole::Dialogue);
+        assert!((g - 0.5012).abs() < 0.001);
+        // None role returns unity
+        assert!((p.bus_gain_linear(&AudioRole::None) - 1.0).abs() < 1e-9);
     }
 }

@@ -45,15 +45,29 @@ struct ChannelStrip {
     root: GBox,
 }
 
+/// Per-bus UI handles (one per audio role that has tracks).
+struct BusStrip {
+    role: AudioRole,
+    vu_meter: DrawingArea,
+    peak_cell: Rc<Cell<[f64; 2]>>,
+    gain_scale: gtk::Scale,
+    db_readout: Label,
+    mute_btn: gtk::ToggleButton,
+    solo_btn: gtk::ToggleButton,
+    root: GBox,
+}
+
 /// Shared view state for the mixer panel, held in an `Rc` by `window.rs`.
 pub struct MixerPanelView {
     strips_box: GBox,
+    bus_strips_box: GBox,
     master_strip: GBox,
     master_meter: DrawingArea,
     master_peak_cell: Rc<Cell<[f64; 2]>>,
     master_gain_scale: gtk::Scale,
     master_db_readout: Label,
     strips: RefCell<Vec<ChannelStrip>>,
+    bus_strips: RefCell<Vec<BusStrip>>,
     project: Rc<RefCell<Project>>,
     timeline_state: Rc<RefCell<TimelineState>>,
     on_project_changed: Rc<dyn Fn()>,
@@ -99,6 +113,31 @@ impl MixerPanelView {
 
         *self.strips.borrow_mut() = new_strips;
 
+        // Rebuild bus strips: one per role that has audio tracks.
+        while let Some(child) = self.bus_strips_box.first_child() {
+            self.bus_strips_box.remove(&child);
+        }
+        let roles_in_use: Vec<AudioRole> = {
+            let mut roles: Vec<AudioRole> = proj
+                .tracks
+                .iter()
+                .filter(|t| t.is_audio() && t.audio_role != AudioRole::None)
+                .map(|t| t.audio_role)
+                .collect();
+            roles.sort_by_key(|r| *r as u8);
+            roles.dedup();
+            roles
+        };
+        let mut new_bus_strips = Vec::new();
+        for role in &roles_in_use {
+            let bs = self.build_bus_strip(*role, &proj);
+            self.bus_strips_box.append(&bs.root);
+            new_bus_strips.push(bs);
+        }
+        // Show/hide bus section based on whether any buses exist.
+        self.bus_strips_box.set_visible(!new_bus_strips.is_empty());
+        *self.bus_strips.borrow_mut() = new_bus_strips;
+
         // Update master gain fader.
         self.master_gain_scale.set_value(proj.master_gain_db);
         self.master_db_readout
@@ -129,12 +168,24 @@ impl MixerPanelView {
         self.master_gain_scale.set_value(proj.master_gain_db);
         self.master_db_readout
             .set_text(&format_db(proj.master_gain_db));
+
+        // Sync bus strip state.
+        for bs in self.bus_strips.borrow().iter() {
+            if let Some(bus) = proj.bus_for_role(&bs.role) {
+                bs.gain_scale.set_value(bus.gain_db);
+                bs.db_readout.set_text(&format_db(bus.gain_db));
+                bs.mute_btn.set_active(bus.muted);
+                bs.solo_btn.set_active(bus.soloed);
+            }
+        }
+
         self.updating.set(false);
     }
 
     /// Refresh VU meters from current peak data. Called from the 33ms poll tick.
     pub fn update_meters(&self) {
         let ts = self.timeline_state.borrow();
+        let proj = self.project.borrow();
         for strip in self.strips.borrow().iter() {
             let peaks = ts
                 .track_audio_peak_db
@@ -143,6 +194,24 @@ impl MixerPanelView {
                 .unwrap_or([-60.0, -60.0]);
             strip.peak_cell.set(peaks);
             strip.vu_meter.queue_draw();
+        }
+        // Bus meters — aggregate peak across all tracks in the bus's role.
+        for bs in self.bus_strips.borrow().iter() {
+            let bus_peaks = proj
+                .tracks
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| t.is_audio() && t.audio_role == bs.role)
+                .fold([-60.0_f64, -60.0_f64], |acc, (i, _)| {
+                    let p = ts
+                        .track_audio_peak_db
+                        .get(i)
+                        .copied()
+                        .unwrap_or([-60.0, -60.0]);
+                    [acc[0].max(p[0]), acc[1].max(p[1])]
+                });
+            bs.peak_cell.set(bus_peaks);
+            bs.vu_meter.queue_draw();
         }
         // Master meter — use the main program monitor peak data.
         // TimelineState doesn't expose master peaks directly; the mixer will
@@ -522,6 +591,242 @@ impl MixerPanelView {
             root,
         }
     }
+
+    fn build_bus_strip(&self, role: AudioRole, proj: &Project) -> BusStrip {
+        let bus = proj
+            .bus_for_role(&role)
+            .expect("build_bus_strip called with None role");
+
+        let root = GBox::new(Orientation::Vertical, 2);
+        root.set_width_request(STRIP_WIDTH);
+        root.add_css_class("mixer-channel-strip");
+        root.add_css_class("mixer-bus-strip");
+        root.set_margin_start(2);
+        root.set_margin_end(2);
+        root.set_margin_top(4);
+        root.set_margin_bottom(4);
+
+        // Bus name label.
+        let label = Label::new(Some(role.label()));
+        label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        label.set_max_width_chars(8);
+        label.add_css_class("mixer-label");
+        label.add_css_class("mixer-bus-label");
+        root.append(&label);
+
+        // Role badge.
+        let role_badge = Label::new(Some(role_badge_text(&role)));
+        role_badge.add_css_class("mixer-role-badge");
+        role_badge.set_halign(gtk::Align::Center);
+        root.append(&role_badge);
+
+        // VU meter.
+        let peak_cell: Rc<Cell<[f64; 2]>> = Rc::new(Cell::new([-60.0, -60.0]));
+        let vu_meter = DrawingArea::new();
+        vu_meter.set_content_width(METER_WIDTH);
+        vu_meter.set_content_height(METER_HEIGHT);
+        vu_meter.set_halign(gtk::Align::Center);
+        vu_meter.add_css_class("mixer-vu-meter");
+        {
+            let pc = peak_cell.clone();
+            vu_meter.set_draw_func(move |_da, cr, width, height| {
+                draw_vu_meter(cr, width, height, pc.get());
+            });
+        }
+        root.append(&vu_meter);
+
+        // Gain fader (vertical).
+        let gain_scale =
+            gtk::Scale::with_range(Orientation::Vertical, GAIN_MIN_DB, GAIN_MAX_DB, 0.1);
+        gain_scale.set_inverted(true);
+        gain_scale.set_value(bus.gain_db);
+        gain_scale.set_size_request(-1, 80);
+        gain_scale.set_halign(gtk::Align::Center);
+        gain_scale.add_css_class("mixer-fader");
+        gain_scale.add_mark(0.0, gtk::PositionType::Right, Some("0"));
+        root.append(&gain_scale);
+
+        // dB readout.
+        let db_readout = Label::new(Some(&format_db(bus.gain_db)));
+        db_readout.add_css_class("mixer-db-readout");
+        root.append(&db_readout);
+
+        // Mute / Solo buttons.
+        let btn_row = GBox::new(Orientation::Horizontal, 2);
+        btn_row.set_halign(gtk::Align::Center);
+        let mute_btn = gtk::ToggleButton::with_label("M");
+        mute_btn.set_active(bus.muted);
+        mute_btn.add_css_class("mixer-mute");
+        mute_btn.set_size_request(28, 24);
+        let solo_btn = gtk::ToggleButton::with_label("S");
+        solo_btn.set_active(bus.soloed);
+        solo_btn.add_css_class("mixer-solo");
+        solo_btn.set_size_request(28, 24);
+        btn_row.append(&mute_btn);
+        btn_row.append(&solo_btn);
+        root.append(&btn_row);
+
+        // --- Signal handlers ---
+
+        // Gain fader — live update + undo on release.
+        {
+            let proj = self.project.clone();
+            let r = role;
+            let readout = db_readout.clone();
+            let on_changed = self.on_project_changed.clone();
+            let updating = self.updating.clone();
+            let drag_start_db: Rc<Cell<f64>> = Rc::new(Cell::new(bus.gain_db));
+            let ds = drag_start_db.clone();
+            gain_scale.connect_value_changed(move |scale| {
+                if updating.get() {
+                    return;
+                }
+                let new_db = scale.value();
+                readout.set_text(&format_db(new_db));
+                let mut p = proj.borrow_mut();
+                if let Some(b) = p.bus_for_role_mut(&r) {
+                    b.gain_db = new_db;
+                }
+                drop(p);
+                on_changed();
+            });
+            let proj2 = self.project.clone();
+            let r2 = role;
+            let gesture_click = gtk::GestureClick::new();
+            gesture_click.set_button(0);
+            let ds2 = drag_start_db.clone();
+            gesture_click.connect_pressed(move |_, _, _, _| {
+                let p = proj2.borrow();
+                if let Some(b) = p.bus_for_role(&r2) {
+                    ds2.set(b.gain_db);
+                }
+            });
+            gain_scale.add_controller(gesture_click);
+
+            let ts3 = self.timeline_state.clone();
+            let proj3 = self.project.clone();
+            let r3 = role;
+            let updating3 = self.updating.clone();
+            let gesture_release = gtk::GestureClick::new();
+            gesture_release.set_button(0);
+            gesture_release.connect_released(move |_, _, _, _| {
+                if updating3.get() {
+                    return;
+                }
+                let old_db = ds.get();
+                let p = proj3.borrow();
+                let new_db = p.bus_for_role(&r3).map(|b| b.gain_db).unwrap_or(old_db);
+                drop(p);
+                if (old_db - new_db).abs() > f64::EPSILON {
+                    let cmd = crate::undo::set_bus_gain_cmd(r3, old_db, new_db);
+                    let mut ts = ts3.borrow_mut();
+                    ts.history.undo_stack.push(Box::new(cmd));
+                    ts.history.redo_stack.clear();
+                }
+            });
+            gain_scale.add_controller(gesture_release);
+        }
+
+        // Mute button.
+        {
+            let proj = self.project.clone();
+            let ts = self.timeline_state.clone();
+            let r = role;
+            let on_changed = self.on_project_changed.clone();
+            let updating = self.updating.clone();
+            mute_btn.connect_toggled(move |btn| {
+                if updating.get() {
+                    return;
+                }
+                let new_val = btn.is_active();
+                let old_val = {
+                    let p = proj.borrow();
+                    p.bus_for_role(&r).map(|b| b.muted).unwrap_or(false)
+                };
+                let cmd = crate::undo::set_bus_mute_cmd(r, old_val, new_val);
+                {
+                    let mut proj_mut = proj.borrow_mut();
+                    ts.borrow_mut()
+                        .history
+                        .execute(Box::new(cmd), &mut proj_mut);
+                }
+                on_changed();
+            });
+        }
+
+        // Solo button.
+        {
+            let proj = self.project.clone();
+            let ts = self.timeline_state.clone();
+            let r = role;
+            let on_changed = self.on_project_changed.clone();
+            let updating = self.updating.clone();
+            solo_btn.connect_toggled(move |btn| {
+                if updating.get() {
+                    return;
+                }
+                let new_val = btn.is_active();
+                let old_val = {
+                    let p = proj.borrow();
+                    p.bus_for_role(&r).map(|b| b.soloed).unwrap_or(false)
+                };
+                let cmd = crate::undo::set_bus_solo_cmd(r, old_val, new_val);
+                {
+                    let mut proj_mut = proj.borrow_mut();
+                    ts.borrow_mut()
+                        .history
+                        .execute(Box::new(cmd), &mut proj_mut);
+                }
+                on_changed();
+            });
+        }
+
+        // Double-click gain fader to reset to 0 dB.
+        {
+            let proj = self.project.clone();
+            let ts = self.timeline_state.clone();
+            let r = role;
+            let scale = gain_scale.clone();
+            let readout = db_readout.clone();
+            let on_changed = self.on_project_changed.clone();
+            let gesture = gtk::GestureClick::new();
+            gesture.set_button(1);
+            gesture.connect_released(move |g, n_press, _, _| {
+                if n_press < 2 {
+                    return;
+                }
+                let _ = g;
+                let old = {
+                    let p = proj.borrow();
+                    p.bus_for_role(&r).map(|b| b.gain_db).unwrap_or(0.0)
+                };
+                if (old - 0.0).abs() > f64::EPSILON {
+                    let cmd = crate::undo::set_bus_gain_cmd(r, old, 0.0);
+                    {
+                        let mut proj_mut = proj.borrow_mut();
+                        ts.borrow_mut()
+                            .history
+                            .execute(Box::new(cmd), &mut proj_mut);
+                    }
+                    scale.set_value(0.0);
+                    readout.set_text(&format_db(0.0));
+                    on_changed();
+                }
+            });
+            gain_scale.add_controller(gesture);
+        }
+
+        BusStrip {
+            role,
+            vu_meter,
+            peak_cell,
+            gain_scale,
+            db_readout,
+            mute_btn,
+            solo_btn,
+            root,
+        }
+    }
 }
 
 /// Build the mixer panel widget and its shared view state.
@@ -546,6 +851,17 @@ pub fn build_mixer_panel(
     scroller.set_child(Some(&strips_box));
     root.append(&scroller);
 
+    // Separator before bus strips.
+    let bus_sep = Separator::new(Orientation::Vertical);
+    bus_sep.set_margin_start(4);
+    bus_sep.set_margin_end(4);
+    root.append(&bus_sep);
+
+    // Bus strips area (between track strips and master).
+    let bus_strips_box = GBox::new(Orientation::Horizontal, 0);
+    bus_strips_box.set_visible(false); // hidden until buses are populated
+    root.append(&bus_strips_box);
+
     // Separator before master strip.
     let sep = Separator::new(Orientation::Vertical);
     sep.set_margin_start(4);
@@ -559,12 +875,14 @@ pub fn build_mixer_panel(
 
     let view = Rc::new(MixerPanelView {
         strips_box,
+        bus_strips_box,
         master_strip,
         master_meter,
         master_peak_cell,
         master_gain_scale,
         master_db_readout,
         strips: RefCell::new(Vec::new()),
+        bus_strips: RefCell::new(Vec::new()),
         project,
         timeline_state,
         on_project_changed,
