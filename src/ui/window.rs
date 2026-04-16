@@ -5792,6 +5792,14 @@ pub fn build_window(
 
     // ── Build toolbar ─────────────────────────────────────────────────────
     let window_weak = window.downgrade();
+    timeline_state.borrow_mut().on_history_feedback = Some(Rc::new({
+        let window_weak = window_weak.clone();
+        move |message: String| {
+            if let Some(win) = window_weak.upgrade() {
+                show_window_status_toast(&win, &message, ToastSeverity::Info);
+            }
+        }
+    }));
 
     // Two-phase setup: create a stable Rc handle now, fill in the real
     // implementation after the timeline panel is built (so we can capture

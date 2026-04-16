@@ -1537,24 +1537,34 @@ impl EditHistory {
         self.redo_stack.clear(); // new action clears redo stack
     }
 
+    pub fn undo_with_description(&mut self, project: &mut Project) -> Option<String> {
+        let description = self
+            .undo_stack
+            .last()
+            .map(|c| c.description().to_string())?;
+        let cmd = self.undo_stack.pop().expect("undo stack just had an item");
+        cmd.undo(project);
+        self.redo_stack.push(cmd);
+        Some(description)
+    }
+
     pub fn undo(&mut self, project: &mut Project) -> bool {
-        if let Some(cmd) = self.undo_stack.pop() {
-            cmd.undo(project);
-            self.redo_stack.push(cmd);
-            true
-        } else {
-            false
-        }
+        self.undo_with_description(project).is_some()
+    }
+
+    pub fn redo_with_description(&mut self, project: &mut Project) -> Option<String> {
+        let description = self
+            .redo_stack
+            .last()
+            .map(|c| c.description().to_string())?;
+        let cmd = self.redo_stack.pop().expect("redo stack just had an item");
+        cmd.execute(project);
+        self.undo_stack.push(cmd);
+        Some(description)
     }
 
     pub fn redo(&mut self, project: &mut Project) -> bool {
-        if let Some(cmd) = self.redo_stack.pop() {
-            cmd.execute(project);
-            self.undo_stack.push(cmd);
-            true
-        } else {
-            false
-        }
+        self.redo_with_description(project).is_some()
     }
 
     #[allow(dead_code)]
@@ -1569,6 +1579,11 @@ impl EditHistory {
     #[allow(dead_code)]
     pub fn undo_description(&self) -> Option<&str> {
         self.undo_stack.last().map(|c| c.description())
+    }
+
+    #[allow(dead_code)]
+    pub fn redo_description(&self) -> Option<&str> {
+        self.redo_stack.last().map(|c| c.description())
     }
 }
 
@@ -3400,11 +3415,39 @@ mod tests {
     }
 
     #[test]
+    fn test_edit_history_undo_redo_descriptions_follow_operations() {
+        let (mut project, track_id, clip_id) = make_project_with_clip("C", 10, 0);
+        let mut history = EditHistory::new();
+        let cmd = TrimOutCommand {
+            clip_id: clip_id.clone(),
+            track_id: track_id.clone(),
+            old_source_out: 10,
+            new_source_out: 6,
+        };
+        history.execute(Box::new(cmd), &mut project);
+
+        assert_eq!(history.undo_description(), Some("Trim clip out-point"));
+        assert!(history.redo_description().is_none());
+
+        let undo_label = history.undo_with_description(&mut project);
+        assert_eq!(undo_label.as_deref(), Some("Trim clip out-point"));
+        assert!(history.undo_description().is_none());
+        assert_eq!(history.redo_description(), Some("Trim clip out-point"));
+
+        let redo_label = history.redo_with_description(&mut project);
+        assert_eq!(redo_label.as_deref(), Some("Trim clip out-point"));
+        assert_eq!(history.undo_description(), Some("Trim clip out-point"));
+        assert!(history.redo_description().is_none());
+    }
+
+    #[test]
     fn test_edit_history_empty_undo_redo() {
         let mut project = Project::new("Test");
         let mut history = EditHistory::new();
         assert!(!history.undo(&mut project));
         assert!(!history.redo(&mut project));
+        assert!(history.undo_with_description(&mut project).is_none());
+        assert!(history.redo_with_description(&mut project).is_none());
     }
 
     // ── Compound clip undo tests ──────────────────────────────────────

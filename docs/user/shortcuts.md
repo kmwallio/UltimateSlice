@@ -14,8 +14,8 @@
 | `Ctrl+,` | Open Preferences |
 | `Shift+P` | Toggle proxy playback on/off (switches the bottom status bar between `Original Media` and `Using Proxies`, and restores the last non-Off proxy size) |
 | `Ctrl+J` | Go to timecode (jump playhead) |
-| `Ctrl+Z` | Undo |
-| `Ctrl+Y` / `Ctrl+Shift+Z` | Redo |
+| `Ctrl+Z` | Undo — shows a brief `Undid: …` toast when an action is available |
+| `Ctrl+Y` / `Ctrl+Shift+Z` | Redo — shows a brief `Redid: …` toast when an action is available |
 
 ---
 

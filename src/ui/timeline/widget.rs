@@ -416,6 +416,22 @@ fn snap_to_candidates(
     }
 }
 
+fn format_history_feedback_label(label: &str) -> String {
+    let mut chars = label.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    let rest = chars.as_str();
+    let next = chars.next();
+    if first.is_uppercase() && next.map(|c| c.is_lowercase()).unwrap_or(false) {
+        let mut lowered = first.to_lowercase().collect::<String>();
+        lowered.push_str(rest);
+        lowered
+    } else {
+        label.to_string()
+    }
+}
+
 /// Shared state for the timeline widget
 pub struct TimelineState {
     pub project: Rc<RefCell<Project>>,
@@ -434,6 +450,8 @@ pub struct TimelineState {
     pub on_seek: Option<Rc<dyn Fn(u64)>>,
     /// Callback fired when project changes — use Rc so it can be cloned out before releasing the RefMut
     pub on_project_changed: Option<Rc<dyn Fn()>>,
+    /// Callback fired after an undo/redo action completes, with a ready-to-display message.
+    pub on_history_feedback: Option<Rc<dyn Fn(String)>>,
     /// Callback fired when the user presses Space to toggle play/pause
     pub on_play_pause: Option<Rc<dyn Fn()>>,
     /// Callback to pause/resume background thumbnail+waveform extraction during playback.
@@ -539,6 +557,7 @@ impl TimelineState {
             ruler_pan_start_offset: 0.0,
             on_seek: None,
             on_project_changed: None,
+            on_history_feedback: None,
             on_play_pause: None,
             on_extraction_pause: None,
             on_drop_clip: None,
@@ -1140,14 +1159,38 @@ impl TimelineState {
         true
     }
 
-    pub fn undo(&mut self) {
+    pub fn undo(&mut self) -> bool {
         let mut proj = self.project.borrow_mut();
-        self.history.undo(&mut proj);
+        let description = self.history.undo_with_description(&mut proj);
+        drop(proj);
+        if let Some(description) = description {
+            if let Some(cb) = self.on_history_feedback.clone() {
+                cb(format!(
+                    "Undid: {}",
+                    format_history_feedback_label(&description)
+                ));
+            }
+            true
+        } else {
+            false
+        }
     }
 
-    pub fn redo(&mut self) {
+    pub fn redo(&mut self) -> bool {
         let mut proj = self.project.borrow_mut();
-        self.history.redo(&mut proj);
+        let description = self.history.redo_with_description(&mut proj);
+        drop(proj);
+        if let Some(description) = description {
+            if let Some(cb) = self.on_history_feedback.clone() {
+                cb(format!(
+                    "Redid: {}",
+                    format_history_feedback_label(&description)
+                ));
+            }
+            true
+        } else {
+            false
+        }
     }
 
     /// Delete the currently selected clip
@@ -7492,18 +7535,15 @@ pub fn build_timeline(
 
             let handled = match key {
                 Key::z if ctrl && !shift => {
-                    st.undo();
-                    notify_project = true;
+                    notify_project = st.undo();
                     true
                 }
                 Key::z if ctrl && shift => {
-                    st.redo();
-                    notify_project = true;
+                    notify_project = st.redo();
                     true
                 }
                 Key::y if ctrl => {
-                    st.redo();
-                    notify_project = true;
+                    notify_project = st.redo();
                     true
                 }
                 Key::a | Key::A if ctrl => {

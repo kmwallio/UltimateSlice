@@ -446,6 +446,8 @@ All clip moves, trims, splits, deletions, track add/remove operations, transitio
 - `Ctrl+Z` — Undo
 - `Ctrl+Y` or `Ctrl+Shift+Z` — Redo
 
+When an undo or redo succeeds, UltimateSlice shows a short toast such as **"Undid: trim clip out-point"** or **"Redid: move clip"**. If the history is empty, the shortcut remains quiet.
+
 The undo history is per-session (not persisted in the FCPXML).
 
 ## Clip Appearance

@@ -2868,8 +2868,9 @@ pub fn build_toolbar(
         let timeline_state = timeline_state.clone();
         let on_project_changed = on_project_changed.clone();
         btn_undo.connect_clicked(move |_| {
-            timeline_state.borrow_mut().undo();
-            on_project_changed();
+            if timeline_state.borrow_mut().undo() {
+                on_project_changed();
+            }
         });
     }
     header.pack_start(&btn_undo);
@@ -2880,8 +2881,9 @@ pub fn build_toolbar(
         let timeline_state = timeline_state.clone();
         let on_project_changed = on_project_changed.clone();
         btn_redo.connect_clicked(move |_| {
-            timeline_state.borrow_mut().redo();
-            on_project_changed();
+            if timeline_state.borrow_mut().redo() {
+                on_project_changed();
+            }
         });
     }
     header.pack_start(&btn_redo);
