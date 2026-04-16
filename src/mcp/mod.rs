@@ -72,6 +72,19 @@ pub enum McpCommand {
         muted: bool,
         reply: SyncSender<Value>,
     },
+    SetTrackGain {
+        track_id: String,
+        gain_db: f64,
+        reply: SyncSender<Value>,
+    },
+    SetTrackPan {
+        track_id: String,
+        pan: f64,
+        reply: SyncSender<Value>,
+    },
+    GetMixerState {
+        reply: SyncSender<Value>,
+    },
     SetTrackLocked {
         track_id: String,
         locked: bool,

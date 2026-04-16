@@ -299,6 +299,14 @@ pub struct Track {
     /// Per-track color swatch for the accent bar and label dot.
     #[serde(default)]
     pub color_label: TrackColorLabel,
+    /// Track-level gain in dB (post-clip volume multiplier). Default 0.0 dB (unity).
+    /// Applied after per-clip volume in both preview (audiomixer pad) and export.
+    #[serde(default)]
+    pub gain_db: f64,
+    /// Track-level stereo pan (−1.0 = hard left, 0.0 = center, +1.0 = hard right).
+    /// Applied after per-clip pan in both preview and export.
+    #[serde(default)]
+    pub pan: f64,
 }
 
 impl Track {
@@ -317,6 +325,8 @@ impl Track {
             duck_amount_db: default_duck_amount_db(),
             surround_position: SurroundPositionOverride::default(),
             color_label: TrackColorLabel::None,
+            gain_db: 0.0,
+            pan: 0.0,
         }
     }
 
@@ -335,6 +345,8 @@ impl Track {
             duck_amount_db: default_duck_amount_db(),
             surround_position: SurroundPositionOverride::default(),
             color_label: TrackColorLabel::None,
+            gain_db: 0.0,
+            pan: 0.0,
         }
     }
 
@@ -346,6 +358,16 @@ impl Track {
     /// True if this is an audio track.
     pub fn is_audio(&self) -> bool {
         self.kind == TrackKind::Audio
+    }
+
+    /// Convert track gain from dB to linear multiplier.
+    /// 0 dB → 1.0, +6 dB → ~2.0, −6 dB → ~0.5, −∞ (≤ −100) → 0.0.
+    pub fn gain_linear(&self) -> f64 {
+        if self.gain_db <= -100.0 {
+            0.0
+        } else {
+            10.0_f64.powf(self.gain_db / 20.0)
+        }
     }
 
     /// Add a clip and keep clips sorted by timeline position
@@ -498,5 +520,46 @@ mod tests {
         track.sort_clips();
         assert_eq!(track.clips[0].id, "A");
         assert_eq!(track.clips[1].id, "B");
+    }
+
+    #[test]
+    fn test_gain_linear_zero_db() {
+        let t = Track::new_audio("A1");
+        assert!((t.gain_linear() - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_gain_linear_plus_6() {
+        let mut t = Track::new_audio("A1");
+        t.gain_db = 6.0;
+        let linear = t.gain_linear();
+        assert!((linear - 1.9953).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_gain_linear_minus_6() {
+        let mut t = Track::new_audio("A1");
+        t.gain_db = -6.0;
+        let linear = t.gain_linear();
+        assert!((linear - 0.5012).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_gain_linear_negative_infinity() {
+        let mut t = Track::new_audio("A1");
+        t.gain_db = -100.0;
+        assert_eq!(t.gain_linear(), 0.0);
+        t.gain_db = -200.0;
+        assert_eq!(t.gain_linear(), 0.0);
+    }
+
+    #[test]
+    fn test_new_track_defaults() {
+        let v = Track::new_video("V1");
+        assert_eq!(v.gain_db, 0.0);
+        assert_eq!(v.pan, 0.0);
+        let a = Track::new_audio("A1");
+        assert_eq!(a.gain_db, 0.0);
+        assert_eq!(a.pan, 0.0);
     }
 }

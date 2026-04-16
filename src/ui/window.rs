@@ -4756,6 +4756,8 @@ fn clip_to_program_clips(
     project_fps_num: u32,
     project_fps_den: u32,
     track_muted: bool,
+    track_gain_linear: f64,
+    track_pan: f64,
 ) -> Vec<ProgramClip> {
     use crate::model::clip::ClipKind;
 
@@ -4849,6 +4851,8 @@ fn clip_to_program_clips(
                     project_fps_num,
                     project_fps_den,
                     track_muted,
+                    track_gain_linear,
+                    track_pan,
                 ));
             }
             return result;
@@ -4949,6 +4953,8 @@ fn clip_to_program_clips(
                     project_fps_num,
                     project_fps_den,
                     track_muted,
+                    track_gain_linear,
+                    track_pan,
                 );
                 // Video segments have no embedded audio (audio comes from the mix below)
                 for pc in &mut seg_results {
@@ -4993,6 +4999,8 @@ fn clip_to_program_clips(
                     project_fps_num,
                     project_fps_den,
                     track_muted,
+                    track_gain_linear,
+                    track_pan,
                 );
                 result.extend(audio_results);
             }
@@ -5160,6 +5168,8 @@ fn clip_to_program_clips(
         masks: c.masks.clone(),
         hsl_qualifier: c.hsl_qualifier.clone(),
         track_muted,
+        track_gain_linear,
+        track_pan,
     }]
 }
 
@@ -5682,6 +5692,8 @@ pub fn build_window(
         RefCell<Option<Rc<crate::ui::transcript_panel::TranscriptPanelView>>>,
     > = Rc::new(RefCell::new(None));
     let markers_panel_cell: Rc<RefCell<Option<Rc<crate::ui::markers_panel::MarkersPanelView>>>> =
+        Rc::new(RefCell::new(None));
+    let mixer_panel_cell: Rc<RefCell<Option<Rc<crate::ui::mixer_panel::MixerPanelView>>>> =
         Rc::new(RefCell::new(None));
     // transform_overlay_cell holds the TransformOverlay after the program monitor is built.
     let transform_overlay_cell: Rc<
@@ -12394,6 +12406,7 @@ pub fn build_window(
         let transform_overlay_poll = transform_overlay_cell.clone();
         let keyframe_editor_poll = keyframe_editor_cell.clone();
         let transcript_panel_poll = transcript_panel_cell.clone();
+        let mixer_panel_poll = mixer_panel_cell.clone();
         let timeline_state_poll = timeline_state.clone();
         let inspector_view_poll = inspector_view.clone();
         let prog_frame_updater_poll = prog_frame_updater.clone();
@@ -12542,6 +12555,10 @@ pub fn build_window(
             vu_pc.set(peaks);
             vu.queue_draw();
             ts.borrow_mut().track_audio_peak_db = track_peaks;
+            // Update mixer panel VU meters.
+            if let Some(ref mx) = *mixer_panel_poll.borrow() {
+                mx.update_meters();
+            }
             // Update colour scopes with the latest video frame.
             if let Some(frame) = scope_frame {
                 prog_frame_updater_poll(frame.clone());
@@ -14388,6 +14405,7 @@ pub fn build_window(
         let keyframe_editor_cell = keyframe_editor_cell.clone();
         let transcript_panel_cell = transcript_panel_cell.clone();
         let markers_panel_cell = markers_panel_cell.clone();
+        let mixer_panel_cell = mixer_panel_cell.clone();
         let prog_canvas_frame = prog_canvas_frame.clone();
         let program_empty_hint = program_empty_hint.clone();
         let picture_a = picture_a.clone();
@@ -14454,6 +14472,9 @@ pub fn build_window(
                 if let Some(ref mp) = *markers_panel_cell.borrow() {
                     mp.rebuild_from_project(&proj);
                 }
+                if let Some(ref mx) = *mixer_panel_cell.borrow() {
+                    mx.sync_from_project();
+                }
 
                 // Sync transform overlay: show handles when a clip is selected,
                 // using keyframe-interpolated values at the current playhead.
@@ -14493,6 +14514,8 @@ pub fn build_window(
                         let audio_only = t.is_audio();
                         let suppress = suppress_embedded_audio_ids.clone();
                         let muted = t.muted || (has_solo && !t.soloed);
+                        let gain_linear = t.gain_linear();
+                        let pan = t.pan;
                         t.clips.iter().flat_map(move |c| {
                             clip_to_program_clips(
                                 c,
@@ -14506,6 +14529,8 @@ pub fn build_window(
                                 proj_fps_num,
                                 proj_fps_den,
                                 muted,
+                                gain_linear,
+                                pan,
                             )
                         })
                     })
@@ -15047,11 +15072,21 @@ pub fn build_window(
     markers_scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     markers_scroller.set_child(Some(&markers_widget));
 
+    // Mixer panel — traditional mixing-console channel strips with gain
+    // faders, pan sliders, VU meters, and mute/solo per track.
+    let (mixer_widget, mixer_view) = crate::ui::mixer_panel::build_mixer_panel(
+        project.clone(),
+        timeline_state.clone(),
+        on_project_changed.clone(),
+    );
+    mixer_widget.set_size_request(-1, 200);
+
     let bottom_panel_stack = gtk::Stack::new();
     bottom_panel_stack.set_transition_type(gtk::StackTransitionType::None);
     bottom_panel_stack.add_named(&keyframe_scroller, Some("keyframes"));
     bottom_panel_stack.add_named(&transcript_scroller, Some("transcript"));
     bottom_panel_stack.add_named(&markers_scroller, Some("markers"));
+    bottom_panel_stack.add_named(&mixer_widget, Some("mixer"));
     bottom_panel_stack.set_visible_child_name("keyframes");
     bottom_panel_stack.set_visible(false);
     timeline_paned.set_end_child(Some(&bottom_panel_stack));
@@ -15074,6 +15109,7 @@ pub fn build_window(
     *keyframe_editor_cell.borrow_mut() = Some(keyframe_editor_view);
     *transcript_panel_cell.borrow_mut() = Some(transcript_view);
     *markers_panel_cell.borrow_mut() = Some(markers_view);
+    *mixer_panel_cell.borrow_mut() = Some(mixer_view);
 
     // Add spacer + toggle buttons to the track-management bar. Both toggles
     // share the same `bottom_panel_stack`: clicking one switches the visible
@@ -15085,6 +15121,8 @@ pub fn build_window(
     transcript_toggle.add_css_class("small-btn");
     let markers_toggle = gtk::Button::with_label("Show Markers");
     markers_toggle.add_css_class("small-btn");
+    let mixer_toggle = gtk::Button::with_label("Show Mixer");
+    mixer_toggle.add_css_class("small-btn");
     let minimap_toggle =
         gtk::Button::with_label(if preferences_state.borrow().show_timeline_minimap {
             "Hide Mini-Map"
@@ -15101,6 +15139,7 @@ pub fn build_window(
             bar.append(&keyframes_toggle);
             bar.append(&transcript_toggle);
             bar.append(&markers_toggle);
+            bar.append(&mixer_toggle);
         }
     }
 
@@ -15169,12 +15208,14 @@ pub fn build_window(
         let kf = keyframes_toggle.clone();
         let tr = transcript_toggle.clone();
         let mk = markers_toggle.clone();
+        let mx = mixer_toggle.clone();
         Rc::new(move || {
             let visible = stack.is_visible();
             let active = stack.visible_child_name();
             let kf_active = visible && active.as_deref() == Some("keyframes");
             let tr_active = visible && active.as_deref() == Some("transcript");
             let mk_active = visible && active.as_deref() == Some("markers");
+            let mx_active = visible && active.as_deref() == Some("mixer");
             kf.set_label(if kf_active {
                 "Hide Keyframes"
             } else {
@@ -15189,6 +15230,11 @@ pub fn build_window(
                 "Hide Markers"
             } else {
                 "Show Markers"
+            });
+            mx.set_label(if mx_active {
+                "Hide Mixer"
+            } else {
+                "Show Mixer"
             });
         })
     };
@@ -15259,6 +15305,33 @@ pub fn build_window(
                 collapse_workspace_paned_end_child(&paned);
             } else {
                 stack.set_visible_child_name("markers");
+                if !stack.is_visible() {
+                    stack.set_visible(true);
+                    let total = paned.allocation().height();
+                    if total > 0 {
+                        paned.set_position((total as f64 * 0.7) as i32);
+                    }
+                }
+            }
+            refresh_labels();
+            if !workspace_layouts_applying.get() {
+                sync_workspace_layout_state();
+            }
+        });
+    }
+    {
+        let stack = bottom_panel_stack.clone();
+        let paned = timeline_paned.clone();
+        let workspace_layouts_applying = workspace_layouts_applying.clone();
+        let sync_workspace_layout_state = sync_workspace_layout_state.clone();
+        let refresh_labels = refresh_bottom_toggle_labels.clone();
+        mixer_toggle.connect_clicked(move |_| {
+            let active = stack.visible_child_name();
+            if stack.is_visible() && active.as_deref() == Some("mixer") {
+                stack.set_visible(false);
+                collapse_workspace_paned_end_child(&paned);
+            } else {
+                stack.set_visible_child_name("mixer");
                 if !stack.is_visible() {
                     stack.set_visible(true);
                     let total = paned.allocation().height();

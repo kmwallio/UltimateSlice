@@ -520,6 +520,16 @@ fn write_otio_with_mode(
             } else {
                 None
             },
+            gain_db: if track.gain_db != 0.0 {
+                Some(track.gain_db)
+            } else {
+                None
+            },
+            pan: if track.pan != 0.0 {
+                Some(track.pan)
+            } else {
+                None
+            },
         });
 
         otio_tracks.push(OtioTrack {

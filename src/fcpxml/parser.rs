@@ -1020,6 +1020,12 @@ fn parse_asset_clip(
         if let Some(v) = attrs.get("us:track-color") {
             track.color_label = crate::model::track::TrackColorLabel::from_str(v);
         }
+        if let Some(v) = attrs.get("us:track-gain-db") {
+            track.gain_db = v.parse().unwrap_or(0.0);
+        }
+        if let Some(v) = attrs.get("us:track-pan") {
+            track.pan = v.parse().unwrap_or(0.0);
+        }
 
         let mut clip = Clip::new(
             &resolved_source_path,
@@ -2813,6 +2819,8 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:track-duck-amount-db"
             | "us:track-height"
             | "us:track-color"
+            | "us:track-gain-db"
+            | "us:track-pan"
             | "us:clip-id"
             | "us:color-label"
             | "us:brightness"

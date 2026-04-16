@@ -13,6 +13,7 @@ pub mod loudness_popover;
 pub mod markers_panel;
 pub mod mcp_handler;
 pub mod media_browser;
+pub mod mixer_panel;
 pub mod multicam_viewer;
 pub mod preferences;
 pub mod preview;

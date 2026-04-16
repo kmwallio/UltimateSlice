@@ -864,6 +864,12 @@ pub struct ProgramClip {
     /// The clip stays in the pipeline to preserve topology, but
     /// volume and opacity are forced to zero during preview.
     pub track_muted: bool,
+    /// Track-level gain as a linear multiplier (from `Track::gain_linear()`).
+    /// Composed with per-clip volume in `volume_at_timeline_ns`.
+    pub track_gain_linear: f64,
+    /// Track-level stereo pan offset (−1.0 to +1.0).
+    /// Added to per-clip pan in `pan_at_timeline_ns`.
+    pub track_pan: f64,
 }
 
 impl ProgramClip {
@@ -973,46 +979,52 @@ impl ProgramClip {
         let local_ns = self.local_timeline_position_ns(timeline_pos_ns);
         let base_vol =
             ModelClip::evaluate_keyframed_value(&self.volume_keyframes, local_ns, self.volume);
-        if self.voice_isolation > 0.0 && !self.voice_isolation_merged_intervals_ns.is_empty() {
-            let rel_ns = timeline_pos_ns.saturating_sub(self.timeline_start_ns);
-            let clip_local_ns = (rel_ns as f64 * self.speed) as u64;
-            let fade_ns = self.voice_isolation_fade_ns;
-            // Merged intervals are already padded — find the nearest boundary
-            // for cosine fade. Distance 0 means we're inside a speech region.
-            let mut min_dist: u64 = u64::MAX;
-            for &(start, end) in &self.voice_isolation_merged_intervals_ns {
-                if clip_local_ns >= start && clip_local_ns <= end {
-                    min_dist = 0;
-                    break;
+        let clip_vol =
+            if self.voice_isolation > 0.0 && !self.voice_isolation_merged_intervals_ns.is_empty() {
+                let rel_ns = timeline_pos_ns.saturating_sub(self.timeline_start_ns);
+                let clip_local_ns = (rel_ns as f64 * self.speed) as u64;
+                let fade_ns = self.voice_isolation_fade_ns;
+                // Merged intervals are already padded — find the nearest boundary
+                // for cosine fade. Distance 0 means we're inside a speech region.
+                let mut min_dist: u64 = u64::MAX;
+                for &(start, end) in &self.voice_isolation_merged_intervals_ns {
+                    if clip_local_ns >= start && clip_local_ns <= end {
+                        min_dist = 0;
+                        break;
+                    }
+                    let d = if clip_local_ns < start {
+                        start - clip_local_ns
+                    } else {
+                        clip_local_ns - end
+                    };
+                    min_dist = min_dist.min(d);
                 }
-                let d = if clip_local_ns < start {
-                    start - clip_local_ns
+                if min_dist > 0 {
+                    // Duck towards floor instead of silence.
+                    let duck_range = self.voice_isolation * (1.0 - self.voice_isolation_floor);
+                    if fade_ns > 0 && min_dist <= fade_ns {
+                        let t = min_dist as f64 / fade_ns as f64;
+                        let smooth = 0.5 * (1.0 - (t * std::f64::consts::PI).cos());
+                        base_vol * (1.0 - duck_range * smooth)
+                    } else {
+                        base_vol * (1.0 - duck_range)
+                    }
                 } else {
-                    clip_local_ns - end
-                };
-                min_dist = min_dist.min(d);
-            }
-            if min_dist > 0 {
-                // Duck towards floor instead of silence.
-                let duck_range = self.voice_isolation * (1.0 - self.voice_isolation_floor);
-                if fade_ns > 0 && min_dist <= fade_ns {
-                    let t = min_dist as f64 / fade_ns as f64;
-                    let smooth = 0.5 * (1.0 - (t * std::f64::consts::PI).cos());
-                    return base_vol * (1.0 - duck_range * smooth);
+                    base_vol
                 }
-                return base_vol * (1.0 - duck_range);
-            }
-        }
-        base_vol
+            } else {
+                base_vol
+            };
+        clip_vol * self.track_gain_linear
     }
 
     pub fn pan_at_timeline_ns(&self, timeline_pos_ns: u64) -> f64 {
-        ModelClip::evaluate_keyframed_value(
+        let clip_pan = ModelClip::evaluate_keyframed_value(
             &self.pan_keyframes,
             self.local_timeline_position_ns(timeline_pos_ns),
             self.pan,
-        )
-        .clamp(-1.0, 1.0)
+        );
+        (clip_pan + self.track_pan).clamp(-1.0, 1.0)
     }
 
     /// Evaluate keyframed EQ gain (dB) for band `idx` at a given timeline position.
@@ -15997,6 +16009,8 @@ mod tests {
             title_animation_duration_ns: 1_000_000_000,
             drawing_items: Vec::new(),
             track_muted: false,
+            track_gain_linear: 1.0,
+            track_pan: 0.0,
         }
     }
 

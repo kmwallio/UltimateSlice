@@ -836,3 +836,56 @@ expander > title {
     padding: 1px 6px;
     border-radius: 4px;
 }
+
+/* Audio mixer panel */
+.mixer-panel {
+    background: #1a1a1d;
+}
+.mixer-channel-strip {
+    background: #222226;
+    border: 1px solid #2a2a2e;
+    border-radius: 4px;
+    padding: 4px;
+}
+.mixer-master {
+    border-color: #1565c0;
+}
+.mixer-label {
+    font-size: 0.85em;
+    font-weight: bold;
+}
+.mixer-role-badge {
+    font-size: 0.75em;
+    font-weight: bold;
+    color: #ccc;
+    background: #333;
+    border-radius: 3px;
+    padding: 0 4px;
+    margin: 2px 0;
+}
+.mixer-db-readout {
+    font-size: 0.8em;
+    font-family: monospace;
+    color: #bbb;
+}
+.mixer-fader trough {
+    min-width: 6px;
+}
+.mixer-pan trough {
+    min-height: 6px;
+}
+.mixer-mute,
+.mixer-solo {
+    font-size: 0.75em;
+    padding: 0 4px;
+    min-height: 20px;
+    min-width: 24px;
+}
+.mixer-mute:checked {
+    background: #c62828;
+    color: white;
+}
+.mixer-solo:checked {
+    background: #f9a825;
+    color: #1a1a1d;
+}

@@ -318,6 +318,39 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_track_gain",
+            "description": "Set the gain (volume) of a track in decibels. 0 dB is unity gain, negative values attenuate, positive values boost (max +12 dB). Values <= -100 dB are treated as -infinity (silence).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string", "description": "Target track id from list_tracks." },
+                    "gain_db": { "type": "number", "description": "Gain in decibels (-100 to +12)." }
+                },
+                "required": ["track_id", "gain_db"]
+            }
+        },
+        {
+            "name": "set_track_pan",
+            "description": "Set the stereo pan of a track. -1.0 is hard left, 0.0 is center, +1.0 is hard right.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string", "description": "Target track id from list_tracks." },
+                    "pan": { "type": "number", "description": "Pan position from -1.0 (left) to 1.0 (right)." }
+                },
+                "required": ["track_id", "pan"]
+            }
+        },
+        {
+            "name": "get_mixer_state",
+            "description": "Get the current mixer state for all tracks: gain, pan, muted, soloed, and audio role.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        },
+        {
             "name": "set_track_locked",
             "description": "Lock or unlock a track. Locked tracks cannot be edited.",
             "inputSchema": {
@@ -2593,6 +2626,17 @@ fn dispatch_tool_payload(
             muted: arg_bool!(args, "muted"),
             reply: tx,
         },
+        "set_track_gain" => McpCommand::SetTrackGain {
+            track_id: arg_str!(args, "track_id"),
+            gain_db: arg_f64!(args, "gain_db", 0.0),
+            reply: tx,
+        },
+        "set_track_pan" => McpCommand::SetTrackPan {
+            track_id: arg_str!(args, "track_id"),
+            pan: arg_f64!(args, "pan", 0.0),
+            reply: tx,
+        },
+        "get_mixer_state" => McpCommand::GetMixerState { reply: tx },
         "set_track_locked" => McpCommand::SetTrackLocked {
             track_id: arg_str!(args, "track_id"),
             locked: arg_bool!(args, "locked"),

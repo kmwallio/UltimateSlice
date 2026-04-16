@@ -14,6 +14,7 @@ Welcome to UltimateSlice, a Final Cut Pro–inspired non-linear video editor bui
 | [timeline.md](timeline.md) | Arranging clips, trimming, splitting, markers, zoom/pan |
 | [VIDEOAUDIOALIGNMENT.md](VIDEOAUDIOALIGNMENT.md) | Multi-cam sync: timecode alignment and audio cross-correlation |
 | [auditions.md](auditions.md) | Nondestructive alternate-take swapping for A/B comparison |
+| [mixer.md](mixer.md) | Audio track mixer: gain faders, pan, VU meters, mute/solo |
 | [inspector.md](inspector.md) | Color correction, effects, audio, transform, titles, speed |
 | [transcript.md](transcript.md) | Edit the timeline by deleting words from STT transcripts |
 | [effects.md](effects.md) | Complete effects reference: color grading, frei0r plugins, blend modes, chroma key, LUTs |

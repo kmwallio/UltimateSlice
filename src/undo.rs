@@ -1285,6 +1285,36 @@ pub fn set_track_label_cmd(
     }
 }
 
+/// Set a track's gain in dB. Construct via `set_track_gain_cmd()`.
+pub fn set_track_gain_cmd(
+    track_id: String,
+    old_gain_db: f64,
+    new_gain_db: f64,
+) -> TrackMutateCommand<f64> {
+    TrackMutateCommand {
+        track_id,
+        old_state: old_gain_db,
+        new_state: new_gain_db,
+        apply: |track, v| {
+            track.gain_db = v;
+        },
+        label: "Set track gain",
+    }
+}
+
+/// Set a track's stereo pan (−1.0 to +1.0). Construct via `set_track_pan_cmd()`.
+pub fn set_track_pan_cmd(track_id: String, old_pan: f64, new_pan: f64) -> TrackMutateCommand<f64> {
+    TrackMutateCommand {
+        track_id,
+        old_state: old_pan,
+        new_state: new_pan,
+        apply: |track, v| {
+            track.pan = v;
+        },
+        label: "Set track pan",
+    }
+}
+
 /// Match one clip's color to another — stores all color parameters before/after.
 pub struct MatchColorCommand {
     pub clip_id: String,
@@ -3514,5 +3544,39 @@ mod tests {
         cmd.undo(&mut project);
         assert_eq!(project.markers[0].label, "Before");
         assert_eq!(project.markers[0].notes, "old notes");
+    }
+
+    #[test]
+    fn test_set_track_gain_cmd() {
+        let mut project = Project::new("Gain Test");
+        let mut audio_track = Track::new_audio("A1");
+        let track_id = audio_track.id.clone();
+        project.tracks.push(audio_track);
+        assert_eq!(project.track_ref(&track_id).unwrap().gain_db, 0.0);
+
+        let cmd = set_track_gain_cmd(track_id.clone(), 0.0, -6.0);
+        cmd.execute(&mut project);
+        assert_eq!(project.track_ref(&track_id).unwrap().gain_db, -6.0);
+        cmd.undo(&mut project);
+        assert_eq!(project.track_ref(&track_id).unwrap().gain_db, 0.0);
+        cmd.execute(&mut project);
+        assert_eq!(project.track_ref(&track_id).unwrap().gain_db, -6.0);
+    }
+
+    #[test]
+    fn test_set_track_pan_cmd() {
+        let mut project = Project::new("Pan Test");
+        let mut audio_track = Track::new_audio("A1");
+        let track_id = audio_track.id.clone();
+        project.tracks.push(audio_track);
+        assert_eq!(project.track_ref(&track_id).unwrap().pan, 0.0);
+
+        let cmd = set_track_pan_cmd(track_id.clone(), 0.0, -0.5);
+        cmd.execute(&mut project);
+        assert_eq!(project.track_ref(&track_id).unwrap().pan, -0.5);
+        cmd.undo(&mut project);
+        assert_eq!(project.track_ref(&track_id).unwrap().pan, 0.0);
+        cmd.execute(&mut project);
+        assert_eq!(project.track_ref(&track_id).unwrap().pan, -0.5);
     }
 }

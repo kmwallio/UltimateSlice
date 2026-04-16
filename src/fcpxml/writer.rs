@@ -699,6 +699,16 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                             track.color_label.label().to_lowercase().as_str(),
                         ));
                     }
+                    if track.gain_db != 0.0 {
+                        asset_clip.push_attribute((
+                            "us:track-gain-db",
+                            format!("{:.2}", track.gain_db).as_str(),
+                        ));
+                    }
+                    if track.pan != 0.0 {
+                        asset_clip
+                            .push_attribute(("us:track-pan", format!("{:.2}", track.pan).as_str()));
+                    }
                     asset_clip.push_attribute((
                         "us:color-label",
                         match clip.color_label {

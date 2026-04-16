@@ -521,6 +521,88 @@ pub(crate) fn handle_mcp_command(
             }
         }
 
+        McpCommand::SetTrackGain {
+            track_id,
+            gain_db,
+            reply,
+        } => {
+            let result = {
+                let mut proj = project.borrow_mut();
+                if let Some(track) = proj.track_mut(&track_id) {
+                    track.gain_db = gain_db;
+                    proj.dirty = true;
+                    Ok(())
+                } else {
+                    Err(format!("Track id not found: {track_id}"))
+                }
+            };
+            match result {
+                Ok(()) => {
+                    reply
+                        .send(json!({"success": true, "track_id": track_id, "gain_db": gain_db}))
+                        .ok();
+                    on_project_changed();
+                }
+                Err(message) => {
+                    reply.send(json!({"success": false, "error": message})).ok();
+                }
+            }
+        }
+
+        McpCommand::SetTrackPan {
+            track_id,
+            pan,
+            reply,
+        } => {
+            let result = {
+                let mut proj = project.borrow_mut();
+                if let Some(track) = proj.track_mut(&track_id) {
+                    track.pan = pan.clamp(-1.0, 1.0);
+                    proj.dirty = true;
+                    Ok(())
+                } else {
+                    Err(format!("Track id not found: {track_id}"))
+                }
+            };
+            match result {
+                Ok(()) => {
+                    reply
+                        .send(json!({"success": true, "track_id": track_id, "pan": pan}))
+                        .ok();
+                    on_project_changed();
+                }
+                Err(message) => {
+                    reply.send(json!({"success": false, "error": message})).ok();
+                }
+            }
+        }
+
+        McpCommand::GetMixerState { reply } => {
+            let proj = project.borrow();
+            let tracks: Vec<serde_json::Value> = proj
+                .tracks
+                .iter()
+                .map(|t| {
+                    json!({
+                        "track_id": t.id,
+                        "label": t.label,
+                        "kind": if t.is_video() { "video" } else { "audio" },
+                        "gain_db": t.gain_db,
+                        "pan": t.pan,
+                        "muted": t.muted,
+                        "soloed": t.soloed,
+                        "audio_role": t.audio_role.label(),
+                    })
+                })
+                .collect();
+            reply
+                .send(json!({
+                    "master_gain_db": proj.master_gain_db,
+                    "tracks": tracks,
+                }))
+                .ok();
+        }
+
         McpCommand::SetTrackLocked {
             track_id,
             locked,

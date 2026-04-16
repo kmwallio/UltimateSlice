@@ -384,6 +384,12 @@ pub(crate) struct UltimateSliceTrackOtioMetadata {
     /// Timeline track height preset (small / medium / large).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) height_preset: Option<String>,
+    /// Track-level gain in dB (post-clip volume multiplier). `None` means unity (0.0 dB).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) gain_db: Option<f64>,
+    /// Track-level stereo pan (−1.0 to +1.0). `None` means center (0.0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) pan: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

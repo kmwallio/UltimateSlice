@@ -92,6 +92,12 @@ pub fn parse_otio_with_path(json: &str, otio_path: Option<&Path>) -> Result<Proj
                     _ => crate::model::track::TrackHeightPreset::Medium,
                 };
             }
+            if let Some(db) = us.gain_db {
+                track.gain_db = db;
+            }
+            if let Some(p) = us.pan {
+                track.pan = p;
+            }
         }
 
         // Walk children: Clips advance cursor, Gaps advance cursor without

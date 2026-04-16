@@ -1046,6 +1046,11 @@ pub fn export_project(
                 filter.push_str(&format!(
                 ";[{i}:a]{areverse}{atempo}{enhance_part}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{match_eq_part}{eq_part},{fade_filters}anull[{pre_pan}]"
             ));
+                // Primary video clips — find owning track for role + surround position + track gain/pan.
+                let owning_track = project
+                    .tracks
+                    .iter()
+                    .find(|t| t.clips.iter().any(|c| c.id == clip.id));
                 append_pan_filter_chain(
                     &mut filter,
                     clip,
@@ -1053,13 +1058,18 @@ pub fn export_project(
                     &post_pan,
                     &label,
                     options.audio_channel_layout,
+                    owning_track.map(|t| t.pan).unwrap_or(0.0),
                 );
-                filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
-                // Primary video clips — find owning track for role + surround position.
-                let owning_track = project
-                    .tracks
-                    .iter()
-                    .find(|t| t.clips.iter().any(|c| c.id == clip.id));
+                let track_gain_linear = owning_track.map(|t| t.gain_linear()).unwrap_or(1.0);
+                if (track_gain_linear - 1.0).abs() > f64::EPSILON {
+                    let tg_label = format!("{label}_tg");
+                    filter.push_str(&format!(
+                        ";[{post_pan}]volume={track_gain_linear:.6}[{tg_label}]"
+                    ));
+                    filter.push_str(&format!(";[{tg_label}]adelay={delay_ms}:all=1[{label}]"));
+                } else {
+                    filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
+                }
                 let role = owning_track.map(|t| t.audio_role).unwrap_or_default();
                 let surround_override = owning_track
                     .map(|t| t.surround_position)
@@ -1129,6 +1139,11 @@ pub fn export_project(
                 filter.push_str(&format!(
                 ";[{in_idx}:a]{areverse}{atempo}{enhance_part}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{match_eq_part}{eq_part},{fade_filters}anull[{pre_pan}]"
             ));
+                // Find the track for this secondary clip to get its role + surround position + track gain/pan.
+                let owning_track = project
+                    .tracks
+                    .iter()
+                    .find(|t| t.clips.iter().any(|c| c.id == clip.id));
                 append_pan_filter_chain(
                     &mut filter,
                     clip,
@@ -1136,13 +1151,18 @@ pub fn export_project(
                     &post_pan,
                     &label,
                     options.audio_channel_layout,
+                    owning_track.map(|t| t.pan).unwrap_or(0.0),
                 );
-                filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
-                // Find the track for this secondary clip to get its role + surround position.
-                let owning_track = project
-                    .tracks
-                    .iter()
-                    .find(|t| t.clips.iter().any(|c| c.id == clip.id));
+                let track_gain_linear = owning_track.map(|t| t.gain_linear()).unwrap_or(1.0);
+                if (track_gain_linear - 1.0).abs() > f64::EPSILON {
+                    let tg_label = format!("{label}_tg");
+                    filter.push_str(&format!(
+                        ";[{post_pan}]volume={track_gain_linear:.6}[{tg_label}]"
+                    ));
+                    filter.push_str(&format!(";[{tg_label}]adelay={delay_ms}:all=1[{label}]"));
+                } else {
+                    filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
+                }
                 let role = owning_track.map(|t| t.audio_role).unwrap_or_default();
                 let surround_override = owning_track
                     .map(|t| t.surround_position)
@@ -1199,10 +1219,11 @@ pub fn export_project(
                 format!(",{eq_filter}")
             };
             // Ducking filter: reduce volume when non-ducked audio overlaps.
-            let duck_filter = project
+            let owning_track = project
                 .tracks
                 .iter()
-                .find(|t| t.clips.iter().any(|c| c.id == clip.id))
+                .find(|t| t.clips.iter().any(|c| c.id == clip.id));
+            let duck_filter = owning_track
                 .map(|track| build_duck_filter(clip, track, &project.tracks))
                 .unwrap_or_default();
             let duck_part = if duck_filter.is_empty() {
@@ -1225,12 +1246,19 @@ pub fn export_project(
                 &post_pan,
                 &label,
                 options.audio_channel_layout,
+                owning_track.map(|t| t.pan).unwrap_or(0.0),
             );
-            filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
-            let owning_track = project
-                .tracks
-                .iter()
-                .find(|t| t.clips.iter().any(|c| c.id == clip.id));
+            // Apply track-level gain between pan and timeline delay.
+            let track_gain_linear = owning_track.map(|t| t.gain_linear()).unwrap_or(1.0);
+            if (track_gain_linear - 1.0).abs() > f64::EPSILON {
+                let tg_label = format!("{label}_tg");
+                filter.push_str(&format!(
+                    ";[{post_pan}]volume={track_gain_linear:.6}[{tg_label}]"
+                ));
+                filter.push_str(&format!(";[{tg_label}]adelay={delay_ms}:all=1[{label}]"));
+            } else {
+                filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
+            }
             let role = owning_track.map(|t| t.audio_role).unwrap_or_default();
             let surround_override = owning_track
                 .map(|t| t.surround_position)
@@ -2993,13 +3021,23 @@ fn append_pan_filter_chain(
     output_label: &str,
     label_prefix: &str,
     target_layout: AudioChannelLayout,
+    track_pan: f64,
 ) {
-    if clip.pan.abs() <= f32::EPSILON && clip.pan_keyframes.is_empty() {
+    if clip.pan.abs() <= f32::EPSILON
+        && clip.pan_keyframes.is_empty()
+        && track_pan.abs() <= f64::EPSILON
+    {
         filter.push_str(&format!(";[{input_label}]anull[{output_label}]"));
         return;
     }
 
-    let pan_expr = build_pan_expression(clip);
+    let clip_pan_expr = build_pan_expression(clip);
+    // Compose clip pan with track pan: clamp(clip_pan + track_pan, -1, 1)
+    let pan_expr = if track_pan.abs() > f64::EPSILON {
+        format!("clip({clip_pan_expr}+({track_pan:.10}),-1,1)")
+    } else {
+        clip_pan_expr
+    };
     let left_gain_expr = format!("if(gt({pan_expr},0),1-({pan_expr}),1)");
     let right_gain_expr = format!("if(lt({pan_expr},0),1+({pan_expr}),1)");
 
@@ -6561,6 +6599,7 @@ mod tests {
             "out",
             "clip1",
             AudioChannelLayout::Stereo,
+            0.0,
         );
         assert_eq!(graph, ";[in]anull[out]");
     }
@@ -6590,6 +6629,7 @@ mod tests {
             "out",
             "clip1",
             AudioChannelLayout::Stereo,
+            0.0,
         );
         assert!(graph.contains("channelsplit=channel_layout=stereo"));
         assert!(graph.contains("volume='if(gt("));
@@ -6612,6 +6652,7 @@ mod tests {
             "out",
             "clip1",
             AudioChannelLayout::Surround51,
+            0.0,
         );
         assert!(
             !graph.contains("channelsplit=channel_layout=stereo"),
@@ -6638,6 +6679,7 @@ mod tests {
             "out",
             "clip1",
             AudioChannelLayout::Surround51,
+            0.0,
         );
         assert_eq!(graph, ";[in]anull[out]");
     }
