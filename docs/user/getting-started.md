@@ -79,6 +79,8 @@ When launched without a project file, UltimateSlice shows a **Welcome screen** w
 
 Clicking any action transitions smoothly to the editor. If you launch with a project file (e.g., `ultimate-slice project.uspxml`), the welcome screen is skipped and the project opens directly.
 
+The first time you enter the editor, UltimateSlice now offers a short in-app tour that points out the five core regions: **Media Browser**, **Source Monitor**, **Timeline**, **Program Monitor**, and **Inspector**. You can skip it, finish it, or reopen it later from **Help -> Replay Tour** in the toolbar.
+
 UltimateSlice uses a dark, GTK4/libadwaita-inspired control style so popovers, sliders, dropdowns, and tab groups remain visually consistent across panels.
 
 Short-lived feedback now appears as an in-app toast near the top of the window instead of temporarily replacing the window title. Continuous work now has two layers: the bottom status bar gives a compact at-a-glance summary, and the footer **Jobs** dropdown beside **Workspace** expands active background tasks such as proxy generation, render work, exports, subtitle generation, and motion tracking into a detailed live list.
@@ -91,7 +93,7 @@ Empty panels now try to tell you what to do next instead of just sitting blank: 
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│  Toolbar (New / Open / Recent / Save / Settings / Export / Undo / Redo)  │
+│  Toolbar (New / Open / Recent / Help / Save / Settings / Export / Undo / Redo)  │
 ├────────────────┬─────────────────────────────┬────────────────────┤
 │  Media Library │   Source Monitor            │  Inspector         │
 │                │   (source preview)          │  (clip properties) │

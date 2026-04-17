@@ -26,9 +26,20 @@ use tempfile::NamedTempFile;
 //   2: gray 160×90 → YUV444 320×180 (color matching, no template drift)
 //   3: + motion prediction, confidence recovery, anchor-on-loss
 //   4: SAD → normalized cross-correlation (different sample confidences)
-const CACHE_VERSION: u32 = 4;
+//   5: + multi-scale coarse-to-fine matching pyramid
+//   6: + confidence-gated adaptive template refresh
+//   7: + blur-tolerant template variants
+const CACHE_VERSION: u32 = 7;
 const ANALYSIS_WIDTH: usize = 320;
 const ANALYSIS_HEIGHT: usize = 180;
+/// Small fast-moving subjects benefit from a denser analysis buffer so
+/// the fixed first-frame template keeps more detail before the
+/// multiscale matcher starts searching.
+const HIGH_DETAIL_ANALYSIS_WIDTH: usize = 480;
+const HIGH_DETAIL_ANALYSIS_HEIGHT: usize = 270;
+/// If the tracked box would be smaller than this at the default
+/// analysis size, promote the whole job to the high-detail buffer.
+const HIGH_DETAIL_TEMPLATE_MIN_DIMENSION_PX: i32 = 40;
 /// Sentinel step meaning "use the source clip's native frame rate".
 /// Non-zero values in the job override this.
 const DEFAULT_FRAME_STEP_NS: u64 = 0;
@@ -36,14 +47,11 @@ const DEFAULT_FRAME_STEP_NS: u64 = 0;
 /// probed. Picked conservatively (i.e. low) so the search radius still
 /// catches motion if we miscount frames.
 const FALLBACK_SOURCE_FPS: f64 = 24.0;
-/// Search radius at ANALYSIS_WIDTH=320 — 24 px ≈ 7.5% of frame width
-/// per sample step. Motion prediction effectively extends this by the
-/// current velocity so the *reachable* per-frame motion is
-/// `radius + |velocity|`; the radius itself only has to cover
-/// acceleration (change in velocity) between consecutive frames. 24
-/// is a balance: big enough that the prediction doesn't have to be
-/// perfect to catch the subject, small enough that the candidate loop
-/// stays fast (49² ≈ 2400 candidates per frame).
+/// Search radius applied at the coarsest pyramid level. At
+/// ANALYSIS_WIDTH=320, a radius of 24 px still keeps the common path
+/// cheap, but applying that same numeric radius at reduced resolutions
+/// expands the effective full-resolution reach without widening every
+/// fine-level candidate loop.
 const DEFAULT_SEARCH_RADIUS_PX: u32 = 24;
 const MIN_TEMPLATE_HALF_SIZE_PX: i32 = 4;
 /// Cap to keep memory + compute bounded. 1200 frames × 320×180 YUV444
@@ -52,6 +60,20 @@ const MIN_TEMPLATE_HALF_SIZE_PX: i32 = 4;
 /// `MAX_TRACKING_FRAMES / source_fps` seconds get proportionally
 /// decimated.
 const MAX_TRACKING_FRAMES: usize = 1200;
+/// Preserve the old 320×180 × 1200-frame worst-case decode budget even
+/// when individual jobs promote themselves to a denser analysis buffer.
+const MAX_TRACKING_ANALYSIS_PIXELS: usize = ANALYSIS_WIDTH * ANALYSIS_HEIGHT * MAX_TRACKING_FRAMES;
+/// Even high-detail jobs should still get enough temporal coverage to
+/// remain useful on longer analysis windows.
+const MIN_TRACKING_FRAMES: usize = 240;
+/// Full → half → quarter is enough to widen the effective search
+/// window substantially without bloating memory or refinement passes.
+const MAX_TRACKING_PYRAMID_LEVELS: usize = 3;
+/// Don't build levels smaller than the minimum viable template size.
+const MIN_PYRAMID_LEVEL_DIMENSION: usize = (MIN_TEMPLATE_HALF_SIZE_PX as usize) * 2;
+/// Once the coarse level finds the approximate subject location, finer
+/// levels only need a small local refinement radius.
+const MULTISCALE_REFINE_RADIUS_PX: i32 = 6;
 
 /// Confidence at-or-below this triggers a recovery pass with a wider
 /// search radius centered on the last known-good position.  The NCC
@@ -62,6 +84,21 @@ const MAX_TRACKING_FRAMES: usize = 1200;
 /// stays on the recovered result when the normal search drifts onto
 /// background texture.
 const RECOVERY_CONFIDENCE_THRESHOLD: f64 = 0.30;
+/// High-confidence matches are allowed to refresh the adaptive
+/// template path so the normal tracker can follow appearance changes
+/// without giving up the original first-frame recovery anchor.
+const ADAPTIVE_TEMPLATE_UPDATE_THRESHOLD: f64 = 0.55;
+/// The adaptive template should only win when it is meaningfully
+/// better than the anchored first-frame template; otherwise we stay on
+/// the original path to avoid drift on ambiguous backgrounds.
+const ADAPTIVE_TEMPLATE_SELECTION_MARGIN: f64 = 0.03;
+/// Blend only part of each fresh patch into the adaptive template so a
+/// single blurred frame cannot immediately rewrite the tracker model.
+const ADAPTIVE_TEMPLATE_BLEND_WEIGHT: f64 = 0.35;
+/// Blurred templates are more generic than sharp ones, so they pay a
+/// small score penalty and only win when they explain a fast blurred
+/// subject materially better than the sharp patch.
+const BLURRED_TEMPLATE_SCORE_PENALTY: f64 = 0.04;
 /// Hard cap on how far the matched rect is allowed to move from the
 /// *previous* matched rect in a single frame. At 320 analysis width,
 /// 32 px = 10% of frame per frame, which is already past what real
@@ -70,13 +107,23 @@ const RECOVERY_CONFIDENCE_THRESHOLD: f64 = 0.30;
 /// clamp them to preserve trajectory continuity even if the score
 /// wanted otherwise.
 const MAX_SINGLE_FRAME_JUMP_PX: i32 = 32;
+/// Large jumps found by the pyramid can still be real when the match
+/// confidence is strong. Above this threshold, allow a wider jump cap
+/// derived from the active coarse search radius instead of forcing the
+/// old fixed 32 px budget.
+const STRONG_JUMP_CONFIDENCE_THRESHOLD: f64 = 0.55;
+/// Fast motion already shifts the predicted center by the current
+/// velocity estimate; this adds a smaller extra margin so acceleration
+/// and EMA lag still fit inside the common search path.
+const FAST_MOTION_RADIUS_DIVISOR: i32 = 2;
+/// When confidence has dipped for a few consecutive frames, widen the
+/// normal search before resorting to the full recovery pass.
+const LOW_CONFIDENCE_RADIUS_GROWTH_PX: i32 = 2;
+const MAX_LOW_CONFIDENCE_RADIUS_STEPS: u32 = 6;
 /// Recovery search radius, applied when a frame's normal match drops
-/// below the confidence threshold.  At ANALYSIS_WIDTH=320 this is an
-/// 80 px half-width = 25% of frame width, enough to catch a hand whip
-/// that briefly leaves the normal search window during a full 1/24 s
-/// frame.  Cost: 161² ≈ 26k candidates per recovery call, about 11×
-/// the normal search, so the recovery threshold is tuned to keep this
-/// out of the common path.
+/// below the confidence threshold. Recovery now runs through the same
+/// coarse-to-fine pyramid, so this wide search happens on the
+/// coarsest level first and is refined locally at finer levels.
 const RECOVERY_SEARCH_RADIUS_PX: i32 = 80;
 /// How many consecutive low-confidence frames we'll tolerate while
 /// still chasing motion before anchoring the search at the last
@@ -157,6 +204,15 @@ impl TrackingJob {
         self.analysis_end_ns.saturating_sub(self.analysis_start_ns)
     }
 
+    fn analysis_dimensions(&self) -> (usize, usize) {
+        let default_rect = region_to_rect(self.analysis_region, ANALYSIS_WIDTH, ANALYSIS_HEIGHT);
+        if default_rect.width.min(default_rect.height) <= HIGH_DETAIL_TEMPLATE_MIN_DIMENSION_PX {
+            (HIGH_DETAIL_ANALYSIS_WIDTH, HIGH_DETAIL_ANALYSIS_HEIGHT)
+        } else {
+            (ANALYSIS_WIDTH, ANALYSIS_HEIGHT)
+        }
+    }
+
     pub fn effective_frame_step_ns(&self) -> u64 {
         // frame_step_ns == 0 means "unresolved" — the caller should
         // have populated this via `source_frame_step_ns` before
@@ -171,9 +227,13 @@ impl TrackingJob {
         if duration == 0 {
             return requested;
         }
-        // Cap total samples to MAX_TRACKING_FRAMES. If the requested
-        // step would overshoot, widen it to hit the cap exactly.
-        let min_step = ((duration as f64) / MAX_TRACKING_FRAMES as f64).ceil() as u64;
+        // Cap total samples to the per-job frame budget derived from
+        // the chosen analysis resolution. Higher-detail jobs keep more
+        // spatial information by accepting a proportionally smaller
+        // temporal budget under the same overall pixel cap.
+        let (analysis_width, analysis_height) = self.analysis_dimensions();
+        let max_frames = max_tracking_frames_for_dimensions(analysis_width, analysis_height);
+        let min_step = ((duration as f64) / max_frames as f64).ceil() as u64;
         requested.max(min_step.max(1))
     }
 
@@ -195,6 +255,7 @@ impl TrackingJob {
     }
 
     pub fn cache_key(&self) -> String {
+        let (analysis_width, analysis_height) = self.analysis_dimensions();
         crate::media::cache_key::hashed_key("tracking", |key| {
             key.add(CACHE_VERSION)
                 .add_source_fingerprint(&self.source_path)
@@ -203,6 +264,8 @@ impl TrackingJob {
                 .add(self.analysis_end_ns)
                 .add(self.effective_frame_step_ns())
                 .add(self.effective_search_radius_px())
+                .add(analysis_width)
+                .add(analysis_height)
                 .add(quantize_norm(self.analysis_region.center_x))
                 .add(quantize_norm(self.analysis_region.center_y))
                 .add(quantize_norm(self.analysis_region.width))
@@ -210,6 +273,11 @@ impl TrackingJob {
                 .add(quantize_norm(self.analysis_region.rotation_deg));
         })
     }
+}
+
+fn max_tracking_frames_for_dimensions(width: usize, height: usize) -> usize {
+    let pixels_per_frame = width.saturating_mul(height).max(1);
+    (MAX_TRACKING_ANALYSIS_PIXELS / pixels_per_frame).max(MIN_TRACKING_FRAMES)
 }
 
 #[derive(Debug, Clone)]
@@ -1175,10 +1243,56 @@ struct TemplatePatch {
 }
 
 #[derive(Debug, Clone)]
-struct FrameSequence {
+struct FrameSequenceLevel {
     width: usize,
     height: usize,
     frames: Vec<YuvFrame>,
+}
+
+#[derive(Debug, Clone)]
+struct FrameSequence {
+    levels: Vec<FrameSequenceLevel>,
+}
+
+#[derive(Debug, Clone)]
+struct MultiscaleTemplateLevel {
+    rect: PixelRect,
+    patch: TemplatePatch,
+    blurred_patch: TemplatePatch,
+}
+
+impl FrameSequence {
+    fn from_base_level(width: usize, height: usize, frames: Vec<YuvFrame>) -> Self {
+        let mut levels = vec![FrameSequenceLevel {
+            width,
+            height,
+            frames,
+        }];
+        while levels.len() < MAX_TRACKING_PYRAMID_LEVELS {
+            let previous = levels.last().expect("base pyramid level exists");
+            let next_width = previous.width.div_ceil(2);
+            let next_height = previous.height.div_ceil(2);
+            if next_width < MIN_PYRAMID_LEVEL_DIMENSION || next_height < MIN_PYRAMID_LEVEL_DIMENSION
+            {
+                break;
+            }
+            let next_frames = previous
+                .frames
+                .iter()
+                .map(|frame| downscale_frame_half(frame, previous.width, previous.height))
+                .collect::<Vec<_>>();
+            levels.push(FrameSequenceLevel {
+                width: next_width,
+                height: next_height,
+                frames: next_frames,
+            });
+        }
+        Self { levels }
+    }
+
+    fn finest_level(&self) -> Option<&FrameSequenceLevel> {
+        self.levels.first()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1277,23 +1391,31 @@ where
     if cancel_flag.load(Ordering::Relaxed) {
         return Err((TrackingFailure::Cancelled, "Tracking canceled".to_string()));
     }
-    if sequence.frames.is_empty() {
+    let finest_level = sequence.finest_level().ok_or_else(|| {
+        (
+            TrackingFailure::Failed,
+            "No tracking pyramid levels were built".to_string(),
+        )
+    })?;
+    if finest_level.frames.is_empty() {
         return Err((
             TrackingFailure::Failed,
             "No video frames extracted for tracking".to_string(),
         ));
     }
 
-    let initial_rect = region_to_rect(job.analysis_region, sequence.width, sequence.height);
+    let initial_rect = region_to_rect(job.analysis_region, finest_level.width, finest_level.height);
     let mut current_rect = initial_rect;
     // Template is captured ONCE from the first frame and reused for
     // every subsequent search — this is the key drift fix.  The old
     // tracker rewrote `template` at the end of each iteration from
     // whatever it matched, so a single-pixel search error cascaded
     // into ever-worse templates.
-    let template = extract_template(&sequence.frames[0], sequence.width, current_rect)?;
+    let original_templates = extract_multiscale_templates(sequence, job.analysis_region)?;
+    let mut adaptive_templates = original_templates.clone();
+    let mut adaptive_templates_ready = false;
     let effective_step_ns = job.effective_frame_step_ns();
-    let total_frames = sequence.frames.len();
+    let total_frames = finest_level.frames.len();
     let mut samples = Vec::with_capacity(total_frames);
     samples.push(TrackingSample::identity(job.analysis_start_ns));
     report_progress(1, total_frames);
@@ -1311,9 +1433,7 @@ where
     // brief bad match can't pull the tracker off-subject permanently.
     let mut last_good_rect = current_rect;
     let mut consecutive_low_confidence = 0u32;
-    let normal_radius = job.effective_search_radius_px() as i32;
-
-    for (frame_index, frame) in sequence.frames.iter().enumerate().skip(1) {
+    for frame_index in 1..total_frames {
         if cancel_flag.load(Ordering::Relaxed) {
             return Err((TrackingFailure::Cancelled, "Tracking canceled".to_string()));
         }
@@ -1324,19 +1444,39 @@ where
             current_rect,
             velocity_x,
             velocity_y,
-            sequence.width as i32,
-            sequence.height as i32,
+            finest_level.width as i32,
+            finest_level.height as i32,
         );
 
-        // 2. Normal search around the prediction.
-        let (mut matched_rect, mut confidence) = find_best_match(
-            frame,
-            sequence.width,
-            sequence.height,
-            &template,
+        // 2. Normal search around the prediction. The coarse-to-fine
+        //    matcher finds large sudden motion cheaply at low
+        //    resolution and then refines back at full resolution.
+        let normal_radius =
+            adaptive_search_radius_px(job, velocity_x, velocity_y, consecutive_low_confidence);
+        let original_normal_match = find_best_match_multiscale(
+            sequence,
+            &original_templates,
+            frame_index,
             predicted_rect,
             normal_radius,
         )?;
+        let ((mut matched_rect, mut confidence), _) = if adaptive_templates_ready {
+            let adaptive_normal_match = find_best_match_multiscale(
+                sequence,
+                &adaptive_templates,
+                frame_index,
+                predicted_rect,
+                normal_radius,
+            )?;
+            if should_prefer_adaptive_template(original_normal_match.1, adaptive_normal_match.1) {
+                (adaptive_normal_match, true)
+            } else {
+                (original_normal_match, false)
+            }
+        } else {
+            (original_normal_match, false)
+        };
+        let mut matched_search_radius = normal_radius;
 
         // 3. If the match is suspicious, run a wider recovery search
         //    centered on the LAST GOOD position (not the current, not
@@ -1346,35 +1486,50 @@ where
         if confidence <= RECOVERY_CONFIDENCE_THRESHOLD
             && consecutive_low_confidence < MAX_CONSECUTIVE_LOW_CONFIDENCE_FRAMES
         {
-            let (recovery_rect, recovery_confidence) = find_best_match(
-                frame,
-                sequence.width,
-                sequence.height,
-                &template,
+            let mut best_recovery_match = find_best_match_multiscale(
+                sequence,
+                &original_templates,
+                frame_index,
                 last_good_rect,
                 RECOVERY_SEARCH_RADIUS_PX,
             )?;
-            if recovery_confidence > confidence {
-                matched_rect = recovery_rect;
-                confidence = recovery_confidence;
+            if adaptive_templates_ready {
+                let adaptive_recovery_match = find_best_match_multiscale(
+                    sequence,
+                    &adaptive_templates,
+                    frame_index,
+                    last_good_rect,
+                    RECOVERY_SEARCH_RADIUS_PX,
+                )?;
+                if should_prefer_adaptive_template(best_recovery_match.1, adaptive_recovery_match.1)
+                {
+                    best_recovery_match = adaptive_recovery_match;
+                }
+            }
+            if best_recovery_match.1 > confidence {
+                matched_rect = best_recovery_match.0;
+                confidence = best_recovery_match.1;
+                matched_search_radius = RECOVERY_SEARCH_RADIUS_PX;
             }
         }
 
-        // 3b. Hard trajectory-continuity cap: clamp the per-frame
-        //     delta to MAX_SINGLE_FRAME_JUMP_PX. At 320 analysis
-        //     width this is 32 px = 10% of frame, which is faster
-        //     than virtually any real subject moves at source frame
-        //     rate. Anything bigger is the matcher teleporting to a
-        //     distant local minimum — we preserve the direction but
-        //     cap the magnitude. Recovery is still free to find a
-        //     distant subject *over multiple frames* because the
-        //     prediction accumulates; it just can't do it in one.
+        // 3b. Trajectory-continuity cap: weak matches are still clamped
+        //     to the legacy 32 px budget, but strong pyramid matches can
+        //     spend the wider coarse-level search radius they actually
+        //     used. Without this, the multiscale matcher can correctly
+        //     recover a real fast whip-pan and then immediately have that
+        //     recovery thrown away by the old post-match clamp.
         let dx = matched_rect.x - current_rect.x;
         let dy = matched_rect.y - current_rect.y;
-        if dx.abs() > MAX_SINGLE_FRAME_JUMP_PX || dy.abs() > MAX_SINGLE_FRAME_JUMP_PX {
+        let jump_budget = if confidence >= STRONG_JUMP_CONFIDENCE_THRESHOLD {
+            multiscale_full_res_jump_budget(sequence, matched_search_radius)
+        } else {
+            MAX_SINGLE_FRAME_JUMP_PX
+        };
+        if dx.abs() > jump_budget || dy.abs() > jump_budget {
             matched_rect = PixelRect {
-                x: current_rect.x + dx.clamp(-MAX_SINGLE_FRAME_JUMP_PX, MAX_SINGLE_FRAME_JUMP_PX),
-                y: current_rect.y + dy.clamp(-MAX_SINGLE_FRAME_JUMP_PX, MAX_SINGLE_FRAME_JUMP_PX),
+                x: current_rect.x + dx.clamp(-jump_budget, jump_budget),
+                y: current_rect.y + dy.clamp(-jump_budget, jump_budget),
                 width: matched_rect.width,
                 height: matched_rect.height,
             };
@@ -1439,14 +1594,27 @@ where
             }
         }
 
+        if confidence >= ADAPTIVE_TEMPLATE_UPDATE_THRESHOLD {
+            let fresh_templates = extract_multiscale_templates_at_rect(
+                sequence,
+                frame_index,
+                matched_rect,
+                &original_templates,
+            )?;
+            refresh_adaptive_templates(&mut adaptive_templates, &fresh_templates);
+            adaptive_templates_ready = true;
+        }
+
         let sample_time = job
             .analysis_start_ns
             .saturating_add((frame_index as u64).saturating_mul(effective_step_ns))
             .min(job.analysis_end_ns);
         samples.push(TrackingSample {
             time_ns: sample_time,
-            offset_x: (matched_rect.center_x() - initial_rect.center_x()) / sequence.width as f64,
-            offset_y: (matched_rect.center_y() - initial_rect.center_y()) / sequence.height as f64,
+            offset_x: (matched_rect.center_x() - initial_rect.center_x())
+                / finest_level.width as f64,
+            offset_y: (matched_rect.center_y() - initial_rect.center_y())
+                / finest_level.height as f64,
             scale_multiplier: 1.0,
             rotation_deg: 0.0,
             confidence,
@@ -1484,6 +1652,100 @@ fn translate_rect_clamped(
     }
 }
 
+fn rect_from_center_clamped(
+    center_x: f64,
+    center_y: f64,
+    width: i32,
+    height: i32,
+    image_width: usize,
+    image_height: usize,
+) -> PixelRect {
+    let max_x = image_width as i32 - width;
+    let max_y = image_height as i32 - height;
+    PixelRect {
+        x: (center_x.round() as i32 - width / 2).clamp(0, max_x.max(0)),
+        y: (center_y.round() as i32 - height / 2).clamp(0, max_y.max(0)),
+        width,
+        height,
+    }
+}
+
+fn project_rect_to_level(
+    rect: PixelRect,
+    from_width: usize,
+    from_height: usize,
+    target_rect: PixelRect,
+    to_width: usize,
+    to_height: usize,
+) -> PixelRect {
+    let projected_center_x = rect.center_x() * to_width as f64 / from_width as f64;
+    let projected_center_y = rect.center_y() * to_height as f64 / from_height as f64;
+    rect_from_center_clamped(
+        projected_center_x,
+        projected_center_y,
+        target_rect.width,
+        target_rect.height,
+        to_width,
+        to_height,
+    )
+}
+
+fn multiscale_full_res_jump_budget(sequence: &FrameSequence, coarse_search_radius_px: i32) -> i32 {
+    let Some(finest_level) = sequence.finest_level() else {
+        return MAX_SINGLE_FRAME_JUMP_PX;
+    };
+    let Some(coarsest_level) = sequence.levels.last() else {
+        return MAX_SINGLE_FRAME_JUMP_PX;
+    };
+    let scale_x = (finest_level.width as f64 / coarsest_level.width as f64).ceil() as i32;
+    let scale_y = (finest_level.height as f64 / coarsest_level.height as f64).ceil() as i32;
+    MAX_SINGLE_FRAME_JUMP_PX.max(coarse_search_radius_px.saturating_mul(scale_x.max(scale_y)))
+}
+
+fn adaptive_search_radius_px(
+    job: &TrackingJob,
+    velocity_x: i32,
+    velocity_y: i32,
+    consecutive_low_confidence: u32,
+) -> i32 {
+    let base = job.effective_search_radius_px() as i32;
+    let speed = velocity_x.abs().max(velocity_y.abs());
+    let speed_margin = (speed + FAST_MOTION_RADIUS_DIVISOR - 1) / FAST_MOTION_RADIUS_DIVISOR;
+    let low_confidence_margin = LOW_CONFIDENCE_RADIUS_GROWTH_PX
+        .saturating_mul(consecutive_low_confidence.min(MAX_LOW_CONFIDENCE_RADIUS_STEPS) as i32);
+    base.saturating_add(speed_margin)
+        .saturating_add(low_confidence_margin)
+        .clamp(base, RECOVERY_SEARCH_RADIUS_PX)
+}
+
+fn downscale_plane_half(plane: &[u8], width: usize, height: usize) -> Vec<u8> {
+    let next_width = width.div_ceil(2);
+    let next_height = height.div_ceil(2);
+    let mut next = Vec::with_capacity(next_width * next_height);
+    for y in 0..next_height {
+        for x in 0..next_width {
+            let mut sum = 0u32;
+            let mut count = 0u32;
+            for src_y in (y * 2)..((y * 2 + 2).min(height)) {
+                for src_x in (x * 2)..((x * 2 + 2).min(width)) {
+                    sum += plane[src_y * width + src_x] as u32;
+                    count += 1;
+                }
+            }
+            next.push((sum / count.max(1)) as u8);
+        }
+    }
+    next
+}
+
+fn downscale_frame_half(frame: &YuvFrame, width: usize, height: usize) -> YuvFrame {
+    YuvFrame {
+        y: downscale_plane_half(&frame.y, width, height),
+        u: downscale_plane_half(&frame.u, width, height),
+        v: downscale_plane_half(&frame.v, width, height),
+    }
+}
+
 fn extract_yuv_frames(
     job: &TrackingJob,
     cancel_flag: &AtomicBool,
@@ -1492,6 +1754,7 @@ fn extract_yuv_frames(
     let duration_ns = job.analysis_duration_ns();
     let fps = 1_000_000_000.0 / job.effective_frame_step_ns() as f64;
     let expected_frames = job.estimated_sample_count().max(1);
+    let (analysis_width, analysis_height) = job.analysis_dimensions();
     let temp = NamedTempFile::new().map_err(|e| {
         (
             TrackingFailure::Failed,
@@ -1505,7 +1768,7 @@ fn extract_yuv_frames(
     // `scale` filter uses `bicubic` + `full_chroma_int` for sharper
     // chroma downsampling than the old `bilinear` gray path.
     let filter = format!(
-        "fps={fps:.6},scale={ANALYSIS_WIDTH}:{ANALYSIS_HEIGHT}:flags=bicubic+full_chroma_int,format=yuv444p"
+        "fps={fps:.6},scale={analysis_width}:{analysis_height}:flags=bicubic+full_chroma_int,format=yuv444p"
     );
     let mut child = Command::new("ffmpeg")
         .args([
@@ -1578,7 +1841,7 @@ fn extract_yuv_frames(
             format!("Failed reading temporary tracking frames: {e}"),
         )
     })?;
-    let plane_size = ANALYSIS_WIDTH * ANALYSIS_HEIGHT;
+    let plane_size = analysis_width * analysis_height;
     let frame_size = plane_size * 3; // YUV444: Y + U + V, each full resolution
     if bytes.len() < frame_size {
         return Err((
@@ -1600,11 +1863,11 @@ fn extract_yuv_frames(
             "Tracking decode produced no complete frames".to_string(),
         ));
     }
-    Ok(FrameSequence {
-        width: ANALYSIS_WIDTH,
-        height: ANALYSIS_HEIGHT,
+    Ok(FrameSequence::from_base_level(
+        analysis_width,
+        analysis_height,
         frames,
-    })
+    ))
 }
 
 fn region_to_rect(region: TrackingRegion, image_width: usize, image_height: usize) -> PixelRect {
@@ -1638,6 +1901,84 @@ fn extract_plane_patch(plane: &[u8], image_width: usize, rect: PixelRect) -> Vec
     pixels
 }
 
+fn build_template_patch(y_pixels: Vec<u8>, u_pixels: Vec<u8>, v_pixels: Vec<u8>) -> TemplatePatch {
+    let y_mean = patch_mean(&y_pixels);
+    let u_mean = patch_mean(&u_pixels);
+    let v_mean = patch_mean(&v_pixels);
+    let y_energy = plane_mean_centered_energy(&y_pixels, y_mean);
+    let u_energy = plane_mean_centered_energy(&u_pixels, u_mean);
+    let v_energy = plane_mean_centered_energy(&v_pixels, v_mean);
+    TemplatePatch {
+        y_pixels,
+        y_mean,
+        y_energy,
+        u_pixels,
+        u_mean,
+        u_energy,
+        v_pixels,
+        v_mean,
+        v_energy,
+    }
+}
+
+fn blur_plane_box(plane: &[u8], width: usize, height: usize) -> Vec<u8> {
+    let mut out = vec![0u8; plane.len()];
+    for y in 0..height {
+        for x in 0..width {
+            let mut sum = 0u32;
+            let mut count = 0u32;
+            for sy in y.saturating_sub(1)..=(y + 1).min(height - 1) {
+                for sx in x.saturating_sub(1)..=(x + 1).min(width - 1) {
+                    sum += plane[sy * width + sx] as u32;
+                    count += 1;
+                }
+            }
+            out[y * width + x] = (sum / count.max(1)) as u8;
+        }
+    }
+    out
+}
+
+fn build_blurred_template_patch(rect: PixelRect, patch: &TemplatePatch) -> TemplatePatch {
+    let width = rect.width.max(1) as usize;
+    let height = rect.height.max(1) as usize;
+    build_template_patch(
+        blur_plane_box(&patch.y_pixels, width, height),
+        blur_plane_box(&patch.u_pixels, width, height),
+        blur_plane_box(&patch.v_pixels, width, height),
+    )
+}
+
+fn build_template_level(rect: PixelRect, patch: TemplatePatch) -> MultiscaleTemplateLevel {
+    let blurred_patch = build_blurred_template_patch(rect, &patch);
+    MultiscaleTemplateLevel {
+        rect,
+        patch,
+        blurred_patch,
+    }
+}
+
+fn blend_template_plane(old_pixels: &[u8], fresh_pixels: &[u8]) -> Vec<u8> {
+    old_pixels
+        .iter()
+        .zip(fresh_pixels)
+        .map(|(old, fresh)| {
+            (((*old as f64) * (1.0 - ADAPTIVE_TEMPLATE_BLEND_WEIGHT))
+                + (*fresh as f64) * ADAPTIVE_TEMPLATE_BLEND_WEIGHT)
+                .round()
+                .clamp(0.0, 255.0) as u8
+        })
+        .collect()
+}
+
+fn blend_template_patch(old_patch: &TemplatePatch, fresh_patch: &TemplatePatch) -> TemplatePatch {
+    build_template_patch(
+        blend_template_plane(&old_patch.y_pixels, &fresh_patch.y_pixels),
+        blend_template_plane(&old_patch.u_pixels, &fresh_patch.u_pixels),
+        blend_template_plane(&old_patch.v_pixels, &fresh_patch.v_pixels),
+    )
+}
+
 fn extract_template(
     frame: &YuvFrame,
     image_width: usize,
@@ -1649,26 +1990,93 @@ fn extract_template(
             "Tracking template rect is empty".to_string(),
         ));
     }
-    let y_pixels = extract_plane_patch(&frame.y, image_width, rect);
-    let u_pixels = extract_plane_patch(&frame.u, image_width, rect);
-    let v_pixels = extract_plane_patch(&frame.v, image_width, rect);
-    let y_mean = patch_mean(&y_pixels);
-    let u_mean = patch_mean(&u_pixels);
-    let v_mean = patch_mean(&v_pixels);
-    let y_energy = plane_mean_centered_energy(&y_pixels, y_mean);
-    let u_energy = plane_mean_centered_energy(&u_pixels, u_mean);
-    let v_energy = plane_mean_centered_energy(&v_pixels, v_mean);
-    Ok(TemplatePatch {
-        y_pixels,
-        y_mean,
-        y_energy,
-        u_pixels,
-        u_mean,
-        u_energy,
-        v_pixels,
-        v_mean,
-        v_energy,
-    })
+    Ok(build_template_patch(
+        extract_plane_patch(&frame.y, image_width, rect),
+        extract_plane_patch(&frame.u, image_width, rect),
+        extract_plane_patch(&frame.v, image_width, rect),
+    ))
+}
+
+fn extract_multiscale_templates(
+    sequence: &FrameSequence,
+    region: TrackingRegion,
+) -> Result<Vec<MultiscaleTemplateLevel>, (TrackingFailure, String)> {
+    sequence
+        .levels
+        .iter()
+        .map(|level| {
+            let first_frame = level.frames.first().ok_or_else(|| {
+                (
+                    TrackingFailure::Failed,
+                    "Tracking pyramid level is missing its first frame".to_string(),
+                )
+            })?;
+            let rect = region_to_rect(region, level.width, level.height);
+            let patch = extract_template(first_frame, level.width, rect)?;
+            Ok(build_template_level(rect, patch))
+        })
+        .collect()
+}
+
+fn extract_multiscale_templates_at_rect(
+    sequence: &FrameSequence,
+    frame_index: usize,
+    finest_rect: PixelRect,
+    reference_templates: &[MultiscaleTemplateLevel],
+) -> Result<Vec<MultiscaleTemplateLevel>, (TrackingFailure, String)> {
+    let finest_level = sequence.finest_level().ok_or_else(|| {
+        (
+            TrackingFailure::Failed,
+            "Tracking pyramid is missing its finest level".to_string(),
+        )
+    })?;
+    if sequence.levels.len() != reference_templates.len() {
+        return Err((
+            TrackingFailure::Failed,
+            "Tracking pyramid levels and templates are out of sync".to_string(),
+        ));
+    }
+    sequence
+        .levels
+        .iter()
+        .zip(reference_templates)
+        .map(|(level, reference_template)| {
+            let frame = level.frames.get(frame_index).ok_or_else(|| {
+                (
+                    TrackingFailure::Failed,
+                    format!(
+                        "Tracking pyramid level {}x{} is missing frame {}",
+                        level.width, level.height, frame_index
+                    ),
+                )
+            })?;
+            let rect = project_rect_to_level(
+                finest_rect,
+                finest_level.width,
+                finest_level.height,
+                reference_template.rect,
+                level.width,
+                level.height,
+            );
+            let patch = extract_template(frame, level.width, rect)?;
+            Ok(build_template_level(rect, patch))
+        })
+        .collect()
+}
+
+fn refresh_adaptive_templates(
+    adaptive_templates: &mut [MultiscaleTemplateLevel],
+    fresh_templates: &[MultiscaleTemplateLevel],
+) {
+    for (adaptive, fresh) in adaptive_templates.iter_mut().zip(fresh_templates) {
+        adaptive.rect = fresh.rect;
+        adaptive.patch = blend_template_patch(&adaptive.patch, &fresh.patch);
+        adaptive.blurred_patch = build_blurred_template_patch(adaptive.rect, &adaptive.patch);
+    }
+}
+
+fn should_prefer_adaptive_template(original_confidence: f64, adaptive_confidence: f64) -> bool {
+    adaptive_confidence >= original_confidence + ADAPTIVE_TEMPLATE_SELECTION_MARGIN
 }
 
 /// L2 norm of the mean-centered template: `sqrt(Σ (p - mean)²)`.
@@ -1728,6 +2136,127 @@ fn find_best_match(
         ));
     }
     Ok((best_rect, tracking_confidence_ncc(best_score, second_best)))
+}
+
+fn yuv_ncc_with_template_variants(
+    frame: &YuvFrame,
+    image_width: usize,
+    template: &MultiscaleTemplateLevel,
+    candidate: PixelRect,
+) -> f64 {
+    let sharp = yuv_ncc(frame, image_width, &template.patch, candidate);
+    let blurred = yuv_ncc(frame, image_width, &template.blurred_patch, candidate)
+        - BLURRED_TEMPLATE_SCORE_PENALTY;
+    sharp.max(blurred)
+}
+
+fn find_best_match_with_template_variants(
+    frame: &YuvFrame,
+    image_width: usize,
+    image_height: usize,
+    template: &MultiscaleTemplateLevel,
+    current_rect: PixelRect,
+    search_radius_px: i32,
+) -> Result<(PixelRect, f64), (TrackingFailure, String)> {
+    let mut best_rect = current_rect;
+    let mut best_score = f64::NEG_INFINITY;
+    let mut second_best = f64::NEG_INFINITY;
+    for dy in -search_radius_px..=search_radius_px {
+        for dx in -search_radius_px..=search_radius_px {
+            let candidate = PixelRect {
+                x: current_rect.x + dx,
+                y: current_rect.y + dy,
+                width: current_rect.width,
+                height: current_rect.height,
+            };
+            if candidate.x < 0
+                || candidate.y < 0
+                || candidate.x + candidate.width > image_width as i32
+                || candidate.y + candidate.height > image_height as i32
+            {
+                continue;
+            }
+            let score = yuv_ncc_with_template_variants(frame, image_width, template, candidate);
+            if score > best_score {
+                second_best = best_score;
+                best_score = score;
+                best_rect = candidate;
+            } else if score > second_best {
+                second_best = score;
+            }
+        }
+    }
+    if best_score.is_infinite() {
+        return Err((
+            TrackingFailure::Failed,
+            "Tracking search failed to find a valid candidate window".to_string(),
+        ));
+    }
+    Ok((best_rect, tracking_confidence_ncc(best_score, second_best)))
+}
+
+fn find_best_match_multiscale(
+    sequence: &FrameSequence,
+    templates: &[MultiscaleTemplateLevel],
+    frame_index: usize,
+    current_rect: PixelRect,
+    search_radius_px: i32,
+) -> Result<(PixelRect, f64), (TrackingFailure, String)> {
+    if sequence.levels.is_empty() || sequence.levels.len() != templates.len() {
+        return Err((
+            TrackingFailure::Failed,
+            "Tracking pyramid levels and templates are out of sync".to_string(),
+        ));
+    }
+    let finest_level = sequence.finest_level().ok_or_else(|| {
+        (
+            TrackingFailure::Failed,
+            "Tracking pyramid is missing its finest level".to_string(),
+        )
+    })?;
+    let coarse_index = sequence.levels.len() - 1;
+    let mut projected_rect = current_rect;
+    let mut from_width = finest_level.width;
+    let mut from_height = finest_level.height;
+    let mut confidence = 0.0;
+
+    for level_index in (0..sequence.levels.len()).rev() {
+        let level = &sequence.levels[level_index];
+        let template = &templates[level_index];
+        let frame = level.frames.get(frame_index).ok_or_else(|| {
+            (
+                TrackingFailure::Failed,
+                format!("Tracking pyramid level {level_index} is missing frame {frame_index}"),
+            )
+        })?;
+        let level_rect = project_rect_to_level(
+            projected_rect,
+            from_width,
+            from_height,
+            template.rect,
+            level.width,
+            level.height,
+        );
+        let level_radius = if level_index == coarse_index {
+            search_radius_px
+        } else {
+            search_radius_px.clamp(2, MULTISCALE_REFINE_RADIUS_PX)
+        };
+        let (matched_rect, matched_confidence) = find_best_match_with_template_variants(
+            frame,
+            level.width,
+            level.height,
+            template,
+            level_rect,
+            level_radius,
+        )?;
+        projected_rect = matched_rect;
+        from_width = level.width;
+        from_height = level.height;
+        confidence = matched_confidence;
+    }
+
+    Ok((projected_rect, confidence))
 }
 
 /// Normalized cross-correlation for a single plane. Returns a value in
@@ -1932,6 +2461,10 @@ mod tests {
         }
     }
 
+    fn make_frame_sequence(width: usize, height: usize, frames: Vec<YuvFrame>) -> FrameSequence {
+        FrameSequence::from_base_level(width, height, frames)
+    }
+
     /// Colored region test: the background has low-amplitude texture
     /// in all channels, and the tracked object is distinctively
     /// different in U/V but nearly identical in Y. A pure-luma matcher
@@ -1994,6 +2527,124 @@ mod tests {
     }
 
     #[test]
+    fn tracking_job_promotes_small_regions_to_high_detail_analysis() {
+        let large_job = TrackingJob::new(
+            "tracker-large",
+            "Large",
+            "/tmp/source.mp4",
+            0,
+            0,
+            1_000_000_000,
+            TrackingRegion {
+                center_x: 0.5,
+                center_y: 0.5,
+                width: 0.14,
+                height: 0.14,
+                rotation_deg: 0.0,
+            },
+        );
+        let small_job = TrackingJob::new(
+            "tracker-small",
+            "Small",
+            "/tmp/source.mp4",
+            0,
+            0,
+            1_000_000_000,
+            TrackingRegion {
+                center_x: 0.5,
+                center_y: 0.5,
+                width: 0.04,
+                height: 0.04,
+                rotation_deg: 0.0,
+            },
+        );
+
+        assert_eq!(
+            large_job.analysis_dimensions(),
+            (ANALYSIS_WIDTH, ANALYSIS_HEIGHT)
+        );
+        assert_eq!(
+            small_job.analysis_dimensions(),
+            (HIGH_DETAIL_ANALYSIS_WIDTH, HIGH_DETAIL_ANALYSIS_HEIGHT)
+        );
+    }
+
+    #[test]
+    fn tracking_job_scales_frame_budget_with_analysis_resolution() {
+        let duration_ns = 100_000_000_000;
+        let mut large_job = TrackingJob::new(
+            "tracker-large",
+            "Large",
+            "/tmp/source.mp4",
+            0,
+            0,
+            duration_ns,
+            TrackingRegion {
+                center_x: 0.5,
+                center_y: 0.5,
+                width: 0.14,
+                height: 0.14,
+                rotation_deg: 0.0,
+            },
+        );
+        let mut small_job = TrackingJob::new(
+            "tracker-small",
+            "Small",
+            "/tmp/source.mp4",
+            0,
+            0,
+            duration_ns,
+            TrackingRegion {
+                center_x: 0.5,
+                center_y: 0.5,
+                width: 0.04,
+                height: 0.04,
+                rotation_deg: 0.0,
+            },
+        );
+        large_job.frame_step_ns = 1;
+        small_job.frame_step_ns = 1;
+
+        assert_eq!(large_job.estimated_sample_count(), MAX_TRACKING_FRAMES);
+        assert_eq!(
+            small_job.estimated_sample_count(),
+            max_tracking_frames_for_dimensions(
+                HIGH_DETAIL_ANALYSIS_WIDTH,
+                HIGH_DETAIL_ANALYSIS_HEIGHT
+            )
+        );
+        assert!(small_job.estimated_sample_count() < large_job.estimated_sample_count());
+    }
+
+    #[test]
+    fn adaptive_search_radius_grows_for_fast_or_uncertain_motion() {
+        let mut job = TrackingJob::new(
+            "tracker-radius",
+            "Radius",
+            "/tmp/source.mp4",
+            0,
+            0,
+            1_000_000_000,
+            TrackingRegion {
+                center_x: 0.5,
+                center_y: 0.5,
+                width: 0.14,
+                height: 0.14,
+                rotation_deg: 0.0,
+            },
+        );
+        job.search_radius_px = 8;
+
+        assert_eq!(adaptive_search_radius_px(&job, 0, 0, 0), 8);
+        assert_eq!(adaptive_search_radius_px(&job, 12, 0, 0), 14);
+        assert_eq!(adaptive_search_radius_px(&job, 12, 0, 3), 20);
+        assert_eq!(
+            adaptive_search_radius_px(&job, 200, 200, MAX_CONSECUTIVE_LOW_CONFIDENCE_FRAMES),
+            RECOVERY_SEARCH_RADIUS_PX
+        );
+    }
+
+    #[test]
     fn track_motion_sequence_detects_translation() {
         let width = 64;
         let height = 40;
@@ -2004,11 +2655,7 @@ mod tests {
         let frames = (0..5)
             .map(|idx| make_patterned_yuv(width, height, 18 + idx * 2, 10 + idx))
             .collect::<Vec<_>>();
-        let sequence = FrameSequence {
-            width,
-            height,
-            frames,
-        };
+        let sequence = make_frame_sequence(width, height, frames);
         let mut job = TrackingJob::new(
             "tracker-1",
             "Subject",
@@ -2055,11 +2702,7 @@ mod tests {
         let frames = (0..5)
             .map(|idx| make_color_distinct_yuv(width, height, 18 + idx * 3, 10 + idx * 2))
             .collect::<Vec<_>>();
-        let sequence = FrameSequence {
-            width,
-            height,
-            frames,
-        };
+        let sequence = make_frame_sequence(width, height, frames);
         let mut job = TrackingJob::new(
             "tracker-chroma",
             "ColorSubject",
@@ -2133,6 +2776,55 @@ mod tests {
         }
     }
 
+    fn make_morphing_patterned_yuv(
+        width: usize,
+        height: usize,
+        x: usize,
+        y: usize,
+        phase: usize,
+    ) -> YuvFrame {
+        let mut y_plane = vec![0u8; width * height];
+        let mut u_plane = vec![0u8; width * height];
+        let mut v_plane = vec![0u8; width * height];
+        for row in 0..height {
+            for col in 0..width {
+                let idx = row * width + col;
+                let noise = (((row * 11 + col * 7) % 7) as u8).saturating_sub(3);
+                y_plane[idx] = 80u8.saturating_add(noise);
+                u_plane[idx] = 128u8.saturating_add(noise);
+                v_plane[idx] = 128u8.saturating_add(noise);
+            }
+        }
+        for row in y..(y + 8).min(height) {
+            for col in x..(x + 8).min(width) {
+                let idx = row * width + col;
+                let bucket = ((row * 3 + col * 5 + phase * 7) % 4) as u8;
+                let (yv, uv, vv) = match bucket {
+                    0 => (220, 200, 60),
+                    1 => (40, 70, 210),
+                    2 => (170, 220, 170),
+                    _ => (90, 40, 220),
+                };
+                y_plane[idx] = yv;
+                u_plane[idx] = uv;
+                v_plane[idx] = vv;
+            }
+        }
+        YuvFrame {
+            y: y_plane,
+            u: u_plane,
+            v: v_plane,
+        }
+    }
+
+    fn blur_yuv_frame(frame: &YuvFrame, width: usize, height: usize) -> YuvFrame {
+        YuvFrame {
+            y: blur_plane_box(&frame.y, width, height),
+            u: blur_plane_box(&frame.u, width, height),
+            v: blur_plane_box(&frame.v, width, height),
+        }
+    }
+
     #[test]
     fn track_motion_sequence_follows_fast_motion_via_prediction() {
         // Subject moves 10 px per frame in x — faster than a 6-px
@@ -2144,11 +2836,7 @@ mod tests {
         let frames = (0..6)
             .map(|idx| make_patterned_yuv(width, height, 18 + idx * 10, 14))
             .collect::<Vec<_>>();
-        let sequence = FrameSequence {
-            width,
-            height,
-            frames,
-        };
+        let sequence = make_frame_sequence(width, height, frames);
         let mut job = TrackingJob::new(
             "tracker-fast",
             "Fast",
@@ -2183,12 +2871,228 @@ mod tests {
     }
 
     #[test]
-    fn track_motion_sequence_honors_cancel_flag() {
-        let sequence = FrameSequence {
-            width: 32,
-            height: 18,
-            frames: vec![make_synthetic_yuv(32, 18, 8, 4)],
+    fn adaptive_template_refresh_improves_match_after_appearance_change() {
+        let width = 96;
+        let height = 48;
+        let frames = (0..6)
+            .map(|phase| make_morphing_patterned_yuv(width, height, 24, 18, phase))
+            .collect::<Vec<_>>();
+        let sequence = make_frame_sequence(width, height, frames);
+        let region = TrackingRegion {
+            center_x: 28.0 / width as f64,
+            center_y: 22.0 / height as f64,
+            width: 4.0 / width as f64,
+            height: 4.0 / height as f64,
+            rotation_deg: 0.0,
         };
+        let finest_level = sequence.finest_level().expect("finest level");
+        let initial_rect = region_to_rect(region, finest_level.width, finest_level.height);
+        let original_templates =
+            extract_multiscale_templates(&sequence, region).expect("templates");
+        let mut adaptive_templates = original_templates.clone();
+        for frame_index in 1..5 {
+            let fresh_templates = extract_multiscale_templates_at_rect(
+                &sequence,
+                frame_index,
+                initial_rect,
+                &original_templates,
+            )
+            .expect("fresh templates");
+            refresh_adaptive_templates(&mut adaptive_templates, &fresh_templates);
+        }
+
+        let (_, adaptive_confidence) =
+            find_best_match_multiscale(&sequence, &adaptive_templates, 5, initial_rect, 6)
+                .expect("adaptive match");
+
+        assert!(
+            adaptive_templates[0].patch.y_pixels != original_templates[0].patch.y_pixels,
+            "adaptive template should differ from the original first-frame patch"
+        );
+        assert!(
+            adaptive_confidence >= RECOVERY_CONFIDENCE_THRESHOLD,
+            "adaptive confidence {adaptive_confidence} should stay above recovery threshold"
+        );
+    }
+
+    #[test]
+    fn blurred_template_variant_improves_match_confidence() {
+        let width = 96;
+        let height = 48;
+        let sharp_frame = make_patterned_yuv(width, height, 24, 18);
+        let blurred_frame =
+            blur_yuv_frame(&make_patterned_yuv(width, height, 36, 18), width, height);
+        let sequence = make_frame_sequence(width, height, vec![sharp_frame, blurred_frame.clone()]);
+        let region = TrackingRegion {
+            center_x: 28.0 / width as f64,
+            center_y: 22.0 / height as f64,
+            width: 4.0 / width as f64,
+            height: 4.0 / height as f64,
+            rotation_deg: 0.0,
+        };
+        let finest_level = sequence.finest_level().expect("finest level");
+        let initial_rect = region_to_rect(region, finest_level.width, finest_level.height);
+        let templates = extract_multiscale_templates(&sequence, region).expect("templates");
+
+        let (_, sharp_confidence) = find_best_match(
+            &blurred_frame,
+            finest_level.width,
+            finest_level.height,
+            &templates[0].patch,
+            initial_rect,
+            16,
+        )
+        .expect("sharp match");
+        let (variant_rect, variant_confidence) = find_best_match_with_template_variants(
+            &blurred_frame,
+            finest_level.width,
+            finest_level.height,
+            &templates[0],
+            initial_rect,
+            16,
+        )
+        .expect("variant match");
+
+        assert!(
+            variant_confidence >= sharp_confidence,
+            "variant confidence {variant_confidence} should be at least sharp confidence {sharp_confidence}"
+        );
+        assert!(
+            (variant_rect.center_x() - (initial_rect.center_x() + 12.0)).abs() < 3.0,
+            "variant matcher should stay near the blurred target, got center {}",
+            variant_rect.center_x()
+        );
+    }
+
+    #[test]
+    fn track_motion_sequence_handles_fast_motion_with_appearance_shift() {
+        let width = 160;
+        let height = 56;
+        let frames = (0..6)
+            .map(|idx| make_morphing_patterned_yuv(width, height, 20 + idx * 8, 18, idx))
+            .collect::<Vec<_>>();
+        let sequence = make_frame_sequence(width, height, frames);
+        let mut job = TrackingJob::new(
+            "tracker-fast-morph",
+            "Fast Morph",
+            "/tmp/source.mp4",
+            0,
+            0,
+            600_000_000,
+            TrackingRegion {
+                center_x: 24.0 / width as f64,
+                center_y: 22.0 / height as f64,
+                width: 4.0 / width as f64,
+                height: 4.0 / height as f64,
+                rotation_deg: 0.0,
+            },
+        );
+        job.frame_step_ns = 100_000_000;
+        job.search_radius_px = 6;
+        let cancel_flag = AtomicBool::new(false);
+
+        let analysis = track_motion_in_frames(&sequence, &job, &cancel_flag, |_, _| {})
+            .expect("appearance-shift tracking should succeed");
+        let expected = 40.0 / width as f64;
+        let actual = analysis.samples[5].offset_x;
+        assert!(
+            (actual - expected).abs() < 0.05,
+            "offset_x sample[5] = {actual}, expected ~{expected}"
+        );
+        assert!(
+            analysis.samples[5].confidence >= RECOVERY_CONFIDENCE_THRESHOLD,
+            "final confidence should stay above recovery threshold, got {}",
+            analysis.samples[5].confidence
+        );
+    }
+
+    #[test]
+    fn track_motion_sequence_handles_blurred_fast_motion() {
+        let width = 128;
+        let height = 48;
+        let sequence = make_frame_sequence(
+            width,
+            height,
+            vec![
+                make_patterned_yuv(width, height, 18, 18),
+                blur_yuv_frame(&make_patterned_yuv(width, height, 30, 18), width, height),
+                blur_yuv_frame(&make_patterned_yuv(width, height, 42, 18), width, height),
+                blur_yuv_frame(&make_patterned_yuv(width, height, 54, 18), width, height),
+            ],
+        );
+        let mut job = TrackingJob::new(
+            "tracker-fast-blur",
+            "Fast Blur",
+            "/tmp/source.mp4",
+            0,
+            0,
+            400_000_000,
+            TrackingRegion {
+                center_x: 22.0 / width as f64,
+                center_y: 22.0 / height as f64,
+                width: 4.0 / width as f64,
+                height: 4.0 / height as f64,
+                rotation_deg: 0.0,
+            },
+        );
+        job.frame_step_ns = 100_000_000;
+        job.search_radius_px = 6;
+        let cancel_flag = AtomicBool::new(false);
+
+        let analysis = track_motion_in_frames(&sequence, &job, &cancel_flag, |_, _| {})
+            .expect("blurred fast-motion tracking should succeed");
+        let expected = 36.0 / width as f64;
+        let actual = analysis.samples[3].offset_x;
+        assert!(
+            (actual - expected).abs() < 0.06,
+            "offset_x sample[3] = {actual}, expected ~{expected}"
+        );
+    }
+
+    #[test]
+    fn track_motion_sequence_can_leave_initial_quadrant() {
+        let width = 192;
+        let height = 64;
+        let frames = (0..6)
+            .map(|idx| make_patterned_yuv(width, height, 16 + idx * 24, 20))
+            .collect::<Vec<_>>();
+        let sequence = make_frame_sequence(width, height, frames);
+        let mut job = TrackingJob::new(
+            "tracker-wide-travel",
+            "Wide Travel",
+            "/tmp/source.mp4",
+            0,
+            0,
+            600_000_000,
+            TrackingRegion {
+                center_x: 20.0 / width as f64,
+                center_y: 24.0 / height as f64,
+                width: 4.0 / width as f64,
+                height: 4.0 / height as f64,
+                rotation_deg: 0.0,
+            },
+        );
+        job.frame_step_ns = 100_000_000;
+        job.search_radius_px = 10;
+        let cancel_flag = AtomicBool::new(false);
+
+        let analysis = track_motion_in_frames(&sequence, &job, &cancel_flag, |_, _| {})
+            .expect("wide-travel tracking should succeed");
+        let expected = 120.0 / width as f64;
+        let actual = analysis.samples[5].offset_x;
+        assert!(
+            actual > 0.5,
+            "tracker should leave the initial quadrant, got offset_x {actual}"
+        );
+        assert!(
+            (actual - expected).abs() < 0.06,
+            "offset_x sample[5] = {actual}, expected ~{expected}"
+        );
+    }
+
+    #[test]
+    fn track_motion_sequence_honors_cancel_flag() {
+        let sequence = make_frame_sequence(32, 18, vec![make_synthetic_yuv(32, 18, 8, 4)]);
         let job = TrackingJob::new(
             "tracker-1",
             "Subject",
@@ -2203,6 +3107,100 @@ mod tests {
         assert_eq!(
             result,
             Err((TrackingFailure::Cancelled, "Tracking canceled".to_string()))
+        );
+    }
+
+    #[test]
+    fn multiscale_matcher_recovers_large_single_frame_jump() {
+        let width = 128;
+        let height = 48;
+        let sequence = make_frame_sequence(
+            width,
+            height,
+            vec![
+                make_patterned_yuv(width, height, 18, 18),
+                make_patterned_yuv(width, height, 50, 18),
+            ],
+        );
+        let finest_level = sequence.finest_level().expect("finest level");
+        let region = TrackingRegion {
+            center_x: 22.0 / width as f64,
+            center_y: 22.0 / height as f64,
+            width: 4.0 / width as f64,
+            height: 4.0 / height as f64,
+            rotation_deg: 0.0,
+        };
+        let initial_rect = region_to_rect(region, finest_level.width, finest_level.height);
+        let templates = extract_multiscale_templates(&sequence, region).expect("template pyramid");
+
+        let (single_scale_rect, _) = find_best_match(
+            &finest_level.frames[1],
+            finest_level.width,
+            finest_level.height,
+            &templates[0].patch,
+            initial_rect,
+            8,
+        )
+        .expect("single-scale match");
+        let (multiscale_rect, _) =
+            find_best_match_multiscale(&sequence, &templates, 1, initial_rect, 8)
+                .expect("multiscale match");
+
+        let single_scale_dx = single_scale_rect.center_x() - initial_rect.center_x();
+        let multiscale_dx = multiscale_rect.center_x() - initial_rect.center_x();
+        assert!(
+            (single_scale_dx - 32.0).abs() > 8.0,
+            "single-scale matcher should not reach the 32 px jump, got {single_scale_dx}"
+        );
+        assert!(
+            (multiscale_dx - 32.0).abs() < 3.0,
+            "multiscale matcher should recover the large jump, got {multiscale_dx}"
+        );
+    }
+
+    #[test]
+    fn track_motion_sequence_keeps_strong_large_jump_found_by_pyramid() {
+        let width = 128;
+        let height = 48;
+        let sequence = make_frame_sequence(
+            width,
+            height,
+            vec![
+                make_patterned_yuv(width, height, 18, 18),
+                make_patterned_yuv(width, height, 58, 18),
+            ],
+        );
+        let mut job = TrackingJob::new(
+            "tracker-large-jump",
+            "Fast Subject",
+            "/tmp/source.mp4",
+            0,
+            0,
+            200_000_000,
+            TrackingRegion {
+                center_x: 22.0 / width as f64,
+                center_y: 22.0 / height as f64,
+                width: 4.0 / width as f64,
+                height: 4.0 / height as f64,
+                rotation_deg: 0.0,
+            },
+        );
+        job.frame_step_ns = 100_000_000;
+        job.search_radius_px = 10;
+        let cancel_flag = AtomicBool::new(false);
+
+        let analysis = track_motion_in_frames(&sequence, &job, &cancel_flag, |_, _| {})
+            .expect("large-jump tracking should succeed");
+        let expected = 40.0 / width as f64;
+        let actual = analysis.samples[1].offset_x;
+        assert!(
+            (actual - expected).abs() < 0.04,
+            "offset_x sample[1] = {actual}, expected ~{expected}"
+        );
+        assert!(
+            analysis.samples[1].confidence >= STRONG_JUMP_CONFIDENCE_THRESHOLD,
+            "large jump should remain strongly matched, got confidence {}",
+            analysis.samples[1].confidence
         );
     }
 
@@ -2278,6 +3276,56 @@ mod tests {
         assert!((resolved_mask.center_x_keyframes[1].value - 0.7).abs() < 1e-6);
         assert!((resolved_mask.center_y_keyframes[0].value - 0.45).abs() < 1e-6);
         assert!((resolved_mask.center_y_keyframes[1].value - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn apply_tracking_bindings_can_project_motion_beyond_quadrant() {
+        let mut source = Clip::new(
+            "/tmp/source.mp4",
+            2_000_000_000,
+            2_000_000_000,
+            crate::model::clip::ClipKind::Video,
+        );
+        source.id = "source-clip".to_string();
+        let mut tracker = MotionTracker::new("Subject");
+        tracker.id = "tracker-1".to_string();
+        tracker.samples = vec![
+            TrackingSample::identity(0),
+            TrackingSample {
+                time_ns: 1_000_000_000,
+                offset_x: 0.8,
+                offset_y: 0.0,
+                scale_multiplier: 1.0,
+                rotation_deg: 0.0,
+                confidence: 1.0,
+            },
+        ];
+        source.motion_trackers.push(tracker);
+
+        let mut target = Clip::new(
+            "/tmp/overlay.png",
+            2_000_000_000,
+            2_500_000_000,
+            crate::model::clip::ClipKind::Image,
+        );
+        target.id = "target-clip".to_string();
+        target.tracking_binding = Some(TrackingBinding::new("source-clip", "tracker-1"));
+
+        let mut track = Track::new_video("Video");
+        track.clips = vec![source, target];
+
+        apply_tracking_bindings_to_tracks(std::slice::from_mut(&mut track));
+
+        let resolved = track
+            .clips
+            .iter()
+            .find(|clip| clip.id == "target-clip")
+            .expect("target clip should remain present");
+        assert!(
+            resolved.position_x_keyframes[1].value > 0.5,
+            "binding projection should permit motion beyond one quadrant, got {}",
+            resolved.position_x_keyframes[1].value
+        );
     }
 
     #[test]

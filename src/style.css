@@ -95,6 +95,28 @@ headerbar .title {
     color: #fc8181;
 }
 
+/* ── In-app onboarding tour ──────────────────────────────────────────────── */
+.onboarding-popover-card {
+    min-width: 320px;
+}
+
+.onboarding-step-title {
+    font-weight: 700;
+}
+
+.onboarding-step-body {
+    color: @theme_fg_color;
+}
+
+.onboarding-step-counter {
+    opacity: 0.85;
+}
+
+.onboarding-target {
+    box-shadow: 0 0 0 2px alpha(@accent_bg_color, 0.85);
+    border-radius: 12px;
+}
+
 /* ── Background job tray ──────────────────────────────────────────────────── */
 .job-tray-button-active {
     border-color: #3f76c1;
