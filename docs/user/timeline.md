@@ -258,6 +258,8 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC, SVG) can be placed on the t
 - **Break Apart Compound Clip** — right-click a compound clip → "Break Apart Compound Clip" to restore the internal clips to the timeline.
 - **Drill-down editing** — double-click a compound clip to enter its sub-timeline. A teal breadcrumb bar shows your navigation path (e.g. "Project > Compound Clip 1"). Press `Escape` to go back one level.
 - Compound clips render with a teal fill color and a stacked-layers badge.
+- Compound clips now get a **simple first-pass thumbnail strip** in the timeline by sampling the top visible source-backed child clip inside the compound window.
+- This thumbnail strip is intentionally lightweight: it does **not** yet composite titles, adjustment layers, or other overlay-only children into the thumbnail, and compound waveforms are still a separate follow-up.
 - Preview and export correctly flatten compound clips, rendering all internal clips at the right timeline positions.
 - Compound clips are saved/loaded via FCPXML (`us:clip-kind="compound"` + `us:compound-tracks` vendor attribute).
 - MCP tools: `create_compound_clip` (takes `clip_ids` array), `break_apart_compound_clip` (takes `clip_id`).
@@ -394,6 +396,8 @@ The panel lists every project marker with:
 - **Active track** — click anywhere in a track row (including empty space) to highlight it. The active track shows a coloured accent bar on its label (uses the track colour label when set, otherwise blue). The active track is used as the target for the Append button and the Remove Track button.
 - **Track height presets** — right-click a track header and choose **Track Height: Small / Medium / Large** to resize that track row independently.
 - Audio tracks show a waveform visualisation (decoded in the background after import).
+- Waveform drawing now reuses a shared multi-resolution cache after extraction, so zoomed-out timelines stay responsive even when many clips are visible at once.
+- New waveform data now repaints automatically when background extraction finishes, so you do not need to start playback just to make freshly loaded waveforms appear.
 - **Mute track** — click the **M** badge on a track header (or press **M** with that track active) to mute it. Muted tracks are silenced in playback and export; a dimming overlay appears on the track content area.
 - **Lock track** — click the **L** badge on a track header (or press **Shift+L** with that track active) to lock it. Locked tracks cannot be edited; a hatch overlay appears on the track content area.
 - **Solo track** — click the **S** badge on a track header (or press **S** with that track active) to solo it. When one or more tracks are soloed, only soloed non-muted tracks are active for Program Monitor playback and export.
@@ -458,6 +462,8 @@ The undo history is per-session (not persisted in the FCPXML).
 - Thumbnail strips now load progressively with adaptive tile density to keep timeline warm-up responsive on heavy media.
 - Preferences → Timeline → **Show timeline preview** lets you switch to start/end-only thumbnails per video clip.
 - Audio clips show a normalised waveform.
+- When **Show audio waveforms on video clips** is enabled, the video-overlay view reuses the same cached waveform path instead of a separate slower draw pass.
+- Those video-clip waveform overlays also repaint automatically as soon as waveform extraction completes.
 - A **yellow speed badge** (e.g. `2×`) appears on clips with a speed multiplier ≠ 1.0. Clips with speed keyframes (variable speed ramps) show a **⏲ Ramp** badge instead.
 - Clips with phase-1 keyframes show color-coded keyframe ticks/guides on the clip body (Scale, Opacity, Position X, Position Y, Volume, Pan, Rotate, Crop Left/Right/Top/Bottom), a `KF <count>` badge, and a `◆` prefix in the clip label when keyframes are present. **Click a keyframe tick** to select the clip and jump the playhead to that keyframe time.
 - Hovering a keyframe marker shows a tooltip with the clip name, keyframe time, and which properties are modified at that keyframe moment.

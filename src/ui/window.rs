@@ -397,6 +397,30 @@ fn workspace_paned_child_min_size(child: Option<gtk::Widget>, orientation: Orien
         .unwrap_or(0)
 }
 
+fn workspace_stack_visible_child_min_size(stack: &gtk::Stack, orientation: Orientation) -> i32 {
+    stack
+        .visible_child()
+        .map(|child| child.measure(orientation, -1).0.max(0))
+        .unwrap_or(0)
+}
+
+fn clamp_workspace_paned_position_with_end_min(paned: &Paned, desired: i32, min_end: i32) -> i32 {
+    let desired = desired.max(0);
+    let total = workspace_paned_extent(paned);
+    if total <= 0 {
+        return desired;
+    }
+    let orientation = paned.orientation();
+    let min_start = workspace_paned_child_min_size(paned.start_child(), orientation);
+    let min_bound = min_start.min(total);
+    let max_bound = total.saturating_sub(min_end.max(0));
+    if max_bound < min_bound {
+        desired.clamp(0, total)
+    } else {
+        desired.clamp(min_bound, max_bound)
+    }
+}
+
 fn clamp_workspace_paned_position(paned: &Paned, desired: i32) -> i32 {
     let desired = desired.max(0);
     let total = workspace_paned_extent(paned);
@@ -443,6 +467,29 @@ fn workspace_target_paned_position(
     let scaled =
         crate::ui_state::workspace_split_position_from_ratio(ratio_permille, total, position);
     Some(clamp_workspace_paned_position(paned, scaled))
+}
+
+fn clamp_timeline_bottom_panel_position(paned: &Paned, stack: &gtk::Stack, desired: i32) -> i32 {
+    let orientation = paned.orientation();
+    let min_end = workspace_stack_visible_child_min_size(stack, orientation).max(
+        workspace_paned_child_min_size(paned.end_child(), orientation),
+    );
+    clamp_workspace_paned_position_with_end_min(paned, desired, min_end)
+}
+
+fn show_timeline_bottom_panel(stack: &gtk::Stack, paned: &Paned) {
+    let total = workspace_paned_extent(paned);
+    if total <= 0 {
+        stack.set_visible(true);
+        return;
+    }
+    let desired = if stack.is_visible() {
+        paned.position()
+    } else {
+        (total as f64 * 0.7) as i32
+    };
+    stack.set_visible(true);
+    paned.set_position(clamp_timeline_bottom_panel_position(paned, stack, desired));
 }
 
 fn collapse_workspace_paned_end_child(paned: &Paned) {
@@ -16047,13 +16094,16 @@ pub fn build_window(
         on_project_changed.clone(),
     );
     mixer_widget.set_size_request(-1, 200);
+    let mixer_scroller = ScrolledWindow::new();
+    mixer_scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    mixer_scroller.set_child(Some(&mixer_widget));
 
     let bottom_panel_stack = gtk::Stack::new();
     bottom_panel_stack.set_transition_type(gtk::StackTransitionType::None);
     bottom_panel_stack.add_named(&keyframe_scroller, Some("keyframes"));
     bottom_panel_stack.add_named(&transcript_scroller, Some("transcript"));
     bottom_panel_stack.add_named(&markers_scroller, Some("markers"));
-    bottom_panel_stack.add_named(&mixer_widget, Some("mixer"));
+    bottom_panel_stack.add_named(&mixer_scroller, Some("mixer"));
     bottom_panel_stack.set_visible_child_name("keyframes");
     bottom_panel_stack.set_visible(false);
     timeline_paned.set_end_child(Some(&bottom_panel_stack));
@@ -16066,7 +16116,7 @@ pub fn build_window(
             let total = p.allocation().height();
             if total > 0 && p.position() == 0 {
                 if stack.is_visible() {
-                    p.set_position((total as f64 * 0.7) as i32);
+                    show_timeline_bottom_panel(&stack, p);
                 } else {
                     collapse_workspace_paned_end_child(p);
                 }
@@ -16218,13 +16268,7 @@ pub fn build_window(
                 collapse_workspace_paned_end_child(&paned);
             } else {
                 stack.set_visible_child_name("keyframes");
-                if !stack.is_visible() {
-                    stack.set_visible(true);
-                    let total = paned.allocation().height();
-                    if total > 0 {
-                        paned.set_position((total as f64 * 0.7) as i32);
-                    }
-                }
+                show_timeline_bottom_panel(&stack, &paned);
             }
             refresh_labels();
             if !workspace_layouts_applying.get() {
@@ -16245,13 +16289,7 @@ pub fn build_window(
                 collapse_workspace_paned_end_child(&paned);
             } else {
                 stack.set_visible_child_name("transcript");
-                if !stack.is_visible() {
-                    stack.set_visible(true);
-                    let total = paned.allocation().height();
-                    if total > 0 {
-                        paned.set_position((total as f64 * 0.7) as i32);
-                    }
-                }
+                show_timeline_bottom_panel(&stack, &paned);
             }
             refresh_labels();
             if !workspace_layouts_applying.get() {
@@ -16272,13 +16310,7 @@ pub fn build_window(
                 collapse_workspace_paned_end_child(&paned);
             } else {
                 stack.set_visible_child_name("markers");
-                if !stack.is_visible() {
-                    stack.set_visible(true);
-                    let total = paned.allocation().height();
-                    if total > 0 {
-                        paned.set_position((total as f64 * 0.7) as i32);
-                    }
-                }
+                show_timeline_bottom_panel(&stack, &paned);
             }
             refresh_labels();
             if !workspace_layouts_applying.get() {
@@ -16299,13 +16331,7 @@ pub fn build_window(
                 collapse_workspace_paned_end_child(&paned);
             } else {
                 stack.set_visible_child_name("mixer");
-                if !stack.is_visible() {
-                    stack.set_visible(true);
-                    let total = paned.allocation().height();
-                    if total > 0 {
-                        paned.set_position((total as f64 * 0.7) as i32);
-                    }
-                }
+                show_timeline_bottom_panel(&stack, &paned);
             }
             refresh_labels();
             if !workspace_layouts_applying.get() {
@@ -16372,7 +16398,17 @@ pub fn build_window(
     {
         let workspace_layouts_applying = workspace_layouts_applying.clone();
         let sync_workspace_layout_state = sync_workspace_layout_state.clone();
-        timeline_paned.connect_position_notify(move |_| {
+        let bottom_panel_stack = bottom_panel_stack.clone();
+        timeline_paned.connect_position_notify(move |paned| {
+            if bottom_panel_stack.is_visible() {
+                let current = paned.position();
+                let clamped =
+                    clamp_timeline_bottom_panel_position(paned, &bottom_panel_stack, current);
+                if clamped != current {
+                    paned.set_position(clamped);
+                    return;
+                }
+            }
             if !workspace_layouts_applying.get() {
                 sync_workspace_layout_state();
             }
@@ -16906,6 +16942,7 @@ pub fn build_window(
                 let top_paned = top_paned.clone();
                 let left_vpaned = left_vpaned.clone();
                 let timeline_paned = timeline_paned.clone();
+                let bottom_panel_stack = bottom_panel_stack.clone();
                 let right_sidebar_paned = right_sidebar_paned.clone();
                 let docked_scopes_paned = docked_scopes_paned.clone();
                 let transitions_last_visible_split_pos = transitions_last_visible_split_pos.clone();
@@ -16945,12 +16982,13 @@ pub fn build_window(
                             arrangement.timeline_paned_pos,
                             arrangement.timeline_paned_ratio_permille,
                         ) {
-                            timeline_paned.set_position(pos);
+                            timeline_paned.set_position(clamp_timeline_bottom_panel_position(
+                                &timeline_paned,
+                                &bottom_panel_stack,
+                                pos,
+                            ));
                         } else {
-                            let total = timeline_paned.allocation().height();
-                            if total > 0 {
-                                timeline_paned.set_position((total as f64 * 0.7) as i32);
-                            }
+                            show_timeline_bottom_panel(&bottom_panel_stack, &timeline_paned);
                         }
                     } else {
                         collapse_workspace_paned_end_child(&timeline_paned);

@@ -16,6 +16,13 @@ corresponding toggle button.
 The mixer visibility is saved in workspace layouts, so you can include it in
 your preferred arrangement.
 
+If the bottom dock is shorter than the full channel-strip stack, the mixer now
+scrolls vertically instead of forcing the panel taller. When the shared bottom
+panel is shown or restored, UltimateSlice also clamps the split to the active
+panel's minimum height instead of blindly reopening it at a too-small 70/30
+ratio. That keeps saved workspace layouts usable on shorter displays and avoids
+GTK layout warnings while the mixer is open.
+
 ---
 
 ## Channel Strip Anatomy

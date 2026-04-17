@@ -19,8 +19,13 @@ struct RawPeaks {
     peaks: Vec<f32>, // normalized 0.0..=1.0
 }
 
+type WaveformLevels = Vec<Vec<f32>>;
+
 pub struct WaveformCache {
     pub data: HashMap<String, Vec<f32>>,
+    /// Coarser max-pooled summaries built from `data`; level N aggregates
+    /// 2^(N+1) raw peaks so zoomed-out draws can avoid rescanning raw samples.
+    lod_levels: HashMap<String, WaveformLevels>,
     loading: HashSet<String>,
     pending: VecDeque<String>,
     in_flight: usize,
@@ -35,6 +40,7 @@ impl WaveformCache {
         let (tx, rx) = mpsc::sync_channel(8);
         Self {
             data: HashMap::new(),
+            lod_levels: HashMap::new(),
             loading: HashSet::new(),
             pending: VecDeque::new(),
             in_flight: 0,
@@ -64,15 +70,21 @@ impl WaveformCache {
     }
 
     /// Drain completed background results. Call this periodically on the main thread.
-    pub fn poll(&mut self) {
+    /// Returns true when new waveform data became available.
+    pub fn poll(&mut self) -> bool {
+        let mut changed = false;
         while let Ok(raw) = self.rx.try_recv() {
             self.loading.remove(&raw.key);
             self.in_flight = self.in_flight.saturating_sub(1);
             if !raw.peaks.is_empty() {
+                self.lod_levels
+                    .insert(raw.key.clone(), build_lod_levels(&raw.peaks));
                 self.data.insert(raw.key, raw.peaks);
+                changed = true;
             }
         }
         self.flush_pending();
+        changed
     }
 
     /// Get peak slice for the clip's marked region, downsampled to `pixel_width` columns.
@@ -84,34 +96,13 @@ impl WaveformCache {
         source_out_ns: u64,
         pixel_width: usize,
     ) -> Option<Vec<f32>> {
-        let all = self.data.get(source_path)?;
-        if all.is_empty() || pixel_width == 0 {
-            return None;
-        }
-
-        let in_sec = source_in_ns as f64 / 1_000_000_000.0;
-        let out_sec = source_out_ns as f64 / 1_000_000_000.0;
-        let dur_sec = (out_sec - in_sec).max(0.001);
-
-        let peaks_per_px = (dur_sec * PEAKS_PER_SEC) / pixel_width as f64;
-
-        let mut result = Vec::with_capacity(pixel_width);
-        for px in 0..pixel_width {
-            let start_peak = (in_sec * PEAKS_PER_SEC + px as f64 * peaks_per_px) as usize;
-            let end_peak = (in_sec * PEAKS_PER_SEC + (px + 1) as f64 * peaks_per_px) as usize;
-            let end_peak = end_peak.max(start_peak + 1);
-
-            let mut max = 0.0f32;
-            for i in start_peak..end_peak {
-                if let Some(&v) = all.get(i) {
-                    if v > max {
-                        max = v;
-                    }
-                }
-            }
-            result.push(max);
-        }
-        Some(result)
+        let raw = self.data.get(source_path)?;
+        let lod_levels = self
+            .lod_levels
+            .get(source_path)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        sample_cached_peaks(raw, lod_levels, source_in_ns, source_out_ns, pixel_width)
     }
 
     /// Spawn pending extraction threads up to the concurrency limit.
@@ -132,6 +123,92 @@ impl WaveformCache {
             }
         }
     }
+}
+
+fn build_lod_levels(raw: &[f32]) -> WaveformLevels {
+    let mut levels = Vec::new();
+    let mut current = raw.to_vec();
+    while current.len() > 1 {
+        let mut next = Vec::with_capacity((current.len() + 1) / 2);
+        for chunk in current.chunks(2) {
+            next.push(chunk.iter().copied().fold(0.0f32, f32::max));
+        }
+        levels.push(next.clone());
+        current = next;
+    }
+    levels
+}
+
+fn choose_lod_level(raw_peaks_per_px: f64, extra_levels: usize) -> usize {
+    let mut level = 0usize;
+    let mut peaks_per_px = raw_peaks_per_px.max(1.0);
+    while level < extra_levels && peaks_per_px >= 2.0 {
+        peaks_per_px *= 0.5;
+        level += 1;
+    }
+    level
+}
+
+fn sample_cached_peaks(
+    raw: &[f32],
+    lod_levels: &[Vec<f32>],
+    source_in_ns: u64,
+    source_out_ns: u64,
+    pixel_width: usize,
+) -> Option<Vec<f32>> {
+    if raw.is_empty() || pixel_width == 0 {
+        return None;
+    }
+    let in_sec = source_in_ns as f64 / 1_000_000_000.0;
+    let out_sec = source_out_ns as f64 / 1_000_000_000.0;
+    let dur_sec = (out_sec - in_sec).max(0.001);
+    let raw_peaks_per_px = (dur_sec * PEAKS_PER_SEC) / pixel_width as f64;
+    let level = choose_lod_level(raw_peaks_per_px, lod_levels.len());
+    if level == 0 {
+        return Some(sample_peaks_from_level(
+            raw,
+            1.0,
+            source_in_ns,
+            source_out_ns,
+            pixel_width,
+        ));
+    }
+    let scale = (1usize << level) as f64;
+    let level_data = lod_levels.get(level - 1)?;
+    Some(sample_peaks_from_level(
+        level_data,
+        scale,
+        source_in_ns,
+        source_out_ns,
+        pixel_width,
+    ))
+}
+
+fn sample_peaks_from_level(
+    level_data: &[f32],
+    scale: f64,
+    source_in_ns: u64,
+    source_out_ns: u64,
+    pixel_width: usize,
+) -> Vec<f32> {
+    let in_sec = source_in_ns as f64 / 1_000_000_000.0;
+    let out_sec = source_out_ns as f64 / 1_000_000_000.0;
+    let dur_sec = (out_sec - in_sec).max(0.001);
+    let start_peak = (in_sec * PEAKS_PER_SEC) / scale;
+    let peaks_per_px = (dur_sec * PEAKS_PER_SEC) / (pixel_width as f64 * scale);
+    let mut result = Vec::with_capacity(pixel_width);
+    for px in 0..pixel_width {
+        let start = (start_peak + px as f64 * peaks_per_px) as usize;
+        let end = (start_peak + (px + 1) as f64 * peaks_per_px).ceil() as usize;
+        let start = start.min(level_data.len());
+        let end = end.max(start + 1).min(level_data.len());
+        let max = level_data[start..end]
+            .iter()
+            .copied()
+            .fold(0.0f32, f32::max);
+        result.push(max);
+    }
+    result
 }
 
 // ── Background extraction ──────────────────────────────────────────────────
@@ -265,5 +342,67 @@ fn tune_decoder_threads(element: &gst::Element) {
     }
     if element.find_property("threads").is_some() {
         element.set_property_from_str("threads", "1");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_lod_levels_max_pools_successive_levels() {
+        let levels = build_lod_levels(&[0.1, 0.4, 0.3, 0.2, 0.8]);
+        assert_eq!(levels.len(), 3);
+        assert_eq!(levels[0], vec![0.4, 0.3, 0.8]);
+        assert_eq!(levels[1], vec![0.4, 0.8]);
+        assert_eq!(levels[2], vec![0.8]);
+    }
+
+    #[test]
+    fn choose_lod_level_prefers_near_one_bucket_per_pixel() {
+        assert_eq!(choose_lod_level(0.8, 6), 0);
+        assert_eq!(choose_lod_level(1.9, 6), 0);
+        assert_eq!(choose_lod_level(2.0, 6), 1);
+        assert_eq!(choose_lod_level(3.5, 6), 1);
+        assert_eq!(choose_lod_level(16.0, 6), 4);
+    }
+
+    #[test]
+    fn get_peaks_uses_lod_for_zoomed_out_ranges() {
+        let raw = [
+            0.2, 0.1, 0.05, 0.1, 0.2, 0.15, 0.1, 0.05, 0.2, 0.1, 0.05, 0.1, 0.2, 0.15, 0.1, 0.05,
+            0.4, 0.3, 0.2, 0.1, 0.4, 0.35, 0.2, 0.1, 0.4, 0.3, 0.2, 0.1, 0.4, 0.35, 0.2, 0.1, 0.6,
+            0.5, 0.3, 0.2, 0.6, 0.55, 0.3, 0.2, 0.6, 0.5, 0.3, 0.2, 0.6, 0.55, 0.3, 0.2, 0.9, 0.7,
+            0.4, 0.2, 0.9, 0.8, 0.4, 0.2, 0.9, 0.7, 0.4, 0.2, 0.9, 0.8, 0.4, 0.2,
+        ];
+        let mut cache = WaveformCache::new();
+        cache.data.insert("clip".into(), raw.to_vec());
+        cache
+            .lod_levels
+            .insert("clip".into(), build_lod_levels(&raw));
+
+        let peaks = cache.get_peaks("clip", 0, 640_000_000, 4).unwrap();
+
+        assert_eq!(peaks, vec![0.2, 0.4, 0.6, 0.9]);
+    }
+
+    #[test]
+    fn poll_reports_when_new_waveform_data_arrives() {
+        let mut cache = WaveformCache::new();
+        cache.loading.insert("clip".into());
+        cache.in_flight = 1;
+        cache
+            .tx
+            .send(RawPeaks {
+                key: "clip".into(),
+                peaks: vec![0.2, 0.5, 0.1],
+            })
+            .unwrap();
+
+        assert!(cache.poll());
+        assert_eq!(cache.data.get("clip"), Some(&vec![0.2, 0.5, 0.1]));
+        assert_eq!(cache.in_flight, 0);
+        assert!(!cache.loading.contains("clip"));
+        assert!(!cache.poll());
     }
 }

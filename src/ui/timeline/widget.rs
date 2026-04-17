@@ -5597,8 +5597,8 @@ pub fn build_timeline(
         let wave_cache = wave_cache.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
             let thumbs_done = thumb_cache.borrow_mut().poll();
-            wave_cache.borrow_mut().poll();
-            if thumbs_done {
+            let waves_done = wave_cache.borrow_mut().poll();
+            if thumbs_done || waves_done {
                 if let Some(a) = area_weak.upgrade() {
                     a.queue_draw();
                 }
@@ -9863,14 +9863,7 @@ fn draw_clip(
     }
 
     // ── Thumbnail strip for video clips ──────────────────────────────────
-    if track.is_video()
-        && clip.kind != crate::model::clip::ClipKind::Title
-        && clip.kind != crate::model::clip::ClipKind::Adjustment
-        && clip.kind != crate::model::clip::ClipKind::Compound
-        && clip.kind != crate::model::clip::ClipKind::Multicam
-        && clip.kind != crate::model::clip::ClipKind::Audition
-        && cw > 20.0
-    {
+    if track.is_video() && timeline_clip_supports_thumbnails(clip) && cw > 20.0 {
         const THUMB_ASPECT: f64 = 160.0 / 90.0;
         const MAX_THUMB_TILES_PER_CLIP: usize = 6;
         const MAX_NEW_THUMB_REQUESTS_PER_CLIP_PER_DRAW: usize = 2;
@@ -9881,7 +9874,6 @@ fn draw_clip(
         let inner_h = (ch - 2.0).max(0.0);
 
         if inner_w > 1.0 && inner_h > 1.0 {
-            let src_span = clip.source_duration();
             let scale_y = inner_h / 90.0;
 
             cr.save().ok();
@@ -9902,59 +9894,53 @@ fn draw_clip(
                     let draw_w = (x1 - x0).max(1.0);
                     let mid = (f0 + f1) * 0.5;
 
-                    let src_offset = if src_span <= 1 {
-                        0
-                    } else {
-                        ((mid * src_span as f64) as u64).min(src_span - 1)
-                    };
-                    let sample_time =
-                        if clip.kind == crate::model::clip::ClipKind::Image && !clip.animated_svg {
-                            0
-                        } else {
-                            clip.source_in + src_offset
-                        };
-
-                    if let Some(surf) = cache.get(&clip.source_path, sample_time) {
-                        cr.save().ok();
-                        cr.rectangle(x0, inner_y, draw_w, inner_h);
-                        cr.clip();
-                        cr.translate(x0, inner_y);
-                        cr.scale(draw_w / 160.0, scale_y);
-                        cr.set_source_surface(surf, 0.0, 0.0).ok();
-                        cr.paint_with_alpha(0.75).ok();
-                        cr.restore().ok();
-                    } else if requested_this_draw < MAX_NEW_THUMB_REQUESTS_PER_CLIP_PER_DRAW {
-                        cache.request(&clip.source_path, sample_time);
-                        requested_this_draw += 1;
+                    let sample_local_ns = clip_local_sample_time(
+                        clip.duration(),
+                        (mid * clip.duration() as f64) as u64,
+                    );
+                    if let Some(sample) = timeline_thumbnail_sample_for_clip(clip, sample_local_ns)
+                    {
+                        if let Some(surf) = cache.get(&sample.source_path, sample.sample_time_ns) {
+                            cr.save().ok();
+                            cr.rectangle(x0, inner_y, draw_w, inner_h);
+                            cr.clip();
+                            cr.translate(x0, inner_y);
+                            cr.scale(draw_w / 160.0, scale_y);
+                            cr.set_source_surface(surf, 0.0, 0.0).ok();
+                            cr.paint_with_alpha(0.75).ok();
+                            cr.restore().ok();
+                        } else if requested_this_draw < MAX_NEW_THUMB_REQUESTS_PER_CLIP_PER_DRAW {
+                            cache.request(&sample.source_path, sample.sample_time_ns);
+                            requested_this_draw += 1;
+                        }
                     }
                 }
             } else {
                 let draw_w = ((inner_h * THUMB_ASPECT).max(1.0)).min((inner_w * 0.5).max(1.0));
                 let mut requested_this_draw = 0usize;
-                let is_img = clip.kind == crate::model::clip::ClipKind::Image && !clip.animated_svg;
-                let start_time = if is_img { 0 } else { clip.source_in };
-                let end_time = if is_img {
-                    0
-                } else {
-                    clip.source_out.saturating_sub(1).max(clip.source_in)
-                };
                 let endpoints = [
-                    (inner_x, start_time),
-                    (inner_x + inner_w - draw_w, end_time),
+                    (inner_x, 0),
+                    (
+                        inner_x + inner_w - draw_w,
+                        clip_local_sample_time(clip.duration(), clip.duration()),
+                    ),
                 ];
-                for (x0, sample_time) in endpoints {
-                    if let Some(surf) = cache.get(&clip.source_path, sample_time) {
-                        cr.save().ok();
-                        cr.rectangle(x0, inner_y, draw_w, inner_h);
-                        cr.clip();
-                        cr.translate(x0, inner_y);
-                        cr.scale(draw_w / 160.0, scale_y);
-                        cr.set_source_surface(surf, 0.0, 0.0).ok();
-                        cr.paint_with_alpha(0.75).ok();
-                        cr.restore().ok();
-                    } else if requested_this_draw < MAX_NEW_THUMB_REQUESTS_PER_CLIP_PER_DRAW {
-                        cache.request(&clip.source_path, sample_time);
-                        requested_this_draw += 1;
+                for (x0, sample_local_ns) in endpoints {
+                    if let Some(sample) = timeline_thumbnail_sample_for_clip(clip, sample_local_ns)
+                    {
+                        if let Some(surf) = cache.get(&sample.source_path, sample.sample_time_ns) {
+                            cr.save().ok();
+                            cr.rectangle(x0, inner_y, draw_w, inner_h);
+                            cr.clip();
+                            cr.translate(x0, inner_y);
+                            cr.scale(draw_w / 160.0, scale_y);
+                            cr.set_source_surface(surf, 0.0, 0.0).ok();
+                            cr.paint_with_alpha(0.75).ok();
+                            cr.restore().ok();
+                        } else if requested_this_draw < MAX_NEW_THUMB_REQUESTS_PER_CLIP_PER_DRAW {
+                            cache.request(&sample.source_path, sample.sample_time_ns);
+                            requested_this_draw += 1;
+                        }
                     }
                 }
             }
@@ -9971,70 +9957,54 @@ fn draw_clip(
     // ── Waveform for audio clips ───────────────────────────────────────────
     if track.is_audio() && cw > 8.0 {
         wcache.request(&clip.source_path);
-        // Only compute peaks for the visible portion of the clip to avoid
-        // allocating/iterating over tens of thousands of off-screen pixels.
-        let vis_x0 = cx.max(TRACK_LABEL_WIDTH);
-        let vis_x1 = (cx + cw).min(view_width);
-        let vis_px = (vis_x1 - vis_x0).ceil().max(0.0) as usize;
-        if vis_px > 0 {
-            let src_span_ns = clip.source_duration() as f64;
-            let frac0 = ((vis_x0 - cx) / cw).clamp(0.0, 1.0);
-            let frac1 = ((vis_x1 - cx) / cw).clamp(0.0, 1.0);
-            let vis_src_in = clip.source_in + (frac0 * src_span_ns) as u64;
-            let vis_src_out = clip.source_in + (frac1 * src_span_ns) as u64;
-            if let Some(peaks) =
-                wcache.get_peaks(&clip.source_path, vis_src_in, vis_src_out, vis_px)
-            {
-                cr.save().ok();
-                rounded_rect(cr, cx + 1.0, cy + 1.0, cw - 2.0, ch - 2.0, 3.0);
-                cr.clip();
-                let mid = cy + ch / 2.0;
-                cr.set_line_width(1.0);
-                let volumes = compute_per_pixel_volumes(clip, frac0, frac1, vis_px);
-                draw_waveform_batched(cr, &peaks, vis_x0, mid, ch / 2.0 - 2.0, &volumes, 0.85);
-                draw_volume_envelope(cr, &volumes, vis_x0, mid, ch / 2.0 - 2.0);
-                cr.restore().ok();
-            }
+        if let Some(waveform) = visible_waveform_segment(clip, cx, cw, view_width, wcache) {
+            cr.save().ok();
+            rounded_rect(cr, cx + 1.0, cy + 1.0, cw - 2.0, ch - 2.0, 3.0);
+            cr.clip();
+            let mid = cy + ch / 2.0;
+            cr.set_line_width(1.0);
+            let volumes =
+                compute_per_pixel_volumes(clip, waveform.frac0, waveform.frac1, waveform.vis_px);
+            draw_waveform_batched(
+                cr,
+                &waveform.peaks,
+                waveform.vis_x0,
+                mid,
+                ch / 2.0 - 2.0,
+                &volumes,
+                0.85,
+            );
+            draw_volume_envelope(cr, &volumes, waveform.vis_x0, mid, ch / 2.0 - 2.0);
+            cr.restore().ok();
         }
     }
 
     // ── Waveform overlay for video clips (when preference enabled) ────────
     if track.is_video() && st.show_waveform_on_video && cw > 8.0 {
         wcache.request(&clip.source_path);
-        let vis_x0 = cx.max(TRACK_LABEL_WIDTH);
-        let vis_x1 = (cx + cw).min(view_width);
-        let vis_px = (vis_x1 - vis_x0).ceil().max(0.0) as usize;
-        if vis_px > 0 {
-            let src_span_ns = clip.source_duration() as f64;
-            let frac0 = ((vis_x0 - cx) / cw).clamp(0.0, 1.0);
-            let frac1 = ((vis_x1 - cx) / cw).clamp(0.0, 1.0);
-            let vis_src_in = clip.source_in + (frac0 * src_span_ns) as u64;
-            let vis_src_out = clip.source_in + (frac1 * src_span_ns) as u64;
-            if let Some(peaks) =
-                wcache.get_peaks(&clip.source_path, vis_src_in, vis_src_out, vis_px)
-            {
-                let wave_h = (ch * 0.40).max(6.0);
-                let wave_y = cy + ch - wave_h - 1.0;
-                cr.save().ok();
-                rounded_rect(cr, cx + 1.0, wave_y, cw - 2.0, wave_h, 2.0);
-                cr.clip();
-                cr.set_source_rgba(0.0, 0.0, 0.0, 0.45);
-                cr.paint().ok();
-                cr.set_line_width(1.0);
-                let wave_mid = wave_y + wave_h / 2.0;
-                let volumes = compute_per_pixel_volumes(clip, frac0, frac1, vis_px);
-                draw_waveform_batched(
-                    cr,
-                    &peaks,
-                    vis_x0,
-                    wave_mid,
-                    wave_h / 2.0 - 1.0,
-                    &volumes,
-                    0.9,
-                );
-                draw_volume_envelope(cr, &volumes, vis_x0, wave_mid, wave_h / 2.0 - 1.0);
-                cr.restore().ok();
-            }
+        if let Some(waveform) = visible_waveform_segment(clip, cx, cw, view_width, wcache) {
+            let wave_h = (ch * 0.40).max(6.0);
+            let wave_y = cy + ch - wave_h - 1.0;
+            cr.save().ok();
+            rounded_rect(cr, cx + 1.0, wave_y, cw - 2.0, wave_h, 2.0);
+            cr.clip();
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.45);
+            cr.paint().ok();
+            cr.set_line_width(1.0);
+            let wave_mid = wave_y + wave_h / 2.0;
+            let volumes =
+                compute_per_pixel_volumes(clip, waveform.frac0, waveform.frac1, waveform.vis_px);
+            draw_waveform_batched(
+                cr,
+                &waveform.peaks,
+                waveform.vis_x0,
+                wave_mid,
+                wave_h / 2.0 - 1.0,
+                &volumes,
+                0.9,
+            );
+            draw_volume_envelope(cr, &volumes, waveform.vis_x0, wave_mid, wave_h / 2.0 - 1.0);
+            cr.restore().ok();
         }
     }
 
@@ -10579,6 +10549,145 @@ fn rounded_rect(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64
     cr.close_path();
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TimelineThumbnailSample {
+    source_path: String,
+    sample_time_ns: u64,
+}
+
+fn timeline_clip_supports_thumbnails(clip: &Clip) -> bool {
+    matches!(
+        clip.kind,
+        crate::model::clip::ClipKind::Video
+            | crate::model::clip::ClipKind::Image
+            | crate::model::clip::ClipKind::Compound
+    )
+}
+
+fn clip_local_sample_time(duration_ns: u64, nominal_local_ns: u64) -> u64 {
+    if duration_ns <= 1 {
+        0
+    } else {
+        nominal_local_ns.min(duration_ns - 1)
+    }
+}
+
+fn timeline_thumbnail_sample_for_clip(
+    clip: &Clip,
+    sample_local_ns: u64,
+) -> Option<TimelineThumbnailSample> {
+    match clip.kind {
+        crate::model::clip::ClipKind::Compound => {
+            compound_thumbnail_sample_for_clip(clip, sample_local_ns, 0)
+        }
+        crate::model::clip::ClipKind::Video | crate::model::clip::ClipKind::Image => {
+            timeline_thumbnail_sample_for_source_clip(clip, sample_local_ns)
+        }
+        _ => None,
+    }
+}
+
+fn timeline_thumbnail_sample_for_source_clip(
+    clip: &Clip,
+    sample_local_ns: u64,
+) -> Option<TimelineThumbnailSample> {
+    if clip.source_path.trim().is_empty() {
+        return None;
+    }
+    let duration_ns = clip.duration();
+    if duration_ns == 0 {
+        return None;
+    }
+    let sample_local_ns = clip_local_sample_time(duration_ns, sample_local_ns);
+    let sample_time_ns = if clip.kind == crate::model::clip::ClipKind::Image && !clip.animated_svg {
+        0
+    } else {
+        let src_span = clip.source_duration();
+        let src_offset = if src_span <= 1 {
+            0
+        } else {
+            ((sample_local_ns as f64 / duration_ns as f64) * src_span as f64) as u64
+        };
+        clip.source_in + src_offset.min(src_span.saturating_sub(1))
+    };
+    Some(TimelineThumbnailSample {
+        source_path: clip.source_path.clone(),
+        sample_time_ns,
+    })
+}
+
+fn compound_thumbnail_sample_for_clip(
+    compound: &Clip,
+    sample_local_ns: u64,
+    depth: usize,
+) -> Option<TimelineThumbnailSample> {
+    if compound.kind != crate::model::clip::ClipKind::Compound || depth >= 16 {
+        return None;
+    }
+    let internal_tracks = compound.compound_tracks.as_ref()?;
+    for logical_idx in visual_order(internal_tracks) {
+        let track = &internal_tracks[logical_idx];
+        if !track.is_video() {
+            continue;
+        }
+        for inner_clip in &track.clips {
+            let Some(rebased) = crate::model::compound_flattening::rebase_clip_from_compound_window(
+                inner_clip,
+                0,
+                compound.source_in,
+                compound.source_out,
+            ) else {
+                continue;
+            };
+            let rebased_end = rebased.timeline_start.saturating_add(rebased.duration());
+            if sample_local_ns < rebased.timeline_start || sample_local_ns >= rebased_end {
+                continue;
+            }
+            let child_local_ns = sample_local_ns.saturating_sub(rebased.timeline_start);
+            if let Some(sample) = timeline_thumbnail_sample_for_clip(&rebased, child_local_ns) {
+                return Some(sample);
+            }
+        }
+    }
+    None
+}
+
+struct VisibleWaveformSegment {
+    peaks: Vec<f32>,
+    vis_x0: f64,
+    vis_px: usize,
+    frac0: f64,
+    frac1: f64,
+}
+
+fn visible_waveform_segment(
+    clip: &Clip,
+    cx: f64,
+    cw: f64,
+    view_width: f64,
+    wcache: &crate::media::waveform_cache::WaveformCache,
+) -> Option<VisibleWaveformSegment> {
+    let vis_x0 = cx.max(TRACK_LABEL_WIDTH);
+    let vis_x1 = (cx + cw).min(view_width);
+    let vis_px = (vis_x1 - vis_x0).ceil().max(0.0) as usize;
+    if vis_px == 0 {
+        return None;
+    }
+    let src_span_ns = clip.source_duration() as f64;
+    let frac0 = ((vis_x0 - cx) / cw).clamp(0.0, 1.0);
+    let frac1 = ((vis_x1 - cx) / cw).clamp(0.0, 1.0);
+    let vis_src_in = clip.source_in + (frac0 * src_span_ns) as u64;
+    let vis_src_out = clip.source_in + (frac1 * src_span_ns) as u64;
+    let peaks = wcache.get_peaks(&clip.source_path, vis_src_in, vis_src_out, vis_px)?;
+    Some(VisibleWaveformSegment {
+        peaks,
+        vis_x0,
+        vis_px,
+        frac0,
+        frac1,
+    })
+}
+
 /// Map a normalized peak amplitude (0.0–1.0) to an RGB color for waveform display.
 /// Zones mirror the VU meter: green (quiet), yellow (moderate), red (loud).
 /// Draw a waveform using batched strokes grouped by color band.
@@ -10994,6 +11103,7 @@ mod tests {
     use super::*;
     use crate::model::clip::{Clip, ClipKind, KeyframeInterpolation, NumericKeyframe};
     use crate::model::project::Project;
+    use crate::model::track::Track;
     use std::cell::RefCell;
     use std::collections::{HashMap, HashSet};
     use std::rc::Rc;
@@ -11922,6 +12032,38 @@ mod tests {
             .find(|clip| clip.freeze_frame)
             .expect("freeze clip should exist");
         assert!(!freeze_clip.outgoing_transition.is_active());
+    }
+
+    #[test]
+    fn compound_thumbnail_uses_top_visible_video_child() {
+        let mut lower = Track::new_video("V1");
+        lower.add_clip(Clip::new("lower.mov", 8_000_000_000, 0, ClipKind::Video));
+        let mut upper = Track::new_video("V2");
+        upper.add_clip(Clip::new("upper.mov", 8_000_000_000, 0, ClipKind::Video));
+
+        let compound = Clip::new_compound(0, vec![lower, upper]);
+        let sample = compound_thumbnail_sample_for_clip(&compound, 2_000_000_000, 0)
+            .expect("top child thumbnail sample");
+
+        assert_eq!(sample.source_path, "upper.mov");
+        assert_eq!(sample.sample_time_ns, 2_000_000_000);
+    }
+
+    #[test]
+    fn compound_thumbnail_skips_title_overlay_and_falls_back_to_video() {
+        let mut lower = Track::new_video("V1");
+        lower.add_clip(Clip::new("base.mov", 8_000_000_000, 0, ClipKind::Video));
+        let mut upper = Track::new_video("V2");
+        let mut title = Clip::new("", 8_000_000_000, 0, ClipKind::Title);
+        title.label = "Title".to_string();
+        upper.add_clip(title);
+
+        let compound = Clip::new_compound(0, vec![lower, upper]);
+        let sample = compound_thumbnail_sample_for_clip(&compound, 1_000_000_000, 0)
+            .expect("fallback thumbnail sample");
+
+        assert_eq!(sample.source_path, "base.mov");
+        assert_eq!(sample.sample_time_ns, 1_000_000_000);
     }
 
     #[test]
