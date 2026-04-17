@@ -395,6 +395,7 @@ The panel lists every project marker with:
 - **Reorder tracks** by dragging a track's label vertically; a blue indicator line shows the drop target. Release to confirm.
 - **Active track** — click anywhere in a track row (including empty space) to highlight it. The active track shows a coloured accent bar on its label (uses the track colour label when set, otherwise blue). The active track is used as the target for the Append button and the Remove Track button.
 - **Track height presets** — right-click a track header and choose **Track Height: Small / Medium / Large** to resize that track row independently.
+- **Direct track resizing** — drag the bottom edge of a track header when the **row-resize** cursor appears. The row snaps between the same **Small / Medium / Large** presets used by the context menu, so you can resize quickly without opening a menu.
 - Audio tracks show a waveform visualisation (decoded in the background after import).
 - Waveform drawing now reuses a shared multi-resolution cache after extraction, so zoomed-out timelines stay responsive even when many clips are visible at once.
 - New waveform data now repaints automatically when background extraction finishes, so you do not need to start playback just to make freshly loaded waveforms appear.

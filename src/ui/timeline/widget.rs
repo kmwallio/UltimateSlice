@@ -24,6 +24,7 @@ use std::rc::Rc;
 const TRACK_HEIGHT: f64 = 60.0;
 const TRACK_HEIGHT_SMALL: f64 = 44.0;
 const TRACK_HEIGHT_LARGE: f64 = 84.0;
+const TRACK_RESIZE_HANDLE_HALF_HEIGHT: f64 = 6.0;
 const TRACK_LABEL_WIDTH: f64 = 140.0;
 const TRACK_LABEL_METER_WIDTH: f64 = 18.0;
 const TRACK_LABEL_SOLO_BADGE_WIDTH: f64 = 16.0;
@@ -59,6 +60,68 @@ fn track_row_height(track: &crate::model::track::Track) -> f64 {
         crate::model::track::TrackHeightPreset::Medium => TRACK_HEIGHT,
         crate::model::track::TrackHeightPreset::Large => TRACK_HEIGHT_LARGE,
     }
+}
+
+fn track_height_preset_for_height(height: f64) -> crate::model::track::TrackHeightPreset {
+    let small_medium_mid = (TRACK_HEIGHT_SMALL + TRACK_HEIGHT) * 0.5;
+    let medium_large_mid = (TRACK_HEIGHT + TRACK_HEIGHT_LARGE) * 0.5;
+    if height <= small_medium_mid {
+        crate::model::track::TrackHeightPreset::Small
+    } else if height <= medium_large_mid {
+        crate::model::track::TrackHeightPreset::Medium
+    } else {
+        crate::model::track::TrackHeightPreset::Large
+    }
+}
+
+fn track_resize_hit_track_index_in_tracks(
+    tracks: &[crate::model::track::Track],
+    y: f64,
+) -> Option<usize> {
+    if y < 0.0 {
+        return None;
+    }
+    let mut row_top = 0.0;
+    for &logical_idx in &visual_order(tracks) {
+        let height = track_row_height(&tracks[logical_idx]);
+        let boundary_y = row_top + height;
+        if y >= boundary_y - TRACK_RESIZE_HANDLE_HALF_HEIGHT
+            && y <= boundary_y + TRACK_RESIZE_HANDLE_HALF_HEIGHT
+        {
+            return Some(logical_idx);
+        }
+        row_top += height;
+    }
+    None
+}
+
+fn build_track_color_swatch_button(color: crate::model::track::TrackColorLabel) -> gtk::Button {
+    let btn = gtk::Button::new();
+    btn.set_size_request(18, 18);
+    btn.add_css_class("flat");
+    if let Some((r, g, b)) = color.rgb() {
+        let swatch = gtk::DrawingArea::new();
+        swatch.set_content_width(12);
+        swatch.set_content_height(12);
+        swatch.set_halign(gtk::Align::Center);
+        swatch.set_valign(gtk::Align::Center);
+        swatch.set_draw_func(move |_area, cr, width, height| {
+            let cx = width as f64 * 0.5;
+            let cy = height as f64 * 0.5;
+            let radius = width.min(height) as f64 * 0.35;
+            cr.set_source_rgb(r, g, b);
+            cr.arc(cx, cy, radius, 0.0, std::f64::consts::TAU);
+            cr.fill().ok();
+        });
+        btn.set_child(Some(&swatch));
+        btn.set_tooltip_text(Some(color.label()));
+    } else {
+        let label = gtk::Label::new(Some("⊘"));
+        label.add_css_class("dim-label");
+        btn.set_child(Some(&label));
+        btn.set_tooltip_text(Some("None"));
+    }
+    btn
 }
 
 /// Returns logical track indices in top-to-bottom visual order.
@@ -221,6 +284,12 @@ enum DragOp {
     ReorderTrack {
         track_idx: usize,
         target_idx: usize,
+    },
+    /// Resizing a track row by dragging its bottom boundary.
+    ResizeTrackHeight {
+        track_idx: usize,
+        original_preset: crate::model::track::TrackHeightPreset,
+        original_height: f64,
     },
     /// Moving one or more keyframe time-columns (all lanes at selected times) on a clip.
     MoveKeyframeColumns {
@@ -947,6 +1016,18 @@ impl TimelineState {
         } else {
             None
         }
+    }
+
+    fn track_resize_hit_track_index(&self, x: f64, y: f64) -> Option<usize> {
+        if !(0.0..=TRACK_LABEL_WIDTH).contains(&x) {
+            return None;
+        }
+        let project = self.project.borrow();
+        let editing_tracks = self.resolve_editing_tracks(&project);
+        track_resize_hit_track_index_in_tracks(
+            editing_tracks,
+            y + self.vertical_scroll_offset - self.breadcrumb_bar_height(),
+        )
     }
 
     fn toggle_track_mute_by_index(&mut self, track_idx: usize) -> bool {
@@ -4002,6 +4083,9 @@ impl TimelineState {
     }
 
     fn badge_tooltip_text(&self, x: f64, y: f64) -> Option<&'static str> {
+        if self.track_resize_hit_track_index(x, y).is_some() {
+            return Some("Drag to resize track");
+        }
         if self.solo_badge_hit_track_index(x, y).is_some() {
             return Some("Solo (S)");
         }
@@ -4753,6 +4837,31 @@ pub fn build_timeline(
             false
         });
     }
+    {
+        let state = state.clone();
+        let area_weak = area.downgrade();
+        let motion = gtk::EventControllerMotion::new();
+        motion.connect_motion(move |_controller, x, y| {
+            let cursor_name = {
+                let st = state.borrow();
+                if st.track_resize_hit_track_index(x, y).is_some() {
+                    Some("row-resize")
+                } else {
+                    None
+                }
+            };
+            if let Some(area) = area_weak.upgrade() {
+                area.set_cursor_from_name(cursor_name);
+            }
+        });
+        let area_weak = area.downgrade();
+        motion.connect_leave(move |_controller| {
+            if let Some(area) = area_weak.upgrade() {
+                area.set_cursor_from_name(None);
+            }
+        });
+        area.add_controller(motion);
+    }
 
     let thumb_cache = Rc::new(RefCell::new(
         crate::media::thumb_cache::ThumbnailCache::new(),
@@ -4927,16 +5036,7 @@ pub fn build_timeline(
         crate::model::track::TrackColorLabel::ALL
             .iter()
             .map(|&color| {
-                let btn = gtk::Button::new();
-                btn.set_size_request(18, 18);
-                btn.add_css_class("flat");
-                if color == crate::model::track::TrackColorLabel::None {
-                    btn.set_label("⊘");
-                    btn.set_tooltip_text(Some("None"));
-                } else {
-                    btn.set_label("●");
-                    btn.set_tooltip_text(Some(color.label()));
-                }
+                let btn = build_track_color_swatch_button(color);
                 color_row.append(&btn);
                 (btn, color)
             })
@@ -5708,7 +5808,7 @@ pub fn build_timeline(
                             .min_by_key(|m| m.position_ns.abs_diff(ns))
                             .map(|m| m.id.clone())
                     };
-                    if let Some(id) = to_remove {
+                    let marker_removed = if let Some(id) = to_remove {
                         let marker = {
                             let proj = st.project.borrow();
                             proj.markers.iter().find(|m| m.id == id).cloned()
@@ -5720,15 +5820,19 @@ pub fn build_timeline(
                                 Box::new(crate::undo::RemoveMarkerCommand { marker }),
                                 &mut proj,
                             );
+                            true
+                        } else {
+                            false
                         }
-                        drop(st);
-                        TimelineState::notify_project_changed(&state);
-                    }
-                    let mut st = state.borrow_mut();
-                    let ns = st.x_to_ns(x);
+                    } else {
+                        false
+                    };
                     st.set_playhead_visual(ns);
                     let seek_cb = st.on_seek.clone();
                     drop(st);
+                    if marker_removed {
+                        TimelineState::notify_project_changed(&state);
+                    }
                     if let Some(cb) = seek_cb {
                         cb(ns);
                     }
@@ -5739,6 +5843,7 @@ pub fn build_timeline(
                 // also seek/scrub or trigger compound drill-down.
                 if n_press == 2
                     && x < TRACK_LABEL_WIDTH
+                    && st.track_resize_hit_track_index(x, y).is_none()
                     && st.solo_badge_hit_track_index(x, y).is_none()
                     && st.duck_badge_hit_track_index(x, y).is_none()
                     && st.mute_badge_hit_track_index(x, y).is_none()
@@ -6339,8 +6444,23 @@ pub fn build_timeline(
                     && st.mute_badge_hit_track_index(x, y).is_none()
                     && st.lock_badge_hit_track_index(x, y).is_none()
                 {
-                    // Drag started in track label area → track reorder
-                    if let Some(track_idx) = st.track_index_at_y(y) {
+                    if let Some(track_idx) = st.track_resize_hit_track_index(x, y) {
+                        let track_resize_info = {
+                            let project = st.project.borrow();
+                            let editing_tracks = st.resolve_editing_tracks(&project);
+                            editing_tracks
+                                .get(track_idx)
+                                .map(|track| (track.height_preset, track_row_height(track)))
+                        };
+                        if let Some((original_preset, original_height)) = track_resize_info {
+                            st.drag_op = DragOp::ResizeTrackHeight {
+                                track_idx,
+                                original_preset,
+                                original_height,
+                            };
+                        }
+                    } else if let Some(track_idx) = st.track_index_at_y(y) {
+                        // Drag started in track label area → track reorder
                         st.drag_op = DragOp::ReorderTrack {
                             track_idx,
                             target_idx: track_idx,
@@ -6954,6 +7074,16 @@ pub fn build_timeline(
                             *target_idx = new_target;
                         }
                     }
+                    DragOp::ResizeTrackHeight {
+                        track_idx,
+                        original_height,
+                        ..
+                    } => {
+                        let requested_height = (original_height + offset_y)
+                            .clamp(TRACK_HEIGHT_SMALL, TRACK_HEIGHT_LARGE);
+                        let preset = track_height_preset_for_height(requested_height);
+                        st.set_track_height_preset_by_index(track_idx, preset);
+                    }
                     DragOp::MoveKeyframeColumns {
                         ref clip_id,
                         ref track_id,
@@ -7042,7 +7172,22 @@ pub fn build_timeline(
                 let music_generation_outcome = st.finish_music_generation_region_drag();
                 let drag_op = std::mem::replace(&mut st.drag_op, DragOp::None);
                 st.active_snap_hit = None;
-                let should_notify_project = !matches!(&drag_op, DragOp::None);
+                let should_notify_project = match &drag_op {
+                    DragOp::None => false,
+                    DragOp::ResizeTrackHeight {
+                        track_idx,
+                        original_preset,
+                        ..
+                    } => {
+                        let project = st.project.borrow();
+                        let editing_tracks = st.resolve_editing_tracks(&project);
+                        editing_tracks
+                            .get(*track_idx)
+                            .map(|track| track.height_preset != *original_preset)
+                            .unwrap_or(false)
+                    }
+                    _ => true,
+                };
                 let had_marquee = st.marquee_selection.is_some();
                 if had_marquee {
                     st.end_marquee_selection();
@@ -7471,6 +7616,7 @@ pub fn build_timeline(
                             }
                         }
                     }
+                    DragOp::ResizeTrackHeight { .. } => {}
                     DragOp::MoveKeyframeColumns {
                         ref track_id,
                         ref original_track_clips,
@@ -9433,6 +9579,17 @@ fn draw_track_row(
         );
     }
 
+    // Subtle bottom-edge resize affordance for direct track height dragging.
+    let handle_center_x = TRACK_LABEL_WIDTH * 0.5;
+    let handle_y = y + track_height - 6.0;
+    cr.set_source_rgba(0.82, 0.82, 0.88, 0.28);
+    cr.set_line_width(1.2);
+    cr.move_to(handle_center_x - 10.0, handle_y - 2.0);
+    cr.line_to(handle_center_x + 10.0, handle_y - 2.0);
+    cr.move_to(handle_center_x - 10.0, handle_y + 1.0);
+    cr.line_to(handle_center_x + 10.0, handle_y + 1.0);
+    cr.stroke().ok();
+
     cr.set_source_rgb(0.1, 0.1, 0.12);
     cr.set_line_width(1.0);
     cr.move_to(0.0, y + track_height);
@@ -11214,6 +11371,45 @@ mod tests {
             first_ids,
             second_ids,
         )
+    }
+
+    #[test]
+    fn track_height_preset_for_height_snaps_to_existing_presets() {
+        assert_eq!(
+            track_height_preset_for_height(TRACK_HEIGHT_SMALL),
+            crate::model::track::TrackHeightPreset::Small
+        );
+        assert_eq!(
+            track_height_preset_for_height((TRACK_HEIGHT_SMALL + TRACK_HEIGHT) * 0.5),
+            crate::model::track::TrackHeightPreset::Small
+        );
+        assert_eq!(
+            track_height_preset_for_height(TRACK_HEIGHT),
+            crate::model::track::TrackHeightPreset::Medium
+        );
+        assert_eq!(
+            track_height_preset_for_height(TRACK_HEIGHT_LARGE),
+            crate::model::track::TrackHeightPreset::Large
+        );
+    }
+
+    #[test]
+    fn track_resize_hit_test_uses_row_boundaries() {
+        let mut video = Track::new_video("Video 1");
+        video.height_preset = crate::model::track::TrackHeightPreset::Large;
+        let mut audio = Track::new_audio("Audio 1");
+        audio.height_preset = crate::model::track::TrackHeightPreset::Small;
+        let tracks = vec![video, audio];
+
+        assert_eq!(
+            track_resize_hit_track_index_in_tracks(&tracks, 84.0),
+            Some(0)
+        );
+        assert_eq!(
+            track_resize_hit_track_index_in_tracks(&tracks, 128.0),
+            Some(1)
+        );
+        assert_eq!(track_resize_hit_track_index_in_tracks(&tracks, 24.0), None);
     }
 
     fn timeline_state_with_audio_clips(

@@ -715,7 +715,7 @@ FCPXML persistence).
 - [x] Mini-map / timeline overview strip — thin strip above the ruler showing the whole project at a glance with a viewport rectangle for the visible region
 - [x] Track header redesign — per-track color swatch, clearer Solo/Mute/Lock button states, drag handle for reorder, double-click to rename inline
 - [x] Marker list panel — a sortable list of timeline markers with name, time, color, and notes; double-click to seek
-- [ ] Configurable timeline row heights — preset (Compact / Normal / Tall) plus drag-to-resize per track (uses existing `height_preset` field)
+- [x] Configurable timeline row heights — per-track **Small / Medium / Large** presets plus direct drag-to-resize on the track-header bottom edge (uses existing `height_preset` field)
 - [ ] Color-tag legend — a small persistent legend showing what each clip color means in this project, editable
 - [x] Auto-scroll timeline to keep playhead in view during playback — when the playhead reaches the right edge of the visible region, smoothly page (or continuously scroll) the timeline so the playhead stays visible; preference toggle for Page / Smooth / Off, and suspend auto-scroll while the user is actively dragging/scrolling the timeline
 
