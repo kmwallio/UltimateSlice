@@ -5542,22 +5542,16 @@ pub(crate) fn handle_mcp_command(
                         .ok();
                 }
                 Some(cid) => {
-                    let clip_info = {
+                    let (clip_exists, clip_info) = {
                         let proj = project.borrow();
-                        proj.tracks
-                            .iter()
-                            .flat_map(|t| t.clips.iter())
-                            .find(|c| c.id == cid)
-                            .map(|c| {
-                                (
-                                    c.source_path.clone(),
-                                    c.source_in,
-                                    c.source_out,
-                                    c.timeline_start,
-                                )
-                            })
+                        (proj.clip_ref(&cid).is_some(), proj.clip_instance(&cid))
                     };
                     match clip_info {
+                        None if clip_exists => {
+                            reply
+                                .send(json!({"ok": false, "error": "Clip has no source media (title/adjustment)"}))
+                                .ok();
+                        }
                         None => {
                             reply
                                 .send(
@@ -5565,38 +5559,99 @@ pub(crate) fn handle_mcp_command(
                                 )
                                 .ok();
                         }
-                        Some((source_path, source_in, source_out, timeline_start)) => {
-                            if source_path.is_empty() {
-                                reply
-                                    .send(json!({"ok": false, "error": "Clip has no source media (title/adjustment)"}))
-                                    .ok();
-                            } else {
-                                let duration_ns = library
-                                    .borrow()
-                                    .items
-                                    .iter()
-                                    .find(|item| item.source_path == source_path)
-                                    .map(|item| item.duration_ns)
-                                    .unwrap_or(source_out);
-                                on_source_selected(source_path.clone(), duration_ns);
-                                let source_pos = (source_in
-                                    + playhead_ns.saturating_sub(timeline_start))
-                                .min(source_out)
-                                .max(source_in);
-                                let _ = player.borrow().seek(source_pos);
-                                reply
-                                    .send(json!({
-                                        "ok": true,
-                                        "source_path": source_path,
-                                        "source_pos_ns": source_pos,
-                                        "source_in_ns": source_in,
-                                        "source_out_ns": source_out,
-                                        "duration_ns": duration_ns,
-                                    }))
-                                    .ok();
-                            }
+                        Some(instance) => {
+                            let duration_ns = library
+                                .borrow()
+                                .items
+                                .iter()
+                                .find(|item| item.source_path == instance.source_path)
+                                .map(|item| item.duration_ns)
+                                .unwrap_or(instance.source_out);
+                            on_source_selected(instance.source_path.clone(), duration_ns);
+                            let source_pos = (instance.source_in
+                                + playhead_ns.saturating_sub(instance.root_timeline_start))
+                            .min(instance.source_out)
+                            .max(instance.source_in);
+                            let _ = player.borrow().seek(source_pos);
+                            reply
+                                .send(json!({
+                                    "ok": true,
+                                    "source_path": instance.source_path,
+                                    "source_pos_ns": source_pos,
+                                    "source_in_ns": instance.source_in,
+                                    "source_out_ns": instance.source_out,
+                                    "duration_ns": duration_ns,
+                                    "clip_id": instance.clip_id,
+                                    "track_id": instance.track_id,
+                                    "compound_path_ids": instance.compound_path_ids,
+                                    "compound_path_labels": instance.compound_path_labels,
+                                }))
+                                .ok();
                         }
                     }
+                }
+            }
+        }
+
+        McpCommand::ReverseMatchFrame { path, reply } => {
+            let item = library
+                .borrow()
+                .items
+                .iter()
+                .find(|item| item.source_path == path)
+                .cloned();
+            match item {
+                Some(media_item) if media_item.has_backing_file() => {
+                    let (frame_rate, matches) = {
+                        let proj = project.borrow();
+                        (proj.frame_rate.clone(), proj.source_clip_instances(&path))
+                    };
+                    let matches_json: Vec<serde_json::Value> = matches
+                        .into_iter()
+                        .map(|instance| {
+                            json!({
+                                "clip_id": instance.clip_id,
+                                "clip_label": instance.clip_label,
+                                "track_id": instance.track_id,
+                                "track_label": instance.track_label,
+                                "timeline_start_ns": instance.timeline_start,
+                                "timeline_end_ns": instance.timeline_end,
+                                "root_timeline_start_ns": instance.root_timeline_start,
+                                "root_timeline_end_ns": instance.root_timeline_end,
+                                "root_timeline_timecode": crate::ui::timecode::format_ns_as_timecode(instance.root_timeline_start, &frame_rate),
+                                "timeline_timecode": crate::ui::timecode::format_ns_as_timecode(instance.timeline_start, &frame_rate),
+                                "source_in_ns": instance.source_in,
+                                "source_out_ns": instance.source_out,
+                                "compound_path_ids": instance.compound_path_ids,
+                                "compound_path_labels": instance.compound_path_labels,
+                            })
+                        })
+                        .collect();
+                    reply
+                        .send(json!({
+                            "ok": true,
+                            "path": path,
+                            "label": media_item.label,
+                            "count": matches_json.len(),
+                            "matches": matches_json,
+                        }))
+                        .ok();
+                }
+                Some(_) => {
+                    reply
+                        .send(json!({
+                            "ok": false,
+                            "error": "Library item has no source media to match",
+                        }))
+                        .ok();
+                }
+                None => {
+                    reply
+                        .send(json!({
+                            "ok": false,
+                            "error": format!("No library item with path: {path}"),
+                        }))
+                        .ok();
                 }
             }
         }

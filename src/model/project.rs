@@ -215,6 +215,31 @@ pub struct MotionTrackerReference {
     pub sample_count: usize,
 }
 
+/// One visible source-backed clip instance anywhere in the project, including
+/// clips nested inside compound timelines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceClipInstance {
+    pub clip_id: String,
+    pub clip_label: String,
+    pub track_id: String,
+    pub track_label: String,
+    /// The clip's start time inside the currently editing timeline context.
+    /// For root clips this is the normal timeline start; for nested clips this
+    /// is the full compound-internal timeline position.
+    pub timeline_start: u64,
+    pub timeline_end: u64,
+    /// Root-level timeline coordinates after rebasing compound windows.
+    pub root_timeline_start: u64,
+    pub root_timeline_end: u64,
+    pub source_path: String,
+    pub source_in: u64,
+    pub source_out: u64,
+    /// Ordered compound ids from outermost to innermost, excluding the clip.
+    pub compound_path_ids: Vec<String>,
+    /// Human-readable labels matching `compound_path_ids`.
+    pub compound_path_labels: Vec<String>,
+}
+
 impl Project {
     pub fn new(title: impl Into<String>) -> Self {
         let mut project = Self {
@@ -458,6 +483,187 @@ impl Project {
             }
         }
         None
+    }
+
+    pub fn clip_instance(&self, clip_id: &str) -> Option<SourceClipInstance> {
+        let mut compound_path_ids = Vec::new();
+        let mut compound_path_labels = Vec::new();
+        Self::find_clip_instance_recursive(
+            &self.tracks,
+            clip_id,
+            0,
+            &mut compound_path_ids,
+            &mut compound_path_labels,
+        )
+    }
+
+    fn find_clip_instance_recursive(
+        tracks: &[Track],
+        clip_id: &str,
+        absolute_origin_ns: i128,
+        compound_path_ids: &mut Vec<String>,
+        compound_path_labels: &mut Vec<String>,
+    ) -> Option<SourceClipInstance> {
+        for track in tracks {
+            for clip in &track.clips {
+                if clip.id == clip_id && !clip.source_path.is_empty() {
+                    let root_start = (absolute_origin_ns + i128::from(clip.timeline_start)).max(0);
+                    let root_end = (absolute_origin_ns + i128::from(clip.timeline_end())).max(0);
+                    return Some(SourceClipInstance {
+                        clip_id: clip.id.clone(),
+                        clip_label: clip.label.clone(),
+                        track_id: track.id.clone(),
+                        track_label: track.label.clone(),
+                        timeline_start: clip.timeline_start,
+                        timeline_end: clip.timeline_end(),
+                        root_timeline_start: root_start as u64,
+                        root_timeline_end: root_end as u64,
+                        source_path: clip.source_path.clone(),
+                        source_in: clip.source_in,
+                        source_out: clip.source_out,
+                        compound_path_ids: compound_path_ids.clone(),
+                        compound_path_labels: compound_path_labels.clone(),
+                    });
+                }
+                if clip.is_compound() {
+                    let Some(inner_tracks) = clip.compound_tracks.as_ref() else {
+                        continue;
+                    };
+                    let windowed_tracks = Self::window_tracks_for_compound(
+                        inner_tracks,
+                        clip.source_in,
+                        clip.source_out,
+                    );
+                    if windowed_tracks.iter().all(|track| track.clips.is_empty()) {
+                        continue;
+                    }
+                    compound_path_ids.push(clip.id.clone());
+                    compound_path_labels.push(clip.label.clone());
+                    let child_origin_ns = absolute_origin_ns + i128::from(clip.timeline_start)
+                        - i128::from(clip.source_in);
+                    let found = Self::find_clip_instance_recursive(
+                        &windowed_tracks,
+                        clip_id,
+                        child_origin_ns,
+                        compound_path_ids,
+                        compound_path_labels,
+                    );
+                    compound_path_ids.pop();
+                    compound_path_labels.pop();
+                    if found.is_some() {
+                        return found;
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    pub fn source_clip_instances(&self, source_path: &str) -> Vec<SourceClipInstance> {
+        if source_path.is_empty() {
+            return Vec::new();
+        }
+        let mut instances = Vec::new();
+        let mut compound_path_ids = Vec::new();
+        let mut compound_path_labels = Vec::new();
+        Self::collect_source_clip_instances_recursive(
+            &self.tracks,
+            source_path,
+            0,
+            &mut compound_path_ids,
+            &mut compound_path_labels,
+            &mut instances,
+        );
+        instances.sort_by_key(|instance| {
+            (
+                instance.root_timeline_start,
+                instance.compound_path_ids.len(),
+                instance.track_label.clone(),
+                instance.clip_id.clone(),
+            )
+        });
+        instances
+    }
+
+    fn collect_source_clip_instances_recursive(
+        tracks: &[Track],
+        source_path: &str,
+        absolute_origin_ns: i128,
+        compound_path_ids: &mut Vec<String>,
+        compound_path_labels: &mut Vec<String>,
+        instances: &mut Vec<SourceClipInstance>,
+    ) {
+        for track in tracks {
+            for clip in &track.clips {
+                if clip.source_path == source_path {
+                    let root_start = (absolute_origin_ns + i128::from(clip.timeline_start)).max(0);
+                    let root_end = (absolute_origin_ns + i128::from(clip.timeline_end())).max(0);
+                    instances.push(SourceClipInstance {
+                        clip_id: clip.id.clone(),
+                        clip_label: clip.label.clone(),
+                        track_id: track.id.clone(),
+                        track_label: track.label.clone(),
+                        timeline_start: clip.timeline_start,
+                        timeline_end: clip.timeline_end(),
+                        root_timeline_start: root_start as u64,
+                        root_timeline_end: root_end as u64,
+                        source_path: clip.source_path.clone(),
+                        source_in: clip.source_in,
+                        source_out: clip.source_out,
+                        compound_path_ids: compound_path_ids.clone(),
+                        compound_path_labels: compound_path_labels.clone(),
+                    });
+                }
+                if clip.is_compound() {
+                    let Some(inner_tracks) = clip.compound_tracks.as_ref() else {
+                        continue;
+                    };
+                    let windowed_tracks = Self::window_tracks_for_compound(
+                        inner_tracks,
+                        clip.source_in,
+                        clip.source_out,
+                    );
+                    if windowed_tracks.iter().all(|track| track.clips.is_empty()) {
+                        continue;
+                    }
+                    compound_path_ids.push(clip.id.clone());
+                    compound_path_labels.push(clip.label.clone());
+                    let child_origin_ns = absolute_origin_ns + i128::from(clip.timeline_start)
+                        - i128::from(clip.source_in);
+                    Self::collect_source_clip_instances_recursive(
+                        &windowed_tracks,
+                        source_path,
+                        child_origin_ns,
+                        compound_path_ids,
+                        compound_path_labels,
+                        instances,
+                    );
+                    compound_path_ids.pop();
+                    compound_path_labels.pop();
+                }
+            }
+        }
+    }
+
+    fn window_tracks_for_compound(
+        tracks: &[Track],
+        compound_source_in: u64,
+        compound_source_out: u64,
+    ) -> Vec<Track> {
+        tracks
+            .iter()
+            .cloned()
+            .map(|mut track| {
+                track.clips = track
+                    .clips
+                    .into_iter()
+                    .filter_map(|clip| {
+                        clip.rebase_to_window(compound_source_in, compound_source_out)
+                    })
+                    .collect();
+                track
+            })
+            .collect()
     }
 
     fn find_clip_mut_recursive<'a>(
@@ -839,6 +1045,67 @@ mod tests {
         let found = p.clip_ref("compound-1");
         assert!(found.is_some());
         assert!(found.unwrap().is_compound());
+    }
+
+    #[test]
+    fn test_clip_instance_finds_nested_clip_with_compound_context() {
+        let mut p = make_project_with_compound();
+        let compound = p.clip_mut("compound-1").unwrap();
+        compound.timeline_start = 10_000_000_000;
+        compound.source_in = 4_000_000_000;
+        compound.source_out = 9_000_000_000;
+
+        let instance = p
+            .clip_instance("inner-clip-1")
+            .expect("nested clip instance should be found");
+        assert_eq!(instance.track_label, "Inner V1");
+        assert_eq!(instance.timeline_start, 4_000_000_000);
+        assert_eq!(instance.timeline_end, 5_000_000_000);
+        assert_eq!(instance.root_timeline_start, 10_000_000_000);
+        assert_eq!(instance.root_timeline_end, 11_000_000_000);
+        assert_eq!(instance.compound_path_ids, vec!["compound-1".to_string()]);
+        assert_eq!(
+            instance.compound_path_labels,
+            vec!["Compound Clip".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_source_clip_instances_include_root_and_nested_visible_matches() {
+        let mut p = make_project_with_compound();
+        let mut root_match = Clip::new("inner.mp4", 2_000_000_000, 20_000_000_000, ClipKind::Video);
+        root_match.id = "root-match".into();
+        p.tracks[0].add_clip(root_match);
+        let compound = p.clip_mut("compound-1").unwrap();
+        compound.timeline_start = 10_000_000_000;
+        compound.source_in = 4_000_000_000;
+        compound.source_out = 9_000_000_000;
+
+        let instances = p.source_clip_instances("inner.mp4");
+        assert_eq!(instances.len(), 2);
+
+        assert_eq!(instances[0].clip_id, "inner-clip-1");
+        assert_eq!(instances[0].root_timeline_start, 10_000_000_000);
+        assert_eq!(
+            instances[0].compound_path_ids,
+            vec!["compound-1".to_string()]
+        );
+
+        assert_eq!(instances[1].clip_id, "root-match");
+        assert_eq!(instances[1].root_timeline_start, 20_000_000_000);
+        assert!(instances[1].compound_path_ids.is_empty());
+    }
+
+    #[test]
+    fn test_source_clip_instances_skip_compound_children_outside_visible_window() {
+        let mut p = make_project_with_compound();
+        let compound = p.clip_mut("compound-1").unwrap();
+        compound.timeline_start = 10_000_000_000;
+        compound.source_in = 5_000_000_000;
+        compound.source_out = 6_000_000_000;
+
+        let instances = p.source_clip_instances("inner.mp4");
+        assert!(instances.is_empty());
     }
 
     #[test]

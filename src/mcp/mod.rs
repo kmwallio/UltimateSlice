@@ -750,6 +750,10 @@ pub enum McpCommand {
         clip_id: Option<String>,
         reply: SyncSender<Value>,
     },
+    ReverseMatchFrame {
+        path: String,
+        reply: SyncSender<Value>,
+    },
     SetClipStabilization {
         clip_id: String,
         enabled: bool,

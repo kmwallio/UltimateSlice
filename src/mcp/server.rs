@@ -1820,6 +1820,17 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "reverse_match_frame",
+            "description": "Find every visible timeline instance of a media-library source path, including clips nested inside compounds.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path of the source-backed library item to look up." }
+                },
+                "required": ["path"]
+            }
+        },
+        {
             "name": "list_backups",
             "description": "List available versioned backup files with timestamps and sizes.",
             "inputSchema": { "type": "object", "properties": {} }
@@ -3770,6 +3781,10 @@ fn dispatch_tool_payload(
                 .get("clip_id")
                 .and_then(|v| v.as_str())
                 .map(str::to_string),
+            reply: tx,
+        },
+        "reverse_match_frame" => McpCommand::ReverseMatchFrame {
+            path: arg_str!(args, "path"),
             reply: tx,
         },
         "list_backups" => McpCommand::ListBackups { reply: tx },

@@ -2790,6 +2790,50 @@ impl TimelineState {
         visual_ns
     }
 
+    /// Focus a specific clip instance, optionally entering compound edit
+    /// context first and revealing the target time in the viewport.
+    pub fn focus_clip_instance(
+        &mut self,
+        clip_id: String,
+        track_id: String,
+        compound_path_ids: Vec<String>,
+        visual_timeline_ns: u64,
+        viewport_width: Option<f64>,
+    ) {
+        if self.compound_nav_stack != compound_path_ids {
+            if compound_path_ids.is_empty() {
+                self.exit_compound_to_root();
+            } else {
+                if self.compound_nav_stack.is_empty() {
+                    self.compound_saved_scroll = Some(self.scroll_offset);
+                }
+                self.compound_nav_stack = compound_path_ids;
+                self.selected_clip_id = None;
+                self.selected_clip_ids.clear();
+                self.selected_track_id = None;
+                self.clear_keyframe_selection();
+                self.scroll_offset = 0.0;
+            }
+        }
+        self.set_single_clip_selection(clip_id, track_id);
+        self.set_playhead_visual(visual_timeline_ns);
+        if let Some(viewport_width) = viewport_width {
+            self.reveal_visual_time(visual_timeline_ns, viewport_width);
+        }
+    }
+
+    fn reveal_visual_time(&mut self, visual_timeline_ns: u64, viewport_width: f64) {
+        let usable_w = (viewport_width - TRACK_LABEL_WIDTH).max(100.0);
+        let target_x = TRACK_LABEL_WIDTH
+            + (visual_timeline_ns as f64 / NS_PER_SECOND) * self.pixels_per_second;
+        let left_edge = self.scroll_offset + TRACK_LABEL_WIDTH;
+        let right_edge = left_edge + usable_w;
+        if target_x < left_edge || target_x > right_edge {
+            let target_local_x = TRACK_LABEL_WIDTH + usable_w * 0.25;
+            self.scroll_offset = (target_x - target_local_x).max(0.0);
+        }
+    }
+
     /// Resolve the currently-editing tracks based on the navigation stack.
     /// Returns project.tracks when at root level, or the innermost compound
     /// clip's internal tracks when drilled in.

@@ -119,6 +119,8 @@ Patch selections are **workspace-local** rather than saved into the project file
 
 Press **F** on the timeline to load the selected clip's source into the Source Monitor and seek to the frame matching the current playhead position. The Source Monitor's In/Out points are set to the clip's source range. This is useful for quickly reviewing original footage from the assembled timeline.
 
+Match Frame also works when the selected clip lives inside a compound timeline, and the reverse workflow is available from the Media Library via **Reverse Match Frame…** when you want to start from a source clip and find every visible timeline use.
+
 Also available via the `match_frame` MCP tool.
 
 ## Insert and Overwrite Edits

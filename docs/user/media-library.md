@@ -51,6 +51,13 @@ Bins are saved with your project and restored when you reopen it.
 - The clip name is shown above the source monitor preview.
 - Title and other non-file-backed browser cards remain visible/searchable and can still be organized into bins, but they do not load the Source Monitor because they have no source file to preview.
 
+## Reverse Match Frame
+
+- **Right-click** a single **source-backed** library item and choose **Reverse Match Frame…** to find everywhere that source appears on the timeline.
+- The results list includes root timeline uses plus clips nested inside compound timelines.
+- Each result shows its project / compound breadcrumb plus the matching timecode; click a result to jump the timeline there and select the clip.
+- MCP automation can use the same lookup with `reverse_match_frame(path)`.
+
 ## Metadata and Filtering
 
 - Each media card now shows compact metadata beneath the clip name when available:

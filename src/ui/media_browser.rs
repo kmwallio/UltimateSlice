@@ -164,6 +164,7 @@ fn refresh_collection_picker(
 pub fn build_media_browser(
     library: Rc<RefCell<MediaLibrary>>,
     on_source_selected: Rc<dyn Fn(String, u64)>,
+    on_reverse_match_frame: Rc<dyn Fn(String)>,
     on_relink_media: Rc<dyn Fn()>,
     on_create_multicam_from_browser: Rc<dyn Fn(Vec<String>)>,
     on_library_changed: Rc<dyn Fn()>,
@@ -783,6 +784,7 @@ pub fn build_media_browser(
         let all_media_btn_ctx = all_media_btn.clone();
         let filters_ctx = filters.clone();
         let on_library_changed_ctx = on_library_changed.clone();
+        let on_reverse_match_frame_ctx = on_reverse_match_frame.clone();
         let rclick = gtk::GestureClick::new();
         rclick.set_button(3); // right button
         rclick.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -1006,6 +1008,26 @@ pub fn build_media_browser(
                     drop(entries);
 
                     if !selected_ids.is_empty() {
+                        let reverse_match_source_path = if selected_ids.len() == 1 {
+                            let lib = library_ctx.borrow();
+                            lib.items
+                                .iter()
+                                .find(|item| item.id == selected_ids[0] && item.has_backing_file())
+                                .map(|item| item.source_path.clone())
+                        } else {
+                            None
+                        };
+                        if let Some(source_path) = reverse_match_source_path {
+                            let reverse_match_btn =
+                                add_menu_item(&menu_box, "Reverse Match Frame…");
+                            let popover = popover.clone();
+                            let on_reverse_match_frame = on_reverse_match_frame_ctx.clone();
+                            reverse_match_btn.connect_clicked(move |_| {
+                                popover.popdown();
+                                on_reverse_match_frame(source_path.clone());
+                            });
+                        }
+
                         let favorite_btn = add_menu_item(&menu_box, "Mark Favorite");
                         {
                             let item_ids = selected_ids.clone();

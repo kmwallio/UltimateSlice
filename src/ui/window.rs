@@ -8,7 +8,7 @@ use crate::model::media_library::{
     MediaKeywordRange, MediaKindFilter, MediaLibrary, MediaRating, MediaRatingFilter,
     ResolutionFilter, SourceMarks,
 };
-use crate::model::project::{FrameRate, Project};
+use crate::model::project::{FrameRate, Project, SourceClipInstance};
 use crate::model::track::TrackKind;
 use crate::model::transition::supported_transition_definitions;
 use crate::recent;
@@ -1581,6 +1581,174 @@ fn seek_playhead_and_notify(
     if let Some(ref w) = *timeline_panel_cell.borrow() {
         w.queue_draw();
     }
+}
+
+fn focus_timeline_clip_instance_and_notify(
+    timeline_state: &Rc<RefCell<TimelineState>>,
+    timeline_panel_cell: &Rc<RefCell<Option<gtk::Widget>>>,
+    instance: &SourceClipInstance,
+) {
+    let viewport_width = timeline_panel_cell
+        .borrow()
+        .as_ref()
+        .map(|widget| widget.allocation().width() as f64)
+        .filter(|width| *width > 0.0);
+    let (seek_cb, selected_cb, selected_id) = {
+        let mut st = timeline_state.borrow_mut();
+        st.focus_clip_instance(
+            instance.clip_id.clone(),
+            instance.track_id.clone(),
+            instance.compound_path_ids.clone(),
+            instance.timeline_start,
+            viewport_width,
+        );
+        (
+            st.on_seek.clone(),
+            st.on_clip_selected.clone(),
+            st.selected_clip_id.clone(),
+        )
+    };
+    if let Some(cb) = seek_cb {
+        cb(instance.timeline_start);
+    }
+    if let Some(cb) = selected_cb {
+        cb(selected_id);
+    }
+    if let Some(ref w) = *timeline_panel_cell.borrow() {
+        w.queue_draw();
+    }
+}
+
+fn reverse_match_instance_title(instance: &SourceClipInstance) -> String {
+    let clip_label = instance.clip_label.trim();
+    let clip_label = if clip_label.is_empty() {
+        std::path::Path::new(&instance.source_path)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("Clip")
+    } else {
+        clip_label
+    };
+    let track_label = instance.track_label.trim();
+    if track_label.is_empty() {
+        clip_label.to_string()
+    } else {
+        format!("{clip_label} - {track_label}")
+    }
+}
+
+fn reverse_match_instance_detail(instance: &SourceClipInstance, frame_rate: &FrameRate) -> String {
+    let root_tc = timecode::format_ns_as_timecode(instance.root_timeline_start, frame_rate);
+    let location = if instance.compound_path_labels.is_empty() {
+        "Project".to_string()
+    } else {
+        format!("Project > {}", instance.compound_path_labels.join(" > "))
+    };
+    if instance.compound_path_labels.is_empty() {
+        format!("{location} - {root_tc}")
+    } else {
+        let local_tc = timecode::format_ns_as_timecode(instance.timeline_start, frame_rate);
+        format!("{location} - root {root_tc} - local {local_tc}")
+    }
+}
+
+#[allow(deprecated)]
+fn present_reverse_match_frame_dialog(
+    window: &gtk::ApplicationWindow,
+    project: &Rc<RefCell<Project>>,
+    timeline_state: &Rc<RefCell<TimelineState>>,
+    timeline_panel_cell: &Rc<RefCell<Option<gtk::Widget>>>,
+    source_label: &str,
+    matches: Vec<SourceClipInstance>,
+    frame_rate: FrameRate,
+) {
+    let dialog = gtk::Dialog::builder()
+        .title("Reverse Match Frame")
+        .transient_for(window)
+        .modal(true)
+        .default_width(520)
+        .default_height(360)
+        .build();
+    dialog.add_button("Close", gtk::ResponseType::Close);
+
+    let content = dialog.content_area();
+    let summary = gtk::Label::new(Some(&format!(
+        "\"{source_label}\" appears {} time{} on the timeline.",
+        matches.len(),
+        if matches.len() == 1 { "" } else { "s" }
+    )));
+    summary.set_halign(gtk::Align::Start);
+    summary.set_wrap(true);
+    content.append(&summary);
+
+    let hint = gtk::Label::new(Some("Click a result to jump to that timeline instance."));
+    hint.set_halign(gtk::Align::Start);
+    hint.add_css_class("dim-label");
+    hint.set_wrap(true);
+    content.append(&hint);
+
+    let scroller = gtk::ScrolledWindow::new();
+    scroller.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroller.set_vexpand(true);
+    scroller.set_min_content_height(240);
+
+    let results_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    results_box.set_margin_top(8);
+    results_box.set_margin_bottom(8);
+    results_box.set_margin_start(4);
+    results_box.set_margin_end(4);
+
+    for instance in matches {
+        let button = gtk::Button::new();
+        button.add_css_class("flat");
+        button.set_halign(gtk::Align::Fill);
+        button.set_hexpand(true);
+
+        let row_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        row_box.set_halign(gtk::Align::Fill);
+        row_box.set_hexpand(true);
+        row_box.set_margin_top(6);
+        row_box.set_margin_bottom(6);
+        row_box.set_margin_start(8);
+        row_box.set_margin_end(8);
+
+        let title = gtk::Label::new(Some(&reverse_match_instance_title(&instance)));
+        title.set_halign(gtk::Align::Start);
+        title.set_xalign(0.0);
+        row_box.append(&title);
+
+        let detail = gtk::Label::new(Some(&reverse_match_instance_detail(&instance, &frame_rate)));
+        detail.set_halign(gtk::Align::Start);
+        detail.set_xalign(0.0);
+        detail.set_wrap(true);
+        detail.add_css_class("dim-label");
+        row_box.append(&detail);
+
+        button.set_child(Some(&row_box));
+        results_box.append(&button);
+
+        let dialog = dialog.clone();
+        let window = window.clone();
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let timeline_panel_cell = timeline_panel_cell.clone();
+        let frame_rate = frame_rate.clone();
+        button.connect_clicked(move |_| {
+            focus_timeline_clip_instance_and_notify(
+                &timeline_state,
+                &timeline_panel_cell,
+                &instance,
+            );
+            let tc = timecode::format_ns_as_timecode(instance.root_timeline_start, &frame_rate);
+            flash_window_status_title(&window, &project, &format!("Jumped to {tc}"));
+            dialog.close();
+        });
+    }
+
+    scroller.set_child(Some(&results_box));
+    content.append(&scroller);
+    dialog.connect_response(|dialog, _| dialog.close());
+    dialog.present();
 }
 
 #[allow(deprecated)]
@@ -14374,24 +14542,14 @@ pub fn build_window(
                     None => return,
                 }
             };
-            let clip_info = {
+            let clip_instance = {
                 let proj = project.borrow();
-                proj.tracks
-                    .iter()
-                    .flat_map(|t| t.clips.iter())
-                    .find(|c| c.id == selected_id)
-                    .map(|c| {
-                        (
-                            c.source_path.clone(),
-                            c.source_in,
-                            c.source_out,
-                            c.timeline_start,
-                        )
-                    })
+                proj.clip_instance(&selected_id)
             };
-            let Some((source_path, source_in, source_out, timeline_start)) = clip_info else {
+            let Some(clip_instance) = clip_instance else {
                 return;
             };
+            let source_path = clip_instance.source_path.clone();
             if source_path.is_empty() {
                 return; // Title/adjustment clips have no source
             }
@@ -14401,24 +14559,78 @@ pub fn build_window(
                     .iter()
                     .find(|item| item.source_path == source_path)
                     .map(|item| item.duration_ns)
-                    .unwrap_or(source_out)
+                    .unwrap_or(clip_instance.source_out)
             };
             // Load the source clip in the source monitor.
             on_source_selected(source_path, duration_ns);
             // Compute the source position matching the playhead.
-            let source_pos = source_in + playhead_ns.saturating_sub(timeline_start);
-            let source_pos = source_pos.min(source_out).max(source_in);
+            let source_pos = clip_instance.source_in
+                + playhead_ns.saturating_sub(clip_instance.root_timeline_start);
+            let source_pos = source_pos
+                .min(clip_instance.source_out)
+                .max(clip_instance.source_in);
             // Seek the source player to the matching frame.
             let _ = player.borrow().seek(source_pos);
             // Update source marks to reflect the clip's in/out range.
             let mut m = source_marks.borrow_mut();
-            m.in_ns = source_in;
-            m.out_ns = source_out;
+            m.in_ns = clip_instance.source_in;
+            m.out_ns = clip_instance.source_out;
             m.display_pos_ns = source_pos;
             drop(m);
             refresh_source_keyword_actions();
         }));
     }
+
+    let on_reverse_match_frame: Rc<dyn Fn(String)> = {
+        let window_weak = window_weak.clone();
+        let project = project.clone();
+        let library = library.clone();
+        let timeline_state = timeline_state.clone();
+        let timeline_panel_cell = timeline_panel_cell.clone();
+        Rc::new(move |source_path: String| {
+            let Some(window) = window_weak.upgrade() else {
+                return;
+            };
+            let source_label = {
+                let lib = library.borrow();
+                lib.items
+                    .iter()
+                    .find(|item| item.source_path == source_path)
+                    .map(|item| item.label.clone())
+                    .unwrap_or_else(|| {
+                        std::path::Path::new(&source_path)
+                            .file_stem()
+                            .and_then(|stem| stem.to_str())
+                            .unwrap_or(&source_path)
+                            .to_string()
+                    })
+            };
+            let (matches, frame_rate) = {
+                let proj = project.borrow();
+                (
+                    proj.source_clip_instances(&source_path),
+                    proj.frame_rate.clone(),
+                )
+            };
+            if matches.is_empty() {
+                flash_window_status_title(
+                    &window,
+                    &project,
+                    "Selected media is not used anywhere on the timeline",
+                );
+                return;
+            }
+            present_reverse_match_frame_dialog(
+                &window,
+                &project,
+                &timeline_state,
+                &timeline_panel_cell,
+                &source_label,
+                matches,
+                frame_rate,
+            );
+        })
+    };
 
     // ── Media browser ─────────────────────────────────────────────────────
     // Callback for "Create Multicam Clip" from media browser.
@@ -14642,6 +14854,7 @@ pub fn build_window(
         media_browser::build_media_browser(
             library.clone(),
             on_source_selected.clone(),
+            on_reverse_match_frame,
             on_relink_media_gui.clone(),
             on_create_multicam_from_browser,
             on_library_changed.clone(),
