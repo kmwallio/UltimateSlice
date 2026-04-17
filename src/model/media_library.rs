@@ -234,6 +234,80 @@ impl MediaTranscriptWindow {
     }
 }
 
+/// CLIP-style visual-search embedding captured for a representative frame.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MediaVisualEmbeddingFrame {
+    #[serde(default)]
+    pub time_ns: u64,
+    #[serde(default)]
+    pub embedding: Vec<f32>,
+}
+
+/// Runtime visual-search embedding state for a media item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MediaVisualEmbedding {
+    #[serde(default)]
+    pub model_id: String,
+    #[serde(default)]
+    pub frames: Vec<MediaVisualEmbeddingFrame>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaAutoTagCategory {
+    ShotType,
+    Setting,
+    TimeOfDay,
+    Subject,
+}
+
+impl MediaAutoTagCategory {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ShotType => "Shot type",
+            Self::Setting => "Setting",
+            Self::TimeOfDay => "Time of day",
+            Self::Subject => "Subject",
+        }
+    }
+
+    pub fn search_text(self) -> &'static str {
+        match self {
+            Self::ShotType => "shot type shot framing",
+            Self::Setting => "setting location scene",
+            Self::TimeOfDay => "time of day daytime nighttime",
+            Self::Subject => "subject object people",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MediaAutoTag {
+    pub category: MediaAutoTagCategory,
+    pub label: String,
+    #[serde(default)]
+    pub confidence: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub best_frame_time_ns: Option<u64>,
+}
+
+impl MediaAutoTag {
+    pub fn new(
+        category: MediaAutoTagCategory,
+        label: impl Into<String>,
+        confidence: f32,
+        best_frame_time_ns: Option<u64>,
+    ) -> Option<Self> {
+        let label = label.into().trim().to_string();
+        (!label.is_empty()).then_some(Self {
+            category,
+            label,
+            confidence: confidence.clamp(0.0, 1.0),
+            best_frame_time_ns,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MediaSearchField {
@@ -243,7 +317,9 @@ pub enum MediaSearchField {
     SourcePath,
     Codec,
     Keyword,
+    AutoTag,
     Transcript,
+    Visual,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -304,8 +380,15 @@ pub struct MediaItem {
     pub rating: MediaRating,
     /// Named sub-ranges within the source media for browser triage.
     pub keyword_ranges: Vec<MediaKeywordRange>,
+    /// Persistent semantic tags inferred from the visual search embedding.
+    pub auto_tags: Vec<MediaAutoTag>,
+    /// True once contextual auto-tagging has run for this item, even if no
+    /// tags cleared the confidence threshold.
+    pub auto_tags_indexed: bool,
     /// Library-keyed transcript windows generated from speech-to-text runs.
     pub transcript_windows: Vec<MediaTranscriptWindow>,
+    /// Runtime-only CLIP-style frame embeddings for semantic visual search.
+    pub visual_embedding: Option<MediaVisualEmbedding>,
 }
 
 impl MediaItem {
@@ -339,7 +422,10 @@ impl MediaItem {
             bin_id: None,
             rating: MediaRating::None,
             keyword_ranges: Vec::new(),
+            auto_tags: Vec::new(),
+            auto_tags_indexed: false,
             transcript_windows: Vec::new(),
+            visual_embedding: None,
         }
     }
 
@@ -389,6 +475,53 @@ impl MediaItem {
         ));
         self.transcript_windows
             .sort_by_key(|window| (window.source_in_ns, window.source_out_ns));
+        true
+    }
+
+    pub fn upsert_visual_embedding(&mut self, embedding: MediaVisualEmbedding) -> bool {
+        if embedding.frames.is_empty() {
+            return false;
+        }
+        if self.visual_embedding.as_ref() == Some(&embedding) {
+            return false;
+        }
+        self.visual_embedding = Some(embedding);
+        true
+    }
+
+    pub fn upsert_auto_tags(&mut self, auto_tags: Vec<MediaAutoTag>) -> bool {
+        let mut normalized = auto_tags
+            .into_iter()
+            .filter_map(|tag| {
+                MediaAutoTag::new(
+                    tag.category,
+                    tag.label,
+                    tag.confidence,
+                    tag.best_frame_time_ns,
+                )
+            })
+            .collect::<Vec<_>>();
+        normalized.sort_by(|a, b| {
+            (a.category as u8)
+                .cmp(&(b.category as u8))
+                .then_with(|| {
+                    b.confidence
+                        .partial_cmp(&a.confidence)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| {
+                    a.label
+                        .to_ascii_lowercase()
+                        .cmp(&b.label.to_ascii_lowercase())
+                })
+        });
+        normalized
+            .dedup_by(|a, b| a.category == b.category && a.label.eq_ignore_ascii_case(&b.label));
+        if self.auto_tags == normalized && self.auto_tags_indexed {
+            return false;
+        }
+        self.auto_tags = normalized;
+        self.auto_tags_indexed = true;
         true
     }
 }
@@ -482,6 +615,70 @@ pub fn media_keyword_summary(item: &MediaItem, max_labels: usize) -> Option<Stri
     Some(labels.join(" • "))
 }
 
+pub fn media_auto_tag_summary(item: &MediaItem, max_tags: usize) -> Option<String> {
+    if item.auto_tags.is_empty() || max_tags == 0 {
+        return None;
+    }
+    let mut labels: Vec<String> = item
+        .auto_tags
+        .iter()
+        .map(|tag| tag.label.trim())
+        .filter(|label| !label.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    labels.sort();
+    labels.dedup();
+    if labels.is_empty() {
+        return None;
+    }
+    let extra = labels.len().saturating_sub(max_tags);
+    labels.truncate(max_tags);
+    if extra > 0 {
+        labels.push(format!("+{extra}"));
+    }
+    Some(labels.join(" • "))
+}
+
+pub fn media_auto_tag_state_key(item: &MediaItem) -> String {
+    std::iter::once(format!("indexed:{}", item.auto_tags_indexed))
+        .chain(item.auto_tags.iter().map(|tag| {
+            format!(
+                "{:?}:{}:{:.3}:{}",
+                tag.category,
+                tag.label,
+                tag.confidence,
+                tag.best_frame_time_ns.unwrap_or_default()
+            )
+        }))
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+fn media_auto_tag_search_excerpt(item: &MediaItem, query: &SearchQuery) -> Option<String> {
+    let mut best: Option<(i32, &MediaAutoTag)> = None;
+    for tag in &item.auto_tags {
+        let tag_text = format!("{} {}", tag.category.search_text(), tag.label);
+        let Some(score) = score_search_text(tag_text.as_str(), query, 860, 720) else {
+            continue;
+        };
+        let replace = best
+            .as_ref()
+            .map(|(current, _)| score > *current)
+            .unwrap_or(true);
+        if replace {
+            best = Some((score, tag));
+        }
+    }
+    best.map(|(_, tag)| {
+        format!(
+            "{}: {} ({:.0}%)",
+            tag.category.label(),
+            highlight_search_excerpt(tag.label.as_str(), query),
+            tag.confidence * 100.0
+        )
+    })
+}
+
 pub fn media_transcript_state_key(item: &MediaItem) -> String {
     item.transcript_windows
         .iter()
@@ -521,8 +718,37 @@ pub fn media_background_ai_index_request(item: &MediaItem) -> Option<(u64, u64)>
     Some((0, item.duration_ns))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MediaVisualIndexRequest {
+    pub duration_ns: u64,
+    pub is_image: bool,
+}
+
+pub fn media_background_visual_index_request(item: &MediaItem) -> Option<MediaVisualIndexRequest> {
+    if !item.has_backing_file()
+        || item.is_missing
+        || item.is_audio_only
+        || item.is_animated_svg
+        || item.visual_embedding.is_some()
+    {
+        return None;
+    }
+    Some(MediaVisualIndexRequest {
+        duration_ns: item.duration_ns,
+        is_image: item.is_image,
+    })
+}
+
+pub fn media_background_auto_tag_request(item: &MediaItem) -> Option<MediaVisualEmbedding> {
+    if !item.has_backing_file() || item.is_missing || item.auto_tags_indexed {
+        return None;
+    }
+    item.visual_embedding.clone()
+}
+
 pub fn media_search_match(item: &MediaItem, query: &str) -> Option<MediaSearchMatch> {
-    let query = SearchQuery::new(query)?;
+    let raw_query = query.trim();
+    let query = SearchQuery::new(raw_query)?;
     let mut best = None;
 
     consider_text_search(
@@ -603,6 +829,25 @@ pub fn media_search_match(item: &MediaItem, query: &str) -> Option<MediaSearchMa
             None,
         );
     }
+    if !item.auto_tags.is_empty() {
+        let auto_tag_text = item
+            .auto_tags
+            .iter()
+            .map(|tag| format!("{} {}", tag.category.search_text(), tag.label))
+            .collect::<Vec<_>>()
+            .join(" ");
+        consider_text_search(
+            &mut best,
+            MediaSearchField::AutoTag,
+            auto_tag_text.as_str(),
+            &query,
+            850,
+            720,
+            media_auto_tag_search_excerpt(item, &query),
+            item.auto_tags.iter().find_map(|tag| tag.best_frame_time_ns),
+            item.auto_tags.iter().find_map(|tag| tag.best_frame_time_ns),
+        );
+    }
     for window in &item.transcript_windows {
         let joined_text = window
             .segments
@@ -640,6 +885,29 @@ pub fn media_search_match(item: &MediaItem, query: &str) -> Option<MediaSearchMa
                 Some(window.source_in_ns.saturating_add(segment.start_ns)),
                 Some(window.source_in_ns.saturating_add(segment.end_ns)),
             );
+        }
+    }
+    if let Some(embedding) = item.visual_embedding.as_ref() {
+        if let Some(visual_match) =
+            crate::media::clip_embedding_cache::visual_search_match(raw_query, embedding)
+        {
+            let candidate = MediaSearchMatch {
+                field: MediaSearchField::Visual,
+                score: visual_match.score,
+                excerpt: visual_match
+                    .best_frame_time_ns
+                    .map(format_visual_search_excerpt)
+                    .or_else(|| Some("Semantic visual match".to_string())),
+                source_in_ns: visual_match.best_frame_time_ns,
+                source_out_ns: visual_match.best_frame_time_ns,
+            };
+            let replace = best
+                .as_ref()
+                .map(|current| candidate.score > current.score)
+                .unwrap_or(true);
+            if replace {
+                best = Some(candidate);
+            }
         }
     }
 
@@ -686,6 +954,42 @@ pub fn upsert_media_transcript(
     let changed = item.upsert_transcript_window(source_in_ns, source_out_ns, segments);
     lib.items.push(item);
     changed
+}
+
+pub fn upsert_media_visual_embedding(
+    lib: &mut MediaLibrary,
+    source_path: &str,
+    embedding: MediaVisualEmbedding,
+) -> bool {
+    if source_path.trim().is_empty() || embedding.frames.is_empty() {
+        return false;
+    }
+    if let Some(item) = lib
+        .items
+        .iter_mut()
+        .find(|item| item.source_path == source_path)
+    {
+        return item.upsert_visual_embedding(embedding);
+    }
+    false
+}
+
+pub fn upsert_media_auto_tags(
+    lib: &mut MediaLibrary,
+    source_path: &str,
+    auto_tags: Vec<MediaAutoTag>,
+) -> bool {
+    if source_path.trim().is_empty() {
+        return false;
+    }
+    if let Some(item) = lib
+        .items
+        .iter_mut()
+        .find(|item| item.source_path == source_path)
+    {
+        return item.upsert_auto_tags(auto_tags);
+    }
+    false
 }
 
 #[derive(Debug, Clone)]
@@ -801,6 +1105,19 @@ fn highlight_search_excerpt(text: &str, query: &SearchQuery) -> String {
     text.to_string()
 }
 
+fn format_visual_search_excerpt(time_ns: u64) -> String {
+    let total_millis = time_ns / 1_000_000;
+    let hours = total_millis / 3_600_000;
+    let minutes = (total_millis / 60_000) % 60;
+    let seconds = (total_millis / 1_000) % 60;
+    let tenths = (total_millis % 1_000) / 100;
+    if hours > 0 {
+        format!("Closest visual frame around {hours:02}:{minutes:02}:{seconds:02}.{tenths}")
+    } else {
+        format!("Closest visual frame around {minutes:02}:{seconds:02}.{tenths}")
+    }
+}
+
 fn consider_text_search(
     best: &mut Option<MediaSearchMatch>,
     field: MediaSearchField,
@@ -876,12 +1193,16 @@ pub fn matches_media_rating_filter(item: &MediaItem, filter: MediaRatingFilter) 
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 struct SavedMediaAnnotations {
     #[serde(default)]
     rating: MediaRating,
     #[serde(default)]
     keyword_ranges: Vec<MediaKeywordRange>,
+    #[serde(default)]
+    auto_tags: Vec<MediaAutoTag>,
+    #[serde(default)]
+    auto_tags_indexed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1014,15 +1335,21 @@ pub fn sync_bins_to_project(lib: &MediaLibrary, project: &mut crate::model::proj
         .items
         .iter()
         .filter_map(|item| {
-            ((item.rating != MediaRating::None) || !item.keyword_ranges.is_empty()).then(|| {
-                (
-                    item.library_key(),
-                    SavedMediaAnnotations {
-                        rating: item.rating,
-                        keyword_ranges: item.keyword_ranges.clone(),
-                    },
-                )
-            })
+            ((item.rating != MediaRating::None)
+                || !item.keyword_ranges.is_empty()
+                || !item.auto_tags.is_empty()
+                || item.auto_tags_indexed)
+                .then(|| {
+                    (
+                        item.library_key(),
+                        SavedMediaAnnotations {
+                            rating: item.rating,
+                            keyword_ranges: item.keyword_ranges.clone(),
+                            auto_tags: item.auto_tags.clone(),
+                            auto_tags_indexed: item.auto_tags_indexed,
+                        },
+                    )
+                })
         })
         .collect();
     if annotations.is_empty() {
@@ -1107,6 +1434,8 @@ pub fn apply_bins_from_project(
                 if let Some(annotations) = annotations {
                     item.rating = annotations.rating;
                     item.keyword_ranges = annotations.keyword_ranges.clone();
+                    item.auto_tags = annotations.auto_tags.clone();
+                    item.auto_tags_indexed = annotations.auto_tags_indexed;
                 }
             }
         }
@@ -1217,7 +1546,10 @@ mod tests {
             bin_id,
             rating: MediaRating::None,
             keyword_ranges: Vec::new(),
+            auto_tags: Vec::new(),
+            auto_tags_indexed: false,
             transcript_windows: Vec::new(),
+            visual_embedding: None,
         }
     }
 
@@ -1423,6 +1755,43 @@ mod tests {
     }
 
     #[test]
+    fn test_media_search_match_finds_auto_tags() {
+        let mut item = MediaItem::new("/tmp/clip.mov", 3_000_000_000);
+        item.is_missing = false;
+        assert!(item.upsert_auto_tags(vec![
+            MediaAutoTag::new(
+                MediaAutoTagCategory::ShotType,
+                "wide",
+                0.82,
+                Some(1_000_000_000),
+            )
+            .expect("wide tag"),
+            MediaAutoTag::new(
+                MediaAutoTagCategory::Setting,
+                "outdoor",
+                0.76,
+                Some(2_000_000_000),
+            )
+            .expect("outdoor tag"),
+        ]));
+
+        let search_match =
+            media_search_match(&item, "outdoor wide").expect("expected auto-tag match");
+        assert_eq!(search_match.field, MediaSearchField::AutoTag);
+        assert!(search_match
+            .excerpt
+            .as_deref()
+            .is_some_and(|excerpt| excerpt.contains("wide") || excerpt.contains("outdoor")));
+        assert!(media_matches_filters(
+            &item,
+            &MediaFilterCriteria {
+                search_text: "outdoor wide".to_string(),
+                ..Default::default()
+            }
+        ));
+    }
+
+    #[test]
     fn test_upsert_media_transcript_creates_library_item() {
         let mut lib = MediaLibrary::new();
         let segments = vec![SubtitleSegment {
@@ -1513,6 +1882,118 @@ mod tests {
     }
 
     #[test]
+    fn test_media_background_visual_index_request_requires_visual_gap() {
+        let mut item = MediaItem::new("/tmp/visual.mov", 12_000_000_000);
+        item.is_missing = false;
+        assert_eq!(
+            media_background_visual_index_request(&item),
+            Some(MediaVisualIndexRequest {
+                duration_ns: 12_000_000_000,
+                is_image: false,
+            })
+        );
+
+        item.is_audio_only = true;
+        assert_eq!(media_background_visual_index_request(&item), None);
+
+        item.is_audio_only = false;
+        item.is_animated_svg = true;
+        assert_eq!(media_background_visual_index_request(&item), None);
+
+        item.is_animated_svg = false;
+        item.visual_embedding = Some(MediaVisualEmbedding {
+            model_id: "test".to_string(),
+            frames: vec![MediaVisualEmbeddingFrame {
+                time_ns: 0,
+                embedding: vec![1.0, 0.0],
+            }],
+        });
+        assert_eq!(media_background_visual_index_request(&item), None);
+    }
+
+    #[test]
+    fn test_media_background_auto_tag_request_requires_visual_gap() {
+        let mut item = MediaItem::new("/tmp/visual.mov", 12_000_000_000);
+        item.is_missing = false;
+        assert_eq!(media_background_auto_tag_request(&item), None);
+
+        let embedding = MediaVisualEmbedding {
+            model_id: "test".to_string(),
+            frames: vec![MediaVisualEmbeddingFrame {
+                time_ns: 0,
+                embedding: vec![1.0, 0.0],
+            }],
+        };
+        item.visual_embedding = Some(embedding.clone());
+        assert_eq!(
+            media_background_auto_tag_request(&item),
+            Some(embedding.clone())
+        );
+
+        item.upsert_auto_tags(vec![MediaAutoTag::new(
+            MediaAutoTagCategory::Subject,
+            "person",
+            0.8,
+            Some(0),
+        )
+        .expect("person tag")]);
+        assert_eq!(media_background_auto_tag_request(&item), None);
+    }
+
+    #[test]
+    fn test_upsert_media_visual_embedding_updates_existing_item() {
+        let mut lib = MediaLibrary::new();
+        let mut item = MediaItem::new("/tmp/visual.mov", 5_000_000_000);
+        item.is_missing = false;
+        lib.items.push(item);
+
+        let embedding = MediaVisualEmbedding {
+            model_id: "test-model".to_string(),
+            frames: vec![MediaVisualEmbeddingFrame {
+                time_ns: 2_000_000_000,
+                embedding: vec![0.5, 0.5],
+            }],
+        };
+        assert!(upsert_media_visual_embedding(
+            &mut lib,
+            "/tmp/visual.mov",
+            embedding.clone()
+        ));
+        assert_eq!(lib.items[0].visual_embedding.as_ref(), Some(&embedding));
+        assert!(!upsert_media_visual_embedding(
+            &mut lib,
+            "/tmp/visual.mov",
+            embedding
+        ));
+    }
+
+    #[test]
+    fn test_upsert_media_auto_tags_updates_existing_item() {
+        let mut lib = MediaLibrary::new();
+        let mut item = MediaItem::new("/tmp/visual.mov", 5_000_000_000);
+        item.is_missing = false;
+        lib.items.push(item);
+
+        let auto_tags = vec![
+            MediaAutoTag::new(MediaAutoTagCategory::Setting, "indoor", 0.65, Some(0))
+                .expect("indoor tag"),
+            MediaAutoTag::new(MediaAutoTagCategory::Subject, "person", 0.71, Some(0))
+                .expect("person tag"),
+        ];
+        assert!(upsert_media_auto_tags(
+            &mut lib,
+            "/tmp/visual.mov",
+            auto_tags.clone()
+        ));
+        assert_eq!(lib.items[0].auto_tags, auto_tags);
+        assert!(!upsert_media_auto_tags(
+            &mut lib,
+            "/tmp/visual.mov",
+            auto_tags
+        ));
+    }
+
+    #[test]
     fn test_sync_bins_round_trips_collections() {
         let mut lib = MediaLibrary::new();
         lib.collections.push(MediaCollection::new(
@@ -1549,6 +2030,15 @@ mod tests {
         item.rating = MediaRating::Favorite;
         item.keyword_ranges
             .push(MediaKeywordRange::new("B-roll", 250_000_000, 900_000_000));
+        item.auto_tags.push(
+            MediaAutoTag::new(
+                MediaAutoTagCategory::Setting,
+                "outdoor",
+                0.77,
+                Some(500_000_000),
+            )
+            .expect("outdoor tag"),
+        );
         item.upsert_transcript_window(
             0,
             2_000_000_000,
@@ -1572,7 +2062,7 @@ mod tests {
         assert!(project
             .parsed_media_annotations_json
             .as_ref()
-            .is_some_and(|json| json.contains("B-roll")));
+            .is_some_and(|json| json.contains("B-roll") && json.contains("outdoor")));
         assert!(project
             .parsed_transcript_cache_json
             .as_ref()
@@ -1586,6 +2076,8 @@ mod tests {
         assert_eq!(restored.items[0].rating, MediaRating::Favorite);
         assert_eq!(restored.items[0].keyword_ranges.len(), 1);
         assert_eq!(restored.items[0].keyword_ranges[0].label, "B-roll");
+        assert_eq!(restored.items[0].auto_tags.len(), 1);
+        assert_eq!(restored.items[0].auto_tags[0].label, "outdoor");
         assert_eq!(restored.items[0].transcript_windows.len(), 1);
         assert_eq!(
             restored.items[0].transcript_windows[0].segments[0].text,

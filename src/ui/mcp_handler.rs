@@ -16,7 +16,10 @@ use crate::model::transition::{
 };
 use crate::ui::timecode;
 use crate::ui::timeline::TimelineState;
-use crate::ui::window::{AutoCropOutcome, PreparedLtcConversion, AUTO_CROP_DEFAULT_PADDING};
+use crate::ui::window::{
+    cleanup_project_health_cache, current_project_health_snapshot, AutoCropOutcome,
+    PreparedLtcConversion, AUTO_CROP_DEFAULT_PADDING,
+};
 use crate::undo::TrackClipsChange;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -28,6 +31,24 @@ use gtk4::prelude::*;
 thread_local! {
     static MCP_LOADED_SCRIPT: RefCell<Option<crate::media::script::Script>> = RefCell::new(None);
     static MCP_ALIGNMENT_RESULT: RefCell<Option<crate::media::script_align::AlignmentResult>> = RefCell::new(None);
+}
+
+fn parse_project_health_cache_kind(
+    cache: &str,
+) -> Option<crate::media::project_health::ProjectHealthPathKind> {
+    use crate::media::project_health::ProjectHealthPathKind;
+
+    match cache {
+        "proxy_local" => Some(ProjectHealthPathKind::ProxyLocal),
+        "proxy_sidecars" => Some(ProjectHealthPathKind::ProxySidecars),
+        "prerender" => Some(ProjectHealthPathKind::Prerender),
+        "background_removal" => Some(ProjectHealthPathKind::BackgroundRemoval),
+        "frame_interpolation" => Some(ProjectHealthPathKind::FrameInterpolation),
+        "voice_enhancement" => Some(ProjectHealthPathKind::VoiceEnhancement),
+        "clip_embeddings" => Some(ProjectHealthPathKind::ClipEmbeddings),
+        "auto_tags" => Some(ProjectHealthPathKind::AutoTags),
+        _ => None,
+    }
 }
 
 pub(crate) fn handle_mcp_command(
@@ -44,6 +65,9 @@ pub(crate) fn handle_mcp_command(
     proxy_cache: &Rc<RefCell<crate::media::proxy_cache::ProxyCache>>,
     bg_removal_cache: &Rc<RefCell<crate::media::bg_removal_cache::BgRemovalCache>>,
     frame_interp_cache: &Rc<RefCell<crate::media::frame_interp_cache::FrameInterpCache>>,
+    voice_enhance_cache: &Rc<RefCell<crate::media::voice_enhance_cache::VoiceEnhanceCache>>,
+    clip_embedding_cache: &Rc<RefCell<crate::media::clip_embedding_cache::ClipEmbeddingCache>>,
+    auto_tag_cache: &Rc<RefCell<crate::media::auto_tag_cache::AutoTagCache>>,
     stt_cache: &Rc<RefCell<crate::media::stt_cache::SttCache>>,
     music_gen_cache: &Rc<RefCell<crate::media::music_gen::MusicGenCache>>,
     tracking_cache: &Rc<RefCell<crate::media::tracking::TrackingCache>>,
@@ -843,6 +867,7 @@ pub(crate) fn handle_mcp_command(
                     "realtime_preview": prefs.realtime_preview,
                     "background_prerender": prefs.background_prerender,
                     "background_ai_indexing": prefs.background_ai_indexing,
+                    "background_auto_tagging": prefs.background_auto_tagging,
                     "prerender_preset": prefs.prerender_preset.as_str(),
                     "prerender_crf": prefs.prerender_crf,
                     "persist_prerenders_next_to_project_file": prefs.persist_prerenders_next_to_project_file,
@@ -852,6 +877,49 @@ pub(crate) fn handle_mcp_command(
                     "crossfade_duration_ns": prefs.crossfade_duration_ns
                 }))
                 .ok();
+        }
+
+        McpCommand::GetProjectHealth { reply } => {
+            let snapshot = {
+                let proj = project.borrow();
+                let lib = library.borrow();
+                let prog = prog_player.borrow();
+                current_project_health_snapshot(&proj, &lib, &prog)
+            };
+            reply
+                .send(serde_json::to_value(snapshot).unwrap_or(json!(null)))
+                .ok();
+        }
+
+        McpCommand::CleanupProjectCache { cache, reply } => {
+            let Some(kind) = parse_project_health_cache_kind(&cache) else {
+                reply.send(json!({
+                    "success": false,
+                    "error": "cache must be one of: proxy_local, proxy_sidecars, prerender, background_removal, frame_interpolation, voice_enhancement, clip_embeddings, auto_tags"
+                })).ok();
+                return;
+            };
+            match cleanup_project_health_cache(
+                kind,
+                &project.borrow(),
+                &library.borrow(),
+                proxy_cache,
+                bg_removal_cache,
+                frame_interp_cache,
+                voice_enhance_cache,
+                clip_embedding_cache,
+                auto_tag_cache,
+                prog_player,
+            ) {
+                Ok(message) => {
+                    reply
+                        .send(json!({"success": true, "cache": cache, "message": message}))
+                        .ok();
+                }
+                Err(message) => {
+                    reply.send(json!({"success": false, "error": message})).ok();
+                }
+            }
         }
 
         McpCommand::SetHardwareAcceleration { enabled, reply } => {
@@ -1086,6 +1154,18 @@ pub(crate) fn handle_mcp_command(
                 .send(json!({
                     "success": true,
                     "background_ai_indexing": enabled
+                }))
+                .ok();
+        }
+
+        McpCommand::SetBackgroundAutoTagging { enabled, reply } => {
+            let mut new_state = preferences_state.borrow().clone();
+            new_state.background_auto_tagging = enabled;
+            apply_preferences_state(new_state.clone());
+            reply
+                .send(json!({
+                    "success": true,
+                    "background_auto_tagging": enabled
                 }))
                 .ok();
         }
@@ -4299,6 +4379,14 @@ pub(crate) fn handle_mcp_command(
                             "end_ns": range.end_ns,
                             "start_s": range.start_ns as f64 / 1_000_000_000.0,
                             "end_s": range.end_ns as f64 / 1_000_000_000.0,
+                        })).collect::<Vec<_>>(),
+                        "auto_tags_indexed": item.auto_tags_indexed,
+                        "auto_tags": item.auto_tags.iter().map(|tag| json!({
+                            "category": tag.category,
+                            "label": tag.label,
+                            "confidence": tag.confidence,
+                            "best_frame_time_ns": tag.best_frame_time_ns,
+                            "best_frame_time_s": tag.best_frame_time_ns.map(|v| v as f64 / 1_000_000_000.0),
                         })).collect::<Vec<_>>(),
                         "transcript_window_count": item.transcript_windows.len(),
                         "transcript_segment_count": transcript_segment_count,

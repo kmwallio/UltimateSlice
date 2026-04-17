@@ -2929,6 +2929,16 @@ impl ProgramPlayer {
         }
     }
 
+    pub fn project_health_prerender_cache_root(&self) -> &Path {
+        &self.prerender_cache_root
+    }
+
+    pub fn purge_project_health_prerender_cache(&mut self) {
+        self.cleanup_background_prerender_cache(true);
+        self.prewarmed_boundary_ns = None;
+        self.invalidate_short_frame_cache("project-health-prerender-cache-cleared");
+    }
+
     pub fn set_project_dimensions(&mut self, width: u32, height: u32) {
         if self.project_width != width || self.project_height != height {
             self.invalidate_short_frame_cache("project-dimensions-changed");

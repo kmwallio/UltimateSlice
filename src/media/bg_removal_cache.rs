@@ -278,6 +278,10 @@ fn dirs_cache_root() -> PathBuf {
     crate::media::cache_support::cache_root_dir("bg_removal")
 }
 
+pub fn cache_root_dir() -> PathBuf {
+    dirs_cache_root()
+}
+
 pub const MODEL_FILENAME: &str = "modnet_photographic_portrait_matting.onnx";
 pub const MODEL_DOWNLOAD_URL: &str =
     "https://drive.usercontent.google.com/download?id=1cgycTQlYXpTh26gB9FTnthE7AvruV8hd&export=download&confirm=t";

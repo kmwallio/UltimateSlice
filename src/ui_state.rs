@@ -1162,6 +1162,10 @@ pub struct PreferencesState {
     /// in the background when speech-to-text support is available.
     #[serde(default)]
     pub background_ai_indexing: bool,
+    /// Automatically derive persistent contextual Media Library tags once
+    /// visual-search embeddings are available.
+    #[serde(default)]
+    pub background_auto_tagging: bool,
     /// FFmpeg x264 preset used for background prerender video segments.
     #[serde(default)]
     pub prerender_preset: PrerenderEncodingPreset,
@@ -1224,6 +1228,9 @@ pub struct PreferencesState {
     /// Show the timeline mini-map overview strip above the track canvas.
     #[serde(default)]
     pub show_timeline_minimap: bool,
+    /// Tracks whether the first-run onboarding tour has already been shown or dismissed.
+    #[serde(default)]
+    pub seen_onboarding_v1: bool,
 }
 
 fn default_ai_backend() -> String {
@@ -1252,6 +1259,7 @@ impl Default for PreferencesState {
             realtime_preview: true,
             background_prerender: false,
             background_ai_indexing: false,
+            background_auto_tagging: false,
             prerender_preset: PrerenderEncodingPreset::default(),
             prerender_crf: default_prerender_crf(),
             persist_prerenders_next_to_project_file:
@@ -1269,6 +1277,7 @@ impl Default for PreferencesState {
             voice_enhance_cache_cap_gib: default_voice_enhance_cache_cap_gib(),
             ai_backend: default_ai_backend(),
             show_timeline_minimap: false,
+            seen_onboarding_v1: false,
         }
     }
 }
@@ -1642,6 +1651,7 @@ mod tests {
         assert!(!parsed.preferences.source_monitor_auto_link_av);
         assert!(!parsed.preferences.crossfade_enabled);
         assert!(!parsed.preferences.background_ai_indexing);
+        assert!(!parsed.preferences.background_auto_tagging);
         assert_eq!(
             parsed.preferences.crossfade_curve,
             CrossfadeCurve::EqualPower
@@ -1657,6 +1667,7 @@ mod tests {
             parsed.preferences.crossfade_duration_ns,
             default_crossfade_duration_ns()
         );
+        assert!(!parsed.preferences.seen_onboarding_v1);
     }
 
     #[test]
@@ -1694,6 +1705,28 @@ mod tests {
         let json = serde_json::to_string(&prefs).unwrap();
         let decoded: PreferencesState = serde_json::from_str(&json).unwrap();
         assert!(decoded.background_ai_indexing);
+    }
+
+    #[test]
+    fn preferences_background_auto_tagging_round_trip() {
+        let prefs = PreferencesState {
+            background_auto_tagging: true,
+            ..PreferencesState::default()
+        };
+        let json = serde_json::to_string(&prefs).unwrap();
+        let decoded: PreferencesState = serde_json::from_str(&json).unwrap();
+        assert!(decoded.background_auto_tagging);
+    }
+
+    #[test]
+    fn preferences_onboarding_round_trip() {
+        let prefs = PreferencesState {
+            seen_onboarding_v1: true,
+            ..PreferencesState::default()
+        };
+        let json = serde_json::to_string(&prefs).unwrap();
+        let decoded: PreferencesState = serde_json::from_str(&json).unwrap();
+        assert!(decoded.seen_onboarding_v1);
     }
 
     #[test]

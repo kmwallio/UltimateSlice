@@ -372,6 +372,10 @@ fn dirs_cache_root() -> PathBuf {
     crate::media::cache_support::cache_root_dir("voice_enhance")
 }
 
+pub fn cache_root_dir() -> PathBuf {
+    dirs_cache_root()
+}
+
 fn file_is_ready(path: &str) -> bool {
     crate::media::cache_support::file_has_content(path)
 }

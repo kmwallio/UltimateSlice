@@ -350,6 +350,10 @@ fn dirs_cache_root() -> PathBuf {
     crate::media::cache_support::cache_root_dir("frame_interp")
 }
 
+pub fn cache_root_dir() -> PathBuf {
+    dirs_cache_root()
+}
+
 pub const MODEL_FILENAME: &str = "rife.onnx";
 /// Filenames accepted in the model directory, in priority order. We accept
 /// the conventional `rife.onnx` first; `model.onnx` is also accepted as a

@@ -3,11 +3,11 @@ use crate::media::proxy_cache::ProxyCache;
 use crate::media::thumb_cache::ThumbnailCache;
 use crate::model::clip::ClipKind;
 use crate::model::media_library::{
-    media_display_name, media_frame_rate_value, media_keyword_summary, media_matches_filters,
-    media_rating_text, media_search_match, media_transcript_state_key, non_file_clip_kind_text,
-    normalized_media_text, FrameRateFilter, MediaCollection, MediaFilterCriteria, MediaItem,
-    MediaKindFilter, MediaLibrary, MediaRating, MediaRatingFilter, MediaSearchField,
-    ResolutionFilter,
+    media_auto_tag_state_key, media_auto_tag_summary, media_display_name, media_frame_rate_value,
+    media_keyword_summary, media_matches_filters, media_rating_text, media_search_match,
+    media_transcript_state_key, non_file_clip_kind_text, normalized_media_text, FrameRateFilter,
+    MediaCollection, MediaFilterCriteria, MediaItem, MediaKindFilter, MediaLibrary, MediaRating,
+    MediaRatingFilter, MediaSearchField, ResolutionFilter,
 };
 use crate::ui_state::PreferencesState;
 use gdk4;
@@ -1954,6 +1954,15 @@ fn make_grid_item(
         cell.append(&keyword_label);
     }
 
+    if let Some(auto_tag_text) = media_auto_tag_card_text(item) {
+        let auto_tag_label = Label::new(Some(&auto_tag_text));
+        auto_tag_label.set_halign(gtk::Align::Center);
+        auto_tag_label.set_max_width_chars(26);
+        auto_tag_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        auto_tag_label.add_css_class("media-keyword-summary");
+        cell.append(&auto_tag_label);
+    }
+
     if let Some(search_hint) = media_search_hint(item, search_text) {
         let search_label = Label::new(Some(&search_hint));
         search_label.set_halign(gtk::Align::Center);
@@ -2115,7 +2124,7 @@ fn build_expected_entries(
 
 fn media_display_key(item: &MediaItem) -> String {
     format!(
-        "{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
         item.id,
         item.source_path,
         item.is_missing,
@@ -2124,6 +2133,7 @@ fn media_display_key(item: &MediaItem) -> String {
         media_secondary_text(item).unwrap_or_default(),
         media_rating_text(item.rating).unwrap_or_default(),
         media_keyword_state_key(item),
+        media_auto_tag_state_key(item),
         media_transcript_state_key(item),
     )
 }
@@ -2203,6 +2213,10 @@ fn media_keyword_card_text(item: &MediaItem) -> Option<String> {
     media_keyword_summary(item, 2).map(|summary| format!("Keywords: {summary}"))
 }
 
+fn media_auto_tag_card_text(item: &MediaItem) -> Option<String> {
+    media_auto_tag_summary(item, 3).map(|summary| format!("Tags: {summary}"))
+}
+
 fn media_keyword_state_key(item: &MediaItem) -> String {
     item.keyword_ranges
         .iter()
@@ -2214,6 +2228,28 @@ fn media_keyword_state_key(item: &MediaItem) -> String {
         })
         .collect::<Vec<_>>()
         .join("|")
+}
+
+fn media_auto_tag_detail_lines(item: &MediaItem) -> Vec<String> {
+    item.auto_tags
+        .iter()
+        .map(|tag| {
+            let confidence = (tag.confidence * 100.0).round();
+            match tag.best_frame_time_ns {
+                Some(time_ns) => format!(
+                    "Tag: {} — {} ({confidence:.0}%) @ {}",
+                    tag.category.label(),
+                    tag.label,
+                    format_duration_short(time_ns)
+                ),
+                None => format!(
+                    "Tag: {} — {} ({confidence:.0}%)",
+                    tag.category.label(),
+                    tag.label
+                ),
+            }
+        })
+        .collect()
 }
 
 fn sort_media_items(items: &mut [&MediaItem], search_text: &str) {
@@ -2253,8 +2289,21 @@ fn media_keyword_detail_lines(item: &MediaItem) -> Vec<String> {
 
 fn media_search_hint(item: &MediaItem, search_text: &str) -> Option<String> {
     let search_match = media_search_match(item, search_text)?;
-    (search_match.field == MediaSearchField::Transcript)
-        .then(|| format!("Spoken: {}", search_match.excerpt.unwrap_or_default()))
+    match search_match.field {
+        MediaSearchField::Transcript => Some(format!(
+            "Spoken: {}",
+            search_match.excerpt.unwrap_or_default()
+        )),
+        MediaSearchField::AutoTag => Some(format!(
+            "Tags: {}",
+            search_match.excerpt.unwrap_or_default()
+        )),
+        MediaSearchField::Visual => Some(format!(
+            "Visual: {}",
+            search_match.excerpt.unwrap_or_default()
+        )),
+        _ => None,
+    }
 }
 
 fn media_tooltip_text(item: &MediaItem, search_text: Option<&str>) -> String {
@@ -2284,6 +2333,7 @@ fn media_tooltip_text(item: &MediaItem, search_text: Option<&str>) -> String {
             lines.push(format!("Rating: {rating_text}"));
         }
         lines.extend(media_keyword_detail_lines(item));
+        lines.extend(media_auto_tag_detail_lines(item));
         if let Some(search_text) = search_text.filter(|text| !text.trim().is_empty()) {
             if let Some(search_match) = media_search_match(item, search_text) {
                 lines.push(format!(
@@ -2324,6 +2374,7 @@ fn media_tooltip_text(item: &MediaItem, search_text: Option<&str>) -> String {
         lines.push(format!("Rating: {rating_text}"));
     }
     lines.extend(media_keyword_detail_lines(item));
+    lines.extend(media_auto_tag_detail_lines(item));
     let transcript_segments = item
         .transcript_windows
         .iter()
@@ -2354,7 +2405,9 @@ fn media_search_field_label(field: MediaSearchField) -> &'static str {
         MediaSearchField::SourcePath => "file path",
         MediaSearchField::Codec => "codec",
         MediaSearchField::Keyword => "keyword",
+        MediaSearchField::AutoTag => "auto tag",
         MediaSearchField::Transcript => "spoken content",
+        MediaSearchField::Visual => "visual content",
     }
 }
 
@@ -3302,7 +3355,9 @@ fn delete_collection(
 mod tests {
     use super::*;
     use crate::model::clip::SubtitleSegment;
-    use crate::model::media_library::{MediaBin, MediaKeywordRange};
+    use crate::model::media_library::{
+        MediaAutoTag, MediaAutoTagCategory, MediaBin, MediaKeywordRange,
+    };
 
     fn make_video_item(path: &str) -> MediaItem {
         let mut item = MediaItem::new(path, 83_000_000_000);
@@ -3341,6 +3396,19 @@ mod tests {
         );
     }
 
+    fn add_auto_tag(
+        item: &mut MediaItem,
+        category: MediaAutoTagCategory,
+        label: &str,
+        confidence: f32,
+    ) {
+        let mut auto_tags = item.auto_tags.clone();
+        auto_tags.push(
+            MediaAutoTag::new(category, label, confidence, Some(1_000_000_000)).expect("auto tag"),
+        );
+        item.upsert_auto_tags(auto_tags);
+    }
+
     #[test]
     fn media_secondary_text_formats_codec_duration_and_size() {
         let item = make_video_item("/tmp/clip.mov");
@@ -3370,6 +3438,10 @@ mod tests {
         let keyword_key = media_display_key(&item);
         add_transcript(&mut item, "Find the sticker");
         assert_ne!(media_display_key(&item), keyword_key);
+
+        let transcript_key = media_display_key(&item);
+        add_auto_tag(&mut item, MediaAutoTagCategory::Setting, "outdoor", 0.81);
+        assert_ne!(media_display_key(&item), transcript_key);
     }
 
     #[test]
@@ -3385,6 +3457,10 @@ mod tests {
         let tooltip = media_tooltip_text(&item, None);
         assert!(tooltip.contains("Rating: Favorite"));
         assert!(tooltip.contains("Keyword: Close Up"));
+
+        add_auto_tag(&mut item, MediaAutoTagCategory::Subject, "person", 0.74);
+        let tooltip = media_tooltip_text(&item, None);
+        assert!(tooltip.contains("Tag: Subject — person"));
     }
 
     #[test]
@@ -3439,6 +3515,20 @@ mod tests {
         let tooltip = media_tooltip_text(&item, Some("sticker"));
         assert!(tooltip.contains("Search hit: spoken content"));
         assert!(tooltip.contains("Match: Find the [sticker]"));
+    }
+
+    #[test]
+    fn auto_tag_search_hint_and_tooltip_show_tag_match() {
+        let mut item = make_video_item("/tmp/outdoor.mov");
+        add_auto_tag(&mut item, MediaAutoTagCategory::Setting, "outdoor", 0.79);
+        add_auto_tag(&mut item, MediaAutoTagCategory::ShotType, "wide", 0.83);
+
+        let hint = media_search_hint(&item, "outdoor wide").expect("expected tag search hint");
+        assert!(hint.contains("Tags:"));
+
+        let tooltip = media_tooltip_text(&item, Some("outdoor wide"));
+        assert!(tooltip.contains("Search hit: auto tag"));
+        assert!(tooltip.contains("Match:"));
     }
 
     #[test]

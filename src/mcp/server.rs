@@ -433,6 +433,26 @@ fn tools_list() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
+            "name": "get_project_health",
+            "description": "Return offline-media counts plus generated cache and installed-model disk usage for the current project.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "cleanup_project_cache",
+            "description": "Purge one generated cache family and reset its runtime path map so preview falls back cleanly until the cache is rebuilt.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "cache": {
+                        "type": "string",
+                        "enum": ["proxy_local", "proxy_sidecars", "prerender", "background_removal", "frame_interpolation", "voice_enhancement", "clip_embeddings", "auto_tags"],
+                        "description": "Generated cache family to purge."
+                    }
+                },
+                "required": ["cache"]
+            }
+        },
+        {
             "name": "set_hardware_acceleration",
             "description": "Set hardware acceleration preference and apply it to source preview playback.",
             "inputSchema": {
@@ -1014,11 +1034,11 @@ fn tools_list() -> Value {
         },
         {
             "name": "list_library",
-            "description": "List media-library items, or filter them by optional search text. Search text matches browser metadata plus any stored speech-to-text transcript content, and filtered results are returned in browser-style relevance order with match metadata.",
+            "description": "List media-library items, or filter them by optional search text. Search text matches browser metadata, any stored speech-to-text transcript content, and any cached visual-search embeddings, and filtered results are returned in browser-style relevance order with match metadata.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "search_text": { "type": "string", "description": "Optional metadata + transcript search query. When provided, only matching items are returned and each result includes search_match metadata." }
+                    "search_text": { "type": "string", "description": "Optional metadata + auto-tag + transcript + visual search query. When provided, only matching items are returned and each result includes search_match metadata." }
                 }
             }
         },
@@ -1620,7 +1640,18 @@ fn tools_list() -> Value {
         },
         {
             "name": "set_background_ai_indexing",
-            "description": "Enable or disable automatic background AI indexing for Media Library transcript search. When enabled, eligible audio-backed library items are queued one at a time for speech-to-text indexing when Whisper is available.",
+            "description": "Enable or disable automatic background AI indexing for Media Library search enrichment. When enabled, eligible library items are queued one at a time for transcript indexing (Whisper) and visual embedding generation (CLIP-style search) when the corresponding models are available.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "enabled": { "type": "boolean", "description": "true to enable, false to disable." }
+                },
+                "required": ["enabled"]
+            }
+        },
+        {
+            "name": "set_background_auto_tagging",
+            "description": "Enable or disable persistent contextual auto-tagging for Media Library items after visual-search embeddings are available.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2574,6 +2605,7 @@ fn is_cacheable_read_tool(name: &str) -> bool {
             | "get_playhead_position"
             | "get_performance_snapshot"
             | "get_preferences"
+            | "get_project_health"
             | "list_export_presets"
             | "list_workspace_layouts"
             | "list_library"
@@ -2708,6 +2740,11 @@ fn dispatch_tool_payload(
         },
         "close_source_preview" => McpCommand::CloseSourcePreview { reply: tx },
         "get_preferences" => McpCommand::GetPreferences { reply: tx },
+        "get_project_health" => McpCommand::GetProjectHealth { reply: tx },
+        "cleanup_project_cache" => McpCommand::CleanupProjectCache {
+            cache: arg_str!(args, "cache"),
+            reply: tx,
+        },
         "set_hardware_acceleration" => McpCommand::SetHardwareAcceleration {
             enabled: arg_bool!(args, "enabled"),
             reply: tx,
@@ -3659,6 +3696,10 @@ fn dispatch_tool_payload(
             reply: tx,
         },
         "set_background_ai_indexing" => McpCommand::SetBackgroundAiIndexing {
+            enabled: arg_bool!(args, "enabled"),
+            reply: tx,
+        },
+        "set_background_auto_tagging" => McpCommand::SetBackgroundAutoTagging {
             enabled: arg_bool!(args, "enabled"),
             reply: tx,
         },
@@ -4651,6 +4692,53 @@ mod tests {
     }
 
     #[test]
+    fn call_tool_dispatches_get_project_health() {
+        let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
+        std::thread::spawn(move || {
+            let cmd = receiver.recv().expect("expected command");
+            match cmd {
+                McpCommand::GetProjectHealth { reply } => {
+                    reply.send(json!({"offline_paths": []})).ok();
+                }
+                _ => panic!("unexpected MCP command"),
+            }
+        });
+        let id = json!(10);
+        let params = json!({
+            "name": "get_project_health",
+            "arguments": {}
+        });
+        let mut cache = std::collections::HashMap::new();
+        let response = call_tool(&id, &params, &sender, &mut cache);
+        assert_eq!(response["id"], id);
+        assert_eq!(response["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn call_tool_dispatches_cleanup_project_cache() {
+        let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
+        std::thread::spawn(move || {
+            let cmd = receiver.recv().expect("expected command");
+            match cmd {
+                McpCommand::CleanupProjectCache { cache, reply } => {
+                    assert_eq!(cache, "proxy_local");
+                    reply.send(json!({"success": true})).ok();
+                }
+                _ => panic!("unexpected MCP command"),
+            }
+        });
+        let id = json!(11);
+        let params = json!({
+            "name": "cleanup_project_cache",
+            "arguments": { "cache": "proxy_local" }
+        });
+        let mut cache = std::collections::HashMap::new();
+        let response = call_tool(&id, &params, &sender, &mut cache);
+        assert_eq!(response["id"], id);
+        assert_eq!(response["error"], serde_json::Value::Null);
+    }
+
+    #[test]
     fn call_tool_dispatches_set_background_ai_indexing() {
         let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
         std::thread::spawn(move || {
@@ -4668,6 +4756,32 @@ mod tests {
         let id = json!(10);
         let params = json!({
             "name": "set_background_ai_indexing",
+            "arguments": { "enabled": true }
+        });
+        let mut cache = std::collections::HashMap::new();
+        let response = call_tool(&id, &params, &sender, &mut cache);
+        assert_eq!(response["id"], id);
+        assert_eq!(response["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn call_tool_dispatches_set_background_auto_tagging() {
+        let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
+        std::thread::spawn(move || {
+            let cmd = receiver.recv().expect("expected command");
+            match cmd {
+                McpCommand::SetBackgroundAutoTagging { enabled, reply } => {
+                    assert!(enabled);
+                    reply
+                        .send(json!({"success": true, "background_auto_tagging": enabled}))
+                        .ok();
+                }
+                _ => panic!("unexpected MCP command"),
+            }
+        });
+        let id = json!(10);
+        let params = json!({
+            "name": "set_background_auto_tagging",
             "arguments": { "enabled": true }
         });
         let mut cache = std::collections::HashMap::new();

@@ -1025,7 +1025,9 @@ pub fn build_toolbar(
     on_show_editor: impl Fn() + 'static + Clone,
     on_use_collected_locations: impl Fn(fcpxml::writer::CollectFilesManifest) + 'static + Clone,
     on_export_frame: impl Fn() + 'static + Clone,
+    on_show_project_health: impl Fn(Option<gtk::Window>) + 'static + Clone,
     on_record_voiceover: impl Fn() + 'static + Clone,
+    on_replay_onboarding: impl Fn() + 'static + Clone,
 ) -> (HeaderBar, Button, Button) {
     let header = HeaderBar::new();
 
@@ -1342,6 +1344,55 @@ pub fn build_toolbar(
         });
     }
     header.pack_start(&btn_recent);
+
+    let btn_help = gtk::MenuButton::new();
+    btn_help.set_label("Help");
+    btn_help.set_tooltip_text(Some("Keyboard shortcuts and onboarding help"));
+    {
+        let pop = gtk::Popover::new();
+        let vbox = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        vbox.set_margin_start(4);
+        vbox.set_margin_end(4);
+        vbox.set_margin_top(4);
+        vbox.set_margin_bottom(4);
+
+        let btn_shortcuts = gtk::Button::with_label("Keyboard Shortcuts");
+        btn_shortcuts.add_css_class("flat");
+        btn_shortcuts.set_halign(gtk::Align::Fill);
+        btn_shortcuts.set_hexpand(true);
+        {
+            let pop_weak = pop.downgrade();
+            btn_shortcuts.connect_clicked(move |btn| {
+                if let Some(pop) = pop_weak.upgrade() {
+                    pop.popdown();
+                }
+                if let Some(window) = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok()) {
+                    crate::ui::timeline::widget::show_shortcuts_dialog(&window);
+                }
+            });
+        }
+        vbox.append(&btn_shortcuts);
+
+        let btn_replay_tour = gtk::Button::with_label("Replay Tour");
+        btn_replay_tour.add_css_class("flat");
+        btn_replay_tour.set_halign(gtk::Align::Fill);
+        btn_replay_tour.set_hexpand(true);
+        {
+            let pop_weak = pop.downgrade();
+            let on_replay_onboarding = on_replay_onboarding.clone();
+            btn_replay_tour.connect_clicked(move |_| {
+                if let Some(pop) = pop_weak.upgrade() {
+                    pop.popdown();
+                }
+                on_replay_onboarding();
+            });
+        }
+        vbox.append(&btn_replay_tour);
+
+        pop.set_child(Some(&vbox));
+        btn_help.set_popover(Some(&pop));
+    }
+    header.pack_start(&btn_help);
     let btn_save = Button::with_label("Save…");
     btn_save.set_tooltip_text(Some("Save project XML (Ctrl+S)"));
     {
@@ -2833,6 +2884,22 @@ pub fn build_toolbar(
         });
     }
     export_pop_box.append(&btn_export_queue);
+
+    let btn_project_health = gtk::Button::with_label("Project Health…");
+    btn_project_health.add_css_class("flat");
+    btn_project_health.set_tooltip_text(Some("Inspect offline media and managed cache usage"));
+    {
+        let export_pop_weak = export_pop.downgrade();
+        let on_show_project_health = on_show_project_health.clone();
+        btn_project_health.connect_clicked(move |btn| {
+            if let Some(pop) = export_pop_weak.upgrade() {
+                pop.popdown();
+            }
+            let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+            on_show_project_health(window);
+        });
+    }
+    export_pop_box.append(&btn_project_health);
 
     export_pop.set_child(Some(&export_pop_box));
     export_pop.set_parent(&btn_export_more);

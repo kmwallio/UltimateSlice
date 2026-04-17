@@ -250,15 +250,26 @@ The MODNet entry includes an in-app **Download Model** button. Whisper, MusicGen
 
 ## AI Index in Background (Models)
 
-- **AI index in background** automatically builds Media Library transcript-search data for eligible audio-backed library items after import/open.
+- **AI index in background** automatically builds Media Library search data for eligible library items after import/open.
 - It is **disabled by default**.
-- Current scope: this is the transcript-first indexing phase, so it uses Whisper speech-to-text data rather than visual embeddings or auto-tagging.
+- Current scope: it can queue Whisper transcript indexing for eligible audio-backed items and CLIP-style visual embeddings for eligible video/still-image items.
 - Jobs run **one clip at a time** in the background so automatic indexing does not flood the STT queue.
-- It only runs when speech-to-text support is available and a Whisper model is installed.
-- Existing projects can use it to backfill library search data over time without manually regenerating subtitles for every clip.
+- It only runs when the corresponding models are available: Whisper for transcript indexing, and a CLIP search model directory for visual embeddings.
+- The preferred CLIP search install location is `~/.local/share/ultimateslice/models/clip-search/` containing `image_encoder.onnx`, `text_encoder.onnx`, and `tokenizer.json`.
+- Existing projects can use it to backfill library search data over time without manually regenerating subtitles or reimporting clips.
 - MCP automation:
   - `get_preferences` returns `background_ai_indexing`.
   - `set_background_ai_indexing` toggles the setting.
+
+## Auto-tag Visual Media (Models)
+
+- **Auto-tag visual media** derives persistent contextual Media Library tags after CLIP-style visual embeddings exist for a clip.
+- It is **disabled by default** and depends on **AI index in background** being enabled, because tagging runs as the next step after background visual embedding generation.
+- Generated tags currently cover shot type, setting, time of day, and a small curated set of common subjects.
+- Tags are saved with the project, appear in Media Library card/tooltips, and participate in normal `search_text` matching and Smart Collections.
+- MCP automation:
+  - `get_preferences` returns `background_auto_tagging`.
+  - `set_background_auto_tagging` toggles the setting.
 
 For the RIFE model specifically: use any RIFE ONNX export with the standard 6-channel input + timestep convention. The upstream project ([`github.com/hzwer/Practical-RIFE`](https://github.com/hzwer/Practical-RIFE)) hosts the model and a PyTorch → ONNX export script; pre-built ONNX exports are also published periodically by the community on Hugging Face. Place the file at `~/.local/share/ultimateslice/models/rife.onnx` (the filename `model.onnx` is also accepted in the same directory, so community downloads under that upstream filename work without renaming). The dropdown entry in the Inspector appears automatically once the file is present — no restart required. See [inspector.md](inspector.md#slow-motion-interpolation) for the Inspector workflow.
 

@@ -121,6 +121,13 @@ pub enum McpCommand {
     GetPreferences {
         reply: SyncSender<Value>,
     },
+    GetProjectHealth {
+        reply: SyncSender<Value>,
+    },
+    CleanupProjectCache {
+        cache: String,
+        reply: SyncSender<Value>,
+    },
     SetHardwareAcceleration {
         enabled: bool,
         reply: SyncSender<Value>,
@@ -148,6 +155,10 @@ pub enum McpCommand {
         reply: SyncSender<Value>,
     },
     SetBackgroundAiIndexing {
+        enabled: bool,
+        reply: SyncSender<Value>,
+    },
+    SetBackgroundAutoTagging {
         enabled: bool,
         reply: SyncSender<Value>,
     },

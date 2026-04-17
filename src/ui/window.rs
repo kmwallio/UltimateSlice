@@ -2,8 +2,10 @@ use crate::media::player::Player;
 use crate::media::program_player::{ProgramClip, ProgramPlayer};
 use crate::model::clip::{AudioChannelMode, Clip, ClipKind, Phase1KeyframeProperty};
 use crate::model::media_library::{
-    media_background_ai_index_request, media_keyword_summary, FrameRateFilter, MediaFilterCriteria,
-    MediaItem, MediaKeywordRange, MediaKindFilter, MediaLibrary, MediaRating, MediaRatingFilter,
+    media_background_ai_index_request, media_background_auto_tag_request,
+    media_background_visual_index_request, media_keyword_summary, upsert_media_auto_tags,
+    upsert_media_visual_embedding, FrameRateFilter, MediaFilterCriteria, MediaItem,
+    MediaKeywordRange, MediaKindFilter, MediaLibrary, MediaRating, MediaRatingFilter,
     ResolutionFilter, SourceMarks,
 };
 use crate::model::project::{FrameRate, Project};
@@ -104,6 +106,173 @@ impl WindowToastHandle {
                 revealer.set_reveal_child(false);
             }
         });
+    }
+}
+
+#[derive(Clone)]
+struct OnboardingStep {
+    target: gtk::Widget,
+    title: &'static str,
+    body: &'static str,
+    position: gtk::PositionType,
+}
+
+#[derive(Clone)]
+struct OnboardingTourHandle {
+    overlay: gtk::Overlay,
+    popover: gtk::Popover,
+    title_label: gtk::Label,
+    body_label: gtk::Label,
+    counter_label: gtk::Label,
+    back_btn: gtk::Button,
+    next_btn: gtk::Button,
+    steps: Rc<Vec<OnboardingStep>>,
+    current_index: Rc<Cell<usize>>,
+    active_target: Rc<RefCell<Option<gtk::Widget>>>,
+    active: Rc<Cell<bool>>,
+    auto_started: Rc<Cell<bool>>,
+    previous_arrangement: Rc<RefCell<Option<crate::ui_state::WorkspaceArrangement>>>,
+    capture_workspace_arrangement: Rc<dyn Fn() -> crate::ui_state::WorkspaceArrangement>,
+    apply_workspace_arrangement: Rc<dyn Fn(crate::ui_state::WorkspaceArrangement)>,
+    preferences_state: Rc<RefCell<crate::ui_state::PreferencesState>>,
+    apply_preferences_state: Rc<dyn Fn(crate::ui_state::PreferencesState)>,
+    show_editor: Rc<dyn Fn()>,
+    timeline_state: Rc<RefCell<TimelineState>>,
+}
+
+fn fallback_onboarding_rect(overlay: &gtk::Widget) -> gtk::gdk::Rectangle {
+    let allocation = overlay.allocation();
+    gtk::gdk::Rectangle::new(
+        (allocation.width() / 2).saturating_sub(1),
+        (allocation.height() / 2).saturating_sub(1),
+        2,
+        2,
+    )
+}
+
+fn onboarding_target_rect(
+    target: &gtk::Widget,
+    overlay: &gtk::Widget,
+) -> Option<gtk::gdk::Rectangle> {
+    let bounds = target.compute_bounds(overlay)?;
+    Some(gtk::gdk::Rectangle::new(
+        bounds.x().round().max(0.0) as i32,
+        bounds.y().round().max(0.0) as i32,
+        bounds.width().round().max(1.0) as i32,
+        bounds.height().round().max(1.0) as i32,
+    ))
+}
+
+impl OnboardingTourHandle {
+    fn clear_target_highlight(&self) {
+        if let Some(widget) = self.active_target.borrow_mut().take() {
+            widget.remove_css_class("onboarding-target");
+        }
+    }
+
+    fn set_target_highlight(&self, widget: &gtk::Widget) {
+        self.clear_target_highlight();
+        widget.add_css_class("onboarding-target");
+        *self.active_target.borrow_mut() = Some(widget.clone());
+    }
+
+    fn mark_seen(&self) {
+        if self.preferences_state.borrow().seen_onboarding_v1 {
+            return;
+        }
+        let mut new_state = self.preferences_state.borrow().clone();
+        new_state.seen_onboarding_v1 = true;
+        (self.apply_preferences_state)(new_state);
+    }
+
+    fn restore_workspace(&self) {
+        if let Some(arrangement) = self.previous_arrangement.borrow_mut().take() {
+            (self.apply_workspace_arrangement)(arrangement);
+        }
+    }
+
+    fn show_current_step(&self) {
+        if !self.active.get() {
+            return;
+        }
+        let index = self.current_index.get();
+        let Some(step) = self.steps.get(index) else {
+            self.dismiss(true);
+            return;
+        };
+        if step.target.is_visible() {
+            self.set_target_highlight(&step.target);
+        } else {
+            self.clear_target_highlight();
+        }
+        self.title_label.set_text(step.title);
+        self.body_label.set_text(step.body);
+        self.counter_label
+            .set_text(&format!("{} of {}", index + 1, self.steps.len()));
+        self.back_btn.set_visible(index > 0);
+        self.next_btn.set_label(if index + 1 >= self.steps.len() {
+            "Finish"
+        } else {
+            "Next"
+        });
+        let overlay_widget: &gtk::Widget = self.overlay.upcast_ref();
+        let rect = onboarding_target_rect(&step.target, overlay_widget)
+            .unwrap_or_else(|| fallback_onboarding_rect(overlay_widget));
+        self.popover.set_position(step.position);
+        self.popover.set_pointing_to(Some(&rect));
+        self.popover.popup();
+    }
+
+    fn schedule_show_current_step(&self) {
+        let handle = self.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(220), move || {
+            handle.show_current_step();
+        });
+    }
+
+    fn start(&self) {
+        (self.show_editor)();
+        if !self.active.get() {
+            *self.previous_arrangement.borrow_mut() = Some((self.capture_workspace_arrangement)());
+            let mut arrangement = (self.capture_workspace_arrangement)();
+            arrangement.media_browser_visible = true;
+            arrangement.inspector_visible = true;
+            arrangement.left_panel_tab = crate::ui_state::WorkspaceLeftPanelTab::Media;
+            arrangement.program_monitor.popped = false;
+            arrangement.program_monitor.scopes_visible = false;
+            (self.apply_workspace_arrangement)(arrangement);
+        }
+        self.active.set(true);
+        self.current_index.set(0);
+        self.schedule_show_current_step();
+    }
+
+    fn maybe_start(&self) {
+        if self.preferences_state.borrow().seen_onboarding_v1
+            || self.auto_started.get()
+            || self.active.get()
+        {
+            return;
+        }
+        if self.timeline_state.borrow().loading {
+            let handle = self.clone();
+            glib::timeout_add_local_once(std::time::Duration::from_millis(250), move || {
+                handle.maybe_start();
+            });
+            return;
+        }
+        self.auto_started.set(true);
+        self.start();
+    }
+
+    fn dismiss(&self, mark_seen: bool) {
+        if mark_seen {
+            self.mark_seen();
+        }
+        self.active.set(false);
+        self.popover.popdown();
+        self.clear_target_highlight();
+        self.restore_workspace();
     }
 }
 
@@ -1712,43 +1881,13 @@ fn sync_library_with_project_entries(library: &mut MediaLibrary, entries: &[Proj
     }
 }
 
-fn collect_media_source_paths(project: &Project, library: &[MediaItem]) -> HashSet<String> {
-    let mut paths: HashSet<String> = project
-        .tracks
-        .iter()
-        .flat_map(|track| track.clips.iter())
-        .filter(|clip| !clip.source_path.is_empty())
-        .map(|clip| clip.source_path.clone())
-        .collect();
-    paths.extend(
-        library
-            .iter()
-            .filter(|item| !item.source_path.is_empty())
-            .map(|item| item.source_path.clone()),
-    );
-    paths
-}
-
-fn build_media_availability_index(
-    project: &Project,
-    library: &[MediaItem],
-) -> HashMap<String, bool> {
-    let mut availability = HashMap::new();
-    for path in collect_media_source_paths(project, library) {
-        availability.insert(
-            path.clone(),
-            crate::model::media_library::source_path_exists(&path),
-        );
-    }
-    availability
-}
-
 pub(crate) fn refresh_media_availability_state(
     project: &Project,
     library: &mut [MediaItem],
     timeline_state: &mut TimelineState,
 ) -> HashSet<String> {
-    let availability = build_media_availability_index(project, library);
+    let availability =
+        crate::media::project_health::build_media_availability_index(project, library);
     let missing_paths: HashSet<String> = availability
         .iter()
         .filter_map(|(path, exists)| if *exists { None } else { Some(path.clone()) })
@@ -1761,13 +1900,115 @@ pub(crate) fn refresh_media_availability_state(
 }
 
 fn collect_missing_source_paths(project: &Project, library: &[MediaItem]) -> Vec<String> {
-    let availability = build_media_availability_index(project, library);
-    let mut missing: Vec<String> = availability
-        .into_iter()
-        .filter_map(|(path, exists)| if exists { None } else { Some(path) })
-        .collect();
-    missing.sort_unstable();
-    missing
+    crate::media::project_health::missing_source_paths(project, library)
+}
+
+pub(crate) fn current_project_health_snapshot(
+    project: &Project,
+    library: &MediaLibrary,
+    prog_player: &ProgramPlayer,
+) -> crate::media::project_health::ProjectHealthSnapshot {
+    crate::media::project_health::collect_snapshot(
+        project,
+        &library.items,
+        Some(prog_player.project_health_prerender_cache_root()),
+    )
+}
+
+pub(crate) fn cleanup_project_health_cache(
+    kind: crate::media::project_health::ProjectHealthPathKind,
+    project: &Project,
+    library: &MediaLibrary,
+    proxy_cache: &Rc<RefCell<crate::media::proxy_cache::ProxyCache>>,
+    bg_removal_cache: &Rc<RefCell<crate::media::bg_removal_cache::BgRemovalCache>>,
+    frame_interp_cache: &Rc<RefCell<crate::media::frame_interp_cache::FrameInterpCache>>,
+    voice_enhance_cache: &Rc<RefCell<crate::media::voice_enhance_cache::VoiceEnhanceCache>>,
+    clip_embedding_cache: &Rc<RefCell<crate::media::clip_embedding_cache::ClipEmbeddingCache>>,
+    auto_tag_cache: &Rc<RefCell<crate::media::auto_tag_cache::AutoTagCache>>,
+    prog_player: &Rc<RefCell<ProgramPlayer>>,
+) -> Result<String, String> {
+    use crate::media::project_health::ProjectHealthPathKind;
+
+    let message = match kind {
+        ProjectHealthPathKind::ProxyLocal => {
+            let root = crate::media::proxy_cache::local_proxy_cache_dir();
+            crate::media::project_health::purge_path(&root)?;
+            proxy_cache.borrow_mut().invalidate_all();
+            prog_player.borrow_mut().update_proxy_paths(HashMap::new());
+            "Cleared managed proxy cache.".to_string()
+        }
+        ProjectHealthPathKind::ProxySidecars => {
+            let source_paths =
+                crate::media::project_health::relevant_media_source_paths(project, &library.items);
+            let removed =
+                crate::media::proxy_cache::purge_sidecar_proxy_cache_for_sources(&source_paths)?;
+            proxy_cache.borrow_mut().invalidate_all();
+            prog_player.borrow_mut().update_proxy_paths(HashMap::new());
+            if removed.file_count == 0 {
+                "No alongside-media proxy cache files matched this project.".to_string()
+            } else {
+                format!(
+                    "Cleared {} alongside-media proxy cache file(s).",
+                    removed.file_count
+                )
+            }
+        }
+        ProjectHealthPathKind::Prerender => {
+            prog_player
+                .borrow_mut()
+                .purge_project_health_prerender_cache();
+            "Cleared background prerender cache.".to_string()
+        }
+        ProjectHealthPathKind::BackgroundRemoval => {
+            let root = crate::media::bg_removal_cache::cache_root_dir();
+            crate::media::project_health::purge_path(&root)?;
+            bg_removal_cache.borrow_mut().invalidate_all();
+            prog_player
+                .borrow_mut()
+                .update_bg_removal_paths(HashMap::new());
+            "Cleared background removal cache.".to_string()
+        }
+        ProjectHealthPathKind::FrameInterpolation => {
+            let root = crate::media::frame_interp_cache::cache_root_dir();
+            crate::media::project_health::purge_path(&root)?;
+            frame_interp_cache.borrow_mut().invalidate_all();
+            prog_player
+                .borrow_mut()
+                .update_frame_interp_paths(HashMap::new());
+            "Cleared frame interpolation cache.".to_string()
+        }
+        ProjectHealthPathKind::VoiceEnhancement => {
+            let root = crate::media::voice_enhance_cache::cache_root_dir();
+            crate::media::project_health::purge_path(&root)?;
+            voice_enhance_cache.borrow_mut().invalidate_all();
+            prog_player
+                .borrow_mut()
+                .update_voice_enhance_paths(HashMap::new());
+            "Cleared voice enhancement cache.".to_string()
+        }
+        ProjectHealthPathKind::ClipEmbeddings => {
+            let root = crate::media::clip_embedding_cache::cache_root_dir();
+            crate::media::project_health::purge_path(&root)?;
+            let _ = clip_embedding_cache;
+            "Cleared clip embedding cache files.".to_string()
+        }
+        ProjectHealthPathKind::AutoTags => {
+            let root = crate::media::auto_tag_cache::cache_root_dir();
+            crate::media::project_health::purge_path(&root)?;
+            let _ = auto_tag_cache;
+            "Cleared auto-tag cache files.".to_string()
+        }
+        ProjectHealthPathKind::ClipSearchModels
+        | ProjectHealthPathKind::BackgroundRemovalModel
+        | ProjectHealthPathKind::FrameInterpolationModel
+        | ProjectHealthPathKind::SttModel => {
+            return Err(
+                "Installed model directories are reported but not purged from Project Health."
+                    .to_string(),
+            )
+        }
+    };
+    Ok(message)
 }
 
 fn collect_files_recursive(root: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
@@ -5811,6 +6052,12 @@ pub fn build_window(
         crate::media::frame_interp_cache::FrameInterpCache::new(),
     ));
     let stt_cache = Rc::new(RefCell::new(crate::media::stt_cache::SttCache::new()));
+    let clip_embedding_cache = Rc::new(RefCell::new(
+        crate::media::clip_embedding_cache::ClipEmbeddingCache::new(),
+    ));
+    let auto_tag_cache = Rc::new(RefCell::new(
+        crate::media::auto_tag_cache::AutoTagCache::new(),
+    ));
     let tracking_cache = Rc::new(RefCell::new(crate::media::tracking::TrackingCache::new()));
     let music_gen_cache = Rc::new(RefCell::new(crate::media::music_gen::MusicGenCache::new()));
     let effective_proxy_enabled = Rc::new(Cell::new(initial_proxy_mode.is_enabled()));
@@ -9305,6 +9552,16 @@ pub fn build_window(
             }
         })
     };
+    let on_replay_onboarding_impl: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    let on_replay_onboarding_gui: Rc<dyn Fn()> = {
+        let cb = on_replay_onboarding_impl.clone();
+        Rc::new(move || {
+            let callback = cb.borrow().as_ref().cloned();
+            if let Some(f) = callback {
+                f();
+            }
+        })
+    };
 
     let (header, btn_record, btn_draw_tools) = toolbar::build_toolbar(
         project.clone(),
@@ -9336,7 +9593,71 @@ pub fn build_window(
             let cb = on_export_frame_gui.clone();
             move || cb()
         },
-        // on_record_voiceover — opens the voiceover recording dialog.
+        {
+            let project = project.clone();
+            let library = library.clone();
+            let proxy_cache = proxy_cache.clone();
+            let bg_removal_cache = bg_removal_cache.clone();
+            let frame_interp_cache = frame_interp_cache.clone();
+            let voice_enhance_cache = voice_enhance_cache.clone();
+            let clip_embedding_cache = clip_embedding_cache.clone();
+            let auto_tag_cache = auto_tag_cache.clone();
+            let prog_player = prog_player.clone();
+            let on_relink_media_gui = on_relink_media_gui.clone();
+            move |window| {
+                let snapshot_provider: Rc<
+                    dyn Fn() -> crate::media::project_health::ProjectHealthSnapshot,
+                > = {
+                    let project = project.clone();
+                    let library = library.clone();
+                    let prog_player = prog_player.clone();
+                    Rc::new(move || {
+                        let project = project.borrow();
+                        let library = library.borrow();
+                        let prog_player = prog_player.borrow();
+                        current_project_health_snapshot(&project, &library, &prog_player)
+                    })
+                };
+                let on_cleanup: Rc<
+                    dyn Fn(
+                        crate::media::project_health::ProjectHealthPathKind,
+                    ) -> Result<String, String>,
+                > = {
+                    let project = project.clone();
+                    let library = library.clone();
+                    let proxy_cache = proxy_cache.clone();
+                    let bg_removal_cache = bg_removal_cache.clone();
+                    let frame_interp_cache = frame_interp_cache.clone();
+                    let voice_enhance_cache = voice_enhance_cache.clone();
+                    let clip_embedding_cache = clip_embedding_cache.clone();
+                    let auto_tag_cache = auto_tag_cache.clone();
+                    let prog_player = prog_player.clone();
+                    Rc::new(move |kind| {
+                        let proj = project.borrow();
+                        let lib = library.borrow();
+                        cleanup_project_health_cache(
+                            kind,
+                            &proj,
+                            &lib,
+                            &proxy_cache,
+                            &bg_removal_cache,
+                            &frame_interp_cache,
+                            &voice_enhance_cache,
+                            &clip_embedding_cache,
+                            &auto_tag_cache,
+                            &prog_player,
+                        )
+                    })
+                };
+                let dialog = crate::ui::project_health::build_project_health_dialog(
+                    snapshot_provider,
+                    on_cleanup,
+                    on_relink_media_gui.clone(),
+                    window.as_ref(),
+                );
+                dialog.present();
+            }
+        },
         {
             let recorder = voiceover_recorder.clone();
             let recording = voiceover_recording.clone();
@@ -9616,6 +9937,10 @@ pub fn build_window(
 
                 dialog.present();
             }
+        },
+        {
+            let cb = on_replay_onboarding_gui.clone();
+            move || cb()
         },
     );
     // ── Script to Timeline button ─────────────────────────────────────
@@ -17073,6 +17398,151 @@ pub fn build_window(
             generation: Rc::new(Cell::new(0)),
         },
     );
+
+    let onboarding_popover = gtk::Popover::new();
+    onboarding_popover.set_autohide(false);
+    onboarding_popover.set_has_arrow(true);
+    onboarding_popover.set_parent(&app_overlay);
+    let onboarding_box = gtk::Box::new(Orientation::Vertical, 10);
+    onboarding_box.add_css_class("onboarding-popover-card");
+    onboarding_box.set_margin_start(14);
+    onboarding_box.set_margin_end(14);
+    onboarding_box.set_margin_top(14);
+    onboarding_box.set_margin_bottom(14);
+    let onboarding_title = gtk::Label::new(None);
+    onboarding_title.set_xalign(0.0);
+    onboarding_title.add_css_class("heading");
+    onboarding_title.add_css_class("onboarding-step-title");
+    onboarding_box.append(&onboarding_title);
+    let onboarding_body = gtk::Label::new(None);
+    onboarding_body.set_wrap(true);
+    onboarding_body.set_xalign(0.0);
+    onboarding_body.set_max_width_chars(36);
+    onboarding_body.add_css_class("onboarding-step-body");
+    onboarding_box.append(&onboarding_body);
+    let onboarding_actions = gtk::Box::new(Orientation::Horizontal, 8);
+    let onboarding_counter = gtk::Label::new(None);
+    onboarding_counter.set_xalign(0.0);
+    onboarding_counter.add_css_class("dim-label");
+    onboarding_counter.add_css_class("onboarding-step-counter");
+    onboarding_counter.set_hexpand(true);
+    onboarding_actions.append(&onboarding_counter);
+    let onboarding_back = gtk::Button::with_label("Back");
+    onboarding_back.add_css_class("flat");
+    onboarding_actions.append(&onboarding_back);
+    let onboarding_skip = gtk::Button::with_label("Skip");
+    onboarding_skip.add_css_class("flat");
+    onboarding_actions.append(&onboarding_skip);
+    let onboarding_next = gtk::Button::with_label("Next");
+    onboarding_next.add_css_class("suggested-action");
+    onboarding_actions.append(&onboarding_next);
+    onboarding_box.append(&onboarding_actions);
+    onboarding_popover.set_child(Some(&onboarding_box));
+
+    let onboarding_steps = Rc::new(vec![
+        OnboardingStep {
+            target: browser.clone().upcast::<gtk::Widget>(),
+            title: "Media Browser",
+            body: "Import, organize, and revisit the clips you want to edit. This is the quickest place to bring media into the project.",
+            position: gtk::PositionType::Right,
+        },
+        OnboardingStep {
+            target: source_monitor_panel.clone().upcast::<gtk::Widget>(),
+            title: "Source Monitor",
+            body: "Preview source clips, set In and Out points, and control how inserts and overwrites land in the timeline.",
+            position: gtk::PositionType::Right,
+        },
+        OnboardingStep {
+            target: timeline_outer_vbox.clone().upcast::<gtk::Widget>(),
+            title: "Timeline",
+            body: "Arrange, trim, and refine the edit here. Once media is imported, this is where your sequence takes shape.",
+            position: gtk::PositionType::Top,
+        },
+        OnboardingStep {
+            target: prog_monitor_host.clone().upcast::<gtk::Widget>(),
+            title: "Program Monitor",
+            body: "Watch the assembled cut, scrub playback, and review what the current timeline edit looks and sounds like.",
+            position: gtk::PositionType::Left,
+        },
+        OnboardingStep {
+            target: inspector_box.clone().upcast::<gtk::Widget>(),
+            title: "Inspector",
+            body: "Adjust the selected clip, title, or effect here. Most detailed property editing lives in this sidebar.",
+            position: gtk::PositionType::Left,
+        },
+    ]);
+    let onboarding_tour = OnboardingTourHandle {
+        overlay: app_overlay.clone(),
+        popover: onboarding_popover.clone(),
+        title_label: onboarding_title.clone(),
+        body_label: onboarding_body.clone(),
+        counter_label: onboarding_counter.clone(),
+        back_btn: onboarding_back.clone(),
+        next_btn: onboarding_next.clone(),
+        steps: onboarding_steps,
+        current_index: Rc::new(Cell::new(0)),
+        active_target: Rc::new(RefCell::new(None)),
+        active: Rc::new(Cell::new(false)),
+        auto_started: Rc::new(Cell::new(false)),
+        previous_arrangement: Rc::new(RefCell::new(None)),
+        capture_workspace_arrangement: capture_workspace_arrangement.clone(),
+        apply_workspace_arrangement: apply_workspace_arrangement.clone(),
+        preferences_state: preferences_state.clone(),
+        apply_preferences_state: apply_preferences_state.clone(),
+        show_editor: on_show_editor_gui.clone(),
+        timeline_state: timeline_state.clone(),
+    };
+    {
+        let onboarding_tour = onboarding_tour.clone();
+        onboarding_back.connect_clicked(move |_| {
+            let index = onboarding_tour.current_index.get();
+            if index == 0 {
+                return;
+            }
+            onboarding_tour.current_index.set(index - 1);
+            onboarding_tour.show_current_step();
+        });
+    }
+    {
+        let onboarding_tour = onboarding_tour.clone();
+        onboarding_skip.connect_clicked(move |_| {
+            onboarding_tour.dismiss(true);
+        });
+    }
+    {
+        let onboarding_tour = onboarding_tour.clone();
+        onboarding_next.connect_clicked(move |_| {
+            let index = onboarding_tour.current_index.get();
+            if index + 1 >= onboarding_tour.steps.len() {
+                onboarding_tour.dismiss(true);
+            } else {
+                onboarding_tour.current_index.set(index + 1);
+                onboarding_tour.show_current_step();
+            }
+        });
+    }
+    {
+        let onboarding_tour = onboarding_tour.clone();
+        onboarding_popover.connect_closed(move |_| {
+            if onboarding_tour.active.get() {
+                onboarding_tour.dismiss(true);
+            }
+        });
+    }
+    {
+        let onboarding_tour = onboarding_tour.clone();
+        *on_replay_onboarding_impl.borrow_mut() = Some(Rc::new(move || {
+            onboarding_tour.start();
+        }));
+    }
+    {
+        let onboarding_tour = onboarding_tour.clone();
+        main_stack.connect_notify_local(Some("visible-child-name"), move |stack, _| {
+            if stack.visible_child_name().as_deref() == Some("editor") {
+                onboarding_tour.maybe_start();
+            }
+        });
+    }
     window.set_child(Some(&app_overlay));
 
     // ── Plugin discovery (deferred to avoid blocking startup) ──────────
@@ -17131,6 +17601,8 @@ pub fn build_window(
         let bg_removal_cache = bg_removal_cache.clone();
         let frame_interp_cache = frame_interp_cache.clone();
         let stt_cache = stt_cache.clone();
+        let clip_embedding_cache = clip_embedding_cache.clone();
+        let auto_tag_cache = auto_tag_cache.clone();
         let tracking_cache = tracking_cache.clone();
         let tracking_job_owner_by_key = tracking_job_owner_by_key.clone();
         let voice_enhance_cache = voice_enhance_cache.clone();
@@ -17304,6 +17776,50 @@ pub fn build_window(
                 });
             }
 
+            let clip_embedding_progress = clip_embedding_cache.borrow().progress();
+            if clip_embedding_progress.in_flight {
+                let fraction = background_job_count_fraction(
+                    clip_embedding_progress.completed,
+                    clip_embedding_progress.total,
+                );
+                jobs.push(ActiveBackgroundJob {
+                    id: "visual-search-indexing".to_string(),
+                    title: "Visual search indexing".to_string(),
+                    detail: format!(
+                        "{} of {} visual indexing jobs complete",
+                        clip_embedding_progress.completed, clip_embedding_progress.total
+                    ),
+                    progress_text: fraction
+                        .map(background_job_fraction_text)
+                        .unwrap_or_else(|| "Running…".to_string()),
+                    fraction,
+                    pulse: fraction.is_none(),
+                    cancel_action: None,
+                });
+            }
+
+            let auto_tag_progress = auto_tag_cache.borrow().progress();
+            if auto_tag_progress.in_flight {
+                let fraction = background_job_count_fraction(
+                    auto_tag_progress.completed,
+                    auto_tag_progress.total,
+                );
+                jobs.push(ActiveBackgroundJob {
+                    id: "media-auto-tagging".to_string(),
+                    title: "Media auto-tagging".to_string(),
+                    detail: format!(
+                        "{} of {} auto-tag jobs complete",
+                        auto_tag_progress.completed, auto_tag_progress.total
+                    ),
+                    progress_text: fraction
+                        .map(background_job_fraction_text)
+                        .unwrap_or_else(|| "Running…".to_string()),
+                    fraction,
+                    pulse: fraction.is_none(),
+                    cancel_action: None,
+                });
+            }
+
             let tracking_jobs = tracking_job_owner_by_key
                 .borrow()
                 .iter()
@@ -17442,6 +17958,8 @@ pub fn build_window(
         let voice_enhance_cache = voice_enhance_cache.clone();
         let on_project_changed_voice_enhance = on_project_changed.clone();
         let frame_interp_cache = frame_interp_cache.clone();
+        let clip_embedding_cache = clip_embedding_cache.clone();
+        let auto_tag_cache = auto_tag_cache.clone();
         let stt_cache = stt_cache.clone();
         let tracking_cache = tracking_cache.clone();
         let project_for_stt = project.clone();
@@ -17815,6 +18333,122 @@ pub fn build_window(
                 }
             }
             {
+                let visual_results = clip_embedding_cache.borrow_mut().poll();
+                let mut visual_cache_changed = false;
+                for result in visual_results {
+                    if upsert_media_visual_embedding(
+                        &mut library_for_stt.borrow_mut(),
+                        &result.source_path,
+                        result.embedding,
+                    ) {
+                        visual_cache_changed = true;
+                    }
+                }
+                if visual_cache_changed {
+                    on_library_changed_stt();
+                }
+                clip_embedding_cache.borrow_mut().refresh_model_paths();
+                if !clip_embedding_cache.borrow().progress().in_flight
+                    && preferences_state.borrow().background_ai_indexing
+                    && clip_embedding_cache.borrow().is_available()
+                {
+                    let candidates: Vec<(
+                        String,
+                        crate::model::media_library::MediaVisualIndexRequest,
+                    )> = {
+                        let lib = library_for_stt.borrow();
+                        lib.items
+                            .iter()
+                            .filter_map(|item| {
+                                media_background_visual_index_request(item)
+                                    .map(|request| (item.source_path.clone(), request))
+                            })
+                            .collect()
+                    };
+                    let mut cache = clip_embedding_cache.borrow_mut();
+                    for (source_path, request) in candidates {
+                        match cache.request(&source_path, request.duration_ns, request.is_image) {
+                            crate::media::clip_embedding_cache::ClipEmbeddingRequest::Skipped => {}
+                            crate::media::clip_embedding_cache::ClipEmbeddingRequest::Queued => {
+                                break;
+                            }
+                            crate::media::clip_embedding_cache::ClipEmbeddingRequest::Ready(
+                                ready,
+                            ) => {
+                                if upsert_media_visual_embedding(
+                                    &mut library_for_stt.borrow_mut(),
+                                    &ready.source_path,
+                                    ready.embedding,
+                                ) {
+                                    visual_cache_changed = true;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    if visual_cache_changed {
+                        on_library_changed_stt();
+                    }
+                }
+            }
+            {
+                let auto_tag_results = auto_tag_cache.borrow_mut().poll();
+                let mut auto_tag_cache_changed = false;
+                for result in auto_tag_results {
+                    if upsert_media_auto_tags(
+                        &mut library_for_stt.borrow_mut(),
+                        &result.source_path,
+                        result.auto_tags,
+                    ) {
+                        auto_tag_cache_changed = true;
+                    }
+                }
+                if auto_tag_cache_changed {
+                    on_library_changed_stt();
+                }
+                if !auto_tag_cache.borrow().progress().in_flight
+                    && preferences_state.borrow().background_ai_indexing
+                    && preferences_state.borrow().background_auto_tagging
+                    && auto_tag_cache.borrow().is_available()
+                {
+                    let candidates: Vec<(
+                        String,
+                        crate::model::media_library::MediaVisualEmbedding,
+                    )> = {
+                        let lib = library_for_stt.borrow();
+                        lib.items
+                            .iter()
+                            .filter_map(|item| {
+                                media_background_auto_tag_request(item)
+                                    .map(|embedding| (item.source_path.clone(), embedding))
+                            })
+                            .collect()
+                    };
+                    let mut cache = auto_tag_cache.borrow_mut();
+                    for (source_path, embedding) in candidates {
+                        match cache.request(&source_path, embedding) {
+                            crate::media::auto_tag_cache::AutoTagRequest::Skipped => {}
+                            crate::media::auto_tag_cache::AutoTagRequest::Queued => {
+                                break;
+                            }
+                            crate::media::auto_tag_cache::AutoTagRequest::Ready(ready) => {
+                                if upsert_media_auto_tags(
+                                    &mut library_for_stt.borrow_mut(),
+                                    &ready.source_path,
+                                    ready.auto_tags,
+                                ) {
+                                    auto_tag_cache_changed = true;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    if auto_tag_cache_changed {
+                        on_library_changed_stt();
+                    }
+                }
+            }
+            {
                 let tracking_results = tracking_cache.borrow_mut().poll();
                 let mut tracking_changed_project = false;
                 for result in tracking_results {
@@ -18183,6 +18817,9 @@ pub fn build_window(
         let proxy_cache = proxy_cache.clone();
         let bg_removal_cache = bg_removal_cache.clone();
         let frame_interp_cache = frame_interp_cache.clone();
+        let voice_enhance_cache = voice_enhance_cache.clone();
+        let clip_embedding_cache = clip_embedding_cache.clone();
+        let auto_tag_cache = auto_tag_cache.clone();
         let tracking_cache_for_mcp = tracking_cache.clone();
         let tracking_job_owner_by_key_for_mcp = tracking_job_owner_by_key.clone();
         let tracking_job_key_by_clip_for_mcp = tracking_job_key_by_clip.clone();
@@ -18249,6 +18886,9 @@ pub fn build_window(
                         &proxy_cache,
                         &bg_removal_cache,
                         &frame_interp_cache,
+                        &voice_enhance_cache,
+                        &clip_embedding_cache,
+                        &auto_tag_cache,
                         &stt_cache,
                         &music_gen_cache,
                         &tracking_cache_for_mcp,
@@ -18871,6 +19511,9 @@ pub fn build_window(
     }
 
     window.present();
+    if main_stack.visible_child_name().as_deref() == Some("editor") {
+        onboarding_tour.maybe_start();
+    }
 }
 
 // ── MCP Script-to-Timeline state (GTK main thread only) ─────────────────────
@@ -18893,6 +19536,9 @@ fn handle_mcp_command(
     proxy_cache: &Rc<RefCell<crate::media::proxy_cache::ProxyCache>>,
     bg_removal_cache: &Rc<RefCell<crate::media::bg_removal_cache::BgRemovalCache>>,
     frame_interp_cache: &Rc<RefCell<crate::media::frame_interp_cache::FrameInterpCache>>,
+    voice_enhance_cache: &Rc<RefCell<crate::media::voice_enhance_cache::VoiceEnhanceCache>>,
+    clip_embedding_cache: &Rc<RefCell<crate::media::clip_embedding_cache::ClipEmbeddingCache>>,
+    auto_tag_cache: &Rc<RefCell<crate::media::auto_tag_cache::AutoTagCache>>,
     stt_cache: &Rc<RefCell<crate::media::stt_cache::SttCache>>,
     music_gen_cache: &Rc<RefCell<crate::media::music_gen::MusicGenCache>>,
     tracking_cache: &Rc<RefCell<crate::media::tracking::TrackingCache>>,
@@ -18925,6 +19571,9 @@ fn handle_mcp_command(
         proxy_cache,
         bg_removal_cache,
         frame_interp_cache,
+        voice_enhance_cache,
+        clip_embedding_cache,
+        auto_tag_cache,
         stt_cache,
         music_gen_cache,
         tracking_cache,
