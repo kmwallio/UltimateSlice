@@ -2,15 +2,16 @@ use crate::media::program_player::{ProgramPlayer, ScopeFrame};
 use crate::model::project::FrameRate;
 use crate::ui::colors::{LUMA_B, LUMA_G, LUMA_R};
 use crate::ui::timecode;
+use crate::ui_state::AspectMaskPreset;
 
 /// Discrete zoom levels for the program monitor zoom in/out buttons.
 const PROGRAM_MONITOR_ZOOM_LEVELS: &[f64] = &[0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
 const PROGRAM_MONITOR_CANVAS_BASE_CSS_CLASSES: &[&str] = &["preview-video"];
 use gtk4::prelude::*;
 use gtk4::{
-    self as gtk, AspectFrame, Box as GBox, Button, CheckButton, DrawingArea, EventControllerScroll,
-    EventControllerScrollFlags, Label, MenuButton, Orientation, Overlay, Picture, Popover,
-    ScrolledWindow,
+    self as gtk, AspectFrame, Box as GBox, Button, CheckButton, DrawingArea, DropDown,
+    EventControllerScroll, EventControllerScrollFlags, Label, MenuButton, Orientation, Overlay,
+    Picture, Popover, ScrolledWindow, StringList,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -213,12 +214,13 @@ fn style_program_monitor_canvas_base(widget: &impl IsA<gtk::Widget>) {
 }
 
 /// Build the program monitor widget.
-/// Returns `(widget, pos_label, speed_label, picture_a, picture_b, vu_meter, peak_cell, canvas_frame, safe_area_setter, false_color_setter, zebra_setter, hud_setter, hud_redraw, frame_updater, subtitle_text_setter)`.
+/// Returns `(widget, pos_label, speed_label, picture_a, picture_b, vu_meter, peak_cell, canvas_frame, safe_area_setter, false_color_setter, zebra_setter, hud_setter, hud_redraw, aspect_mask_setter, frame_updater, subtitle_text_setter)`.
 /// - `safe_area_setter(enabled)` — toggle safe-area guide overlay.
 /// - `false_color_setter(enabled)` — toggle false-color luminance overlay.
 /// - `zebra_setter(enabled, threshold)` — toggle zebra overexposure overlay; threshold is 0.0–1.0.
 /// - `hud_setter(enabled)` — toggle HUD overlay (timecode/frame/fps/resolution/dropped).
 /// - `hud_redraw()` — request a HUD redraw; call from the position poll so the HUD ticks.
+/// - `aspect_mask_setter(preset)` — select a delivery-format letterbox/pillarbox preset on the Program Monitor.
 /// - `frame_updater(frame)` — push a new 320×180 RGBA scope frame; triggers overlay redraw.
 /// - `subtitle_text_setter(lines)` — set current subtitle lines for overlay display with per-clip styling.
 pub fn build_program_monitor(
@@ -242,6 +244,8 @@ pub fn build_program_monitor(
     initial_show_hud: bool,
     on_hud_changed: impl Fn(bool) + 'static,
     hud_stats_getter: impl Fn() -> HudStats + 'static,
+    initial_aspect_mask: AspectMaskPreset,
+    on_aspect_mask_changed: impl Fn(AspectMaskPreset) + 'static,
     // Optional extra button to append to the Program Monitor header
     // controls row (e.g. the Loudness Radar popover toggle). When `None`
     // the header looks exactly as before.
@@ -260,6 +264,7 @@ pub fn build_program_monitor(
     Rc<dyn Fn(bool, f64)>,
     Rc<dyn Fn(bool)>,
     Rc<dyn Fn()>,
+    Rc<dyn Fn(AspectMaskPreset)>,
     Rc<dyn Fn(ScopeFrame)>,
     Rc<dyn Fn(Vec<SubtitleLine>)>,
 ) {
@@ -337,6 +342,30 @@ pub fn build_program_monitor(
         "HUD overlay: timecode, frame number, fps, resolution, and dropped-frame count (Shift+H)",
     ));
 
+    // Aspect-ratio mask preset dropdown — letterboxes/pillarboxes the
+    // canvas to a delivery-format target. `None` disables the overlay.
+    let on_aspect_mask_changed = Rc::new(on_aspect_mask_changed);
+    let aspect_mask_label_row = GBox::new(Orientation::Horizontal, 6);
+    let aspect_mask_label = Label::new(Some("Aspect mask"));
+    aspect_mask_label.set_xalign(0.0);
+    aspect_mask_label.set_hexpand(true);
+    let aspect_mask_strings: Vec<&'static str> = AspectMaskPreset::ALL
+        .iter()
+        .map(|p| p.label())
+        .collect();
+    let aspect_mask_model = StringList::new(&aspect_mask_strings);
+    let aspect_mask_dropdown = DropDown::new(Some(aspect_mask_model), None::<gtk::Expression>);
+    aspect_mask_dropdown.set_tooltip_text(Some(
+        "Preview a delivery-format aspect ratio by letterboxing the Program Monitor canvas",
+    ));
+    let initial_mask_index = AspectMaskPreset::ALL
+        .iter()
+        .position(|p| *p == initial_aspect_mask)
+        .unwrap_or(0) as u32;
+    aspect_mask_dropdown.set_selected(initial_mask_index);
+    aspect_mask_label_row.append(&aspect_mask_label);
+    aspect_mask_label_row.append(&aspect_mask_dropdown);
+
     // "Overlays" dropdown — pops up a small panel with the three check items.
     let overlays_popover_box = GBox::new(Orientation::Vertical, 4);
     overlays_popover_box.set_margin_top(8);
@@ -353,6 +382,7 @@ pub fn build_program_monitor(
     overlays_popover_box.append(&zebra_btn);
     overlays_popover_box.append(&hud_btn);
     overlays_popover_box.append(&subtitle_overlay_btn);
+    overlays_popover_box.append(&aspect_mask_label_row);
 
     let overlays_popover = Popover::new();
     overlays_popover.set_child(Some(&overlays_popover_box));
@@ -670,6 +700,80 @@ pub fn build_program_monitor(
     }
     overlay.add_overlay(&hud_da);
     overlay.set_measure_overlay(&hud_da, false);
+
+    // Aspect-ratio mask overlay: darkens the canvas regions outside the
+    // selected delivery-format target rectangle. When the active preset
+    // is `None` (the default) the draw func early-outs so the overlay is
+    // effectively free.
+    let aspect_mask_preset: Rc<Cell<AspectMaskPreset>> = Rc::new(Cell::new(initial_aspect_mask));
+    let aspect_mask_da = DrawingArea::new();
+    aspect_mask_da.set_hexpand(true);
+    aspect_mask_da.set_vexpand(true);
+    aspect_mask_da.set_halign(gtk::Align::Fill);
+    aspect_mask_da.set_valign(gtk::Align::Fill);
+    aspect_mask_da.set_can_target(false);
+    {
+        let aspect_mask_preset = aspect_mask_preset.clone();
+        aspect_mask_da.set_draw_func(move |_da, cr, width, height| {
+            if width <= 0 || height <= 0 {
+                return;
+            }
+            let Some(target_ratio) = aspect_mask_preset.get().ratio() else {
+                return;
+            };
+            let w = width as f64;
+            let h = height as f64;
+            let canvas_ratio = w / h;
+
+            // Compute the inner target-ratio rectangle centered in the canvas.
+            // target_ratio > canvas_ratio → target is wider than canvas, so the
+            //   inner rect fills the canvas width and is shorter → letterbox
+            //   bars on top/bottom.
+            // target_ratio < canvas_ratio → target is narrower than canvas, so
+            //   the inner rect fills the canvas height and is narrower →
+            //   pillarbox bars on left/right.
+            let (inner_w, inner_h) = if target_ratio > canvas_ratio {
+                (w, w / target_ratio)
+            } else {
+                (h * target_ratio, h)
+            };
+            let inner_x = (w - inner_w) * 0.5;
+            let inner_y = (h - inner_h) * 0.5;
+
+            // Skip drawing when the target effectively matches the canvas
+            // (sub-pixel difference). Avoids a faint 1px guide line on the
+            // same-ratio preset.
+            if (inner_w - w).abs() < 1.0 && (inner_h - h).abs() < 1.0 {
+                return;
+            }
+
+            // Fill the four letterbox/pillarbox bands with translucent black.
+            // Using individual rectangles (not a cut-out path) keeps the draw
+            // simple and avoids fill-rule gotchas across Cairo versions.
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.75);
+            if inner_y > 0.5 {
+                cr.rectangle(0.0, 0.0, w, inner_y);
+                let _ = cr.fill();
+                cr.rectangle(0.0, inner_y + inner_h, w, h - (inner_y + inner_h));
+                let _ = cr.fill();
+            }
+            if inner_x > 0.5 {
+                cr.rectangle(0.0, inner_y, inner_x, inner_h);
+                let _ = cr.fill();
+                cr.rectangle(inner_x + inner_w, inner_y, w - (inner_x + inner_w), inner_h);
+                let _ = cr.fill();
+            }
+
+            // 1px guide line around the target rect, matching the Safe Areas
+            // overlay treatment so the two overlays read as a family.
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.32);
+            cr.set_line_width(1.0);
+            cr.rectangle(inner_x, inner_y, inner_w, inner_h);
+            let _ = cr.stroke();
+        });
+    }
+    overlay.add_overlay(&aspect_mask_da);
+    overlay.set_measure_overlay(&aspect_mask_da, false);
 
     // Subtitle overlay: displays current subtitle lines with per-clip styling.
     let subtitle_lines: Rc<RefCell<Vec<SubtitleLine>>> = Rc::new(RefCell::new(Vec::new()));
@@ -1290,6 +1394,54 @@ pub fn build_program_monitor(
         })
     };
 
+    // Aspect-mask dropdown → setter round-trip. `updating` guards against
+    // the selection-notify callback feeding back into itself when the
+    // setter programmatically updates the dropdown index.
+    let aspect_mask_updating: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    let aspect_mask_setter: Rc<dyn Fn(AspectMaskPreset)> = {
+        let aspect_mask_preset = aspect_mask_preset.clone();
+        let aspect_mask_da = aspect_mask_da.clone();
+        let aspect_mask_dropdown = aspect_mask_dropdown.clone();
+        let aspect_mask_updating = aspect_mask_updating.clone();
+        Rc::new(move |preset: AspectMaskPreset| {
+            aspect_mask_preset.set(preset);
+            let idx = AspectMaskPreset::ALL
+                .iter()
+                .position(|p| *p == preset)
+                .unwrap_or(0) as u32;
+            if aspect_mask_dropdown.selected() != idx {
+                aspect_mask_updating.set(true);
+                aspect_mask_dropdown.set_selected(idx);
+                aspect_mask_updating.set(false);
+            }
+            aspect_mask_da.queue_draw();
+        })
+    };
+    {
+        let aspect_mask_setter = aspect_mask_setter.clone();
+        let on_aspect_mask_changed = on_aspect_mask_changed.clone();
+        let aspect_mask_updating = aspect_mask_updating.clone();
+        // Dismiss the Overlays popover after a pick. Nested GTK4 popovers
+        // (the DropDown opens its own popover inside this one) can leave the
+        // outer popover's autohide stuck after the child popover closes, so
+        // we popdown explicitly — which is also the right UX since the user
+        // has made their selection.
+        let overlays_popover_close = overlays_popover.clone();
+        aspect_mask_dropdown.connect_selected_notify(move |dd| {
+            if aspect_mask_updating.get() {
+                return;
+            }
+            let idx = dd.selected() as usize;
+            let preset = AspectMaskPreset::ALL
+                .get(idx)
+                .copied()
+                .unwrap_or(AspectMaskPreset::None);
+            aspect_mask_setter(preset);
+            on_aspect_mask_changed(preset);
+            overlays_popover_close.popdown();
+        });
+    }
+
     // Wire subtitle overlay checkbox toggle.
     {
         let sv = subtitle_visible.clone();
@@ -1342,6 +1494,7 @@ pub fn build_program_monitor(
         zebra_setter,
         hud_setter,
         hud_redraw,
+        aspect_mask_setter,
         frame_updater,
         subtitle_text_setter,
     )

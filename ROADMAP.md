@@ -731,7 +731,7 @@ FCPXML persistence).
 - [x] HUD overlay — togglable overlay showing timecode, frame number, fps, resolution, and dropped-frame count (reuse `src/ui/timecode.rs`); shortcut **Shift+H**; persists via `ProgramMonitorState.show_hud`; MCP `set_program_monitor_hud`
 - [ ] A/B compare / split-view — vertical wipe between graded and ungraded versions of the current frame, draggable midline
 - [ ] Reference still pin — capture the current frame as a pinned thumbnail strip (up to 4 stills) for color-matching across scenes
-- [ ] Cinemascope / aspect-ratio mask overlay — togglable letterbox preview at 2.39:1, 2.00:1, 1.85:1, 1:1, 9:16, 4:5 etc. for delivery-format previewing
+- [x] Cinemascope / aspect-ratio mask overlay — dropdown in the **Overlays ▾** popover offering 2.39 : 1, 2.00 : 1, 1.85 : 1, 4 : 3, 1 : 1, 4 : 5, 9 : 16 (plus None) with translucent bars + 1 px guide line; persists via `ProgramMonitorState.aspect_mask`; MCP `set_program_monitor_aspect_mask`
 
 **Workspace & Ergonomics**
 - [ ] Detachable / Multi-Monitor Panels for Scopes, Media Library, and Inspector

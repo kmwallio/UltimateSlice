@@ -1650,6 +1650,21 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_program_monitor_aspect_mask",
+            "description": "Select the Program Monitor aspect-ratio mask preset. Letterboxes or pillarboxes the preview to the chosen delivery-format target. Use 'none' to disable. Setting persists across sessions.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "preset": {
+                        "type": "string",
+                        "enum": ["none", "cinemascope", "univisium", "academy", "standard", "square", "social_45", "vertical"],
+                        "description": "Aspect mask preset: none (off), cinemascope (2.39:1), univisium (2.00:1), academy (1.85:1), standard (4:3), square (1:1), social_45 (4:5), vertical (9:16)."
+                    }
+                },
+                "required": ["preset"]
+            }
+        },
+        {
             "name": "set_background_ai_indexing",
             "description": "Enable or disable automatic background AI indexing for Media Library search enrichment. When enabled, eligible library items are queued one at a time for transcript indexing (Whisper) and visual embedding generation (CLIP-style search) when the corresponding models are available.",
             "inputSchema": {
@@ -3730,6 +3745,10 @@ fn dispatch_tool_payload(
         },
         "set_program_monitor_hud" => McpCommand::SetProgramMonitorHud {
             enabled: arg_bool!(args, "enabled"),
+            reply: tx,
+        },
+        "set_program_monitor_aspect_mask" => McpCommand::SetProgramMonitorAspectMask {
+            preset: arg_str!(args, "preset", "none"),
             reply: tx,
         },
         "set_background_ai_indexing" => McpCommand::SetBackgroundAiIndexing {

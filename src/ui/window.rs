@@ -12049,6 +12049,7 @@ pub fn build_window(
         prog_zebra_setter,
         prog_hud_setter,
         prog_hud_redraw,
+        prog_aspect_mask_setter,
         prog_frame_updater,
         prog_subtitle_text_setter,
     ) = {
@@ -13311,6 +13312,17 @@ pub fn build_window(
                     }
                 }
             },
+            monitor_state.borrow().aspect_mask,
+            {
+                let monitor_state = monitor_state.clone();
+                move |preset: crate::ui_state::AspectMaskPreset| {
+                    let mut state = monitor_state.borrow_mut();
+                    if state.aspect_mask != preset {
+                        state.aspect_mask = preset;
+                        crate::ui_state::save_program_monitor_state(&state);
+                    }
+                }
+            },
             // The Loudness Radar popover button is placed next to the
             // Scopes toggle below `prog_monitor_host`, not in the
             // Program Monitor header, so we pass None here.
@@ -13378,6 +13390,23 @@ pub fn build_window(
             let mut state = monitor_state.borrow_mut();
             if state.show_hud != enabled {
                 state.show_hud = enabled;
+                crate::ui_state::save_program_monitor_state(&state);
+            }
+        })
+    };
+
+    // Shared entry point for selecting the Program Monitor aspect-mask preset.
+    // Same shape as `apply_program_monitor_hud` above: it forwards to the
+    // overlay setter (which also syncs the dropdown), then persists the new
+    // preset into `ui-state.json` so it survives a restart.
+    let apply_program_monitor_aspect_mask: Rc<dyn Fn(crate::ui_state::AspectMaskPreset)> = {
+        let aspect_mask_setter = prog_aspect_mask_setter.clone();
+        let monitor_state = monitor_state.clone();
+        Rc::new(move |preset: crate::ui_state::AspectMaskPreset| {
+            aspect_mask_setter(preset);
+            let mut state = monitor_state.borrow_mut();
+            if state.aspect_mask != preset {
+                state.aspect_mask = preset;
                 crate::ui_state::save_program_monitor_state(&state);
             }
         })
@@ -19259,6 +19288,7 @@ pub fn build_window(
                         &sync_workspace_layout_controls,
                         &apply_preferences_state,
                         &apply_program_monitor_hud,
+                        &apply_program_monitor_aspect_mask,
                         &suppress_resume_on_next_reload,
                         &clear_media_browser_on_next_reload,
                     );
@@ -19942,6 +19972,7 @@ fn handle_mcp_command(
     sync_workspace_layout_controls: &Rc<dyn Fn()>,
     apply_preferences_state: &Rc<dyn Fn(crate::ui_state::PreferencesState)>,
     apply_program_monitor_hud: &Rc<dyn Fn(bool)>,
+    apply_program_monitor_aspect_mask: &Rc<dyn Fn(crate::ui_state::AspectMaskPreset)>,
     suppress_resume_on_next_reload: &Rc<Cell<bool>>,
     clear_media_browser_on_next_reload: &Rc<Cell<bool>>,
 ) {
@@ -19978,6 +20009,7 @@ fn handle_mcp_command(
         sync_workspace_layout_controls,
         apply_preferences_state,
         apply_program_monitor_hud,
+        apply_program_monitor_aspect_mask,
         suppress_resume_on_next_reload,
         clear_media_browser_on_next_reload,
     );

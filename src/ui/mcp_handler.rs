@@ -84,6 +84,7 @@ pub(crate) fn handle_mcp_command(
     sync_workspace_layout_controls: &Rc<dyn Fn()>,
     apply_preferences_state: &Rc<dyn Fn(crate::ui_state::PreferencesState)>,
     apply_program_monitor_hud: &Rc<dyn Fn(bool)>,
+    apply_program_monitor_aspect_mask: &Rc<dyn Fn(crate::ui_state::AspectMaskPreset)>,
     suppress_resume_on_next_reload: &Rc<Cell<bool>>,
     clear_media_browser_on_next_reload: &Rc<Cell<bool>>,
 ) {
@@ -1155,6 +1156,31 @@ pub(crate) fn handle_mcp_command(
                     "show_hud": enabled
                 }))
                 .ok();
+        }
+
+        McpCommand::SetProgramMonitorAspectMask { preset, reply } => {
+            match crate::ui_state::AspectMaskPreset::from_str(&preset) {
+                Some(parsed) => {
+                    apply_program_monitor_aspect_mask(parsed);
+                    reply
+                        .send(json!({
+                            "success": true,
+                            "aspect_mask": parsed.as_str()
+                        }))
+                        .ok();
+                }
+                None => {
+                    reply
+                        .send(json!({
+                            "success": false,
+                            "error": format!(
+                                "unknown aspect_mask preset '{}': expected one of none, cinemascope, univisium, academy, standard, square, social_45, vertical",
+                                preset
+                            )
+                        }))
+                        .ok();
+                }
+            }
         }
 
         McpCommand::SetBackgroundAiIndexing { enabled, reply } => {

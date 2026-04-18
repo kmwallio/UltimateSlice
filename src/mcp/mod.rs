@@ -690,6 +690,10 @@ pub enum McpCommand {
         enabled: bool,
         reply: SyncSender<Value>,
     },
+    SetProgramMonitorAspectMask {
+        preset: String,
+        reply: SyncSender<Value>,
+    },
     SetPrerenderProjectPersistence {
         enabled: bool,
         reply: SyncSender<Value>,

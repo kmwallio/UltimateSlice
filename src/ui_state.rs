@@ -35,6 +35,94 @@ pub struct ProgramMonitorState {
     /// Show HUD overlay (timecode, frame #, fps, resolution, dropped frames).
     #[serde(default)]
     pub show_hud: bool,
+    /// Aspect-ratio mask overlay preset on the Program Monitor.
+    #[serde(default)]
+    pub aspect_mask: AspectMaskPreset,
+}
+
+/// Delivery-format letterbox/pillarbox preview selected from the Program
+/// Monitor **Overlays ▾** popover. `None` disables the overlay.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AspectMaskPreset {
+    #[default]
+    None,
+    /// 2.39:1 — modern anamorphic cinema master.
+    Cinemascope,
+    /// 2.00:1 — "Univisium" / modern streaming features.
+    Univisium,
+    /// 1.85:1 — US theatrical flat.
+    Academy,
+    /// 4:3 (≈1.333:1) — legacy broadcast / SD.
+    Standard,
+    /// 1:1 — square social feed.
+    Square,
+    /// 4:5 — Instagram portrait feed.
+    Social45,
+    /// 9:16 — Reels / TikTok / Shorts vertical.
+    Vertical,
+}
+
+impl AspectMaskPreset {
+    pub const ALL: [AspectMaskPreset; 8] = [
+        AspectMaskPreset::None,
+        AspectMaskPreset::Cinemascope,
+        AspectMaskPreset::Univisium,
+        AspectMaskPreset::Academy,
+        AspectMaskPreset::Standard,
+        AspectMaskPreset::Square,
+        AspectMaskPreset::Social45,
+        AspectMaskPreset::Vertical,
+    ];
+
+    /// Target width/height ratio. `None` means "no mask".
+    pub fn ratio(self) -> Option<f64> {
+        match self {
+            AspectMaskPreset::None => None,
+            AspectMaskPreset::Cinemascope => Some(2.39),
+            AspectMaskPreset::Univisium => Some(2.0),
+            AspectMaskPreset::Academy => Some(1.85),
+            AspectMaskPreset::Standard => Some(4.0 / 3.0),
+            AspectMaskPreset::Square => Some(1.0),
+            AspectMaskPreset::Social45 => Some(4.0 / 5.0),
+            AspectMaskPreset::Vertical => Some(9.0 / 16.0),
+        }
+    }
+
+    /// Human-readable label shown in the Overlays popover dropdown.
+    pub fn label(self) -> &'static str {
+        match self {
+            AspectMaskPreset::None => "None",
+            AspectMaskPreset::Cinemascope => "2.39 : 1",
+            AspectMaskPreset::Univisium => "2.00 : 1",
+            AspectMaskPreset::Academy => "1.85 : 1",
+            AspectMaskPreset::Standard => "4 : 3",
+            AspectMaskPreset::Square => "1 : 1",
+            AspectMaskPreset::Social45 => "4 : 5",
+            AspectMaskPreset::Vertical => "9 : 16",
+        }
+    }
+
+    /// Snake-case serde key, also used as the MCP `preset` argument.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AspectMaskPreset::None => "none",
+            AspectMaskPreset::Cinemascope => "cinemascope",
+            AspectMaskPreset::Univisium => "univisium",
+            AspectMaskPreset::Academy => "academy",
+            AspectMaskPreset::Standard => "standard",
+            AspectMaskPreset::Square => "square",
+            AspectMaskPreset::Social45 => "social_45",
+            AspectMaskPreset::Vertical => "vertical",
+        }
+    }
+
+    /// Parse a snake-case preset key back into the enum. Returns `None`
+    /// for unknown input, which lets callers distinguish "invalid" from
+    /// "intentionally `None`" (the latter round-trips through `"none"`).
+    pub fn from_str(s: &str) -> Option<AspectMaskPreset> {
+        Self::ALL.iter().copied().find(|p| p.as_str() == s)
+    }
 }
 
 fn default_zebra_threshold() -> f64 {
@@ -126,6 +214,7 @@ impl Default for ProgramMonitorState {
             show_zebra: false,
             zebra_threshold: default_zebra_threshold(),
             show_hud: false,
+            aspect_mask: AspectMaskPreset::None,
         }
     }
 }
@@ -1905,6 +1994,7 @@ mod tests {
             show_zebra: true,
             zebra_threshold: 0.95,
             show_hud: true,
+            aspect_mask: AspectMaskPreset::Cinemascope,
         };
         let workspace = ProgramMonitorWorkspaceState::from_program_monitor_state(&monitor);
         assert!(workspace.popped);
@@ -1912,6 +2002,57 @@ mod tests {
         assert_eq!(workspace.height, 777);
         assert_eq!(workspace.docked_split_pos, 512);
         assert!(workspace.scopes_visible);
+    }
+
+    #[test]
+    fn aspect_mask_preset_ratio_covers_all_variants() {
+        assert_eq!(AspectMaskPreset::None.ratio(), None);
+        for preset in AspectMaskPreset::ALL.iter().copied() {
+            if preset == AspectMaskPreset::None {
+                continue;
+            }
+            let r = preset
+                .ratio()
+                .unwrap_or_else(|| panic!("{:?} must have a ratio", preset));
+            assert!(r > 0.0, "{:?} ratio must be positive, got {}", preset, r);
+            assert!(r < 10.0, "{:?} ratio sanity bound, got {}", preset, r);
+        }
+        // Spot-check a few exact values.
+        assert!((AspectMaskPreset::Cinemascope.ratio().unwrap() - 2.39).abs() < 1e-9);
+        assert!((AspectMaskPreset::Square.ratio().unwrap() - 1.0).abs() < 1e-9);
+        assert!((AspectMaskPreset::Vertical.ratio().unwrap() - 9.0 / 16.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn aspect_mask_preset_str_round_trips() {
+        for preset in AspectMaskPreset::ALL.iter().copied() {
+            let s = preset.as_str();
+            assert_eq!(AspectMaskPreset::from_str(s), Some(preset));
+        }
+        assert_eq!(AspectMaskPreset::from_str("not-a-preset"), None);
+        assert_eq!(AspectMaskPreset::from_str(""), None);
+    }
+
+    #[test]
+    fn program_monitor_state_aspect_mask_round_trips() {
+        let mut monitor = ProgramMonitorState::default();
+        assert_eq!(
+            monitor.aspect_mask,
+            AspectMaskPreset::None,
+            "default aspect_mask is None"
+        );
+        monitor.aspect_mask = AspectMaskPreset::Vertical;
+        let encoded = serde_json::to_string(&monitor).expect("serialize");
+        assert!(encoded.contains(r#""aspect_mask":"vertical""#));
+        let decoded: ProgramMonitorState = serde_json::from_str(&encoded).expect("deserialize");
+        assert_eq!(decoded.aspect_mask, AspectMaskPreset::Vertical);
+        let legacy: ProgramMonitorState =
+            serde_json::from_str(r#"{"popped":false}"#).expect("legacy deserialize");
+        assert_eq!(
+            legacy.aspect_mask,
+            AspectMaskPreset::None,
+            "legacy JSON without aspect_mask defaults None"
+        );
     }
 
     #[test]
