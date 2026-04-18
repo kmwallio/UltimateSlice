@@ -864,9 +864,26 @@ scale slider:hover {
 
 /* Compact spin-buttons alongside inspector sliders */
 spinbutton.inspector-spin {
-    min-width: 56px;
-    padding: 0 2px;
+    min-width: 0;
+    padding: 0;
     font-size: 0.85em;
+}
+spinbutton.inspector-spin text {
+    min-width: 36px;
+}
+spinbutton.inspector-spin button {
+    min-width: 16px;
+    min-height: 16px;
+    padding: 0;
+}
+
+/* Small circular reset-to-default button alongside inspector sliders */
+button.inspector-reset {
+    min-width: 20px;
+    min-height: 20px;
+    padding: 0;
+    margin: 0;
+    border-radius: 10px;
 }
 
 /* Check/radio controls used across settings panels */
