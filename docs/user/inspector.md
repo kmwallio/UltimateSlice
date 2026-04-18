@@ -6,6 +6,8 @@ Select a clip in the timeline to populate the Inspector. All changes apply immed
 
 When nothing is selected, the Inspector hides its edit controls and shows a short hint explaining how to get started again. The hint points to real timeline actions: click a clip to inspect it, or use selection commands such as **Ctrl+A** from the Timeline once that panel has focus.
 
+Every slider in the Inspector has a compact numeric entry (SpinButton) to its right. You can drag the slider as usual, or click the entry and type an exact value. Both inputs stay in sync — changing one immediately updates the other.
+
 ---
 
 ## Clip Info

@@ -1297,10 +1297,7 @@ impl InspectorView {
                             let step = ((max - min) / 100.0).max(f64::MIN_POSITIVE);
                             let slider = Scale::with_range(Orientation::Horizontal, min, max, step);
                             slider.set_value(param_val);
-                            slider.set_draw_value(true);
-                            slider.set_digits(2);
-                            slider.set_hexpand(true);
-                            param_row.append(&slider);
+                            append_slider_with_spin(&param_row, &slider, 2);
 
                             let project = self.project.clone();
                             let selected_clip_id = self.selected_clip_id.clone();
@@ -2546,7 +2543,7 @@ impl InspectorView {
                     .set_sensitive(c.voice_enhance);
                 self.voice_isolation_slider
                     .set_value((c.voice_isolation * 100.0) as f64);
-                self.voice_isolation_slider.set_sensitive(true);
+                set_slider_row_sensitive(&self.voice_isolation_slider, true);
                 self.vi_pad_slider
                     .set_value(c.voice_isolation_pad_ms as f64);
                 self.vi_fade_slider
@@ -2765,14 +2762,12 @@ impl InspectorView {
                                         if step > 0.0 { step } else { 0.01 },
                                     );
                                     slider.set_value(val);
-                                    slider.set_draw_value(true);
-                                    slider.set_digits(2);
                                     slider.add_mark(
                                         param_info.default_value,
                                         gtk4::PositionType::Bottom,
                                         None,
                                     );
-                                    param_row.append(&slider);
+                                    append_slider_with_spin(&param_row, &slider, 2);
 
                                     // Wire slider
                                     let project = self.project.clone();
@@ -3066,14 +3061,14 @@ impl InspectorView {
                 self.vidstab_slider.set_value(0.5);
                 self.motion_blur_check.set_active(false);
                 self.motion_blur_shutter_slider.set_value(180.0);
-                self.motion_blur_shutter_slider.set_sensitive(false);
+                set_slider_row_sensitive(&self.motion_blur_shutter_slider, false);
                 self.shadows_slider.set_value(0.0);
                 self.midtones_slider.set_value(0.0);
                 self.highlights_slider.set_value(0.0);
                 self.volume_slider.set_value(0.0);
                 self.voice_enhance_check.set_active(false);
                 self.voice_enhance_strength_slider.set_value(50.0);
-                self.voice_enhance_strength_slider.set_sensitive(false);
+                set_slider_row_sensitive(&self.voice_enhance_strength_slider, false);
                 self.voice_isolation_slider.set_value(0.0);
                 self.vi_source_dropdown.set_visible(false);
                 self.vi_silence_threshold_slider.set_visible(false);
@@ -3166,10 +3161,10 @@ impl InspectorView {
                 self.tracking_width_slider.set_value(0.25);
                 self.tracking_height_slider.set_value(0.25);
                 self.tracking_rotation_spin.set_value(0.0);
-                self.tracking_center_x_slider.set_sensitive(false);
-                self.tracking_center_y_slider.set_sensitive(false);
-                self.tracking_width_slider.set_sensitive(false);
-                self.tracking_height_slider.set_sensitive(false);
+                set_slider_row_sensitive(&self.tracking_center_x_slider, false);
+                set_slider_row_sensitive(&self.tracking_center_y_slider, false);
+                set_slider_row_sensitive(&self.tracking_width_slider, false);
+                set_slider_row_sensitive(&self.tracking_height_slider, false);
                 self.tracking_rotation_spin.set_sensitive(false);
                 self.tracking_run_btn.set_label("Track Region");
                 self.tracking_run_btn.set_sensitive(false);
@@ -3600,10 +3595,8 @@ pub fn build_inspector(
         COLOR_SLIDER_STEP,
     );
     exposure_slider.set_value(0.0);
-    exposure_slider.set_draw_value(true);
-    exposure_slider.set_digits(2);
     exposure_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&exposure_slider);
+    append_slider_with_spin(&color_inner, &exposure_slider, 2);
 
     row_label(&color_inner, "Brightness");
     let brightness_slider = Scale::with_range(
@@ -3613,10 +3606,8 @@ pub fn build_inspector(
         COLOR_SLIDER_STEP,
     );
     brightness_slider.set_value(0.0);
-    brightness_slider.set_draw_value(true);
-    brightness_slider.set_digits(2);
     brightness_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&brightness_slider);
+    append_slider_with_spin(&color_inner, &brightness_slider, 2);
 
     row_label(&color_inner, "Contrast");
     let contrast_slider = Scale::with_range(
@@ -3626,10 +3617,8 @@ pub fn build_inspector(
         DOUBLE_SLIDER_STEP,
     );
     contrast_slider.set_value(1.0);
-    contrast_slider.set_draw_value(true);
-    contrast_slider.set_digits(2);
     contrast_slider.add_mark(1.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&contrast_slider);
+    append_slider_with_spin(&color_inner, &contrast_slider, 2);
 
     row_label(&color_inner, "Saturation");
     let saturation_slider = Scale::with_range(
@@ -3639,10 +3628,8 @@ pub fn build_inspector(
         DOUBLE_SLIDER_STEP,
     );
     saturation_slider.set_value(1.0);
-    saturation_slider.set_draw_value(true);
-    saturation_slider.set_digits(2);
     saturation_slider.add_mark(1.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&saturation_slider);
+    append_slider_with_spin(&color_inner, &saturation_slider, 2);
 
     row_label(&color_inner, "Temperature (K)");
     let temperature_slider = Scale::with_range(
@@ -3652,10 +3639,8 @@ pub fn build_inspector(
         COLOR_TEMPERATURE_STEP_K,
     );
     temperature_slider.set_value(6500.0);
-    temperature_slider.set_draw_value(true);
-    temperature_slider.set_digits(0);
     temperature_slider.add_mark(6500.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&temperature_slider);
+    append_slider_with_spin(&color_inner, &temperature_slider, 0);
 
     row_label(&color_inner, "Tint");
     let tint_slider = Scale::with_range(
@@ -3665,10 +3650,8 @@ pub fn build_inspector(
         COLOR_SLIDER_STEP,
     );
     tint_slider.set_value(0.0);
-    tint_slider.set_draw_value(true);
-    tint_slider.set_digits(2);
     tint_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&tint_slider);
+    append_slider_with_spin(&color_inner, &tint_slider, 2);
 
     row_label(&color_inner, "Black Point");
     let black_point_slider = Scale::with_range(
@@ -3678,10 +3661,8 @@ pub fn build_inspector(
         COLOR_SLIDER_STEP,
     );
     black_point_slider.set_value(0.0);
-    black_point_slider.set_draw_value(true);
-    black_point_slider.set_digits(2);
     black_point_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&black_point_slider);
+    append_slider_with_spin(&color_inner, &black_point_slider, 2);
 
     let ds_title = Label::new(Some("Denoise / Sharpness / Blur"));
     ds_title.set_halign(gtk::Align::Start);
@@ -3696,10 +3677,8 @@ pub fn build_inspector(
         UNIT_SLIDER_STEP,
     );
     denoise_slider.set_value(0.0);
-    denoise_slider.set_draw_value(true);
-    denoise_slider.set_digits(2);
     denoise_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&denoise_slider);
+    append_slider_with_spin(&color_inner, &denoise_slider, 2);
 
     row_label(&color_inner, "Sharpness");
     let sharpness_slider = Scale::with_range(
@@ -3709,10 +3688,8 @@ pub fn build_inspector(
         COLOR_SLIDER_STEP,
     );
     sharpness_slider.set_value(0.0);
-    sharpness_slider.set_draw_value(true);
-    sharpness_slider.set_digits(2);
     sharpness_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&sharpness_slider);
+    append_slider_with_spin(&color_inner, &sharpness_slider, 2);
 
     row_label(&color_inner, "Blur");
     let blur_slider = Scale::with_range(
@@ -3722,10 +3699,8 @@ pub fn build_inspector(
         UNIT_SLIDER_STEP,
     );
     blur_slider.set_value(0.0);
-    blur_slider.set_draw_value(true);
-    blur_slider.set_digits(2);
     blur_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&blur_slider);
+    append_slider_with_spin(&color_inner, &blur_slider, 2);
 
     let stab_title = Label::new(Some("Stabilization"));
     stab_title.set_halign(gtk::Align::Start);
@@ -3749,10 +3724,8 @@ pub fn build_inspector(
         UNIT_SLIDER_STEP,
     );
     vidstab_slider.set_value(0.5);
-    vidstab_slider.set_draw_value(true);
-    vidstab_slider.set_digits(2);
     vidstab_slider.add_mark(0.5, gtk4::PositionType::Bottom, None);
-    color_inner.append(&vidstab_slider);
+    append_slider_with_spin(&color_inner, &vidstab_slider, 2);
 
     let grading_title = Label::new(Some("Grading"));
     grading_title.set_halign(gtk::Align::Start);
@@ -3767,10 +3740,8 @@ pub fn build_inspector(
         COLOR_SLIDER_STEP,
     );
     shadows_slider.set_value(0.0);
-    shadows_slider.set_draw_value(true);
-    shadows_slider.set_digits(2);
     shadows_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&shadows_slider);
+    append_slider_with_spin(&color_inner, &shadows_slider, 2);
 
     row_label(&color_inner, "Midtones");
     let midtones_slider = Scale::with_range(
@@ -3780,10 +3751,8 @@ pub fn build_inspector(
         COLOR_SLIDER_STEP,
     );
     midtones_slider.set_value(0.0);
-    midtones_slider.set_draw_value(true);
-    midtones_slider.set_digits(2);
     midtones_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&midtones_slider);
+    append_slider_with_spin(&color_inner, &midtones_slider, 2);
 
     row_label(&color_inner, "Highlights");
     let highlights_slider = Scale::with_range(
@@ -3793,10 +3762,8 @@ pub fn build_inspector(
         COLOR_SLIDER_STEP,
     );
     highlights_slider.set_value(0.0);
-    highlights_slider.set_draw_value(true);
-    highlights_slider.set_digits(2);
     highlights_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&highlights_slider);
+    append_slider_with_spin(&color_inner, &highlights_slider, 2);
 
     row_label(&color_inner, "Highlights Warmth");
     let highlights_warmth_slider = Scale::with_range(
@@ -3806,10 +3773,8 @@ pub fn build_inspector(
         COLOR_SLIDER_STEP,
     );
     highlights_warmth_slider.set_value(0.0);
-    highlights_warmth_slider.set_draw_value(true);
-    highlights_warmth_slider.set_digits(2);
     highlights_warmth_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&highlights_warmth_slider);
+    append_slider_with_spin(&color_inner, &highlights_warmth_slider, 2);
 
     row_label(&color_inner, "Highlights Tint");
     let highlights_tint_slider = Scale::with_range(
@@ -3819,10 +3784,8 @@ pub fn build_inspector(
         COLOR_SLIDER_STEP,
     );
     highlights_tint_slider.set_value(0.0);
-    highlights_tint_slider.set_draw_value(true);
-    highlights_tint_slider.set_digits(2);
     highlights_tint_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&highlights_tint_slider);
+    append_slider_with_spin(&color_inner, &highlights_tint_slider, 2);
 
     row_label(&color_inner, "Midtones Warmth");
     let midtones_warmth_slider = Scale::with_range(
@@ -3832,10 +3795,8 @@ pub fn build_inspector(
         COLOR_SLIDER_STEP,
     );
     midtones_warmth_slider.set_value(0.0);
-    midtones_warmth_slider.set_draw_value(true);
-    midtones_warmth_slider.set_digits(2);
     midtones_warmth_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&midtones_warmth_slider);
+    append_slider_with_spin(&color_inner, &midtones_warmth_slider, 2);
 
     row_label(&color_inner, "Midtones Tint");
     let midtones_tint_slider = Scale::with_range(
@@ -3845,10 +3806,8 @@ pub fn build_inspector(
         COLOR_SLIDER_STEP,
     );
     midtones_tint_slider.set_value(0.0);
-    midtones_tint_slider.set_draw_value(true);
-    midtones_tint_slider.set_digits(2);
     midtones_tint_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&midtones_tint_slider);
+    append_slider_with_spin(&color_inner, &midtones_tint_slider, 2);
 
     row_label(&color_inner, "Shadows Warmth");
     let shadows_warmth_slider = Scale::with_range(
@@ -3858,10 +3817,8 @@ pub fn build_inspector(
         COLOR_SLIDER_STEP,
     );
     shadows_warmth_slider.set_value(0.0);
-    shadows_warmth_slider.set_draw_value(true);
-    shadows_warmth_slider.set_digits(2);
     shadows_warmth_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&shadows_warmth_slider);
+    append_slider_with_spin(&color_inner, &shadows_warmth_slider, 2);
 
     row_label(&color_inner, "Shadows Tint");
     let shadows_tint_slider = Scale::with_range(
@@ -3871,10 +3828,8 @@ pub fn build_inspector(
         COLOR_SLIDER_STEP,
     );
     shadows_tint_slider.set_value(0.0);
-    shadows_tint_slider.set_draw_value(true);
-    shadows_tint_slider.set_digits(2);
     shadows_tint_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&shadows_tint_slider);
+    append_slider_with_spin(&color_inner, &shadows_tint_slider, 2);
 
     // ── Match Color button ───────────────────────────────────────────────────
     let match_color_sep = Separator::new(Orientation::Horizontal);
@@ -3930,10 +3885,8 @@ pub fn build_inspector(
         UNIT_SLIDER_STEP,
     );
     chroma_tolerance_slider.set_value(0.3);
-    chroma_tolerance_slider.set_draw_value(true);
-    chroma_tolerance_slider.set_digits(2);
     chroma_tolerance_slider.add_mark(0.3, gtk4::PositionType::Bottom, None);
-    chroma_key_inner.append(&chroma_tolerance_slider);
+    append_slider_with_spin(&chroma_key_inner, &chroma_tolerance_slider, 2);
 
     row_label(&chroma_key_inner, "Edge Softness");
     let chroma_softness_slider = Scale::with_range(
@@ -3943,10 +3896,8 @@ pub fn build_inspector(
         UNIT_SLIDER_STEP,
     );
     chroma_softness_slider.set_value(0.1);
-    chroma_softness_slider.set_draw_value(true);
-    chroma_softness_slider.set_digits(2);
     chroma_softness_slider.add_mark(0.1, gtk4::PositionType::Bottom, None);
-    chroma_key_inner.append(&chroma_softness_slider);
+    append_slider_with_spin(&chroma_key_inner, &chroma_softness_slider, 2);
 
     // ── Background Removal section (Video + Image only) ──────────────────────
     let bg_removal_section = GBox::new(Orientation::Vertical, 8);
@@ -3970,10 +3921,8 @@ pub fn build_inspector(
         UNIT_SLIDER_STEP,
     );
     bg_removal_threshold_slider.set_value(0.5);
-    bg_removal_threshold_slider.set_draw_value(true);
-    bg_removal_threshold_slider.set_digits(2);
     bg_removal_threshold_slider.add_mark(0.5, gtk4::PositionType::Bottom, None);
-    bg_removal_inner.append(&bg_removal_threshold_slider);
+    append_slider_with_spin(&bg_removal_inner, &bg_removal_threshold_slider, 2);
 
     // ── Subtitles section (Video + Audio clips) ────────────────────────
     let subtitle_section = GBox::new(Orientation::Vertical, 8);
@@ -4177,23 +4126,19 @@ pub fn build_inspector(
 
     let subtitle_word_window_slider = Scale::with_range(Orientation::Horizontal, 2.0, 10.0, 1.0);
     subtitle_word_window_slider.set_value(4.0);
-    subtitle_word_window_slider.set_draw_value(true);
-    subtitle_word_window_slider.set_digits(0);
     subtitle_word_window_slider.add_mark(4.0, gtk4::PositionType::Bottom, None);
     subtitle_word_window_slider
         .set_tooltip_text(Some("Number of words shown per group in highlight mode"));
-    subtitle_style_box.append(&subtitle_word_window_slider);
+    append_slider_with_spin(&subtitle_style_box, &subtitle_word_window_slider, 0);
 
     row_label(&subtitle_style_box, "Vertical Position");
     let subtitle_position_slider = Scale::with_range(Orientation::Horizontal, 0.05, 0.95, 0.05);
     subtitle_position_slider.set_value(0.85);
-    subtitle_position_slider.set_draw_value(true);
-    subtitle_position_slider.set_digits(2);
     subtitle_position_slider.add_mark(0.85, gtk4::PositionType::Bottom, None);
     subtitle_position_slider.add_mark(0.10, gtk4::PositionType::Bottom, Some("Top"));
     subtitle_position_slider.add_mark(0.50, gtk4::PositionType::Bottom, Some("Mid"));
     subtitle_position_slider.set_tooltip_text(Some("Vertical position: 0 = top, 1 = bottom"));
-    subtitle_style_box.append(&subtitle_position_slider);
+    append_slider_with_spin(&subtitle_style_box, &subtitle_position_slider, 2);
 
     row_label(&subtitle_style_box, "Outline Color");
     let sub_outline_color_dialog = gtk4::ColorDialog::new();
@@ -4297,10 +4242,8 @@ pub fn build_inspector(
         UNIT_SLIDER_STEP,
     );
     mask_center_x_slider.set_value(0.5);
-    mask_center_x_slider.set_draw_value(true);
-    mask_center_x_slider.set_digits(2);
     mask_center_x_slider.add_mark(0.5, gtk4::PositionType::Bottom, None);
-    mask_rect_ellipse_controls.append(&mask_center_x_slider);
+    append_slider_with_spin(&mask_rect_ellipse_controls, &mask_center_x_slider, 2);
 
     row_label(&mask_rect_ellipse_controls, "Center Y");
     let mask_center_y_slider = Scale::with_range(
@@ -4310,24 +4253,18 @@ pub fn build_inspector(
         UNIT_SLIDER_STEP,
     );
     mask_center_y_slider.set_value(0.5);
-    mask_center_y_slider.set_draw_value(true);
-    mask_center_y_slider.set_digits(2);
     mask_center_y_slider.add_mark(0.5, gtk4::PositionType::Bottom, None);
-    mask_rect_ellipse_controls.append(&mask_center_y_slider);
+    append_slider_with_spin(&mask_rect_ellipse_controls, &mask_center_y_slider, 2);
 
     row_label(&mask_rect_ellipse_controls, "Width");
     let mask_width_slider = Scale::with_range(Orientation::Horizontal, 0.01, 0.5, 0.01);
     mask_width_slider.set_value(0.25);
-    mask_width_slider.set_draw_value(true);
-    mask_width_slider.set_digits(2);
-    mask_rect_ellipse_controls.append(&mask_width_slider);
+    append_slider_with_spin(&mask_rect_ellipse_controls, &mask_width_slider, 2);
 
     row_label(&mask_rect_ellipse_controls, "Height");
     let mask_height_slider = Scale::with_range(Orientation::Horizontal, 0.01, 0.5, 0.01);
     mask_height_slider.set_value(0.25);
-    mask_height_slider.set_draw_value(true);
-    mask_height_slider.set_digits(2);
-    mask_rect_ellipse_controls.append(&mask_height_slider);
+    append_slider_with_spin(&mask_rect_ellipse_controls, &mask_height_slider, 2);
 
     row_label(&mask_rect_ellipse_controls, "Rotation");
     let mask_rotation_spin = gtk4::SpinButton::with_range(-180.0, 180.0, 1.0);
@@ -4338,17 +4275,13 @@ pub fn build_inspector(
     row_label(&mask_rect_ellipse_controls, "Feather");
     let mask_feather_slider = Scale::with_range(Orientation::Horizontal, 0.0, 0.5, 0.01);
     mask_feather_slider.set_value(0.0);
-    mask_feather_slider.set_draw_value(true);
-    mask_feather_slider.set_digits(2);
-    mask_rect_ellipse_controls.append(&mask_feather_slider);
+    append_slider_with_spin(&mask_rect_ellipse_controls, &mask_feather_slider, 2);
 
     row_label(&mask_rect_ellipse_controls, "Expansion");
     let mask_expansion_slider = Scale::with_range(Orientation::Horizontal, -0.5, 0.5, 0.01);
     mask_expansion_slider.set_value(0.0);
-    mask_expansion_slider.set_draw_value(true);
-    mask_expansion_slider.set_digits(2);
     mask_expansion_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    mask_rect_ellipse_controls.append(&mask_expansion_slider);
+    append_slider_with_spin(&mask_rect_ellipse_controls, &mask_expansion_slider, 2);
 
     let mask_invert_check = CheckButton::with_label("Invert Mask");
     mask_rect_ellipse_controls.append(&mask_invert_check);
@@ -4564,10 +4497,8 @@ pub fn build_inspector(
         UNIT_SLIDER_STEP,
     );
     tracking_center_x_slider.set_value(0.5);
-    tracking_center_x_slider.set_draw_value(true);
-    tracking_center_x_slider.set_digits(2);
     tracking_center_x_slider.add_mark(0.5, gtk4::PositionType::Bottom, None);
-    tracking_inner.append(&tracking_center_x_slider);
+    append_slider_with_spin(&tracking_inner, &tracking_center_x_slider, 2);
 
     row_label(&tracking_inner, "Region Center Y");
     let tracking_center_y_slider = Scale::with_range(
@@ -4577,24 +4508,18 @@ pub fn build_inspector(
         UNIT_SLIDER_STEP,
     );
     tracking_center_y_slider.set_value(0.5);
-    tracking_center_y_slider.set_draw_value(true);
-    tracking_center_y_slider.set_digits(2);
     tracking_center_y_slider.add_mark(0.5, gtk4::PositionType::Bottom, None);
-    tracking_inner.append(&tracking_center_y_slider);
+    append_slider_with_spin(&tracking_inner, &tracking_center_y_slider, 2);
 
     row_label(&tracking_inner, "Region Width");
     let tracking_width_slider = Scale::with_range(Orientation::Horizontal, 0.05, 1.0, 0.01);
     tracking_width_slider.set_value(0.25);
-    tracking_width_slider.set_draw_value(true);
-    tracking_width_slider.set_digits(2);
-    tracking_inner.append(&tracking_width_slider);
+    append_slider_with_spin(&tracking_inner, &tracking_width_slider, 2);
 
     row_label(&tracking_inner, "Region Height");
     let tracking_height_slider = Scale::with_range(Orientation::Horizontal, 0.05, 1.0, 0.01);
     tracking_height_slider.set_value(0.25);
-    tracking_height_slider.set_draw_value(true);
-    tracking_height_slider.set_digits(2);
-    tracking_inner.append(&tracking_height_slider);
+    append_slider_with_spin(&tracking_inner, &tracking_height_slider, 2);
 
     row_label(&tracking_inner, "Region Rotation");
     let tracking_rotation_spin = gtk4::SpinButton::with_range(-180.0, 180.0, 1.0);
@@ -4624,13 +4549,11 @@ pub fn build_inspector(
     let tracking_auto_crop_padding_slider =
         Scale::with_range(Orientation::Horizontal, 0.0, 0.5, 0.05);
     tracking_auto_crop_padding_slider.set_value(0.1);
-    tracking_auto_crop_padding_slider.set_draw_value(true);
-    tracking_auto_crop_padding_slider.set_digits(2);
     tracking_auto_crop_padding_slider.set_tooltip_text(Some(
         "Extra headroom around the tracked region (0 = tight crop, 0.5 = generous margin). Takes effect the next time you click Auto-Crop, or immediately if an auto-crop is already active",
     ));
-    tracking_auto_crop_padding_slider.set_sensitive(false);
-    tracking_inner.append(&tracking_auto_crop_padding_slider);
+    set_slider_row_sensitive(&tracking_auto_crop_padding_slider, false);
+    append_slider_with_spin(&tracking_inner, &tracking_auto_crop_padding_slider, 2);
 
     let tracking_status_label = Label::new(Some(
         "Select a visual clip to create or attach motion tracking.",
@@ -4798,12 +4721,10 @@ pub fn build_inspector(
     let volume_slider =
         Scale::with_range(Orientation::Horizontal, VOLUME_DB_MIN, VOLUME_DB_MAX, 0.1);
     volume_slider.set_value(0.0);
-    volume_slider.set_draw_value(true);
-    volume_slider.set_digits(1);
     volume_slider.add_mark(VOLUME_DB_MIN, gtk4::PositionType::Bottom, Some("-100 dB"));
     volume_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("0 dB"));
     volume_slider.add_mark(VOLUME_DB_MAX, gtk4::PositionType::Bottom, Some("+12 dB"));
-    audio_inner.append(&volume_slider);
+    append_slider_with_spin(&audio_inner, &volume_slider, 1);
     let volume_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let volume_set_keyframe_btn = Button::with_label("Set Volume Keyframe");
     let volume_remove_keyframe_btn = Button::with_label("Remove Volume Keyframe");
@@ -4826,16 +4747,14 @@ pub fn build_inspector(
     row_label(&audio_inner, "  Strength");
     let voice_enhance_strength_slider = Scale::with_range(Orientation::Horizontal, 0.0, 100.0, 1.0);
     voice_enhance_strength_slider.set_value(50.0);
-    voice_enhance_strength_slider.set_draw_value(true);
-    voice_enhance_strength_slider.set_digits(0);
     voice_enhance_strength_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("Subtle"));
     voice_enhance_strength_slider.add_mark(100.0, gtk4::PositionType::Bottom, Some("Strong"));
-    voice_enhance_strength_slider.set_sensitive(false);
+    set_slider_row_sensitive(&voice_enhance_strength_slider, false);
     voice_enhance_strength_slider.set_tooltip_text(Some(
         "Scales noise-reduction depth, presence boost, and compression. \
          0 = subtle clean-up, 100 = broadcast voice.",
     ));
-    audio_inner.append(&voice_enhance_strength_slider);
+    append_slider_with_spin(&audio_inner, &voice_enhance_strength_slider, 0);
 
     // Per-clip cache status row: shows whether the prerender is ready,
     // running, or failed for the current strength. Updated by the
@@ -4858,46 +4777,38 @@ pub fn build_inspector(
     row_label(&audio_inner, "Voice Isolation");
     let voice_isolation_slider = Scale::with_range(Orientation::Horizontal, 0.0, 100.0, 1.0);
     voice_isolation_slider.set_value(0.0);
-    voice_isolation_slider.set_draw_value(true);
-    voice_isolation_slider.set_digits(0);
     voice_isolation_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("Off"));
     voice_isolation_slider.add_mark(100.0, gtk4::PositionType::Bottom, Some("Max"));
     voice_isolation_slider.set_tooltip_text(Some(
         "Duck volume between spoken words (requires generated subtitles)",
     ));
-    audio_inner.append(&voice_isolation_slider);
+    append_slider_with_spin(&audio_inner, &voice_isolation_slider, 0);
 
     row_label(&audio_inner, "  Padding (ms)");
     let vi_pad_slider = Scale::with_range(Orientation::Horizontal, 0.0, 500.0, 5.0);
     vi_pad_slider.set_value(80.0);
-    vi_pad_slider.set_draw_value(true);
-    vi_pad_slider.set_digits(0);
     vi_pad_slider.set_tooltip_text(Some(
         "Extend word boundaries to merge close words into continuous speech",
     ));
-    audio_inner.append(&vi_pad_slider);
+    append_slider_with_spin(&audio_inner, &vi_pad_slider, 0);
 
     row_label(&audio_inner, "  Fade (ms)");
     let vi_fade_slider = Scale::with_range(Orientation::Horizontal, 0.0, 200.0, 1.0);
     vi_fade_slider.set_value(25.0);
-    vi_fade_slider.set_draw_value(true);
-    vi_fade_slider.set_digits(0);
     vi_fade_slider.set_tooltip_text(Some(
         "Smooth transition time between speech and ducked regions",
     ));
-    audio_inner.append(&vi_fade_slider);
+    append_slider_with_spin(&audio_inner, &vi_fade_slider, 0);
 
     row_label(&audio_inner, "  Floor");
     let vi_floor_slider = Scale::with_range(Orientation::Horizontal, 0.0, 100.0, 1.0);
     vi_floor_slider.set_value(0.0);
-    vi_floor_slider.set_draw_value(true);
-    vi_floor_slider.set_digits(0);
     vi_floor_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("Silent"));
     vi_floor_slider.add_mark(100.0, gtk4::PositionType::Bottom, Some("Full"));
     vi_floor_slider.set_tooltip_text(Some(
         "Minimum volume during ducked regions (preserves room tone)",
     ));
-    audio_inner.append(&vi_floor_slider);
+    append_slider_with_spin(&audio_inner, &vi_floor_slider, 0);
 
     // ── Voice isolation source: Subtitles (default) or Silence-detect ──
     row_label(&audio_inner, "  Source");
@@ -4912,8 +4823,6 @@ pub fn build_inspector(
     row_label(&audio_inner, "  Silence threshold");
     let vi_silence_threshold_slider = Scale::with_range(Orientation::Horizontal, -60.0, -10.0, 1.0);
     vi_silence_threshold_slider.set_value(-30.0);
-    vi_silence_threshold_slider.set_draw_value(true);
-    vi_silence_threshold_slider.set_digits(0);
     vi_silence_threshold_slider.add_mark(-60.0, gtk4::PositionType::Bottom, Some("-60 dB"));
     vi_silence_threshold_slider.add_mark(-30.0, gtk4::PositionType::Bottom, Some("-30 dB"));
     vi_silence_threshold_slider.add_mark(-10.0, gtk4::PositionType::Bottom, Some("-10 dB"));
@@ -4921,18 +4830,16 @@ pub fn build_inspector(
         "Audio below this dB level is treated as silence. Lower = stricter \
          (only treat near-silence as gaps). Click Suggest to auto-pick.",
     ));
-    audio_inner.append(&vi_silence_threshold_slider);
+    append_slider_with_spin(&audio_inner, &vi_silence_threshold_slider, 0);
 
     row_label(&audio_inner, "  Min gap (ms)");
     let vi_silence_min_ms_slider = Scale::with_range(Orientation::Horizontal, 50.0, 2000.0, 10.0);
     vi_silence_min_ms_slider.set_value(200.0);
-    vi_silence_min_ms_slider.set_draw_value(true);
-    vi_silence_min_ms_slider.set_digits(0);
     vi_silence_min_ms_slider.set_tooltip_text(Some(
         "Minimum silence duration to count as a gap. Higher = ignore \
          brief pauses between words.",
     ));
-    audio_inner.append(&vi_silence_min_ms_slider);
+    append_slider_with_spin(&audio_inner, &vi_silence_min_ms_slider, 0);
 
     let vi_silence_actions_row = GBox::new(Orientation::Horizontal, 6);
     let vi_suggest_btn = Button::with_label("Suggest");
@@ -5100,10 +5007,8 @@ pub fn build_inspector(
         COLOR_SLIDER_STEP,
     );
     pan_slider.set_value(0.0);
-    pan_slider.set_draw_value(true);
-    pan_slider.set_digits(2);
     pan_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    audio_inner.append(&pan_slider);
+    append_slider_with_spin(&audio_inner, &pan_slider, 2);
     let pan_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let pan_set_keyframe_btn = Button::with_label("Set Pan Keyframe");
     let pan_remove_keyframe_btn = Button::with_label("Remove Pan Keyframe");
@@ -5141,28 +5046,22 @@ pub fn build_inspector(
             1.0,
         );
         freq_slider.set_value(eq_freq_ranges[i].2);
-        freq_slider.set_draw_value(true);
-        freq_slider.set_digits(0);
         freq_slider.add_mark(eq_freq_ranges[i].2, gtk4::PositionType::Bottom, None);
-        eq_inner.append(&freq_slider);
+        append_slider_with_spin(&eq_inner, &freq_slider, 0);
         eq_freq_sliders.push(freq_slider);
 
         row_label(&eq_inner, "Gain (dB)");
         let gain_slider = Scale::with_range(Orientation::Horizontal, -24.0, 12.0, 0.1);
         gain_slider.set_value(0.0);
-        gain_slider.set_draw_value(true);
-        gain_slider.set_digits(1);
         gain_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-        eq_inner.append(&gain_slider);
+        append_slider_with_spin(&eq_inner, &gain_slider, 1);
         eq_gain_sliders.push(gain_slider);
 
         row_label(&eq_inner, "Q");
         let q_slider = Scale::with_range(Orientation::Horizontal, 0.1, 10.0, 0.1);
         q_slider.set_value(1.0);
-        q_slider.set_draw_value(true);
-        q_slider.set_digits(1);
         q_slider.add_mark(1.0, gtk4::PositionType::Bottom, None);
-        eq_inner.append(&q_slider);
+        append_slider_with_spin(&eq_inner, &q_slider, 1);
         eq_q_sliders.push(q_slider);
     }
 
@@ -5188,12 +5087,10 @@ pub fn build_inspector(
     row_label(&pitch_inner, "Pitch Shift (semitones)");
     let pitch_shift_slider = Scale::with_range(Orientation::Horizontal, -12.0, 12.0, 0.5);
     pitch_shift_slider.set_value(0.0);
-    pitch_shift_slider.set_draw_value(true);
-    pitch_shift_slider.set_digits(1);
     pitch_shift_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("0"));
     pitch_shift_slider.add_mark(-12.0, gtk4::PositionType::Bottom, Some("-12"));
     pitch_shift_slider.add_mark(12.0, gtk4::PositionType::Bottom, Some("+12"));
-    pitch_inner.append(&pitch_shift_slider);
+    append_slider_with_spin(&pitch_inner, &pitch_shift_slider, 1);
 
     let pitch_preserve_check = gtk4::CheckButton::with_label("Preserve pitch during speed changes");
     pitch_preserve_check.set_tooltip_text(Some(
@@ -5260,11 +5157,9 @@ pub fn build_inspector(
     row_label(&duck_inner, "Duck Amount (dB)");
     let duck_amount_slider = Scale::with_range(Orientation::Horizontal, -24.0, 0.0, 0.5);
     duck_amount_slider.set_value(-6.0);
-    duck_amount_slider.set_draw_value(true);
-    duck_amount_slider.set_digits(1);
     duck_amount_slider.add_mark(-6.0, gtk4::PositionType::Bottom, Some("-6 dB"));
     duck_amount_slider.add_mark(-12.0, gtk4::PositionType::Bottom, Some("-12 dB"));
-    duck_inner.append(&duck_amount_slider);
+    append_slider_with_spin(&duck_inner, &duck_amount_slider, 1);
 
     let duck_hint = Label::new(Some("Lowers this track\u{2019}s volume when audio from\nnon-ducked tracks (e.g. dialogue) is playing"));
     duck_hint.set_halign(gtk4::Align::Start);
@@ -5360,27 +5255,21 @@ pub fn build_inspector(
     row_label(&transform_inner, "Shutter Angle");
     let motion_blur_shutter_slider = Scale::with_range(Orientation::Horizontal, 0.0, 720.0, 1.0);
     motion_blur_shutter_slider.set_value(180.0);
-    motion_blur_shutter_slider.set_draw_value(true);
-    motion_blur_shutter_slider.set_digits(0);
     motion_blur_shutter_slider.add_mark(180.0, gtk4::PositionType::Bottom, Some("180°"));
     motion_blur_shutter_slider.add_mark(360.0, gtk4::PositionType::Bottom, Some("360°"));
-    motion_blur_shutter_slider.set_hexpand(true);
     motion_blur_shutter_slider.set_tooltip_text(Some(
         "Shutter angle in degrees: 180° = cinematic, 360° = full natural blur",
     ));
-    transform_inner.append(&motion_blur_shutter_slider);
+    append_slider_with_spin(&transform_inner, &motion_blur_shutter_slider, 0);
 
     row_label(&transform_inner, "Scale");
     let scale_slider = Scale::with_range(Orientation::Horizontal, SCALE_MIN, SCALE_MAX, 0.05);
     scale_slider.set_value(1.0);
-    scale_slider.set_draw_value(true);
-    scale_slider.set_digits(2);
     scale_slider.add_mark(0.5, gtk4::PositionType::Bottom, Some("½×"));
     scale_slider.add_mark(1.0, gtk4::PositionType::Bottom, Some("1×"));
     scale_slider.add_mark(2.0, gtk4::PositionType::Bottom, Some("2×"));
-    scale_slider.set_hexpand(true);
     scale_slider.set_tooltip_text(Some("Scale: <1 = shrink with black borders, >1 = zoom in"));
-    transform_inner.append(&scale_slider);
+    append_slider_with_spin(&transform_inner, &scale_slider, 2);
     let scale_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let scale_set_keyframe_btn = Button::with_label("Set Scale Keyframe");
     let scale_remove_keyframe_btn = Button::with_label("Remove Scale Keyframe");
@@ -5396,13 +5285,10 @@ pub fn build_inspector(
         UNIT_SLIDER_STEP,
     );
     opacity_slider.set_value(1.0);
-    opacity_slider.set_draw_value(true);
-    opacity_slider.set_digits(2);
     opacity_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("0%"));
     opacity_slider.add_mark(1.0, gtk4::PositionType::Bottom, Some("100%"));
-    opacity_slider.set_hexpand(true);
     opacity_slider.set_tooltip_text(Some("Clip opacity for compositing"));
-    transform_inner.append(&opacity_slider);
+    append_slider_with_spin(&transform_inner, &opacity_slider, 2);
     let opacity_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let opacity_set_keyframe_btn = Button::with_label("Set Opacity Keyframe");
     let opacity_remove_keyframe_btn = Button::with_label("Remove Opacity Keyframe");
@@ -5414,18 +5300,15 @@ pub fn build_inspector(
     let position_x_slider =
         Scale::with_range(Orientation::Horizontal, POSITION_MIN, POSITION_MAX, 0.01);
     position_x_slider.set_value(0.0);
-    position_x_slider.set_draw_value(true);
-    position_x_slider.set_digits(2);
     position_x_slider.add_mark(POSITION_MIN, gtk4::PositionType::Bottom, Some("⇤"));
     position_x_slider.add_mark(-1.0, gtk4::PositionType::Bottom, Some("←"));
     position_x_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("·"));
     position_x_slider.add_mark(1.0, gtk4::PositionType::Bottom, Some("→"));
     position_x_slider.add_mark(POSITION_MAX, gtk4::PositionType::Bottom, Some("⇥"));
-    position_x_slider.set_hexpand(true);
     position_x_slider.set_tooltip_text(Some(
         "Horizontal position: −1 = canvas left edge, 0 = center, +1 = canvas right edge. Values past ±1 push the clip off-canvas.",
     ));
-    transform_inner.append(&position_x_slider);
+    append_slider_with_spin(&transform_inner, &position_x_slider, 2);
     let position_x_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let position_x_set_keyframe_btn = Button::with_label("Set Position X Keyframe");
     let position_x_remove_keyframe_btn = Button::with_label("Remove Position X Keyframe");
@@ -5437,18 +5320,15 @@ pub fn build_inspector(
     let position_y_slider =
         Scale::with_range(Orientation::Horizontal, POSITION_MIN, POSITION_MAX, 0.01);
     position_y_slider.set_value(0.0);
-    position_y_slider.set_draw_value(true);
-    position_y_slider.set_digits(2);
     position_y_slider.add_mark(POSITION_MIN, gtk4::PositionType::Bottom, Some("⤒"));
     position_y_slider.add_mark(-1.0, gtk4::PositionType::Bottom, Some("↑"));
     position_y_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("·"));
     position_y_slider.add_mark(1.0, gtk4::PositionType::Bottom, Some("↓"));
     position_y_slider.add_mark(POSITION_MAX, gtk4::PositionType::Bottom, Some("⤓"));
-    position_y_slider.set_hexpand(true);
     position_y_slider.set_tooltip_text(Some(
         "Vertical position: −1 = canvas top edge, 0 = center, +1 = canvas bottom edge. Values past ±1 push the clip off-canvas.",
     ));
-    transform_inner.append(&position_y_slider);
+    append_slider_with_spin(&transform_inner, &position_y_slider, 2);
     let position_y_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let position_y_set_keyframe_btn = Button::with_label("Set Position Y Keyframe");
     let position_y_remove_keyframe_btn = Button::with_label("Remove Position Y Keyframe");
@@ -5460,10 +5340,8 @@ pub fn build_inspector(
     let crop_left_slider =
         Scale::with_range(Orientation::Horizontal, CROP_MIN_PX, CROP_MAX_PX, 2.0);
     crop_left_slider.set_value(0.0);
-    crop_left_slider.set_draw_value(true);
-    crop_left_slider.set_digits(0);
     crop_left_slider.set_tooltip_text(Some("Crop from the left edge, in project pixels (0–4000)."));
-    transform_inner.append(&crop_left_slider);
+    append_slider_with_spin(&transform_inner, &crop_left_slider, 0);
     let crop_left_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let crop_left_set_keyframe_btn = Button::with_label("Set Crop Left Keyframe");
     let crop_left_remove_keyframe_btn = Button::with_label("Remove Crop Left Keyframe");
@@ -5475,12 +5353,10 @@ pub fn build_inspector(
     let crop_right_slider =
         Scale::with_range(Orientation::Horizontal, CROP_MIN_PX, CROP_MAX_PX, 2.0);
     crop_right_slider.set_value(0.0);
-    crop_right_slider.set_draw_value(true);
-    crop_right_slider.set_digits(0);
     crop_right_slider.set_tooltip_text(Some(
         "Crop from the right edge, in project pixels (0–4000).",
     ));
-    transform_inner.append(&crop_right_slider);
+    append_slider_with_spin(&transform_inner, &crop_right_slider, 0);
     let crop_right_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let crop_right_set_keyframe_btn = Button::with_label("Set Crop Right Keyframe");
     let crop_right_remove_keyframe_btn = Button::with_label("Remove Crop Right Keyframe");
@@ -5491,10 +5367,8 @@ pub fn build_inspector(
     row_label(&transform_inner, "Crop Top");
     let crop_top_slider = Scale::with_range(Orientation::Horizontal, CROP_MIN_PX, CROP_MAX_PX, 2.0);
     crop_top_slider.set_value(0.0);
-    crop_top_slider.set_draw_value(true);
-    crop_top_slider.set_digits(0);
     crop_top_slider.set_tooltip_text(Some("Crop from the top edge, in project pixels (0–4000)."));
-    transform_inner.append(&crop_top_slider);
+    append_slider_with_spin(&transform_inner, &crop_top_slider, 0);
     let crop_top_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let crop_top_set_keyframe_btn = Button::with_label("Set Crop Top Keyframe");
     let crop_top_remove_keyframe_btn = Button::with_label("Remove Crop Top Keyframe");
@@ -5506,12 +5380,10 @@ pub fn build_inspector(
     let crop_bottom_slider =
         Scale::with_range(Orientation::Horizontal, CROP_MIN_PX, CROP_MAX_PX, 2.0);
     crop_bottom_slider.set_value(0.0);
-    crop_bottom_slider.set_draw_value(true);
-    crop_bottom_slider.set_digits(0);
     crop_bottom_slider.set_tooltip_text(Some(
         "Crop from the bottom edge, in project pixels (0–4000).",
     ));
-    transform_inner.append(&crop_bottom_slider);
+    append_slider_with_spin(&transform_inner, &crop_bottom_slider, 0);
     let crop_bottom_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let crop_bottom_set_keyframe_btn = Button::with_label("Set Crop Bottom Keyframe");
     let crop_bottom_remove_keyframe_btn = Button::with_label("Remove Crop Bottom Keyframe");
@@ -5667,8 +5539,7 @@ pub fn build_inspector(
         UNIT_SLIDER_STEP,
     );
     title_x_slider.set_value(0.5);
-    title_x_slider.set_hexpand(true);
-    title_inner.append(&title_x_slider);
+    append_slider_with_spin(&title_inner, &title_x_slider, 2);
 
     row_label(&title_inner, "Position Y");
     let title_y_slider = Scale::with_range(
@@ -5678,16 +5549,12 @@ pub fn build_inspector(
         UNIT_SLIDER_STEP,
     );
     title_y_slider.set_value(0.9);
-    title_y_slider.set_hexpand(true);
-    title_inner.append(&title_y_slider);
+    append_slider_with_spin(&title_inner, &title_y_slider, 2);
 
     row_label(&title_inner, "Outline Width");
     let title_outline_width_slider = Scale::with_range(Orientation::Horizontal, 0.0, 10.0, 0.5);
     title_outline_width_slider.set_value(0.0);
-    title_outline_width_slider.set_draw_value(true);
-    title_outline_width_slider.set_digits(1);
-    title_outline_width_slider.set_hexpand(true);
-    title_inner.append(&title_outline_width_slider);
+    append_slider_with_spin(&title_inner, &title_outline_width_slider, 1);
 
     row_label(&title_inner, "Outline Color");
     let title_outline_color_dialog = gtk4::ColorDialog::new();
@@ -5711,18 +5578,12 @@ pub fn build_inspector(
     row_label(&title_inner, "Shadow Offset X");
     let title_shadow_x_slider = Scale::with_range(Orientation::Horizontal, -10.0, 10.0, 0.5);
     title_shadow_x_slider.set_value(2.0);
-    title_shadow_x_slider.set_draw_value(true);
-    title_shadow_x_slider.set_digits(1);
-    title_shadow_x_slider.set_hexpand(true);
-    title_inner.append(&title_shadow_x_slider);
+    append_slider_with_spin(&title_inner, &title_shadow_x_slider, 1);
 
     row_label(&title_inner, "Shadow Offset Y");
     let title_shadow_y_slider = Scale::with_range(Orientation::Horizontal, -10.0, 10.0, 0.5);
     title_shadow_y_slider.set_value(2.0);
-    title_shadow_y_slider.set_draw_value(true);
-    title_shadow_y_slider.set_digits(1);
-    title_shadow_y_slider.set_hexpand(true);
-    title_inner.append(&title_shadow_y_slider);
+    append_slider_with_spin(&title_inner, &title_shadow_y_slider, 1);
 
     let title_bg_box_check = CheckButton::with_label("Background Box");
     title_inner.append(&title_bg_box_check);
@@ -5738,10 +5599,7 @@ pub fn build_inspector(
     row_label(&title_inner, "Box Padding");
     let title_bg_box_padding_slider = Scale::with_range(Orientation::Horizontal, 0.0, 30.0, 1.0);
     title_bg_box_padding_slider.set_value(8.0);
-    title_bg_box_padding_slider.set_draw_value(true);
-    title_bg_box_padding_slider.set_digits(0);
-    title_bg_box_padding_slider.set_hexpand(true);
-    title_inner.append(&title_bg_box_padding_slider);
+    append_slider_with_spin(&title_inner, &title_bg_box_padding_slider, 0);
 
     title_inner.append(&Separator::new(Orientation::Horizontal));
     row_label(&title_inner, "Animation");
@@ -5752,9 +5610,7 @@ pub fn build_inspector(
     row_label(&title_inner, "  Duration (s)");
     let title_animation_duration_slider = Scale::with_range(Orientation::Horizontal, 0.1, 5.0, 0.1);
     title_animation_duration_slider.set_value(1.0);
-    title_animation_duration_slider.set_draw_value(true);
-    title_animation_duration_slider.set_hexpand(true);
-    title_inner.append(&title_animation_duration_slider);
+    append_slider_with_spin(&title_inner, &title_animation_duration_slider, 2);
 
     // ── Speed section (all clip types) ───────────────────────────────────────
     let speed_section_box = GBox::new(Orientation::Vertical, 8);
@@ -5770,14 +5626,11 @@ pub fn build_inspector(
     row_label(&speed_inner, "Speed Multiplier");
     let speed_slider = Scale::with_range(Orientation::Horizontal, 0.25, 4.0, 0.05);
     speed_slider.set_value(1.0);
-    speed_slider.set_draw_value(true);
-    speed_slider.set_digits(2);
     speed_slider.add_mark(0.5, gtk4::PositionType::Bottom, Some("½×"));
     speed_slider.add_mark(1.0, gtk4::PositionType::Bottom, Some("1×"));
     speed_slider.add_mark(2.0, gtk4::PositionType::Bottom, Some("2×"));
-    speed_slider.set_hexpand(true);
     speed_slider.set_tooltip_text(Some("Playback speed: <1 = slow motion, >1 = fast forward"));
-    speed_inner.append(&speed_slider);
+    append_slider_with_spin(&speed_inner, &speed_slider, 2);
 
     let speed_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let speed_set_keyframe_btn = Button::with_label("Set Speed Keyframe");
@@ -6161,7 +6014,7 @@ pub fn build_inspector(
                 return;
             }
             let enabled = btn.is_active();
-            shutter_slider.set_sensitive(enabled);
+            set_slider_row_sensitive(&shutter_slider, enabled);
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
                 let mut proj = project.borrow_mut();
@@ -6210,7 +6063,7 @@ pub fn build_inspector(
                 return;
             }
             let enabled = btn.is_active();
-            strength_slider.set_sensitive(enabled);
+            set_slider_row_sensitive(&strength_slider, enabled);
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
                 {
@@ -11402,6 +11255,34 @@ fn row_label(parent: &GBox, text: &str) {
     l.set_halign(gtk4::Align::Start);
     l.add_css_class("clip-path");
     parent.append(&l);
+}
+
+/// Append a Scale inside an HBox with a compact SpinButton sharing the same
+/// Adjustment. The SpinButton shows the exact numeric value so the Scale's
+/// built-in draw_value is turned off.
+fn append_slider_with_spin(parent: &GBox, slider: &Scale, digits: u32) {
+    let adj = slider.adjustment();
+    let spin = gtk4::SpinButton::new(Some(&adj), 0.0, digits);
+    spin.set_width_chars(6);
+    spin.set_max_width_chars(8);
+    spin.add_css_class("inspector-spin");
+    slider.set_draw_value(false);
+    slider.set_hexpand(true);
+
+    let row = GBox::new(gtk4::Orientation::Horizontal, 4);
+    row.append(slider);
+    row.append(&spin);
+    parent.append(&row);
+}
+
+/// Set sensitivity on the slider's wrapper row (so the sibling SpinButton is
+/// also affected), falling back to the slider itself if it has no parent yet.
+fn set_slider_row_sensitive(slider: &Scale, sensitive: bool) {
+    if let Some(parent) = slider.parent() {
+        parent.set_sensitive(sensitive);
+    } else {
+        slider.set_sensitive(sensitive);
+    }
 }
 
 fn value_label(text: &str) -> Label {

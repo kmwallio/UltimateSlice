@@ -862,6 +862,13 @@ scale slider:hover {
     background-color: #ffffff;
 }
 
+/* Compact spin-buttons alongside inspector sliders */
+spinbutton.inspector-spin {
+    min-width: 56px;
+    padding: 0 2px;
+    font-size: 0.85em;
+}
+
 /* Check/radio controls used across settings panels */
 checkbutton,
 radiobutton {

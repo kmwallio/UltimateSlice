@@ -711,7 +711,7 @@ FCPXML persistence).
 - [ ] Two-Up / Four-Up Trim Displays in the Program Monitor for precision edits (Slip/Slide/Roll)
 - [ ] Kinetic Scrolling & Playhead Elasticity
 - [x] Snap indicator visual — when snapping to a clip edge, marker, playhead, or sequence start, draw a dashed vertical guideline + small badge ("clip start" / "clip end" / "marker" / "playhead" / "start") at the snap point; snap targets now include the playhead, timeline markers, and time 0 in addition to other clip edges
-- [ ] Drag preview ghosting — translucent ghost of the clip at the drop target with the new in/out timecode floating above it during move/trim
+- [x] Drag preview ghosting — move/trim drags now show translucent ghost overlays at the live drop result, with a floating in/out timecode badge on the primary dragged clip
 - [x] Mini-map / timeline overview strip — thin strip above the ruler showing the whole project at a glance with a viewport rectangle for the visible region
 - [x] Track header redesign — per-track color swatch, clearer Solo/Mute/Lock button states, drag handle for reorder, double-click to rename inline
 - [x] Marker list panel — a sortable list of timeline markers with name, time, color, and notes; double-click to seek
@@ -724,7 +724,7 @@ FCPXML persistence).
 - [ ] Search field at the top of the inspector — type "denoise" and only the relevant slider is shown
 - [ ] Reset-to-default badge on every slider — small circular reset button that appears only when a value differs from the default; click to reset that property with undo
 - [ ] Right-click → "Copy/Paste this property" on any slider/control, with a "Paste to all selected clips" variant (currently only color grading has copy/paste)
-- [ ] Numeric-entry on every slider — inline `SpinButton` or click-to-edit so users can type exact values
+- [x] Numeric-entry on every slider — compact `SpinButton` sharing the slider's `Adjustment` so typed values and slider drags stay in sync
 
 **Program Monitor polish**
 - [ ] HUD overlay — togglable overlay showing timecode, frame number, fps, resolution, and dropped-frame count (reuse `src/ui/timecode.rs`)
