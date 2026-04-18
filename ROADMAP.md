@@ -721,7 +721,7 @@ FCPXML persistence).
 
 **Inspector polish**
 - [x] Collapsible sections with persisted state — each section (Color, Audio, Video, Transform, Effects, Masks, Subtitles) is a collapsible expander whose open/closed state is remembered per-session
-- [ ] Search field at the top of the inspector — type "denoise" and only the relevant slider is shown
+- [x] Search field at the top of the inspector — type "denoise" and only the relevant slider is shown
 - [x] Reset-to-default badge on every slider — small circular reset button that appears only when a value differs from the default; click to reset that property with undo
 - [ ] Right-click → "Copy/Paste this property" on any slider/control, with a "Paste to all selected clips" variant (currently only color grading has copy/paste)
 - [x] Numeric-entry on every slider — compact `SpinButton` sharing the slider's `Adjustment` so typed values and slider drags stay in sync

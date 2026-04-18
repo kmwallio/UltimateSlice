@@ -3444,9 +3444,37 @@ pub fn build_inspector(
     vbox.set_margin_end(8);
     vbox.set_margin_top(8);
 
+    let header_row = GBox::new(Orientation::Horizontal, 4);
     let title = Label::new(Some("Inspector"));
     title.add_css_class("browser-header");
-    vbox.append(&title);
+    title.set_hexpand(true);
+    header_row.append(&title);
+    let search_toggle = gtk4::ToggleButton::new();
+    search_toggle.set_icon_name("edit-find-symbolic");
+    search_toggle.add_css_class("flat");
+    search_toggle.set_tooltip_text(Some("Filter controls"));
+    header_row.append(&search_toggle);
+    vbox.append(&header_row);
+
+    let search_entry = gtk4::SearchEntry::new();
+    search_entry.set_placeholder_text(Some("Filter controls\u{2026}"));
+    search_entry.set_visible(false);
+    search_entry.set_halign(gtk4::Align::Fill);
+    search_entry.set_max_width_chars(20);
+    vbox.append(&search_entry);
+
+    {
+        let entry = search_entry.clone();
+        search_toggle.connect_toggled(move |btn| {
+            let active = btn.is_active();
+            entry.set_visible(active);
+            if active {
+                entry.grab_focus();
+            } else {
+                entry.set_text("");
+            }
+        });
+    }
 
     let empty_state_label = Label::new(Some(
         "Select a clip in the Timeline to edit its properties here.\nTip: click a clip once, or press Ctrl+A in the Timeline to inspect the current selection.",
@@ -10828,6 +10856,53 @@ pub fn build_inspector(
         connect_expander_persist(exp);
     }
 
+    // Wire search/filter field.
+    {
+        let saved_sections = saved_sections.clone();
+        let filter_sections: Vec<(GBox, Expander)> = vec![
+            (color_section.clone(), color_expander.clone()),
+            (chroma_key_section.clone(), chroma_key_expander.clone()),
+            (bg_removal_section.clone(), bg_removal_expander.clone()),
+            (subtitle_section.clone(), subtitle_expander.clone()),
+            (subtitle_segments_section.clone(), segments_expander.clone()),
+            (mask_section.clone(), mask_expander.clone()),
+            (hsl_section.clone(), hsl_expander.clone()),
+            (tracking_section.clone(), tracking_expander.clone()),
+            (frei0r_effects_section.clone(), frei0r_effects_expander.clone()),
+            (audio_section.clone(), audio_expander.clone()),
+            (transform_section.clone(), transform_expander.clone()),
+            (transition_section.clone(), transition_expander.clone()),
+            (audition_section_box.clone(), audition_expander.clone()),
+            (title_section_box.clone(), title_expander.clone()),
+            (speed_section_box.clone(), speed_expander.clone()),
+            (lut_section_box.clone(), lut_expander.clone()),
+        ];
+        search_entry.connect_search_changed(move |entry| {
+            let query = entry.text().to_string().to_lowercase();
+            if query.is_empty() {
+                for (section, expander) in &filter_sections {
+                    section.set_visible(true);
+                    show_all_inner_controls(expander);
+                    restore_expander_state(expander, &saved_sections);
+                }
+                return;
+            }
+            for (section, expander) in &filter_sections {
+                let section_name_matches = expander
+                    .label()
+                    .map(|l| l.to_lowercase().contains(&query))
+                    .unwrap_or(false);
+                let inner_has_match =
+                    filter_inner_controls(expander, &query, section_name_matches);
+                let visible = section_name_matches || inner_has_match;
+                section.set_visible(visible);
+                if visible {
+                    expander.set_expanded(true);
+                }
+            }
+        });
+    }
+
     let view = Rc::new(InspectorView {
         name_entry,
         path_value,
@@ -11305,6 +11380,52 @@ fn connect_expander_persist(expander: &Expander) {
             crate::ui_state::save_inspector_sections_state(&sections);
         }
     });
+}
+
+/// Filter an expander's inner controls by query. Returns true if any control matched.
+/// Labels with the `clip-path` CSS class are row labels; each label and its next
+/// sibling (the control row) are shown/hidden together.
+fn filter_inner_controls(expander: &Expander, query: &str, show_all: bool) -> bool {
+    let inner = match expander.child().and_then(|c| c.downcast::<GBox>().ok()) {
+        Some(b) => b,
+        None => return false,
+    };
+    let mut any_match = false;
+    let mut child = inner.first_child();
+    while let Some(widget) = child {
+        let next = widget.next_sibling();
+        if widget.has_css_class("clip-path") {
+            let label_text = widget
+                .downcast_ref::<Label>()
+                .map(|l| l.text().to_string().to_lowercase())
+                .unwrap_or_default();
+            let matches = show_all || label_text.contains(query);
+            widget.set_visible(matches);
+            if let Some(ref ctrl) = next {
+                if !ctrl.has_css_class("clip-path") {
+                    ctrl.set_visible(matches);
+                }
+            }
+            if matches {
+                any_match = true;
+            }
+        }
+        child = next;
+    }
+    any_match
+}
+
+/// Show all children of an expander's inner container.
+fn show_all_inner_controls(expander: &Expander) {
+    let inner = match expander.child().and_then(|c| c.downcast::<GBox>().ok()) {
+        Some(b) => b,
+        None => return,
+    };
+    let mut child = inner.first_child();
+    while let Some(widget) = child {
+        widget.set_visible(true);
+        child = widget.next_sibling();
+    }
 }
 
 /// Append a Scale inside an HBox with a compact SpinButton sharing the same
