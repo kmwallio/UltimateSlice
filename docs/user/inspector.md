@@ -605,12 +605,45 @@ You can copy all color grading values from one clip and paste them onto another.
 |---|---|
 | **Ctrl+Alt+C** | Copy color grade from the selected clip |
 | **Ctrl+Alt+V** | Paste color grade onto the selected clip |
+| **Ctrl+Alt+Shift+V** | Paste color grade onto **every selected clip** (single undo rolls them all back together) |
 
 **Copied properties:** Brightness, Contrast, Saturation, Temperature, Tint, Exposure, Black Point, Shadows, Midtones, Highlights, per-tone Warmth/Tint, Denoise, Sharpness, Blur, and LUT path. Static values only — keyframe animations are not included.
 
 > **Tip:** Use **Ctrl+Shift+V** (Paste Attributes) to copy *all* clip attributes including audio, transforms, and effects. Use **Ctrl+Alt+V** (Paste Color Grade) when you only want to match the color look between clips.
 
 > **MCP tools:** `copy_clip_color_grade` and `paste_clip_color_grade` provide the same functionality for automation.
+
+## Copy & Paste a Single Property
+
+Right-click any scalar slider in the Inspector to get a small menu with **Copy**, **Paste**, and (when more than one clip is selected) **Paste to all selected** options for that single property. This is the easy way to transfer exactly one value — for example, match the opacity of clip B to clip A without touching anything else.
+
+- **Coverage:** every numeric scalar slider across Color (brightness, contrast, saturation, temperature, tint, exposure, black point, shadows/midtones/highlights + warmth/tint variants, denoise, sharpness, blur), Transform (scale, opacity, position x/y, rotate, crop edges), Audio (volume, pan, pitch shift), Speed, Keying/BG removal (chroma tolerance/softness, BG removal threshold), and Motion Blur shutter angle.
+- **Paste** is disabled when the clipboard is empty, when the copied property doesn't apply to the selected clip kind (for example, trying to paste *Volume* onto a Title clip), or when the value would not change.
+- **Paste to all selected** silently skips any selected clips for which the property doesn't apply, and wraps the whole batch in a single undo entry.
+- Static values only. Keyframe lanes on the source clip are ignored on Copy, and pasting onto a clip with an animated lane replaces only the static baseline (keyframes are left in place).
+
+> **No keyboard shortcut** — the right-click menu is intentionally the only surface for single-property copy/paste. Use **Ctrl+Alt+Shift+V** when you want the full color-grade bundle across the selection instead.
+
+## Copy & Paste a Bundle
+
+Right-click on the following Inspector controls to copy and paste entire multi-field setups at once. Each bundle lives in its own clipboard slot, so you can, for example, hold a Frei0r chain and a chroma-key setup at the same time and paste each onto different clips.
+
+| Right-click target | Bundle |
+|---|---|
+| **Flip Horizontal** / **Flip Vertical** toggle buttons | the corresponding flip flag |
+| **Blend Mode** dropdown | blend mode enum (Normal, Multiply, Screen, Overlay, Difference, …) |
+| **LUT Stack** section header | the ordered list of `.cube` file paths assigned to the clip |
+| **Effects** section header (Frei0r chain) | the full list of Frei0r effect instances with enabled/disabled state and all parameters |
+| **Audio Effects** section header (LADSPA chain) | the full list of LADSPA plugin instances with enabled/disabled state and parameters |
+| **EQ** curve area | the 3-band parametric EQ (Low / Mid / High, each with freq/gain/Q) |
+| **Chroma Key** enable checkbox | chroma-key bundle: enabled + color + tolerance + softness |
+| **BG Removal** enable checkbox | BG-removal bundle: enabled + threshold |
+
+- Each bundle has its own **Copy**, **Paste**, and (when a multi-selection is active) **Paste to all selected** actions.
+- **Paste** silently no-ops if the clipboard holds a bundle of a different kind (e.g., trying to paste a Frei0r chain from the Chroma Key menu does nothing).
+- **Paste to all selected** skips clips for which the bundle doesn't apply — chroma key, BG removal, and Frei0r chains skip pure audio clips; LADSPA chains and EQ skip Title and Image clips; flip / blend mode / LUT stack skip pure audio clips.
+- Every bundle paste is undoable as a **single** Ctrl+Z step, even when it touches many clips across many tracks.
+- Bundles capture static values only — effect-parameter keyframe lanes and EQ-gain keyframe lanes are not part of the Copy payload (they remain untouched on Paste targets).
 
 Only `.cube` format (3D LUT) is supported. One LUT per clip; multiple-LUT stacking is a future feature.
 

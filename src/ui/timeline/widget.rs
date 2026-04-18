@@ -339,6 +339,49 @@ struct TimelineClipboard {
     source_track_id: String,
 }
 
+/// Inspector clipboard holding the most recently copied property or
+/// bundle. Captured by right-click **Copy …** actions and consumed by
+/// **Paste …** / **Paste … to all selected clips**.
+///
+/// Phase 1 shipped only `Scalar` (one numeric slider). Phase 2 adds
+/// bundles that cover the most common "apply the same look/setup to
+/// another clip" workflows: creative effect chains, audio effect
+/// chains, LUT stacks, EQ bands, blend mode, flip toggles, chroma key,
+/// and AI background removal.
+#[derive(Debug, Clone)]
+pub enum PropertyClipboard {
+    Scalar {
+        property: crate::ui::clip_property::ClipProperty,
+        value: f64,
+    },
+    Flip {
+        axis: FlipAxis,
+        value: bool,
+    },
+    BlendMode(crate::model::clip::BlendMode),
+    LutPaths(Vec<String>),
+    Frei0rChain(Vec<crate::model::clip::Frei0rEffect>),
+    LadspaChain(Vec<crate::model::clip::LadspaEffect>),
+    EqBands([crate::model::clip::EqBand; 3]),
+    ChromaKey {
+        enabled: bool,
+        color: u32,
+        tolerance: f32,
+        softness: f32,
+    },
+    BgRemoval {
+        enabled: bool,
+        threshold: f64,
+    },
+}
+
+/// Which axis a [`PropertyClipboard::Flip`] payload refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlipAxis {
+    Horizontal,
+    Vertical,
+}
+
 /// Clipboard holding only color-grading static values (no keyframes).
 #[derive(Debug, Clone)]
 pub struct ColorGradeClipboard {
@@ -595,6 +638,11 @@ pub struct TimelineState {
     clipboard: Option<TimelineClipboard>,
     /// Color-grade-only clipboard for copy/paste color grading between clips.
     pub color_grade_clipboard: Option<ColorGradeClipboard>,
+    /// Single-property clipboard for the Inspector right-click Copy / Paste
+    /// this property action. Holds the last scalar value read via
+    /// [`ClipProperty::read`] and is applied back via
+    /// [`ClipProperty::write`] on paste.
+    pub property_clipboard: Option<PropertyClipboard>,
     /// Multi-selection set (primary selection remains in `selected_clip_id`).
     selected_clip_ids: HashSet<String>,
     /// Anchor clip used for Shift+click range selection.
@@ -682,6 +730,7 @@ impl TimelineState {
             show_track_audio_levels: true,
             clipboard: None,
             color_grade_clipboard: None,
+            property_clipboard: None,
             selected_clip_ids: HashSet::new(),
             selection_anchor_clip_id: None,
             marquee_selection: None,
@@ -2513,6 +2562,88 @@ impl TimelineState {
         let mut proj = self.project.borrow_mut();
         self.history.execute(Box::new(cmd), &mut proj);
         true
+    }
+
+    /// Paste the color grade clipboard onto every selected clip. Each
+    /// affected track gets a single `SetTrackClipsCommand` child, and
+    /// the whole batch is wrapped in one [`CompoundEditCommand`] so a
+    /// single Ctrl+Z reverses the operation across every track. Returns
+    /// true if at least one clip was actually changed.
+    pub fn paste_color_grade_to_all_selected(&mut self) -> bool {
+        let Some(grade) = self.color_grade_clipboard.clone() else {
+            return false;
+        };
+        let target_ids: HashSet<String> = if self.selected_clip_ids.is_empty() {
+            self.selected_clip_id
+                .iter()
+                .cloned()
+                .collect::<HashSet<String>>()
+        } else {
+            self.selected_clip_ids.clone()
+        };
+        if target_ids.is_empty() {
+            return false;
+        }
+
+        // Build one SetTrackClipsCommand per affected track. Visit each
+        // track only once so clips on the same track share a single
+        // old_clips snapshot / new_clips replacement.
+        let per_track: Vec<(String, Vec<Clip>, Vec<Clip>)> = {
+            let proj = self.project.borrow();
+            let editing_tracks = self.resolve_editing_tracks(&proj);
+            editing_tracks
+                .iter()
+                .filter_map(|track| {
+                    let touches_track = track.clips.iter().any(|c| target_ids.contains(&c.id));
+                    if !touches_track {
+                        return None;
+                    }
+                    let old_clips = track.clips.clone();
+                    let mut new_clips = old_clips.clone();
+                    let mut any_changed = false;
+                    for clip in new_clips.iter_mut() {
+                        if target_ids.contains(&clip.id) && grade.apply_to(clip) {
+                            any_changed = true;
+                        }
+                    }
+                    if any_changed {
+                        Some((track.id.clone(), old_clips, new_clips))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        if per_track.is_empty() {
+            return false;
+        }
+
+        let children: Vec<Box<dyn crate::undo::EditCommand>> = per_track
+            .into_iter()
+            .map(|(track_id, old_clips, new_clips)| {
+                Box::new(SetTrackClipsCommand {
+                    track_id,
+                    old_clips,
+                    new_clips,
+                    label: "Paste color grade".to_string(),
+                }) as Box<dyn crate::undo::EditCommand>
+            })
+            .collect();
+        let cmd = crate::undo::CompoundEditCommand {
+            children,
+            description: "Paste color grade to selected".to_string(),
+        };
+        let mut proj = self.project.borrow_mut();
+        self.history.execute(Box::new(cmd), &mut proj);
+        true
+    }
+
+    /// Public read-only view onto the multi-selection set. Consumers that
+    /// need to iterate currently-selected clips should use this rather
+    /// than reaching into the private field directly.
+    pub fn selected_clip_ids(&self) -> &HashSet<String> {
+        &self.selected_clip_ids
     }
 
     fn clear_clip_selection(&mut self) {
@@ -7789,6 +7920,13 @@ pub fn build_timeline(
                         return glib::Propagation::Stop;
                     }
                     false
+                }
+                Key::v | Key::V if ctrl && alt && shift => {
+                    let changed = st.paste_color_grade_to_all_selected();
+                    if changed {
+                        notify_project = true;
+                    }
+                    changed
                 }
                 Key::v | Key::V if ctrl && alt => {
                     let changed = st.paste_color_grade();

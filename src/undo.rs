@@ -61,6 +61,31 @@ impl<T: Clone + 'static> EditCommand for ClipMutateCommand<T> {
     }
 }
 
+/// Groups multiple `EditCommand` children into a single history entry.
+/// Used by Inspector "Paste property to all selected clips" and related
+/// bulk operations so the entire batch is undone in one Ctrl+Z press.
+/// Children are executed in order and undone in reverse order.
+pub struct CompoundEditCommand {
+    pub children: Vec<Box<dyn EditCommand>>,
+    pub description: String,
+}
+
+impl EditCommand for CompoundEditCommand {
+    fn execute(&self, project: &mut Project) {
+        for child in &self.children {
+            child.execute(project);
+        }
+    }
+    fn undo(&self, project: &mut Project) {
+        for child in self.children.iter().rev() {
+            child.undo(project);
+        }
+    }
+    fn description(&self) -> &str {
+        &self.description
+    }
+}
+
 /// Generic "set one track property" undo command.
 pub struct TrackMutateCommand<T: Clone> {
     pub track_id: String,
@@ -2670,6 +2695,56 @@ mod tests {
     use crate::model::clip::{Clip, ClipKind};
     use crate::model::project::Project;
     use crate::model::track::Track;
+
+    #[test]
+    fn compound_edit_command_round_trip() {
+        let mut project = Project::new("Compound test");
+        let mut track = Track::new_video("Video");
+        let mut clip = Clip::new("/tmp/a.mp4", 5_000_000_000, 0, ClipKind::Video);
+        clip.id = "clip-a".to_string();
+        clip.brightness = 0.0;
+        track.add_clip(clip);
+        let mut clip2 = Clip::new("/tmp/b.mp4", 5_000_000_000, 5_000_000_000, ClipKind::Video);
+        clip2.id = "clip-b".to_string();
+        clip2.brightness = 0.0;
+        track.add_clip(clip2);
+        project.tracks.push(track);
+
+        // Two children: set each clip's brightness to 0.4. Reversing the
+        // compound should restore both to 0.0.
+        let cmd = CompoundEditCommand {
+            description: "Paste Brightness to all selected".to_string(),
+            children: vec![
+                Box::new(ClipMutateCommand::<f32> {
+                    clip_id: "clip-a".to_string(),
+                    old_state: 0.0,
+                    new_state: 0.4,
+                    apply: |clip, v| clip.brightness = v,
+                    label: "paste brightness",
+                }),
+                Box::new(ClipMutateCommand::<f32> {
+                    clip_id: "clip-b".to_string(),
+                    old_state: 0.0,
+                    new_state: 0.4,
+                    apply: |clip, v| clip.brightness = v,
+                    label: "paste brightness",
+                }),
+            ],
+        };
+
+        cmd.execute(&mut project);
+        assert!((project.clip_mut("clip-a").unwrap().brightness - 0.4).abs() < 1e-6);
+        assert!((project.clip_mut("clip-b").unwrap().brightness - 0.4).abs() < 1e-6);
+
+        cmd.undo(&mut project);
+        assert!((project.clip_mut("clip-a").unwrap().brightness - 0.0).abs() < 1e-6);
+        assert!((project.clip_mut("clip-b").unwrap().brightness - 0.0).abs() < 1e-6);
+
+        // Re-execute after undo (redo path): values go back to 0.4.
+        cmd.execute(&mut project);
+        assert!((project.clip_mut("clip-a").unwrap().brightness - 0.4).abs() < 1e-6);
+        assert!((project.clip_mut("clip-b").unwrap().brightness - 0.4).abs() < 1e-6);
+    }
 
     #[test]
     fn auto_crop_command_round_trip() {

@@ -1,4 +1,5 @@
 pub mod audio_effects_browser;
+pub mod clip_property;
 pub mod color_scopes;
 pub mod color_wheel;
 pub mod colors;

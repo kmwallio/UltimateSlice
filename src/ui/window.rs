@@ -7718,6 +7718,16 @@ pub fn build_window(
         },
     );
 
+    // Phase 1 right-click Copy / Paste this property on every scalar
+    // slider in the Inspector. Wired here (after build_inspector) so the
+    // helper can hold refs to both the project and the timeline_state.
+    crate::ui::inspector::attach_property_context_menus(
+        &inspector_view,
+        project.clone(),
+        timeline_state.clone(),
+        on_project_changed.clone(),
+    );
+
     let sync_tracking_controls: Rc<dyn Fn()> = {
         let inspector_view = inspector_view.clone();
         let project = project.clone();

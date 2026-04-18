@@ -11551,3 +11551,1051 @@ fn humanize_frei0r_name(name: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
+
+// ---------------------------------------------------------------------------
+// Right-click Copy / Paste property helper
+// ---------------------------------------------------------------------------
+
+/// Attach a right-click context menu to every Phase-1 scalar slider on the
+/// Inspector. The menu offers **Copy <property>**, **Paste <property>**,
+/// and **Paste <property> to all selected clips** (visible only when more
+/// than one clip is selected).
+///
+/// Called once by `window.rs` after `build_inspector` returns. The
+/// wiring is table-driven so future properties can be added in one place
+/// without touching each slider's construction site.
+pub fn attach_property_context_menus(
+    view: &InspectorView,
+    project: Rc<RefCell<Project>>,
+    timeline_state: Rc<RefCell<crate::ui::timeline::widget::TimelineState>>,
+    on_project_changed: Rc<dyn Fn()>,
+) {
+    use crate::ui::clip_property::ClipProperty;
+
+    let bindings: Vec<(Scale, ClipProperty)> = vec![
+        // Color grade
+        (view.brightness_slider.clone(), ClipProperty::Brightness),
+        (view.contrast_slider.clone(), ClipProperty::Contrast),
+        (view.saturation_slider.clone(), ClipProperty::Saturation),
+        (view.temperature_slider.clone(), ClipProperty::Temperature),
+        (view.tint_slider.clone(), ClipProperty::Tint),
+        (view.exposure_slider.clone(), ClipProperty::Exposure),
+        (view.black_point_slider.clone(), ClipProperty::BlackPoint),
+        (view.shadows_slider.clone(), ClipProperty::Shadows),
+        (view.midtones_slider.clone(), ClipProperty::Midtones),
+        (view.highlights_slider.clone(), ClipProperty::Highlights),
+        (
+            view.highlights_warmth_slider.clone(),
+            ClipProperty::HighlightsWarmth,
+        ),
+        (
+            view.highlights_tint_slider.clone(),
+            ClipProperty::HighlightsTint,
+        ),
+        (
+            view.midtones_warmth_slider.clone(),
+            ClipProperty::MidtonesWarmth,
+        ),
+        (
+            view.midtones_tint_slider.clone(),
+            ClipProperty::MidtonesTint,
+        ),
+        (
+            view.shadows_warmth_slider.clone(),
+            ClipProperty::ShadowsWarmth,
+        ),
+        (view.shadows_tint_slider.clone(), ClipProperty::ShadowsTint),
+        // Detail
+        (view.denoise_slider.clone(), ClipProperty::Denoise),
+        (view.sharpness_slider.clone(), ClipProperty::Sharpness),
+        (view.blur_slider.clone(), ClipProperty::Blur),
+        // Transform
+        (view.scale_slider.clone(), ClipProperty::Scale),
+        (view.opacity_slider.clone(), ClipProperty::Opacity),
+        (view.position_x_slider.clone(), ClipProperty::PositionX),
+        (view.position_y_slider.clone(), ClipProperty::PositionY),
+        (view.crop_left_slider.clone(), ClipProperty::CropLeft),
+        (view.crop_right_slider.clone(), ClipProperty::CropRight),
+        (view.crop_top_slider.clone(), ClipProperty::CropTop),
+        (view.crop_bottom_slider.clone(), ClipProperty::CropBottom),
+        // Audio
+        (view.volume_slider.clone(), ClipProperty::Volume),
+        (view.pan_slider.clone(), ClipProperty::Pan),
+        (
+            view.pitch_shift_slider.clone(),
+            ClipProperty::PitchShiftSemitones,
+        ),
+        // Speed
+        (view.speed_slider.clone(), ClipProperty::Speed),
+        // Chroma key / BG removal
+        (
+            view.chroma_tolerance_slider.clone(),
+            ClipProperty::ChromaKeyTolerance,
+        ),
+        (
+            view.chroma_softness_slider.clone(),
+            ClipProperty::ChromaKeySoftness,
+        ),
+        (
+            view.bg_removal_threshold_slider.clone(),
+            ClipProperty::BgRemovalThreshold,
+        ),
+        // Motion blur
+        (
+            view.motion_blur_shutter_slider.clone(),
+            ClipProperty::MotionBlurShutterAngle,
+        ),
+    ];
+
+    for (slider, property) in bindings {
+        attach_one_property_context_menu(
+            slider,
+            property,
+            project.clone(),
+            timeline_state.clone(),
+            on_project_changed.clone(),
+        );
+    }
+
+    // Phase 2: bundle Copy / Paste on the non-scalar controls
+    // (Flip H/V, Blend Mode, LUT Stack, Frei0r Effect Chain,
+    // LADSPA Audio Effect Chain, EQ Bands, Chroma Key, BG Removal).
+    attach_all_bundle_context_menus(
+        view,
+        project,
+        timeline_state,
+        on_project_changed,
+    );
+}
+
+fn attach_one_property_context_menu(
+    slider: Scale,
+    property: crate::ui::clip_property::ClipProperty,
+    project: Rc<RefCell<Project>>,
+    timeline_state: Rc<RefCell<crate::ui::timeline::widget::TimelineState>>,
+    on_project_changed: Rc<dyn Fn()>,
+) {
+    use crate::ui::timeline::widget::PropertyClipboard;
+
+    let gesture = gtk4::GestureClick::new();
+    gesture.set_button(3); // right-click
+    let slider_for_popup = slider.clone();
+    gesture.connect_released(move |_gesture, _n_press, x, y| {
+        // Build a small popover anchored at the click point with Copy /
+        // Paste / Paste-to-all buttons.
+        let popover = gtk::Popover::new();
+        popover.set_autohide(true);
+        popover.set_has_arrow(true);
+        popover.set_parent(&slider_for_popup);
+        popover.set_pointing_to(Some(&gdk4::Rectangle::new(
+            x.round() as i32,
+            y.round() as i32,
+            1,
+            1,
+        )));
+
+        let content = GBox::new(Orientation::Vertical, 2);
+        content.set_margin_top(6);
+        content.set_margin_bottom(6);
+        content.set_margin_start(8);
+        content.set_margin_end(8);
+
+        let copy_btn = Button::with_label(&format!("Copy {}", property.label()));
+        copy_btn.add_css_class("flat");
+        let paste_btn = Button::with_label(&format!("Paste {}", property.label()));
+        paste_btn.add_css_class("flat");
+        let paste_all_btn =
+            Button::with_label(&format!("Paste {} to all selected", property.label()));
+        paste_all_btn.add_css_class("flat");
+
+        // Primary selected clip id (drives Copy source and Paste target).
+        let primary_id: Option<String> = timeline_state.borrow().selected_clip_id.clone();
+        let selected_ids = timeline_state.borrow().selected_clip_ids().clone();
+
+        // Enable/disable items based on current state.
+        let primary_clip_compatible = primary_id
+            .as_ref()
+            .and_then(|id| {
+                let proj = project.borrow();
+                for track in proj.tracks.iter() {
+                    if let Some(c) = track.clips.iter().find(|c| &c.id == id) {
+                        return Some(property.applies_to(c));
+                    }
+                }
+                None
+            })
+            .unwrap_or(false);
+        copy_btn.set_sensitive(primary_clip_compatible);
+
+        let clipboard_matches = matches!(
+            timeline_state.borrow().property_clipboard,
+            Some(PropertyClipboard::Scalar { property: p, .. }) if p == property
+        );
+        paste_btn.set_sensitive(clipboard_matches && primary_clip_compatible);
+
+        let multi_select = selected_ids.len() > 1
+            || (selected_ids.len() == 1 && primary_id.is_some()
+                && !selected_ids.contains(primary_id.as_deref().unwrap_or("")));
+        paste_all_btn.set_visible(multi_select);
+        paste_all_btn.set_sensitive(clipboard_matches);
+
+        // --- Copy ---
+        {
+            let project = project.clone();
+            let timeline_state = timeline_state.clone();
+            let popover_close = popover.clone();
+            copy_btn.connect_clicked(move |_| {
+                let Some(clip_id) = timeline_state.borrow().selected_clip_id.clone() else {
+                    popover_close.popdown();
+                    return;
+                };
+                let value = {
+                    let proj = project.borrow();
+                    let mut found = None;
+                    for track in proj.tracks.iter() {
+                        if let Some(c) = track.clips.iter().find(|c| c.id == clip_id) {
+                            found = Some(property.read(c));
+                            break;
+                        }
+                    }
+                    found
+                };
+                if let Some(value) = value {
+                    timeline_state.borrow_mut().property_clipboard =
+                        Some(PropertyClipboard::Scalar { property, value });
+                }
+                popover_close.popdown();
+            });
+        }
+
+        // --- Paste (primary clip) ---
+        {
+            let project = project.clone();
+            let timeline_state = timeline_state.clone();
+            let on_project_changed = on_project_changed.clone();
+            let popover_close = popover.clone();
+            paste_btn.connect_clicked(move |_| {
+                let Some(primary_id) = timeline_state.borrow().selected_clip_id.clone() else {
+                    popover_close.popdown();
+                    return;
+                };
+                let clipboard_value: Option<f64> = match timeline_state.borrow().property_clipboard {
+                    Some(PropertyClipboard::Scalar {
+                        property: p,
+                        value: v,
+                    }) if p == property => Some(v),
+                    _ => None,
+                };
+                let Some(clipboard_value) = clipboard_value else {
+                    popover_close.popdown();
+                    return;
+                };
+                // Build a ClipMutateCommand<f64> that snapshots the old
+                // value and writes the new one via ClipProperty::write.
+                let old_value: Option<f64> = {
+                    let proj = project.borrow();
+                    proj.tracks.iter().find_map(|t| {
+                        t.clips
+                            .iter()
+                            .find(|c| c.id == primary_id)
+                            .map(|c| property.read(c))
+                    })
+                };
+                let Some(old_value) = old_value else {
+                    popover_close.popdown();
+                    return;
+                };
+                if (old_value - clipboard_value).abs() < 1e-9 {
+                    popover_close.popdown();
+                    return;
+                }
+                let cmd = clip_property_mutate_command(
+                    primary_id.clone(),
+                    property,
+                    old_value,
+                    clipboard_value,
+                );
+                {
+                    let mut ts = timeline_state.borrow_mut();
+                    let mut proj = project.borrow_mut();
+                    ts.history.execute(cmd, &mut proj);
+                }
+                on_project_changed();
+                popover_close.popdown();
+            });
+        }
+
+        // --- Paste to all selected ---
+        {
+            let project = project.clone();
+            let timeline_state = timeline_state.clone();
+            let on_project_changed = on_project_changed.clone();
+            let popover_close = popover.clone();
+            paste_all_btn.connect_clicked(move |_| {
+                let clipboard_value: f64 = match timeline_state.borrow().property_clipboard {
+                    Some(PropertyClipboard::Scalar {
+                        property: p,
+                        value: v,
+                    }) if p == property => v,
+                    _ => {
+                        popover_close.popdown();
+                        return;
+                    }
+                };
+                // Union of multi-select + primary. We never want to skip
+                // the primary clip just because selected_clip_ids happened
+                // not to include it.
+                let mut target_ids: HashSet<String> =
+                    timeline_state.borrow().selected_clip_ids().clone();
+                if let Some(ref id) = timeline_state.borrow().selected_clip_id {
+                    target_ids.insert(id.clone());
+                }
+                if target_ids.is_empty() {
+                    popover_close.popdown();
+                    return;
+                }
+
+                let mut children: Vec<Box<dyn crate::undo::EditCommand>> = Vec::new();
+                {
+                    let proj = project.borrow();
+                    for track in proj.tracks.iter() {
+                        for c in track.clips.iter() {
+                            if !target_ids.contains(&c.id) {
+                                continue;
+                            }
+                            if !property.applies_to(c) {
+                                continue;
+                            }
+                            let old_v = property.read(c);
+                            if (old_v - clipboard_value).abs() < 1e-9 {
+                                continue;
+                            }
+                            children.push(clip_property_mutate_command(
+                                c.id.clone(),
+                                property,
+                                old_v,
+                                clipboard_value,
+                            ));
+                        }
+                    }
+                }
+
+                if children.is_empty() {
+                    popover_close.popdown();
+                    return;
+                }
+
+                let cmd = Box::new(crate::undo::CompoundEditCommand {
+                    description: format!("Paste {} to selected", property.label()),
+                    children,
+                });
+                {
+                    let mut ts = timeline_state.borrow_mut();
+                    let mut proj = project.borrow_mut();
+                    ts.history.execute(cmd, &mut proj);
+                }
+                on_project_changed();
+                popover_close.popdown();
+            });
+        }
+
+        content.append(&copy_btn);
+        content.append(&paste_btn);
+        content.append(&paste_all_btn);
+        popover.set_child(Some(&content));
+        popover.popup();
+    });
+    slider.add_controller(gesture);
+}
+
+/// Build a `ClipMutateCommand<f64>` that writes a single
+/// [`ClipProperty`](crate::ui::clip_property::ClipProperty) value via the
+/// generic property-write path.
+fn clip_property_mutate_command(
+    clip_id: String,
+    property: crate::ui::clip_property::ClipProperty,
+    old_value: f64,
+    new_value: f64,
+) -> Box<dyn crate::undo::EditCommand> {
+    Box::new(PastePropertyCommand {
+        clip_id,
+        property,
+        old_value,
+        new_value,
+    })
+}
+
+struct PastePropertyCommand {
+    clip_id: String,
+    property: crate::ui::clip_property::ClipProperty,
+    old_value: f64,
+    new_value: f64,
+}
+
+impl crate::undo::EditCommand for PastePropertyCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            self.property.write(clip, self.new_value);
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            self.property.write(clip, self.old_value);
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Paste property"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 bundle Copy / Paste
+// ---------------------------------------------------------------------------
+//
+// The Phase 1 helper above handles one scalar slider at a time. Phase 2
+// layers on "bundle" variants of the clipboard — a whole frei0r/ladspa/
+// LUT stack, the EQ bands, chroma-key settings, BG-removal settings,
+// blend mode, and the flip toggles. Each bundle is attached to a
+// sensible widget target (section container, enable checkbox,
+// dropdown, toggle button) and reuses `ClipMutateCommand<T>` for undo
+// so paste-to-all still collapses into a single Ctrl+Z step.
+
+/// Shared popover builder used by every bundle's right-click menu. All
+/// action labels and enabled-state flags are supplied by the caller.
+/// The popover dismisses itself after any button click.
+#[allow(clippy::too_many_arguments)]
+fn show_property_popover(
+    anchor: &impl IsA<gtk::Widget>,
+    x: f64,
+    y: f64,
+    copy_label: &str,
+    paste_label: &str,
+    paste_all_label: &str,
+    copy_enabled: bool,
+    paste_enabled: bool,
+    paste_all_visible: bool,
+    paste_all_enabled: bool,
+    on_copy: impl Fn() + 'static,
+    on_paste: impl Fn() + 'static,
+    on_paste_all: impl Fn() + 'static,
+) {
+    let popover = gtk::Popover::new();
+    popover.set_autohide(true);
+    popover.set_has_arrow(true);
+    popover.set_parent(anchor);
+    popover.set_pointing_to(Some(&gdk4::Rectangle::new(
+        x.round() as i32,
+        y.round() as i32,
+        1,
+        1,
+    )));
+
+    let content = GBox::new(Orientation::Vertical, 2);
+    content.set_margin_top(6);
+    content.set_margin_bottom(6);
+    content.set_margin_start(8);
+    content.set_margin_end(8);
+
+    let copy_btn = Button::with_label(copy_label);
+    copy_btn.add_css_class("flat");
+    copy_btn.set_sensitive(copy_enabled);
+    let popover_close = popover.clone();
+    copy_btn.connect_clicked(move |_| {
+        on_copy();
+        popover_close.popdown();
+    });
+
+    let paste_btn = Button::with_label(paste_label);
+    paste_btn.add_css_class("flat");
+    paste_btn.set_sensitive(paste_enabled);
+    let popover_close = popover.clone();
+    paste_btn.connect_clicked(move |_| {
+        on_paste();
+        popover_close.popdown();
+    });
+
+    let paste_all_btn = Button::with_label(paste_all_label);
+    paste_all_btn.add_css_class("flat");
+    paste_all_btn.set_visible(paste_all_visible);
+    paste_all_btn.set_sensitive(paste_all_enabled);
+    let popover_close = popover.clone();
+    paste_all_btn.connect_clicked(move |_| {
+        on_paste_all();
+        popover_close.popdown();
+    });
+
+    content.append(&copy_btn);
+    content.append(&paste_btn);
+    content.append(&paste_all_btn);
+    popover.set_child(Some(&content));
+    popover.popup();
+}
+
+/// Returns `(primary_id, selected_ids)` for the current timeline selection,
+/// where `selected_ids` always includes the primary even when the
+/// selection set does not.
+fn current_selection(
+    timeline_state: &std::rc::Rc<
+        std::cell::RefCell<crate::ui::timeline::widget::TimelineState>,
+    >,
+) -> (Option<String>, HashSet<String>) {
+    let ts = timeline_state.borrow();
+    let primary = ts.selected_clip_id.clone();
+    let mut ids: HashSet<String> = ts.selected_clip_ids().clone();
+    if let Some(ref id) = primary {
+        ids.insert(id.clone());
+    }
+    (primary, ids)
+}
+
+/// Read the first clip with id `clip_id` from the project. Multicam,
+/// compound, and deep-tracks are not traversed — bundles always live on
+/// top-level clips.
+fn find_clip_cloned(project: &Project, clip_id: &str) -> Option<crate::model::clip::Clip> {
+    project
+        .tracks
+        .iter()
+        .find_map(|t| t.clips.iter().find(|c| c.id == clip_id).cloned())
+}
+
+/// ---- apply functions for ClipMutateCommand<T> ----
+
+fn apply_blend_mode(clip: &mut crate::model::clip::Clip, value: crate::model::clip::BlendMode) {
+    clip.blend_mode = value;
+}
+
+fn apply_flip_h(clip: &mut crate::model::clip::Clip, value: bool) {
+    clip.flip_h = value;
+}
+
+fn apply_flip_v(clip: &mut crate::model::clip::Clip, value: bool) {
+    clip.flip_v = value;
+}
+
+fn apply_lut_paths(clip: &mut crate::model::clip::Clip, value: Vec<String>) {
+    clip.lut_paths = value;
+}
+
+fn apply_frei0r_chain(
+    clip: &mut crate::model::clip::Clip,
+    value: Vec<crate::model::clip::Frei0rEffect>,
+) {
+    clip.frei0r_effects = value;
+}
+
+fn apply_ladspa_chain(
+    clip: &mut crate::model::clip::Clip,
+    value: Vec<crate::model::clip::LadspaEffect>,
+) {
+    clip.ladspa_effects = value;
+}
+
+fn apply_eq_bands(
+    clip: &mut crate::model::clip::Clip,
+    value: [crate::model::clip::EqBand; 3],
+) {
+    clip.eq_bands = value;
+}
+
+#[derive(Clone, Debug)]
+struct ChromaKeyBundle {
+    enabled: bool,
+    color: u32,
+    tolerance: f32,
+    softness: f32,
+}
+
+fn apply_chroma_key(clip: &mut crate::model::clip::Clip, value: ChromaKeyBundle) {
+    clip.chroma_key_enabled = value.enabled;
+    clip.chroma_key_color = value.color;
+    clip.chroma_key_tolerance = value.tolerance;
+    clip.chroma_key_softness = value.softness;
+}
+
+#[derive(Clone, Debug)]
+struct BgRemovalBundle {
+    enabled: bool,
+    threshold: f64,
+}
+
+fn apply_bg_removal(clip: &mut crate::model::clip::Clip, value: BgRemovalBundle) {
+    clip.bg_removal_enabled = value.enabled;
+    clip.bg_removal_threshold = value.threshold;
+}
+
+// ---- A single generic helper that handles the whole Copy/Paste/Paste-to-all
+//      orchestration for any ClipMutateCommand<T>. ----
+
+#[allow(clippy::too_many_arguments)]
+fn attach_bundle_context_menu<T>(
+    widget: gtk::Widget,
+    project: Rc<RefCell<Project>>,
+    timeline_state: Rc<RefCell<crate::ui::timeline::widget::TimelineState>>,
+    on_project_changed: Rc<dyn Fn()>,
+    label: &'static str,
+    applies_to: fn(&crate::model::clip::Clip) -> bool,
+    read: fn(&crate::model::clip::Clip) -> T,
+    apply: fn(&mut crate::model::clip::Clip, T),
+    wrap: fn(T) -> crate::ui::timeline::widget::PropertyClipboard,
+    unwrap: fn(&crate::ui::timeline::widget::PropertyClipboard) -> Option<T>,
+    eq: fn(&T, &T) -> bool,
+    undo_label: &'static str,
+) where
+    T: Clone + 'static,
+{
+    let gesture = gtk4::GestureClick::new();
+    gesture.set_button(3);
+    let widget_for_popup = widget.clone();
+    gesture.connect_released(move |_g, _n, x, y| {
+        let (primary_id, selected_ids) = current_selection(&timeline_state);
+        let primary_clip = primary_id
+            .as_ref()
+            .and_then(|id| find_clip_cloned(&project.borrow(), id));
+        let primary_compatible = primary_clip
+            .as_ref()
+            .map(|c| applies_to(c))
+            .unwrap_or(false);
+        let clipboard_has_match = timeline_state
+            .borrow()
+            .property_clipboard
+            .as_ref()
+            .and_then(|pc| unwrap(pc))
+            .is_some();
+        let multi_selected = selected_ids.len() > 1;
+
+        let copy_label_full = format!("Copy {}", label);
+        let paste_label_full = format!("Paste {}", label);
+        let paste_all_label_full = format!("Paste {} to all selected", label);
+
+        // Build Copy / Paste / Paste-all closures. Each borrows the
+        // project + timeline_state + on_project_changed.
+        let on_copy = {
+            let project = project.clone();
+            let timeline_state = timeline_state.clone();
+            let primary_id = primary_id.clone();
+            move || {
+                let Some(id) = primary_id.clone() else { return };
+                let Some(value) = find_clip_cloned(&project.borrow(), &id)
+                    .as_ref()
+                    .map(|c| read(c))
+                else {
+                    return;
+                };
+                timeline_state.borrow_mut().property_clipboard = Some(wrap(value));
+            }
+        };
+
+        let on_paste = {
+            let project = project.clone();
+            let timeline_state = timeline_state.clone();
+            let on_project_changed = on_project_changed.clone();
+            let primary_id = primary_id.clone();
+            move || {
+                let Some(id) = primary_id.clone() else { return };
+                let value = match timeline_state
+                    .borrow()
+                    .property_clipboard
+                    .as_ref()
+                    .and_then(|pc| unwrap(pc))
+                {
+                    Some(v) => v,
+                    None => return,
+                };
+                let old_value = match find_clip_cloned(&project.borrow(), &id)
+                    .as_ref()
+                    .map(|c| read(c))
+                {
+                    Some(v) => v,
+                    None => return,
+                };
+                if eq(&old_value, &value) {
+                    return;
+                }
+                let cmd = Box::new(crate::undo::ClipMutateCommand::<T> {
+                    clip_id: id,
+                    old_state: old_value,
+                    new_state: value,
+                    apply,
+                    label: undo_label,
+                });
+                {
+                    let mut ts = timeline_state.borrow_mut();
+                    let mut proj = project.borrow_mut();
+                    ts.history.execute(cmd, &mut proj);
+                }
+                on_project_changed();
+            }
+        };
+
+        let on_paste_all = {
+            let project = project.clone();
+            let timeline_state = timeline_state.clone();
+            let on_project_changed = on_project_changed.clone();
+            let selected_ids = selected_ids.clone();
+            move || {
+                let value = match timeline_state
+                    .borrow()
+                    .property_clipboard
+                    .as_ref()
+                    .and_then(|pc| unwrap(pc))
+                {
+                    Some(v) => v,
+                    None => return,
+                };
+                if selected_ids.is_empty() {
+                    return;
+                }
+
+                let mut children: Vec<Box<dyn crate::undo::EditCommand>> = Vec::new();
+                {
+                    let proj = project.borrow();
+                    for track in proj.tracks.iter() {
+                        for c in track.clips.iter() {
+                            if !selected_ids.contains(&c.id) {
+                                continue;
+                            }
+                            if !applies_to(c) {
+                                continue;
+                            }
+                            let old_v = read(c);
+                            if eq(&old_v, &value) {
+                                continue;
+                            }
+                            children.push(Box::new(crate::undo::ClipMutateCommand::<T> {
+                                clip_id: c.id.clone(),
+                                old_state: old_v,
+                                new_state: value.clone(),
+                                apply,
+                                label: undo_label,
+                            }));
+                        }
+                    }
+                }
+                if children.is_empty() {
+                    return;
+                }
+                let cmd = Box::new(crate::undo::CompoundEditCommand {
+                    description: format!("Paste {} to selected", label),
+                    children,
+                });
+                {
+                    let mut ts = timeline_state.borrow_mut();
+                    let mut proj = project.borrow_mut();
+                    ts.history.execute(cmd, &mut proj);
+                }
+                on_project_changed();
+            }
+        };
+
+        show_property_popover(
+            &widget_for_popup,
+            x,
+            y,
+            &copy_label_full,
+            &paste_label_full,
+            &paste_all_label_full,
+            primary_compatible,
+            clipboard_has_match && primary_compatible,
+            multi_selected,
+            clipboard_has_match,
+            on_copy,
+            on_paste,
+            on_paste_all,
+        );
+    });
+    widget.add_controller(gesture);
+}
+
+/// True for clips that can hold visual (video-path) bundles — every
+/// clip kind except pure audio.
+fn is_visual_clip(clip: &crate::model::clip::Clip) -> bool {
+    !matches!(clip.kind, crate::model::clip::ClipKind::Audio)
+}
+
+/// True for clips that can carry audio — video, audio, compound, multicam.
+fn is_audio_capable_clip(clip: &crate::model::clip::Clip) -> bool {
+    matches!(
+        clip.kind,
+        crate::model::clip::ClipKind::Video
+            | crate::model::clip::ClipKind::Audio
+            | crate::model::clip::ClipKind::Compound
+            | crate::model::clip::ClipKind::Multicam
+    )
+}
+
+/// True for video-only features like chroma key, BG removal, and
+/// frei0r effects.
+fn is_video_path_clip(clip: &crate::model::clip::Clip) -> bool {
+    matches!(
+        clip.kind,
+        crate::model::clip::ClipKind::Video
+            | crate::model::clip::ClipKind::Compound
+            | crate::model::clip::ClipKind::Multicam
+            | crate::model::clip::ClipKind::Audition
+    )
+}
+
+fn vec_paths_eq(a: &Vec<String>, b: &Vec<String>) -> bool {
+    a == b
+}
+fn vec_frei0r_eq(
+    a: &Vec<crate::model::clip::Frei0rEffect>,
+    b: &Vec<crate::model::clip::Frei0rEffect>,
+) -> bool {
+    a == b
+}
+fn vec_ladspa_eq(
+    a: &Vec<crate::model::clip::LadspaEffect>,
+    b: &Vec<crate::model::clip::LadspaEffect>,
+) -> bool {
+    a == b
+}
+fn eq_bands_eq(
+    a: &[crate::model::clip::EqBand; 3],
+    b: &[crate::model::clip::EqBand; 3],
+) -> bool {
+    a == b
+}
+fn chroma_eq(a: &ChromaKeyBundle, b: &ChromaKeyBundle) -> bool {
+    a.enabled == b.enabled
+        && a.color == b.color
+        && (a.tolerance - b.tolerance).abs() < 1e-6
+        && (a.softness - b.softness).abs() < 1e-6
+}
+fn bg_removal_eq(a: &BgRemovalBundle, b: &BgRemovalBundle) -> bool {
+    a.enabled == b.enabled && (a.threshold - b.threshold).abs() < 1e-9
+}
+fn blend_eq(
+    a: &crate::model::clip::BlendMode,
+    b: &crate::model::clip::BlendMode,
+) -> bool {
+    a == b
+}
+fn bool_eq(a: &bool, b: &bool) -> bool {
+    a == b
+}
+
+fn attach_all_bundle_context_menus(
+    view: &InspectorView,
+    project: Rc<RefCell<Project>>,
+    timeline_state: Rc<RefCell<crate::ui::timeline::widget::TimelineState>>,
+    on_project_changed: Rc<dyn Fn()>,
+) {
+    use crate::ui::timeline::widget::{FlipAxis, PropertyClipboard};
+
+    // Flip H toggle — single bool, visual-only.
+    attach_bundle_context_menu::<bool>(
+        view.flip_h_btn.clone().upcast::<gtk::Widget>(),
+        project.clone(),
+        timeline_state.clone(),
+        on_project_changed.clone(),
+        "Flip Horizontal",
+        is_visual_clip,
+        |c| c.flip_h,
+        apply_flip_h,
+        |v| PropertyClipboard::Flip {
+            axis: FlipAxis::Horizontal,
+            value: v,
+        },
+        |pc| match pc {
+            PropertyClipboard::Flip {
+                axis: FlipAxis::Horizontal,
+                value,
+            } => Some(*value),
+            _ => None,
+        },
+        bool_eq,
+        "Paste flip horizontal",
+    );
+
+    attach_bundle_context_menu::<bool>(
+        view.flip_v_btn.clone().upcast::<gtk::Widget>(),
+        project.clone(),
+        timeline_state.clone(),
+        on_project_changed.clone(),
+        "Flip Vertical",
+        is_visual_clip,
+        |c| c.flip_v,
+        apply_flip_v,
+        |v| PropertyClipboard::Flip {
+            axis: FlipAxis::Vertical,
+            value: v,
+        },
+        |pc| match pc {
+            PropertyClipboard::Flip {
+                axis: FlipAxis::Vertical,
+                value,
+            } => Some(*value),
+            _ => None,
+        },
+        bool_eq,
+        "Paste flip vertical",
+    );
+
+    // Blend mode — enum on a DropDown.
+    attach_bundle_context_menu::<crate::model::clip::BlendMode>(
+        view.blend_mode_dropdown.clone().upcast::<gtk::Widget>(),
+        project.clone(),
+        timeline_state.clone(),
+        on_project_changed.clone(),
+        "Blend Mode",
+        is_visual_clip,
+        |c| c.blend_mode.clone(),
+        apply_blend_mode,
+        PropertyClipboard::BlendMode,
+        |pc| match pc {
+            PropertyClipboard::BlendMode(v) => Some(v.clone()),
+            _ => None,
+        },
+        blend_eq,
+        "Paste blend mode",
+    );
+
+    // LUT paths — Vec<String>, visual-only.
+    attach_bundle_context_menu::<Vec<String>>(
+        view.lut_section_box.clone().upcast::<gtk::Widget>(),
+        project.clone(),
+        timeline_state.clone(),
+        on_project_changed.clone(),
+        "LUT Stack",
+        is_visual_clip,
+        |c| c.lut_paths.clone(),
+        apply_lut_paths,
+        PropertyClipboard::LutPaths,
+        |pc| match pc {
+            PropertyClipboard::LutPaths(v) => Some(v.clone()),
+            _ => None,
+        },
+        vec_paths_eq,
+        "Paste LUT stack",
+    );
+
+    // Frei0r chain — Vec<Frei0rEffect>, video-path only.
+    attach_bundle_context_menu::<Vec<crate::model::clip::Frei0rEffect>>(
+        view.frei0r_effects_list.clone().upcast::<gtk::Widget>(),
+        project.clone(),
+        timeline_state.clone(),
+        on_project_changed.clone(),
+        "Effect Chain",
+        is_video_path_clip,
+        |c| c.frei0r_effects.clone(),
+        apply_frei0r_chain,
+        PropertyClipboard::Frei0rChain,
+        |pc| match pc {
+            PropertyClipboard::Frei0rChain(v) => Some(v.clone()),
+            _ => None,
+        },
+        vec_frei0r_eq,
+        "Paste effect chain",
+    );
+
+    // LADSPA chain — Vec<LadspaEffect>, audio-capable clips.
+    attach_bundle_context_menu::<Vec<crate::model::clip::LadspaEffect>>(
+        view.ladspa_effects_list.clone().upcast::<gtk::Widget>(),
+        project.clone(),
+        timeline_state.clone(),
+        on_project_changed.clone(),
+        "Audio Effect Chain",
+        is_audio_capable_clip,
+        |c| c.ladspa_effects.clone(),
+        apply_ladspa_chain,
+        PropertyClipboard::LadspaChain,
+        |pc| match pc {
+            PropertyClipboard::LadspaChain(v) => Some(v.clone()),
+            _ => None,
+        },
+        vec_ladspa_eq,
+        "Paste audio effect chain",
+    );
+
+    // EQ bands — [EqBand; 3], audio-capable clips.
+    attach_bundle_context_menu::<[crate::model::clip::EqBand; 3]>(
+        view.match_eq_curve.clone().upcast::<gtk::Widget>(),
+        project.clone(),
+        timeline_state.clone(),
+        on_project_changed.clone(),
+        "EQ Bands",
+        is_audio_capable_clip,
+        |c| c.eq_bands,
+        apply_eq_bands,
+        PropertyClipboard::EqBands,
+        |pc| match pc {
+            PropertyClipboard::EqBands(v) => Some(*v),
+            _ => None,
+        },
+        eq_bands_eq,
+        "Paste EQ bands",
+    );
+
+    // Chroma key bundle — video-path only.
+    attach_bundle_context_menu::<ChromaKeyBundle>(
+        view.chroma_key_enable.clone().upcast::<gtk::Widget>(),
+        project.clone(),
+        timeline_state.clone(),
+        on_project_changed.clone(),
+        "Chroma Key",
+        is_video_path_clip,
+        |c| ChromaKeyBundle {
+            enabled: c.chroma_key_enabled,
+            color: c.chroma_key_color,
+            tolerance: c.chroma_key_tolerance,
+            softness: c.chroma_key_softness,
+        },
+        apply_chroma_key,
+        |b| PropertyClipboard::ChromaKey {
+            enabled: b.enabled,
+            color: b.color,
+            tolerance: b.tolerance,
+            softness: b.softness,
+        },
+        |pc| match pc {
+            PropertyClipboard::ChromaKey {
+                enabled,
+                color,
+                tolerance,
+                softness,
+            } => Some(ChromaKeyBundle {
+                enabled: *enabled,
+                color: *color,
+                tolerance: *tolerance,
+                softness: *softness,
+            }),
+            _ => None,
+        },
+        chroma_eq,
+        "Paste chroma key",
+    );
+
+    // BG removal bundle — video-path only.
+    attach_bundle_context_menu::<BgRemovalBundle>(
+        view.bg_removal_enable.clone().upcast::<gtk::Widget>(),
+        project.clone(),
+        timeline_state.clone(),
+        on_project_changed.clone(),
+        "BG Removal",
+        is_video_path_clip,
+        |c| BgRemovalBundle {
+            enabled: c.bg_removal_enabled,
+            threshold: c.bg_removal_threshold,
+        },
+        apply_bg_removal,
+        |b| PropertyClipboard::BgRemoval {
+            enabled: b.enabled,
+            threshold: b.threshold,
+        },
+        |pc| match pc {
+            PropertyClipboard::BgRemoval {
+                enabled,
+                threshold,
+            } => Some(BgRemovalBundle {
+                enabled: *enabled,
+                threshold: *threshold,
+            }),
+            _ => None,
+        },
+        bg_removal_eq,
+        "Paste BG removal",
+    );
+}

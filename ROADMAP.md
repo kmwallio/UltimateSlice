@@ -724,7 +724,7 @@ FCPXML persistence).
 - [x] Collapsible sections with persisted state — each section (Color, Audio, Video, Transform, Effects, Masks, Subtitles) is a collapsible expander whose open/closed state is remembered per-session
 - [x] Search field at the top of the inspector — type "denoise" and only the relevant slider is shown
 - [x] Reset-to-default badge on every slider — small circular reset button that appears only when a value differs from the default; click to reset that property with undo
-- [ ] Right-click → "Copy/Paste this property" on any slider/control, with a "Paste to all selected clips" variant (currently only color grading has copy/paste)
+- [x] Right-click → "Copy/Paste this property" on any slider/control: right-click menu with **Copy**, **Paste**, and **Paste to all selected** covers every scalar slider (Color/Detail/Transform/Audio/Speed/Keying/Motion-Blur) plus non-scalar bundle controls (Flip H/V toggles, Blend Mode dropdown, LUT stack, Frei0r chain, LADSPA chain, EQ bands, Chroma Key bundle, BG Removal bundle). `Ctrl+Alt+Shift+V` pastes the existing color-grade clipboard to every selected clip. Keyframe-lane copying is still deferred (static values only).
 - [x] Numeric-entry on every slider — compact `SpinButton` sharing the slider's `Adjustment` so typed values and slider drags stay in sync
 
 **Program Monitor polish**
