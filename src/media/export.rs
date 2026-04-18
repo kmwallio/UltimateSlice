@@ -177,6 +177,10 @@ pub struct ExportOptions {
     pub gif_fps: Option<u32>,
     /// Output audio channel layout. Default = Stereo (legacy pipeline unchanged).
     pub audio_channel_layout: AudioChannelLayout,
+    /// When true, skip HDR→SDR tone mapping and preserve HDR metadata in the
+    /// output file (10-bit pixel format, PQ/HLG transfer characteristics,
+    /// MaxCLL/MaxFALL). Only effective with H.265, VP9, or AV1 codecs.
+    pub hdr_passthrough: bool,
 }
 
 impl Default for ExportOptions {
@@ -191,6 +195,7 @@ impl Default for ExportOptions {
             audio_bitrate_kbps: 192,
             gif_fps: None,
             audio_channel_layout: AudioChannelLayout::Stereo,
+            hdr_passthrough: false,
         }
     }
 }
@@ -531,6 +536,11 @@ pub fn export_project(
             project.frame_rate.numerator,
             project.frame_rate.denominator,
         );
+        let tonemap_prefix = if options.hdr_passthrough {
+            String::new()
+        } else {
+            build_tonemap_filter_prefix(&clip.source_path)
+        };
         let lut_prefix = build_lut_filter_prefix(clip);
         let crop_filter =
             build_crop_filter(clip, out_w, out_h, project.width, project.height, false);
@@ -602,7 +612,7 @@ pub fn export_project(
                 )
             };
             filter.push_str(&format!(
-                "[{i}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{speed_filter}\
+                "[{i}:v]{tonemap_prefix}{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{speed_filter}\
                  ,scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[pv{i}fg];\
                  color=c=black:size={out_w}x{out_h}:r={}/{}:d={clip_duration_s:.6}[pv{i}bg];\
                  [pv{i}bg][pv{i}fg]overlay=x='{overlay_x_expr}':y='{overlay_y_expr}':eval=frame\
@@ -634,14 +644,14 @@ pub fn export_project(
             let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
             let anamorphic_filter = build_anamorphic_filter(clip);
             filter.push_str(&format!(
-                "[{i}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{speed_filter}[pv{i}raw];[pv{i}raw]format=yuv420p{motion_blur_filter}{transition_stop_pad_filter}[pv{i}];",
+                "[{i}:v]{tonemap_prefix}{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{speed_filter}[pv{i}raw];[pv{i}raw]format=yuv420p{motion_blur_filter}{transition_stop_pad_filter}[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
             ));
         } else {
             let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
             let anamorphic_filter = build_anamorphic_filter(clip);
             filter.push_str(&format!(
-                "[{i}:v]{lut_prefix}{anamorphic_filter}scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{},format=yuv420p{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{title_filter}{subtitle_filter}{speed_filter}{motion_blur_filter}{transition_stop_pad_filter}[pv{i}];",
+                "[{i}:v]{tonemap_prefix}{lut_prefix}{anamorphic_filter}scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{},format=yuv420p{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{title_filter}{subtitle_filter}{speed_filter}{motion_blur_filter}{transition_stop_pad_filter}[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
             ));
         }
@@ -713,6 +723,11 @@ pub fn export_project(
             project.frame_rate.numerator,
             project.frame_rate.denominator,
         );
+        let tonemap_prefix = if options.hdr_passthrough {
+            String::new()
+        } else {
+            build_tonemap_filter_prefix(&clip.source_path)
+        };
         let lut_prefix = build_lut_filter_prefix(clip);
         let crop_filter =
             build_crop_filter(clip, out_w, out_h, project.width, project.height, true);
@@ -789,7 +804,7 @@ pub fn export_project(
                 )
             };
             filter.push_str(&format!(
-                ";[{in_idx}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{crop_filter}{rotate_filter}{speed_filter}\
+                ";[{in_idx}:v]{tonemap_prefix}{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{crop_filter}{rotate_filter}{speed_filter}\
                  ,scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[ov{k}fg];\
                  color=c=black@0:size={out_w}x{out_h}:r={}/{}:d={clip_duration_s:.6}[ov{k}bg];\
                  [ov{k}bg][ov{k}fg]overlay=x='{overlay_x_expr}':y='{overlay_y_expr}':eval=frame\
@@ -812,7 +827,7 @@ pub fn export_project(
             let opacity = clip.opacity.clamp(0.0, 1.0);
             let anamorphic_filter = build_anamorphic_filter(clip);
             filter.push_str(&format!(
-                ";[{in_idx}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{crop_filter}{scale_pos_filter}{rotate_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
+                ";[{in_idx}:v]{tonemap_prefix}{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{crop_filter}{scale_pos_filter}{rotate_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
                 , project.frame_rate.numerator, project.frame_rate.denominator
             ));
         }
@@ -1604,9 +1619,19 @@ pub fn export_project(
                 cmd.arg("-c:v")
                     .arg("libx265")
                     .arg("-crf")
-                    .arg(options.crf.to_string())
-                    .arg("-pix_fmt")
-                    .arg("yuv420p");
+                    .arg(options.crf.to_string());
+                if options.hdr_passthrough {
+                    cmd.arg("-pix_fmt").arg("yuv420p10le");
+                    cmd.arg("-x265-params").arg(
+                        "hdr-opt=1:repeat-headers=1:colorprim=bt2020:\
+                         transfer=smpte2084:colormatrix=bt2020nc",
+                    );
+                    cmd.arg("-color_primaries").arg("bt2020");
+                    cmd.arg("-color_trc").arg("smpte2084");
+                    cmd.arg("-colorspace").arg("bt2020nc");
+                } else {
+                    cmd.arg("-pix_fmt").arg("yuv420p");
+                }
             }
             VideoCodec::Vp9 => {
                 cmd.arg("-c:v")
@@ -1614,9 +1639,15 @@ pub fn export_project(
                     .arg("-crf")
                     .arg(options.crf.to_string())
                     .arg("-b:v")
-                    .arg("0")
-                    .arg("-pix_fmt")
-                    .arg("yuv420p");
+                    .arg("0");
+                if options.hdr_passthrough {
+                    cmd.arg("-pix_fmt").arg("yuv420p10le");
+                    cmd.arg("-color_primaries").arg("bt2020");
+                    cmd.arg("-color_trc").arg("smpte2084");
+                    cmd.arg("-colorspace").arg("bt2020nc");
+                } else {
+                    cmd.arg("-pix_fmt").arg("yuv420p");
+                }
             }
             VideoCodec::ProRes => {
                 cmd.arg("-c:v").arg("prores_ks").arg("-profile:v").arg("3");
@@ -1627,9 +1658,15 @@ pub fn export_project(
                     .arg("-crf")
                     .arg(options.crf.to_string())
                     .arg("-b:v")
-                    .arg("0")
-                    .arg("-pix_fmt")
-                    .arg("yuv420p");
+                    .arg("0");
+                if options.hdr_passthrough {
+                    cmd.arg("-pix_fmt").arg("yuv420p10le");
+                    cmd.arg("-color_primaries").arg("bt2020");
+                    cmd.arg("-color_trc").arg("smpte2084");
+                    cmd.arg("-colorspace").arg("bt2020nc");
+                } else {
+                    cmd.arg("-pix_fmt").arg("yuv420p");
+                }
             }
         }
     }
@@ -3588,6 +3625,37 @@ fn build_frei0r_effects_filter(clip: &crate::model::clip::Clip) -> String {
 
 /// LUT filter chain for use at the start of a filter pipeline (trailing comma, no leading).
 /// Returns `lut3d={path1},lut3d={path2},` or empty string.
+/// Build an FFmpeg tonemap filter prefix for HDR→SDR conversion.
+/// Uses ffprobe to detect HDR transfer characteristics at export time.
+/// Returns an empty string for SDR sources.
+fn build_tonemap_filter_prefix(source_path: &str) -> String {
+    if source_path.is_empty() {
+        return String::new();
+    }
+    // Quick ffprobe check for HDR transfer characteristics.
+    let output = std::process::Command::new("ffprobe")
+        .args([
+            "-v", "quiet",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=color_transfer",
+            "-of", "csv=p=0",
+            source_path,
+        ])
+        .output()
+        .ok();
+    let transfer = output
+        .as_ref()
+        .and_then(|o| String::from_utf8(o.stdout.clone()).ok())
+        .unwrap_or_default();
+    let transfer = transfer.trim().to_lowercase();
+    if transfer.contains("smpte2084") || transfer.contains("arib-std-b67") {
+        // zscale tonemap: linearize → tonemap (hable) → convert to BT.709
+        "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p,".to_string()
+    } else {
+        String::new()
+    }
+}
+
 fn build_lut_filter_prefix(clip: &crate::model::clip::Clip) -> String {
     let mut result = String::new();
     for path in &clip.lut_paths {
@@ -5779,6 +5847,7 @@ pub fn analyze_project_loudness(project: &Project) -> Result<LoudnessReport> {
         audio_bitrate_kbps: 320,
         gif_fps: None,
         audio_channel_layout: AudioChannelLayout::Stereo,
+        hdr_passthrough: false,
     };
 
     let (tx, _rx) = mpsc::channel();

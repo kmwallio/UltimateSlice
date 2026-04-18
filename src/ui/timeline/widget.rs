@@ -124,6 +124,38 @@ fn build_track_color_swatch_button(color: crate::model::track::TrackColorLabel) 
     btn
 }
 
+fn active_drag_clip_ids(drag_op: &DragOp) -> HashSet<String> {
+    match drag_op {
+        DragOp::MoveClip { move_clip_ids, .. } => move_clip_ids.iter().cloned().collect(),
+        DragOp::TrimIn { clip_id, .. } | DragOp::TrimOut { clip_id, .. } => {
+            std::iter::once(clip_id.clone()).collect()
+        }
+        _ => HashSet::new(),
+    }
+}
+
+fn drag_preview_range_label(start_ns: u64, end_ns: u64) -> String {
+    let start = format_timecode(start_ns as f64 / NS_PER_SECOND, 0.1);
+    let end = format_timecode(end_ns as f64 / NS_PER_SECOND, 0.1);
+    format!("In {start}  Out {end}")
+}
+
+fn drag_preview_badge_text(drag_op: &DragOp, clip: &crate::model::clip::Clip) -> Option<String> {
+    match drag_op {
+        DragOp::MoveClip { clip_id, .. }
+        | DragOp::TrimIn { clip_id, .. }
+        | DragOp::TrimOut { clip_id, .. }
+            if clip.id == *clip_id =>
+        {
+            Some(drag_preview_range_label(
+                clip.timeline_start,
+                clip.timeline_end(),
+            ))
+        }
+        _ => None,
+    }
+}
+
 /// Returns logical track indices in top-to-bottom visual order.
 ///
 /// The professional NLE convention: video tracks stack upward (higher-numbered
@@ -583,6 +615,8 @@ pub struct TimelineState {
     pub on_tool_changed: Option<Rc<dyn Fn(ActiveTool)>>,
     /// Set of source paths currently resolved as missing/offline.
     pub missing_media_paths: HashSet<String>,
+    /// Set of source paths whose media is detected as HDR (PQ/HLG).
+    pub hdr_media_paths: HashSet<String>,
     /// Callback fired when user presses the match-color shortcut (Ctrl+Alt+M).
     pub on_match_color: Option<Rc<dyn Fn()>>,
     /// Callback fired when user presses the match-frame shortcut (F).
@@ -658,6 +692,7 @@ impl TimelineState {
             music_generation_overlays: Vec::new(),
             on_tool_changed: None,
             missing_media_paths: HashSet::new(),
+            hdr_media_paths: HashSet::new(),
             on_match_color: None,
             on_match_frame: None,
             on_create_multicam: None,
@@ -8879,6 +8914,20 @@ fn draw_timeline(
         draw_timeline_empty_state(cr, w, h, track_content_top);
     }
 
+    draw_drag_preview_overlays(
+        cr,
+        w,
+        h,
+        track_content_top,
+        effective_scroll,
+        editing_tracks,
+        st,
+        &grouped_peer_highlight_ids,
+        &linked_peer_highlight_ids,
+        cache,
+        wcache,
+    );
+
     // Playhead (clipped to content area so it doesn't overdraw track labels)
     // When inside a compound, translate the main-timeline playhead to the
     // compound's internal time so it aligns with the internal clips.
@@ -9332,6 +9381,7 @@ fn draw_track_row(
     cache: &mut crate::media::thumb_cache::ThumbnailCache,
     wcache: &mut crate::media::waveform_cache::WaveformCache,
 ) {
+    let active_drag_ids = active_drag_clip_ids(&st.drag_op);
     let (r, g, b) = match track.kind {
         TrackKind::Video => (0.16, 0.16, 0.18),
         TrackKind::Audio => (0.14, 0.16, 0.18),
@@ -9347,6 +9397,9 @@ fn draw_track_row(
 
     // Draw clips first (they may overlap into label column before clipping)
     for clip in &track.clips {
+        if active_drag_ids.contains(&clip.id) {
+            continue;
+        }
         draw_clip(
             cr,
             width,
@@ -9369,6 +9422,9 @@ fn draw_track_row(
 
     // Draw transition markers (clip -> next clip) after clip bodies.
     for clip in &track.clips {
+        if active_drag_ids.contains(&clip.id) {
+            continue;
+        }
         if clip.outgoing_transition.is_active() {
             let ex = st.ns_to_x(clip.timeline_end());
             let marker_w = 10.0;
@@ -10278,6 +10334,7 @@ fn draw_clip(
         let has_speed_badge =
             (clip.speed - 1.0).abs() > 0.01 || clip.reverse || !clip.speed_keyframes.is_empty();
         let has_lut_badge = !clip.lut_paths.is_empty();
+        let has_hdr_badge = st.hdr_media_paths.contains(&clip.source_path);
         let has_missing_badge = clip.kind != crate::model::clip::ClipKind::Title
             && clip.kind != crate::model::clip::ClipKind::Adjustment
             && clip.kind != crate::model::clip::ClipKind::Compound
@@ -10354,6 +10411,23 @@ fn draw_clip(
                 rounded_rect(cr, bx - 2.0, by - 11.0, ext.width() + 4.0, 14.0, 2.0);
                 cr.fill().ok();
                 cr.set_source_rgb(0.4, 0.8, 1.0);
+                let _ = cr.move_to(bx, by);
+                let _ = cr.show_text(badge);
+                badge_right = bx - 8.0;
+            }
+        }
+
+        // HDR badge: small "HDR" indicator when source is detected as HDR
+        if has_hdr_badge && cw > 60.0 {
+            let badge = "HDR";
+            cr.set_font_size(10.0);
+            if let Ok(ext) = cr.text_extents(badge) {
+                let bx = badge_right - ext.width();
+                let by = cy + 14.0;
+                cr.set_source_rgba(0.0, 0.0, 0.0, 0.55);
+                rounded_rect(cr, bx - 2.0, by - 11.0, ext.width() + 4.0, 14.0, 2.0);
+                cr.fill().ok();
+                cr.set_source_rgb(1.0, 0.6, 0.1); // Orange for HDR
                 let _ = cr.move_to(bx, by);
                 let _ = cr.show_text(badge);
                 badge_right = bx - 8.0;
@@ -10473,6 +10547,135 @@ fn collect_keyframe_property_labels_at_local_time(
                 .then_some(*label)
         })
         .collect()
+}
+
+fn draw_clip_with_alpha(
+    cr: &gtk::cairo::Context,
+    view_width: f64,
+    track_y: f64,
+    track_height: f64,
+    clip: &crate::model::clip::Clip,
+    track: &crate::model::track::Track,
+    st: &TimelineState,
+    grouped_peer_highlight_ids: &HashSet<String>,
+    linked_peer_highlight_ids: &HashSet<String>,
+    cache: &mut crate::media::thumb_cache::ThumbnailCache,
+    wcache: &mut crate::media::waveform_cache::WaveformCache,
+    alpha: f64,
+) {
+    cr.push_group();
+    draw_clip(
+        cr,
+        view_width,
+        track_y,
+        track_height,
+        clip,
+        track,
+        st,
+        grouped_peer_highlight_ids,
+        linked_peer_highlight_ids,
+        cache,
+        wcache,
+    );
+    cr.pop_group_to_source().ok();
+    cr.paint_with_alpha(alpha).ok();
+}
+
+fn draw_drag_preview_badge(
+    cr: &gtk::cairo::Context,
+    view_width: f64,
+    track_y: f64,
+    clip: &crate::model::clip::Clip,
+    st: &TimelineState,
+    label: &str,
+) {
+    let left = st.ns_to_x(clip.timeline_start).max(TRACK_LABEL_WIDTH);
+    let right = st.ns_to_x(clip.timeline_end()).min(view_width - 4.0);
+    if right <= left {
+        return;
+    }
+
+    cr.save().ok();
+    cr.select_font_face(
+        "sans",
+        gtk::cairo::FontSlant::Normal,
+        gtk::cairo::FontWeight::Bold,
+    );
+    cr.set_font_size(10.0);
+    let te = cr
+        .text_extents(label)
+        .unwrap_or_else(|_| cr.text_extents("X").unwrap());
+    let pad_x = 6.0;
+    let pad_y = 4.0;
+    let bw = te.width() + pad_x * 2.0;
+    let bh = te.height() + pad_y * 2.0;
+    let anchor_x = (left + right) * 0.5;
+    let min_x = TRACK_LABEL_WIDTH + 4.0;
+    let max_x = (view_width - bw - 4.0).max(min_x);
+    let bx = (anchor_x - bw * 0.5).clamp(min_x, max_x);
+    let by = (track_y - bh - 6.0).max(4.0);
+    rounded_rect(cr, bx, by, bw, bh, 4.0);
+    cr.set_source_rgba(0.08, 0.09, 0.12, 0.92);
+    cr.fill_preserve().ok();
+    cr.set_source_rgba(0.58, 0.76, 1.0, 0.95);
+    cr.set_line_width(1.0);
+    cr.stroke().ok();
+    cr.set_source_rgba(0.98, 0.98, 1.0, 0.98);
+    let tx = bx + pad_x - te.x_bearing();
+    let ty = by + pad_y + te.height();
+    cr.move_to(tx, ty);
+    let _ = cr.show_text(label);
+    cr.restore().ok();
+}
+
+fn draw_drag_preview_overlays(
+    cr: &gtk::cairo::Context,
+    view_width: f64,
+    view_height: f64,
+    track_content_top: f64,
+    effective_scroll: f64,
+    editing_tracks: &[crate::model::track::Track],
+    st: &TimelineState,
+    grouped_peer_highlight_ids: &HashSet<String>,
+    linked_peer_highlight_ids: &HashSet<String>,
+    cache: &mut crate::media::thumb_cache::ThumbnailCache,
+    wcache: &mut crate::media::waveform_cache::WaveformCache,
+) {
+    let active_drag_ids = active_drag_clip_ids(&st.drag_op);
+    if active_drag_ids.is_empty() {
+        return;
+    }
+
+    for (track_idx, track) in editing_tracks.iter().enumerate() {
+        let track_y = track_row_top_in_tracks(editing_tracks, track_idx) + track_content_top
+            - effective_scroll;
+        let track_height = track_row_height(track);
+        if track_y + track_height <= track_content_top || track_y >= view_height {
+            continue;
+        }
+        for clip in &track.clips {
+            if !active_drag_ids.contains(&clip.id) {
+                continue;
+            }
+            draw_clip_with_alpha(
+                cr,
+                view_width,
+                track_y,
+                track_height,
+                clip,
+                track,
+                st,
+                grouped_peer_highlight_ids,
+                linked_peer_highlight_ids,
+                cache,
+                wcache,
+                0.58,
+            );
+            if let Some(label) = drag_preview_badge_text(&st.drag_op, clip) {
+                draw_drag_preview_badge(cr, view_width, track_y, clip, st, &label);
+            }
+        }
+    }
 }
 
 fn collect_keyframe_local_times_in_range(
@@ -11410,6 +11613,41 @@ mod tests {
             Some(1)
         );
         assert_eq!(track_resize_hit_track_index_in_tracks(&tracks, 24.0), None);
+    }
+
+    #[test]
+    fn active_drag_clip_ids_covers_move_and_trim_modes() {
+        let move_ids = active_drag_clip_ids(&DragOp::MoveClip {
+            clip_id: "primary".to_string(),
+            original_track_id: "track-a".to_string(),
+            current_track_id: "track-a".to_string(),
+            original_start: 0,
+            clip_offset_ns: 0,
+            original_track_clips: Vec::new(),
+            move_clip_ids: vec!["primary".to_string(), "linked".to_string()],
+            original_member_starts: vec![("primary".to_string(), 0), ("linked".to_string(), 10)],
+            original_tracks: Vec::new(),
+        });
+        assert!(move_ids.contains("primary"));
+        assert!(move_ids.contains("linked"));
+
+        let trim_ids = active_drag_clip_ids(&DragOp::TrimIn {
+            clip_id: "trimmed".to_string(),
+            track_id: "track-a".to_string(),
+            original_source_in: 0,
+            original_timeline_start: 0,
+            original_track_clips: Vec::new(),
+        });
+        assert_eq!(trim_ids.len(), 1);
+        assert!(trim_ids.contains("trimmed"));
+    }
+
+    #[test]
+    fn drag_preview_range_label_formats_timeline_in_and_out() {
+        assert_eq!(
+            drag_preview_range_label(1_200_000_000, 3_400_000_000),
+            "In 0:01.2  Out 0:03.4"
+        );
     }
 
     fn timeline_state_with_audio_clips(

@@ -775,6 +775,7 @@ fn collect_export_options(
         audio_bitrate_kbps: ab_entry.text().parse::<u32>().unwrap_or(192),
         gif_fps,
         audio_channel_layout: audio_channel_layout_from_selected(cl_combo.selected()),
+        hdr_passthrough: false,
     }
 }
 

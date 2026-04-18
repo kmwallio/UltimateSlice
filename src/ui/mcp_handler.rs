@@ -3974,6 +3974,7 @@ pub(crate) fn handle_mcp_command(
                     let (tx, _rx) = std::sync::mpsc::channel();
                     let options = crate::media::export::ExportOptions {
                         audio_channel_layout: layout,
+                        hdr_passthrough: false,
                         ..crate::media::export::ExportOptions::default()
                     };
                     let result = crate::media::export::export_project(
@@ -4116,6 +4117,7 @@ pub(crate) fn handle_mcp_command(
                 audio_bitrate_kbps,
                 gif_fps: None,
                 audio_channel_layout: layout,
+                hdr_passthrough: false,
             };
             let mut state = crate::ui_state::load_export_presets_state();
             match state.upsert_preset(crate::ui_state::ExportPreset::from_export_options(
@@ -6411,6 +6413,7 @@ pub(crate) fn handle_mcp_command(
                         audio_bitrate_kbps: 192,
                         gif_fps: None,
                         audio_channel_layout: crate::ui_state::ExportAudioChannelLayout::Stereo,
+                        hdr_passthrough: false,
                     })
             };
             let job = crate::ui_state::ExportQueueJob::new(&output_path, preset);

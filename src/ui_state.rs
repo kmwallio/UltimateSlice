@@ -842,6 +842,9 @@ pub struct ExportPreset {
     /// without this field continues to load unchanged.
     #[serde(default)]
     pub audio_channel_layout: ExportAudioChannelLayout,
+    /// Preserve HDR metadata and skip tone mapping on export.
+    #[serde(default)]
+    pub hdr_passthrough: bool,
 }
 
 impl ExportPreset {
@@ -859,6 +862,7 @@ impl ExportPreset {
             audio_channel_layout: ExportAudioChannelLayout::from_layout(
                 &options.audio_channel_layout,
             ),
+            hdr_passthrough: options.hdr_passthrough,
         }
     }
 
@@ -873,6 +877,7 @@ impl ExportPreset {
             audio_bitrate_kbps: self.audio_bitrate_kbps,
             gif_fps: self.gif_fps,
             audio_channel_layout: self.audio_channel_layout.to_layout(),
+            hdr_passthrough: self.hdr_passthrough,
         }
     }
 }
@@ -972,6 +977,7 @@ fn default_export_presets() -> Vec<ExportPreset> {
             audio_bitrate_kbps: 192,
             gif_fps: None,
             audio_channel_layout: ExportAudioChannelLayout::Stereo,
+            hdr_passthrough: false,
         },
         ExportPreset {
             name: "High Quality H.264 4K".to_string(),
@@ -984,6 +990,7 @@ fn default_export_presets() -> Vec<ExportPreset> {
             audio_bitrate_kbps: 320,
             gif_fps: None,
             audio_channel_layout: ExportAudioChannelLayout::Stereo,
+            hdr_passthrough: false,
         },
         ExportPreset {
             name: "Archive ProRes 4K".to_string(),
@@ -996,6 +1003,7 @@ fn default_export_presets() -> Vec<ExportPreset> {
             audio_bitrate_kbps: 320,
             gif_fps: None,
             audio_channel_layout: ExportAudioChannelLayout::Stereo,
+            hdr_passthrough: false,
         },
         ExportPreset {
             name: "WebM VP9 1080p".to_string(),
@@ -1008,6 +1016,7 @@ fn default_export_presets() -> Vec<ExportPreset> {
             audio_bitrate_kbps: 160,
             gif_fps: None,
             audio_channel_layout: ExportAudioChannelLayout::Stereo,
+            hdr_passthrough: false,
         },
         ExportPreset {
             name: "Animated GIF".to_string(),
@@ -1020,6 +1029,7 @@ fn default_export_presets() -> Vec<ExportPreset> {
             audio_bitrate_kbps: 128,
             gif_fps: Some(15),
             audio_channel_layout: ExportAudioChannelLayout::Stereo,
+            hdr_passthrough: false,
         },
         // Cinema-style 5.1 surround at 1080p / 448 kbps AAC. Auto-routes
         // dialogue to Front Center, music to Front L/R, and effects to
@@ -1035,6 +1045,7 @@ fn default_export_presets() -> Vec<ExportPreset> {
             audio_bitrate_kbps: 448,
             gif_fps: None,
             audio_channel_layout: ExportAudioChannelLayout::Surround51,
+            hdr_passthrough: false,
         },
     ]
 }
@@ -1231,6 +1242,10 @@ pub struct PreferencesState {
     /// Tracks whether the first-run onboarding tour has already been shown or dismissed.
     #[serde(default)]
     pub seen_onboarding_v1: bool,
+    /// When true, skip HDR→SDR tone mapping in the Program Monitor preview
+    /// so HDR sources display at native dynamic range (requires HDR display).
+    #[serde(default)]
+    pub hdr_preview_passthrough: bool,
 }
 
 fn default_ai_backend() -> String {
@@ -1278,6 +1293,7 @@ impl Default for PreferencesState {
             ai_backend: default_ai_backend(),
             show_timeline_minimap: false,
             seen_onboarding_v1: false,
+            hdr_preview_passthrough: false,
         }
     }
 }
@@ -1537,6 +1553,7 @@ mod tests {
             audio_bitrate_kbps: 256,
             gif_fps: None,
             audio_channel_layout: AudioChannelLayout::Surround51,
+            hdr_passthrough: false,
         };
         let preset = ExportPreset::from_export_options("High Quality", &options);
         assert_eq!(preset.name, "High Quality");
@@ -1584,6 +1601,7 @@ mod tests {
     fn export_preset_round_trip_preserves_surround_5_1() {
         let options = ExportOptions {
             audio_channel_layout: AudioChannelLayout::Surround51,
+            hdr_passthrough: false,
             ..ExportOptions::default()
         };
         let preset = ExportPreset::from_export_options("Cinema", &options);

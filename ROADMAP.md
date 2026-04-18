@@ -467,11 +467,12 @@ Tracking docs:
   - [ ] Working colorspace preference (scene-linear, ACEScg, Rec.709 — controls internal processing space)
 - [ ] HDR workflow via libplacebo
   - [ ] libplacebo Vulkan integration for GPU-accelerated video rendering in Program Monitor
-  - [ ] HDR tone mapping (PQ/HLG → SDR) using libplacebo algorithms (hable, bt2446a, st2094-40) for accurate SDR preview of HDR sources
+  - [x] HDR source detection and timeline badge (PQ/HLG colorimetry probed on import, orange "HDR" badge on timeline clips, persisted via library metadata)
+  - [x] HDR tone mapping (PQ/HLG → SDR) — GStreamer `videoconvert` with `primaries-mode=merge-only` per-slot for preview; FFmpeg `zscale`+`tonemap=hable` for export
   - [ ] Inverse tone mapping (SDR → HDR) for HDR display output and export
   - [ ] High-quality upscaling/downscaling (libplacebo polar/orthogonal scalers as alternative to GStreamer `videoscale`)
-  - [ ] HDR export metadata (PQ/HLG transfer characteristics, mastering display color volume, MaxCLL/MaxFALL)
-  - [ ] HDR passthrough mode for native HDR display output
+  - [x] HDR export metadata — `hdr_passthrough` option in ExportOptions/ExportPreset preserves PQ/HLG transfer characteristics with 10-bit output and BT.2020 color tags (H.265 x265-params, VP9, AV1)
+  - [x] HDR passthrough mode — `hdr_preview_passthrough` preference skips tone mapping in Program Monitor for native HDR display output; GPU `glcolorconvert` tried before CPU fallback
 - [x] Frei0r video effects plugin support
   - [x] Load and enumerate installed Frei0r plugins via GStreamer `frei0r` element (auto-discover from standard paths)
   - [x] Effects browser UI listing available Frei0r filters with categories and search

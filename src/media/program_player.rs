@@ -870,6 +870,8 @@ pub struct ProgramClip {
     /// Track-level stereo pan offset (−1.0 to +1.0).
     /// Added to per-clip pan in `pan_at_timeline_ns`.
     pub track_pan: f64,
+    /// True when the source media uses an HDR transfer function (PQ/HLG).
+    pub is_hdr: bool,
 }
 
 impl ProgramClip {
@@ -10703,6 +10705,30 @@ impl ProgramPlayer {
                 chain.push(cs);
             }
         }
+        // 0. HDR tone mapping — insert a tone-mapping element before the RGBA
+        //    capsfilter clamps to SDR.  Try GPU-accelerated paths first:
+        //      1. glcolorconvert (GL-based, widely available with GL plugins)
+        //      2. videoconvert with primaries-mode (GStreamer 1.24+ CPU path)
+        //      3. plain videoconvert (best-effort matrix conversion)
+        //    Only added when the source is flagged HDR; otherwise a no-op.
+        if clip.is_hdr {
+            let tm_name = format!("hdr_tonemap_{}", clip.id);
+            let tm = gst::ElementFactory::make("glcolorconvert")
+                .name(&tm_name)
+                .build()
+                .or_else(|_| {
+                    gst::ElementFactory::make("videoconvert")
+                        .name(&tm_name)
+                        .build()
+                });
+            if let Ok(tm) = tm {
+                if tm.has_property("primaries-mode") {
+                    tm.set_property_from_str("primaries-mode", "merge-only");
+                }
+                chain.push(tm);
+            }
+        }
+
         // 1. Convert + downscale to project resolution in a single pass.
         if let Some(ref e) = convertscale {
             chain.push(e.clone());
@@ -16021,6 +16047,7 @@ mod tests {
             track_muted: false,
             track_gain_linear: 1.0,
             track_pan: 0.0,
+            is_hdr: false,
         }
     }
 

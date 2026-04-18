@@ -2,6 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::mpsc;
 
+use gstreamer_pbutils::prelude::DiscovererStreamInfoExt;
+
 /// Shared media metadata resolved from a probe pass.
 #[derive(Debug, Clone, Default)]
 pub struct MediaProbeMetadata {
@@ -17,6 +19,9 @@ pub struct MediaProbeMetadata {
     pub frame_rate_den: Option<u32>,
     pub codec_summary: Option<String>,
     pub file_size_bytes: Option<u64>,
+    /// HDR colorimetry label (e.g. "bt2100-pq", "bt2100-hlg") when the source
+    /// uses a high dynamic range transfer function.
+    pub hdr_colorimetry: Option<String>,
 }
 
 /// Result of a background media probe.
@@ -36,6 +41,7 @@ pub struct ProbeResult {
     pub frame_rate_den: Option<u32>,
     pub codec_summary: Option<String>,
     pub file_size_bytes: Option<u64>,
+    pub hdr_colorimetry: Option<String>,
 }
 
 /// Asynchronous media probe cache.
@@ -79,6 +85,7 @@ impl MediaProbeCache {
                         frame_rate_den: metadata.frame_rate_den,
                         codec_summary: metadata.codec_summary,
                         file_size_bytes: metadata.file_size_bytes,
+                        hdr_colorimetry: metadata.hdr_colorimetry,
                     })
                     .is_err()
                 {
@@ -199,6 +206,21 @@ pub fn probe_media_metadata(path: &str) -> MediaProbeMetadata {
         })
         .unwrap_or((24, 1));
 
+    // Detect HDR transfer function from video stream caps.
+    let hdr_colorimetry = video_stream.and_then(|vs| {
+        let caps = vs.caps()?;
+        let s = caps.structure(0)?;
+        let colorimetry = s.get::<&str>("colorimetry").ok()?;
+        let lower = colorimetry.to_lowercase();
+        if lower.contains("smpte2084") || lower.contains("14:") || lower.contains(":14:") {
+            Some("bt2100-pq".to_string())
+        } else if lower.contains("arib-std-b67") || lower.contains("15:") || lower.contains(":15:") {
+            Some("bt2100-hlg".to_string())
+        } else {
+            None
+        }
+    });
+
     // Prefer the embedded timecode track (required by FCP) over creation
     // date/time which is only useful for multi-cam sync.
     let file_path = uri.strip_prefix("file://").unwrap_or(&uri);
@@ -217,6 +239,7 @@ pub fn probe_media_metadata(path: &str) -> MediaProbeMetadata {
         frame_rate_den: video_stream.map(|_| frame_rate_den),
         codec_summary: ffprobe_codec_summary(path),
         file_size_bytes,
+        hdr_colorimetry,
         ..MediaProbeMetadata::default()
     }
 }

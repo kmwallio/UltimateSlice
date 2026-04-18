@@ -1527,6 +1527,7 @@ pub fn show_preferences_dialog(
                     }
                 },
                 seen_onboarding_v1: current.seen_onboarding_v1,
+                hdr_preview_passthrough: current.hdr_preview_passthrough,
             };
             new_state.set_proxy_mode(ProxyMode::from_str(
                 proxy_mode.active_id().as_deref().unwrap_or("off"),

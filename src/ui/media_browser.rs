@@ -1418,6 +1418,7 @@ pub fn build_media_browser(
                             item.frame_rate_den = result.frame_rate_den;
                             item.codec_summary = result.codec_summary.clone();
                             item.file_size_bytes = result.file_size_bytes;
+                            item.hdr_colorimetry = result.hdr_colorimetry.clone();
                             if item.source_timecode_base_ns.is_none() {
                                 item.source_timecode_base_ns = result.source_timecode_base_ns;
                             }

@@ -2111,6 +2111,11 @@ pub(crate) fn refresh_media_availability_state(
         item.is_missing = missing_paths.contains(&item.source_path);
     }
     timeline_state.missing_media_paths = missing_paths.clone();
+    timeline_state.hdr_media_paths = library
+        .iter()
+        .filter(|item| item.hdr_colorimetry.is_some())
+        .map(|item| item.source_path.clone())
+        .collect();
     missing_paths
 }
 
@@ -5600,6 +5605,7 @@ fn clip_to_program_clips(
     track_muted: bool,
     track_gain_linear: f64,
     track_pan: f64,
+    hdr_paths: &std::collections::HashSet<String>,
 ) -> Vec<ProgramClip> {
     use crate::model::clip::ClipKind;
 
@@ -5695,6 +5701,7 @@ fn clip_to_program_clips(
                     track_muted,
                     track_gain_linear,
                     track_pan,
+                    hdr_paths,
                 ));
             }
             return result;
@@ -5797,6 +5804,7 @@ fn clip_to_program_clips(
                     track_muted,
                     track_gain_linear,
                     track_pan,
+                    hdr_paths,
                 );
                 // Video segments have no embedded audio (audio comes from the mix below)
                 for pc in &mut seg_results {
@@ -5843,6 +5851,7 @@ fn clip_to_program_clips(
                     track_muted,
                     track_gain_linear,
                     track_pan,
+                    hdr_paths,
                 );
                 result.extend(audio_results);
             }
@@ -6012,6 +6021,7 @@ fn clip_to_program_clips(
         track_muted,
         track_gain_linear,
         track_pan,
+        is_hdr: hdr_paths.contains(&c.source_path),
     }]
 }
 
@@ -10917,6 +10927,7 @@ pub fn build_window(
                         item.frame_rate_den = metadata.frame_rate_den;
                         item.codec_summary = metadata.codec_summary.clone();
                         item.file_size_bytes = metadata.file_size_bytes;
+                        item.hdr_colorimetry = metadata.hdr_colorimetry.clone();
                         library.borrow_mut().items.push(item);
                     }
 
@@ -15726,6 +15737,7 @@ pub fn build_window(
                 let proj_fps_den = proj.frame_rate.denominator;
                 let has_solo = proj.has_solo_tracks();
                 let has_solo_buses = proj.has_solo_buses();
+                let hdr_paths = timeline_state.borrow().hdr_media_paths.clone();
                 let mut clips: Vec<ProgramClip> = editing_tracks
                     .iter()
                     .enumerate()
@@ -15743,6 +15755,7 @@ pub fn build_window(
                         // Compose bus gain into track gain
                         let gain_linear = t.gain_linear() * proj.bus_gain_linear(&t.audio_role);
                         let pan = t.pan;
+                        let hdr_ref = hdr_paths.clone();
                         t.clips.iter().flat_map(move |c| {
                             clip_to_program_clips(
                                 c,
@@ -15758,6 +15771,7 @@ pub fn build_window(
                                 muted,
                                 gain_linear,
                                 pan,
+                                &hdr_ref,
                             )
                         })
                     })

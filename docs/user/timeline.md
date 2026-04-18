@@ -55,6 +55,7 @@ The default tool. Use it to:
 - **Move** a clip by dragging its body (horizontally within a track, or vertically to another track of the same kind).
 - **Trim** the In-point by dragging the left edge of a selected clip.
 - **Trim** the Out-point by dragging the right edge of a selected clip.
+- **Drag preview ghosting** — while moving or trimming, the active clip is shown as a translucent ghost at the current result, and the primary dragged clip gets a floating **In / Out** timecode badge above it.
 
 Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while moving or trimming.
 
@@ -310,6 +311,7 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC, SVG) can be placed on the t
 - Right-clicking a selected clip opens a context menu that only shows currently actionable clip operations (for example Link/Unlink when applicable), so link editing is available without extra disabled entries.
 - Linked clips show a **LINK** badge in the timeline so linked relationships stay visible even when nothing is selected.
 - Clips whose source files are unavailable show an **OFFLINE** badge in the timeline clip header.
+- Clips from HDR sources (PQ/HLG) show an orange **HDR** badge in the timeline clip header.
 - When a linked selection spans multiple clips, non-primary linked peers also get a cyan inset border so they stay visually distinct from the primary selected clip.
 
 ## Keyboard Shortcuts

@@ -366,6 +366,9 @@ pub struct MediaItem {
     pub frame_rate_den: Option<u32>,
     /// Human-friendly codec summary derived from probe metadata.
     pub codec_summary: Option<String>,
+    /// Detected HDR colorimetry label (e.g. "bt2100-pq", "bt2100-hlg") when
+    /// the source video uses a high dynamic range transfer function.
+    pub hdr_colorimetry: Option<String>,
     /// File size resolved from filesystem metadata.
     pub file_size_bytes: Option<u64>,
     /// Timeline-native clip kind when this item has no backing source file.
@@ -415,6 +418,7 @@ impl MediaItem {
             frame_rate_num: None,
             frame_rate_den: None,
             codec_summary: None,
+            hdr_colorimetry: None,
             file_size_bytes: None,
             clip_kind: None,
             title_text: None,
@@ -1233,6 +1237,8 @@ struct SavedLibraryItem {
     #[serde(default)]
     pub codec_summary: Option<String>,
     #[serde(default)]
+    pub hdr_colorimetry: Option<String>,
+    #[serde(default)]
     pub file_size_bytes: Option<u64>,
 }
 
@@ -1252,6 +1258,7 @@ impl SavedLibraryItem {
             frame_rate_num: item.frame_rate_num,
             frame_rate_den: item.frame_rate_den,
             codec_summary: item.codec_summary.clone(),
+            hdr_colorimetry: item.hdr_colorimetry.clone(),
             file_size_bytes: item.file_size_bytes,
         })
     }
@@ -1273,6 +1280,7 @@ impl SavedLibraryItem {
         item.frame_rate_num = self.frame_rate_num;
         item.frame_rate_den = self.frame_rate_den;
         item.codec_summary = self.codec_summary.clone();
+        item.hdr_colorimetry = self.hdr_colorimetry.clone();
         item.file_size_bytes = self.file_size_bytes;
         item.is_missing = source_path_exists(&item.source_path);
         item.is_missing = !item.is_missing;
@@ -1293,6 +1301,7 @@ impl SavedLibraryItem {
         item.frame_rate_num = self.frame_rate_num;
         item.frame_rate_den = self.frame_rate_den;
         item.codec_summary = self.codec_summary;
+        item.hdr_colorimetry = self.hdr_colorimetry;
         item.file_size_bytes = self.file_size_bytes;
         item
     }
@@ -1539,6 +1548,7 @@ mod tests {
             frame_rate_num: None,
             frame_rate_den: None,
             codec_summary: None,
+            hdr_colorimetry: None,
             file_size_bytes: None,
             clip_kind: None,
             title_text: None,
