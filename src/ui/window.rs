@@ -1570,13 +1570,12 @@ fn seek_playhead_and_notify(
     timeline_panel_cell: &Rc<RefCell<Option<gtk::Widget>>>,
     timeline_pos_ns: u64,
 ) {
-    let seek_cb = {
+    let (visual_pos_ns, seek_cb) = {
         let mut st = timeline_state.borrow_mut();
-        st.playhead_ns = timeline_pos_ns;
-        st.on_seek.clone()
+        (st.set_playhead_visual(timeline_pos_ns), st.on_seek.clone())
     };
     if let Some(cb) = seek_cb {
-        cb(timeline_pos_ns);
+        cb(visual_pos_ns);
     }
     if let Some(ref w) = *timeline_panel_cell.borrow() {
         w.queue_draw();
@@ -1779,7 +1778,7 @@ fn present_go_to_timecode_dialog(
     entry.set_activates_default(true);
     {
         let fr = project.borrow().frame_rate.clone();
-        let current = timeline_state.borrow().playhead_ns;
+        let current = timeline_state.borrow().editing_playhead_ns();
         entry.set_text(&timecode::format_ns_as_timecode(current, &fr));
     }
     content.append(&entry);
@@ -3222,6 +3221,43 @@ mod tests {
 
         let suppressed = collect_embedded_audio_suppression_ids(&project.tracks);
         assert!(suppressed.contains("inner-video"));
+    }
+
+    #[test]
+    fn seek_playhead_and_notify_keeps_compound_seeks_in_visual_time() {
+        let mut project = Project::new("Compound seek test");
+        project.tracks.clear();
+
+        let mut inner_track = crate::model::track::Track::new_video("Inner Video");
+        inner_track
+            .clips
+            .push(Clip::new("inner.mp4", 3_000_000_000, 0, ClipKind::Video));
+
+        let mut compound = Clip::new_compound(5_000_000_000, vec![inner_track]);
+        compound.id = "compound".to_string();
+
+        let mut root_track = crate::model::track::Track::new_video("Root Video");
+        root_track.clips.push(compound);
+        project.tracks.push(root_track);
+
+        let timeline_state = Rc::new(RefCell::new(TimelineState::new(Rc::new(RefCell::new(
+            project,
+        )))));
+        timeline_state.borrow_mut().compound_nav_stack = vec!["compound".to_string()];
+
+        let seen_seek = Rc::new(RefCell::new(None));
+        timeline_state.borrow_mut().on_seek = Some(Rc::new({
+            let seen_seek = seen_seek.clone();
+            move |ns| {
+                *seen_seek.borrow_mut() = Some(ns);
+            }
+        }));
+
+        let timeline_panel_cell = Rc::new(RefCell::new(None));
+        seek_playhead_and_notify(&timeline_state, &timeline_panel_cell, 2_000_000_000);
+
+        assert_eq!(timeline_state.borrow().playhead_ns, 7_000_000_000);
+        assert_eq!(*seen_seek.borrow(), Some(2_000_000_000));
     }
 
     fn audio_match_clip_info_with_regions(
@@ -7145,7 +7181,7 @@ pub fn build_window(
         },
         {
             let timeline_state = timeline_state.clone();
-            move || timeline_state.borrow().playhead_ns
+            move || timeline_state.borrow().editing_playhead_ns()
         },
         // on_seek_to: navigate the playhead from the inspector (keyframe navigation)
         {
@@ -7153,11 +7189,11 @@ pub fn build_window(
             let timeline_panel_cell = timeline_panel_cell.clone();
             let prog_player = prog_player.clone();
             move |ns: u64| {
-                {
+                let visual_ns = {
                     let mut st = timeline_state.borrow_mut();
-                    st.playhead_ns = ns;
-                }
-                prog_player.borrow_mut().seek(ns);
+                    st.set_playhead_visual(ns)
+                };
+                prog_player.borrow_mut().seek(visual_ns);
                 if let Some(ref w) = *timeline_panel_cell.borrow() {
                     w.queue_draw();
                 }
@@ -9421,7 +9457,7 @@ pub fn build_window(
                 let proj = project.borrow();
                 let (playhead_ns, missing_paths) = {
                     let st = timeline_state_for_sel.borrow();
-                    (st.playhead_ns, st.missing_media_paths.clone())
+                    (st.editing_playhead_ns(), st.missing_media_paths.clone())
                 };
                 inspector_view.update(&proj, clip_id.as_deref(), playhead_ns, Some(&missing_paths));
                 sync_tracking_controls();
@@ -10041,7 +10077,7 @@ pub fn build_window(
                 body.append(&track_label);
 
                 // Playhead position
-                let playhead_ns = timeline_state.borrow().playhead_ns;
+                let playhead_ns = timeline_state.borrow().editing_playhead_ns();
                 let pos_label = gtk4::Label::new(Some(&format!(
                     "Recording starts at: {:.2}s",
                     playhead_ns as f64 / 1e9
@@ -12286,7 +12322,7 @@ pub fn build_window(
                         return;
                     }
                     if inspector_view.animation_mode.get() {
-                        let playhead = timeline_state.borrow().playhead_ns;
+                        let playhead = timeline_state.borrow().editing_playhead_ns();
                         let clip_id = timeline_state.borrow().selected_clip_id.clone();
                         if let Some(clip_id) = clip_id {
                             let sc = inspector_view.scale_slider.value();
@@ -12441,7 +12477,7 @@ pub fn build_window(
                 let schedule_rebuild = schedule_drawing_commit_rebuild.clone();
                 move |stroke| {
                     let mut proj = project.borrow_mut();
-                    let playhead = timeline_state.borrow().playhead_ns;
+                    let playhead = timeline_state.borrow().editing_playhead_ns();
                     let selected_track_id = timeline_state.borrow().selected_track_id.clone();
 
                     let mut target_clip_id = None;
@@ -12508,7 +12544,7 @@ pub fn build_window(
                 let schedule_rebuild = schedule_drawing_commit_rebuild.clone();
                 move |target_idx: Option<usize>| {
                     let mut proj = project.borrow_mut();
-                    let playhead = timeline_state.borrow().playhead_ns;
+                    let playhead = timeline_state.borrow().editing_playhead_ns();
                     let selected_track_id = timeline_state.borrow().selected_track_id.clone();
                     let mut target_clip_id = None;
                     if let Some(ref tid) = selected_track_id {
@@ -15004,7 +15040,8 @@ pub fn build_window(
                             lib.items.as_mut_slice(),
                             &mut st,
                         );
-                        let (selected, playhead_ns) = (st.selected_clip_id.clone(), st.playhead_ns);
+                        let (selected, playhead_ns) =
+                            (st.selected_clip_id.clone(), st.editing_playhead_ns());
                         drop(st);
                         inspector_view.update(&proj, selected.as_deref(), playhead_ns, Some(&mp));
                         drop(proj);
@@ -15099,7 +15136,8 @@ pub fn build_window(
                         let mut lib = library.borrow_mut();
                         let mut st = timeline_state.borrow_mut();
                         let mp = refresh_media_availability_state(&proj, lib.items.as_mut_slice(), &mut st);
-                        let (selected, playhead_ns) = (st.selected_clip_id.clone(), st.playhead_ns);
+                        let (selected, playhead_ns) =
+                            (st.selected_clip_id.clone(), st.editing_playhead_ns());
                         drop(st);
                         inspector_view.update(&proj, selected.as_deref(), playhead_ns, Some(&mp));
                         drop(proj);
@@ -15691,7 +15729,7 @@ pub fn build_window(
             ) = {
                 let proj = project.borrow();
                 let selected = timeline_state.borrow().selected_clip_id.clone();
-                let playhead_ns = timeline_state.borrow().playhead_ns;
+                let playhead_ns = timeline_state.borrow().editing_playhead_ns();
                 if let Some(ref editor) = *keyframe_editor_cell.borrow() {
                     editor.queue_redraw();
                 }
@@ -15834,7 +15872,7 @@ pub fn build_window(
                 let proj = project.borrow();
                 let (selected, playhead_ns) = {
                     let st = timeline_state.borrow();
-                    (st.selected_clip_id.clone(), st.playhead_ns)
+                    (st.selected_clip_id.clone(), st.editing_playhead_ns())
                 };
                 inspector_view.update(
                     &proj,
@@ -16258,13 +16296,13 @@ pub fn build_window(
         let project = project.clone();
         let timeline_panel_cell = timeline_panel_cell.clone();
         Rc::new(move |ns: u64| {
-            {
+            let visual_ns = {
                 let mut st = timeline_state.borrow_mut();
-                st.playhead_ns = ns;
-            }
-            prog_player.borrow_mut().seek(ns);
+                st.set_playhead_visual(ns)
+            };
+            prog_player.borrow_mut().seek(visual_ns);
             let proj = project.borrow();
-            inspector_view.update_keyframe_indicator(&proj, ns);
+            inspector_view.update_keyframe_indicator(&proj, visual_ns);
             if let Some(ref w) = *timeline_panel_cell.borrow() {
                 w.queue_draw();
             }
@@ -19590,35 +19628,30 @@ pub fn build_window(
             }
             let (clip_id, playhead) = {
                 let st = timeline_state.borrow();
-                (st.selected_clip_id.clone(), st.playhead_ns)
+                (st.selected_clip_id.clone(), st.editing_playhead_ns())
             };
             let Some(clip_id) = clip_id else {
                 return glib::Propagation::Proceed;
             };
             let proj = project.borrow();
-            let target = proj
-                .tracks
-                .iter()
-                .flat_map(|t| t.clips.iter())
-                .find(|c| c.id == clip_id)
-                .and_then(|clip| {
-                    let local = clip.local_timeline_position_ns(playhead);
-                    let local_target = if key == Key::Left {
-                        clip.prev_keyframe_local_ns(local)
-                    } else {
-                        clip.next_keyframe_local_ns(local)
-                    };
-                    local_target.map(|lt| clip.timeline_start.saturating_add(lt))
-                });
+            let target = proj.clip_ref(&clip_id).and_then(|clip| {
+                let local = clip.local_timeline_position_ns(playhead);
+                let local_target = if key == Key::Left {
+                    clip.prev_keyframe_local_ns(local)
+                } else {
+                    clip.next_keyframe_local_ns(local)
+                };
+                local_target.map(|lt| clip.timeline_start.saturating_add(lt))
+            });
             drop(proj);
             if let Some(ns) = target {
-                {
+                let visual_ns = {
                     let mut st = timeline_state.borrow_mut();
-                    st.playhead_ns = ns;
-                }
-                prog_player.borrow_mut().seek(ns);
+                    st.set_playhead_visual(ns)
+                };
+                prog_player.borrow_mut().seek(visual_ns);
                 let proj = project.borrow();
-                inspector_view.update_keyframe_indicator(&proj, ns);
+                inspector_view.update_keyframe_indicator(&proj, visual_ns);
                 if let Some(ref w) = *timeline_panel_cell.borrow() {
                     w.queue_draw();
                 }

@@ -14916,6 +14916,23 @@ impl ProgramPlayer {
         }
     }
 
+    fn bounded_audio_multi_wait_timeout_ms(
+        base_ms: u64,
+        playing: bool,
+        prioritize_ui: bool,
+    ) -> u64 {
+        if playing {
+            // Compound entry commonly switches from clip-embedded audio to the
+            // separate audio-track mixer. Keep that handoff short enough that
+            // the GTK main thread doesn't feel frozen.
+            base_ms.min(180)
+        } else if prioritize_ui {
+            base_ms.min(120)
+        } else {
+            base_ms
+        }
+    }
+
     fn audio_level_element_name(audio_clip_idx: usize, track_index: usize) -> String {
         format!("audiolevel_clip{audio_clip_idx}_track{track_index}")
     }
@@ -14947,7 +14964,11 @@ impl ProgramPlayer {
         };
         let was_playing = self.state == PlayerState::Playing;
         let _ = pipeline.set_state(gst::State::Paused);
-        let audio_reseek_ms: u64 = if was_playing { 500 } else { 200 };
+        let audio_reseek_ms = Self::bounded_audio_multi_wait_timeout_ms(
+            self.effective_wait_timeout_ms(180),
+            was_playing,
+            self.should_prioritize_ui_responsiveness(),
+        );
         let _ = pipeline.state(Some(gst::ClockTime::from_mseconds(audio_reseek_ms)));
         // Reset the separate audio pipeline's segment/running-time before the
         // per-decoder reseeks. Without this flush, the audiomixer can keep the
@@ -15350,13 +15371,13 @@ impl ProgramPlayer {
         let _ = pipeline.set_state(gst::State::Paused);
         // Cap the blocking wait to avoid freezing the GTK main thread.
         // Audio decoders don't need GL context and preroll quickly; the
-        // old 2-second timeout caused multi-second freezes when combined
-        // with the video pipeline rebuild (especially with compound clips).
-        let audio_preroll_ms: u64 = if self.state == PlayerState::Playing {
-            1000
-        } else {
-            300
-        };
+        // old long timeout caused compound-entry handoffs to visibly stall
+        // when the audio-track mixer rebuilt alongside the video boundary.
+        let audio_preroll_ms = Self::bounded_audio_multi_wait_timeout_ms(
+            self.effective_wait_timeout_ms(220),
+            self.state == PlayerState::Playing,
+            self.should_prioritize_ui_responsiveness(),
+        );
         let _ = pipeline.state(Some(gst::ClockTime::from_mseconds(audio_preroll_ms)));
 
         for (decoder, branch) in &decoders {
@@ -15894,6 +15915,30 @@ mod tests {
             &[2, 3],
             true,
         ));
+    }
+
+    #[test]
+    fn audio_multi_wait_timeout_stays_tight_during_playback() {
+        assert_eq!(
+            ProgramPlayer::bounded_audio_multi_wait_timeout_ms(220, true, false),
+            180
+        );
+    }
+
+    #[test]
+    fn audio_multi_wait_timeout_stays_tight_for_responsive_paused_seeks() {
+        assert_eq!(
+            ProgramPlayer::bounded_audio_multi_wait_timeout_ms(220, false, true),
+            120
+        );
+    }
+
+    #[test]
+    fn audio_multi_wait_timeout_preserves_noninteractive_budget() {
+        assert_eq!(
+            ProgramPlayer::bounded_audio_multi_wait_timeout_ms(220, false, false),
+            220
+        );
     }
 
     #[test]

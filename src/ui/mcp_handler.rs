@@ -5349,8 +5349,11 @@ pub(crate) fn handle_mcp_command(
             timeline_pos_ns,
             reply,
         } => {
-            timeline_state.borrow_mut().playhead_ns = timeline_pos_ns;
-            let needs_async = prog_player.borrow_mut().seek(timeline_pos_ns);
+            let visual_pos_ns = {
+                let mut st = timeline_state.borrow_mut();
+                st.set_playhead_visual(timeline_pos_ns)
+            };
+            let needs_async = prog_player.borrow_mut().seek(visual_pos_ns);
             if needs_async {
                 // 3+ tracks: the pipeline is in Playing.  Let the GTK main
                 // loop run so gtk4paintablesink can complete its preroll, then
@@ -5359,13 +5362,80 @@ pub(crate) fn handle_mcp_command(
                 glib::timeout_add_local_once(std::time::Duration::from_millis(500), move || {
                     pp.borrow().complete_playing_pulse();
                     reply
-                        .send(json!({"ok": true, "timeline_pos_ns": timeline_pos_ns}))
+                        .send(json!({"ok": true, "timeline_pos_ns": visual_pos_ns}))
                         .ok();
                 });
             } else {
                 reply
-                    .send(json!({"ok": true, "timeline_pos_ns": timeline_pos_ns}))
+                    .send(json!({"ok": true, "timeline_pos_ns": visual_pos_ns}))
                     .ok();
+            }
+        }
+
+        McpCommand::FocusClipInstance { clip_id, reply } => {
+            let (clip_exists, clip_info) = {
+                let proj = project.borrow();
+                (
+                    proj.clip_ref(&clip_id).is_some(),
+                    proj.clip_instance(&clip_id),
+                )
+            };
+            match clip_info {
+                Some(instance) => {
+                    let (nav_changed, seek_cb, selected_cb, selected_id) = {
+                        let mut st = timeline_state.borrow_mut();
+                        let nav_changed = st.compound_nav_stack != instance.compound_path_ids;
+                        st.focus_clip_instance(
+                            instance.clip_id.clone(),
+                            instance.track_id.clone(),
+                            instance.compound_path_ids.clone(),
+                            instance.timeline_start,
+                            None,
+                        );
+                        (
+                            nav_changed,
+                            st.on_seek.clone(),
+                            st.on_clip_selected.clone(),
+                            st.selected_clip_id.clone(),
+                        )
+                    };
+                    if nav_changed {
+                        crate::ui::timeline::TimelineState::notify_project_changed(timeline_state);
+                    } else if let Some(cb) = seek_cb {
+                        cb(instance.timeline_start);
+                    }
+                    if let Some(cb) = selected_cb {
+                        cb(selected_id);
+                    }
+                    window.queue_draw();
+                    reply
+                        .send(json!({
+                            "ok": true,
+                            "clip_id": instance.clip_id,
+                            "track_id": instance.track_id,
+                            "timeline_pos_ns": instance.timeline_start,
+                            "root_timeline_pos_ns": instance.root_timeline_start,
+                            "compound_path_ids": instance.compound_path_ids,
+                            "compound_path_labels": instance.compound_path_labels,
+                        }))
+                        .ok();
+                }
+                None if clip_exists => {
+                    reply
+                        .send(json!({
+                            "ok": false,
+                            "error": "Clip has no source-backed timeline instance to focus",
+                        }))
+                        .ok();
+                }
+                None => {
+                    reply
+                        .send(json!({
+                            "ok": false,
+                            "error": format!("Clip not found: {clip_id}"),
+                        }))
+                        .ok();
+                }
             }
         }
 

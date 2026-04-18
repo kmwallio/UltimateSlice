@@ -1745,6 +1745,17 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "focus_clip_instance",
+            "description": "Focus a visible timeline clip instance by clip id, entering compound edit context first when that clip lives inside a compound.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Timeline clip id to focus. For nested clips, use an id returned by reverse_match_frame." }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
             "name": "export_displayed_frame",
             "description": "Export the currently displayed program-monitor frame to an image file (binary PPM/P6 format).",
             "inputSchema": {
@@ -3757,6 +3768,10 @@ fn dispatch_tool_payload(
         "stop" => McpCommand::Stop { reply: tx },
         "seek_playhead" => McpCommand::SeekPlayhead {
             timeline_pos_ns: arg_u64!(args, "timeline_pos_ns", 0),
+            reply: tx,
+        },
+        "focus_clip_instance" => McpCommand::FocusClipInstance {
+            clip_id: arg_str!(args, "clip_id"),
             reply: tx,
         },
         "export_displayed_frame" => McpCommand::ExportDisplayedFrame {

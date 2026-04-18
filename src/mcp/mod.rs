@@ -698,6 +698,10 @@ pub enum McpCommand {
         timeline_pos_ns: u64,
         reply: SyncSender<Value>,
     },
+    FocusClipInstance {
+        clip_id: String,
+        reply: SyncSender<Value>,
+    },
     ExportDisplayedFrame {
         path: String,
         reply: SyncSender<Value>,
