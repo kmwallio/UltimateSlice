@@ -214,7 +214,8 @@ pub fn probe_media_metadata(path: &str) -> MediaProbeMetadata {
         let lower = colorimetry.to_lowercase();
         if lower.contains("smpte2084") || lower.contains("14:") || lower.contains(":14:") {
             Some("bt2100-pq".to_string())
-        } else if lower.contains("arib-std-b67") || lower.contains("15:") || lower.contains(":15:") {
+        } else if lower.contains("arib-std-b67") || lower.contains("15:") || lower.contains(":15:")
+        {
             Some("bt2100-hlg".to_string())
         } else {
             None

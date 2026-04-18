@@ -3635,10 +3635,14 @@ fn build_tonemap_filter_prefix(source_path: &str) -> String {
     // Quick ffprobe check for HDR transfer characteristics.
     let output = std::process::Command::new("ffprobe")
         .args([
-            "-v", "quiet",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=color_transfer",
-            "-of", "csv=p=0",
+            "-v",
+            "quiet",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=color_transfer",
+            "-of",
+            "csv=p=0",
             source_path,
         ])
         .output()

@@ -2767,7 +2767,12 @@ impl InspectorView {
                                         gtk4::PositionType::Bottom,
                                         None,
                                     );
-                                    append_slider_with_spin(&param_row, &slider, 2, param_info.default_value);
+                                    append_slider_with_spin(
+                                        &param_row,
+                                        &slider,
+                                        2,
+                                        param_info.default_value,
+                                    );
 
                                     // Wire slider
                                     let project = self.project.clone();
@@ -10868,7 +10873,10 @@ pub fn build_inspector(
             (mask_section.clone(), mask_expander.clone()),
             (hsl_section.clone(), hsl_expander.clone()),
             (tracking_section.clone(), tracking_expander.clone()),
-            (frei0r_effects_section.clone(), frei0r_effects_expander.clone()),
+            (
+                frei0r_effects_section.clone(),
+                frei0r_effects_expander.clone(),
+            ),
             (audio_section.clone(), audio_expander.clone()),
             (transform_section.clone(), transform_expander.clone()),
             (transition_section.clone(), transition_expander.clone()),
@@ -10892,8 +10900,7 @@ pub fn build_inspector(
                     .label()
                     .map(|l| l.to_lowercase().contains(&query))
                     .unwrap_or(false);
-                let inner_has_match =
-                    filter_inner_controls(expander, &query, section_name_matches);
+                let inner_has_match = filter_inner_controls(expander, &query, section_name_matches);
                 let visible = section_name_matches || inner_has_match;
                 section.set_visible(visible);
                 if visible {
