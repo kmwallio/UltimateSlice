@@ -1401,6 +1401,8 @@ struct UiState {
     export_queue: ExportQueueState,
     #[serde(default)]
     workspace_layouts: WorkspaceLayoutsState,
+    #[serde(default)]
+    inspector_sections: HashMap<String, bool>,
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -1506,6 +1508,16 @@ pub fn load_workspace_layouts_state() -> WorkspaceLayoutsState {
 pub fn save_workspace_layouts_state(state: &WorkspaceLayoutsState) {
     let mut ui = load_ui_state();
     ui.workspace_layouts = state.clone();
+    save_ui_state(&ui);
+}
+
+pub fn load_inspector_sections_state() -> HashMap<String, bool> {
+    load_ui_state().inspector_sections
+}
+
+pub fn save_inspector_sections_state(state: &HashMap<String, bool>) {
+    let mut ui = load_ui_state();
+    ui.inspector_sections = state.clone();
     save_ui_state(&ui);
 }
 

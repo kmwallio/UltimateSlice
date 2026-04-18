@@ -3398,6 +3398,9 @@ pub fn build_inspector(
     on_clear_match_eq: impl Fn(&str) + 'static,
     on_request_sam_prompt: impl Fn(Box<dyn Fn(f64, f64, f64, f64) + 'static>) + 'static,
 ) -> (GBox, Rc<InspectorView>) {
+    // Load persisted inspector section expanded/collapsed state.
+    let saved_sections = crate::ui_state::load_inspector_sections_state();
+
     // Bring transform-bound constants into scope so the slider/range/clamp
     // sites below can use them by short name instead of literal magic
     // numbers.  See `src/model/transform_bounds.rs` for the canonical
@@ -10798,6 +10801,33 @@ pub fn build_inspector(
     wire_hsl_slider!(hsl_contrast, contrast);
     wire_hsl_slider!(hsl_saturation, saturation);
 
+    // Restore persisted expander states and wire save-on-toggle.
+    for exp in &[
+        &transition_expander,
+        &color_expander,
+        &chroma_key_expander,
+        &bg_removal_expander,
+        &subtitle_expander,
+        &segments_expander,
+        &mask_expander,
+        &hsl_expander,
+        &tracking_expander,
+        &frei0r_effects_expander,
+        &audio_expander,
+        &eq_expander,
+        &pitch_expander,
+        &ladspa_effects_expander,
+        &duck_expander,
+        &transform_expander,
+        &audition_expander,
+        &title_expander,
+        &speed_expander,
+        &lut_expander,
+    ] {
+        restore_expander_state(exp, &saved_sections);
+        connect_expander_persist(exp);
+    }
+
     let view = Rc::new(InspectorView {
         name_entry,
         path_value,
@@ -11255,6 +11285,26 @@ fn row_label(parent: &GBox, text: &str) {
     l.set_halign(gtk4::Align::Start);
     l.add_css_class("clip-path");
     parent.append(&l);
+}
+
+/// Restore an expander's expanded state from the persisted section map.
+fn restore_expander_state(expander: &Expander, sections: &std::collections::HashMap<String, bool>) {
+    if let Some(label) = expander.label() {
+        if let Some(&expanded) = sections.get(label.as_str()) {
+            expander.set_expanded(expanded);
+        }
+    }
+}
+
+/// Connect an expander to persist its expanded/collapsed state on toggle.
+fn connect_expander_persist(expander: &Expander) {
+    expander.connect_notify(Some("expanded"), |exp, _| {
+        if let Some(label) = exp.label() {
+            let mut sections = crate::ui_state::load_inspector_sections_state();
+            sections.insert(label.to_string(), exp.is_expanded());
+            crate::ui_state::save_inspector_sections_state(&sections);
+        }
+    });
 }
 
 /// Append a Scale inside an HBox with a compact SpinButton sharing the same

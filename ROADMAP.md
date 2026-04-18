@@ -720,7 +720,7 @@ FCPXML persistence).
 - [x] Auto-scroll timeline to keep playhead in view during playback — when the playhead reaches the right edge of the visible region, smoothly page (or continuously scroll) the timeline so the playhead stays visible; preference toggle for Page / Smooth / Off, and suspend auto-scroll while the user is actively dragging/scrolling the timeline
 
 **Inspector polish**
-- [ ] Collapsible sections with persisted state — each section (Color, Audio, Video, Transform, Effects, Masks, Subtitles) is a collapsible expander whose open/closed state is remembered per-session
+- [x] Collapsible sections with persisted state — each section (Color, Audio, Video, Transform, Effects, Masks, Subtitles) is a collapsible expander whose open/closed state is remembered per-session
 - [ ] Search field at the top of the inspector — type "denoise" and only the relevant slider is shown
 - [x] Reset-to-default badge on every slider — small circular reset button that appears only when a value differs from the default; click to reset that property with undo
 - [ ] Right-click → "Copy/Paste this property" on any slider/control, with a "Paste to all selected clips" variant (currently only color grading has copy/paste)
