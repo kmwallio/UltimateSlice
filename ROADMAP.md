@@ -728,7 +728,7 @@ FCPXML persistence).
 - [x] Numeric-entry on every slider — compact `SpinButton` sharing the slider's `Adjustment` so typed values and slider drags stay in sync
 
 **Program Monitor polish**
-- [ ] HUD overlay — togglable overlay showing timecode, frame number, fps, resolution, and dropped-frame count (reuse `src/ui/timecode.rs`)
+- [x] HUD overlay — togglable overlay showing timecode, frame number, fps, resolution, and dropped-frame count (reuse `src/ui/timecode.rs`); shortcut **Shift+H**; persists via `ProgramMonitorState.show_hud`; MCP `set_program_monitor_hud`
 - [ ] A/B compare / split-view — vertical wipe between graded and ungraded versions of the current frame, draggable midline
 - [ ] Reference still pin — capture the current frame as a pinned thumbnail strip (up to 4 stills) for color-matching across scenes
 - [ ] Cinemascope / aspect-ratio mask overlay — togglable letterbox preview at 2.39:1, 2.00:1, 1.85:1, 1:1, 9:16, 4:5 etc. for delivery-format previewing

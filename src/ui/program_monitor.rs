@@ -164,6 +164,35 @@ fn subtitle_preview_baseline_y(
     }
 }
 
+/// Snapshot of the values shown in the Program Monitor HUD overlay
+/// (timecode, frame #, fps, canvas resolution, and cumulative dropped
+/// frames). The caller supplies a getter closure so the HUD can reflect
+/// whatever the current project / player state is without holding a
+/// borrow on the heavier state objects.
+#[derive(Clone)]
+pub struct HudStats {
+    pub playhead_ns: u64,
+    pub frame_rate: FrameRate,
+    pub width: u32,
+    pub height: u32,
+    pub dropped_frames: u64,
+}
+
+impl Default for HudStats {
+    fn default() -> Self {
+        Self {
+            playhead_ns: 0,
+            frame_rate: FrameRate {
+                numerator: 24,
+                denominator: 1,
+            },
+            width: 1920,
+            height: 1080,
+            dropped_frames: 0,
+        }
+    }
+}
+
 /// Transform parameters for a clip (crop, rotation, flip).
 /// Kept here so other modules can reference it without a separate file.
 #[derive(Clone, Copy, Default)]
@@ -184,10 +213,12 @@ fn style_program_monitor_canvas_base(widget: &impl IsA<gtk::Widget>) {
 }
 
 /// Build the program monitor widget.
-/// Returns `(widget, pos_label, speed_label, picture_a, picture_b, vu_meter, peak_cell, canvas_frame, safe_area_setter, false_color_setter, zebra_setter, frame_updater, subtitle_text_setter)`.
+/// Returns `(widget, pos_label, speed_label, picture_a, picture_b, vu_meter, peak_cell, canvas_frame, safe_area_setter, false_color_setter, zebra_setter, hud_setter, hud_redraw, frame_updater, subtitle_text_setter)`.
 /// - `safe_area_setter(enabled)` — toggle safe-area guide overlay.
 /// - `false_color_setter(enabled)` — toggle false-color luminance overlay.
 /// - `zebra_setter(enabled, threshold)` — toggle zebra overexposure overlay; threshold is 0.0–1.0.
+/// - `hud_setter(enabled)` — toggle HUD overlay (timecode/frame/fps/resolution/dropped).
+/// - `hud_redraw()` — request a HUD redraw; call from the position poll so the HUD ticks.
 /// - `frame_updater(frame)` — push a new 320×180 RGBA scope frame; triggers overlay redraw.
 /// - `subtitle_text_setter(lines)` — set current subtitle lines for overlay display with per-clip styling.
 pub fn build_program_monitor(
@@ -208,6 +239,9 @@ pub fn build_program_monitor(
     initial_show_zebra: bool,
     initial_zebra_threshold: f64,
     on_zebra_changed: impl Fn(bool, f64) + 'static,
+    initial_show_hud: bool,
+    on_hud_changed: impl Fn(bool) + 'static,
+    hud_stats_getter: impl Fn() -> HudStats + 'static,
     // Optional extra button to append to the Program Monitor header
     // controls row (e.g. the Loudness Radar popover toggle). When `None`
     // the header looks exactly as before.
@@ -224,6 +258,8 @@ pub fn build_program_monitor(
     Rc<dyn Fn(bool)>,
     Rc<dyn Fn(bool)>,
     Rc<dyn Fn(bool, f64)>,
+    Rc<dyn Fn(bool)>,
+    Rc<dyn Fn()>,
     Rc<dyn Fn(ScopeFrame)>,
     Rc<dyn Fn(Vec<SubtitleLine>)>,
 ) {
@@ -294,6 +330,13 @@ pub fn build_program_monitor(
         "Zebra stripes: diagonal lines on regions exceeding the exposure threshold (default 90%)",
     ));
 
+    let on_hud_changed = Rc::new(on_hud_changed);
+    let hud_btn = CheckButton::with_label("HUD");
+    hud_btn.set_active(initial_show_hud);
+    hud_btn.set_tooltip_text(Some(
+        "HUD overlay: timecode, frame number, fps, resolution, and dropped-frame count (Shift+H)",
+    ));
+
     // "Overlays" dropdown — pops up a small panel with the three check items.
     let overlays_popover_box = GBox::new(Orientation::Vertical, 4);
     overlays_popover_box.set_margin_top(8);
@@ -308,6 +351,7 @@ pub fn build_program_monitor(
     overlays_popover_box.append(&safe_area_btn);
     overlays_popover_box.append(&false_color_btn);
     overlays_popover_box.append(&zebra_btn);
+    overlays_popover_box.append(&hud_btn);
     overlays_popover_box.append(&subtitle_overlay_btn);
 
     let overlays_popover = Popover::new();
@@ -517,6 +561,115 @@ pub fn build_program_monitor(
     }
     overlay.add_overlay(&zebra_da);
     overlay.set_measure_overlay(&zebra_da, false);
+
+    // HUD overlay: top-left info panel with timecode, frame #, fps, resolution,
+    // and cumulative dropped-frame count. State lives in `hud_visible`, and the
+    // `hud_stats_getter` closure is called each draw to pull fresh values.
+    let hud_visible = Rc::new(Cell::new(initial_show_hud));
+    let hud_stats_getter: Rc<dyn Fn() -> HudStats> = Rc::new(hud_stats_getter);
+    let hud_da = DrawingArea::new();
+    hud_da.set_hexpand(true);
+    hud_da.set_vexpand(true);
+    hud_da.set_halign(gtk::Align::Fill);
+    hud_da.set_valign(gtk::Align::Fill);
+    hud_da.set_can_target(false);
+    {
+        let hud_visible = hud_visible.clone();
+        let hud_stats_getter = hud_stats_getter.clone();
+        hud_da.set_draw_func(move |_da, cr, width, height| {
+            if !hud_visible.get() || width <= 0 || height <= 0 {
+                return;
+            }
+            let stats = hud_stats_getter();
+            let nominal = timecode::nominal_fps(&stats.frame_rate).max(1);
+            let fps_num = u128::from(stats.frame_rate.numerator.max(1));
+            let fps_den = u128::from(stats.frame_rate.denominator.max(1));
+            let total_frames =
+                (u128::from(stats.playhead_ns) * fps_num) / (1_000_000_000u128 * fps_den);
+            let fps_label = if stats.frame_rate.denominator <= 1 {
+                format!("{}", nominal)
+            } else {
+                format!("{:.2}", stats.frame_rate.as_f64())
+            };
+            let lines = [
+                format!(
+                    "TC   {}",
+                    timecode::format_ns_as_timecode(stats.playhead_ns, &stats.frame_rate)
+                ),
+                format!("FRM  {}", total_frames),
+                format!("FPS  {}", fps_label),
+                format!("RES  {}×{}", stats.width, stats.height),
+                format!("DROP {}", stats.dropped_frames),
+            ];
+
+            let pad = 10.0;
+            let line_h = 15.0;
+            let font_size = 12.0;
+            cr.select_font_face(
+                "monospace",
+                gtk::cairo::FontSlant::Normal,
+                gtk::cairo::FontWeight::Normal,
+            );
+            cr.set_font_size(font_size);
+
+            let mut text_w: f64 = 0.0;
+            for line in &lines {
+                if let Ok(ext) = cr.text_extents(line) {
+                    if ext.width() > text_w {
+                        text_w = ext.width();
+                    }
+                }
+            }
+            let box_w = text_w + pad * 2.0;
+            let box_h = line_h * lines.len() as f64 + pad * 2.0;
+            let x = 12.0;
+            let y = 12.0;
+
+            // Dark translucent rounded background.
+            let radius = 6.0;
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.62);
+            cr.new_sub_path();
+            cr.arc(
+                x + box_w - radius,
+                y + radius,
+                radius,
+                -std::f64::consts::FRAC_PI_2,
+                0.0,
+            );
+            cr.arc(
+                x + box_w - radius,
+                y + box_h - radius,
+                radius,
+                0.0,
+                std::f64::consts::FRAC_PI_2,
+            );
+            cr.arc(
+                x + radius,
+                y + box_h - radius,
+                radius,
+                std::f64::consts::FRAC_PI_2,
+                std::f64::consts::PI,
+            );
+            cr.arc(
+                x + radius,
+                y + radius,
+                radius,
+                std::f64::consts::PI,
+                3.0 * std::f64::consts::FRAC_PI_2,
+            );
+            cr.close_path();
+            let _ = cr.fill();
+
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.92);
+            for (i, line) in lines.iter().enumerate() {
+                let ty = y + pad + line_h * (i as f64 + 1.0) - 3.0;
+                cr.move_to(x + pad, ty);
+                let _ = cr.show_text(line);
+            }
+        });
+    }
+    overlay.add_overlay(&hud_da);
+    overlay.set_measure_overlay(&hud_da, false);
 
     // Subtitle overlay: displays current subtitle lines with per-clip styling.
     let subtitle_lines: Rc<RefCell<Vec<SubtitleLine>>> = Rc::new(RefCell::new(Vec::new()));
@@ -1106,6 +1259,37 @@ pub fn build_program_monitor(
         });
     }
 
+    let hud_setter: Rc<dyn Fn(bool)> = {
+        let hud_visible = hud_visible.clone();
+        let hud_da = hud_da.clone();
+        let hud_btn = hud_btn.clone();
+        Rc::new(move |enabled: bool| {
+            hud_visible.set(enabled);
+            if hud_btn.is_active() != enabled {
+                hud_btn.set_active(enabled);
+            }
+            hud_da.queue_draw();
+        })
+    };
+    {
+        let hud_setter = hud_setter.clone();
+        let on_hud_changed = on_hud_changed.clone();
+        hud_btn.connect_toggled(move |btn| {
+            let enabled = btn.is_active();
+            hud_setter(enabled);
+            on_hud_changed(enabled);
+        });
+    }
+    let hud_redraw: Rc<dyn Fn()> = {
+        let hud_visible = hud_visible.clone();
+        let hud_da = hud_da.clone();
+        Rc::new(move || {
+            if hud_visible.get() {
+                hud_da.queue_draw();
+            }
+        })
+    };
+
     // Wire subtitle overlay checkbox toggle.
     {
         let sv = subtitle_visible.clone();
@@ -1156,6 +1340,8 @@ pub fn build_program_monitor(
         safe_area_setter,
         false_color_setter,
         zebra_setter,
+        hud_setter,
+        hud_redraw,
         frame_updater,
         subtitle_text_setter,
     )

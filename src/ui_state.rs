@@ -32,6 +32,9 @@ pub struct ProgramMonitorState {
     /// Luminance threshold for zebra stripes (0.0–1.0, default 0.90 = 90 IRE).
     #[serde(default = "default_zebra_threshold")]
     pub zebra_threshold: f64,
+    /// Show HUD overlay (timecode, frame #, fps, resolution, dropped frames).
+    #[serde(default)]
+    pub show_hud: bool,
 }
 
 fn default_zebra_threshold() -> f64 {
@@ -122,6 +125,7 @@ impl Default for ProgramMonitorState {
             show_false_color: false,
             show_zebra: false,
             zebra_threshold: default_zebra_threshold(),
+            show_hud: false,
         }
     }
 }
@@ -1900,6 +1904,7 @@ mod tests {
             show_false_color: true,
             show_zebra: true,
             zebra_threshold: 0.95,
+            show_hud: true,
         };
         let workspace = ProgramMonitorWorkspaceState::from_program_monitor_state(&monitor);
         assert!(workspace.popped);
@@ -1907,6 +1912,20 @@ mod tests {
         assert_eq!(workspace.height, 777);
         assert_eq!(workspace.docked_split_pos, 512);
         assert!(workspace.scopes_visible);
+    }
+
+    #[test]
+    fn program_monitor_state_show_hud_round_trips() {
+        let mut monitor = ProgramMonitorState::default();
+        assert!(!monitor.show_hud, "show_hud defaults to false");
+        monitor.show_hud = true;
+        let encoded = serde_json::to_string(&monitor).expect("serialize");
+        assert!(encoded.contains(r#""show_hud":true"#));
+        let decoded: ProgramMonitorState = serde_json::from_str(&encoded).expect("deserialize");
+        assert!(decoded.show_hud);
+        let legacy: ProgramMonitorState =
+            serde_json::from_str(r#"{"popped":false}"#).expect("legacy deserialize");
+        assert!(!legacy.show_hud, "legacy JSON without show_hud defaults false");
     }
 
     #[test]

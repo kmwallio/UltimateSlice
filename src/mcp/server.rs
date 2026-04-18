@@ -1639,6 +1639,17 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_program_monitor_hud",
+            "description": "Show or hide the Program Monitor HUD overlay (timecode, frame number, fps, resolution, and cumulative dropped-frame count). Setting persists across sessions.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "enabled": { "type": "boolean", "description": "true to show the HUD, false to hide it." }
+                },
+                "required": ["enabled"]
+            }
+        },
+        {
             "name": "set_background_ai_indexing",
             "description": "Enable or disable automatic background AI indexing for Media Library search enrichment. When enabled, eligible library items are queued one at a time for transcript indexing (Whisper) and visual embedding generation (CLIP-style search) when the corresponding models are available.",
             "inputSchema": {
@@ -3714,6 +3725,10 @@ fn dispatch_tool_payload(
         }
 
         "set_background_prerender" => McpCommand::SetBackgroundPrerender {
+            enabled: arg_bool!(args, "enabled"),
+            reply: tx,
+        },
+        "set_program_monitor_hud" => McpCommand::SetProgramMonitorHud {
             enabled: arg_bool!(args, "enabled"),
             reply: tx,
         },

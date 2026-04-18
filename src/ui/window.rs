@@ -12047,6 +12047,8 @@ pub fn build_window(
         _prog_safe_area_setter,
         prog_false_color_setter,
         prog_zebra_setter,
+        prog_hud_setter,
+        prog_hud_redraw,
         prog_frame_updater,
         prog_subtitle_text_setter,
     ) = {
@@ -13279,6 +13281,36 @@ pub fn build_window(
                     }
                 }
             },
+            monitor_state.borrow().show_hud,
+            {
+                let monitor_state = monitor_state.clone();
+                move |show| {
+                    let mut state = monitor_state.borrow_mut();
+                    if state.show_hud != show {
+                        state.show_hud = show;
+                        crate::ui_state::save_program_monitor_state(&state);
+                    }
+                }
+            },
+            {
+                let project = project.clone();
+                let ts = timeline_state.clone();
+                let dropped_handle = prog_player.borrow().dropped_frames_handle();
+                move || {
+                    let (width, height, frame_rate) = {
+                        let p = project.borrow();
+                        (p.width, p.height, p.frame_rate.clone())
+                    };
+                    crate::ui::program_monitor::HudStats {
+                        playhead_ns: ts.borrow().playhead_ns,
+                        frame_rate,
+                        width,
+                        height,
+                        dropped_frames: dropped_handle
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                    }
+                }
+            },
             // The Loudness Radar popover button is placed next to the
             // Scopes toggle below `prog_monitor_host`, not in the
             // Program Monitor header, so we pass None here.
@@ -13333,6 +13365,23 @@ pub fn build_window(
     let prog_monitor_overlay = gtk4::Overlay::new();
     prog_monitor_overlay.set_child(Some(&prog_monitor_widget));
     prog_monitor_overlay.add_overlay(&countdown_overlay_da);
+
+    // Single entry point for flipping the Program Monitor HUD on/off. Used by
+    // the Shift+H shortcut (indirectly via prog_hud_setter), the MCP
+    // `set_program_monitor_hud` tool, and any future toolbar/palette entry so
+    // the setter, persisted state, and draw all stay in sync.
+    let apply_program_monitor_hud: Rc<dyn Fn(bool)> = {
+        let hud_setter = prog_hud_setter.clone();
+        let monitor_state = monitor_state.clone();
+        Rc::new(move |enabled: bool| {
+            hud_setter(enabled);
+            let mut state = monitor_state.borrow_mut();
+            if state.show_hud != enabled {
+                state.show_hud = enabled;
+                crate::ui_state::save_program_monitor_state(&state);
+            }
+        })
+    };
 
     // ── Loudness Radar popover callbacks ──────────────────────────────
     //
@@ -13600,6 +13649,7 @@ pub fn build_window(
         let inspector_view_poll = inspector_view.clone();
         let prog_frame_updater_poll = prog_frame_updater.clone();
         let prog_subtitle_setter_poll = prog_subtitle_text_setter.clone();
+        let prog_hud_redraw_poll = prog_hud_redraw.clone();
         let monitor_state_poll = monitor_state.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(33), move || {
             let (pos_ns, playing, opacity_a, opacity_b, peaks, track_peaks, scope_frame, jkl_rate) = {
@@ -13762,6 +13812,7 @@ pub fn build_window(
                 speed_lbl.set_text(&format!("{arrow} {abs}×"));
                 speed_lbl.set_visible(true);
             }
+            prog_hud_redraw_poll();
             if pos_ns != last_pos_ns_c.get() {
                 let frame_rate = { project.borrow().frame_rate.clone() };
                 // When inside a compound deep-dive, the program player reports
@@ -19207,6 +19258,7 @@ pub fn build_window(
                         &workspace_layout_pending_name_for_mcp,
                         &sync_workspace_layout_controls,
                         &apply_preferences_state,
+                        &apply_program_monitor_hud,
                         &suppress_resume_on_next_reload,
                         &clear_media_browser_on_next_reload,
                     );
@@ -19421,6 +19473,43 @@ pub fn build_window(
             preferences_state.borrow_mut().show_timeline_minimap = show;
             if show {
                 minimap_area.queue_draw();
+            }
+            glib::Propagation::Stop
+        });
+        window.add_controller(key_ctrl);
+    }
+    // ── Window-level Shift+H: toggle Program Monitor HUD overlay ─────────
+    {
+        let monitor_state = monitor_state.clone();
+        let hud_setter = prog_hud_setter.clone();
+        let key_ctrl = gtk4::EventControllerKey::new();
+        key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        key_ctrl.connect_key_pressed(move |ctrl, key, _, mods| {
+            use gtk4::gdk::{Key, ModifierType};
+            if !mods.contains(ModifierType::SHIFT_MASK) {
+                return glib::Propagation::Proceed;
+            }
+            if mods.contains(ModifierType::CONTROL_MASK) || mods.contains(ModifierType::ALT_MASK) {
+                return glib::Propagation::Proceed;
+            }
+            if key != Key::H && key != Key::h {
+                return glib::Propagation::Proceed;
+            }
+            if let Some(widget) = ctrl.widget() {
+                if let Some(focused) = widget.root().and_then(|r| r.focus()) {
+                    if is_text_input_focused(&focused) {
+                        return glib::Propagation::Proceed;
+                    }
+                }
+            }
+            let show = !monitor_state.borrow().show_hud;
+            hud_setter(show);
+            {
+                let mut state = monitor_state.borrow_mut();
+                if state.show_hud != show {
+                    state.show_hud = show;
+                    crate::ui_state::save_program_monitor_state(&state);
+                }
             }
             glib::Propagation::Stop
         });
@@ -19852,6 +19941,7 @@ fn handle_mcp_command(
     workspace_layout_pending_name: &Rc<RefCell<Option<String>>>,
     sync_workspace_layout_controls: &Rc<dyn Fn()>,
     apply_preferences_state: &Rc<dyn Fn(crate::ui_state::PreferencesState)>,
+    apply_program_monitor_hud: &Rc<dyn Fn(bool)>,
     suppress_resume_on_next_reload: &Rc<Cell<bool>>,
     clear_media_browser_on_next_reload: &Rc<Cell<bool>>,
 ) {
@@ -19887,6 +19977,7 @@ fn handle_mcp_command(
         workspace_layout_pending_name,
         sync_workspace_layout_controls,
         apply_preferences_state,
+        apply_program_monitor_hud,
         suppress_resume_on_next_reload,
         clear_media_browser_on_next_reload,
     );

@@ -1905,6 +1905,13 @@ pub struct ProgramPlayer {
     /// Cache of parsed 3D LUT files keyed by file path.
     /// Avoids re-parsing the same `.cube` file on every slot rebuild.
     lut_cache: HashMap<String, Arc<CubeLut>>,
+    /// Cumulative video frames dropped by QoS-reporting elements in the
+    /// preview pipeline, surfaced on the Program Monitor HUD. Reset when
+    /// clips reload (project replacement). QoS stats messages carry
+    /// cumulative counts per element since the last reset, so we keep
+    /// per-source last-seen values and accumulate only the delta.
+    dropped_frames_total: Arc<AtomicU64>,
+    dropped_frames_last_seen: HashMap<String, u64>,
 }
 
 impl ProgramPlayer {
@@ -2621,6 +2628,8 @@ impl ProgramPlayer {
                 last_boundary_rebuild_at: None,
                 last_not_negotiated_recover_at: None,
                 lut_cache: HashMap::new(),
+                dropped_frames_total: Arc::new(AtomicU64::new(0)),
+                dropped_frames_last_seen: HashMap::new(),
             },
             paintable,
             paintable2,
@@ -2631,6 +2640,13 @@ impl ProgramPlayer {
 
     pub fn set_playback_priority(&mut self, playback_priority: PlaybackPriority) {
         self.playback_priority = playback_priority;
+    }
+
+    /// Shared handle to the cumulative dropped-frame counter, suitable for
+    /// polling from UI overlays (e.g. the Program Monitor HUD) without
+    /// borrowing the player itself.
+    pub fn dropped_frames_handle(&self) -> Arc<AtomicU64> {
+        self.dropped_frames_total.clone()
     }
 
     pub fn set_proxy_enabled(&mut self, enabled: bool) {
@@ -3664,6 +3680,8 @@ impl ProgramPlayer {
         self.current_prerender_segment_key = None;
         self.teardown_prepreroll_sidecars();
         self.cleanup_background_prerender_cache(!self.should_preserve_prerender_cache_files());
+        self.dropped_frames_total.store(0, Ordering::Relaxed);
+        self.dropped_frames_last_seen.clear();
 
         // Populate adjustment overlays from the loaded clips.
         self.rebuild_adjustment_overlays();
@@ -14814,6 +14832,30 @@ impl ProgramPlayer {
                             main_not_negotiated = true;
                         } else if Self::should_recover_not_linked(&err, debug.as_deref()) {
                             main_not_linked = true;
+                        }
+                    }
+                    gstreamer::MessageView::Qos(_) => {
+                        // QoS stats messages carry the element's cumulative
+                        // dropped-buffer count in their structure. We read
+                        // `dropped` directly from the structure because the
+                        // `Qos::stats()` wrapper wraps the count in a
+                        // `GenericFormattedValue` that is version-sensitive.
+                        let dropped = msg
+                            .structure()
+                            .and_then(|s| s.get::<u64>("dropped").ok());
+                        let src_name = msg
+                            .src()
+                            .and_then(|src| src.clone().downcast::<gst::Element>().ok())
+                            .map(|elem| elem.name().to_string());
+                        if let (Some(dropped), Some(src_name)) = (dropped, src_name) {
+                            let previous = self
+                                .dropped_frames_last_seen
+                                .insert(src_name, dropped)
+                                .unwrap_or(0);
+                            if dropped > previous {
+                                self.dropped_frames_total
+                                    .fetch_add(dropped - previous, Ordering::Relaxed);
+                            }
                         }
                     }
                     _ => {}

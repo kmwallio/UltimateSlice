@@ -83,6 +83,7 @@ pub(crate) fn handle_mcp_command(
     workspace_layout_pending_name: &Rc<RefCell<Option<String>>>,
     sync_workspace_layout_controls: &Rc<dyn Fn()>,
     apply_preferences_state: &Rc<dyn Fn(crate::ui_state::PreferencesState)>,
+    apply_program_monitor_hud: &Rc<dyn Fn(bool)>,
     suppress_resume_on_next_reload: &Rc<Cell<bool>>,
     clear_media_browser_on_next_reload: &Rc<Cell<bool>>,
 ) {
@@ -1142,6 +1143,16 @@ pub(crate) fn handle_mcp_command(
                 .send(json!({
                     "success": true,
                     "background_prerender": enabled
+                }))
+                .ok();
+        }
+
+        McpCommand::SetProgramMonitorHud { enabled, reply } => {
+            apply_program_monitor_hud(enabled);
+            reply
+                .send(json!({
+                    "success": true,
+                    "show_hud": enabled
                 }))
                 .ok();
         }

@@ -95,6 +95,7 @@ The same **I / O** Source Monitor marks are also used by the keyword-range contr
 | `Ctrl`/`Cmd` + Click (mini-map) | Seek playhead to clicked position |
 | Double-click (mini-map) | Zoom timeline to fit entire project |
 | `Shift+M` | Toggle timeline mini-map |
+| `Shift+H` | Toggle Program Monitor HUD overlay (timecode / frame / fps / resolution / dropped) |
 | `?` / `/` | Show keyboard shortcut reference |
 
 Right-click an audio track header and choose **Generate Music Region…** to arm the one-shot MusicGen draw gesture; `Escape` cancels it before you drag.

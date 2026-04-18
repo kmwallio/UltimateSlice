@@ -686,6 +686,10 @@ pub enum McpCommand {
         enabled: bool,
         reply: SyncSender<Value>,
     },
+    SetProgramMonitorHud {
+        enabled: bool,
+        reply: SyncSender<Value>,
+    },
     SetPrerenderProjectPersistence {
         enabled: bool,
         reply: SyncSender<Value>,

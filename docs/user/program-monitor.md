@@ -30,6 +30,7 @@ or outside the export frame.
 | Play / Pause button | Toggle playback |
 | Stop button | Stop and return to position 0 |
 | Safe Areas toggle | Shows/hides action-safe (90%) and title-safe (80%) guides |
+| Overlays → HUD | Shows a top-left info panel with timecode, frame number, fps, canvas resolution, and dropped-frame count (shortcut: **Shift+H**) |
 | Master VU meter | Stereo (L/R) output level meter in dBFS |
 | ▾ Scopes toggle | Show/hide the docked color scopes panel (waveform, histogram, vectorscope, RGB parade) |
 | Loudness button | Next to the Scopes toggle — opens the Loudness Radar popover for broadcast-standard EBU R128 analysis + normalize-to-target |
@@ -165,6 +166,25 @@ When **Motion Tracking → Edit Region in Monitor** is enabled for the selected 
   - **Action-safe** at **90%** of the canvas.
   - **Title-safe** at **80%** of the canvas.
 - The toggle state is persisted across launches.
+
+## HUD Overlay
+
+- Open the **Overlays ▾** popover in the Program Monitor header and enable
+  **HUD**, or press **Shift+H**, to show a compact info panel in the
+  top-left corner of the monitor.
+- The panel displays, in a monospace font:
+  - **TC** — current timeline playhead as `HH:MM:SS:FF` (project-frame-rate aware).
+  - **FRM** — current frame number since the start of the timeline.
+  - **FPS** — project frame rate (e.g. `24`, `29.97`, `59.94`).
+  - **RES** — project canvas resolution (width × height).
+  - **DROP** — cumulative video frames the preview pipeline has dropped
+    under QoS pressure since the project was loaded. Reset on project
+    open/new; a steadily climbing counter is a hint to drop preview
+    quality, enable proxies, or enable background prerender.
+- The HUD does not appear in export output — it is a monitoring overlay only.
+- Toggle state persists across launches (stored with the other Program Monitor
+  overlay toggles in `ui-state.json`). The MCP tool `set_program_monitor_hud`
+  controls the same setting from automation.
 
 ## Playback Behaviour
 
