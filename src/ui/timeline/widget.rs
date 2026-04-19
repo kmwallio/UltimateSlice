@@ -1945,6 +1945,7 @@ impl TimelineState {
         true
     }
 
+    #[allow(dead_code)]
     fn selected_group_ids(&self) -> HashSet<String> {
         let target_ids = self.selected_ids_or_primary();
         if target_ids.is_empty() {
@@ -1960,6 +1961,12 @@ impl TimelineState {
             .collect()
     }
 
+    /// Legacy grouped-only align path. Kept for regression coverage;
+    /// the UI button now calls `sync_selected_clips_by_timecode`
+    /// (strict superset) instead. MCP continues to use the
+    /// standalone helper in `src/ui/window.rs`
+    /// (`align_grouped_clips_by_timecode_in_project`).
+    #[allow(dead_code)]
     pub fn align_selected_groups_by_timecode(&mut self) -> bool {
         let target_groups = self.selected_group_ids();
         if target_groups.is_empty() {
@@ -2084,6 +2091,156 @@ impl TimelineState {
         true
     }
 
+    /// Align every clip in the current multi-selection by their decoded
+    /// source timecode. Strict superset of `align_selected_groups_by_timecode`:
+    /// does not require clips to share a `group_id`. Anchor picking
+    /// matches the grouped path — primary-selected if it has TC, else
+    /// earliest-timecode (lowest `source_timecode_start_ns`; ties broken
+    /// by earliest `timeline_start` for determinism despite HashSet
+    /// iteration order).
+    ///
+    /// Every selected clip must have `source_timecode_start_ns()`
+    /// populated (`source_timecode_base_ns` set via Convert LTC Audio
+    /// to Timecode, FCPXML `start` attr, or the
+    /// `us:source-timecode-base-ns` vendor attr). Clips missing TC are
+    /// silently skipped — the UI gating blocks the whole action when
+    /// any selected clip lacks TC, so in practice this function only
+    /// runs on fully-populated selections, but the skip keeps the
+    /// helper robust if called directly.
+    ///
+    /// All per-track snapshots are wrapped in a single
+    /// `CompoundEditCommand` so Ctrl+Z reverts the whole batch in one
+    /// step (matches `paste_color_grade_to_all_selected`).
+    pub fn sync_selected_clips_by_timecode(&mut self) -> bool {
+        let target_ids = self.selected_ids_or_primary();
+        if target_ids.len() < 2 {
+            return false;
+        }
+
+        let assignments: HashMap<String, u64> = {
+            let proj = self.project.borrow();
+            let primary = self.selected_clip_id.as_deref();
+
+            // Gather (id, timeline_start, source_tc_start) for every
+            // selected clip that has TC. Tuples are sortable so anchor
+            // selection stays deterministic independent of the
+            // HashSet iteration order of `target_ids`.
+            let mut members: Vec<(String, u64, u64)> = proj
+                .tracks
+                .iter()
+                .flat_map(|track| track.clips.iter())
+                .filter(|clip| target_ids.contains(&clip.id))
+                .filter_map(|clip| {
+                    clip.source_timecode_start_ns()
+                        .map(|tc| (clip.id.clone(), clip.timeline_start, tc))
+                })
+                .collect();
+
+            if members.len() < 2 {
+                return false;
+            }
+
+            // Stable sort so `min_by_key` / the primary lookup see a
+            // canonical ordering regardless of track iteration order.
+            members.sort_by_key(|(id, _, _)| id.clone());
+
+            let anchor = members
+                .iter()
+                .find(|(id, _, _)| Some(id.as_str()) == primary)
+                .or_else(|| {
+                    members
+                        .iter()
+                        .min_by_key(|(_, timeline_start, tc)| (*tc, *timeline_start))
+                });
+            let Some((_, anchor_timeline_start, anchor_tc)) = anchor else {
+                return false;
+            };
+            let anchor_timeline_start = *anchor_timeline_start;
+            let anchor_tc = *anchor_tc;
+
+            let mut proposed: Vec<(String, i128)> = members
+                .iter()
+                .map(|(id, _, tc)| {
+                    (
+                        id.clone(),
+                        i128::from(anchor_timeline_start) + i128::from(*tc)
+                            - i128::from(anchor_tc),
+                    )
+                })
+                .collect();
+
+            // Clamp-to-zero: if any proposed start went negative, shift
+            // the entire set right so the earliest lands at 0. Same
+            // behavior as `align_selected_groups_by_timecode`.
+            if let Some(min_start) = proposed.iter().map(|(_, s)| *s).min() {
+                if min_start < 0 {
+                    let shift = -min_start;
+                    for (_, s) in &mut proposed {
+                        *s += shift;
+                    }
+                }
+            }
+
+            proposed
+                .into_iter()
+                .map(|(id, s)| (id, s.max(0) as u64))
+                .collect()
+        };
+
+        if assignments.is_empty() {
+            return false;
+        }
+
+        let per_track: Vec<(String, Vec<Clip>, Vec<Clip>)> = {
+            let proj = self.project.borrow();
+            let editing_tracks = self.resolve_editing_tracks(&proj);
+            editing_tracks
+                .iter()
+                .filter_map(|track| {
+                    let old_clips = track.clips.clone();
+                    let mut new_clips = old_clips.clone();
+                    let mut changed = false;
+                    for clip in &mut new_clips {
+                        if let Some(new_start) = assignments.get(&clip.id) {
+                            if clip.timeline_start != *new_start {
+                                clip.timeline_start = *new_start;
+                                changed = true;
+                            }
+                        }
+                    }
+                    if changed {
+                        Some((track.id.clone(), old_clips, new_clips))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        if per_track.is_empty() {
+            return false;
+        }
+
+        let children: Vec<Box<dyn crate::undo::EditCommand>> = per_track
+            .into_iter()
+            .map(|(track_id, old_clips, new_clips)| {
+                Box::new(SetTrackClipsCommand {
+                    track_id,
+                    old_clips,
+                    new_clips,
+                    label: "Sync by timecode".to_string(),
+                }) as Box<dyn crate::undo::EditCommand>
+            })
+            .collect();
+        let cmd = crate::undo::CompoundEditCommand {
+            children,
+            description: "Sync Selected Clips by Timecode".to_string(),
+        };
+        let mut proj = self.project.borrow_mut();
+        self.history.execute(Box::new(cmd), &mut proj);
+        true
+    }
+
     fn can_link_selected_clips(&self) -> bool {
         self.selected_ids_or_primary().len() >= 2
     }
@@ -2108,6 +2265,7 @@ impl TimelineState {
             })
     }
 
+    #[allow(dead_code)]
     fn can_align_selected_groups_by_timecode(&self) -> bool {
         let target_groups = self.selected_group_ids();
         if target_groups.is_empty() {
@@ -2135,6 +2293,31 @@ impl TimelineState {
             }
         }
         found_group
+    }
+
+    /// Returns `(visible, with_tc_count, total_count)` for the
+    /// "Sync Selected Clips by Timecode" menu entry. The button is
+    /// *visible* whenever 2+ clips are selected (so the user
+    /// discovers the feature even before running Convert LTC) and
+    /// *actionable* only when `with_tc_count == total_count`. A
+    /// disabled-state tooltip uses the two counts to tell the user
+    /// how many clips still need Convert LTC.
+    fn can_sync_selected_clips_by_timecode(&self) -> (bool, usize, usize) {
+        let ids = self.selected_ids_or_primary();
+        let total = ids.len();
+        if total < 2 {
+            return (false, 0, total);
+        }
+        let proj = self.project.borrow();
+        let mut with_tc = 0usize;
+        for clip_id in &ids {
+            if let Some(clip) = proj.clip_ref(clip_id) {
+                if clip.source_timecode_start_ns().is_some() {
+                    with_tc += 1;
+                }
+            }
+        }
+        (true, with_tc, total)
     }
 
     /// Returns true when 2+ selected clips could be synced by audio.
@@ -2206,12 +2389,18 @@ impl TimelineState {
     }
 
     fn clip_context_menu_actionability(&self) -> ClipContextMenuActionability {
+        let (sync_tc_visible, sync_tc_with, sync_tc_total) =
+            self.can_sync_selected_clips_by_timecode();
+        let sync_tc_missing = sync_tc_total.saturating_sub(sync_tc_with);
         ClipContextMenuActionability {
             join_through_edit: self.can_join_selected_through_edit(),
             freeze_frame: self.can_create_freeze_frame_at_playhead(),
             link_selected: self.can_link_selected_clips(),
             unlink_selected: self.can_unlink_selected_clips(),
-            align_grouped: self.can_align_selected_groups_by_timecode(),
+            sync_timecode_visible: sync_tc_visible,
+            sync_timecode_actionable: sync_tc_visible && sync_tc_missing == 0,
+            sync_timecode_missing_count: sync_tc_missing,
+            sync_timecode_total_count: sync_tc_total,
             sync_audio: self.can_sync_selected_clips_by_audio(),
             sync_replace_audio: self.can_sync_selected_clips_by_audio(),
             remove_silent_parts: self.can_remove_silent_parts(),
@@ -5162,7 +5351,20 @@ struct ClipContextMenuActionability {
     freeze_frame: bool,
     link_selected: bool,
     unlink_selected: bool,
-    align_grouped: bool,
+    /// True when the "Sync Selected Clips by Timecode" button should
+    /// be visible (2+ clips selected). Keeps the menu entry
+    /// discoverable even when clips don't yet have decoded timecode
+    /// — the disabled tooltip tells the user to run Convert LTC.
+    sync_timecode_visible: bool,
+    /// True when every visible-selection member has
+    /// `source_timecode_start_ns()` populated. Drives the button's
+    /// sensitivity.
+    sync_timecode_actionable: bool,
+    /// Number of selected clips missing decoded timecode — surfaced
+    /// in the disabled-state tooltip ("N of M selected clips…").
+    sync_timecode_missing_count: usize,
+    /// Total number of clips in the current multi-selection.
+    sync_timecode_total_count: usize,
     sync_audio: bool,
     sync_replace_audio: bool,
     remove_silent_parts: bool,
@@ -5180,7 +5382,10 @@ impl ClipContextMenuActionability {
             || self.freeze_frame
             || self.link_selected
             || self.unlink_selected
-            || self.align_grouped
+            // Visible (not actionable) counts — the menu stays open so
+            // the user sees the "N of M missing timecode" tooltip and
+            // knows what to do next.
+            || self.sync_timecode_visible
             || self.sync_audio
             || self.sync_replace_audio
             || self.remove_silent_parts
@@ -5218,7 +5423,27 @@ fn apply_clip_context_menu_actionability(
     set_state(btn_freeze_frame, actionability.freeze_frame);
     set_state(btn_link_selected, actionability.link_selected);
     set_state(btn_unlink_selected, actionability.unlink_selected);
-    set_state(btn_align_grouped, actionability.align_grouped);
+    // Sync-by-timecode button is driven out-of-band: visible whenever
+    // 2+ clips are selected (discoverability) but only sensitive when
+    // every selected clip has decoded timecode. When visible-but-
+    // disabled, the tooltip tells the user exactly how many clips
+    // still need Convert LTC Audio to Timecode.
+    btn_align_grouped.set_visible(actionability.sync_timecode_visible);
+    btn_align_grouped.set_sensitive(actionability.sync_timecode_actionable);
+    if actionability.sync_timecode_visible && !actionability.sync_timecode_actionable {
+        let missing = actionability.sync_timecode_missing_count;
+        let total = actionability.sync_timecode_total_count;
+        btn_align_grouped.set_tooltip_text(Some(&format!(
+            "{missing} of {total} selected clips are missing decoded timecode. \
+             Run 'Convert LTC Audio to Timecode' on each first."
+        )));
+    } else {
+        btn_align_grouped.set_tooltip_text(Some(
+            "Align selected clips using decoded source timecode. \
+             Works on any multi-selection where every clip has timecode \
+             (from Convert LTC or imported via FCPXML).",
+        ));
+    }
     set_state(btn_sync_audio, actionability.sync_audio);
     set_state(btn_sync_replace_audio, actionability.sync_replace_audio);
     set_state(btn_remove_silent_parts, actionability.remove_silent_parts);
@@ -5368,10 +5593,15 @@ pub fn build_timeline(
     let btn_unlink_selected = gtk::Button::with_label("Unlink Selected Clips");
     btn_unlink_selected.add_css_class("flat");
     btn_unlink_selected.set_tooltip_text(Some("Unlink the current selection (Ctrl+Shift+L)"));
-    let btn_align_grouped = gtk::Button::with_label("Align Grouped Clips by Timecode");
+    let btn_align_grouped = gtk::Button::with_label("Sync Selected Clips by Timecode");
     btn_align_grouped.add_css_class("flat");
+    // Tooltip defaults to the enabled-state copy; the per-selection
+    // actionability pass swaps to a "N of M missing" message when any
+    // selected clip doesn't have decoded timecode yet.
     btn_align_grouped.set_tooltip_text(Some(
-        "Align grouped clips using stored source timecode metadata when available",
+        "Align selected clips using decoded source timecode. \
+         Works on any multi-selection where every clip has timecode \
+         (from Convert LTC or imported via FCPXML).",
     ));
     let btn_sync_audio = gtk::Button::with_label("Sync Selected Clips by Audio");
     btn_sync_audio.add_css_class("flat");
@@ -5710,7 +5940,7 @@ pub fn build_timeline(
         let pop_weak = clip_context_pop.downgrade();
         btn_align_grouped.connect_clicked(move |_| {
             let mut st = state.borrow_mut();
-            let changed = st.align_selected_groups_by_timecode();
+            let changed = st.sync_selected_clips_by_timecode();
             drop(st);
             if let Some(pop) = pop_weak.upgrade() {
                 pop.popdown();
@@ -12732,7 +12962,10 @@ mod tests {
         assert!(actionability.freeze_frame);
         assert!(!actionability.link_selected);
         assert!(!actionability.unlink_selected);
-        assert!(!actionability.align_grouped);
+        // Single-clip selection hides the Sync-by-Timecode entry
+        // entirely — it requires 2+ for the button to even appear.
+        assert!(!actionability.sync_timecode_visible);
+        assert!(!actionability.sync_timecode_actionable);
         assert!(!actionability.sync_audio);
         assert!(actionability.remove_silent_parts);
         assert!(actionability.any());
@@ -12753,7 +12986,13 @@ mod tests {
         assert!(!actionability.freeze_frame);
         assert!(actionability.link_selected);
         assert!(!actionability.unlink_selected);
-        assert!(!actionability.align_grouped);
+        // 2+ clips selected without decoded timecode → the Sync by
+        // Timecode entry is visible (so the user discovers it) but
+        // disabled (no actionable TC on the members).
+        assert!(actionability.sync_timecode_visible);
+        assert!(!actionability.sync_timecode_actionable);
+        assert_eq!(actionability.sync_timecode_missing_count, 2);
+        assert_eq!(actionability.sync_timecode_total_count, 2);
         assert!(actionability.sync_audio);
         assert!(!actionability.remove_silent_parts);
         assert!(actionability.any());
@@ -12817,6 +13056,326 @@ mod tests {
             .collect();
         assert_eq!(starts.get(&ids_b[0]), Some(&4_000_000_000));
         assert_eq!(starts.get(&ids_b[1]), Some(&6_000_000_000));
+    }
+
+    #[test]
+    fn sync_selected_clips_by_timecode_aligns_ungrouped_selection() {
+        // Two clips on different tracks, NO shared group_id. The old
+        // grouped-align helper would've refused; the new sync helper
+        // aligns them.
+        let (mut st, track_a, track_b, ids_a, ids_b) = timeline_state_with_two_video_tracks(
+            &[("A", 0)],
+            &[("X", 3_000_000_000)],
+        );
+        {
+            let mut proj = st.project.borrow_mut();
+            for track in &mut proj.tracks {
+                for clip in &mut track.clips {
+                    if clip.id == ids_a[0] {
+                        clip.source_timecode_base_ns = Some(10_000_000_000);
+                    } else if clip.id == ids_b[0] {
+                        clip.source_timecode_base_ns = Some(12_500_000_000);
+                    }
+                }
+            }
+        }
+        let mut selected = HashSet::new();
+        selected.insert(ids_a[0].clone());
+        selected.insert(ids_b[0].clone());
+        st.set_selection_with_primary(ids_a[0].clone(), track_a.clone(), selected);
+
+        let (visible, with_tc, total) = st.can_sync_selected_clips_by_timecode();
+        assert!(visible);
+        assert_eq!(with_tc, 2);
+        assert_eq!(total, 2);
+
+        assert!(st.sync_selected_clips_by_timecode());
+
+        // Anchor is ids_a[0] (primary selected). Its timeline_start stays at 0.
+        // ids_b[0] shifts to 0 + (12.5s − 10s) = 2.5s.
+        let proj = st.project.borrow();
+        let starts: HashMap<String, u64> = proj
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .map(|c| (c.id.clone(), c.timeline_start))
+            .collect();
+        assert_eq!(starts.get(&ids_a[0]), Some(&0u64));
+        assert_eq!(starts.get(&ids_b[0]), Some(&2_500_000_000u64));
+        drop(proj);
+        let _ = track_b;
+    }
+
+    #[test]
+    fn sync_selected_clips_by_timecode_picks_earliest_tc_when_no_primary_has_tc() {
+        let (mut st, track_id, ids) = timeline_state_with_video_clips(&[
+            ("A", 5_000_000_000),
+            ("B", 10_000_000_000),
+            ("C", 15_000_000_000),
+        ]);
+        {
+            let mut proj = st.project.borrow_mut();
+            for track in &mut proj.tracks {
+                for clip in &mut track.clips {
+                    match clip.id.as_str() {
+                        "A" => clip.source_timecode_base_ns = Some(30_000_000_000),
+                        "B" => clip.source_timecode_base_ns = Some(10_000_000_000),
+                        "C" => clip.source_timecode_base_ns = Some(50_000_000_000),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        // Clear primary selected so anchor falls back to earliest TC.
+        // Set a 3-way multi-selection but make primary a non-existent id.
+        let mut selected = HashSet::new();
+        for id in &ids {
+            selected.insert(id.clone());
+        }
+        // Primary = "A" (its TC is 30s, highest — so it shouldn't win
+        // when we rely on the earliest-TC fallback. But primary DOES
+        // take precedence if present. To exercise the fallback, clear
+        // primary by calling the set helper with a dummy id then
+        // overwriting primary_clip_id to None.
+        st.set_selection_with_primary(ids[0].clone(), track_id.clone(), selected);
+        st.selected_clip_id = None;
+
+        assert!(st.sync_selected_clips_by_timecode());
+
+        // Earliest TC = B at 10s, its timeline_start was 10s. A shifts
+        // from TC 30s → +20s from B → new start 30s. C at TC 50s →
+        // +40s from B → new start 50s.
+        let proj = st.project.borrow();
+        let starts: HashMap<String, u64> = proj
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .map(|c| (c.id.clone(), c.timeline_start))
+            .collect();
+        assert_eq!(starts.get("B"), Some(&10_000_000_000u64));
+        assert_eq!(starts.get("A"), Some(&30_000_000_000u64));
+        assert_eq!(starts.get("C"), Some(&50_000_000_000u64));
+    }
+
+    #[test]
+    fn sync_selected_clips_by_timecode_respects_primary_selected_as_anchor() {
+        let (mut st, track_id, ids) = timeline_state_with_video_clips(&[
+            ("A", 2_000_000_000),
+            ("B", 8_000_000_000),
+        ]);
+        {
+            let mut proj = st.project.borrow_mut();
+            for track in &mut proj.tracks {
+                for clip in &mut track.clips {
+                    match clip.id.as_str() {
+                        "A" => clip.source_timecode_base_ns = Some(50_000_000_000),
+                        "B" => clip.source_timecode_base_ns = Some(10_000_000_000),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let mut selected = HashSet::new();
+        selected.insert(ids[0].clone());
+        selected.insert(ids[1].clone());
+        // B is primary even though its TC is earliest — primary wins.
+        st.set_selection_with_primary(ids[1].clone(), track_id.clone(), selected);
+
+        assert!(st.sync_selected_clips_by_timecode());
+
+        // B stays at its original timeline_start (8s). A shifts so
+        // that (A.new - B.anchor) == (A.tc - B.tc) = 40s → A.new = 48s.
+        let proj = st.project.borrow();
+        let starts: HashMap<String, u64> = proj
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .map(|c| (c.id.clone(), c.timeline_start))
+            .collect();
+        assert_eq!(starts.get("B"), Some(&8_000_000_000u64));
+        assert_eq!(starts.get("A"), Some(&48_000_000_000u64));
+    }
+
+    #[test]
+    fn sync_selected_clips_by_timecode_clamps_to_zero_when_math_goes_negative() {
+        // Anchor starts at 0, but A's TC is LATER than anchor's TC by
+        // 5s. Shifting A forward alone works fine. Test the negative-
+        // shift case: B has EARLIER TC than A, and A is primary. B
+        // would want to sit at A.start - (A.tc - B.tc) = 0 - 5s →
+        // negative. Clamp-to-zero shifts the whole set right by 5s.
+        let (mut st, track_id, ids) = timeline_state_with_video_clips(&[
+            ("A", 0),
+            ("B", 10_000_000_000),
+        ]);
+        {
+            let mut proj = st.project.borrow_mut();
+            for track in &mut proj.tracks {
+                for clip in &mut track.clips {
+                    match clip.id.as_str() {
+                        "A" => clip.source_timecode_base_ns = Some(20_000_000_000),
+                        "B" => clip.source_timecode_base_ns = Some(15_000_000_000),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let mut selected = HashSet::new();
+        selected.insert(ids[0].clone());
+        selected.insert(ids[1].clone());
+        st.set_selection_with_primary(ids[0].clone(), track_id.clone(), selected);
+
+        assert!(st.sync_selected_clips_by_timecode());
+
+        // Without clamp: A stays at 0, B goes to 0 - 5s (negative).
+        // With clamp: whole set shifts right by 5s. A lands at 5s,
+        // B lands at 0s.
+        let proj = st.project.borrow();
+        let starts: HashMap<String, u64> = proj
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .map(|c| (c.id.clone(), c.timeline_start))
+            .collect();
+        assert_eq!(starts.get("A"), Some(&5_000_000_000u64));
+        assert_eq!(starts.get("B"), Some(&0u64));
+    }
+
+    #[test]
+    fn can_sync_selected_clips_by_timecode_visible_but_not_actionable_when_tc_missing() {
+        let (mut st, track_id, ids) = timeline_state_with_video_clips(&[
+            ("A", 0),
+            ("B", 5_000_000_000),
+        ]);
+        {
+            let mut proj = st.project.borrow_mut();
+            for track in &mut proj.tracks {
+                for clip in &mut track.clips {
+                    if clip.id == "A" {
+                        clip.source_timecode_base_ns = Some(10_000_000_000);
+                    }
+                    // B deliberately missing TC.
+                }
+            }
+        }
+        let mut selected = HashSet::new();
+        selected.insert(ids[0].clone());
+        selected.insert(ids[1].clone());
+        st.set_selection_with_primary(ids[0].clone(), track_id, selected);
+
+        let (visible, with_tc, total) = st.can_sync_selected_clips_by_timecode();
+        assert!(visible, "2+ selected → entry visible");
+        assert_eq!(with_tc, 1, "only A has decoded timecode");
+        assert_eq!(total, 2);
+
+        // Sync call is a no-op when not every member has TC (the helper
+        // silently skips members without TC; with only one anchor+no
+        // targets the per-track diff is empty).
+        // The UI-layer gate already blocks this, but confirm the
+        // helper is also safe if called directly.
+        let _ = st.sync_selected_clips_by_timecode();
+    }
+
+    #[test]
+    fn can_sync_selected_clips_by_timecode_hidden_for_single_selection() {
+        let (mut st, track_id, ids) = timeline_state_with_video_clips(&[("A", 0)]);
+        {
+            let mut proj = st.project.borrow_mut();
+            for track in &mut proj.tracks {
+                for clip in &mut track.clips {
+                    clip.source_timecode_base_ns = Some(10_000_000_000);
+                }
+            }
+        }
+        st.set_single_clip_selection(ids[0].clone(), track_id);
+
+        let (visible, _, total) = st.can_sync_selected_clips_by_timecode();
+        assert!(!visible, "single selection hides the entry entirely");
+        assert_eq!(total, 1);
+    }
+
+    #[test]
+    fn sync_selected_clips_by_timecode_still_works_for_grouped_selection() {
+        // Regression: grouped multi-selection is a subset of plain
+        // multi-selection, so the new helper must still handle it.
+        let (mut st, _track_a, track_b, _ids_a, ids_b) = timeline_state_with_two_video_tracks(
+            &[("A", 0)],
+            &[("X", 4_000_000_000), ("Y", 9_000_000_000)],
+        );
+        {
+            let mut proj = st.project.borrow_mut();
+            let group_id = "g1".to_string();
+            if let Some(track) = proj.tracks.iter_mut().find(|t| t.id == track_b) {
+                for clip in &mut track.clips {
+                    if clip.id == ids_b[0] {
+                        clip.group_id = Some(group_id.clone());
+                        clip.source_timecode_base_ns = Some(10_000_000_000);
+                    } else if clip.id == ids_b[1] {
+                        clip.group_id = Some(group_id.clone());
+                        clip.source_timecode_base_ns = Some(12_000_000_000);
+                    }
+                }
+            }
+        }
+        // select_single expands to linked members — here we just
+        // manually build a 2-clip selection so the test doesn't
+        // depend on group-expansion behavior.
+        let mut selected = HashSet::new();
+        selected.insert(ids_b[0].clone());
+        selected.insert(ids_b[1].clone());
+        st.set_selection_with_primary(ids_b[0].clone(), track_b.clone(), selected);
+
+        assert!(st.sync_selected_clips_by_timecode());
+
+        // Same expected result as the legacy grouped test: anchor
+        // stays at its timeline_start; other shifts by the TC delta.
+        let proj = st.project.borrow();
+        let starts: HashMap<String, u64> = proj
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .filter(|c| c.id == ids_b[0] || c.id == ids_b[1])
+            .map(|c| (c.id.clone(), c.timeline_start))
+            .collect();
+        assert_eq!(starts.get(&ids_b[0]), Some(&4_000_000_000u64));
+        assert_eq!(starts.get(&ids_b[1]), Some(&6_000_000_000u64));
+    }
+
+    #[test]
+    fn sync_selected_clips_by_timecode_is_a_single_undo() {
+        let (mut st, track_id, ids) = timeline_state_with_video_clips(&[
+            ("A", 0),
+            ("B", 7_000_000_000),
+        ]);
+        {
+            let mut proj = st.project.borrow_mut();
+            for track in &mut proj.tracks {
+                for clip in &mut track.clips {
+                    match clip.id.as_str() {
+                        "A" => clip.source_timecode_base_ns = Some(10_000_000_000),
+                        "B" => clip.source_timecode_base_ns = Some(13_500_000_000),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let mut selected = HashSet::new();
+        selected.insert(ids[0].clone());
+        selected.insert(ids[1].clone());
+        st.set_selection_with_primary(ids[0].clone(), track_id, selected);
+
+        assert!(st.sync_selected_clips_by_timecode());
+        // One Ctrl+Z reverts BOTH clips back to their original
+        // timeline_start values, not just one.
+        assert!(st.undo());
+        let proj = st.project.borrow();
+        let starts: HashMap<String, u64> = proj
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .map(|c| (c.id.clone(), c.timeline_start))
+            .collect();
+        assert_eq!(starts.get("A"), Some(&0u64));
+        assert_eq!(starts.get("B"), Some(&7_000_000_000u64));
     }
 
     #[test]
