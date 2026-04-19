@@ -1,6 +1,6 @@
 use crate::media::program_player::{ProgramPlayer, ScopeFrame};
 use crate::media::reference_still::DecodedStill;
-use crate::model::project::FrameRate;
+use crate::model::project::{FrameRate, TimecodeBurninPosition};
 use crate::ui::colors::{LUMA_B, LUMA_G, LUMA_R};
 use crate::ui::timecode;
 use crate::ui_state::AspectMaskPreset;
@@ -259,6 +259,9 @@ pub fn build_program_monitor(
     hud_stats_getter: impl Fn() -> HudStats + 'static,
     initial_aspect_mask: AspectMaskPreset,
     on_aspect_mask_changed: impl Fn(AspectMaskPreset) + 'static,
+    initial_timecode_burnin_enabled: bool,
+    initial_timecode_burnin_position: TimecodeBurninPosition,
+    on_timecode_burnin_changed: impl Fn(bool, TimecodeBurninPosition) + 'static,
     // Optional extra button to append to the Program Monitor header
     // controls row (e.g. the Loudness Radar popover toggle). When `None`
     // the header looks exactly as before.
@@ -300,6 +303,11 @@ pub fn build_program_monitor(
     Rc<dyn Fn(f64)>,                                         // ab_midline_setter
     Rc<dyn Fn(Option<Rc<DecodedStill>>)>,                    // ab_reference_setter
     Rc<dyn Fn(Vec<ReferenceStillSummary>, Option<String>)>, // stills_strip_setter
+    // Timecode burn-in setter. Called on project load + after the
+    // Project Settings dialog writes new values so the overlay
+    // reflects the stored state. Monitor keeps its own shared cell
+    // for the draw_func; window.rs owns persistence (FCPXML + model).
+    Rc<dyn Fn(bool, TimecodeBurninPosition)>,
 ) {
     let root = GBox::new(Orientation::Vertical, 0);
     root.set_hexpand(true);
@@ -399,6 +407,43 @@ pub fn build_program_monitor(
     aspect_mask_label_row.append(&aspect_mask_label);
     aspect_mask_label_row.append(&aspect_mask_dropdown);
 
+    // Timecode burn-in — draws a timecode pill over the program monitor
+    // at the configured position. Persisted on the project so export
+    // bakes it into output pixels via drawtext. Delivery specs frequently
+    // require burned timecode for review masters.
+    let on_timecode_burnin_changed = Rc::new(on_timecode_burnin_changed);
+    let tc_burnin_header_row = GBox::new(Orientation::Horizontal, 6);
+    let tc_burnin_label = Label::new(Some("Timecode burn-in"));
+    tc_burnin_label.set_xalign(0.0);
+    tc_burnin_label.set_hexpand(true);
+    tc_burnin_label.add_css_class("dim-label");
+    let tc_burnin_check = CheckButton::new();
+    tc_burnin_check.set_active(initial_timecode_burnin_enabled);
+    tc_burnin_check.set_tooltip_text(Some(
+        "Render a timecode pill on the Program Monitor and burn it into exports",
+    ));
+    tc_burnin_header_row.append(&tc_burnin_label);
+    tc_burnin_header_row.append(&tc_burnin_check);
+
+    let tc_burnin_position_row = GBox::new(Orientation::Horizontal, 6);
+    let tc_burnin_position_label = Label::new(Some("Position"));
+    tc_burnin_position_label.set_xalign(0.0);
+    tc_burnin_position_label.set_hexpand(true);
+    let tc_burnin_pos_strings: Vec<&'static str> = TimecodeBurninPosition::ALL
+        .iter()
+        .map(|p| p.label())
+        .collect();
+    let tc_burnin_pos_model = StringList::new(&tc_burnin_pos_strings);
+    let tc_burnin_dropdown = DropDown::new(Some(tc_burnin_pos_model), None::<gtk::Expression>);
+    tc_burnin_dropdown.set_tooltip_text(Some("Where the timecode pill is drawn on the canvas"));
+    let initial_tc_burnin_idx = TimecodeBurninPosition::ALL
+        .iter()
+        .position(|p| *p == initial_timecode_burnin_position)
+        .unwrap_or(4) as u32;
+    tc_burnin_dropdown.set_selected(initial_tc_burnin_idx);
+    tc_burnin_position_row.append(&tc_burnin_position_label);
+    tc_burnin_position_row.append(&tc_burnin_dropdown);
+
     // "Overlays" dropdown — pops up a small panel with the three check items.
     let overlays_popover_box = GBox::new(Orientation::Vertical, 4);
     overlays_popover_box.set_margin_top(8);
@@ -416,6 +461,8 @@ pub fn build_program_monitor(
     overlays_popover_box.append(&hud_btn);
     overlays_popover_box.append(&subtitle_overlay_btn);
     overlays_popover_box.append(&aspect_mask_label_row);
+    overlays_popover_box.append(&tc_burnin_header_row);
+    overlays_popover_box.append(&tc_burnin_position_row);
 
     // ── Reference stills section (A/B compare wipe) ──
     let ref_stills_separator = gtk::Separator::new(Orientation::Horizontal);
@@ -858,6 +905,96 @@ pub fn build_program_monitor(
     }
     overlay.add_overlay(&aspect_mask_da);
     overlay.set_measure_overlay(&aspect_mask_da, false);
+
+    // Timecode burn-in overlay — draws a rounded monospace pill at the
+    // configured corner. The HUD getter already provides playhead ns +
+    // frame rate which we reuse so the overlay stays in sync with the
+    // HUD and exported burn-in (drawtext).
+    let tc_burnin_enabled_state = Rc::new(Cell::new(initial_timecode_burnin_enabled));
+    let tc_burnin_position_state: Rc<Cell<TimecodeBurninPosition>> =
+        Rc::new(Cell::new(initial_timecode_burnin_position));
+    let tc_burnin_da = DrawingArea::new();
+    tc_burnin_da.set_hexpand(true);
+    tc_burnin_da.set_vexpand(true);
+    tc_burnin_da.set_halign(gtk::Align::Fill);
+    tc_burnin_da.set_valign(gtk::Align::Fill);
+    tc_burnin_da.set_can_target(false);
+    {
+        let enabled = tc_burnin_enabled_state.clone();
+        let position = tc_burnin_position_state.clone();
+        let stats_getter = hud_stats_getter.clone();
+        tc_burnin_da.set_draw_func(move |_da, cr, width, height| {
+            if !enabled.get() || width <= 0 || height <= 0 {
+                return;
+            }
+            let stats = stats_getter();
+            let text = timecode::format_ns_as_timecode(stats.playhead_ns, &stats.frame_rate);
+
+            let w = width as f64;
+            let h = height as f64;
+            let short_edge = w.min(h);
+            let font_size = (short_edge * 0.035).clamp(12.0, 28.0);
+            let pad_x = font_size * 0.7;
+            let pad_y = font_size * 0.35;
+            let margin = (short_edge * 0.02).max(6.0);
+
+            cr.select_font_face(
+                "monospace",
+                gtk::cairo::FontSlant::Normal,
+                gtk::cairo::FontWeight::Bold,
+            );
+            cr.set_font_size(font_size);
+            let ext = match cr.text_extents(&text) {
+                Ok(e) => e,
+                Err(_) => return,
+            };
+            let pill_w = ext.width() + pad_x * 2.0;
+            let pill_h = font_size + pad_y * 2.0;
+            let (x, y) = position.get().anchor(w, h, pill_w, pill_h, margin);
+
+            let radius = (pill_h * 0.35).min(10.0);
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.72);
+            cr.new_sub_path();
+            cr.arc(
+                x + pill_w - radius,
+                y + radius,
+                radius,
+                -std::f64::consts::FRAC_PI_2,
+                0.0,
+            );
+            cr.arc(
+                x + pill_w - radius,
+                y + pill_h - radius,
+                radius,
+                0.0,
+                std::f64::consts::FRAC_PI_2,
+            );
+            cr.arc(
+                x + radius,
+                y + pill_h - radius,
+                radius,
+                std::f64::consts::FRAC_PI_2,
+                std::f64::consts::PI,
+            );
+            cr.arc(
+                x + radius,
+                y + radius,
+                radius,
+                std::f64::consts::PI,
+                3.0 * std::f64::consts::FRAC_PI_2,
+            );
+            cr.close_path();
+            let _ = cr.fill();
+
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.95);
+            let text_x = x + pad_x - ext.x_bearing();
+            let text_y = y + pad_y - ext.y_bearing();
+            cr.move_to(text_x, text_y);
+            let _ = cr.show_text(&text);
+        });
+    }
+    overlay.add_overlay(&tc_burnin_da);
+    overlay.set_measure_overlay(&tc_burnin_da, false);
 
     // A/B compare overlay — vertical wipe painting the selected reference
     // still over the right-hand side of the canvas, with a draggable midline.
@@ -1851,6 +1988,90 @@ pub fn build_program_monitor(
     // Apply the initial stills list so the strip reflects the loaded project.
     stills_strip_setter(initial_stills_summary, initial_active_still_id);
 
+    // ── Timecode burn-in setter + control wiring ──
+    let tc_burnin_updating: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    let timecode_burnin_setter: Rc<dyn Fn(bool, TimecodeBurninPosition)> = {
+        let enabled_state = tc_burnin_enabled_state.clone();
+        let position_state = tc_burnin_position_state.clone();
+        let tc_burnin_da = tc_burnin_da.clone();
+        let tc_burnin_check = tc_burnin_check.clone();
+        let tc_burnin_dropdown = tc_burnin_dropdown.clone();
+        let updating = tc_burnin_updating.clone();
+        Rc::new(move |enabled: bool, pos: TimecodeBurninPosition| {
+            enabled_state.set(enabled);
+            position_state.set(pos);
+            updating.set(true);
+            if tc_burnin_check.is_active() != enabled {
+                tc_burnin_check.set_active(enabled);
+            }
+            let idx = TimecodeBurninPosition::ALL
+                .iter()
+                .position(|p| *p == pos)
+                .unwrap_or(4) as u32;
+            if tc_burnin_dropdown.selected() != idx {
+                tc_burnin_dropdown.set_selected(idx);
+            }
+            updating.set(false);
+            tc_burnin_da.queue_draw();
+        })
+    };
+    {
+        let enabled_state = tc_burnin_enabled_state.clone();
+        let position_state = tc_burnin_position_state.clone();
+        let tc_burnin_da = tc_burnin_da.clone();
+        let on_changed = on_timecode_burnin_changed.clone();
+        let updating = tc_burnin_updating.clone();
+        tc_burnin_check.connect_toggled(move |btn| {
+            if updating.get() {
+                return;
+            }
+            let enabled = btn.is_active();
+            enabled_state.set(enabled);
+            tc_burnin_da.queue_draw();
+            on_changed(enabled, position_state.get());
+        });
+    }
+    {
+        let enabled_state = tc_burnin_enabled_state.clone();
+        let position_state = tc_burnin_position_state.clone();
+        let tc_burnin_da = tc_burnin_da.clone();
+        let on_changed = on_timecode_burnin_changed.clone();
+        let updating = tc_burnin_updating.clone();
+        let overlays_popover_close = overlays_popover.clone();
+        tc_burnin_dropdown.connect_selected_notify(move |dd| {
+            if updating.get() {
+                return;
+            }
+            let idx = dd.selected() as usize;
+            let pos = TimecodeBurninPosition::ALL
+                .get(idx)
+                .copied()
+                .unwrap_or_default();
+            position_state.set(pos);
+            tc_burnin_da.queue_draw();
+            on_changed(enabled_state.get(), pos);
+            // Dismiss the Overlays popover after a pick (same nested-popover
+            // autohide workaround used for the aspect-mask dropdown).
+            overlays_popover_close.popdown();
+        });
+    }
+
+    // Drive a steady redraw of the burn-in overlay by piggybacking on the HUD
+    // redraw timer the caller already ticks. `hud_redraw` below already drives
+    // `hud_da.queue_draw()`; we want the burn-in timecode to advance at the
+    // same cadence whenever the overlay is visible, so extend that closure.
+    let hud_redraw: Rc<dyn Fn()> = {
+        let inner = hud_redraw.clone();
+        let tc_da = tc_burnin_da.clone();
+        let tc_enabled = tc_burnin_enabled_state.clone();
+        Rc::new(move || {
+            inner();
+            if tc_enabled.get() {
+                tc_da.queue_draw();
+            }
+        })
+    };
+
     (
         root,
         pos_label,
@@ -1872,6 +2093,7 @@ pub fn build_program_monitor(
         ab_midline_setter,
         ab_reference_setter,
         stills_strip_setter,
+        timecode_burnin_setter,
     )
 }
 

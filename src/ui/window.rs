@@ -12139,6 +12139,7 @@ pub fn build_window(
         prog_ab_midline_setter,
         prog_ab_reference_setter,
         prog_stills_strip_setter,
+        prog_timecode_burnin_setter,
     ) = {
         // Drawing edits (shape commits, per-item deletes) each fire
         // `on_project_changed`, which runs a two-phase program-player
@@ -13429,6 +13430,32 @@ pub fn build_window(
                     }
                 }
             },
+            // Timecode burn-in — project-level setting. Initial values read
+            // from the loaded Project so reopens reflect the saved state.
+            // Toggle writes back to the project, marks dirty, and nudges
+            // the FCPXML writer (via the on_project_changed callback).
+            project.borrow().timecode_burnin_enabled,
+            project.borrow().timecode_burnin_position,
+            {
+                let project = project.clone();
+                let on_project_changed = on_project_changed.clone();
+                move |enabled: bool, pos: crate::model::project::TimecodeBurninPosition| {
+                    let changed = {
+                        let mut p = project.borrow_mut();
+                        let was =
+                            p.timecode_burnin_enabled != enabled || p.timecode_burnin_position != pos;
+                        if was {
+                            p.timecode_burnin_enabled = enabled;
+                            p.timecode_burnin_position = pos;
+                            p.dirty = true;
+                        }
+                        was
+                    };
+                    if changed {
+                        on_project_changed();
+                    }
+                }
+            },
             // The Loudness Radar popover button is placed next to the
             // Scopes toggle below `prog_monitor_host`, not in the
             // Program Monitor header, so we pass None here.
@@ -13577,6 +13604,36 @@ pub fn build_window(
                 crate::ui_state::save_program_monitor_state(&state);
             }
         })
+    };
+
+    // Shared entry point for project-level timecode burn-in. Writes to the
+    // project (so FCPXML round-trips and exports pick it up), drives the
+    // Program Monitor overlay via the setter, and marks the project dirty.
+    let apply_program_monitor_timecode_burnin: Rc<
+        dyn Fn(bool, crate::model::project::TimecodeBurninPosition),
+    > = {
+        let setter = prog_timecode_burnin_setter.clone();
+        let project = project.clone();
+        let on_project_changed = on_project_changed.clone();
+        Rc::new(
+            move |enabled: bool, pos: crate::model::project::TimecodeBurninPosition| {
+                setter(enabled, pos);
+                let changed = {
+                    let mut p = project.borrow_mut();
+                    let was = p.timecode_burnin_enabled != enabled
+                        || p.timecode_burnin_position != pos;
+                    if was {
+                        p.timecode_burnin_enabled = enabled;
+                        p.timecode_burnin_position = pos;
+                        p.dirty = true;
+                    }
+                    was
+                };
+                if changed {
+                    on_project_changed();
+                }
+            },
+        )
     };
 
     // ── A/B compare: shared setter + reference-still refresh ─────────────
@@ -19892,6 +19949,8 @@ pub fn build_window(
         let apply_program_monitor_ab_enabled_mcp = apply_program_monitor_ab_enabled.clone();
         let apply_program_monitor_ab_midline_mcp = apply_program_monitor_ab_midline.clone();
         let apply_program_monitor_ab_reference_mcp = apply_program_monitor_ab_reference.clone();
+        let apply_program_monitor_timecode_burnin_mcp =
+            apply_program_monitor_timecode_burnin.clone();
         let refresh_reference_stills_mcp = refresh_reference_stills.clone();
         let render_replace_cache_for_mcp = render_replace_cache.clone();
         MCP_MAIN_DISPATCH.with(|slot| {
@@ -19932,6 +19991,7 @@ pub fn build_window(
                         &apply_preferences_state,
                         &apply_program_monitor_hud,
                         &apply_program_monitor_aspect_mask,
+                        &apply_program_monitor_timecode_burnin_mcp,
                         &apply_program_monitor_ab_enabled_mcp,
                         &apply_program_monitor_ab_midline_mcp,
                         &apply_program_monitor_ab_reference_mcp,
@@ -20621,6 +20681,9 @@ fn handle_mcp_command(
     apply_preferences_state: &Rc<dyn Fn(crate::ui_state::PreferencesState)>,
     apply_program_monitor_hud: &Rc<dyn Fn(bool)>,
     apply_program_monitor_aspect_mask: &Rc<dyn Fn(crate::ui_state::AspectMaskPreset)>,
+    apply_program_monitor_timecode_burnin: &Rc<
+        dyn Fn(bool, crate::model::project::TimecodeBurninPosition),
+    >,
     apply_program_monitor_ab_enabled: &Rc<dyn Fn(bool)>,
     apply_program_monitor_ab_midline: &Rc<dyn Fn(f64)>,
     apply_program_monitor_ab_reference: &Rc<dyn Fn(Option<String>)>,
@@ -20663,6 +20726,7 @@ fn handle_mcp_command(
         apply_preferences_state,
         apply_program_monitor_hud,
         apply_program_monitor_aspect_mask,
+        apply_program_monitor_timecode_burnin,
         apply_program_monitor_ab_enabled,
         apply_program_monitor_ab_midline,
         apply_program_monitor_ab_reference,

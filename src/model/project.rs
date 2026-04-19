@@ -133,6 +133,90 @@ impl FrameRate {
     }
 }
 
+/// Screen corner for the project-level timecode burn-in overlay +
+/// export drawtext filter. Serialized as snake_case so FCPXML vendor
+/// attrs stay human-readable.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimecodeBurninPosition {
+    TopLeft,
+    TopCenter,
+    TopRight,
+    BottomLeft,
+    #[default]
+    BottomCenter,
+    BottomRight,
+}
+
+impl TimecodeBurninPosition {
+    pub const ALL: [TimecodeBurninPosition; 6] = [
+        TimecodeBurninPosition::TopLeft,
+        TimecodeBurninPosition::TopCenter,
+        TimecodeBurninPosition::TopRight,
+        TimecodeBurninPosition::BottomLeft,
+        TimecodeBurninPosition::BottomCenter,
+        TimecodeBurninPosition::BottomRight,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TimecodeBurninPosition::TopLeft => "Top Left",
+            TimecodeBurninPosition::TopCenter => "Top Center",
+            TimecodeBurninPosition::TopRight => "Top Right",
+            TimecodeBurninPosition::BottomLeft => "Bottom Left",
+            TimecodeBurninPosition::BottomCenter => "Bottom Center",
+            TimecodeBurninPosition::BottomRight => "Bottom Right",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TimecodeBurninPosition::TopLeft => "top_left",
+            TimecodeBurninPosition::TopCenter => "top_center",
+            TimecodeBurninPosition::TopRight => "top_right",
+            TimecodeBurninPosition::BottomLeft => "bottom_left",
+            TimecodeBurninPosition::BottomCenter => "bottom_center",
+            TimecodeBurninPosition::BottomRight => "bottom_right",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<TimecodeBurninPosition> {
+        Self::ALL.iter().copied().find(|p| p.as_str() == s)
+    }
+
+    /// Compute the top-left corner of a `(pill_w, pill_h)` rectangle
+    /// inside a canvas of `(canvas_w, canvas_h)` with a margin
+    /// (typically ~2% of the short edge). Centered positions center
+    /// horizontally; the top/bottom axis is always margin-based.
+    pub fn anchor(
+        self,
+        canvas_w: f64,
+        canvas_h: f64,
+        pill_w: f64,
+        pill_h: f64,
+        margin: f64,
+    ) -> (f64, f64) {
+        let (hx, vy) = match self {
+            TimecodeBurninPosition::TopLeft | TimecodeBurninPosition::BottomLeft => {
+                (margin, 0.0)
+            }
+            TimecodeBurninPosition::TopCenter | TimecodeBurninPosition::BottomCenter => {
+                ((canvas_w - pill_w) * 0.5, 0.0)
+            }
+            TimecodeBurninPosition::TopRight | TimecodeBurninPosition::BottomRight => {
+                (canvas_w - pill_w - margin, 0.0)
+            }
+        };
+        let y = match self {
+            TimecodeBurninPosition::TopLeft
+            | TimecodeBurninPosition::TopCenter
+            | TimecodeBurninPosition::TopRight => margin,
+            _ => canvas_h - pill_h - margin,
+        };
+        (hx, y + vy)
+    }
+}
+
 /// An audio submix bus. Each `AudioRole` (Dialogue, Effects, Music) has a
 /// corresponding bus that all tracks with that role feed into before reaching
 /// the master output. Tracks with `AudioRole::None` bypass the bus stage.
@@ -202,6 +286,15 @@ pub struct Project {
     /// `us:reference-stills` vendor attr on the event element.
     #[serde(default)]
     pub reference_stills: Vec<ReferenceStill>,
+    /// Project-level timecode burn-in: when true, the Program Monitor
+    /// renders a timecode pill at `timecode_burnin_position` and
+    /// exports bake it into the output pixels via an ffmpeg drawtext
+    /// filter. Delivery specs frequently require this for review
+    /// masters.
+    #[serde(default)]
+    pub timecode_burnin_enabled: bool,
+    #[serde(default)]
+    pub timecode_burnin_position: TimecodeBurninPosition,
     /// Dirty flag — true if there are unsaved changes
     #[serde(skip)]
     pub dirty: bool,
@@ -307,6 +400,8 @@ impl Project {
             effects_bus: AudioBus::default(),
             music_bus: AudioBus::default(),
             reference_stills: Vec::new(),
+            timecode_burnin_enabled: false,
+            timecode_burnin_position: TimecodeBurninPosition::default(),
             dirty: false,
             file_path: None,
             source_fcpxml: None,

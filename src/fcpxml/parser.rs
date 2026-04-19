@@ -238,6 +238,16 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                             if let Some(v) = attrs.get("us:master-gain-db") {
                                 project.master_gain_db = v.parse().unwrap_or(0.0);
                             }
+                            if let Some(v) = attrs.get("us:timecode-burnin-enabled") {
+                                project.timecode_burnin_enabled = v == "1" || v == "true";
+                            }
+                            if let Some(v) = attrs.get("us:timecode-burnin-position") {
+                                if let Some(pos) =
+                                    crate::model::project::TimecodeBurninPosition::from_str(v)
+                                {
+                                    project.timecode_burnin_position = pos;
+                                }
+                            }
                             // Bus gain/mute/solo.
                             for (role_key, bus) in [
                                 ("dialogue", &mut project.dialogue_bus),
@@ -3038,7 +3048,14 @@ fn is_known_project_attr(key: &str) -> bool {
 }
 
 fn is_known_sequence_attr(key: &str) -> bool {
-    if matches!(key, "duration" | "format" | "us:master-gain-db") {
+    if matches!(
+        key,
+        "duration"
+            | "format"
+            | "us:master-gain-db"
+            | "us:timecode-burnin-enabled"
+            | "us:timecode-burnin-position"
+    ) {
         return true;
     }
     if key.starts_with("us:bus-") {

@@ -86,6 +86,9 @@ pub(crate) fn handle_mcp_command(
     apply_preferences_state: &Rc<dyn Fn(crate::ui_state::PreferencesState)>,
     apply_program_monitor_hud: &Rc<dyn Fn(bool)>,
     apply_program_monitor_aspect_mask: &Rc<dyn Fn(crate::ui_state::AspectMaskPreset)>,
+    apply_program_monitor_timecode_burnin: &Rc<
+        dyn Fn(bool, crate::model::project::TimecodeBurninPosition),
+    >,
     apply_program_monitor_ab_enabled: &Rc<dyn Fn(bool)>,
     apply_program_monitor_ab_midline: &Rc<dyn Fn(f64)>,
     apply_program_monitor_ab_reference: &Rc<dyn Fn(Option<String>)>,
@@ -1186,6 +1189,44 @@ pub(crate) fn handle_mcp_command(
                         .ok();
                 }
             }
+        }
+
+        McpCommand::SetProgramMonitorTimecodeBurnin {
+            enabled,
+            position,
+            reply,
+        } => {
+            let current = {
+                let p = project.borrow();
+                (p.timecode_burnin_enabled, p.timecode_burnin_position)
+            };
+            let new_enabled = enabled.unwrap_or(current.0);
+            let new_pos = match position {
+                None => current.1,
+                Some(s) => match crate::model::project::TimecodeBurninPosition::from_str(&s) {
+                    Some(p) => p,
+                    None => {
+                        reply
+                            .send(json!({
+                                "success": false,
+                                "error": format!(
+                                    "unknown timecode burn-in position '{}': expected one of top_left, top_center, top_right, bottom_left, bottom_center, bottom_right",
+                                    s
+                                )
+                            }))
+                            .ok();
+                        return;
+                    }
+                },
+            };
+            apply_program_monitor_timecode_burnin(new_enabled, new_pos);
+            reply
+                .send(json!({
+                    "success": true,
+                    "timecode_burnin_enabled": new_enabled,
+                    "timecode_burnin_position": new_pos.as_str(),
+                }))
+                .ok();
         }
 
         McpCommand::SetProgramMonitorAbCompare {

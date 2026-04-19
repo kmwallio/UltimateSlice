@@ -563,7 +563,7 @@ Tracking docs:
 - [x] False color overlay — map luminance to color spectrum for exposure evaluation
 - [x] Zebra stripes — diagonal lines on areas exceeding configurable IRE threshold
 - [x] Focus peaking — highlight in-focus edges with colored overlay
-- [ ] Timecode Burn-In Effect (Display timeline or source timecode on screen)
+- [x] Timecode Burn-In Effect — Project-level toggle + position (6 corners) in the Program Monitor **Overlays ▾** popover; monitor draws a monospace timecode pill that ticks with the playhead; exports bake the same timecode via ffmpeg `drawtext=timecode=...:rate=<project_rate>` chained after the subtitle post-composite pass; round-trips through FCPXML as `us:timecode-burnin-enabled` / `us:timecode-burnin-position` on `<sequence>`; MCP tool `set_program_monitor_timecode_burnin`
 
 ### Project Management
 - [x] Project save / load as FCPXML (wired to New/Open/Save buttons in toolbar)

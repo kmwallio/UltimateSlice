@@ -1677,6 +1677,24 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_program_monitor_timecode_burnin",
+            "description": "Toggle project-level timecode burn-in and/or choose the on-screen position. The Program Monitor draws a monospace timecode pill at the chosen corner, and exports bake the same timecode into output pixels via an ffmpeg drawtext filter. Position is one of top_left, top_center, top_right, bottom_left, bottom_center, bottom_right. Persists into the project's FCPXML (us:timecode-burnin-* vendor attrs).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "true to enable burn-in, false to disable. Omit to leave unchanged."
+                    },
+                    "position": {
+                        "type": "string",
+                        "enum": ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"],
+                        "description": "Corner anchor for the timecode pill. Omit to leave unchanged."
+                    }
+                }
+            }
+        },
+        {
             "name": "set_program_monitor_ab_compare",
             "description": "Control the Program Monitor A/B-compare wipe overlay. Arguments are all optional; any omitted field is left unchanged. Pass reference_still_id to activate a specific pinned still; pass clear_reference=true to deactivate without disabling the toggle.",
             "inputSchema": {
@@ -3828,6 +3846,18 @@ fn dispatch_tool_payload(
             preset: arg_str!(args, "preset", "none"),
             reply: tx,
         },
+        "set_program_monitor_timecode_burnin" => {
+            let enabled = args.get("enabled").and_then(|v| v.as_bool());
+            let position = args
+                .get("position")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            McpCommand::SetProgramMonitorTimecodeBurnin {
+                enabled,
+                position,
+                reply: tx,
+            }
+        }
         "set_program_monitor_ab_compare" => {
             let enabled = args.get("enabled").and_then(|v| v.as_bool());
             let midline_percent = args

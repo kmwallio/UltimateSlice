@@ -284,6 +284,15 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
         let gain_str = format!("{:.6}", project.master_gain_db);
         seq.push_attribute(("us:master-gain-db", gain_str.as_str()));
     }
+    // Project-level timecode burn-in (Monitoring / delivery feature).
+    // Only emitted when enabled and only in non-strict mode.
+    if !options.strict_dtd && project.timecode_burnin_enabled {
+        seq.push_attribute(("us:timecode-burnin-enabled", "1"));
+        seq.push_attribute((
+            "us:timecode-burnin-position",
+            project.timecode_burnin_position.as_str(),
+        ));
+    }
     // Bus gain/mute/solo — only emit non-default values.
     if !options.strict_dtd {
         for (role, bus) in [
@@ -4419,7 +4428,14 @@ fn is_writer_managed_project_attr(key: &str) -> bool {
 fn is_writer_managed_sequence_attr(key: &str) -> bool {
     if matches!(
         key,
-        "duration" | "format" | "tcFormat" | "audioLayout" | "audioRate" | "us:master-gain-db"
+        "duration"
+            | "format"
+            | "tcFormat"
+            | "audioLayout"
+            | "audioRate"
+            | "us:master-gain-db"
+            | "us:timecode-burnin-enabled"
+            | "us:timecode-burnin-position"
     ) {
         return true;
     }
@@ -5971,6 +5987,41 @@ mod tests {
             ),
             "expected known format name for standard 1080p24 export:\n{xml}"
         );
+    }
+
+    #[test]
+    fn test_write_fcpxml_roundtrip_timecode_burnin() {
+        use crate::fcpxml::parser::parse_fcpxml;
+        use crate::model::project::TimecodeBurninPosition;
+
+        let mut project = Project::new("BurninRoundtrip");
+        project.timecode_burnin_enabled = true;
+        project.timecode_burnin_position = TimecodeBurninPosition::TopRight;
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(
+            xml.contains("us:timecode-burnin-enabled=\"1\""),
+            "expected enabled attr in output:\n{xml}"
+        );
+        assert!(
+            xml.contains("us:timecode-burnin-position=\"top_right\""),
+            "expected position attr in output:\n{xml}"
+        );
+
+        let parsed = parse_fcpxml(&xml).expect("parse should succeed");
+        assert!(parsed.timecode_burnin_enabled);
+        assert_eq!(
+            parsed.timecode_burnin_position,
+            TimecodeBurninPosition::TopRight
+        );
+    }
+
+    #[test]
+    fn test_write_fcpxml_omits_timecode_burnin_when_disabled() {
+        let project = Project::new("BurninOff");
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(!xml.contains("us:timecode-burnin-enabled"));
+        assert!(!xml.contains("us:timecode-burnin-position"));
     }
 
     #[test]

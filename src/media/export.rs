@@ -968,6 +968,25 @@ pub fn export_project(
         }
     }
 
+    // === Timecode burn-in ===
+    // Project-level setting: burns a monospace timecode pill into output
+    // pixels via drawtext. Uses the sequence frame rate so the displayed
+    // tick matches the Program Monitor overlay (non-drop-frame, consistent
+    // with ui::timecode::format_ns_as_timecode).
+    if project.timecode_burnin_enabled {
+        let tc_filter = build_timecode_burnin_filter(
+            project.timecode_burnin_position,
+            &project.frame_rate,
+            out_w,
+            out_h,
+        );
+        if !tc_filter.is_empty() {
+            let next_label = "vtcburn".to_string();
+            filter.push_str(&format!(";[{prev_label}]{tc_filter}[{next_label}]"));
+            prev_label = next_label;
+        }
+    }
+
     // Final output video label — use the last composited label directly
     let vout_label = prev_label;
 
@@ -4023,6 +4042,50 @@ fn ass_bool(enabled: bool) -> i32 {
     } else {
         0
     }
+}
+
+/// Build the drawtext filter that burns project-level timecode into the
+/// output. Mirrors the Program Monitor overlay: monospace, bold, translucent
+/// rounded-ish box (drawtext `box` is rectangular — visually close enough at
+/// export sizes), anchored by `TimecodeBurninPosition` with a ~2% margin.
+/// Uses the project frame rate so displayed frames match the UI timecode
+/// formatter (non-drop-frame, `rate=num/den`).
+fn build_timecode_burnin_filter(
+    position: crate::model::project::TimecodeBurninPosition,
+    frame_rate: &crate::model::project::FrameRate,
+    out_w: u32,
+    out_h: u32,
+) -> String {
+    use crate::model::project::TimecodeBurninPosition;
+    if out_w == 0 || out_h == 0 {
+        return String::new();
+    }
+    let short_edge = out_w.min(out_h) as f64;
+    let fontsize = (short_edge * 0.035).clamp(16.0, 40.0).round() as u32;
+    let margin = (short_edge * 0.02).max(6.0).round() as u32;
+    let num = frame_rate.numerator.max(1);
+    let den = frame_rate.denominator.max(1);
+    let (x_expr, y_expr): (String, String) = match position {
+        TimecodeBurninPosition::TopLeft => (format!("{margin}"), format!("{margin}")),
+        TimecodeBurninPosition::TopCenter => ("(w-text_w)/2".to_string(), format!("{margin}")),
+        TimecodeBurninPosition::TopRight => {
+            (format!("w-text_w-{margin}"), format!("{margin}"))
+        }
+        TimecodeBurninPosition::BottomLeft => {
+            (format!("{margin}"), format!("h-text_h-{margin}"))
+        }
+        TimecodeBurninPosition::BottomCenter => {
+            ("(w-text_w)/2".to_string(), format!("h-text_h-{margin}"))
+        }
+        TimecodeBurninPosition::BottomRight => {
+            (format!("w-text_w-{margin}"), format!("h-text_h-{margin}"))
+        }
+    };
+    // `timecode` option: colons in the initial value must be backslash-escaped
+    // so ffmpeg's filter parser doesn't treat them as option separators.
+    format!(
+        "drawtext=timecode='00\\:00\\:00\\:00':rate={num}/{den}:fontcolor=white@0.95:fontsize={fontsize}:x='{x_expr}':y='{y_expr}':box=1:boxcolor=black@0.72:boxborderw=8:font=Monospace"
+    )
 }
 
 fn build_subtitle_filter_composited(
@@ -7795,6 +7858,55 @@ mod tests {
         assert!(f.contains("fontcolor=ff3366@0.8000"));
         assert!(f.contains("x='(0.250000)*w-text_w/2'"));
         assert!(f.contains("y='(0.750000)*h-text_h/2'"));
+    }
+
+    #[test]
+    fn build_timecode_burnin_filter_bottom_center_uses_centered_x() {
+        use crate::model::project::{FrameRate, TimecodeBurninPosition};
+        let fr = FrameRate {
+            numerator: 30000,
+            denominator: 1001,
+        };
+        let f =
+            super::build_timecode_burnin_filter(TimecodeBurninPosition::BottomCenter, &fr, 1920, 1080);
+        assert!(f.starts_with("drawtext="), "filter: {f}");
+        assert!(
+            f.contains("timecode='00\\:00\\:00\\:00'"),
+            "escaped timecode: {f}"
+        );
+        assert!(f.contains("rate=30000/1001"), "rate uses fraction: {f}");
+        assert!(f.contains("x='(w-text_w)/2'"), "x expr: {f}");
+        assert!(f.contains("y='h-text_h-"), "y expr: {f}");
+        assert!(f.contains("box=1"), "box enabled: {f}");
+    }
+
+    #[test]
+    fn build_timecode_burnin_filter_corners_have_expected_anchors() {
+        use crate::model::project::{FrameRate, TimecodeBurninPosition};
+        let fr = FrameRate {
+            numerator: 24,
+            denominator: 1,
+        };
+        let tl =
+            super::build_timecode_burnin_filter(TimecodeBurninPosition::TopLeft, &fr, 1920, 1080);
+        assert!(tl.contains("x='"), "x expr present: {tl}");
+        assert!(!tl.contains("h-text_h-"), "TopLeft has no bottom anchor: {tl}");
+        let br =
+            super::build_timecode_burnin_filter(TimecodeBurninPosition::BottomRight, &fr, 1920, 1080);
+        assert!(br.contains("w-text_w-"), "BottomRight anchors x to right: {br}");
+        assert!(br.contains("h-text_h-"), "BottomRight anchors y to bottom: {br}");
+    }
+
+    #[test]
+    fn build_timecode_burnin_filter_zero_dimensions_returns_empty() {
+        use crate::model::project::{FrameRate, TimecodeBurninPosition};
+        let fr = FrameRate {
+            numerator: 30,
+            denominator: 1,
+        };
+        let f =
+            super::build_timecode_burnin_filter(TimecodeBurninPosition::TopLeft, &fr, 0, 1080);
+        assert!(f.is_empty(), "0-width returns empty filter: {f}");
     }
 
     #[test]

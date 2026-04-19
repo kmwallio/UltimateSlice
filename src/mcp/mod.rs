@@ -699,6 +699,11 @@ pub enum McpCommand {
         preset: String,
         reply: SyncSender<Value>,
     },
+    SetProgramMonitorTimecodeBurnin {
+        enabled: Option<bool>,
+        position: Option<String>,
+        reply: SyncSender<Value>,
+    },
     SetProgramMonitorAbCompare {
         enabled: Option<bool>,
         midline_percent: Option<f64>,
