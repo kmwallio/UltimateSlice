@@ -224,9 +224,25 @@ pub fn probe_media_metadata(path: &str) -> MediaProbeMetadata {
 
     // Prefer the embedded timecode track (required by FCP) over creation
     // date/time which is only useful for multi-cam sync.
+    //
+    // Resolution order:
+    //   1. Video-stream `timecode` tag (MOV/MP4 embedded timecode track —
+    //      what cameras write).
+    //   2. BWF bext `time_reference` format tag (audio-only WAV from
+    //      field recorders — Sound Devices / Zaxcom / Tascam all
+    //      write this). The value is samples-since-midnight at the
+    //      file's own sample rate, not 48k as sometimes assumed.
+    //   3. Container creation time, used only as a weak fallback.
     let file_path = uri.strip_prefix("file://").unwrap_or(&uri);
     let source_timecode_base_ns =
         extract_embedded_timecode(file_path, frame_rate_num, frame_rate_den)
+            .or_else(|| {
+                if is_audio_only {
+                    extract_bwf_time_reference_ns(file_path)
+                } else {
+                    None
+                }
+            })
             .or_else(|| extract_creation_time_ns(&info));
 
     MediaProbeMetadata {
@@ -279,6 +295,69 @@ fn extract_embedded_timecode(path: &str, fps_num: u32, fps_den: u32) -> Option<u
     }
 
     parse_timecode_to_ns(tc_string, fps_num, fps_den)
+}
+
+/// Read BWF bext `time_reference` (samples since midnight) + the
+/// audio stream's sample rate and convert to nanoseconds. This is
+/// the timecode metadata professional field recorders write into
+/// WAV files — Sound Devices, Zaxcom, Tascam, Zoom all use it.
+///
+/// Unlike audible LTC (decoded by `src/media/ltc.rs`), bext has no
+/// audio carrier: it's a metadata-only chunk in the WAV header.
+/// Reading it only requires an ffprobe invocation, not audio
+/// extraction + edge-detect decoding.
+///
+/// Returns `None` when either tag is absent, which is the common
+/// case for plain (non-BWF) WAVs or files recorded with recorders
+/// whose clocks weren't slaved to a TC source.
+fn extract_bwf_time_reference_ns(path: &str) -> Option<u64> {
+    use std::process::Command;
+
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=sample_rate:format_tags=time_reference",
+            "-of",
+            "default=noprint_wrappers=1:nokey=0",
+            path,
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    parse_bwf_time_reference_ns(&text)
+}
+
+/// Pure-function parser split out for unit tests. Reads the two
+/// key=value lines ffprobe emits for the bext / audio query above,
+/// tolerating either order, and converts samples + sample_rate to
+/// nanoseconds. Returns `None` when either line is missing, when
+/// the sample rate is 0, or when `time_reference=0` (which is
+/// indistinguishable from "no TC set" on default-initialised
+/// recorders — avoid populating a bogus 00:00:00:00 base).
+fn parse_bwf_time_reference_ns(ffprobe_stdout: &str) -> Option<u64> {
+    let mut sample_rate: Option<u64> = None;
+    let mut samples: Option<u64> = None;
+    for line in ffprobe_stdout.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("sample_rate=") {
+            sample_rate = rest.trim().parse().ok();
+        } else if let Some(rest) = line.strip_prefix("TAG:time_reference=") {
+            samples = rest.trim().parse().ok();
+        }
+    }
+    let samples = samples?;
+    if samples == 0 {
+        return None;
+    }
+    let sample_rate = sample_rate?.max(1);
+    Some(samples.saturating_mul(1_000_000_000) / sample_rate)
 }
 
 /// Parse a timecode string (HH:MM:SS:FF or HH:MM:SS;FF) to nanoseconds.
@@ -504,5 +583,60 @@ mod tests {
     #[test]
     fn test_ffprobe_dimensions_empty_output() {
         assert_eq!(ffprobe_dimensions("/definitely/missing/file"), (None, None));
+    }
+
+    #[test]
+    fn test_parse_bwf_time_reference_ns_from_user_wav() {
+        // Exactly matches what ffprobe reported on the test WAV:
+        //   sample_rate=48000
+        //   TAG:time_reference=2722197760
+        // Expected ns: 2722197760 * 1e9 / 48000 = 56712453333333
+        let out = "sample_rate=48000\nTAG:time_reference=2722197760\n";
+        let ns = parse_bwf_time_reference_ns(out).expect("valid BWF bext");
+        assert_eq!(ns, 56_712_453_333_333);
+    }
+
+    #[test]
+    fn test_parse_bwf_time_reference_ns_field_order_independent() {
+        // Same data, flipped line order — parser must tolerate both.
+        let out = "TAG:time_reference=48000\nsample_rate=48000\n";
+        let ns = parse_bwf_time_reference_ns(out).expect("valid BWF bext");
+        assert_eq!(ns, 1_000_000_000);
+    }
+
+    #[test]
+    fn test_parse_bwf_time_reference_ns_zero_is_treated_as_absent() {
+        // `time_reference=0` is the default for recorders that never
+        // wrote real TC — treat as None to avoid a spurious
+        // 00:00:00:00 base on files that have no timecode at all.
+        let out = "sample_rate=48000\nTAG:time_reference=0\n";
+        assert_eq!(parse_bwf_time_reference_ns(out), None);
+    }
+
+    #[test]
+    fn test_parse_bwf_time_reference_ns_missing_fields_return_none() {
+        // No TAG line at all (plain non-BWF WAV)
+        assert_eq!(
+            parse_bwf_time_reference_ns("sample_rate=48000\n"),
+            None
+        );
+        // Missing sample_rate — can't convert without it
+        assert_eq!(
+            parse_bwf_time_reference_ns("TAG:time_reference=48000\n"),
+            None
+        );
+        // Total garbage
+        assert_eq!(parse_bwf_time_reference_ns(""), None);
+    }
+
+    #[test]
+    fn test_parse_bwf_time_reference_ns_handles_non_48k_rate() {
+        // Not all BWF recorders use 48 kHz — some broadcast masters
+        // are 96 kHz. Conversion must scale by the actual rate, not
+        // a 48k assumption.
+        //   96000 Hz, 96000 samples → exactly 1 second
+        let out = "sample_rate=96000\nTAG:time_reference=96000\n";
+        let ns = parse_bwf_time_reference_ns(out).expect("valid BWF bext");
+        assert_eq!(ns, 1_000_000_000);
     }
 }
