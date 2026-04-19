@@ -7807,6 +7807,28 @@ pub fn build_window(
             });
     }
 
+    // Render-and-Replace: wire the "Apply to selected" batch button.
+    // Reads the primary clip's current checkbox state, applies it to
+    // every multi-selected clip via the timeline state's single
+    // undoable batch command, then nudges on_project_changed so the
+    // cache picks up the new toggles.
+    {
+        let iv = inspector_view.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        inspector_view
+            .render_replace_apply_to_selected_btn
+            .connect_clicked(move |_| {
+                let enabled = iv.render_replace_check.is_active();
+                let changed = timeline_state
+                    .borrow_mut()
+                    .set_render_replace_for_all_selected(enabled);
+                if changed {
+                    on_project_changed();
+                }
+            });
+    }
+
     let sync_tracking_controls: Rc<dyn Fn()> = {
         let inspector_view = inspector_view.clone();
         let project = project.clone();
@@ -19298,6 +19320,35 @@ pub fn build_window(
                     inspector_view
                         .render_replace_cancel_btn
                         .set_visible(is_pending);
+                }
+                // "Apply to selected" batch button — visible only when
+                // more than one clip is multi-selected and at least
+                // one of them is bakeable. Single-selection falls back
+                // to the regular checkbox flow.
+                let show_batch = {
+                    let ts = timeline_state_stt.borrow();
+                    let ids = ts.selected_clip_ids();
+                    if ids.len() <= 1 {
+                        false
+                    } else {
+                        let proj = project_for_stt.borrow();
+                        ids.iter().any(|id| {
+                            proj.clip_ref(id)
+                                .map(|c| {
+                                    crate::media::render_replace_cache::is_bakeable_kind(&c.kind)
+                                })
+                                .unwrap_or(false)
+                        })
+                    }
+                };
+                if inspector_view
+                    .render_replace_apply_to_selected_btn
+                    .is_visible()
+                    != show_batch
+                {
+                    inspector_view
+                        .render_replace_apply_to_selected_btn
+                        .set_visible(show_batch);
                 }
             }
             // Poll STT cache — apply generated subtitles via undo system.

@@ -2724,6 +2724,88 @@ impl TimelineState {
         true
     }
 
+    /// Flip `render_replace_enabled` on every clip in the current
+    /// multi-selection. Bakeable-kind clips (Video / Image / Audio /
+    /// Compound) get the new value; non-bakeable kinds (Title /
+    /// Adjustment / Multicam / Drawing) are silently skipped so the
+    /// batch doesn't churn the cache on things it can't bake anyway.
+    /// Same per-track `SetTrackClipsCommand` + `CompoundEditCommand`
+    /// pattern as `paste_color_grade_to_all_selected`, so one Ctrl+Z
+    /// undoes the whole batch. Returns true when at least one clip
+    /// changed.
+    pub fn set_render_replace_for_all_selected(&mut self, enabled: bool) -> bool {
+        let target_ids: HashSet<String> = if self.selected_clip_ids.is_empty() {
+            self.selected_clip_id
+                .iter()
+                .cloned()
+                .collect::<HashSet<String>>()
+        } else {
+            self.selected_clip_ids.clone()
+        };
+        if target_ids.is_empty() {
+            return false;
+        }
+        let per_track: Vec<(String, Vec<Clip>, Vec<Clip>)> = {
+            let proj = self.project.borrow();
+            let editing_tracks = self.resolve_editing_tracks(&proj);
+            editing_tracks
+                .iter()
+                .filter_map(|track| {
+                    let touches_track = track.clips.iter().any(|c| target_ids.contains(&c.id));
+                    if !touches_track {
+                        return None;
+                    }
+                    let old_clips = track.clips.clone();
+                    let mut new_clips = old_clips.clone();
+                    let mut any_changed = false;
+                    for clip in new_clips.iter_mut() {
+                        if !target_ids.contains(&clip.id) {
+                            continue;
+                        }
+                        if !crate::media::render_replace_cache::is_bakeable_kind(&clip.kind) {
+                            continue;
+                        }
+                        if clip.render_replace_enabled != enabled {
+                            clip.render_replace_enabled = enabled;
+                            any_changed = true;
+                        }
+                    }
+                    if any_changed {
+                        Some((track.id.clone(), old_clips, new_clips))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        if per_track.is_empty() {
+            return false;
+        }
+        let label = if enabled {
+            "Enable Render and Replace"
+        } else {
+            "Disable Render and Replace"
+        };
+        let children: Vec<Box<dyn crate::undo::EditCommand>> = per_track
+            .into_iter()
+            .map(|(track_id, old_clips, new_clips)| {
+                Box::new(SetTrackClipsCommand {
+                    track_id,
+                    old_clips,
+                    new_clips,
+                    label: label.to_string(),
+                }) as Box<dyn crate::undo::EditCommand>
+            })
+            .collect();
+        let cmd = crate::undo::CompoundEditCommand {
+            children,
+            description: format!("{label} (batch)"),
+        };
+        let mut proj = self.project.borrow_mut();
+        self.history.execute(Box::new(cmd), &mut proj);
+        true
+    }
+
     /// Paste the color grade clipboard onto every selected clip. Each
     /// affected track gets a single `SetTrackClipsCommand` child, and
     /// the whole batch is wrapped in one [`CompoundEditCommand`] so a
@@ -13204,6 +13286,42 @@ mod tests {
         assert!(!peers.contains(&ids_b[0]));
         assert!(!peers.contains(&ids_b[2]));
         assert!(!peers.contains(&ids_b[3]));
+    }
+
+    #[test]
+    fn set_render_replace_for_all_selected_applies_batch_to_multi_selection() {
+        let (mut st, _track_id, ids) = timeline_state_with_video_clips(&[
+            ("A", 0),
+            ("B", 1_000_000_000),
+            ("C", 2_000_000_000),
+        ]);
+        st.select_all_clips();
+        let changed = st.set_render_replace_for_all_selected(true);
+        assert!(changed);
+        {
+            let proj = st.project.borrow();
+            for id in &ids {
+                let clip = proj.clip_ref(id).expect("clip exists");
+                assert!(clip.render_replace_enabled, "{id} should be enabled");
+            }
+        }
+        // One Ctrl+Z reverts the whole batch.
+        st.undo();
+        let proj = st.project.borrow();
+        for id in &ids {
+            let clip = proj.clip_ref(id).expect("clip exists");
+            assert!(!clip.render_replace_enabled, "{id} should be reverted");
+        }
+    }
+
+    #[test]
+    fn set_render_replace_for_all_selected_is_noop_when_empty() {
+        let (mut st, _track_id, _ids) =
+            timeline_state_with_video_clips(&[("A", 0), ("B", 1_000_000_000)]);
+        // Clear any selection that select_all might have set.
+        let changed = st.set_render_replace_for_all_selected(true);
+        // No primary selection either → function returns false.
+        assert!(!changed);
     }
 
     #[test]

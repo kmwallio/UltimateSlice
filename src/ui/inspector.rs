@@ -581,6 +581,7 @@ pub struct InspectorView {
     pub render_replace_check: CheckButton,
     pub render_replace_status_label: Label,
     pub render_replace_cancel_btn: Button,
+    pub render_replace_apply_to_selected_btn: Button,
     // Applied frei0r effects
     pub frei0r_effects_section: GBox,
     pub frei0r_effects_list: GBox,
@@ -4675,6 +4676,19 @@ pub fn build_inspector(
          queued in the background.",
     ));
     render_replace_section.append(&render_replace_check);
+    // Batch toggle — visible only while the multi-selection holds
+    // more than one bakeable clip. Clicking flips every selected
+    // clip's `render_replace_enabled` to the primary clip's current
+    // checkbox state as one undoable batch, so the user doesn't have
+    // to click into each clip and toggle individually. Wiring + show/
+    // hide logic live in window.rs (it needs the timeline widget).
+    let render_replace_apply_to_selected_btn = Button::with_label("Apply to selected");
+    render_replace_apply_to_selected_btn.set_tooltip_text(Some(
+        "Apply the current Render-and-Replace state to every selected clip as one undoable batch.",
+    ));
+    render_replace_apply_to_selected_btn.set_visible(false);
+    render_replace_apply_to_selected_btn.set_halign(gtk::Align::Start);
+    render_replace_section.append(&render_replace_apply_to_selected_btn);
     let render_replace_status_row = GBox::new(Orientation::Horizontal, 6);
     let render_replace_status_label = Label::new(None);
     render_replace_status_label.set_halign(gtk::Align::Start);
@@ -11045,6 +11059,7 @@ pub fn build_inspector(
         render_replace_check,
         render_replace_status_label,
         render_replace_cancel_btn,
+        render_replace_apply_to_selected_btn,
         voice_isolation_slider,
         vi_pad_slider,
         vi_fade_slider,
