@@ -607,10 +607,21 @@ FCPXML persistence).
   cascade + alpha expression in export
 - [x] FCPXML round-trip for `ClipKind::Drawing`; auto-migration of
   stamped `.svg` Image clips on project load
-- [ ] **Hit-test shape selection.** Click an existing stroke / shape
-  in the monitor to highlight it; per-item Delete replaces the
-  current LIFO behaviour. Data already supports it via
-  `SetDrawingItemsCommand`.
+- [x] **Hit-test shape selection.** In Draw mode the Program Monitor
+  detects press-release clicks without measurable motion and runs
+  `drawing_item_hit` (Stroke via point-to-segment distance, Rectangle
+  filled-or-stroke, Ellipse SDF, Arrow as a capped line segment) in
+  reverse iteration order so the top-most hit wins. The matched item
+  is highlighted with a cyan dashed bounding box. Pressing
+  **Delete / Backspace** in Draw mode routes `selected_drawing_item`
+  through `on_drawing_delete_at(Some(idx))`, which removes that
+  specific item via `SetDrawingItemsCommand`; with no selection the
+  existing LIFO "pop most recent" fallback still applies. **Escape**
+  clears the selection without deleting, switching away from the
+  Draw tool also clears it, and the backing list setter guards
+  against a stale out-of-range index. Unit tests cover all four
+  `DrawingKind` variants plus endpoint clamping in
+  `point_to_segment_distance`.
 - [ ] **Background-encode progress feedback.** Show a spinner (or
   HUD text) while the first MOV bake is in flight so users know
   the static PNG they see isn't the final state.

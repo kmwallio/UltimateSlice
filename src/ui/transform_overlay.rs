@@ -1876,6 +1876,18 @@ impl TransformOverlay {
                         da_redraw_key.queue_draw();
                         return glib::Propagation::Stop;
                     }
+                    // Escape clears a drawing-item selection without
+                    // deleting anything — matches the conventional
+                    // "cancel current selection" affordance and keeps
+                    // the cyan highlight out of the user's way when
+                    // they want to keep drawing. Returns Stop only
+                    // when there was actually a selection to clear so
+                    // other Escape paths (SAM prompt, etc.) still run.
+                    if key == Key::Escape && selected_item_key.get().is_some() {
+                        selected_item_key.set(None);
+                        da_redraw_key.queue_draw();
+                        return glib::Propagation::Stop;
+                    }
                 }
 
                 // Escape cancels SAM prompt mode regardless of clip
@@ -2063,6 +2075,13 @@ impl TransformOverlay {
             None
         };
         self.drawing_area.set_cursor_from_name(cursor_name);
+        // A per-item drawing selection is a Draw-mode concept. Leaving
+        // the cyan highlight painted after the user leaves Draw would be
+        // visually confusing and bypass the "click to select, Delete to
+        // remove" contract. Drop it whenever we exit Draw mode.
+        if tool != crate::ui::timeline::ActiveTool::Draw {
+            self.selected_drawing_item.set(None);
+        }
         self.drawing_area.queue_draw();
     }
 
@@ -2935,4 +2954,120 @@ fn draw_mask_outline(
     }
 
     cr.restore().ok();
+}
+
+#[cfg(test)]
+mod hit_test_tests {
+    use super::{drawing_item_hit, point_to_segment_distance};
+    use crate::model::clip::{DrawingItem, DrawingKind};
+
+    // 1000×1000 canvas rect at origin so normalized points map 1:1 to pixels.
+    // vh = 1000 keeps scale_ref ≈ 0.926 inside drawing_item_hit, which means
+    // the stroke tolerance floor of `max(width*scale_ref, 4.0) * 1.8 ≈ 7.2 px`
+    // applies for tests using `width: 2.0`.
+    const VX: f64 = 0.0;
+    const VY: f64 = 0.0;
+    const VW: f64 = 1000.0;
+    const VH: f64 = 1000.0;
+
+    fn stroke_item(points: &[(f64, f64)]) -> DrawingItem {
+        DrawingItem {
+            kind: DrawingKind::Stroke,
+            points: points.to_vec(),
+            color: 0xFFFFFFFF,
+            width: 2.0,
+            fill_color: None,
+        }
+    }
+
+    #[test]
+    fn drawing_item_hit_stroke_near_midsegment_is_hit() {
+        let item = stroke_item(&[(0.10, 0.10), (0.90, 0.10)]);
+        // Click on the horizontal line at x=500, y=100 (dead center on the
+        // segment).
+        assert!(drawing_item_hit(&item, 500.0, 100.0, VX, VY, VW, VH));
+    }
+
+    #[test]
+    fn drawing_item_hit_stroke_far_from_segment_is_miss() {
+        let item = stroke_item(&[(0.10, 0.10), (0.90, 0.10)]);
+        // Same x as the stroke but 200 px below — well past any reasonable
+        // tolerance.
+        assert!(!drawing_item_hit(&item, 500.0, 300.0, VX, VY, VW, VH));
+    }
+
+    #[test]
+    fn drawing_item_hit_rectangle_filled_interior_is_hit_and_exterior_is_miss() {
+        let item = DrawingItem {
+            kind: DrawingKind::Rectangle,
+            points: vec![(0.20, 0.20), (0.80, 0.80)],
+            color: 0xFFFFFFFF,
+            width: 2.0,
+            fill_color: Some(0x80808080),
+        };
+        // Center of the rectangle → hit.
+        assert!(drawing_item_hit(&item, 500.0, 500.0, VX, VY, VW, VH));
+        // Well outside the bbox → miss.
+        assert!(!drawing_item_hit(&item, 50.0, 50.0, VX, VY, VW, VH));
+    }
+
+    #[test]
+    fn drawing_item_hit_rectangle_stroke_hollow_center_is_miss_edge_is_hit() {
+        let item = DrawingItem {
+            kind: DrawingKind::Rectangle,
+            points: vec![(0.20, 0.20), (0.80, 0.80)],
+            color: 0xFFFFFFFF,
+            width: 2.0,
+            fill_color: None,
+        };
+        // Interior (hollow rectangle) → miss.
+        assert!(!drawing_item_hit(&item, 500.0, 500.0, VX, VY, VW, VH));
+        // Right on the top edge → hit.
+        assert!(drawing_item_hit(&item, 500.0, 200.0, VX, VY, VW, VH));
+    }
+
+    #[test]
+    fn drawing_item_hit_ellipse_center_is_hit_far_outside_is_miss() {
+        let item = DrawingItem {
+            kind: DrawingKind::Ellipse,
+            points: vec![(0.30, 0.30), (0.70, 0.70)],
+            color: 0xFFFFFFFF,
+            width: 2.0,
+            fill_color: Some(0x40404040),
+        };
+        // Ellipse centered at (500, 500) with rx = ry = 200.
+        assert!(drawing_item_hit(&item, 500.0, 500.0, VX, VY, VW, VH));
+        // 800 px from center, way outside.
+        assert!(!drawing_item_hit(&item, 50.0, 50.0, VX, VY, VW, VH));
+    }
+
+    #[test]
+    fn drawing_item_hit_arrow_on_shaft_is_hit_far_off_is_miss() {
+        let item = DrawingItem {
+            kind: DrawingKind::Arrow,
+            points: vec![(0.10, 0.50), (0.90, 0.50)],
+            color: 0xFFFFFFFF,
+            width: 2.0,
+            fill_color: None,
+        };
+        // Midpoint of the shaft → hit.
+        assert!(drawing_item_hit(&item, 500.0, 500.0, VX, VY, VW, VH));
+        // Far perpendicular off the shaft → miss.
+        assert!(!drawing_item_hit(&item, 500.0, 800.0, VX, VY, VW, VH));
+    }
+
+    #[test]
+    fn point_to_segment_distance_clamps_outside_segment() {
+        // Segment along the x axis from (0, 0) to (100, 0).
+        // Query point to the left of the segment (−10, 0): distance should
+        // be 10 (endpoint distance), not 0 (unclamped perpendicular would
+        // project onto the line at x = −10 with perpendicular distance 0).
+        let d = point_to_segment_distance(-10.0, 0.0, 0.0, 0.0, 100.0, 0.0);
+        assert!((d - 10.0).abs() < 1e-6, "left-of-segment endpoint clamp: {d}");
+
+        // Query point to the right of the segment (150, 0): clamped to the
+        // (100, 0) endpoint, distance 50.
+        let d = point_to_segment_distance(150.0, 0.0, 0.0, 0.0, 100.0, 0.0);
+        assert!((d - 50.0).abs() < 1e-6, "right-of-segment endpoint clamp: {d}");
+    }
 }
