@@ -1095,6 +1095,15 @@ fn fold_inner_clip(
         return;
     }
 
+    // Inner-clip masks — the compound bake routes through the full
+    // export pipeline, which bakes per-clip masks into the final
+    // composited alpha. So changes to an INNER clip's mask list (add,
+    // remove, shape, geometry, feather, keyframes) DO change the
+    // compound sidecar's pixels and must invalidate. Standalone
+    // (non-compound) bakes deliberately leave masks live — that
+    // signature path is in `fold_baked_fields` and stays untouched.
+    fold_clip_masks(hasher, &clip.masks);
+
     // Leaf clip: fold its baked-scope signature (same key-space as
     // `cache_key_for_clip` minus the prefix/suffix). This means an inner
     // leaf clip with its own render-replace sidecar shares hash bits
@@ -1102,6 +1111,81 @@ fn fold_inner_clip(
     // baked content is identical.
     let leaf_key = cache_key_for_clip(clip);
     hasher.add(leaf_key.as_str());
+}
+
+/// Fold a clip's mask list into the compound signature. Skips
+/// disabled masks + silent-noop clips (no masks) so casually-
+/// attached empty state doesn't churn the cache. Each enabled mask
+/// hashes its shape, geometry, feather/expansion, invert, keyframe
+/// lanes, and optional path vertex set.
+fn fold_clip_masks(
+    hasher: &mut crate::media::cache_key::CacheKeyHasher,
+    masks: &[crate::model::clip::ClipMask],
+) {
+    if masks.iter().all(|m| !m.enabled) {
+        return;
+    }
+    hasher.add("masks");
+    for (idx, mask) in masks.iter().enumerate() {
+        if !mask.enabled {
+            continue;
+        }
+        let shape_tag: u8 = match mask.shape {
+            crate::model::clip::MaskShape::Rectangle => 1,
+            crate::model::clip::MaskShape::Ellipse => 2,
+            crate::model::clip::MaskShape::Path => 3,
+        };
+        hasher
+            .add(idx as u32)
+            .add(mask.id.as_str())
+            .add(shape_tag)
+            .add((mask.center_x * 10_000.0) as i64)
+            .add((mask.center_y * 10_000.0) as i64)
+            .add((mask.width * 10_000.0) as i64)
+            .add((mask.height * 10_000.0) as i64)
+            .add((mask.rotation * 100.0) as i64)
+            .add((mask.feather * 10_000.0) as i64)
+            .add((mask.expansion * 10_000.0) as i64)
+            .add(if mask.invert { 1u8 } else { 0u8 });
+        // Keyframe lanes — fold each lane's time + value so
+        // animated masks flip the signature per edit.
+        for kf in &mask.center_x_keyframes {
+            hasher.add(kf.time_ns).add((kf.value * 10_000.0) as i64);
+        }
+        for kf in &mask.center_y_keyframes {
+            hasher.add(kf.time_ns).add((kf.value * 10_000.0) as i64);
+        }
+        for kf in &mask.width_keyframes {
+            hasher.add(kf.time_ns).add((kf.value * 10_000.0) as i64);
+        }
+        for kf in &mask.height_keyframes {
+            hasher.add(kf.time_ns).add((kf.value * 10_000.0) as i64);
+        }
+        for kf in &mask.rotation_keyframes {
+            hasher.add(kf.time_ns).add((kf.value * 100.0) as i64);
+        }
+        for kf in &mask.feather_keyframes {
+            hasher.add(kf.time_ns).add((kf.value * 10_000.0) as i64);
+        }
+        for kf in &mask.expansion_keyframes {
+            hasher.add(kf.time_ns).add((kf.value * 10_000.0) as i64);
+        }
+        // Bezier path points — only present for Path-shape masks,
+        // but fold them when present so adding/moving a vertex
+        // invalidates the bake.
+        if let Some(ref path) = mask.path {
+            hasher.add("path").add(path.points.len() as u32);
+            for point in &path.points {
+                hasher
+                    .add((point.x * 10_000.0) as i64)
+                    .add((point.y * 10_000.0) as i64)
+                    .add((point.handle_in_x * 10_000.0) as i64)
+                    .add((point.handle_in_y * 10_000.0) as i64)
+                    .add((point.handle_out_x * 10_000.0) as i64)
+                    .add((point.handle_out_y * 10_000.0) as i64);
+            }
+        }
+    }
 }
 
 /// Construct a synthetic Project that wraps a compound's internal
@@ -2269,6 +2353,91 @@ mod tests {
             cache_key_for_compound(&a),
             cache_key_for_compound(&b),
             "editing an inner clip's brightness must invalidate"
+        );
+    }
+
+    #[test]
+    fn compound_signature_changes_when_inner_mask_added() {
+        use crate::model::clip::{ClipMask, MaskShape};
+        // Baseline compound — no masks on the inner clip.
+        let a = make_compound_with_one_inner(0.0);
+        // Clone so the inner clip keeps the same UUID; then add an
+        // enabled rectangle mask. The export pipeline bakes that
+        // mask into the sidecar's alpha, so the compound signature
+        // MUST flip.
+        let mut b = a.clone();
+        {
+            let inner = &mut b.compound_tracks.as_mut().unwrap()[0].clips[0];
+            inner.masks.push(ClipMask::new(MaskShape::Rectangle));
+        }
+        assert_ne!(
+            cache_key_for_compound(&a),
+            cache_key_for_compound(&b),
+            "adding a mask to an inner clip must invalidate the compound sidecar"
+        );
+    }
+
+    #[test]
+    fn compound_signature_changes_on_inner_mask_geometry_edit() {
+        use crate::model::clip::{ClipMask, MaskShape};
+        let mut a = make_compound_with_one_inner(0.0);
+        {
+            let inner = &mut a.compound_tracks.as_mut().unwrap()[0].clips[0];
+            let mut mask = ClipMask::new(MaskShape::Ellipse);
+            mask.center_x = 0.5;
+            mask.center_y = 0.5;
+            mask.width = 0.3;
+            inner.masks.push(mask);
+        }
+        let mut b = a.clone();
+        {
+            let inner = &mut b.compound_tracks.as_mut().unwrap()[0].clips[0];
+            inner.masks[0].center_x = 0.4;
+        }
+        assert_ne!(
+            cache_key_for_compound(&a),
+            cache_key_for_compound(&b),
+            "shifting an inner mask's center_x must invalidate the compound sidecar"
+        );
+    }
+
+    #[test]
+    fn compound_signature_stable_when_inner_mask_is_disabled() {
+        use crate::model::clip::{ClipMask, MaskShape};
+        // Clone instead of calling make_compound twice — otherwise the
+        // two compounds get different random inner clip UUIDs and
+        // their signatures differ for reasons unrelated to masks.
+        let a = make_compound_with_one_inner(0.0);
+        let mut b = a.clone();
+        {
+            let inner = &mut b.compound_tracks.as_mut().unwrap()[0].clips[0];
+            let mut mask = ClipMask::new(MaskShape::Rectangle);
+            mask.enabled = false;
+            inner.masks.push(mask);
+        }
+        assert_eq!(
+            cache_key_for_compound(&a),
+            cache_key_for_compound(&b),
+            "a disabled mask has no observable effect on the bake — signature must stay"
+        );
+    }
+
+    #[test]
+    fn leaf_signature_stable_across_mask_edits() {
+        use crate::model::clip::{ClipMask, MaskShape};
+        // Leaf (non-compound) clips deliberately leave masks LIVE —
+        // the bake only covers the pixel-level effect stack. So adding
+        // or tweaking a mask on a standalone clip must NOT invalidate
+        // the bake. This is a different path from the compound walker.
+        let a = make_clip();
+        let mut b = a.clone();
+        let mut mask = ClipMask::new(MaskShape::Rectangle);
+        mask.center_x = 0.4;
+        b.masks.push(mask);
+        assert_eq!(
+            cache_key_for_clip(&a),
+            cache_key_for_clip(&b),
+            "standalone-clip mask edits must be free — masks stay live, not baked"
         );
     }
 
