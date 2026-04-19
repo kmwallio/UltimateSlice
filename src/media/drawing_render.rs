@@ -451,6 +451,14 @@ pub fn drawing_encode_is_pending() -> bool {
     PENDING_DRAWING_ENCODES.with(|set| !set.borrow().is_empty())
 }
 
+/// Number of drawing-animation encodes currently in flight on the
+/// background thread pool. Main-thread only. Used by the Program
+/// Monitor HUD pill + Jobs-tray entry for a "N drawing animations
+/// baking" detail string.
+pub fn drawing_encode_pending_count() -> usize {
+    PENDING_DRAWING_ENCODES.with(|set| set.borrow().len())
+}
+
 /// Install the "encode finished" callback once at window build time.
 /// Replaces any previously installed callback.
 pub fn install_drawing_encode_complete_callback(cb: Box<dyn Fn()>) {

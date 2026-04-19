@@ -12707,6 +12707,25 @@ pub fn build_window(
             ));
         }
 
+        // Spinner-animation tick for the drawing-animation bake HUD.
+        // Every 120 ms while any encode is in flight, queue_draw on
+        // the transform-overlay DrawingArea so the rotating arc
+        // advances visibly. When no encodes are pending the tick
+        // returns `Continue(true)` but the draw_func early-outs on
+        // `drawing_encode_pending_count() == 0`, so the cost is
+        // basically nil (one cheap queue_draw).
+        {
+            let transform_overlay_cell = transform_overlay_cell.clone();
+            glib::timeout_add_local(std::time::Duration::from_millis(120), move || {
+                if crate::media::drawing_render::drawing_encode_pending_count() > 0 {
+                    if let Some(ref to) = *transform_overlay_cell.borrow() {
+                        to.drawing_area.queue_draw();
+                    }
+                }
+                glib::ControlFlow::Continue
+            });
+        }
+
         // Forward tool changes (toolbar or keyboard) to the overlay so
         // its gesture router switches into Draw-mode capture. Wraps any
         // pre-installed `on_tool_changed` (toolbar button sync) so both
@@ -18771,6 +18790,31 @@ pub fn build_window(
                         cancel_action: Some(BackgroundJobCancelAction::Tracking { clip_id }),
                     });
                 }
+            }
+
+            // Drawing-animation bake — the MOV encoder pool is a
+            // main-thread-only structure with no per-job progress
+            // (the encoder runs ffmpeg to completion and reports
+            // back). Surface it as a pulsing entry so users know
+            // work is happening; cancel is not supported (encode
+            // jobs are short-lived and cancelling mid-encode would
+            // leave a partial cache file).
+            let drawing_pending =
+                crate::media::drawing_render::drawing_encode_pending_count();
+            if drawing_pending > 0 {
+                jobs.push(ActiveBackgroundJob {
+                    id: "drawing-animation-bake".to_string(),
+                    title: "Drawing animation bake".to_string(),
+                    detail: if drawing_pending == 1 {
+                        "1 drawing animation encoding…".to_string()
+                    } else {
+                        format!("{drawing_pending} drawing animations encoding…")
+                    },
+                    progress_text: "Running…".to_string(),
+                    fraction: None,
+                    pulse: true,
+                    cancel_action: None,
+                });
             }
 
             let voice_enhance_progress = voice_enhance_cache.borrow().progress();

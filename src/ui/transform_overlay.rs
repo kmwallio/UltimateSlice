@@ -459,33 +459,75 @@ impl TransformOverlay {
                 draw_outside_vignette(cr, ww as f64, wh as f64, vx, vy, vw, vh);
                 draw_frame_border(cr, vx, vy, vw, vh);
 
-                // ── Background-encode feedback ──────────────────
-                // Visible in *any* tool while a drawing animation
-                // WebM is baking; keeps users from thinking the
-                // static PNG they see is the final render.
-                if !draw_active
-                    && crate::media::drawing_render::drawing_encode_is_pending()
-                {
-                    let note = "Baking drawing animation…";
+                // ── Drawing-animation bake feedback ─────────────
+                // Visible in *any* tool (including Draw mode) while at
+                // least one drawing-animation MOV encode is running
+                // in the background — keeps users from thinking the
+                // static PNG they see in the Program Monitor is the
+                // final render. The pill includes an animated spinner
+                // arc that rotates with wall-clock time, and — for
+                // multiple concurrent bakes — a "N jobs" counter.
+                // Anchored top-right so it doesn't collide with the
+                // Draw tool's own HUD pill (top-left).
+                let pending_count =
+                    crate::media::drawing_render::drawing_encode_pending_count();
+                if pending_count > 0 {
+                    let note = if pending_count == 1 {
+                        "Baking drawing animation…".to_string()
+                    } else {
+                        format!("Baking {} drawing animations…", pending_count)
+                    };
                     cr.select_font_face(
                         "Sans",
                         gtk4::cairo::FontSlant::Normal,
                         gtk4::cairo::FontWeight::Bold,
                     );
                     cr.set_font_size(12.0);
-                    let ext = cr.text_extents(note).unwrap_or(
-                        gtk4::cairo::TextExtents::new(0.0, 0.0, 180.0, 12.0, 0.0, 0.0),
+                    let ext = cr.text_extents(&note).unwrap_or(
+                        gtk4::cairo::TextExtents::new(0.0, 0.0, 200.0, 12.0, 0.0, 0.0),
                     );
-                    let pill_w = ext.width() + 24.0;
-                    let pill_h = ext.height() + 12.0;
-                    let px = vx + 12.0;
+                    // Layout: [spinner arc] [gap] [text] — all inside
+                    // a rounded pill. Spinner sits to the left of the
+                    // text and rotates via atan2'd sweep angle from
+                    // wall time.
+                    let spinner_r = 6.5;
+                    let spinner_gap = 8.0;
+                    let inner_pad_x = 10.0;
+                    let inner_pad_y = 6.0;
+                    let content_w = spinner_r * 2.0 + spinner_gap + ext.width();
+                    let pill_w = content_w + inner_pad_x * 2.0;
+                    let pill_h = ext.height().max(spinner_r * 2.0) + inner_pad_y * 2.0;
+                    // Anchor top-right of the video rect.
+                    let px = vx + vw - pill_w - 12.0;
                     let py = vy + 12.0;
-                    cr.set_source_rgba(0.0, 0.0, 0.0, 0.72);
+                    cr.save().ok();
+                    cr.set_source_rgba(0.0, 0.0, 0.0, 0.78);
                     cr.rectangle(px, py, pill_w, pill_h);
                     let _ = cr.fill();
+                    // Animated spinner arc — 90° sweep rotating once
+                    // per 1.2 s. Uses the system clock so the
+                    // animation stays smooth across multiple
+                    // queue_draw cycles from the periodic tick the
+                    // window.rs poll loop drives below.
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs_f64())
+                        .unwrap_or(0.0);
+                    let phase = (now % 1.2) / 1.2;
+                    let sweep_start = phase * std::f64::consts::TAU;
+                    let sweep_end = sweep_start + std::f64::consts::FRAC_PI_2 * 3.0;
+                    let cx = px + inner_pad_x + spinner_r;
+                    let cy = py + pill_h * 0.5;
                     cr.set_source_rgba(0.2, 0.8, 1.0, 0.95);
-                    cr.move_to(px + 12.0, py + 6.0 + ext.height());
-                    let _ = cr.show_text(note);
+                    cr.set_line_width(2.0);
+                    cr.arc(cx, cy, spinner_r, sweep_start, sweep_end);
+                    let _ = cr.stroke();
+                    cr.move_to(
+                        cx + spinner_r + spinner_gap,
+                        py + inner_pad_y + ext.height(),
+                    );
+                    let _ = cr.show_text(&note);
+                    cr.restore().ok();
                 }
 
                 // ── Draw-tool HUD: show current brush state ─────
@@ -503,17 +545,11 @@ impl TransformOverlay {
                         Some(_) => " +fill",
                         None => "",
                     };
-                    // Signal a background WebM bake in flight so the
-                    // user knows the static PNG they're seeing isn't
-                    // the final state.
-                    let baking_text =
-                        if crate::media::drawing_render::drawing_encode_is_pending() {
-                            "   • baking animation…"
-                        } else {
-                            ""
-                        };
+                    // The bake-in-flight indicator is rendered as the
+                    // separate top-right spinner pill above, so the
+                    // Draw HUD stays focused on brush state.
                     let label = format!(
-                        "Draw [{kind_label}]  •  #{:06X}  •  {w:.0}px{fill_text}{baking_text}   (1/2/3/4 pick shape · click to select · Del removes)",
+                        "Draw [{kind_label}]  •  #{:06X}  •  {w:.0}px{fill_text}   (1/2/3/4 pick shape · click to select · Del removes)",
                         color >> 8
                     );
                     // Dark pill in the canvas top-left.

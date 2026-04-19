@@ -622,9 +622,18 @@ FCPXML persistence).
   against a stale out-of-range index. Unit tests cover all four
   `DrawingKind` variants plus endpoint clamping in
   `point_to_segment_distance`.
-- [ ] **Background-encode progress feedback.** Show a spinner (or
-  HUD text) while the first MOV bake is in flight so users know
-  the static PNG they see isn't the final state.
+- [x] **Background-encode progress feedback.** Program Monitor
+  transform overlay now renders a top-right "Baking drawing
+  animation…" pill with a rotating spinner arc while at least one
+  MOV encode is in flight, driven by a 120 ms `queue_draw` tick
+  on the overlay DrawingArea that only fires work when
+  `drawing_encode_pending_count() > 0`. Multiple concurrent
+  bakes show a "Baking N drawing animations…" counter.
+  Background Jobs tray ("Drawing animation bake — N drawing
+  animations encoding…") mirrors the state alongside the other
+  background caches. The pill stays visible in *all* tools
+  (including Draw mode) so users always see the signal that the
+  static PNG isn't the final render.
 - [x] **Cache janitor.** Age-based sweep
   (`crate::media::drawing_render::sweep_drawing_cache`) runs at
   startup and removes cached `ultimate-slice-drawing-*.{png,mov,webm}`
