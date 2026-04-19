@@ -85,6 +85,10 @@ pub(crate) fn handle_mcp_command(
     apply_preferences_state: &Rc<dyn Fn(crate::ui_state::PreferencesState)>,
     apply_program_monitor_hud: &Rc<dyn Fn(bool)>,
     apply_program_monitor_aspect_mask: &Rc<dyn Fn(crate::ui_state::AspectMaskPreset)>,
+    apply_program_monitor_ab_enabled: &Rc<dyn Fn(bool)>,
+    apply_program_monitor_ab_midline: &Rc<dyn Fn(f64)>,
+    apply_program_monitor_ab_reference: &Rc<dyn Fn(Option<String>)>,
+    refresh_reference_stills: &Rc<dyn Fn()>,
     suppress_resume_on_next_reload: &Rc<Cell<bool>>,
     clear_media_browser_on_next_reload: &Rc<Cell<bool>>,
 ) {
@@ -1177,6 +1181,185 @@ pub(crate) fn handle_mcp_command(
                                 "unknown aspect_mask preset '{}': expected one of none, cinemascope, univisium, academy, standard, square, social_45, vertical",
                                 preset
                             )
+                        }))
+                        .ok();
+                }
+            }
+        }
+
+        McpCommand::SetProgramMonitorAbCompare {
+            enabled,
+            midline_percent,
+            reference_still_id,
+            clear_reference,
+            reply,
+        } => {
+            // Reference first so enabling without a reference still paints an
+            // empty overlay clearly. `clear_reference` wins over an explicit id.
+            if clear_reference {
+                apply_program_monitor_ab_reference(None);
+            } else if let Some(id) = reference_still_id {
+                // Validate id exists in the project so the MCP response can be
+                // authoritative about whether the activation took effect.
+                let exists = project.borrow().reference_stills.iter().any(|s| s.id == id);
+                if !exists {
+                    reply
+                        .send(json!({
+                            "success": false,
+                            "error": format!("no reference still with id {}", id),
+                        }))
+                        .ok();
+                    return;
+                }
+                apply_program_monitor_ab_reference(Some(id));
+            }
+            if let Some(pct) = midline_percent {
+                apply_program_monitor_ab_midline(pct.clamp(0.0, 100.0));
+            }
+            if let Some(en) = enabled {
+                apply_program_monitor_ab_enabled(en);
+            }
+            reply
+                .send(json!({
+                    "success": true,
+                }))
+                .ok();
+        }
+
+        McpCommand::CaptureReferenceStill { label, reply } => {
+            let at_cap = project.borrow().reference_stills.len() >= 4;
+            if at_cap {
+                reply
+                    .send(json!({
+                        "success": false,
+                        "error": "reference still limit reached (max 4); delete one first"
+                    }))
+                    .ok();
+                return;
+            }
+            let frame = match prog_player.borrow_mut().capture_current_frame_rgba() {
+                Ok(f) => f,
+                Err(e) => {
+                    reply
+                        .send(json!({
+                            "success": false,
+                            "error": format!("capture failed: {e}")
+                        }))
+                        .ok();
+                    return;
+                }
+            };
+            if let Err(e) = crate::media::reference_still::ensure_reference_stills_dir() {
+                reply
+                    .send(json!({
+                        "success": false,
+                        "error": format!("cache dir: {e}")
+                    }))
+                    .ok();
+                return;
+            }
+            let mut still = crate::model::project::ReferenceStill::new("Still");
+            still.captured_at_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            still.width = frame.width as u32;
+            still.height = frame.height as u32;
+            still.filename = crate::media::reference_still::filename_for_id(&still.id);
+            still.label = match label.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                Some(l) => l.to_string(),
+                None => format!("Still {}", project.borrow().reference_stills.len() + 1),
+            };
+            let path = crate::media::reference_still::still_path(&still.filename);
+            if let Err(e) = crate::media::reference_still::write_png(&path, &frame) {
+                reply
+                    .send(json!({
+                        "success": false,
+                        "error": format!("write: {e}")
+                    }))
+                    .ok();
+                return;
+            }
+            let new_id = still.id.clone();
+            let new_label = still.label.clone();
+            {
+                let mut proj = project.borrow_mut();
+                proj.reference_stills.push(still);
+                proj.dirty = true;
+            }
+            on_project_changed();
+            apply_program_monitor_ab_reference(Some(new_id.clone()));
+            refresh_reference_stills();
+            reply
+                .send(json!({
+                    "success": true,
+                    "id": new_id,
+                    "label": new_label,
+                    "path": path.to_string_lossy().to_string(),
+                }))
+                .ok();
+        }
+
+        McpCommand::ListReferenceStills { reply } => {
+            let proj = project.borrow();
+            let items: Vec<Value> = proj
+                .reference_stills
+                .iter()
+                .map(|s| {
+                    let path = crate::media::reference_still::still_path(&s.filename);
+                    let exists = path.exists();
+                    json!({
+                        "id": s.id,
+                        "label": s.label,
+                        "captured_at_ns": s.captured_at_ns,
+                        "timeline_pos_ns": s.timeline_pos_ns,
+                        "width": s.width,
+                        "height": s.height,
+                        "filename": s.filename,
+                        "ungraded": s.ungraded,
+                        "path": path.to_string_lossy().to_string(),
+                        "exists": exists,
+                    })
+                })
+                .collect();
+            reply
+                .send(json!({
+                    "success": true,
+                    "reference_stills": items,
+                }))
+                .ok();
+        }
+
+        McpCommand::DeleteReferenceStill { id, reply } => {
+            let filename_to_remove = {
+                let mut proj = project.borrow_mut();
+                let pos = proj.reference_stills.iter().position(|s| s.id == id);
+                if let Some(pos) = pos {
+                    let removed = proj.reference_stills.remove(pos);
+                    proj.dirty = true;
+                    Some(removed.filename)
+                } else {
+                    None
+                }
+            };
+            match filename_to_remove {
+                Some(filename) => {
+                    crate::media::reference_still::delete_still(&filename);
+                    on_project_changed();
+                    apply_program_monitor_ab_reference(None);
+                    refresh_reference_stills();
+                    reply
+                        .send(json!({
+                            "success": true,
+                            "id": id,
+                        }))
+                        .ok();
+                }
+                None => {
+                    reply
+                        .send(json!({
+                            "success": false,
+                            "error": format!("no reference still with id {id}"),
                         }))
                         .ok();
                 }

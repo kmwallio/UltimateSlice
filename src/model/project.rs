@@ -42,6 +42,54 @@ impl Marker {
     }
 }
 
+/// A pinned reference still captured from the Program Monitor, used as the
+/// fixed side of the A/B compare wipe. Thumbnails are stored as PNGs under
+/// `$XDG_CACHE_HOME/ultimateslice/reference_stills/<id>.png`; the project
+/// stores only metadata + filename so the actual pixel data travels with
+/// the cache rather than bloating project XML.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReferenceStill {
+    pub id: String,
+    #[serde(default)]
+    pub label: String,
+    /// Timestamp (system-time ns since UNIX epoch) of capture — used for sort order.
+    #[serde(default)]
+    pub captured_at_ns: u64,
+    /// Timeline position (ns) the still was captured at. Purely informational.
+    #[serde(default)]
+    pub timeline_pos_ns: u64,
+    /// Captured pixel dimensions (for aspect-correct overlay scaling).
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+    /// Filename within the reference_stills cache directory
+    /// (e.g. `d4f2...png`). Not a full path.
+    #[serde(default)]
+    pub filename: String,
+    /// True if this still was captured with grading bypassed.
+    #[serde(default)]
+    pub ungraded: bool,
+}
+
+impl ReferenceStill {
+    pub fn new(label: impl Into<String>) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            label: label.into(),
+            captured_at_ns: 0,
+            timeline_pos_ns: 0,
+            width: 0,
+            height: 0,
+            filename: String::new(),
+            ungraded: false,
+        }
+    }
+}
+
+/// Maximum number of reference stills that can be pinned per project.
+pub const MAX_REFERENCE_STILLS: usize = 4;
+
 /// Frame rate as a rational number
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FrameRate {
@@ -149,6 +197,11 @@ pub struct Project {
     /// Music submix bus (all tracks with `AudioRole::Music`).
     #[serde(default)]
     pub music_bus: AudioBus,
+    /// Pinned reference stills for the Program Monitor A/B-compare wipe.
+    /// Capped at `MAX_REFERENCE_STILLS`. Saved in FCPXML as the
+    /// `us:reference-stills` vendor attr on the event element.
+    #[serde(default)]
+    pub reference_stills: Vec<ReferenceStill>,
     /// Dirty flag — true if there are unsaved changes
     #[serde(skip)]
     pub dirty: bool,
@@ -253,6 +306,7 @@ impl Project {
             dialogue_bus: AudioBus::default(),
             effects_bus: AudioBus::default(),
             music_bus: AudioBus::default(),
+            reference_stills: Vec::new(),
             dirty: false,
             file_path: None,
             source_fcpxml: None,

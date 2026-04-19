@@ -12045,6 +12045,17 @@ pub fn build_window(
         })
     };
 
+    // A/B compare — handlers installed after the build_program_monitor call
+    // because they need access to the returned setters. The call below uses
+    // thin dispatchers that read from these cells.
+    let on_capture_still_impl: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    let on_select_still_impl: Rc<RefCell<Option<Rc<dyn Fn(Option<String>)>>>> =
+        Rc::new(RefCell::new(None));
+    let on_delete_still_impl: Rc<RefCell<Option<Rc<dyn Fn(String)>>>> =
+        Rc::new(RefCell::new(None));
+    let on_rename_still_impl: Rc<RefCell<Option<Rc<dyn Fn(String, String)>>>> =
+        Rc::new(RefCell::new(None));
+
     let (
         prog_monitor_widget,
         pos_label,
@@ -12062,6 +12073,10 @@ pub fn build_window(
         prog_aspect_mask_setter,
         prog_frame_updater,
         prog_subtitle_text_setter,
+        prog_ab_enabled_setter,
+        prog_ab_midline_setter,
+        prog_ab_reference_setter,
+        prog_stills_strip_setter,
     ) = {
         // Drawing edits (shape commits, per-item deletes) each fire
         // `on_project_changed`, which runs a two-phase program-player
@@ -13337,6 +13352,67 @@ pub fn build_window(
             // Scopes toggle below `prog_monitor_host`, not in the
             // Program Monitor header, so we pass None here.
             None,
+            // ── A/B compare / reference-still strip wiring ──
+            // TODO(ab-compare): initial-state + wiring callbacks are
+            // placeholders that the apply_program_monitor_ab_* setters will
+            // drive. The ScheduleProjectReload path re-applies initial stills
+            // once the project loads in `refresh_reference_stills_strip`.
+            monitor_state.borrow().ab_compare_enabled,
+            monitor_state.borrow().ab_midline_percent,
+            Vec::new(),
+            monitor_state.borrow().ab_reference_still_id.clone(),
+            {
+                let monitor_state = monitor_state.clone();
+                move |enabled| {
+                    let mut state = monitor_state.borrow_mut();
+                    if state.ab_compare_enabled != enabled {
+                        state.ab_compare_enabled = enabled;
+                        crate::ui_state::save_program_monitor_state(&state);
+                    }
+                }
+            },
+            {
+                let monitor_state = monitor_state.clone();
+                move |pct| {
+                    let mut state = monitor_state.borrow_mut();
+                    if (state.ab_midline_percent - pct).abs() > 1e-3 {
+                        state.ab_midline_percent = pct;
+                        crate::ui_state::save_program_monitor_state(&state);
+                    }
+                }
+            },
+            {
+                let slot = on_capture_still_impl.clone();
+                move || {
+                    if let Some(f) = slot.borrow().as_ref() {
+                        f();
+                    }
+                }
+            },
+            {
+                let slot = on_select_still_impl.clone();
+                move |id: Option<String>| {
+                    if let Some(f) = slot.borrow().as_ref() {
+                        f(id);
+                    }
+                }
+            },
+            {
+                let slot = on_delete_still_impl.clone();
+                move |id: String| {
+                    if let Some(f) = slot.borrow().as_ref() {
+                        f(id);
+                    }
+                }
+            },
+            {
+                let slot = on_rename_still_impl.clone();
+                move |id: String, label: String| {
+                    if let Some(f) = slot.borrow().as_ref() {
+                        f(id, label);
+                    }
+                }
+            },
         )
     };
 
@@ -13421,6 +13497,280 @@ pub fn build_window(
             }
         })
     };
+
+    // ── A/B compare: shared setter + reference-still refresh ─────────────
+    //
+    // The Program Monitor returns four setters (ab_enabled, ab_midline,
+    // ab_reference, stills_strip). Mutation paths (capture/delete/rename,
+    // project reload, MCP calls) all go through the apply_program_monitor_ab_*
+    // closures below so UI state + ProgramMonitorState persistence stay in
+    // sync. `refresh_reference_stills` re-reads the project's still list,
+    // decodes each PNG (once per refresh, missing files become placeholder
+    // cells), and pushes both the strip list and the active-reference pixel
+    // data into the corresponding setters.
+    let apply_program_monitor_ab_enabled: Rc<dyn Fn(bool)> = {
+        let ab_enabled_setter = prog_ab_enabled_setter.clone();
+        let monitor_state = monitor_state.clone();
+        Rc::new(move |enabled: bool| {
+            ab_enabled_setter(enabled);
+            let mut state = monitor_state.borrow_mut();
+            if state.ab_compare_enabled != enabled {
+                state.ab_compare_enabled = enabled;
+                crate::ui_state::save_program_monitor_state(&state);
+            }
+        })
+    };
+    let apply_program_monitor_ab_midline: Rc<dyn Fn(f64)> = {
+        let ab_midline_setter = prog_ab_midline_setter.clone();
+        let monitor_state = monitor_state.clone();
+        Rc::new(move |pct: f64| {
+            let clamped = pct.clamp(0.0, 100.0);
+            ab_midline_setter(clamped);
+            let mut state = monitor_state.borrow_mut();
+            if (state.ab_midline_percent - clamped).abs() > 1e-3 {
+                state.ab_midline_percent = clamped;
+                crate::ui_state::save_program_monitor_state(&state);
+            }
+        })
+    };
+
+    // Rebuild the Program Monitor reference-stills strip and active-reference
+    // pixel data from the current project. Call after any capture / delete /
+    // rename, and after every project load / replacement.
+    let refresh_reference_stills: Rc<dyn Fn()> = {
+        let project = project.clone();
+        let monitor_state = monitor_state.clone();
+        let strip_setter = prog_stills_strip_setter.clone();
+        let ref_setter = prog_ab_reference_setter.clone();
+        Rc::new(move || {
+            let (summaries, active_decoded, active_id) = {
+                let proj = project.borrow();
+                let active_id = monitor_state
+                    .borrow()
+                    .ab_reference_still_id
+                    .clone()
+                    .filter(|id| proj.reference_stills.iter().any(|s| &s.id == id));
+
+                let mut active_decoded: Option<Rc<crate::media::reference_still::DecodedStill>> =
+                    None;
+                let mut summaries: Vec<crate::ui::program_monitor::ReferenceStillSummary> =
+                    Vec::with_capacity(proj.reference_stills.len());
+                for still in &proj.reference_stills {
+                    let path =
+                        crate::media::reference_still::still_path(&still.filename);
+                    let decoded = crate::media::reference_still::load_decoded(&path)
+                        .ok()
+                        .map(Rc::new);
+                    if active_id.as_deref() == Some(still.id.as_str()) {
+                        active_decoded = decoded.clone();
+                    }
+                    summaries.push(crate::ui::program_monitor::ReferenceStillSummary {
+                        id: still.id.clone(),
+                        label: still.label.clone(),
+                        thumbnail: decoded,
+                    });
+                }
+                (summaries, active_decoded, active_id)
+            };
+            strip_setter(summaries, active_id);
+            ref_setter(active_decoded);
+        })
+    };
+
+    let apply_program_monitor_ab_reference: Rc<dyn Fn(Option<String>)> = {
+        let monitor_state = monitor_state.clone();
+        let project = project.clone();
+        let refresh = refresh_reference_stills.clone();
+        let apply_enabled = apply_program_monitor_ab_enabled.clone();
+        Rc::new(move |id: Option<String>| {
+            let valid_id = id.and_then(|id| {
+                let proj = project.borrow();
+                proj.reference_stills
+                    .iter()
+                    .find(|s| s.id == id)
+                    .map(|s| s.id.clone())
+            });
+            {
+                let mut state = monitor_state.borrow_mut();
+                if state.ab_reference_still_id != valid_id {
+                    state.ab_reference_still_id = valid_id.clone();
+                    crate::ui_state::save_program_monitor_state(&state);
+                }
+            }
+            // Selecting a still also enables the compare overlay so the user
+            // immediately sees the wipe. Deselecting (None) turns it off.
+            apply_enabled(valid_id.is_some());
+            refresh();
+        })
+    };
+
+    // Install the capture handler: grab current compositor frame, write PNG,
+    // push onto project.reference_stills, refresh the strip, and activate the
+    // new still as the A/B reference.
+    {
+        let project = project.clone();
+        let prog_player = prog_player.clone();
+        let apply_ab_reference = apply_program_monitor_ab_reference.clone();
+        let refresh = refresh_reference_stills.clone();
+        let on_project_changed = on_project_changed.clone();
+        let window_weak = window.downgrade();
+        let toast: Rc<dyn Fn(&str, ToastSeverity)> = {
+            let window_weak = window_weak.clone();
+            Rc::new(move |msg: &str, sev: ToastSeverity| {
+                if let Some(w) = window_weak.upgrade() {
+                    show_window_status_toast(&w, msg, sev);
+                }
+            })
+        };
+        let handler: Rc<dyn Fn()> = Rc::new(move || {
+            let at_cap = project.borrow().reference_stills.len() >= 4;
+            if at_cap {
+                toast(
+                    "Reference still limit reached — delete one before capturing another.",
+                    ToastSeverity::Warning,
+                );
+                return;
+            }
+            let frame = match prog_player.borrow_mut().capture_current_frame_rgba() {
+                Ok(f) => f,
+                Err(e) => {
+                    log::warn!("reference still capture failed: {e}");
+                    toast(
+                        "Could not capture a reference still — the Program Monitor has not produced a frame yet.",
+                        ToastSeverity::Error,
+                    );
+                    return;
+                }
+            };
+            if let Err(e) = crate::media::reference_still::ensure_reference_stills_dir() {
+                log::warn!("reference still dir create: {e}");
+                toast(
+                    "Failed to create reference-still cache directory.",
+                    ToastSeverity::Error,
+                );
+                return;
+            }
+            let mut still = crate::model::project::ReferenceStill::new("Still");
+            still.captured_at_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            still.width = frame.width as u32;
+            still.height = frame.height as u32;
+            still.filename = crate::media::reference_still::filename_for_id(&still.id);
+            still.label = format!(
+                "Still {}",
+                project.borrow().reference_stills.len() + 1
+            );
+            let path = crate::media::reference_still::still_path(&still.filename);
+            if let Err(e) = crate::media::reference_still::write_png(&path, &frame) {
+                log::warn!("reference still write failed: {e}");
+                toast(
+                    "Failed to write the reference still PNG to disk.",
+                    ToastSeverity::Error,
+                );
+                return;
+            }
+            let new_id = still.id.clone();
+            {
+                let mut proj = project.borrow_mut();
+                proj.reference_stills.push(still);
+                proj.dirty = true;
+            }
+            on_project_changed();
+            refresh();
+            apply_ab_reference(Some(new_id));
+        });
+        *on_capture_still_impl.borrow_mut() = Some(handler);
+    }
+
+    // Select handler: change the active reference still (None clears + turns
+    // off the wipe).
+    {
+        let apply_ab_reference = apply_program_monitor_ab_reference.clone();
+        let apply_enabled = apply_program_monitor_ab_enabled.clone();
+        let monitor_state = monitor_state.clone();
+        let handler: Rc<dyn Fn(Option<String>)> = Rc::new(move |id| {
+            // Clicking the already-active still toggles the compare off.
+            let current = monitor_state.borrow().ab_reference_still_id.clone();
+            if let (Some(ref new_id), Some(ref cur)) = (&id, &current) {
+                if new_id == cur && monitor_state.borrow().ab_compare_enabled {
+                    apply_enabled(false);
+                    return;
+                }
+            }
+            apply_ab_reference(id);
+        });
+        *on_select_still_impl.borrow_mut() = Some(handler);
+    }
+
+    // Delete handler: remove from project + disk, refresh strip, clear active
+    // selection if it pointed at the deleted still.
+    {
+        let project = project.clone();
+        let apply_ab_reference = apply_program_monitor_ab_reference.clone();
+        let refresh = refresh_reference_stills.clone();
+        let on_project_changed = on_project_changed.clone();
+        let monitor_state = monitor_state.clone();
+        let handler: Rc<dyn Fn(String)> = Rc::new(move |id: String| {
+            let filename_to_remove = {
+                let mut proj = project.borrow_mut();
+                let pos = proj.reference_stills.iter().position(|s| s.id == id);
+                if let Some(pos) = pos {
+                    let removed = proj.reference_stills.remove(pos);
+                    proj.dirty = true;
+                    Some(removed.filename)
+                } else {
+                    None
+                }
+            };
+            if let Some(filename) = filename_to_remove {
+                crate::media::reference_still::delete_still(&filename);
+            }
+            let was_active = {
+                let state = monitor_state.borrow();
+                state.ab_reference_still_id.as_deref() == Some(id.as_str())
+            };
+            if was_active {
+                apply_ab_reference(None);
+            }
+            on_project_changed();
+            refresh();
+        });
+        *on_delete_still_impl.borrow_mut() = Some(handler);
+    }
+
+    // Rename handler: in-place label change.
+    {
+        let project = project.clone();
+        let refresh = refresh_reference_stills.clone();
+        let on_project_changed = on_project_changed.clone();
+        let handler: Rc<dyn Fn(String, String)> = Rc::new(move |id: String, new_label: String| {
+            let changed = {
+                let mut proj = project.borrow_mut();
+                if let Some(still) = proj.reference_stills.iter_mut().find(|s| s.id == id) {
+                    let trimmed = new_label.trim().to_string();
+                    if still.label != trimmed {
+                        still.label = trimmed;
+                        proj.dirty = true;
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            };
+            if changed {
+                on_project_changed();
+                refresh();
+            }
+        });
+        *on_rename_still_impl.borrow_mut() = Some(handler);
+    }
+
+    // Apply the current (just-loaded) stills + active reference.
+    refresh_reference_stills();
 
     // ── Loudness Radar popover callbacks ──────────────────────────────
     //
@@ -19262,6 +19612,10 @@ pub fn build_window(
         let main_stack_for_mcp = main_stack.clone();
         let window_weak = window.downgrade();
         let workspace_layout_pending_name_for_mcp = workspace_layout_pending_name.clone();
+        let apply_program_monitor_ab_enabled_mcp = apply_program_monitor_ab_enabled.clone();
+        let apply_program_monitor_ab_midline_mcp = apply_program_monitor_ab_midline.clone();
+        let apply_program_monitor_ab_reference_mcp = apply_program_monitor_ab_reference.clone();
+        let refresh_reference_stills_mcp = refresh_reference_stills.clone();
         MCP_MAIN_DISPATCH.with(|slot| {
             *slot.borrow_mut() = Some(Box::new(move |cmd| {
                 if let Some(win) = window_weak.upgrade() {
@@ -19299,6 +19653,10 @@ pub fn build_window(
                         &apply_preferences_state,
                         &apply_program_monitor_hud,
                         &apply_program_monitor_aspect_mask,
+                        &apply_program_monitor_ab_enabled_mcp,
+                        &apply_program_monitor_ab_midline_mcp,
+                        &apply_program_monitor_ab_reference_mcp,
+                        &refresh_reference_stills_mcp,
                         &suppress_resume_on_next_reload,
                         &clear_media_browser_on_next_reload,
                     );
@@ -19983,6 +20341,10 @@ fn handle_mcp_command(
     apply_preferences_state: &Rc<dyn Fn(crate::ui_state::PreferencesState)>,
     apply_program_monitor_hud: &Rc<dyn Fn(bool)>,
     apply_program_monitor_aspect_mask: &Rc<dyn Fn(crate::ui_state::AspectMaskPreset)>,
+    apply_program_monitor_ab_enabled: &Rc<dyn Fn(bool)>,
+    apply_program_monitor_ab_midline: &Rc<dyn Fn(f64)>,
+    apply_program_monitor_ab_reference: &Rc<dyn Fn(Option<String>)>,
+    refresh_reference_stills: &Rc<dyn Fn()>,
     suppress_resume_on_next_reload: &Rc<Cell<bool>>,
     clear_media_browser_on_next_reload: &Rc<Cell<bool>>,
 ) {
@@ -20020,6 +20382,10 @@ fn handle_mcp_command(
         apply_preferences_state,
         apply_program_monitor_hud,
         apply_program_monitor_aspect_mask,
+        apply_program_monitor_ab_enabled,
+        apply_program_monitor_ab_midline,
+        apply_program_monitor_ab_reference,
+        refresh_reference_stills,
         suppress_resume_on_next_reload,
         clear_media_browser_on_next_reload,
     );

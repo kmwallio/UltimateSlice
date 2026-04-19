@@ -425,6 +425,11 @@ pub(crate) struct UltimateSliceProjectOtioMetadata {
     pub(crate) music_bus_muted: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) music_bus_soloed: Option<bool>,
+    /// Program Monitor reference stills pinned for A/B-compare. Empty means
+    /// "not authored" and is skipped on serialization so legacy projects
+    /// don't grow on round-trip.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub(crate) reference_stills: Vec<crate::model::project::ReferenceStill>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

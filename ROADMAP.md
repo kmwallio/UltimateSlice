@@ -729,8 +729,8 @@ FCPXML persistence).
 
 **Program Monitor polish**
 - [x] HUD overlay — togglable overlay showing timecode, frame number, fps, resolution, and dropped-frame count (reuse `src/ui/timecode.rs`); shortcut **Shift+H**; persists via `ProgramMonitorState.show_hud`; MCP `set_program_monitor_hud`
-- [ ] A/B compare / split-view — vertical wipe between graded and ungraded versions of the current frame, draggable midline
-- [ ] Reference still pin — capture the current frame as a pinned thumbnail strip (up to 4 stills) for color-matching across scenes
+- [x] A/B compare / split-view — Program Monitor **Overlays ▾** now contains a **Reference stills** section with an **A/B compare** toggle that draws a vertical wipe between the live Program Monitor frame and the active pinned still, with a draggable midline (diamond handle, ±10 px drag zone). Enable state + midline position persist via `ProgramMonitorState.ab_compare_enabled` / `ab_midline_percent`. MCP `set_program_monitor_ab_compare`. Live-pipeline grading-bypass capture for explicit graded-vs-ungraded comparisons is deferred — users can reset Inspector sliders temporarily to capture an ungraded reference.
+- [x] Reference still pin — **📷 Capture current frame** button writes a PNG under `$XDG_CACHE_HOME/ultimateslice/reference_stills/<id>.png`, appends metadata to `Project.reference_stills` (cap 4), and populates the strip inline. Click a thumbnail to activate it as the A/B reference; right-click to **Rename…** or **Delete**. Round-trips through FCPXML `us:reference-stills` vendor attr and OTIO `ultimateslice.project.reference_stills`. MCP `capture_reference_still` / `list_reference_stills` / `delete_reference_still`. Preview-only (never baked into exports or prerender segments).
 - [x] Cinemascope / aspect-ratio mask overlay — dropdown in the **Overlays ▾** popover offering 2.39 : 1, 2.00 : 1, 1.85 : 1, 4 : 3, 1 : 1, 4 : 5, 9 : 16 (plus None) with translucent bars + 1 px guide line; persists via `ProgramMonitorState.aspect_mask`; MCP `set_program_monitor_aspect_mask`
 
 **Workspace & Ergonomics**

@@ -3293,6 +3293,49 @@ impl ProgramPlayer {
         result
     }
 
+    /// Capture the current Program Monitor composited frame as an RGBA
+    /// `ScopeFrame` at project resolution. Used by the A/B compare reference-
+    /// still workflow. Mirrors the pause/reseek/wait/restore flow of
+    /// `export_displayed_frame_ppm`, but returns the frame in memory rather
+    /// than writing to disk.
+    pub fn capture_current_frame_rgba(&mut self) -> Result<ScopeFrame> {
+        let was_playing = self.state == PlayerState::Playing;
+        if was_playing {
+            self.pause();
+        }
+        let start_comp_seq = self.compositor_frame_seq.load(Ordering::Relaxed);
+        let was_scope_enabled = self.scope_enabled.swap(true, Ordering::Relaxed);
+        let was_comp_capture = self
+            .compositor_capture_enabled
+            .swap(true, Ordering::Relaxed);
+        let result = (|| -> Result<ScopeFrame> {
+            self.reseek_all_slots_for_export();
+            let deadline = Instant::now() + Duration::from_millis(1200);
+            while self.compositor_frame_seq.load(Ordering::Relaxed) <= start_comp_seq
+                && Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let comp_now = self.compositor_frame_seq.load(Ordering::Relaxed);
+            if comp_now <= start_comp_seq {
+                return Err(anyhow!("no fresh project-resolution frame available yet"));
+            }
+            self.latest_compositor_frame
+                .lock()
+                .ok()
+                .and_then(|f| f.clone())
+                .ok_or_else(|| anyhow!("no compositor frame available yet"))
+        })();
+        self.scope_enabled
+            .store(was_scope_enabled, Ordering::Relaxed);
+        self.compositor_capture_enabled
+            .store(was_comp_capture, Ordering::Relaxed);
+        if was_playing {
+            self.play();
+        }
+        result
+    }
+
     /// Phase 1 of async export: enable scope capture, trigger re-seek on all
     /// decoder slots + background, and return (start_seq, was_scope_enabled, left_playing).
     /// The caller should release the borrow on ProgramPlayer after this call,

@@ -694,6 +694,24 @@ pub enum McpCommand {
         preset: String,
         reply: SyncSender<Value>,
     },
+    SetProgramMonitorAbCompare {
+        enabled: Option<bool>,
+        midline_percent: Option<f64>,
+        reference_still_id: Option<String>,
+        clear_reference: bool,
+        reply: SyncSender<Value>,
+    },
+    CaptureReferenceStill {
+        label: Option<String>,
+        reply: SyncSender<Value>,
+    },
+    ListReferenceStills {
+        reply: SyncSender<Value>,
+    },
+    DeleteReferenceStill {
+        id: String,
+        reply: SyncSender<Value>,
+    },
     SetPrerenderProjectPersistence {
         enabled: bool,
         reply: SyncSender<Value>,

@@ -29,6 +29,7 @@ pub mod player;
 pub(crate) mod prerender_filters;
 pub mod probe_cache;
 pub mod program_player;
+pub mod reference_still;
 pub mod project_health;
 pub mod proxy_cache;
 #[cfg(feature = "ai-inference")]

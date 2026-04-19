@@ -71,6 +71,9 @@ pub fn parse_otio_with_path(json: &str, otio_path: Option<&Path>) -> Result<Proj
     if let Some(v) = us_project.music_bus_soloed {
         project.music_bus.soloed = v;
     }
+    if !us_project.reference_stills.is_empty() {
+        project.reference_stills = us_project.reference_stills.clone();
+    }
     // Clear default tracks that Project::new creates.
     project.tracks.clear();
 

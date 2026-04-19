@@ -1665,6 +1665,63 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_program_monitor_ab_compare",
+            "description": "Control the Program Monitor A/B-compare wipe overlay. Arguments are all optional; any omitted field is left unchanged. Pass reference_still_id to activate a specific pinned still; pass clear_reference=true to deactivate without disabling the toggle.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "true to show the wipe, false to hide it. Omit to leave unchanged."
+                    },
+                    "midline_percent": {
+                        "type": "number",
+                        "description": "Midline position as a percentage (0..100) of canvas width. 50 = centered. Omit to leave unchanged."
+                    },
+                    "reference_still_id": {
+                        "type": "string",
+                        "description": "ID of a reference still (see list_reference_stills) to activate as the wipe reference. Omit to leave unchanged."
+                    },
+                    "clear_reference": {
+                        "type": "boolean",
+                        "description": "When true, clear any active reference still and turn the overlay off. Takes precedence over reference_still_id."
+                    }
+                }
+            }
+        },
+        {
+            "name": "capture_reference_still",
+            "description": "Capture the current Program Monitor composited frame as a reference still (max 4 per project). Returns the new still's id and cache PNG path. The still is automatically activated as the A/B-compare reference.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "label": {
+                        "type": "string",
+                        "description": "Optional human-readable label shown on the strip cell. Defaults to 'Still N'."
+                    }
+                }
+            }
+        },
+        {
+            "name": "list_reference_stills",
+            "description": "List all reference stills currently pinned in the project, with id, label, capture timestamp (ns since epoch), dimensions, cache filename, and whether the PNG is present on disk.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        },
+        {
+            "name": "delete_reference_still",
+            "description": "Delete a reference still by id. Removes the PNG from the cache directory and clears it from Program Monitor state if it was the active A/B reference.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "The reference still id (see list_reference_stills)." }
+                },
+                "required": ["id"]
+            }
+        },
+        {
             "name": "set_background_ai_indexing",
             "description": "Enable or disable automatic background AI indexing for Media Library search enrichment. When enabled, eligible library items are queued one at a time for transcript indexing (Whisper) and visual embedding generation (CLIP-style search) when the corresponding models are available.",
             "inputSchema": {
@@ -3749,6 +3806,39 @@ fn dispatch_tool_payload(
         },
         "set_program_monitor_aspect_mask" => McpCommand::SetProgramMonitorAspectMask {
             preset: arg_str!(args, "preset", "none"),
+            reply: tx,
+        },
+        "set_program_monitor_ab_compare" => {
+            let enabled = args.get("enabled").and_then(|v| v.as_bool());
+            let midline_percent = args
+                .get("midline_percent")
+                .and_then(|v| v.as_f64());
+            let reference_still_id = args
+                .get("reference_still_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let clear_reference = args
+                .get("clear_reference")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            McpCommand::SetProgramMonitorAbCompare {
+                enabled,
+                midline_percent,
+                reference_still_id,
+                clear_reference,
+                reply: tx,
+            }
+        }
+        "capture_reference_still" => McpCommand::CaptureReferenceStill {
+            label: args
+                .get("label")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            reply: tx,
+        },
+        "list_reference_stills" => McpCommand::ListReferenceStills { reply: tx },
+        "delete_reference_still" => McpCommand::DeleteReferenceStill {
+            id: arg_str!(args, "id", ""),
             reply: tx,
         },
         "set_background_ai_indexing" => McpCommand::SetBackgroundAiIndexing {

@@ -243,6 +243,13 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                 event.push_attribute(("us:transcript-cache", transcript_cache.as_str()));
             }
         }
+        // Reference stills for Program Monitor A/B compare (vendor-only —
+        // strict writer drops them because there's no DTD equivalent).
+        if !project.reference_stills.is_empty() {
+            if let Ok(json) = serde_json::to_string(&project.reference_stills) {
+                event.push_attribute(("us:reference-stills", json.as_str()));
+            }
+        }
     }
     writer.write_event(Event::Start(event))?;
 
@@ -4401,6 +4408,7 @@ fn is_writer_managed_event_attr(_key: &str) -> bool {
             | "us:media-annotations"
             | "us:script-path"
             | "us:transcript-cache"
+            | "us:reference-stills"
     )
 }
 
@@ -5153,6 +5161,36 @@ mod tests {
             .expect("uspxml extension write should succeed");
         assert!(!strict.contains("xmlns:us=\"urn:ultimateslice\""));
         assert!(rich.contains("xmlns:us=\"urn:ultimateslice\""));
+    }
+
+    #[test]
+    fn test_reference_stills_round_trip_through_fcpxml() {
+        use crate::fcpxml::parser::parse_fcpxml;
+        let mut project = Project::new("ReferenceStillsRT");
+        let mut still = crate::model::project::ReferenceStill::new("Take 1");
+        still.width = 1920;
+        still.height = 1080;
+        still.captured_at_ns = 42_000_000_000;
+        still.timeline_pos_ns = 5_000_000_000;
+        still.filename = format!("{}.png", still.id);
+        project.reference_stills.push(still.clone());
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(
+            xml.contains("us:reference-stills="),
+            "reference stills vendor attr missing"
+        );
+
+        let roundtripped = parse_fcpxml(&xml).expect("parse");
+        assert_eq!(roundtripped.reference_stills.len(), 1);
+        let got = &roundtripped.reference_stills[0];
+        assert_eq!(got.id, still.id);
+        assert_eq!(got.label, "Take 1");
+        assert_eq!(got.width, 1920);
+        assert_eq!(got.height, 1080);
+        assert_eq!(got.filename, still.filename);
+        assert_eq!(got.captured_at_ns, 42_000_000_000);
+        assert_eq!(got.timeline_pos_ns, 5_000_000_000);
     }
 
     #[test]

@@ -640,6 +640,7 @@ fn write_otio_with_mode(
             } else {
                 None
             },
+            reference_stills: project.reference_stills.clone(),
         }),
     };
 
@@ -967,5 +968,25 @@ mod tests {
             ),
             "../media/my%20file.mp4"
         );
+    }
+
+    #[test]
+    fn test_reference_stills_round_trip_through_otio() {
+        let mut p = make_project();
+        let mut still = crate::model::project::ReferenceStill::new("Ref A");
+        still.width = 1280;
+        still.height = 720;
+        still.captured_at_ns = 10_000_000_000;
+        still.filename = format!("{}.png", still.id);
+        p.reference_stills.push(still.clone());
+
+        let json = write_otio(&p).unwrap();
+        let parsed = crate::otio::parser::parse_otio(&json).expect("parse");
+        assert_eq!(parsed.reference_stills.len(), 1);
+        assert_eq!(parsed.reference_stills[0].id, still.id);
+        assert_eq!(parsed.reference_stills[0].label, "Ref A");
+        assert_eq!(parsed.reference_stills[0].width, 1280);
+        assert_eq!(parsed.reference_stills[0].height, 720);
+        assert_eq!(parsed.reference_stills[0].filename, still.filename);
     }
 }

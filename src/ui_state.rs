@@ -38,6 +38,19 @@ pub struct ProgramMonitorState {
     /// Aspect-ratio mask overlay preset on the Program Monitor.
     #[serde(default)]
     pub aspect_mask: AspectMaskPreset,
+    /// When true, the Program Monitor renders an A/B wipe overlay against
+    /// the currently selected reference still (`ab_reference_still_id`).
+    #[serde(default)]
+    pub ab_compare_enabled: bool,
+    /// Vertical midline position of the A/B wipe, as a percentage (0.0–100.0)
+    /// of the video canvas width. 50.0 = centred.
+    #[serde(default = "default_ab_midline")]
+    pub ab_midline_percent: f64,
+    /// Id of the active reference still used as the right-hand side of the
+    /// wipe. When `None` or pointing at a missing still, the overlay is a
+    /// no-op even if `ab_compare_enabled` is true.
+    #[serde(default)]
+    pub ab_reference_still_id: Option<String>,
 }
 
 /// Delivery-format letterbox/pillarbox preview selected from the Program
@@ -129,6 +142,10 @@ fn default_zebra_threshold() -> f64 {
     0.90
 }
 
+fn default_ab_midline() -> f64 {
+    50.0
+}
+
 fn default_width() -> i32 {
     960
 }
@@ -215,6 +232,9 @@ impl Default for ProgramMonitorState {
             zebra_threshold: default_zebra_threshold(),
             show_hud: false,
             aspect_mask: AspectMaskPreset::None,
+            ab_compare_enabled: false,
+            ab_midline_percent: default_ab_midline(),
+            ab_reference_still_id: None,
         }
     }
 }
@@ -1982,6 +2002,30 @@ mod tests {
     }
 
     #[test]
+    fn program_monitor_state_loads_legacy_json_without_ab_fields() {
+        // ui-state.json written before the A/B compare feature shipped will be
+        // missing the three new fields. `#[serde(default)]` must fill them
+        // with defaults so startup does not crash.
+        let legacy = r#"{
+            "popped": false,
+            "width": 960,
+            "height": 540,
+            "docked_split_pos": 420,
+            "scopes_visible": false,
+            "show_safe_areas": false,
+            "show_false_color": false,
+            "show_zebra": false,
+            "zebra_threshold": 0.90,
+            "show_hud": false,
+            "aspect_mask": "none"
+        }"#;
+        let parsed: ProgramMonitorState = serde_json::from_str(legacy).expect("parse");
+        assert!(!parsed.ab_compare_enabled);
+        assert!((parsed.ab_midline_percent - 50.0).abs() < 1e-9);
+        assert!(parsed.ab_reference_still_id.is_none());
+    }
+
+    #[test]
     fn program_monitor_workspace_state_copies_geometry_only() {
         let monitor = ProgramMonitorState {
             popped: true,
@@ -1995,6 +2039,9 @@ mod tests {
             zebra_threshold: 0.95,
             show_hud: true,
             aspect_mask: AspectMaskPreset::Cinemascope,
+            ab_compare_enabled: false,
+            ab_midline_percent: 50.0,
+            ab_reference_still_id: None,
         };
         let workspace = ProgramMonitorWorkspaceState::from_program_monitor_state(&monitor);
         assert!(workspace.popped);

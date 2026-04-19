@@ -182,6 +182,14 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                                 project.parsed_transcript_cache_json =
                                     Some(transcript_cache.clone());
                             }
+                            if let Some(stills_json) = attrs.get("us:reference-stills") {
+                                if let Ok(stills) = serde_json::from_str::<
+                                    Vec<crate::model::project::ReferenceStill>,
+                                >(stills_json)
+                                {
+                                    project.reference_stills = stills;
+                                }
+                            }
                             project.fcpxml_unknown_event.attrs =
                                 collect_unknown_attrs(&attrs, is_known_event_attr);
                         } else {
@@ -3021,6 +3029,7 @@ fn is_known_event_attr(_key: &str) -> bool {
             | "us:media-annotations"
             | "us:script-path"
             | "us:transcript-cache"
+            | "us:reference-stills"
     )
 }
 
