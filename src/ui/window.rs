@@ -13636,6 +13636,20 @@ pub fn build_window(
         )
     };
 
+    // Re-sync Program Monitor project-scoped overlays from the current
+    // `project`. Called whenever a project swap replaces the model in
+    // place (File → Open, Open Recent, autosave recovery, startup open).
+    // Writes straight to the overlay setter without mutating the project,
+    // so it doesn't mark dirty or fire on_project_changed.
+    let sync_program_monitor_from_project: Rc<dyn Fn()> = {
+        let setter = prog_timecode_burnin_setter.clone();
+        let project = project.clone();
+        Rc::new(move || {
+            let p = project.borrow();
+            setter(p.timecode_burnin_enabled, p.timecode_burnin_position);
+        })
+    };
+
     // ── A/B compare: shared setter + reference-still refresh ─────────────
     //
     // The Program Monitor returns four setters (ab_enabled, ab_midline,
@@ -18159,6 +18173,7 @@ pub fn build_window(
                 let project = project.clone();
                 let timeline_state = timeline_state_for_welcome.clone();
                 let on_project_changed = on_project_changed.clone();
+                let sync_monitor = sync_program_monitor_from_project.clone();
                 let window = window_for_welcome.clone();
                 let stack = stack_for_open;
                 move || {
@@ -18176,6 +18191,7 @@ pub fn build_window(
                     let project = project.clone();
                     let timeline_state = timeline_state.clone();
                     let on_project_changed = on_project_changed.clone();
+                    let sync_monitor = sync_monitor.clone();
 
                     let stack = stack.clone();
                     dialog.open(Some(&window), gtk4::gio::Cancellable::NONE, move |result| {
@@ -18193,6 +18209,7 @@ pub fn build_window(
                                 });
                                 let project = project.clone();
                                 let on_project_changed = on_project_changed.clone();
+                                let sync_monitor = sync_monitor.clone();
 
                                 let timeline_state = timeline_state.clone();
                                 let stack = stack.clone();
@@ -18207,6 +18224,7 @@ pub fn build_window(
                                             *project.borrow_mut() = new_proj;
                                             timeline_state.borrow_mut().loading = false;
 
+                                            sync_monitor();
                                             on_project_changed();
                                             stack.set_visible_child_name("editor");
                                             glib::ControlFlow::Break
@@ -18235,6 +18253,7 @@ pub fn build_window(
                 let project = project.clone();
                 let timeline_state = timeline_state_for_welcome.clone();
                 let on_project_changed = on_project_changed.clone();
+                let sync_monitor = sync_program_monitor_from_project.clone();
 
                 let stack = stack_for_recent;
                 move |path_str: String| {
@@ -18249,6 +18268,7 @@ pub fn build_window(
                     });
                     let project = project.clone();
                     let on_project_changed = on_project_changed.clone();
+                    let sync_monitor = sync_monitor.clone();
 
                     let timeline_state = timeline_state.clone();
                     let stack = stack.clone();
@@ -18262,6 +18282,7 @@ pub fn build_window(
                             crate::recent::push(&path_str);
                             *project.borrow_mut() = new_proj;
                             timeline_state.borrow_mut().loading = false;
+                            sync_monitor();
                             on_project_changed();
                             stack.set_visible_child_name("editor");
                             glib::ControlFlow::Break
@@ -18286,6 +18307,7 @@ pub fn build_window(
                 let project = project.clone();
                 let timeline_state = timeline_state_for_welcome.clone();
                 let on_project_changed = on_project_changed.clone();
+                let sync_monitor = sync_program_monitor_from_project.clone();
                 let stack = stack_for_recover;
                 move |entry: crate::project_versions::RecoverableAutosave| {
                     match crate::project_versions::load_fcpxml_project(&entry.autosave_path) {
@@ -18294,6 +18316,7 @@ pub fn build_window(
                             new_proj.file_path = entry.metadata.project_file_path.clone();
                             new_proj.dirty = true;
                             *project.borrow_mut() = new_proj;
+                            sync_monitor();
                             {
                                 let mut st = timeline_state.borrow_mut();
                                 st.playhead_ns = 0;
@@ -20605,6 +20628,7 @@ pub fn build_window(
         let project = project.clone();
         let timeline_state = timeline_state.clone();
         let on_project_changed = on_project_changed.clone();
+        let sync_monitor = sync_program_monitor_from_project.clone();
         let suppress_resume_on_next_reload = suppress_resume_on_next_reload.clone();
         let clear_media_browser_on_next_reload = clear_media_browser_on_next_reload.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(10), move || {
@@ -20616,6 +20640,7 @@ pub fn build_window(
                     timeline_state.borrow_mut().loading = false;
                     suppress_resume_on_next_reload.set(true);
                     clear_media_browser_on_next_reload.set(true);
+                    sync_monitor();
                     on_project_changed();
                     glib::ControlFlow::Break
                 }
