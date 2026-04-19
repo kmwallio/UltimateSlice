@@ -6841,9 +6841,24 @@ pub fn build_timeline(
                         // Right-click clip → keep current selection if already selected, otherwise
                         // select just the clicked clip before showing clip actions.
                         let hit = st.hit_test(x, y);
-                        if let Some(h) = hit {
+                        let actionability_info = if let Some(ref h) = hit {
                             st.prepare_clip_context_menu_selection(&h.clip_id, &h.track_id);
-                            let actionability = st.clip_context_menu_actionability();
+                            Some(st.clip_context_menu_actionability())
+                        } else {
+                            None
+                        };
+                        sel_cb = st.on_clip_selected.clone();
+                        new_sel = st.selected_clip_id.clone();
+                        // Must drop the mutable state borrow BEFORE calling
+                        // `apply_clip_context_menu_actionability`: that helper
+                        // calls `set_tooltip_text` on the Sync-by-Timecode
+                        // button, which synchronously re-emits the widget's
+                        // query-tooltip signal. Our `connect_query_tooltip`
+                        // handler at the top of `build_timeline` borrows
+                        // state, so holding `borrow_mut()` across the call
+                        // would panic "already mutably borrowed".
+                        drop(st);
+                        if let Some(actionability) = actionability_info {
                             if apply_clip_context_menu_actionability(
                                 &btn_join_through_edit,
                                 &btn_freeze_frame,
@@ -6867,11 +6882,11 @@ pub fn build_timeline(
                                 show_context_menu = true;
                             }
                         }
-                        sel_cb = st.on_clip_selected.clone();
-                        new_sel = st.selected_clip_id.clone();
                     }
 
-                    drop(st);
+                    // `st` was explicitly dropped above when the right-click
+                    // actionability path ran; other branches of this
+                    // button == 3 block still own `st` at this point.
                     if let Some(cb) = sel_cb {
                         cb(new_sel);
                     }
