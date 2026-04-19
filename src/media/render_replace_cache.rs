@@ -100,6 +100,12 @@ enum RenderReplaceJob {
         /// PCM s24le audio stream. Today carries the LADSPA chain when
         /// the clip has any enabled LADSPA effects. Empty = passthrough.
         audio_filter: String,
+        /// When true, the encoder switches to ProRes 4444 (profile 4,
+        /// yuva444p10le) so per-pixel alpha survives into the sidecar.
+        /// Set by the request path when chroma key is enabled on the
+        /// clip. Otherwise the bake uses ProRes 422 HQ (profile 3,
+        /// yuv422p10le).
+        needs_alpha: bool,
         start_seconds: f64,
         duration_seconds: f64,
         /// Shared cancel flag. The worker spawns ffmpeg and polls this
@@ -330,6 +336,7 @@ impl RenderReplaceCache {
             None
         };
         let audio_filter = crate::media::export::build_ladspa_effects_filter(clip);
+        let needs_alpha = clip.chroma_key_enabled;
         if let Some(ref tx) = self.work_tx {
             let _ = tx.send(RenderReplaceJob::Leaf {
                 cache_key: key,
@@ -337,6 +344,7 @@ impl RenderReplaceCache {
                 output_path,
                 video_filter,
                 audio_filter,
+                needs_alpha,
                 start_seconds,
                 duration_seconds,
                 cancel_flag,
@@ -728,6 +736,10 @@ fn fold_baked_fields(
     vidstab_smoothing: f64,
     ladspa_effects: &[crate::model::clip::LadspaEffect],
     hsl_qualifier: Option<&crate::model::clip::HslQualifier>,
+    chroma_key_enabled: bool,
+    chroma_key_color: u32,
+    chroma_key_tolerance: f64,
+    chroma_key_softness: f64,
 ) {
     hasher.add_source_fingerprint(source_path);
     hasher.add(source_in).add(source_out);
@@ -812,6 +824,19 @@ fn fold_baked_fields(
                 .add((q.saturation * 10_000.0) as i64);
         }
     }
+    // Chroma key — when enabled it produces per-pixel alpha, which
+    // forces the bake to encode as ProRes 4444 (yuva444p10le)
+    // instead of the usual 422 HQ. All four params affect the
+    // output pixels so fold them. Skip entirely when disabled so
+    // bakes of non-keyed clips don't pay any signature cost.
+    hasher.add("ck");
+    if chroma_key_enabled {
+        hasher
+            .add(1u8)
+            .add(chroma_key_color)
+            .add((chroma_key_tolerance * 10_000.0) as i64)
+            .add((chroma_key_softness * 10_000.0) as i64);
+    }
 }
 
 fn fold_color_keyframes(
@@ -865,6 +890,10 @@ pub fn cache_key_for_program_clip_fields(
     vidstab_smoothing: f64,
     ladspa_effects: &[crate::model::clip::LadspaEffect],
     hsl_qualifier: Option<&crate::model::clip::HslQualifier>,
+    chroma_key_enabled: bool,
+    chroma_key_color: u32,
+    chroma_key_tolerance: f64,
+    chroma_key_softness: f64,
     brightness_kfs: &[crate::model::clip::NumericKeyframe],
     contrast_kfs: &[crate::model::clip::NumericKeyframe],
     saturation_kfs: &[crate::model::clip::NumericKeyframe],
@@ -895,6 +924,10 @@ pub fn cache_key_for_program_clip_fields(
         vidstab_smoothing,
         ladspa_effects,
         hsl_qualifier,
+        chroma_key_enabled,
+        chroma_key_color,
+        chroma_key_tolerance,
+        chroma_key_softness,
     );
     // Insert color-KF fold between the scalar color block and the
     // denoise/sharpness/blur block, matching cache_key_for_clip's
@@ -940,6 +973,10 @@ pub fn cache_key_for_clip(clip: &Clip) -> String {
         clip.vidstab_smoothing as f64,
         &clip.ladspa_effects,
         clip.hsl_qualifier.as_ref(),
+        clip.chroma_key_enabled,
+        clip.chroma_key_color,
+        clip.chroma_key_tolerance as f64,
+        clip.chroma_key_softness as f64,
         &clip.brightness_keyframes,
         &clip.contrast_keyframes,
         &clip.saturation_keyframes,
@@ -1278,6 +1315,11 @@ fn neutralize_baked_fields(clip: &mut Clip) {
     // Drop it so the live pipeline doesn't re-apply the secondary
     // grade on top of already-graded frames.
     clip.hsl_qualifier = None;
+    // Chroma key is baked into the sidecar's alpha channel (Phase 3,
+    // ProRes 4444). Clearing it on substituted clips prevents the
+    // live pipeline from re-keying already-transparent pixels and
+    // doubling up the softness transition.
+    clip.chroma_key_enabled = false;
     // Leaf bakes write ONLY these fields to the sidecar. The clip's
     // render_replace_enabled flag stays set so signatures re-match if
     // the user edits a live-scope field (transform etc.) and the
@@ -1356,6 +1398,16 @@ fn build_bake_video_filter(clip: &Clip) -> String {
     if !frei0r.is_empty() {
         parts.push(frei0r);
     }
+    // Chroma key — produces per-pixel alpha. The builder returns a
+    // leading-comma prefixed chain, same as HSL qualifier — strip
+    // the comma so we can join normally. When this fires, the job
+    // must use the ProRes 4444 encoder path so alpha survives into
+    // the sidecar; `needs_alpha` below drives that switch.
+    let ck_raw = crate::media::export::build_chroma_key_filter(clip);
+    let ck = ck_raw.strip_prefix(',').unwrap_or(&ck_raw).to_string();
+    if !ck.is_empty() {
+        parts.push(ck);
+    }
 
     if parts.is_empty() {
         // No effects in the baked scope — return a simple passthrough so
@@ -1416,6 +1468,7 @@ fn run_render_replace_job(job: RenderReplaceJob) -> JobOutcome {
             output_path,
             video_filter,
             audio_filter,
+            needs_alpha,
             start_seconds,
             duration_seconds,
             cancel_flag,
@@ -1426,6 +1479,7 @@ fn run_render_replace_job(job: RenderReplaceJob) -> JobOutcome {
             &output_path,
             &video_filter,
             &audio_filter,
+            needs_alpha,
             start_seconds,
             duration_seconds,
             &cancel_flag,
@@ -1477,6 +1531,7 @@ fn run_leaf_bake(
     output_path: &str,
     video_filter: &str,
     audio_filter: &str,
+    needs_alpha: bool,
     start_seconds: f64,
     duration_seconds: f64,
     cancel_flag: &Arc<AtomicBool>,
@@ -1565,15 +1620,26 @@ fn run_leaf_bake(
         args.push("-af".into());
         args.push(audio_filter.to_string());
     }
+    // ProRes profile + pixel format: 4444 (profile 4, yuva444p10le)
+    // when the bake needs to preserve per-pixel alpha (chroma key in
+    // baked scope), 422 HQ (profile 3, yuv422p10le) otherwise. 4444
+    // is ~2× the bitrate but gives us lossless alpha — the sidecar
+    // ends up substantially larger only for keyed clips, not every
+    // bake.
+    let (prores_profile, pix_fmt) = if needs_alpha {
+        ("4", "yuva444p10le")
+    } else {
+        ("3", "yuv422p10le")
+    };
     args.extend([
         "-c:v".into(),
         "prores_ks".into(),
         "-profile:v".into(),
-        "3".into(),
+        prores_profile.into(),
         "-vendor".into(),
         "apl0".into(),
         "-pix_fmt".into(),
-        "yuv422p10le".into(),
+        pix_fmt.into(),
         "-c:a".into(),
         "pcm_s24le".into(),
         "-movflags".into(),
@@ -1846,6 +1912,75 @@ mod tests {
         let before = cache.total_requested;
         cache.request(&clip);
         assert_eq!(cache.total_requested, before);
+    }
+
+    #[test]
+    fn signature_changes_on_chroma_key_enabled() {
+        let a = make_clip();
+        let mut b = a.clone();
+        b.chroma_key_enabled = true;
+        b.chroma_key_color = 0x00FF00;
+        b.chroma_key_tolerance = 0.2;
+        b.chroma_key_softness = 0.1;
+        assert_ne!(
+            cache_key_for_clip(&a),
+            cache_key_for_clip(&b),
+            "enabling chroma key must invalidate the bake — output format switches to alpha"
+        );
+    }
+
+    #[test]
+    fn signature_changes_on_chroma_key_tolerance() {
+        let mut a = make_clip();
+        a.chroma_key_enabled = true;
+        a.chroma_key_color = 0x00FF00;
+        a.chroma_key_tolerance = 0.2;
+        let mut b = a.clone();
+        b.chroma_key_tolerance = 0.35;
+        assert_ne!(
+            cache_key_for_clip(&a),
+            cache_key_for_clip(&b),
+            "tolerance tweak shifts the matte, must invalidate the bake"
+        );
+    }
+
+    #[test]
+    fn signature_stable_when_chroma_key_disabled_params_change() {
+        // When chroma key is disabled, tweaking color / tolerance /
+        // softness must NOT invalidate the bake — they're dead fields
+        // until the user flips the enable toggle.
+        let a = make_clip();
+        let mut b = a.clone();
+        b.chroma_key_color = 0x123456;
+        b.chroma_key_tolerance = 0.75;
+        b.chroma_key_softness = 0.25;
+        assert_eq!(
+            cache_key_for_clip(&a),
+            cache_key_for_clip(&b),
+            "chroma-key param edits must be free when the effect is off"
+        );
+    }
+
+    #[test]
+    fn neutralize_clears_chroma_key_so_preview_doesnt_double_key() {
+        let tmp = tempfile::NamedTempFile::new().expect("temp file");
+        std::fs::write(tmp.path(), b"not-empty").expect("write");
+        let sidecar_path = tmp.path().to_string_lossy().to_string();
+        let mut clip = make_clip();
+        clip.render_replace_enabled = true;
+        clip.chroma_key_enabled = true;
+        clip.chroma_key_color = 0x00FF00;
+        clip.chroma_key_tolerance = 0.2;
+        clip.chroma_key_softness = 0.1;
+        let key = cache_key_for_clip(&clip);
+        let mut paths = HashMap::new();
+        paths.insert(key, sidecar_path);
+        let materialized =
+            materialize_clip_with_sidecar(&clip, &paths).expect("substitution should fire");
+        assert!(
+            !materialized.chroma_key_enabled,
+            "chroma key must be cleared on sidecar-backed clips — alpha is already baked in"
+        );
     }
 
     #[test]

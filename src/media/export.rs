@@ -4711,7 +4711,7 @@ fn build_combined_mask_alpha(
     )
 }
 
-fn build_chroma_key_filter(clip: &crate::model::clip::Clip) -> String {
+pub(crate) fn build_chroma_key_filter(clip: &crate::model::clip::Clip) -> String {
     if clip.chroma_key_enabled {
         let color = format!("{:06x}", clip.chroma_key_color & 0xFFFFFF);
         let similarity = (clip.chroma_key_tolerance * 0.5).clamp(0.01, 0.5);
