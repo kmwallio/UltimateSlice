@@ -5587,7 +5587,7 @@ fn find_ladspa_so(name: &str) -> Option<String> {
     None
 }
 
-fn build_ladspa_effects_filter(clip: &crate::model::clip::Clip) -> String {
+pub(crate) fn build_ladspa_effects_filter(clip: &crate::model::clip::Clip) -> String {
     if clip.ladspa_effects.is_empty() {
         return String::new();
     }

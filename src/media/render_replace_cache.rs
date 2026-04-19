@@ -96,6 +96,10 @@ enum RenderReplaceJob {
         source_path: String,
         output_path: String,
         video_filter: String,
+        /// Optional `-af` audio filter chain baked into the sidecar's
+        /// PCM s24le audio stream. Today carries the LADSPA chain when
+        /// the clip has any enabled LADSPA effects. Empty = passthrough.
+        audio_filter: String,
         start_seconds: f64,
         duration_seconds: f64,
         /// Shared cancel flag. The worker spawns ffmpeg and polls this
@@ -325,12 +329,14 @@ impl RenderReplaceCache {
         } else {
             None
         };
+        let audio_filter = crate::media::export::build_ladspa_effects_filter(clip);
         if let Some(ref tx) = self.work_tx {
             let _ = tx.send(RenderReplaceJob::Leaf {
                 cache_key: key,
                 source_path: clip.source_path.clone(),
                 output_path,
                 video_filter,
+                audio_filter,
                 start_seconds,
                 duration_seconds,
                 cancel_flag,
@@ -698,6 +704,7 @@ impl Drop for RenderReplaceCache {
 /// population call (Clip) always compute the same key for the same
 /// effective clip state.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn fold_baked_fields(
     hasher: &mut crate::media::cache_key::CacheKeyHasher,
     source_path: &str,
@@ -719,6 +726,7 @@ fn fold_baked_fields(
     frei0r_effects: &[crate::model::clip::Frei0rEffect],
     vidstab_enabled: bool,
     vidstab_smoothing: f64,
+    ladspa_effects: &[crate::model::clip::LadspaEffect],
 ) {
     hasher.add_source_fingerprint(source_path);
     hasher.add(source_in).add(source_out);
@@ -762,6 +770,20 @@ fn fold_baked_fields(
         str_pairs.sort_by(|a, b| a.0.cmp(b.0));
         for (name, value) in str_pairs {
             hasher.add(name.as_str()).add(value.as_str());
+        }
+    }
+    // LADSPA audio effects — bake into the sidecar so the live pipeline
+    // doesn't re-run the plugin chain every frame.
+    hasher.add("ladspa");
+    for effect in ladspa_effects {
+        hasher
+            .add(effect.plugin_name.as_str())
+            .add(effect.gst_element_name.as_str())
+            .add(if effect.enabled { 1u8 } else { 0u8 });
+        let mut pairs: Vec<(&String, &f64)> = effect.params.iter().collect();
+        pairs.sort_by(|a, b| a.0.cmp(b.0));
+        for (name, value) in pairs {
+            hasher.add(name.as_str()).add((*value * 10_000.0) as i64);
         }
     }
 }
@@ -815,6 +837,7 @@ pub fn cache_key_for_program_clip_fields(
     frei0r_effects: &[crate::model::clip::Frei0rEffect],
     vidstab_enabled: bool,
     vidstab_smoothing: f64,
+    ladspa_effects: &[crate::model::clip::LadspaEffect],
     brightness_kfs: &[crate::model::clip::NumericKeyframe],
     contrast_kfs: &[crate::model::clip::NumericKeyframe],
     saturation_kfs: &[crate::model::clip::NumericKeyframe],
@@ -843,6 +866,7 @@ pub fn cache_key_for_program_clip_fields(
         frei0r_effects,
         vidstab_enabled,
         vidstab_smoothing,
+        ladspa_effects,
     );
     // Insert color-KF fold between the scalar color block and the
     // denoise/sharpness/blur block, matching cache_key_for_clip's
@@ -886,6 +910,7 @@ pub fn cache_key_for_clip(clip: &Clip) -> String {
         &clip.frei0r_effects,
         clip.vidstab_enabled,
         clip.vidstab_smoothing as f64,
+        &clip.ladspa_effects,
         &clip.brightness_keyframes,
         &clip.contrast_keyframes,
         &clip.saturation_keyframes,
@@ -1216,6 +1241,10 @@ fn neutralize_baked_fields(clip: &mut Clip) {
     // produces smeared motion.
     clip.vidstab_enabled = false;
     clip.vidstab_smoothing = 0.0;
+    // LADSPA audio effects are baked into the sidecar's PCM stream
+    // (Phase 3). Clearing them on the substituted clip prevents the
+    // live audio graph from running the plugin chain a second time.
+    clip.ladspa_effects.clear();
     // Leaf bakes write ONLY these fields to the sidecar. The clip's
     // render_replace_enabled flag stays set so signatures re-match if
     // the user edits a live-scope field (transform etc.) and the
@@ -1344,6 +1373,7 @@ fn run_render_replace_job(job: RenderReplaceJob) -> JobOutcome {
             source_path,
             output_path,
             video_filter,
+            audio_filter,
             start_seconds,
             duration_seconds,
             cancel_flag,
@@ -1353,6 +1383,7 @@ fn run_render_replace_job(job: RenderReplaceJob) -> JobOutcome {
             &source_path,
             &output_path,
             &video_filter,
+            &audio_filter,
             start_seconds,
             duration_seconds,
             &cancel_flag,
@@ -1398,10 +1429,12 @@ fn run_render_replace_job(job: RenderReplaceJob) -> JobOutcome {
 /// trimmed by `-ss` + `-t`. Polls `cancel_flag` every ~250 ms and
 /// kills the subprocess when it flips, so long bakes on heavy clips
 /// don't lock the worker thread once the user asks to abort.
+#[allow(clippy::too_many_arguments)]
 fn run_leaf_bake(
     source_path: &str,
     output_path: &str,
     video_filter: &str,
+    audio_filter: &str,
     start_seconds: f64,
     duration_seconds: f64,
     cancel_flag: &Arc<AtomicBool>,
@@ -1485,6 +1518,10 @@ fn run_leaf_bake(
     if !composed_filter.is_empty() {
         args.push("-vf".into());
         args.push(composed_filter);
+    }
+    if !audio_filter.is_empty() {
+        args.push("-af".into());
+        args.push(audio_filter.to_string());
     }
     args.extend([
         "-c:v".into(),
@@ -1767,6 +1804,75 @@ mod tests {
         let before = cache.total_requested;
         cache.request(&clip);
         assert_eq!(cache.total_requested, before);
+    }
+
+    #[test]
+    fn signature_changes_on_ladspa_effect_added() {
+        use crate::model::clip::LadspaEffect;
+        let a = make_clip();
+        let mut b = a.clone();
+        b.ladspa_effects.push(LadspaEffect {
+            id: "e1".into(),
+            plugin_name: "Rubberband Pitch".into(),
+            gst_element_name: "ladspa-ladspa-rubberband-so-rubberband-pitchshifter-stereo".into(),
+            enabled: true,
+            params: HashMap::new(),
+        });
+        assert_ne!(
+            cache_key_for_clip(&a),
+            cache_key_for_clip(&b),
+            "adding a LADSPA effect must invalidate the bake"
+        );
+    }
+
+    #[test]
+    fn signature_changes_on_ladspa_param_tweak() {
+        use crate::model::clip::LadspaEffect;
+        let mut base_params = HashMap::new();
+        base_params.insert("cents".to_string(), 100.0);
+        let mut a = make_clip();
+        a.ladspa_effects.push(LadspaEffect {
+            id: "e1".into(),
+            plugin_name: "Rubberband Pitch".into(),
+            gst_element_name: "ladspa-ladspa-rubberband-so-rubberband-pitchshifter-stereo".into(),
+            enabled: true,
+            params: base_params,
+        });
+        let mut b = a.clone();
+        if let Some(val) = b.ladspa_effects[0].params.get_mut("cents") {
+            *val = 250.0;
+        }
+        assert_ne!(
+            cache_key_for_clip(&a),
+            cache_key_for_clip(&b),
+            "tweaking a LADSPA param must invalidate the bake"
+        );
+    }
+
+    #[test]
+    fn neutralize_clears_ladspa_so_preview_doesnt_double_apply() {
+        use crate::model::clip::LadspaEffect;
+        let tmp = tempfile::NamedTempFile::new().expect("temp file");
+        std::fs::write(tmp.path(), b"not-empty").expect("write");
+        let sidecar_path = tmp.path().to_string_lossy().to_string();
+        let mut clip = make_clip();
+        clip.render_replace_enabled = true;
+        clip.ladspa_effects.push(LadspaEffect {
+            id: "e1".into(),
+            plugin_name: "Rubberband Pitch".into(),
+            gst_element_name: "ladspa-ladspa-rubberband-so-rubberband-pitchshifter-stereo".into(),
+            enabled: true,
+            params: HashMap::new(),
+        });
+        let key = cache_key_for_clip(&clip);
+        let mut paths = HashMap::new();
+        paths.insert(key, sidecar_path);
+        let materialized =
+            materialize_clip_with_sidecar(&clip, &paths).expect("substitution should fire");
+        assert!(
+            materialized.ladspa_effects.is_empty(),
+            "LADSPA chain should be cleared on sidecar-backed clips to avoid double-apply"
+        );
     }
 
     #[test]
