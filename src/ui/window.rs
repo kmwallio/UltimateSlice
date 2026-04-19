@@ -19157,6 +19157,45 @@ pub fn build_window(
                         .set_visible(show_retry);
                 }
             }
+            // Refresh the per-clip Render-and-Replace status row. Same
+            // pattern as voice-enhance above: read the cache's status
+            // for the currently-selected clip's signature, map it to a
+            // short label, and only mutate the widget when the text
+            // actually changes (avoids flicker when the poll tick
+            // runs unchanged). The toggle itself is already hidden on
+            // non-bakeable kinds by the inspector sync.
+            {
+                use crate::media::render_replace_cache::RenderReplaceStatus;
+                let text = {
+                    let proj = project_for_stt.borrow();
+                    let selected = inspector_view.selected_clip_id.borrow().clone();
+                    let clip = selected.and_then(|id| proj.clip_ref(&id).cloned());
+                    match clip {
+                        Some(c) if c.render_replace_enabled => {
+                            let status = render_replace_cache.borrow().status(&c);
+                            match status {
+                                RenderReplaceStatus::Idle => String::new(),
+                                RenderReplaceStatus::Pending => {
+                                    "Baking…".to_string()
+                                }
+                                RenderReplaceStatus::Ready => {
+                                    "Sidecar ready".to_string()
+                                }
+                                RenderReplaceStatus::Failed => {
+                                    "Bake failed — toggle off/on to retry".to_string()
+                                }
+                            }
+                        }
+                        _ => String::new(),
+                    }
+                };
+                if inspector_view.render_replace_status_label.text() != text.as_str() {
+                    inspector_view.render_replace_status_label.set_text(&text);
+                    inspector_view
+                        .render_replace_status_label
+                        .set_visible(!text.is_empty());
+                }
+            }
             // Poll STT cache — apply generated subtitles via undo system.
             {
                 let stt_results = stt_cache.borrow_mut().poll();
@@ -19854,6 +19893,7 @@ pub fn build_window(
         let apply_program_monitor_ab_midline_mcp = apply_program_monitor_ab_midline.clone();
         let apply_program_monitor_ab_reference_mcp = apply_program_monitor_ab_reference.clone();
         let refresh_reference_stills_mcp = refresh_reference_stills.clone();
+        let render_replace_cache_for_mcp = render_replace_cache.clone();
         MCP_MAIN_DISPATCH.with(|slot| {
             *slot.borrow_mut() = Some(Box::new(move |cmd| {
                 if let Some(win) = window_weak.upgrade() {
@@ -19871,6 +19911,7 @@ pub fn build_window(
                         &proxy_cache,
                         &bg_removal_cache,
                         &frame_interp_cache,
+                        &render_replace_cache_for_mcp,
                         &voice_enhance_cache,
                         &clip_embedding_cache,
                         &auto_tag_cache,
@@ -20559,6 +20600,7 @@ fn handle_mcp_command(
     proxy_cache: &Rc<RefCell<crate::media::proxy_cache::ProxyCache>>,
     bg_removal_cache: &Rc<RefCell<crate::media::bg_removal_cache::BgRemovalCache>>,
     frame_interp_cache: &Rc<RefCell<crate::media::frame_interp_cache::FrameInterpCache>>,
+    render_replace_cache: &Rc<RefCell<crate::media::render_replace_cache::RenderReplaceCache>>,
     voice_enhance_cache: &Rc<RefCell<crate::media::voice_enhance_cache::VoiceEnhanceCache>>,
     clip_embedding_cache: &Rc<RefCell<crate::media::clip_embedding_cache::ClipEmbeddingCache>>,
     auto_tag_cache: &Rc<RefCell<crate::media::auto_tag_cache::AutoTagCache>>,
@@ -20600,6 +20642,7 @@ fn handle_mcp_command(
         proxy_cache,
         bg_removal_cache,
         frame_interp_cache,
+        render_replace_cache,
         voice_enhance_cache,
         clip_embedding_cache,
         auto_tag_cache,

@@ -1657,6 +1657,7 @@ pub fn build_toolbar(
         let project = project.clone();
         let bg_removal_cache = bg_removal_cache.clone();
         let frame_interp_cache = frame_interp_cache.clone();
+        let render_replace_cache = render_replace_cache.clone();
         btn_export.connect_clicked(move |btn| {
             let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
             let proj_w = project.borrow().width;
@@ -2881,6 +2882,7 @@ pub fn build_toolbar(
         let project = project.clone();
         let bg_removal_cache = bg_removal_cache.clone();
         let frame_interp_cache = frame_interp_cache.clone();
+        let render_replace_cache_queue = render_replace_cache.clone();
         btn_export_queue.connect_clicked(move |btn| {
             if let Some(pop) = export_pop_weak.upgrade() {
                 pop.popdown();
@@ -2890,6 +2892,7 @@ pub fn build_toolbar(
                 project.clone(),
                 bg_removal_cache.clone(),
                 frame_interp_cache.clone(),
+                render_replace_cache_queue.clone(),
                 window.as_ref(),
             );
             dialog.present();

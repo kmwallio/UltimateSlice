@@ -65,6 +65,7 @@ pub(crate) fn handle_mcp_command(
     proxy_cache: &Rc<RefCell<crate::media::proxy_cache::ProxyCache>>,
     bg_removal_cache: &Rc<RefCell<crate::media::bg_removal_cache::BgRemovalCache>>,
     frame_interp_cache: &Rc<RefCell<crate::media::frame_interp_cache::FrameInterpCache>>,
+    render_replace_cache: &Rc<RefCell<crate::media::render_replace_cache::RenderReplaceCache>>,
     voice_enhance_cache: &Rc<RefCell<crate::media::voice_enhance_cache::VoiceEnhanceCache>>,
     clip_embedding_cache: &Rc<RefCell<crate::media::clip_embedding_cache::ClipEmbeddingCache>>,
     auto_tag_cache: &Rc<RefCell<crate::media::auto_tag_cache::AutoTagCache>>,
@@ -6817,6 +6818,9 @@ pub(crate) fn handle_mcp_command(
             let interp_paths = frame_interp_cache
                 .borrow()
                 .snapshot_paths_by_clip_id(&proj_snapshot);
+            // Include baked render-replace sidecars so scripted batch
+            // exports get the same compute win as interactive exports.
+            let rr_paths = render_replace_cache.borrow().paths.clone();
             std::thread::spawn(move || {
                 let mut results = vec![];
                 for job in &pending {
@@ -6830,12 +6834,6 @@ pub(crate) fn handle_mcp_command(
                     let opts = job.options.to_export_options();
                     let (ptx, _prx) =
                         std::sync::mpsc::channel::<crate::media::export::ExportProgress>();
-                    // Batch export via MCP: empty render_replace_paths
-                    // for now so scripted pipelines keep full live
-                    // rendering. Follow-up can plumb the cache through
-                    // to benefit from baked sidecars here too.
-                    let empty_rr: std::collections::HashMap<String, String> =
-                        std::collections::HashMap::new();
                     let export_result = crate::media::export::export_project(
                         &proj_snapshot,
                         &job.output_path,
@@ -6843,7 +6841,7 @@ pub(crate) fn handle_mcp_command(
                         None,
                         &bg_paths,
                         &interp_paths,
-                        &empty_rr,
+                        &rr_paths,
                         ptx,
                     );
                     let (new_status, err_msg) = match export_result {

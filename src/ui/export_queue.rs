@@ -15,6 +15,7 @@ pub fn build_export_queue_dialog(
     project: Rc<RefCell<Project>>,
     bg_removal_cache: Rc<RefCell<BgRemovalCache>>,
     frame_interp_cache: Rc<RefCell<FrameInterpCache>>,
+    render_replace_cache: Rc<RefCell<crate::media::render_replace_cache::RenderReplaceCache>>,
     transient_for: Option<&gtk::Window>,
 ) -> gtk::Window {
     let win = gtk::Window::builder()
@@ -360,6 +361,13 @@ pub fn build_export_queue_dialog(
             let interp_paths = frame_interp_cache
                 .borrow()
                 .snapshot_paths_by_clip_id(&proj_snapshot);
+            // Snapshot the render-replace sidecar map once for the
+            // whole queue. Each job runs on a fresh thread from this
+            // snapshot, so queued jobs consume whatever bakes are
+            // ready at queue-start time (mid-queue bake completions
+            // aren't picked up — but the queue is already running
+            // non-interactively). Empty when the cache has no bakes.
+            let rr_paths = render_replace_cache.borrow().paths.clone();
 
             std::thread::spawn(move || {
                 for job in &jobs_snapshot {
@@ -371,15 +379,10 @@ pub fn build_export_queue_dialog(
                     let proj2 = proj_snapshot.clone();
                     let bg_paths2 = bg_paths.clone();
                     let interp_paths2 = interp_paths.clone();
+                    let rr_paths2 = rr_paths.clone();
                     let job_id = job.id.clone();
                     let tx2 = tx.clone();
                     let handle = std::thread::spawn(move || {
-                        // Batched queued export: empty render_replace_paths
-                        // for now; a follow-up can thread the cache
-                        // through so queued jobs also benefit from
-                        // baked sidecars.
-                        let empty_rr: std::collections::HashMap<String, String> =
-                            std::collections::HashMap::new();
                         if let Err(e) = export_project(
                             &proj2,
                             &output_bg,
@@ -387,7 +390,7 @@ pub fn build_export_queue_dialog(
                             None,
                             &bg_paths2,
                             &interp_paths2,
-                            &empty_rr,
+                            &rr_paths2,
                             ptx.clone(),
                         ) {
                             let _ = ptx.send(ExportProgress::Error(e.to_string()));

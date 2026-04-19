@@ -2549,7 +2549,14 @@ impl InspectorView {
                 // kinds also protects against stale OTIO imports.
                 let bakeable = crate::media::render_replace_cache::is_bakeable_kind(&c.kind);
                 self.render_replace_check.set_visible(bakeable);
-                self.render_replace_status_label.set_visible(false);
+                // The status label is driven by the 500 ms poll loop
+                // in window.rs (reads render_replace_cache.status). We
+                // only force it hidden when the toggle itself isn't
+                // applicable to this clip kind; otherwise the poll
+                // loop handles visibility based on the cache state.
+                if !bakeable {
+                    self.render_replace_status_label.set_visible(false);
+                }
                 if bakeable {
                     self.render_replace_check.set_active(c.render_replace_enabled);
                 } else {
