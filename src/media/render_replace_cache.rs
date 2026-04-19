@@ -30,8 +30,9 @@ use crate::model::project::Project;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 /// Depth cap for the recursive signature / readiness walks. Matches the
 /// existing `clip_to_program_clips` cap in window.rs so we never follow
@@ -50,10 +51,21 @@ enum WorkerUpdate {
     Done(WorkerResult),
 }
 
+/// Outcome of a finished worker job. Distinguishes a real failure (bake
+/// errored) from user-initiated cancellation so the UI can roll the
+/// entry back to Idle instead of surfacing "Bake failed — toggle off/on
+/// to retry" for something the user chose to stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JobOutcome {
+    Success,
+    Failed,
+    Cancelled,
+}
+
 struct WorkerResult {
     cache_key: String,
     output_path: String,
-    success: bool,
+    outcome: JobOutcome,
 }
 
 /// A single bake job queued onto the cache worker thread. The leaf
@@ -71,6 +83,10 @@ enum RenderReplaceJob {
         video_filter: String,
         start_seconds: f64,
         duration_seconds: f64,
+        /// Shared cancel flag. The worker spawns ffmpeg and polls this
+        /// flag; when the UI sets it, the worker kills the subprocess
+        /// and returns `JobOutcome::Cancelled`.
+        cancel_flag: Arc<AtomicBool>,
     },
     Compound {
         cache_key: String,
@@ -84,6 +100,12 @@ enum RenderReplaceJob {
         /// re-rendering them from scratch. Can be empty when nothing
         /// nested has a bake yet.
         nested_render_replace_paths: HashMap<String, String>,
+        /// Compound-path cancel flag. Today only checked before the
+        /// export_project call runs (early-out if the user cancelled
+        /// while waiting in the work queue) — the nested ffmpeg
+        /// subprocess inside export_project does NOT yet honour mid-
+        /// run cancellation. See comment in `run_compound_bake`.
+        cancel_flag: Arc<AtomicBool>,
     },
 }
 
@@ -135,6 +157,10 @@ pub struct RenderReplaceCache {
     /// Frame-interpolation sidecar paths (clip_id → file). Same lifecycle
     /// as `bg_removal_paths`.
     frame_interp_paths: HashMap<String, String>,
+    /// In-flight bake cancel tokens keyed by cache key. `cancel()` flips
+    /// the flag; the worker polls it and kills the ffmpeg subprocess.
+    /// Cleared when the job completes (success, failure, or cancel).
+    cancel_tokens: HashMap<String, Arc<AtomicBool>>,
 }
 
 impl RenderReplaceCache {
@@ -154,11 +180,14 @@ impl RenderReplaceCache {
                 Ok(job) => {
                     let (cache_key, output_path) =
                         (job.cache_key().to_string(), job.output_path().to_string());
-                    let success = run_render_replace_job(job);
+                    let outcome = run_render_replace_job(job);
+                    if outcome == JobOutcome::Cancelled {
+                        let _ = std::fs::remove_file(&output_path);
+                    }
                     let _ = tx.send(WorkerUpdate::Done(WorkerResult {
                         cache_key,
                         output_path,
-                        success,
+                        outcome,
                     }));
                 }
                 Err(_) => break,
@@ -179,6 +208,7 @@ impl RenderReplaceCache {
             cache_cap_bytes: DEFAULT_MAX_CACHE_BYTES,
             bg_removal_paths: HashMap::new(),
             frame_interp_paths: HashMap::new(),
+            cancel_tokens: HashMap::new(),
         }
     }
 
@@ -253,6 +283,8 @@ impl RenderReplaceCache {
 
         self.total_requested += 1;
         self.pending.insert(key.clone());
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        self.cancel_tokens.insert(key.clone(), cancel_flag.clone());
         if let Some(ref tx) = self.work_tx {
             let _ = tx.send(RenderReplaceJob::Leaf {
                 cache_key: key,
@@ -261,6 +293,7 @@ impl RenderReplaceCache {
                 video_filter,
                 start_seconds,
                 duration_seconds,
+                cancel_flag,
             });
         }
     }
@@ -336,6 +369,8 @@ impl RenderReplaceCache {
 
         self.total_requested += 1;
         self.pending.insert(key.clone());
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        self.cancel_tokens.insert(key.clone(), cancel_flag.clone());
         if let Some(ref tx) = self.work_tx {
             let _ = tx.send(RenderReplaceJob::Compound {
                 cache_key: key,
@@ -344,6 +379,7 @@ impl RenderReplaceCache {
                 bg_removal_paths: self.bg_removal_paths.clone(),
                 frame_interp_paths: self.frame_interp_paths.clone(),
                 nested_render_replace_paths: self.paths.clone(),
+                cancel_flag,
             });
         }
     }
@@ -406,6 +442,8 @@ impl RenderReplaceCache {
         };
         self.total_requested += 1;
         self.pending.insert(key.clone());
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        self.cancel_tokens.insert(key.clone(), cancel_flag.clone());
         if let Some(ref tx) = self.work_tx {
             let _ = tx.send(RenderReplaceJob::Compound {
                 cache_key: key,
@@ -414,6 +452,7 @@ impl RenderReplaceCache {
                 bg_removal_paths: self.bg_removal_paths.clone(),
                 frame_interp_paths: self.frame_interp_paths.clone(),
                 nested_render_replace_paths: self.paths.clone(),
+                cancel_flag,
             });
         }
     }
@@ -515,18 +554,30 @@ impl RenderReplaceCache {
             match update {
                 WorkerUpdate::Done(result) => {
                     self.pending.remove(&result.cache_key);
-                    if result.success && Path::new(&result.output_path).exists() {
-                        log::info!(
-                            "RenderReplaceCache: completed key={} path={}",
-                            result.cache_key,
-                            result.output_path
-                        );
-                        self.paths
-                            .insert(result.cache_key.clone(), result.output_path);
-                        resolved.push(result.cache_key);
-                    } else {
-                        log::warn!("RenderReplaceCache: failed key={}", result.cache_key);
-                        self.failed.insert(result.cache_key);
+                    self.cancel_tokens.remove(&result.cache_key);
+                    match result.outcome {
+                        JobOutcome::Success if Path::new(&result.output_path).exists() => {
+                            log::info!(
+                                "RenderReplaceCache: completed key={} path={}",
+                                result.cache_key,
+                                result.output_path
+                            );
+                            self.paths
+                                .insert(result.cache_key.clone(), result.output_path);
+                            resolved.push(result.cache_key);
+                        }
+                        JobOutcome::Cancelled => {
+                            log::info!(
+                                "RenderReplaceCache: cancelled key={}",
+                                result.cache_key
+                            );
+                            // Roll back total so Jobs tray math stays correct.
+                            self.total_requested = self.total_requested.saturating_sub(1);
+                        }
+                        _ => {
+                            log::warn!("RenderReplaceCache: failed key={}", result.cache_key);
+                            self.failed.insert(result.cache_key);
+                        }
                     }
                 }
             }
@@ -562,6 +613,23 @@ impl RenderReplaceCache {
     pub fn retry(&mut self, clip: &Clip) -> bool {
         let key = cache_key_for_clip(clip);
         self.failed.remove(&key)
+    }
+
+    /// Request cancellation of an in-flight bake for `clip`. The worker
+    /// checks the flag and kills the ffmpeg subprocess at the next
+    /// poll tick (~250 ms granularity). Safe to call regardless of
+    /// status — no-op when the clip has no in-flight token. Returns
+    /// true when a cancel was armed.
+    pub fn cancel(&mut self, clip: &Clip) -> bool {
+        let key = match clip.kind {
+            ClipKind::Compound => cache_key_for_compound(clip),
+            _ => cache_key_for_clip(clip),
+        };
+        if let Some(flag) = self.cancel_tokens.get(&key) {
+            flag.store(true, Ordering::SeqCst);
+            return true;
+        }
+        false
     }
 
     fn output_path_for_key(&self, key: &str) -> String {
@@ -1203,8 +1271,9 @@ fn touch_mtime(path: &str) {
 }
 
 /// Dispatch worker: runs the appropriate pipeline for the job variant.
-/// Returns true on success, false on any ffmpeg / export failure.
-fn run_render_replace_job(job: RenderReplaceJob) -> bool {
+/// Returns the outcome so the cache can distinguish success / failure /
+/// user cancellation.
+fn run_render_replace_job(job: RenderReplaceJob) -> JobOutcome {
     match job {
         RenderReplaceJob::Leaf {
             source_path,
@@ -1212,6 +1281,7 @@ fn run_render_replace_job(job: RenderReplaceJob) -> bool {
             video_filter,
             start_seconds,
             duration_seconds,
+            cancel_flag,
             ..
         } => run_leaf_bake(
             &source_path,
@@ -1219,6 +1289,7 @@ fn run_render_replace_job(job: RenderReplaceJob) -> bool {
             &video_filter,
             start_seconds,
             duration_seconds,
+            &cancel_flag,
         ),
         RenderReplaceJob::Compound {
             synthetic_project,
@@ -1226,27 +1297,47 @@ fn run_render_replace_job(job: RenderReplaceJob) -> bool {
             bg_removal_paths,
             frame_interp_paths,
             nested_render_replace_paths,
+            cancel_flag,
             ..
-        } => run_compound_bake(
-            &synthetic_project,
-            &output_path,
-            &bg_removal_paths,
-            &frame_interp_paths,
-            &nested_render_replace_paths,
-        ),
+        } => {
+            // Compound bakes route through export_project, which has no
+            // cancel plumbing of its own yet. Honour cancellation at the
+            // two points we can: before the long-running export runs,
+            // and after it returns.
+            if cancel_flag.load(Ordering::SeqCst) {
+                return JobOutcome::Cancelled;
+            }
+            let success = run_compound_bake(
+                &synthetic_project,
+                &output_path,
+                &bg_removal_paths,
+                &frame_interp_paths,
+                &nested_render_replace_paths,
+            );
+            if cancel_flag.load(Ordering::SeqCst) {
+                JobOutcome::Cancelled
+            } else if success {
+                JobOutcome::Success
+            } else {
+                JobOutcome::Failed
+            }
+        }
     }
 }
 
 /// Leaf bake: invoke ffmpeg directly with a precomputed filter string.
 /// Output is ProRes 422 HQ + PCM s24le in MOV; source window is
-/// trimmed by `-ss` + `-t`.
+/// trimmed by `-ss` + `-t`. Polls `cancel_flag` every ~250 ms and
+/// kills the subprocess when it flips, so long bakes on heavy clips
+/// don't lock the worker thread once the user asks to abort.
 fn run_leaf_bake(
     source_path: &str,
     output_path: &str,
     video_filter: &str,
     start_seconds: f64,
     duration_seconds: f64,
-) -> bool {
+    cancel_flag: &Arc<AtomicBool>,
+) -> JobOutcome {
     let duration = if duration_seconds > 0.001 {
         format!("{:.6}", duration_seconds)
     } else {
@@ -1302,16 +1393,31 @@ fn run_leaf_bake(
         "+faststart".into(),
         output_path.to_string(),
     ]);
-    let status = Command::new("ffmpeg").args(&args).status();
-    match status {
-        Ok(s) if s.success() => true,
-        Ok(s) => {
-            log::warn!("RenderReplaceCache: leaf ffmpeg exited with {s:?}");
-            false
-        }
+    let mut child = match Command::new("ffmpeg").args(&args).spawn() {
+        Ok(c) => c,
         Err(e) => {
             log::warn!("RenderReplaceCache: leaf ffmpeg spawn error: {e}");
-            false
+            return JobOutcome::Failed;
+        }
+    };
+    loop {
+        if cancel_flag.load(Ordering::SeqCst) {
+            log::info!("RenderReplaceCache: cancel requested — killing ffmpeg pid={}", child.id());
+            let _ = child.kill();
+            let _ = child.wait();
+            return JobOutcome::Cancelled;
+        }
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return JobOutcome::Success,
+            Ok(Some(status)) => {
+                log::warn!("RenderReplaceCache: leaf ffmpeg exited with {status:?}");
+                return JobOutcome::Failed;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(250)),
+            Err(e) => {
+                log::warn!("RenderReplaceCache: leaf ffmpeg wait error: {e}");
+                return JobOutcome::Failed;
+            }
         }
     }
 }
@@ -1462,6 +1568,30 @@ mod tests {
         let before = cache.total_requested;
         cache.request(&clip);
         assert_eq!(cache.total_requested, before);
+    }
+
+    #[test]
+    fn cancel_is_noop_when_no_in_flight_token() {
+        // Calling cancel() on a clip with no queued bake must not panic
+        // and must return false so the UI can treat it as a no-op.
+        let mut cache = RenderReplaceCache::new();
+        let clip = make_clip();
+        assert!(!cache.cancel(&clip));
+    }
+
+    #[test]
+    fn cancel_flips_flag_for_in_flight_leaf() {
+        // Manually install a cancel token for this clip's key and confirm
+        // cancel() flips the shared flag. Avoids spawning ffmpeg in the
+        // test by hand-writing the token instead of going through
+        // request() (which would queue a real bake).
+        let mut cache = RenderReplaceCache::new();
+        let clip = make_clip();
+        let key = cache_key_for_clip(&clip);
+        let flag = Arc::new(AtomicBool::new(false));
+        cache.cancel_tokens.insert(key.clone(), flag.clone());
+        assert!(cache.cancel(&clip));
+        assert!(flag.load(Ordering::SeqCst));
     }
 
     #[test]

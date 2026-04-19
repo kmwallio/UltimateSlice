@@ -7789,6 +7789,24 @@ pub fn build_window(
         on_project_changed.clone(),
     );
 
+    // Render-and-Replace: wire the Cancel button to the cache's cancel
+    // hook. Visibility is driven by the 500 ms poll loop based on the
+    // selected clip's bake status, so we only need to react to clicks.
+    {
+        let project = project.clone();
+        let iv = inspector_view.clone();
+        let cache = render_replace_cache.clone();
+        inspector_view
+            .render_replace_cancel_btn
+            .connect_clicked(move |_| {
+                let selected = iv.selected_clip_id.borrow().clone();
+                let Some(id) = selected else { return };
+                let clip_opt = project.borrow().clip_ref(&id).cloned();
+                let Some(clip) = clip_opt else { return };
+                cache.borrow_mut().cancel(&clip);
+            });
+    }
+
     let sync_tracking_controls: Rc<dyn Fn()> = {
         let inspector_view = inspector_view.clone();
         let project = project.clone();
@@ -19246,7 +19264,7 @@ pub fn build_window(
             // non-bakeable kinds by the inspector sync.
             {
                 use crate::media::render_replace_cache::RenderReplaceStatus;
-                let text = {
+                let (text, is_pending) = {
                     let proj = project_for_stt.borrow();
                     let selected = inspector_view.selected_clip_id.borrow().clone();
                     let clip = selected.and_then(|id| proj.clip_ref(&id).cloned());
@@ -19254,19 +19272,20 @@ pub fn build_window(
                         Some(c) if c.render_replace_enabled => {
                             let status = render_replace_cache.borrow().status(&c);
                             match status {
-                                RenderReplaceStatus::Idle => String::new(),
+                                RenderReplaceStatus::Idle => (String::new(), false),
                                 RenderReplaceStatus::Pending => {
-                                    "Baking…".to_string()
+                                    ("Baking…".to_string(), true)
                                 }
                                 RenderReplaceStatus::Ready => {
-                                    "Sidecar ready".to_string()
+                                    ("Sidecar ready".to_string(), false)
                                 }
-                                RenderReplaceStatus::Failed => {
-                                    "Bake failed — toggle off/on to retry".to_string()
-                                }
+                                RenderReplaceStatus::Failed => (
+                                    "Bake failed — toggle off/on to retry".to_string(),
+                                    false,
+                                ),
                             }
                         }
-                        _ => String::new(),
+                        _ => (String::new(), false),
                     }
                 };
                 if inspector_view.render_replace_status_label.text() != text.as_str() {
@@ -19274,6 +19293,11 @@ pub fn build_window(
                     inspector_view
                         .render_replace_status_label
                         .set_visible(!text.is_empty());
+                }
+                if inspector_view.render_replace_cancel_btn.is_visible() != is_pending {
+                    inspector_view
+                        .render_replace_cancel_btn
+                        .set_visible(is_pending);
                 }
             }
             // Poll STT cache — apply generated subtitles via undo system.

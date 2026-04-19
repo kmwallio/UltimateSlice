@@ -580,6 +580,7 @@ pub struct InspectorView {
     // LUTs + blur/denoise/sharpness.
     pub render_replace_check: CheckButton,
     pub render_replace_status_label: Label,
+    pub render_replace_cancel_btn: Button,
     // Applied frei0r effects
     pub frei0r_effects_section: GBox,
     pub frei0r_effects_list: GBox,
@@ -4674,11 +4675,24 @@ pub fn build_inspector(
          queued in the background.",
     ));
     render_replace_section.append(&render_replace_check);
+    let render_replace_status_row = GBox::new(Orientation::Horizontal, 6);
     let render_replace_status_label = Label::new(None);
     render_replace_status_label.set_halign(gtk::Align::Start);
+    render_replace_status_label.set_hexpand(true);
     render_replace_status_label.add_css_class("dim-label");
     render_replace_status_label.set_visible(false);
-    render_replace_section.append(&render_replace_status_label);
+    render_replace_status_row.append(&render_replace_status_label);
+    // Cancel button — visible only while a bake is in flight. Wired up
+    // in window.rs to call `render_replace_cache.cancel(clip)` on the
+    // currently-selected clip so the worker kills ffmpeg at its next
+    // poll tick.
+    let render_replace_cancel_btn = Button::with_label("Cancel");
+    render_replace_cancel_btn.set_tooltip_text(Some(
+        "Stop the in-flight render-replace bake for this clip",
+    ));
+    render_replace_cancel_btn.set_visible(false);
+    render_replace_status_row.append(&render_replace_cancel_btn);
+    render_replace_section.append(&render_replace_status_row);
     content_box.append(&render_replace_section);
 
     // ── Applied Frei0r Effects section (Video + Image only) ──────────────
@@ -11030,6 +11044,7 @@ pub fn build_inspector(
         voice_enhance_retry_btn,
         render_replace_check,
         render_replace_status_label,
+        render_replace_cancel_btn,
         voice_isolation_slider,
         vi_pad_slider,
         vi_fade_slider,
