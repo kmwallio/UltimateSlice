@@ -719,7 +719,7 @@ FCPXML persistence).
 - [x] Undo toast with action label — undo and redo now show a brief in-app toast such as **"Undid: trim clip out-point"** or **"Redid: move clip"**, reusing the shared `EditCommand::description()` strings from the edit history and staying silent when history is empty.
 
 **Timeline polish**
-- [ ] Hover Scrubbing (Scrubbable Tooltips) in the Media Library and timeline
+- [x] Hover Scrubbing (Scrubbable Tooltips) in the Media Library and timeline — Media Library cards now scrub in place: moving the cursor horizontally across a thumbnail maps the x fraction to a source-time offset (quantized to ~100 ms buckets via the new `quantize_hover_scrub_time_ns` helper) and repaints the cached frame via the existing `ThumbnailCache`. Audio-only and still-image cards skip the motion controller. Timeline hover-scrub paints a 200×128 floating preview panel with the frame at the hovered timeline position and a source-timecode label — anchored near the cursor, clamped to widget bounds, reusing the same `ThumbnailCache`. Suppressed during any active drag, on mouse leave, and outside the content area (ruler / track label / empty track space). Applies to `ClipKind::Video` / `Image` / `Compound` bodies; skips Title / Adjustment / Audio / Drawing clips.
 - [ ] Two-Up / Four-Up Trim Displays in the Program Monitor for precision edits (Slip/Slide/Roll)
 - [ ] Kinetic Scrolling & Playhead Elasticity
 - [x] Snap indicator visual — when snapping to a clip edge, marker, playhead, or sequence start, draw a dashed vertical guideline + small badge ("clip start" / "clip end" / "marker" / "playhead" / "start") at the snap point; snap targets now include the playhead, timeline markers, and time 0 in addition to other clip edges

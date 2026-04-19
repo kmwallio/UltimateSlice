@@ -690,6 +690,25 @@ pub struct TimelineState {
     /// Weak reference to the minimap DrawingArea (if wired).
     /// Used to queue_draw the minimap whenever the main timeline repaints.
     pub minimap_widget: Option<glib::object::WeakRef<DrawingArea>>,
+    /// Active hover-scrub preview target. `None` when the cursor is not
+    /// over a preview-able clip body. Cleared on mouse leave, drag start,
+    /// scroll, or playhead seek so a stale preview never lingers. Purely
+    /// ephemeral view state — not persisted.
+    pub hover_scrub: Option<HoverScrubPreview>,
+}
+
+/// Per-frame payload for the timeline hover-scrub floating preview. The
+/// `source_time_ns` is already quantized to a hover bucket; the motion
+/// handler avoids writing this struct twice inside the same bucket/clip
+/// so redraws stay tied to meaningful changes.
+#[derive(Clone, Debug)]
+pub struct HoverScrubPreview {
+    pub clip_id: String,
+    pub source_path: String,
+    pub source_time_ns: u64,
+    pub cursor_x: f64,
+    pub cursor_y: f64,
+    pub display_timecode: String,
 }
 
 impl TimelineState {
@@ -751,6 +770,7 @@ impl TimelineState {
             user_scroll_cooldown_until: None,
             active_snap_hit: None,
             minimap_widget: None,
+            hover_scrub: None,
         }
     }
 
@@ -813,6 +833,146 @@ impl TimelineState {
     pub fn x_to_ns(&self, x: f64) -> u64 {
         let secs = (x - TRACK_LABEL_WIDTH + self.scroll_offset) / self.pixels_per_second;
         (secs.max(0.0) * NS_PER_SECOND) as u64
+    }
+
+    /// Compute or update the hover-scrub preview target at widget
+    /// coordinates `(x, y)`. Returns `Some(source_path)` when a fresh
+    /// thumbnail request should be kicked for the new target — the caller
+    /// is responsible for calling `thumb_cache.request(...)`. Returns
+    /// `None` when nothing changed (same bucket + same clip) or when the
+    /// cursor is not over a scrubbable clip body.
+    pub fn update_hover_scrub_at(&mut self, x: f64, y: f64) -> Option<String> {
+        // Suppress hover preview during any active drag — the user is
+        // moving/trimming a clip and an overlay panel on top of the drag
+        // would be distracting and visually conflict with the drag ghost.
+        if !matches!(self.drag_op, DragOp::None) {
+            if self.hover_scrub.is_some() {
+                self.hover_scrub = None;
+            }
+            return None;
+        }
+        // Cursor must be inside the content area (not over ruler or track label).
+        if x < TRACK_LABEL_WIDTH || y < RULER_HEIGHT + self.breadcrumb_bar_height() {
+            if self.hover_scrub.is_some() {
+                self.hover_scrub = None;
+            }
+            return None;
+        }
+        let Some(track_idx) = self.track_index_at_y(y) else {
+            if self.hover_scrub.is_some() {
+                self.hover_scrub = None;
+            }
+            return None;
+        };
+        // Resolve (clip_id, source_path, quantized source_time_ns, timecode)
+        // inside a scoped block so the project borrow lives only for the
+        // lookup — the caller may then mutate `self.hover_scrub` safely.
+        #[derive(Default)]
+        struct HoverResolve {
+            clip_id: String,
+            source_path: String,
+            source_time_ns: u64,
+            display_timecode: String,
+        }
+        let resolved: Option<HoverResolve> = {
+            let proj = self.project.borrow();
+            let editing_tracks = self.resolve_editing_tracks(&proj);
+            let mut out: Option<HoverResolve> = None;
+            if let Some(track) = editing_tracks.get(track_idx) {
+                let hit = track.clips.iter().find(|clip| {
+                    let cx = self.ns_to_x(clip.timeline_start);
+                    let cw = (clip.duration() as f64 / NS_PER_SECOND)
+                        * self.pixels_per_second;
+                    x >= cx && x <= cx + cw
+                });
+                if let Some(clip) = hit {
+                    let scrubbable = matches!(
+                        clip.kind,
+                        crate::model::clip::ClipKind::Video
+                            | crate::model::clip::ClipKind::Image
+                            | crate::model::clip::ClipKind::Compound
+                    );
+                    if scrubbable {
+                        let local_ns = self
+                            .x_to_ns(x)
+                            .saturating_sub(clip.timeline_start)
+                            .min(clip.duration().saturating_sub(1));
+                        if let Some(sample) =
+                            timeline_thumbnail_sample_for_clip(clip, local_ns)
+                        {
+                            let source_time_ns =
+                                crate::media::thumb_cache::quantize_hover_scrub_time_ns(
+                                    sample.sample_time_ns,
+                                );
+                            let display_timecode =
+                                crate::ui::timecode::format_ns_as_timecode(
+                                    source_time_ns,
+                                    &proj.frame_rate,
+                                );
+                            out = Some(HoverResolve {
+                                clip_id: clip.id.clone(),
+                                source_path: sample.source_path,
+                                source_time_ns,
+                                display_timecode,
+                            });
+                        }
+                    }
+                }
+            }
+            out
+        };
+        let Some(HoverResolve {
+            clip_id,
+            source_path,
+            source_time_ns,
+            display_timecode,
+        }) = resolved
+        else {
+            if self.hover_scrub.is_some() {
+                self.hover_scrub = None;
+            }
+            return None;
+        };
+
+        let needs_request = match &self.hover_scrub {
+            Some(existing)
+                if existing.clip_id == clip_id
+                    && existing.source_path == source_path
+                    && existing.source_time_ns == source_time_ns =>
+            {
+                // Same bucket + same clip — but still update cursor (x, y)
+                // so the floating preview tracks the cursor without a
+                // flash-to-rerequest round trip.
+                let mut updated = existing.clone();
+                updated.cursor_x = x;
+                updated.cursor_y = y;
+                self.hover_scrub = Some(updated);
+                None
+            }
+            _ => {
+                self.hover_scrub = Some(HoverScrubPreview {
+                    clip_id,
+                    source_path: source_path.clone(),
+                    source_time_ns,
+                    cursor_x: x,
+                    cursor_y: y,
+                    display_timecode,
+                });
+                Some(source_path)
+            }
+        };
+        needs_request
+    }
+
+    /// Clear any active hover-scrub preview. Returns true when the state
+    /// actually changed (useful for deciding whether to `queue_draw`).
+    pub fn clear_hover_scrub(&mut self) -> bool {
+        if self.hover_scrub.is_some() {
+            self.hover_scrub = None;
+            true
+        } else {
+            false
+        }
     }
 
     /// Fire `on_project_changed` with no `TimelineState` borrow held.
@@ -5036,6 +5196,60 @@ pub fn build_timeline(
     let wave_cache = Rc::new(RefCell::new(
         crate::media::waveform_cache::WaveformCache::new(),
     ));
+
+    // Hover-scrub preview: a second motion controller (additive to the
+    // existing cursor-change controller above). Mouse motion inside a
+    // scrubbable clip body updates TimelineState.hover_scrub, kicks a
+    // thumbnail request for the new source-time bucket, and queues a
+    // redraw. Leave clears the preview. Placed here so we can capture
+    // `thumb_cache` for the request side of the feedback loop.
+    {
+        let state_motion = state.clone();
+        let area_motion = area.downgrade();
+        let thumb_cache_motion = thumb_cache.clone();
+        let hover_motion = gtk::EventControllerMotion::new();
+        hover_motion.connect_motion(move |_ctrl, x, y| {
+            let (needs_request, do_queue_draw) = {
+                let mut st = state_motion.borrow_mut();
+                let req = st.update_hover_scrub_at(x, y);
+                // Request a redraw on every motion event where hover_scrub
+                // is populated so the floating preview's cursor anchor
+                // tracks the cursor smoothly. When hover_scrub is None
+                // after the update (cursor off a scrubbable clip), a
+                // redraw is only needed if the preview was just cleared.
+                let redraw = st.hover_scrub.is_some() || req.is_some();
+                (req, redraw)
+            };
+            if let Some(source_path) = needs_request {
+                // Pull the time_ns we just stored out of hover_scrub.
+                let bucket_time = state_motion
+                    .borrow()
+                    .hover_scrub
+                    .as_ref()
+                    .map(|h| h.source_time_ns)
+                    .unwrap_or(0);
+                thumb_cache_motion
+                    .borrow_mut()
+                    .request(&source_path, bucket_time);
+            }
+            if do_queue_draw {
+                if let Some(area) = area_motion.upgrade() {
+                    area.queue_draw();
+                }
+            }
+        });
+        let state_leave = state.clone();
+        let area_leave = area.downgrade();
+        hover_motion.connect_leave(move |_ctrl| {
+            let cleared = state_leave.borrow_mut().clear_hover_scrub();
+            if cleared {
+                if let Some(area) = area_leave.upgrade() {
+                    area.queue_draw();
+                }
+            }
+        });
+        area.add_controller(hover_motion);
+    }
 
     let clip_context_pop = gtk::Popover::new();
     clip_context_pop.set_parent(&area);
@@ -9346,6 +9560,113 @@ fn draw_timeline(
                     }
                 }
             }
+        }
+    }
+
+    // Hover-scrub floating preview. Painted near the cursor (above-right
+    // when possible) with the scrubbed frame + source timecode. Missing
+    // cache entry → skip rendering (the motion handler already kicked a
+    // request and the 200 ms poll timer will queue a redraw when it's
+    // ready). Only visible while not dragging — starts of drags clear
+    // hover_scrub elsewhere.
+    if let Some(ref hover) = st.hover_scrub {
+        if let Some(surface) = cache.get(&hover.source_path, hover.source_time_ns) {
+            const PREVIEW_W: f64 = 200.0;
+            const PREVIEW_H: f64 = 128.0; // 112 for frame + ~16 for timecode strip
+            const FRAME_H: f64 = 112.0;
+            const MARGIN: f64 = 12.0;
+
+            // Anchor above-and-right of the cursor by default. Clamp to
+            // widget bounds so the preview never falls off-screen.
+            let mut panel_x = hover.cursor_x + MARGIN;
+            let mut panel_y = hover.cursor_y - PREVIEW_H - MARGIN;
+            if panel_x + PREVIEW_W > w - 4.0 {
+                panel_x = hover.cursor_x - PREVIEW_W - MARGIN;
+            }
+            if panel_y < 4.0 {
+                panel_y = hover.cursor_y + MARGIN;
+            }
+            panel_x = panel_x.clamp(4.0, (w - PREVIEW_W - 4.0).max(4.0));
+            panel_y = panel_y.clamp(4.0, (h - PREVIEW_H - 4.0).max(4.0));
+
+            // Backdrop with subtle rounded corners (manual path — avoids
+            // pulling in a helper just for this).
+            let radius = 6.0;
+            cr.save().ok();
+            cr.new_path();
+            cr.arc(
+                panel_x + radius,
+                panel_y + radius,
+                radius,
+                std::f64::consts::PI,
+                1.5 * std::f64::consts::PI,
+            );
+            cr.arc(
+                panel_x + PREVIEW_W - radius,
+                panel_y + radius,
+                radius,
+                1.5 * std::f64::consts::PI,
+                2.0 * std::f64::consts::PI,
+            );
+            cr.arc(
+                panel_x + PREVIEW_W - radius,
+                panel_y + PREVIEW_H - radius,
+                radius,
+                0.0,
+                0.5 * std::f64::consts::PI,
+            );
+            cr.arc(
+                panel_x + radius,
+                panel_y + PREVIEW_H - radius,
+                radius,
+                0.5 * std::f64::consts::PI,
+                std::f64::consts::PI,
+            );
+            cr.close_path();
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.88);
+            cr.fill_preserve().ok();
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.35);
+            cr.set_line_width(1.0);
+            cr.stroke().ok();
+            cr.restore().ok();
+
+            // Scaled thumbnail. ThumbnailCache returns 160×90; we render
+            // into a 200×112 slot with aspect-preserving letterbox fit.
+            let thumb_area_w = PREVIEW_W - 8.0;
+            let thumb_area_h = FRAME_H - 8.0;
+            let frame_x = panel_x + 4.0;
+            let frame_y = panel_y + 4.0;
+            const SRC_W: f64 = 160.0;
+            const SRC_H: f64 = 90.0;
+            let scale = (thumb_area_w / SRC_W).min(thumb_area_h / SRC_H);
+            let draw_w = SRC_W * scale;
+            let draw_h = SRC_H * scale;
+            let draw_x = frame_x + (thumb_area_w - draw_w) * 0.5;
+            let draw_y = frame_y + (thumb_area_h - draw_h) * 0.5;
+            cr.save().ok();
+            cr.translate(draw_x, draw_y);
+            cr.scale(scale, scale);
+            let _ = cr.set_source_surface(surface, 0.0, 0.0);
+            cr.paint().ok();
+            cr.restore().ok();
+
+            // Timecode label.
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.95);
+            cr.select_font_face(
+                "Sans",
+                gtk::cairo::FontSlant::Normal,
+                gtk::cairo::FontWeight::Normal,
+            );
+            cr.set_font_size(11.0);
+            let tc = &hover.display_timecode;
+            let extents = cr.text_extents(tc).unwrap_or_else(|_| {
+                cr.text_extents("00:00:00:00")
+                    .expect("fallback text extents")
+            });
+            let text_x = panel_x + (PREVIEW_W - extents.x_advance()) * 0.5;
+            let text_y = panel_y + PREVIEW_H - 4.0;
+            cr.move_to(text_x, text_y);
+            cr.show_text(tc).ok();
         }
     }
 

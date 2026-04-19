@@ -1860,9 +1860,18 @@ fn make_grid_item(
     let thumb_area = DrawingArea::new();
     thumb_area.set_content_width(THUMB_W);
     thumb_area.set_content_height(THUMB_H);
+
+    // Hover-scrub state: None = show the static first-frame thumbnail
+    // (the cache.request(..., 0) call above already queued it). Some(t) =
+    // the cursor is inside the thumbnail and the draw_func should paint
+    // the frame at the corresponding source time instead. The value
+    // lives in a Cell so both the motion controller and the draw_func
+    // can read it cheaply every redraw.
+    let scrub_time_ns: Rc<Cell<Option<u64>>> = Rc::new(Cell::new(None));
     {
         let path_owned = path.clone();
         let thumb_cache = thumb_cache.clone();
+        let scrub_time_ns = scrub_time_ns.clone();
         thumb_area.set_draw_func(move |_, cr, w, h| {
             if !has_backing_file {
                 draw_non_file_placeholder(cr, w, h, clip_kind.as_ref());
@@ -1915,6 +1924,20 @@ fn make_grid_item(
                 return;
             }
             let cache = thumb_cache.borrow();
+            // Hover-scrub: when the cursor is over this thumbnail, prefer
+            // the scrubbed frame. Fall back to the static t=0 frame if
+            // the hover frame hasn't been extracted yet — avoids flashing
+            // a placeholder during ffmpeg latency.
+            if let Some(t) = scrub_time_ns.get() {
+                if let Some(surf) = cache.get(&path_owned, t) {
+                    let sx = w as f64 / THUMB_W as f64;
+                    let sy = h as f64 / THUMB_H as f64;
+                    cr.scale(sx, sy);
+                    let _ = cr.set_source_surface(surf, 0.0, 0.0);
+                    cr.paint().ok();
+                    return;
+                }
+            }
             if let Some(surf) = cache.get(&path_owned, 0) {
                 let sx = w as f64 / THUMB_W as f64;
                 let sy = h as f64 / THUMB_H as f64;
@@ -1929,6 +1952,47 @@ fn make_grid_item(
             cr.fill().ok();
         });
     }
+
+    // Mouse hover-scrub: mapping cursor x to a source time, quantized to
+    // ~100 ms buckets so repeated motion events at nearby pixels share
+    // cache entries. Only wire the controller when there is a meaningful
+    // duration to scrub — still images and audio-only items have nothing
+    // to preview.
+    if has_backing_file && duration_ns > 0 && !is_audio_only {
+        let motion = gtk::EventControllerMotion::new();
+        {
+            let scrub_time_ns = scrub_time_ns.clone();
+            let thumb_area_inner = thumb_area.clone();
+            let thumb_cache_inner = thumb_cache.clone();
+            let path_motion = path.clone();
+            motion.connect_motion(move |_ctrl, x, _y| {
+                let width = thumb_area_inner.width().max(1) as f64;
+                let frac = (x / width).clamp(0.0, 1.0);
+                let raw_t = (frac * duration_ns as f64).round() as u64;
+                let bucket =
+                    crate::media::thumb_cache::quantize_hover_scrub_time_ns(raw_t);
+                if scrub_time_ns.get() != Some(bucket) {
+                    scrub_time_ns.set(Some(bucket));
+                    thumb_cache_inner
+                        .borrow_mut()
+                        .request(&path_motion, bucket);
+                    thumb_area_inner.queue_draw();
+                }
+            });
+        }
+        {
+            let scrub_time_ns = scrub_time_ns.clone();
+            let thumb_area_inner = thumb_area.clone();
+            motion.connect_leave(move |_ctrl| {
+                if scrub_time_ns.get().is_some() {
+                    scrub_time_ns.set(None);
+                    thumb_area_inner.queue_draw();
+                }
+            });
+        }
+        thumb_area.add_controller(motion);
+    }
+
     cell.append(&thumb_area);
 
     let name_label = Label::new(Some(&display_name));

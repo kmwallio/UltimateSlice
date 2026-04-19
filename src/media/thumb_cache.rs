@@ -14,6 +14,22 @@ const THUMB_H: i32 = 90;
 /// Maximum number of simultaneous thumbnail extraction threads.
 const MAX_CONCURRENT: usize = 4;
 
+/// Width of a hover-scrub bucket in nanoseconds. Motion events fire at
+/// 250+ Hz, so we round the cursor-derived target time into coarse buckets
+/// (~100 ms here) before routing through the ThumbnailCache. Adjacent
+/// buckets share the same extracted surface, which caps cache churn while
+/// keeping the preview visually continuous at mouse sweep speeds.
+const HOVER_SCRUB_BUCKET_NS: u64 = 100_000_000; // 100 ms
+
+/// Quantize a source-time target into a hover-scrub bucket so repeated
+/// cursor-motion samples at nearby positions share cache entries. Always
+/// rounds down to the bucket boundary so the result is monotonic with
+/// the input — important for the motion handler's "only redraw when the
+/// bucket changes" check.
+pub fn quantize_hover_scrub_time_ns(time_ns: u64) -> u64 {
+    (time_ns / HOVER_SCRUB_BUCKET_NS) * HOVER_SCRUB_BUCKET_NS
+}
+
 /// A loaded thumbnail ready to draw.
 struct RawFrame {
     key: String,
@@ -493,4 +509,36 @@ fn rgba_to_surface(rgba: &[u8]) -> Result<cairo::ImageSurface> {
     }
 
     Ok(surface)
+}
+
+#[cfg(test)]
+mod hover_scrub_tests {
+    use super::{quantize_hover_scrub_time_ns, HOVER_SCRUB_BUCKET_NS};
+
+    #[test]
+    fn quantize_collapses_adjacent_inputs_within_same_bucket() {
+        // Two timestamps 50 ms apart fall into the same 100 ms bucket.
+        let a = 500_000_000u64; // 0.500 s
+        let b = 550_000_000u64; // 0.550 s
+        assert_eq!(
+            quantize_hover_scrub_time_ns(a),
+            quantize_hover_scrub_time_ns(b)
+        );
+    }
+
+    #[test]
+    fn quantize_distinguishes_inputs_across_bucket_boundary() {
+        // Just below and just at the next bucket boundary.
+        let a = HOVER_SCRUB_BUCKET_NS - 1; // still in bucket 0
+        let b = HOVER_SCRUB_BUCKET_NS; // start of bucket 1
+        assert_ne!(
+            quantize_hover_scrub_time_ns(a),
+            quantize_hover_scrub_time_ns(b)
+        );
+        assert_eq!(quantize_hover_scrub_time_ns(a), 0);
+        assert_eq!(
+            quantize_hover_scrub_time_ns(b),
+            HOVER_SCRUB_BUCKET_NS
+        );
+    }
 }
