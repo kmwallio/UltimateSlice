@@ -9901,6 +9901,7 @@ pub fn build_window(
         timeline_state.clone(),
         bg_removal_cache.clone(),
         frame_interp_cache.clone(),
+        render_replace_cache.clone(),
         {
             let cb = on_project_changed.clone();
             move || cb()

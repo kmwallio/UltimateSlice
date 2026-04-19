@@ -1021,6 +1021,7 @@ pub fn build_toolbar(
     timeline_state: Rc<RefCell<TimelineState>>,
     bg_removal_cache: Rc<RefCell<crate::media::bg_removal_cache::BgRemovalCache>>,
     frame_interp_cache: Rc<RefCell<crate::media::frame_interp_cache::FrameInterpCache>>,
+    render_replace_cache: Rc<RefCell<crate::media::render_replace_cache::RenderReplaceCache>>,
     on_project_changed: impl Fn() + 'static + Clone,
     on_project_reloaded: impl Fn() + 'static + Clone,
     on_show_editor: impl Fn() + 'static + Clone,
@@ -2080,6 +2081,7 @@ pub fn build_toolbar(
             let project = project.clone();
             let bg_removal_cache = bg_removal_cache.clone();
             let frame_interp_cache = frame_interp_cache.clone();
+            let render_replace_cache = render_replace_cache.clone();
             opt_dialog.connect_response(move |d, resp| {
                 if resp != gtk::ResponseType::Accept && resp != gtk::ResponseType::Other(1) {
                     d.close();
@@ -2171,6 +2173,7 @@ pub fn build_toolbar(
                 let project = project.clone();
                 let bg_removal_cache = bg_removal_cache.clone();
                 let frame_interp_cache = frame_interp_cache.clone();
+                let render_replace_cache = render_replace_cache.clone();
                 file_dialog.save(window.as_ref(), gio::Cancellable::NONE, move |result| {
                     if let Ok(file) = result {
                         if let Some(path) = file.path() {
@@ -2181,6 +2184,13 @@ pub fn build_toolbar(
                             let bg_paths = bg_removal_cache.borrow().paths.clone();
                             let interp_paths =
                                 frame_interp_cache.borrow().snapshot_paths_by_clip_id(&proj);
+                            // Render-and-Replace sidecar snapshot. Any clip
+                            // with render_replace_enabled and a ready bake
+                            // will have its source swapped for the baked
+                            // ProRes sidecar during export, skipping the
+                            // baked-scope filter chain. Empty map → all
+                            // clips render live as before.
+                            let rr_paths = render_replace_cache.borrow().paths.clone();
                             let (tx, rx) = std::sync::mpsc::channel::<ExportProgress>();
 
                             std::thread::spawn(move || {
@@ -2191,6 +2201,7 @@ pub fn build_toolbar(
                                     None,
                                     &bg_paths,
                                     &interp_paths,
+                                    &rr_paths,
                                     tx.clone(),
                                 ) {
                                     let _ = tx.send(ExportProgress::Error(e.to_string()));

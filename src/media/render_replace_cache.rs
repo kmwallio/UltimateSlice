@@ -78,6 +78,12 @@ enum RenderReplaceJob {
         output_path: String,
         bg_removal_paths: HashMap<String, String>,
         frame_interp_paths: HashMap<String, String>,
+        /// Snapshot of already-baked render-replace sidecars so the
+        /// compound export pass can substitute nested baked compounds
+        /// / leaf clips with their ready sidecars instead of
+        /// re-rendering them from scratch. Can be empty when nothing
+        /// nested has a bake yet.
+        nested_render_replace_paths: HashMap<String, String>,
     },
 }
 
@@ -337,6 +343,7 @@ impl RenderReplaceCache {
                 output_path,
                 bg_removal_paths: self.bg_removal_paths.clone(),
                 frame_interp_paths: self.frame_interp_paths.clone(),
+                nested_render_replace_paths: self.paths.clone(),
             });
         }
     }
@@ -406,6 +413,7 @@ impl RenderReplaceCache {
                 output_path,
                 bg_removal_paths: self.bg_removal_paths.clone(),
                 frame_interp_paths: self.frame_interp_paths.clone(),
+                nested_render_replace_paths: self.paths.clone(),
             });
         }
     }
@@ -927,6 +935,167 @@ pub fn build_synthetic_project_for_compound(
     Some(synthetic)
 }
 
+/// Try to substitute `clip` with a synthetic file-backed clone that
+/// points at its ready render-replace sidecar. Returns `None` when
+/// render-replace isn't enabled on the clip, the clip isn't a bakeable
+/// kind, or no sidecar is ready for the current signature.
+///
+/// On success, the returned clone:
+/// - points `source_path` at the sidecar;
+/// - for compound clips, flips `kind` to `Video` and clears
+///   `compound_tracks` so downstream flattening treats it as a leaf;
+/// - for leaf clips, keeps the existing kind and window, but the
+///   source_in/source_out are reset to `0..(source_out - source_in)`
+///   because the leaf sidecar is already trimmed during bake;
+/// - zeroes every baked-scope field (brightness / contrast /
+///   saturation / temperature / tint / exposure / black_point /
+///   shadows / highlights / denoise / sharpness / blur / frei0r
+///   effects / LUT stack / color keyframes) so the export pipeline's
+///   `build_*_filter` helpers return empty strings — no double-apply
+///   on top of the baked pixels;
+/// - preserves all "live scope" state (transform / opacity / blend /
+///   transitions / speed / reverse / freeze / timeline_start / label
+///   / masks / chroma key / audio effects) so the rendered sidecar
+///   still gets composited on top of the timeline exactly as the user
+///   sees it in the Program Monitor.
+///
+/// For compound clips the compound's OWN top-level color/effects are
+/// explicitly preserved (they're part of the compound's "live scope"
+/// per Phase 2's locked design) — the sidecar itself holds only the
+/// compound's INTERNAL content's baked pixels.
+pub fn materialize_clip_with_sidecar(
+    clip: &Clip,
+    render_replace_paths: &HashMap<String, String>,
+) -> Option<Clip> {
+    if !clip.render_replace_enabled {
+        return None;
+    }
+    match clip.kind {
+        ClipKind::Video | ClipKind::Image | ClipKind::Audio => {
+            if clip.source_path.trim().is_empty() {
+                return None;
+            }
+            let key = cache_key_for_clip(clip);
+            let sidecar = render_replace_paths.get(&key)?;
+            if !file_exists_and_nonempty(sidecar) {
+                return None;
+            }
+            let mut out = clip.clone();
+            out.source_path = sidecar.clone();
+            let windowed_dur = clip.source_out.saturating_sub(clip.source_in);
+            out.source_in = 0;
+            out.source_out = windowed_dur;
+            neutralize_baked_fields(&mut out);
+            Some(out)
+        }
+        ClipKind::Compound => {
+            let key = cache_key_for_compound(clip);
+            let sidecar = render_replace_paths.get(&key)?;
+            if !file_exists_and_nonempty(sidecar) {
+                return None;
+            }
+            let mut out = clip.clone();
+            // Compound bakes include their internal content's full
+            // duration (0..internal_duration). The compound's window
+            // source_in..source_out applies live at playback, but
+            // export expects source_in/source_out on the FILE-BACKED
+            // clip to mark the range it plays — match the preview
+            // flattening switch's convention: source_in stays at the
+            // compound's source_in, source_out at source_in+window.
+            let internal_dur = clip.source_out.saturating_sub(clip.source_in);
+            out.kind = ClipKind::Video;
+            out.source_path = sidecar.clone();
+            out.source_in = clip.source_in;
+            out.source_out = clip.source_in.saturating_add(internal_dur);
+            out.compound_tracks = None;
+            // For compounds the OWN top-level color is LIVE by design
+            // — do NOT neutralize these fields. The baked sidecar
+            // contains only the INTERNAL content's effects.
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
+/// Recursively substitute every clip in `tracks` (including nested
+/// compound_tracks of clips we don't substitute ourselves) with a
+/// sidecar-backed clone when one is ready. The result is a fresh
+/// `Vec<Track>` safe to feed into the export pipeline. Idempotent —
+/// re-running it on already-substituted tracks is a no-op because
+/// substituted clips have `render_replace_enabled = true` but their
+/// signature no longer matches the cache key (they're pointing at
+/// the sidecar, not the original source).
+pub fn materialize_tracks_with_sidecars(
+    tracks: &[crate::model::track::Track],
+    render_replace_paths: &HashMap<String, String>,
+) -> Vec<crate::model::track::Track> {
+    tracks
+        .iter()
+        .map(|track| {
+            let mut out = track.clone();
+            out.clips = track
+                .clips
+                .iter()
+                .map(|clip| materialize_clip_recursive(clip, render_replace_paths))
+                .collect();
+            out
+        })
+        .collect()
+}
+
+fn materialize_clip_recursive(
+    clip: &Clip,
+    render_replace_paths: &HashMap<String, String>,
+) -> Clip {
+    if let Some(substituted) = materialize_clip_with_sidecar(clip, render_replace_paths) {
+        return substituted;
+    }
+    // No sidecar for this clip — recurse into compound_tracks if any
+    // so nested baked compounds get their substitution too.
+    if let Some(ref inner) = clip.compound_tracks {
+        let mut out = clip.clone();
+        out.compound_tracks = Some(materialize_tracks_with_sidecars(
+            inner,
+            render_replace_paths,
+        ));
+        return out;
+    }
+    clip.clone()
+}
+
+fn neutralize_baked_fields(clip: &mut Clip) {
+    clip.brightness = 0.0;
+    clip.contrast = 1.0;
+    clip.saturation = 1.0;
+    clip.temperature = 6500.0;
+    clip.tint = 0.0;
+    clip.exposure = 0.0;
+    clip.black_point = 0.0;
+    clip.shadows = 0.0;
+    clip.highlights = 0.0;
+    clip.denoise = 0.0;
+    clip.sharpness = 0.0;
+    clip.blur = 0.0;
+    clip.brightness_keyframes.clear();
+    clip.contrast_keyframes.clear();
+    clip.saturation_keyframes.clear();
+    clip.temperature_keyframes.clear();
+    clip.tint_keyframes.clear();
+    clip.lut_paths.clear();
+    clip.frei0r_effects.clear();
+    // Leaf bakes write ONLY these fields to the sidecar. The clip's
+    // render_replace_enabled flag stays set so signatures re-match if
+    // the user edits a live-scope field (transform etc.) and the
+    // substitution happens again next export.
+}
+
+fn file_exists_and_nonempty(path: &str) -> bool {
+    std::fs::metadata(path)
+        .ok()
+        .filter(|m| m.len() > 0)
+        .is_some()
+}
+
 /// Flip `subtitle_visible = false` on every leaf clip in `tracks`,
 /// recursing through nested compounds up to `MAX_COMPOUND_DEPTH`. The
 /// export pipeline's subtitle burn-in checks this flag (export.rs:910)
@@ -1056,12 +1225,14 @@ fn run_render_replace_job(job: RenderReplaceJob) -> bool {
             output_path,
             bg_removal_paths,
             frame_interp_paths,
+            nested_render_replace_paths,
             ..
         } => run_compound_bake(
             &synthetic_project,
             &output_path,
             &bg_removal_paths,
             &frame_interp_paths,
+            &nested_render_replace_paths,
         ),
     }
 }
@@ -1157,6 +1328,7 @@ fn run_compound_bake(
     output_path: &str,
     bg_removal_paths: &HashMap<String, String>,
     frame_interp_paths: &HashMap<String, String>,
+    nested_render_replace_paths: &HashMap<String, String>,
 ) -> bool {
     use crate::media::export::{
         AudioChannelLayout, AudioCodec, Container, ExportOptions, VideoCodec,
@@ -1187,6 +1359,7 @@ fn run_compound_bake(
         None,
         bg_removal_paths,
         frame_interp_paths,
+        nested_render_replace_paths,
         tx,
     ) {
         Ok(()) => true,
@@ -1501,6 +1674,83 @@ mod tests {
             !deep.subtitle_visible,
             "subtitle stripping must reach into nested compounds"
         );
+    }
+
+    #[test]
+    fn materialize_returns_none_when_render_replace_disabled() {
+        let clip = make_clip(); // render_replace_enabled = false by default
+        let paths: HashMap<String, String> = HashMap::new();
+        assert!(materialize_clip_with_sidecar(&clip, &paths).is_none());
+    }
+
+    #[test]
+    fn materialize_returns_none_when_no_sidecar() {
+        let mut clip = make_clip();
+        clip.render_replace_enabled = true;
+        let paths: HashMap<String, String> = HashMap::new();
+        assert!(materialize_clip_with_sidecar(&clip, &paths).is_none());
+    }
+
+    #[test]
+    fn materialize_tracks_walks_nested_compounds() {
+        // Compound A → Compound B → leaf clip.
+        // Only the leaf has a render-replace sidecar ready. The
+        // walker must substitute the leaf while leaving A and B as
+        // compounds (so export's normal flattening handles them).
+        let mut leaf = Clip::new("/tmp/leaf.mp4", 5_000_000_000, 0, ClipKind::Video);
+        leaf.render_replace_enabled = true;
+        let leaf_key = cache_key_for_clip(&leaf);
+
+        let mut inner_track = crate::model::track::Track::new_video("V1");
+        inner_track.clips.push(leaf);
+        let mut inner = Clip::new("", 5_000_000_000, 0, ClipKind::Compound);
+        inner.compound_tracks = Some(vec![inner_track]);
+
+        let mut outer_track = crate::model::track::Track::new_video("V1");
+        outer_track.clips.push(inner);
+
+        // Use a real temp file so the file_exists_and_nonempty guard passes.
+        let tmp = tempfile::NamedTempFile::new().expect("temp");
+        std::fs::write(tmp.path(), b"sidecar-data").expect("write");
+        let mut paths: HashMap<String, String> = HashMap::new();
+        paths.insert(
+            leaf_key.clone(),
+            tmp.path().to_string_lossy().to_string(),
+        );
+
+        let substituted = materialize_tracks_with_sidecars(&[outer_track], &paths);
+        let out_outer = &substituted[0].clips[0];
+        assert_eq!(out_outer.kind, ClipKind::Compound);
+        let out_inner = &out_outer.compound_tracks.as_ref().unwrap()[0].clips[0];
+        // Leaf was substituted: source_path swapped, baked-scope cleared.
+        assert!(out_inner.source_path.ends_with(
+            tmp.path().file_name().unwrap().to_str().unwrap()
+        ));
+        assert!((out_inner.brightness - 0.0).abs() < 1e-6);
+        assert!(out_inner.lut_paths.is_empty());
+        assert!(out_inner.frei0r_effects.is_empty());
+    }
+
+    #[test]
+    fn materialize_substitutes_compound_as_flat_video() {
+        // Compound with a ready sidecar becomes a single file-backed
+        // Video clip (compound_tracks cleared, kind = Video).
+        let compound = make_compound_with_one_inner(0.0);
+        let mut compound = compound;
+        compound.render_replace_enabled = true;
+        let key = cache_key_for_compound(&compound);
+
+        let tmp = tempfile::NamedTempFile::new().expect("temp");
+        std::fs::write(tmp.path(), b"compound-sidecar").expect("write");
+        let mut paths: HashMap<String, String> = HashMap::new();
+        paths.insert(key, tmp.path().to_string_lossy().to_string());
+
+        let substituted = materialize_clip_with_sidecar(&compound, &paths).expect("some");
+        assert_eq!(substituted.kind, ClipKind::Video);
+        assert!(substituted.compound_tracks.is_none());
+        assert!(substituted.source_path.ends_with(
+            tmp.path().file_name().unwrap().to_str().unwrap()
+        ));
     }
 
     #[test]

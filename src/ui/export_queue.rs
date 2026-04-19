@@ -374,6 +374,12 @@ pub fn build_export_queue_dialog(
                     let job_id = job.id.clone();
                     let tx2 = tx.clone();
                     let handle = std::thread::spawn(move || {
+                        // Batched queued export: empty render_replace_paths
+                        // for now; a follow-up can thread the cache
+                        // through so queued jobs also benefit from
+                        // baked sidecars.
+                        let empty_rr: std::collections::HashMap<String, String> =
+                            std::collections::HashMap::new();
                         if let Err(e) = export_project(
                             &proj2,
                             &output_bg,
@@ -381,6 +387,7 @@ pub fn build_export_queue_dialog(
                             None,
                             &bg_paths2,
                             &interp_paths2,
+                            &empty_rr,
                             ptx.clone(),
                         ) {
                             let _ = ptx.send(ExportProgress::Error(e.to_string()));

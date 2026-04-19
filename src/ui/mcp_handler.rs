@@ -4229,6 +4229,12 @@ pub(crate) fn handle_mcp_command(
                         hdr_passthrough: false,
                         ..crate::media::export::ExportOptions::default()
                     };
+                    // Analysis exports intentionally pass empty
+                    // render_replace_paths — we want the live effect
+                    // chain on source so measurements (loudness, match)
+                    // reflect actual rendering, not a baked intermediate.
+                    let empty_rr: std::collections::HashMap<String, String> =
+                        std::collections::HashMap::new();
                     let result = crate::media::export::export_project(
                         &proj_worker,
                         &path_worker,
@@ -4236,6 +4242,7 @@ pub(crate) fn handle_mcp_command(
                         None,
                         &bg_paths,
                         &interp_paths,
+                        &empty_rr,
                         tx,
                     )
                     .map_err(|e| e.to_string())
@@ -4521,6 +4528,12 @@ pub(crate) fn handle_mcp_command(
                 let path_worker = path.clone();
                 std::thread::spawn(move || {
                     let (tx, _rx) = std::sync::mpsc::channel();
+                    // Analysis exports intentionally pass empty
+                    // render_replace_paths — we want the live effect
+                    // chain on source so measurements (loudness, match)
+                    // reflect actual rendering, not a baked intermediate.
+                    let empty_rr: std::collections::HashMap<String, String> =
+                        std::collections::HashMap::new();
                     let result = crate::media::export::export_project(
                         &proj_worker,
                         &path_worker,
@@ -4528,6 +4541,7 @@ pub(crate) fn handle_mcp_command(
                         None,
                         &bg_paths,
                         &interp_paths,
+                        &empty_rr,
                         tx,
                     )
                     .map_err(|e| e.to_string())
@@ -6816,6 +6830,12 @@ pub(crate) fn handle_mcp_command(
                     let opts = job.options.to_export_options();
                     let (ptx, _prx) =
                         std::sync::mpsc::channel::<crate::media::export::ExportProgress>();
+                    // Batch export via MCP: empty render_replace_paths
+                    // for now so scripted pipelines keep full live
+                    // rendering. Follow-up can plumb the cache through
+                    // to benefit from baked sidecars here too.
+                    let empty_rr: std::collections::HashMap<String, String> =
+                        std::collections::HashMap::new();
                     let export_result = crate::media::export::export_project(
                         &proj_snapshot,
                         &job.output_path,
@@ -6823,6 +6843,7 @@ pub(crate) fn handle_mcp_command(
                         None,
                         &bg_paths,
                         &interp_paths,
+                        &empty_rr,
                         ptx,
                     );
                     let (new_status, err_msg) = match export_result {

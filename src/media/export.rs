@@ -265,6 +265,7 @@ pub fn export_project(
     estimated_size_bytes: Option<u64>,
     bg_removal_paths: &std::collections::HashMap<String, String>,
     frame_interp_paths: &std::collections::HashMap<String, String>,
+    render_replace_paths: &std::collections::HashMap<String, String>,
     tx: mpsc::Sender<ExportProgress>,
 ) -> Result<()> {
     // GIF outputs have no audio stream — surround layouts have nothing to do
@@ -296,13 +297,33 @@ pub fn export_project(
         1.0 / 30.0
     };
 
+    // Render-and-Replace substitution: walk the project tracks and
+    // swap any clip with a ready sidecar for a synthetic file-backed
+    // clip pointing at the sidecar. Leaf clips (Video/Image/Audio)
+    // get their baked-scope fields zeroed so the filter-graph
+    // helpers return empty and the sidecar plays through untouched.
+    // Compound clips are replaced with a single file-backed video
+    // clip that will NOT recurse into their internal tracks during
+    // the flatten pass. Recursion into unbaked compounds' internal
+    // tracks still happens — nested baked compounds are substituted
+    // in place during the recursive walk. No-op when
+    // `render_replace_paths` is empty.
+    let substituted_tracks = if render_replace_paths.is_empty() {
+        project.tracks.clone()
+    } else {
+        crate::media::render_replace_cache::materialize_tracks_with_sidecars(
+            &project.tracks,
+            render_replace_paths,
+        )
+    };
+
     // Flatten compound clips before building the filter graph.
     // This produces a modified track list where every compound clip has been
     // recursively expanded into its constituent leaf clips with rebased
     // timeline positions. The rest of the export pipeline operates on this
     // flat representation unchanged.
     let mut flattened_tracks = flatten_compound_tracks_with_fps(
-        &project.tracks,
+        &substituted_tracks,
         project.frame_rate.numerator,
         project.frame_rate.denominator,
     );
@@ -5857,6 +5878,7 @@ pub fn analyze_project_loudness(project: &Project) -> Result<LoudnessReport> {
     let (tx, _rx) = mpsc::channel();
     let empty_bg: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let empty_fi: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let empty_rr: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     export_project(
         &analysis_project,
         &path,
@@ -5864,6 +5886,7 @@ pub fn analyze_project_loudness(project: &Project) -> Result<LoudnessReport> {
         None,
         &empty_bg,
         &empty_fi,
+        &empty_rr,
         tx,
     )?;
 
