@@ -3054,6 +3054,34 @@ impl ProgramPlayer {
         }
     }
 
+    /// Look up the render-replace sidecar path for a compound `Clip`.
+    /// Mirrors [`Self::render_replace_sidecar_path`] but operates on a
+    /// model `Clip` (specifically a compound) because the preview
+    /// flattening walker in `window.rs::clip_to_program_clips` sees
+    /// compound clips as `Clip` — compounds never exist as a single
+    /// `ProgramClip` (they're flattened into their internals). Returns
+    /// `Some(sidecar_path)` only when `render_replace_enabled` is true
+    /// AND the cache has a matching signature AND the file is on disk
+    /// and non-empty.
+    pub fn render_replace_compound_sidecar_path(
+        &self,
+        compound: &crate::model::clip::Clip,
+    ) -> Option<String> {
+        if !compound.render_replace_enabled
+            || compound.kind != crate::model::clip::ClipKind::Compound
+            || self.render_replace_paths.is_empty()
+        {
+            return None;
+        }
+        let key = crate::media::render_replace_cache::cache_key_for_compound(compound);
+        self.render_replace_paths.get(&key).and_then(|p| {
+            std::fs::metadata(p)
+                .ok()
+                .filter(|m| m.len() > 0)
+                .map(|_| p.clone())
+        })
+    }
+
     /// Look up the render-replace sidecar path for `clip` using the
     /// live ProgramClip field view. Returns `None` when the cache
     /// does not have an entry for this clip's current signature, when

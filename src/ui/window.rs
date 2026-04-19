@@ -5642,6 +5642,7 @@ fn clip_to_program_clips(
     track_gain_linear: f64,
     track_pan: f64,
     hdr_paths: &std::collections::HashSet<String>,
+    render_replace_paths: &std::collections::HashMap<String, String>,
 ) -> Vec<ProgramClip> {
     use crate::model::clip::ClipKind;
 
@@ -5715,6 +5716,59 @@ fn clip_to_program_clips(
     }
     let c = drawing_redirect.as_ref().unwrap_or(c);
 
+    // Compound clips: if Render-and-Replace is on AND the cache has a
+    // ready sidecar for this compound's current signature, emit a
+    // single file-backed ProgramClip pointing at the sidecar so the
+    // Program Monitor plays the pre-rendered comp as one flat clip.
+    // The compound's own transform / opacity / blend / color /
+    // transitions stay live — they're applied by the normal
+    // compositing path on top of the sidecar frames. If the sidecar
+    // isn't ready yet, fall through to the flatten path so preview
+    // keeps working during the bake.
+    if c.kind == ClipKind::Compound && c.render_replace_enabled {
+        let sig = crate::media::render_replace_cache::cache_key_for_compound(c);
+        if let Some(sidecar_path) = render_replace_paths.get(&sig).and_then(|p| {
+            std::fs::metadata(p).ok().filter(|m| m.len() > 0).map(|_| p.clone())
+        }) {
+            // Build a synthetic Clip that LOOKS like a file-backed
+            // video clip at the compound's timeline position, but
+            // with a source window of the compound's full internal
+            // duration (0 → dur). The compound's own fields (scale,
+            // position, rotate, crop, opacity, blend, transitions,
+            // color, etc.) are preserved so they apply live on top
+            // of the baked frames.
+            let internal_dur = c.source_out.saturating_sub(c.source_in);
+            let mut file_backed = c.clone();
+            file_backed.kind = ClipKind::Video;
+            file_backed.source_path = sidecar_path;
+            file_backed.source_in = c.source_in;
+            file_backed.source_out = c.source_in.saturating_add(internal_dur);
+            file_backed.compound_tracks = None;
+            // The sidecar's internal content already includes every
+            // internal clip's baked effects. Suppress nothing on the
+            // compound's own fields (the compound's own grade /
+            // effects / crop / etc. stay live — locked design).
+            return clip_to_program_clips(
+                &file_backed,
+                audio_only,
+                duck,
+                duck_amount_db,
+                track_index,
+                suppress_embedded_audio_ids,
+                timeline_offset,
+                depth,
+                project_fps_num,
+                project_fps_den,
+                track_muted,
+                track_gain_linear,
+                track_pan,
+                hdr_paths,
+                render_replace_paths,
+            );
+        }
+        // Sidecar not ready — fall through to the normal flattening path.
+    }
+
     // Compound clips: recursively flatten internal clips
     if c.kind == ClipKind::Compound && depth < 16 {
         if c.compound_tracks.is_some() {
@@ -5738,6 +5792,7 @@ fn clip_to_program_clips(
                     track_gain_linear,
                     track_pan,
                     hdr_paths,
+                    render_replace_paths,
                 ));
             }
             return result;
@@ -5841,6 +5896,7 @@ fn clip_to_program_clips(
                     track_gain_linear,
                     track_pan,
                     hdr_paths,
+                    render_replace_paths,
                 );
                 // Video segments have no embedded audio (audio comes from the mix below)
                 for pc in &mut seg_results {
@@ -5888,6 +5944,7 @@ fn clip_to_program_clips(
                     track_gain_linear,
                     track_pan,
                     hdr_paths,
+                    render_replace_paths,
                 );
                 result.extend(audio_results);
             }
@@ -16128,6 +16185,7 @@ pub fn build_window(
         let sync_tracking_controls = sync_tracking_controls.clone();
         let minimap_weak = minimap_area.downgrade();
         let render_replace_cache_for_reload = render_replace_cache.clone();
+        let render_replace_cache_for_flatten = render_replace_cache.clone();
 
         *on_project_changed_impl.borrow_mut() = Some(Box::new(move || {
             // Sync compound clip duration when editing inside a compound.
@@ -16221,6 +16279,13 @@ pub fn build_window(
                 let has_solo = proj.has_solo_tracks();
                 let has_solo_buses = proj.has_solo_buses();
                 let hdr_paths = timeline_state.borrow().hdr_media_paths.clone();
+                // Snapshot the render-replace sidecar path map once for
+                // this rebuild. `clip_to_program_clips` reads it to decide
+                // whether to emit a compound clip as a flat file-backed
+                // ProgramClip (when its bake is ready) or fall through to
+                // the normal recursive flatten.
+                let render_replace_paths: std::collections::HashMap<String, String> =
+                    render_replace_cache_for_flatten.borrow().paths.clone();
                 let mut clips: Vec<ProgramClip> = editing_tracks
                     .iter()
                     .enumerate()
@@ -16239,6 +16304,7 @@ pub fn build_window(
                         let gain_linear = t.gain_linear() * proj.bus_gain_linear(&t.audio_role);
                         let pan = t.pan;
                         let hdr_ref = hdr_paths.clone();
+                        let rr_ref = render_replace_paths.clone();
                         t.clips.iter().flat_map(move |c| {
                             clip_to_program_clips(
                                 c,
@@ -16255,6 +16321,7 @@ pub fn build_window(
                                 gain_linear,
                                 pan,
                                 &hdr_ref,
+                                &rr_ref,
                             )
                         })
                     })
@@ -16472,22 +16539,62 @@ pub fn build_window(
                     {
                         let proj = project_reload.borrow();
                         let mut cache = render_replace_cache_reload.borrow_mut();
+                        // Post-order walk: recurse into `compound_tracks`
+                        // FIRST so inner bakes are in flight (or ready)
+                        // by the time the outer compound's request()
+                        // runs. The compound request path then checks
+                        // `nested_compounds_ready` and defers itself
+                        // silently when any inner compound is still
+                        // pending. Each subsequent poll cycle's rebuild
+                        // retries the outer request, so bakes complete
+                        // inside-out across multiple ticks.
                         fn walk_render_replace_request(
                             cache: &mut crate::media::render_replace_cache::RenderReplaceCache,
                             tracks: &[crate::model::track::Track],
+                            parent_w: u32,
+                            parent_h: u32,
+                            parent_fps_num: u32,
+                            parent_fps_den: u32,
                         ) {
                             for track in tracks {
                                 for clip in &track.clips {
-                                    if clip.render_replace_enabled {
-                                        cache.request(clip);
-                                    }
+                                    // Recurse first (post-order).
                                     if let Some(ref ctracks) = clip.compound_tracks {
-                                        walk_render_replace_request(cache, ctracks);
+                                        walk_render_replace_request(
+                                            cache,
+                                            ctracks,
+                                            parent_w,
+                                            parent_h,
+                                            parent_fps_num,
+                                            parent_fps_den,
+                                        );
+                                    }
+                                    if clip.render_replace_enabled {
+                                        match clip.kind {
+                                            crate::model::clip::ClipKind::Compound => {
+                                                cache.request_compound_with_parent(
+                                                    clip,
+                                                    parent_w,
+                                                    parent_h,
+                                                    parent_fps_num,
+                                                    parent_fps_den,
+                                                );
+                                            }
+                                            _ => {
+                                                cache.request(clip);
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
-                        walk_render_replace_request(&mut cache, &proj.tracks);
+                        let (pw, ph, pn, pd) = (
+                            proj.width,
+                            proj.height,
+                            proj.frame_rate.numerator,
+                            proj.frame_rate.denominator,
+                        );
+                        walk_render_replace_request(&mut cache, &proj.tracks, pw, ph, pn, pd);
                         let paths = cache.paths.clone();
                         prog_player_reload
                             .borrow_mut()
@@ -18841,7 +18948,11 @@ pub fn build_window(
                 let bg_resolved = bg_removal_cache.borrow_mut().poll();
                 if !bg_resolved.is_empty() || !bg_removal_cache.borrow().paths.is_empty() {
                     let paths = bg_removal_cache.borrow().paths.clone();
-                    prog_player.borrow_mut().update_bg_removal_paths(paths);
+                    prog_player.borrow_mut().update_bg_removal_paths(paths.clone());
+                    // Mirror into the render-replace cache so compound
+                    // bakes see up-to-date sidecars for internal clips
+                    // that use bg-removal.
+                    render_replace_cache.borrow_mut().set_bg_removal_paths(paths);
                 }
                 // Keep inspector section visibility in sync with model availability.
                 inspector_view
@@ -18891,7 +19002,12 @@ pub fn build_window(
                 if !interp_resolved.is_empty() {
                     let proj = project_for_stt.borrow();
                     let snapshot = frame_interp_cache.borrow().snapshot_paths_by_clip_id(&proj);
-                    prog_player.borrow_mut().update_frame_interp_paths(snapshot);
+                    prog_player
+                        .borrow_mut()
+                        .update_frame_interp_paths(snapshot.clone());
+                    render_replace_cache
+                        .borrow_mut()
+                        .set_frame_interp_paths(snapshot);
                 }
                 // Toggle the "AI Interpolation (RIFE)" dropdown entry in
                 // sync with the on-disk model. So users can drop the model
