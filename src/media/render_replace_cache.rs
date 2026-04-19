@@ -51,6 +51,21 @@ enum WorkerUpdate {
     Done(WorkerResult),
 }
 
+/// Vidstab pre-pass parameters. Computed at request time from the
+/// clip's `vidstab_smoothing`, with a `.trf` path keyed off the
+/// cache-key so concurrent bakes of different clips don't clobber
+/// each other's transform files.
+struct VidstabBakeParams {
+    /// Where `vidstabdetect` writes the motion-analysis file.
+    trf_path: String,
+    /// `shakiness` (integer 1..10) passed to `vidstabdetect`. Matches
+    /// the scaling in `media::export::run_vidstab_analysis`.
+    shakiness: i32,
+    /// `smoothing` (integer 1..30) passed to `vidstabtransform`.
+    /// Matches `media::export::build_vidstab_filter`.
+    smoothing: i32,
+}
+
 /// Outcome of a finished worker job. Distinguishes a real failure (bake
 /// errored) from user-initiated cancellation so the UI can roll the
 /// entry back to Idle instead of surfacing "Bake failed — toggle off/on
@@ -87,6 +102,11 @@ enum RenderReplaceJob {
         /// flag; when the UI sets it, the worker kills the subprocess
         /// and returns `JobOutcome::Cancelled`.
         cancel_flag: Arc<AtomicBool>,
+        /// When present, the worker runs `vidstabdetect` as a pre-pass
+        /// to generate a transform file, then prepends a matching
+        /// `vidstabtransform=...` to `video_filter` before the main
+        /// bake. `None` skips the pre-pass entirely.
+        vidstab: Option<VidstabBakeParams>,
     },
     Compound {
         cache_key: String,
@@ -285,6 +305,26 @@ impl RenderReplaceCache {
         self.pending.insert(key.clone());
         let cancel_flag = Arc::new(AtomicBool::new(false));
         self.cancel_tokens.insert(key.clone(), cancel_flag.clone());
+        // Vidstab pre-pass: only video clips with vidstab_enabled +
+        // positive smoothing warrant the extra motion-analysis run.
+        // The .trf path is keyed off the cache_key so concurrent bakes
+        // of different clips don't fight over the same temp file.
+        let vidstab = if matches!(clip.kind, ClipKind::Video)
+            && clip.vidstab_enabled
+            && clip.vidstab_smoothing > 0.0
+        {
+            let trf_path =
+                format!("/tmp/ultimateslice-rrbake-{}.trf", &key);
+            let shakiness = ((clip.vidstab_smoothing * 10.0).round() as i32).clamp(1, 10);
+            let smoothing = ((clip.vidstab_smoothing * 30.0).round() as i32).clamp(1, 30);
+            Some(VidstabBakeParams {
+                trf_path,
+                shakiness,
+                smoothing,
+            })
+        } else {
+            None
+        };
         if let Some(ref tx) = self.work_tx {
             let _ = tx.send(RenderReplaceJob::Leaf {
                 cache_key: key,
@@ -294,6 +334,7 @@ impl RenderReplaceCache {
                 start_seconds,
                 duration_seconds,
                 cancel_flag,
+                vidstab,
             });
         }
     }
@@ -676,6 +717,8 @@ fn fold_baked_fields(
     blur: f64,
     lut_paths: &[String],
     frei0r_effects: &[crate::model::clip::Frei0rEffect],
+    vidstab_enabled: bool,
+    vidstab_smoothing: f64,
 ) {
     hasher.add_source_fingerprint(source_path);
     hasher.add(source_in).add(source_out);
@@ -693,6 +736,15 @@ fn fold_baked_fields(
         .add((denoise * 10_000.0) as i64)
         .add((sharpness * 10_000.0) as i64)
         .add((blur * 10_000.0) as i64);
+    // Vidstab is a 2-pass stabilization that bakes the clip's motion
+    // analysis into the sidecar. Changing either the enable flag or
+    // the smoothing amount changes the output pixels, so fold both
+    // into the signature. Using "vs" as a field separator makes this
+    // ordering explicit for future schema inspectors.
+    hasher
+        .add("vs")
+        .add(if vidstab_enabled { 1u8 } else { 0u8 })
+        .add((vidstab_smoothing * 10_000.0) as i64);
     for path in lut_paths {
         hasher.add(path.as_str());
     }
@@ -742,6 +794,7 @@ fn fold_color_keyframes(
 /// Compute the render-replace cache key from the live ProgramClip field
 /// view. Must produce the same key as [`cache_key_for_clip`] for the
 /// same effective clip state — call sites rely on both sides agreeing.
+#[allow(clippy::too_many_arguments)]
 pub fn cache_key_for_program_clip_fields(
     source_path: &str,
     source_in: u64,
@@ -760,6 +813,8 @@ pub fn cache_key_for_program_clip_fields(
     blur: f64,
     lut_paths: &[String],
     frei0r_effects: &[crate::model::clip::Frei0rEffect],
+    vidstab_enabled: bool,
+    vidstab_smoothing: f64,
     brightness_kfs: &[crate::model::clip::NumericKeyframe],
     contrast_kfs: &[crate::model::clip::NumericKeyframe],
     saturation_kfs: &[crate::model::clip::NumericKeyframe],
@@ -786,6 +841,8 @@ pub fn cache_key_for_program_clip_fields(
         blur,
         lut_paths,
         frei0r_effects,
+        vidstab_enabled,
+        vidstab_smoothing,
     );
     // Insert color-KF fold between the scalar color block and the
     // denoise/sharpness/blur block, matching cache_key_for_clip's
@@ -827,6 +884,8 @@ pub fn cache_key_for_clip(clip: &Clip) -> String {
         clip.blur as f64,
         &clip.lut_paths,
         &clip.frei0r_effects,
+        clip.vidstab_enabled,
+        clip.vidstab_smoothing as f64,
         &clip.brightness_keyframes,
         &clip.contrast_keyframes,
         &clip.saturation_keyframes,
@@ -1151,6 +1210,12 @@ fn neutralize_baked_fields(clip: &mut Clip) {
     clip.tint_keyframes.clear();
     clip.lut_paths.clear();
     clip.frei0r_effects.clear();
+    // Vidstab is part of the baked scope (Phase 3). The sidecar's
+    // frames are already stabilized, so the live pipeline must skip
+    // the second pass — otherwise stabilization double-applies and
+    // produces smeared motion.
+    clip.vidstab_enabled = false;
+    clip.vidstab_smoothing = 0.0;
     // Leaf bakes write ONLY these fields to the sidecar. The clip's
     // render_replace_enabled flag stays set so signatures re-match if
     // the user edits a live-scope field (transform etc.) and the
@@ -1282,6 +1347,7 @@ fn run_render_replace_job(job: RenderReplaceJob) -> JobOutcome {
             start_seconds,
             duration_seconds,
             cancel_flag,
+            vidstab,
             ..
         } => run_leaf_bake(
             &source_path,
@@ -1290,6 +1356,7 @@ fn run_render_replace_job(job: RenderReplaceJob) -> JobOutcome {
             start_seconds,
             duration_seconds,
             &cancel_flag,
+            vidstab.as_ref(),
         ),
         RenderReplaceJob::Compound {
             synthetic_project,
@@ -1338,6 +1405,7 @@ fn run_leaf_bake(
     start_seconds: f64,
     duration_seconds: f64,
     cancel_flag: &Arc<AtomicBool>,
+    vidstab: Option<&VidstabBakeParams>,
 ) -> JobOutcome {
     let duration = if duration_seconds > 0.001 {
         format!("{:.6}", duration_seconds)
@@ -1346,16 +1414,55 @@ fn run_leaf_bake(
     };
     let start = format!("{:.6}", start_seconds.max(0.0));
 
+    // Vidstab pre-pass: run `vidstabdetect` over the same window we're
+    // baking to produce the `.trf` motion file. This is a short,
+    // second ffmpeg invocation; it honours the cancel flag between
+    // poll ticks. On failure we carry on with the main bake sans
+    // stabilization (matches export pipeline's graceful fallback).
+    let vidstab_transform_filter = if let Some(params) = vidstab {
+        if !run_vidstab_detect(
+            source_path,
+            &start,
+            &duration,
+            params,
+            cancel_flag,
+        ) {
+            if cancel_flag.load(Ordering::SeqCst) {
+                // Cancelled during detect — exit without running the
+                // main pass. The dispatcher rolls the job back to Idle.
+                let _ = std::fs::remove_file(&params.trf_path);
+                return JobOutcome::Cancelled;
+            }
+            log::warn!(
+                "RenderReplaceCache: vidstab detect failed — continuing bake without stabilization"
+            );
+            String::new()
+        } else {
+            format!(
+                "vidstabtransform=input={}:smoothing={}:zoom=0:optzoom=1,unsharp=5:5:0.8:3:3:0.4",
+                params.trf_path, params.smoothing
+            )
+        }
+    } else {
+        String::new()
+    };
+    let composed_filter = match (vidstab_transform_filter.is_empty(), video_filter.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => vidstab_transform_filter,
+        (true, false) => video_filter.to_string(),
+        (false, false) => format!("{vidstab_transform_filter},{video_filter}"),
+    };
+
     log::info!(
         "RenderReplaceCache: leaf ffmpeg src={} -> out={} start={}s dur={}s filter={}",
         source_path,
         output_path,
         start,
         duration,
-        if video_filter.is_empty() {
-            "(passthrough)"
+        if composed_filter.is_empty() {
+            "(passthrough)".to_string()
         } else {
-            video_filter
+            composed_filter.clone()
         }
     );
     let mut args: Vec<String> = vec![
@@ -1375,9 +1482,9 @@ fn run_leaf_bake(
     args.push("0:v:0?".into());
     args.push("-map".into());
     args.push("0:a?".into());
-    if !video_filter.is_empty() {
+    if !composed_filter.is_empty() {
         args.push("-vf".into());
-        args.push(video_filter.to_string());
+        args.push(composed_filter);
     }
     args.extend([
         "-c:v".into(),
@@ -1394,30 +1501,117 @@ fn run_leaf_bake(
         "+faststart".into(),
         output_path.to_string(),
     ]);
+    let outcome = (|| -> JobOutcome {
+        let mut child = match Command::new("ffmpeg").args(&args).spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("RenderReplaceCache: leaf ffmpeg spawn error: {e}");
+                return JobOutcome::Failed;
+            }
+        };
+        loop {
+            if cancel_flag.load(Ordering::SeqCst) {
+                log::info!(
+                    "RenderReplaceCache: cancel requested — killing ffmpeg pid={}",
+                    child.id()
+                );
+                let _ = child.kill();
+                let _ = child.wait();
+                return JobOutcome::Cancelled;
+            }
+            match child.try_wait() {
+                Ok(Some(status)) if status.success() => return JobOutcome::Success,
+                Ok(Some(status)) => {
+                    log::warn!("RenderReplaceCache: leaf ffmpeg exited with {status:?}");
+                    return JobOutcome::Failed;
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(250)),
+                Err(e) => {
+                    log::warn!("RenderReplaceCache: leaf ffmpeg wait error: {e}");
+                    return JobOutcome::Failed;
+                }
+            }
+        }
+    })();
+    // Clean up the vidstab .trf file regardless of outcome — it's
+    // only meaningful during this one bake, and leaving it around
+    // wastes /tmp space.
+    if let Some(params) = vidstab {
+        let _ = std::fs::remove_file(&params.trf_path);
+    }
+    outcome
+}
+
+/// Run `vidstabdetect` to produce a motion-analysis `.trf` file over
+/// the same `-ss` / `-t` window as the main bake. Returns true when
+/// the file exists and is non-empty on disk. Respects the cancel
+/// flag between poll ticks (same ~250 ms granularity as the main
+/// bake).
+fn run_vidstab_detect(
+    source_path: &str,
+    start: &str,
+    duration: &str,
+    params: &VidstabBakeParams,
+    cancel_flag: &Arc<AtomicBool>,
+) -> bool {
+    // Always start from a clean slate so a stale .trf from a crashed
+    // previous bake doesn't get picked up.
+    let _ = std::fs::remove_file(&params.trf_path);
+    let mut args: Vec<String> = vec![
+        "-y".into(),
+        "-loglevel".into(),
+        "warning".into(),
+        "-ss".into(),
+        start.to_string(),
+    ];
+    if !duration.is_empty() {
+        args.push("-t".into());
+        args.push(duration.to_string());
+    }
+    args.push("-i".into());
+    args.push(source_path.to_string());
+    args.push("-vf".into());
+    args.push(format!(
+        "vidstabdetect=shakiness={}:result={}",
+        params.shakiness, params.trf_path
+    ));
+    args.push("-f".into());
+    args.push("null".into());
+    args.push("-".into());
+    log::info!(
+        "RenderReplaceCache: vidstab detect src={} -> trf={} shakiness={}",
+        source_path,
+        params.trf_path,
+        params.shakiness
+    );
     let mut child = match Command::new("ffmpeg").args(&args).spawn() {
         Ok(c) => c,
         Err(e) => {
-            log::warn!("RenderReplaceCache: leaf ffmpeg spawn error: {e}");
-            return JobOutcome::Failed;
+            log::warn!("RenderReplaceCache: vidstab detect spawn error: {e}");
+            return false;
         }
     };
     loop {
         if cancel_flag.load(Ordering::SeqCst) {
-            log::info!("RenderReplaceCache: cancel requested — killing ffmpeg pid={}", child.id());
             let _ = child.kill();
             let _ = child.wait();
-            return JobOutcome::Cancelled;
+            return false;
         }
         match child.try_wait() {
-            Ok(Some(status)) if status.success() => return JobOutcome::Success,
+            Ok(Some(status)) if status.success() => {
+                return Path::new(&params.trf_path).exists()
+                    && std::fs::metadata(&params.trf_path)
+                        .map(|m| m.len() > 0)
+                        .unwrap_or(false);
+            }
             Ok(Some(status)) => {
-                log::warn!("RenderReplaceCache: leaf ffmpeg exited with {status:?}");
-                return JobOutcome::Failed;
+                log::warn!("RenderReplaceCache: vidstab detect exited with {status:?}");
+                return false;
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(250)),
             Err(e) => {
-                log::warn!("RenderReplaceCache: leaf ffmpeg wait error: {e}");
-                return JobOutcome::Failed;
+                log::warn!("RenderReplaceCache: vidstab detect wait error: {e}");
+                return false;
             }
         }
     }
@@ -1573,6 +1767,54 @@ mod tests {
         let before = cache.total_requested;
         cache.request(&clip);
         assert_eq!(cache.total_requested, before);
+    }
+
+    #[test]
+    fn signature_changes_on_vidstab_enabled() {
+        let a = make_clip();
+        let mut b = a.clone();
+        b.vidstab_enabled = true;
+        b.vidstab_smoothing = 0.5;
+        assert_ne!(
+            cache_key_for_clip(&a),
+            cache_key_for_clip(&b),
+            "toggling vidstab must invalidate the bake — sidecar frames are pre-stabilized"
+        );
+    }
+
+    #[test]
+    fn signature_changes_on_vidstab_smoothing() {
+        let mut a = make_clip();
+        a.vidstab_enabled = true;
+        a.vidstab_smoothing = 0.3;
+        let mut b = a.clone();
+        b.vidstab_smoothing = 0.7;
+        assert_ne!(
+            cache_key_for_clip(&a),
+            cache_key_for_clip(&b),
+            "smoothing changes the motion transform → different output pixels"
+        );
+    }
+
+    #[test]
+    fn neutralize_zeros_vidstab_so_preview_doesnt_double_stabilize() {
+        // Clip has vidstab enabled. After materializing it against a
+        // ready sidecar, the live pipeline must see vidstab_enabled=false
+        // because the sidecar frames are already stabilized.
+        let tmp = tempfile::NamedTempFile::new().expect("temp file");
+        std::fs::write(tmp.path(), b"not-empty").expect("write");
+        let sidecar_path = tmp.path().to_string_lossy().to_string();
+        let mut clip = make_clip();
+        clip.render_replace_enabled = true;
+        clip.vidstab_enabled = true;
+        clip.vidstab_smoothing = 0.5;
+        let key = cache_key_for_clip(&clip);
+        let mut paths = HashMap::new();
+        paths.insert(key, sidecar_path);
+        let materialized =
+            materialize_clip_with_sidecar(&clip, &paths).expect("substitution should fire");
+        assert!(!materialized.vidstab_enabled);
+        assert_eq!(materialized.vidstab_smoothing, 0.0);
     }
 
     #[test]
