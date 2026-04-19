@@ -3375,7 +3375,7 @@ pub(crate) fn build_blur_filter(clip: &crate::model::clip::Clip) -> String {
 ///
 /// Returns an empty string when the qualifier is neutral so primary-only
 /// clips stay byte-identical to before.
-fn build_hsl_qualifier_filter(clip: &crate::model::clip::Clip) -> String {
+pub(crate) fn build_hsl_qualifier_filter(clip: &crate::model::clip::Clip) -> String {
     let q = match &clip.hsl_qualifier {
         Some(q) if !q.is_neutral() => q,
         _ => return String::new(),

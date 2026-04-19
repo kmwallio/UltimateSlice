@@ -727,6 +727,7 @@ fn fold_baked_fields(
     vidstab_enabled: bool,
     vidstab_smoothing: f64,
     ladspa_effects: &[crate::model::clip::LadspaEffect],
+    hsl_qualifier: Option<&crate::model::clip::HslQualifier>,
 ) {
     hasher.add_source_fingerprint(source_path);
     hasher.add(source_in).add(source_out);
@@ -786,6 +787,31 @@ fn fold_baked_fields(
             hasher.add(name.as_str()).add((*value * 10_000.0) as i64);
         }
     }
+    // HSL qualifier — a pixel-level selective-color pass. Every
+    // threshold, softness, inversion, and secondary-grade value
+    // affects the output pixels, so fold them all. Skipped entirely
+    // when the qualifier is absent or neutral, so casually set-then-
+    // cleared states don't churn the signature.
+    hasher.add("hsl");
+    if let Some(q) = hsl_qualifier {
+        if !q.is_neutral() {
+            hasher
+                .add(if q.enabled { 1u8 } else { 0u8 })
+                .add(if q.invert { 1u8 } else { 0u8 })
+                .add((q.hue_min * 100.0) as i64)
+                .add((q.hue_max * 100.0) as i64)
+                .add((q.hue_softness * 10_000.0) as i64)
+                .add((q.sat_min * 10_000.0) as i64)
+                .add((q.sat_max * 10_000.0) as i64)
+                .add((q.sat_softness * 10_000.0) as i64)
+                .add((q.lum_min * 10_000.0) as i64)
+                .add((q.lum_max * 10_000.0) as i64)
+                .add((q.lum_softness * 10_000.0) as i64)
+                .add((q.brightness * 10_000.0) as i64)
+                .add((q.contrast * 10_000.0) as i64)
+                .add((q.saturation * 10_000.0) as i64);
+        }
+    }
 }
 
 fn fold_color_keyframes(
@@ -838,6 +864,7 @@ pub fn cache_key_for_program_clip_fields(
     vidstab_enabled: bool,
     vidstab_smoothing: f64,
     ladspa_effects: &[crate::model::clip::LadspaEffect],
+    hsl_qualifier: Option<&crate::model::clip::HslQualifier>,
     brightness_kfs: &[crate::model::clip::NumericKeyframe],
     contrast_kfs: &[crate::model::clip::NumericKeyframe],
     saturation_kfs: &[crate::model::clip::NumericKeyframe],
@@ -867,6 +894,7 @@ pub fn cache_key_for_program_clip_fields(
         vidstab_enabled,
         vidstab_smoothing,
         ladspa_effects,
+        hsl_qualifier,
     );
     // Insert color-KF fold between the scalar color block and the
     // denoise/sharpness/blur block, matching cache_key_for_clip's
@@ -911,6 +939,7 @@ pub fn cache_key_for_clip(clip: &Clip) -> String {
         clip.vidstab_enabled,
         clip.vidstab_smoothing as f64,
         &clip.ladspa_effects,
+        clip.hsl_qualifier.as_ref(),
         &clip.brightness_keyframes,
         &clip.contrast_keyframes,
         &clip.saturation_keyframes,
@@ -1245,6 +1274,10 @@ fn neutralize_baked_fields(clip: &mut Clip) {
     // (Phase 3). Clearing them on the substituted clip prevents the
     // live audio graph from running the plugin chain a second time.
     clip.ladspa_effects.clear();
+    // HSL qualifier is baked into the sidecar pixels (Phase 3).
+    // Drop it so the live pipeline doesn't re-apply the secondary
+    // grade on top of already-graded frames.
+    clip.hsl_qualifier = None;
     // Leaf bakes write ONLY these fields to the sidecar. The clip's
     // render_replace_enabled flag stays set so signatures re-match if
     // the user edits a live-scope field (transform etc.) and the
@@ -1297,6 +1330,15 @@ fn build_bake_video_filter(clip: &Clip) -> String {
     let color = crate::media::export::build_color_filter(clip);
     if !color.is_empty() {
         parts.push(color);
+    }
+    // HSL qualifier — selective-color pass. `build_hsl_qualifier_filter`
+    // returns a chain prefixed with a leading comma (designed for
+    // concatenation inside a pre-built filter string); strip it so
+    // we can join it alongside the other baked filters below.
+    let hsl_raw = crate::media::export::build_hsl_qualifier_filter(clip);
+    let hsl = hsl_raw.strip_prefix(',').unwrap_or(&hsl_raw).to_string();
+    if !hsl.is_empty() {
+        parts.push(hsl);
     }
     let denoise = crate::media::export::build_denoise_filter(clip);
     if !denoise.is_empty() {
@@ -1804,6 +1846,67 @@ mod tests {
         let before = cache.total_requested;
         cache.request(&clip);
         assert_eq!(cache.total_requested, before);
+    }
+
+    #[test]
+    fn signature_stable_when_hsl_qualifier_is_neutral() {
+        use crate::model::clip::HslQualifier;
+        // Attaching a neutral qualifier (enabled=false, default ranges)
+        // must not invalidate an existing bake — casual toggle then
+        // reset states would churn the cache otherwise.
+        let a = make_clip();
+        let mut b = a.clone();
+        b.hsl_qualifier = Some(HslQualifier::default());
+        assert_eq!(
+            cache_key_for_clip(&a),
+            cache_key_for_clip(&b),
+            "a neutral qualifier must be equivalent to None for signature purposes"
+        );
+    }
+
+    #[test]
+    fn signature_changes_on_hsl_qualifier_activation() {
+        use crate::model::clip::HslQualifier;
+        let a = make_clip();
+        let mut b = a.clone();
+        b.hsl_qualifier = Some(HslQualifier {
+            enabled: true,
+            hue_min: 80.0,
+            hue_max: 160.0,
+            saturation: 1.3,
+            ..HslQualifier::default()
+        });
+        assert_ne!(
+            cache_key_for_clip(&a),
+            cache_key_for_clip(&b),
+            "enabling the qualifier with a tighter hue range must invalidate the bake"
+        );
+    }
+
+    #[test]
+    fn neutralize_drops_hsl_qualifier() {
+        use crate::model::clip::HslQualifier;
+        let tmp = tempfile::NamedTempFile::new().expect("temp file");
+        std::fs::write(tmp.path(), b"not-empty").expect("write");
+        let sidecar_path = tmp.path().to_string_lossy().to_string();
+        let mut clip = make_clip();
+        clip.render_replace_enabled = true;
+        clip.hsl_qualifier = Some(HslQualifier {
+            enabled: true,
+            hue_min: 40.0,
+            hue_max: 90.0,
+            saturation: 1.5,
+            ..HslQualifier::default()
+        });
+        let key = cache_key_for_clip(&clip);
+        let mut paths = HashMap::new();
+        paths.insert(key, sidecar_path);
+        let materialized =
+            materialize_clip_with_sidecar(&clip, &paths).expect("substitution should fire");
+        assert!(
+            materialized.hsl_qualifier.is_none(),
+            "HSL qualifier should be cleared so the live pipeline doesn't re-apply the secondary grade"
+        );
     }
 
     #[test]
