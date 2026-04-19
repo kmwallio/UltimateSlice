@@ -5924,6 +5924,7 @@ fn clip_to_program_clips(
         voice_isolation: c.voice_isolation as f64,
         voice_enhance: c.voice_enhance,
         voice_enhance_strength: c.voice_enhance_strength,
+        render_replace_enabled: c.render_replace_enabled,
         voice_isolation_pad_ns: (c.voice_isolation_pad_ms as f64 * 1_000_000.0) as u64,
         voice_isolation_fade_ns: (c.voice_isolation_fade_ms as f64 * 1_000_000.0) as u64,
         voice_isolation_floor: c.voice_isolation_floor as f64,
@@ -6309,6 +6310,9 @@ pub fn build_window(
             .borrow_mut()
             .set_cache_cap_bytes(cap_bytes);
     }
+    let render_replace_cache = Rc::new(RefCell::new(
+        crate::media::render_replace_cache::RenderReplaceCache::new(),
+    ));
     let frame_interp_cache = Rc::new(RefCell::new(
         crate::media::frame_interp_cache::FrameInterpCache::new(),
     ));
@@ -16123,6 +16127,7 @@ pub fn build_window(
         let force_rebuild_media_browser = force_rebuild_media_browser.clone();
         let sync_tracking_controls = sync_tracking_controls.clone();
         let minimap_weak = minimap_area.downgrade();
+        let render_replace_cache_for_reload = render_replace_cache.clone();
 
         *on_project_changed_impl.borrow_mut() = Some(Box::new(move || {
             // Sync compound clip duration when editing inside a compound.
@@ -16355,6 +16360,7 @@ pub fn build_window(
             let proxy_cache_reload = proxy_cache.clone();
             let bg_removal_cache_reload = bg_removal_cache.clone();
             let voice_enhance_cache_reload = voice_enhance_cache.clone();
+            let render_replace_cache_reload = render_replace_cache_for_reload.clone();
             let frame_interp_cache_reload = frame_interp_cache.clone();
             let reload_ticket = pending_reload_ticket.get().wrapping_add(1);
             pending_reload_ticket.set(reload_ticket);
@@ -16455,6 +16461,37 @@ pub fn build_window(
                         prog_player_reload
                             .borrow_mut()
                             .update_voice_enhance_paths(paths);
+                    }
+
+                    // Render-and-Replace: walk all clips (including inside
+                    // compounds) and kick bake requests for any with the
+                    // toggle on. Ready sidecars get pushed to the Program
+                    // Monitor here; the 100 ms poll loop picks up
+                    // completions for clips whose bake was still in
+                    // flight.
+                    {
+                        let proj = project_reload.borrow();
+                        let mut cache = render_replace_cache_reload.borrow_mut();
+                        fn walk_render_replace_request(
+                            cache: &mut crate::media::render_replace_cache::RenderReplaceCache,
+                            tracks: &[crate::model::track::Track],
+                        ) {
+                            for track in tracks {
+                                for clip in &track.clips {
+                                    if clip.render_replace_enabled {
+                                        cache.request(clip);
+                                    }
+                                    if let Some(ref ctracks) = clip.compound_tracks {
+                                        walk_render_replace_request(cache, ctracks);
+                                    }
+                                }
+                            }
+                        }
+                        walk_render_replace_request(&mut cache, &proj.tracks);
+                        let paths = cache.paths.clone();
+                        prog_player_reload
+                            .borrow_mut()
+                            .update_render_replace_paths(paths);
                     }
 
                     // Request AI frame interpolation for slow-motion clips
@@ -18355,6 +18392,7 @@ pub fn build_window(
         let silence_detect_in_progress = silence_detect_in_progress.clone();
         let scene_detect_in_progress = scene_detect_in_progress.clone();
         let match_audio_in_progress = match_audio_in_progress.clone();
+        let render_replace_cache = render_replace_cache.clone();
         Rc::new(move || {
             let mut jobs = Vec::new();
 
@@ -18649,6 +18687,28 @@ pub fn build_window(
                 });
             }
 
+            let render_replace_progress = render_replace_cache.borrow().progress();
+            if render_replace_progress.in_flight {
+                let fraction = background_job_count_fraction(
+                    render_replace_progress.completed,
+                    render_replace_progress.total,
+                );
+                jobs.push(ActiveBackgroundJob {
+                    id: "render-replace".to_string(),
+                    title: "Render and Replace".to_string(),
+                    detail: format!(
+                        "{} of {} clips baked",
+                        render_replace_progress.completed, render_replace_progress.total
+                    ),
+                    progress_text: fraction
+                        .map(background_job_fraction_text)
+                        .unwrap_or_else(|| "Running…".to_string()),
+                    fraction,
+                    pulse: fraction.is_none(),
+                    cancel_action: None,
+                });
+            }
+
             let music_progress = music_gen_cache.borrow().progress();
             if music_progress.in_flight {
                 let fraction =
@@ -18736,6 +18796,7 @@ pub fn build_window(
         let sync_tracking_controls = sync_tracking_controls.clone();
         let collect_active_background_jobs = collect_active_background_jobs.clone();
         let render_job_tray = render_job_tray.clone();
+        let render_replace_cache = render_replace_cache.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
             let resolved = proxy_cache.borrow_mut().poll();
             if !resolved.is_empty() {
@@ -18803,6 +18864,22 @@ pub fn build_window(
                     prog_player.borrow_mut().update_voice_enhance_paths(paths);
                 }
                 if !ve_resolved.is_empty() {
+                    on_project_changed_voice_enhance();
+                }
+            }
+            // Poll render-replace cache. Newly-baked sidecars flip the
+            // baked-scope effects on affected clips from "live" to
+            // "baked" — the ProgramPlayer's neutralize pass runs
+            // automatically when paths change so the next pipeline
+            // activity plays the sidecar.
+            {
+                let rr_resolved = render_replace_cache.borrow_mut().poll();
+                let any_paths = !render_replace_cache.borrow().paths.is_empty();
+                if !rr_resolved.is_empty() || any_paths {
+                    let paths = render_replace_cache.borrow().paths.clone();
+                    prog_player.borrow_mut().update_render_replace_paths(paths);
+                }
+                if !rr_resolved.is_empty() {
                     on_project_changed_voice_enhance();
                 }
             }

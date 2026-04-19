@@ -2878,6 +2878,38 @@ pub(crate) fn handle_mcp_command(
             }
         }
 
+        McpCommand::SetClipRenderReplace {
+            clip_id,
+            enabled,
+            reply,
+        } => {
+            let mut proj = project.borrow_mut();
+            let found = if let Some(clip) = proj.clip_mut(&clip_id) {
+                clip.render_replace_enabled = enabled;
+                proj.dirty = true;
+                true
+            } else {
+                false
+            };
+            drop(proj);
+            if found {
+                reply
+                    .send(json!({
+                        "success": true,
+                        "enabled": enabled,
+                    }))
+                    .ok();
+                on_project_changed();
+            } else {
+                reply
+                    .send(json!({
+                        "success": false,
+                        "error": format!("no clip with id {clip_id}"),
+                    }))
+                    .ok();
+            }
+        }
+
         McpCommand::SetClipVoiceEnhance {
             clip_id,
             enabled,

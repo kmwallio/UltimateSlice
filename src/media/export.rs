@@ -1731,7 +1731,7 @@ pub fn export_project(
     Ok(())
 }
 
-fn build_color_filter(clip: &crate::model::clip::Clip) -> String {
+pub(crate) fn build_color_filter(clip: &crate::model::clip::Clip) -> String {
     let has_keyframes = !clip.brightness_keyframes.is_empty()
         || !clip.contrast_keyframes.is_empty()
         || !clip.saturation_keyframes.is_empty();
@@ -3234,7 +3234,7 @@ fn build_temperature_tint_filter_with_caps(
     f
 }
 
-fn build_denoise_filter(clip: &crate::model::clip::Clip) -> String {
+pub(crate) fn build_denoise_filter(clip: &crate::model::clip::Clip) -> String {
     if clip.denoise > 0.0 {
         let d = clip.denoise.clamp(0.0, 1.0);
         format!(
@@ -3249,7 +3249,7 @@ fn build_denoise_filter(clip: &crate::model::clip::Clip) -> String {
     }
 }
 
-fn build_sharpen_filter(clip: &crate::model::clip::Clip) -> String {
+pub(crate) fn build_sharpen_filter(clip: &crate::model::clip::Clip) -> String {
     if clip.sharpness != 0.0 {
         let la = (clip.sharpness * 3.0).clamp(-2.0, 5.0);
         format!(",unsharp=lx=5:ly=5:la={la:.4}:cx=5:cy=5:ca={la:.4}")
@@ -3258,7 +3258,7 @@ fn build_sharpen_filter(clip: &crate::model::clip::Clip) -> String {
     }
 }
 
-fn build_blur_filter(clip: &crate::model::clip::Clip) -> String {
+pub(crate) fn build_blur_filter(clip: &crate::model::clip::Clip) -> String {
     if clip.blur > 0.0 {
         let r = (clip.blur.clamp(0.0, 1.0) * 10.0).round() as i32;
         format!(",boxblur={r}:{r}")
@@ -3518,7 +3518,7 @@ fn format_frei0r_native_param<P: AsRef<str>>(
 /// Build a chain of FFmpeg frei0r filters for user-applied effects on a clip.
 /// Each enabled effect becomes `,frei0r=filter_name={name}:filter_params={p1}|{p2}|...`.
 /// Effects with no FFmpeg frei0r support are silently skipped.
-fn build_frei0r_effects_filter(clip: &crate::model::clip::Clip) -> String {
+pub(crate) fn build_frei0r_effects_filter(clip: &crate::model::clip::Clip) -> String {
     use crate::media::frei0r_registry::Frei0rRegistry;
 
     if clip.frei0r_effects.is_empty() {
@@ -3660,7 +3660,7 @@ fn build_tonemap_filter_prefix(source_path: &str) -> String {
     }
 }
 
-fn build_lut_filter_prefix(clip: &crate::model::clip::Clip) -> String {
+pub(crate) fn build_lut_filter_prefix(clip: &crate::model::clip::Clip) -> String {
     let mut result = String::new();
     for path in &clip.lut_paths {
         if !path.is_empty() && std::path::Path::new(path).exists() {

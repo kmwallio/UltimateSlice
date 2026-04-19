@@ -1687,6 +1687,18 @@ pub struct Clip {
     /// Audio volume multiplier: 0.0 (silent) to 2.0 (double), default 1.0
     #[serde(default = "default_volume")]
     pub volume: f32,
+    /// Render-and-Replace (Bake Effects). When true, the clip's
+    /// primary pixel-level effect stack is baked into a ProRes sidecar
+    /// by `RenderReplaceCache`; preview and export then read from that
+    /// sidecar and skip the live effect chain for the baked scope.
+    /// Transforms, opacity, blend, transitions, and speed ramps stay
+    /// live on top. Changing any baked-scope field invalidates the
+    /// sidecar via the cache signature and a fresh bake is queued.
+    /// Baked scope: color grade, frei0r effects, LUT stack,
+    /// blur/denoise/sharpness. Not baked: chroma key, HSL qualifier,
+    /// masks, stabilization, audio effects (Phase 1 scope).
+    #[serde(default)]
+    pub render_replace_enabled: bool,
     /// One-knob "Enhance Voice" toggle. When true, runs a fixed FFmpeg
     /// chain (HPF + denoise + presence EQ + gentle compressor) on this
     /// clip's audio at export time, applied BEFORE voice isolation so
@@ -2430,6 +2442,7 @@ impl Clip {
             vidstab_enabled: false,
             vidstab_smoothing: default_vidstab_smoothing(),
             volume: 1.0,
+            render_replace_enabled: false,
             voice_enhance: false,
             voice_enhance_strength: default_voice_enhance_strength(),
             voice_isolation: 0.0,

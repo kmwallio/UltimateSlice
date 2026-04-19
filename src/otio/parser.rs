@@ -272,6 +272,9 @@ fn otio_clip_to_clip(
         if let Some(v) = us.match_eq_bands.clone() {
             clip.match_eq_bands = v;
         }
+        if let Some(v) = us.render_replace_enabled {
+            clip.render_replace_enabled = v;
+        }
         if let Some(v) = us.voice_enhance {
             clip.voice_enhance = v;
         }

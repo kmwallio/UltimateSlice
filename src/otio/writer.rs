@@ -228,6 +228,11 @@ fn write_otio_with_mode(
                 } else {
                     Some(clip.match_eq_bands.clone())
                 },
+                render_replace_enabled: if clip.render_replace_enabled {
+                    Some(true)
+                } else {
+                    None
+                },
                 voice_enhance: Some(clip.voice_enhance),
                 voice_enhance_strength: Some(clip.voice_enhance_strength as f64),
                 voice_isolation: Some(clip.voice_isolation as f64),
@@ -967,6 +972,39 @@ mod tests {
                 OtioMediaPathMode::Relative
             ),
             "../media/my%20file.mp4"
+        );
+    }
+
+    #[test]
+    fn test_render_replace_enabled_round_trip_through_otio() {
+        let mut p = make_project();
+        let mut track = Track::new_video("V1");
+        let mut clip = Clip::new("/footage/graded.mov", 5_000_000_000, 0, ClipKind::Video);
+        clip.render_replace_enabled = true;
+        track.add_clip(clip);
+        p.tracks.push(track);
+
+        let json = write_otio(&p).unwrap();
+        let parsed = crate::otio::parser::parse_otio(&json).expect("parse");
+        let pc = &parsed.tracks[0].clips[0];
+        assert!(pc.render_replace_enabled, "flag survived OTIO round-trip");
+    }
+
+    #[test]
+    fn test_render_replace_disabled_not_serialized() {
+        // A clip with the default (false) render_replace_enabled should
+        // not cause the metadata attr to serialize, so legacy projects
+        // don't grow bytes on round-trip.
+        let mut p = make_project();
+        let mut track = Track::new_video("V1");
+        let clip = Clip::new("/footage/plain.mov", 5_000_000_000, 0, ClipKind::Video);
+        track.add_clip(clip);
+        p.tracks.push(track);
+
+        let json = write_otio(&p).unwrap();
+        assert!(
+            !json.contains("render_replace_enabled"),
+            "disabled flag should be omitted from OTIO JSON"
         );
     }
 

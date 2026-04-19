@@ -1327,6 +1327,18 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_clip_render_replace",
+            "description": "Toggle per-clip Render-and-Replace (Phase 1 foundation). When enabled, the RenderReplaceCache bakes this clip's primary pixel-level effect stack (color grade, LUT stack, frei0r effects, blur / denoise / sharpness) into a ProRes 422 HQ sidecar cached under $XDG_CACHE_HOME/ultimateslice/render_replace/. Phase 1 only persists the flag and signature; preview swap and effect-chain suppression land in Phase 1b.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id (from list_clips)." },
+                    "enabled": { "type": "boolean", "description": "Whether Render-and-Replace is on for this clip." }
+                },
+                "required": ["clip_id", "enabled"]
+            }
+        },
+        {
             "name": "set_clip_voice_enhance",
             "description": "Toggle the per-clip 'Enhance Voice' chain (high-pass, FFT denoise, mud cut, presence boost, gentle compressor). Applied before voice isolation in the audio chain. When enabled, a background ffmpeg prerender produces a sidecar mp4 that the Program Monitor swaps in for byte-identical preview/export. Strength scales every stage from subtle (0.0) to broadcast (1.0).",
             "inputSchema": {
@@ -3614,6 +3626,14 @@ fn dispatch_tool_payload(
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
             strength: args.get("strength").and_then(|v| v.as_f64()),
+            reply: tx,
+        },
+        "set_clip_render_replace" => McpCommand::SetClipRenderReplace {
+            clip_id: arg_str!(args, "clip_id"),
+            enabled: args
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             reply: tx,
         },
         "set_clip_subtitle_visible" => McpCommand::SetClipSubtitleVisible {

@@ -692,6 +692,13 @@ pub struct ProgramClip {
     /// Strength of the realtime enhance chain, 0.0..=1.0. Mirrors the
     /// export-side scaling so the slider feels consistent across both.
     pub voice_enhance_strength: f32,
+    /// Render-and-Replace enabled flag. When true AND the cache has a
+    /// sidecar ready for this clip's signature,
+    /// [`ProgramPlayer::resolve_source_path_for_clip`] returns the
+    /// sidecar path and the slot builder neutralizes the baked-scope
+    /// effect fields so they do not double-apply on top of the
+    /// already-baked frames.
+    pub render_replace_enabled: bool,
     pub volume_keyframes: Vec<NumericKeyframe>,
     /// Pre-merged speech intervals (clip-local source-time ns), padded by
     /// `voice_isolation_pad_ns`. Computed from either subtitle word timings
@@ -1729,6 +1736,17 @@ pub struct ProgramPlayer {
     /// Populated by [`Self::update_frame_interp_paths`] from
     /// `FrameInterpCache::snapshot_paths_by_clip_id`.
     frame_interp_paths: HashMap<String, String>,
+    /// Render-and-Replace sidecar paths, keyed by
+    /// `render_replace_cache::cache_key_for_clip(clip)`. Populated by
+    /// [`Self::update_render_replace_paths`] from
+    /// `RenderReplaceCache::paths`. When a clip's signature is a hit
+    /// here AND `clip.render_replace_enabled` is true,
+    /// `resolve_source_path_for_clip` returns the sidecar file path so
+    /// preview reads the pre-baked frames instead of the live effect
+    /// chain. Slot-building code paths simultaneously neutralize the
+    /// baked-scope effect fields so the same effects are not applied
+    /// twice.
+    render_replace_paths: HashMap<String, String>,
     /// Cache for per-path audio-stream probe results.
     audio_stream_probe_cache: HashMap<String, bool>,
     /// GStreamer `level` element on audiomixer output for metering.
@@ -2554,6 +2572,7 @@ impl ProgramPlayer {
                 bg_removal_paths: HashMap::new(),
                 voice_enhance_paths: HashMap::new(),
                 frame_interp_paths: HashMap::new(),
+                render_replace_paths: HashMap::new(),
                 audio_stream_probe_cache: HashMap::new(),
                 level_element,
                 master_volume_element,
@@ -2934,6 +2953,146 @@ impl ProgramPlayer {
             self.prewarmed_boundary_ns = None;
             self.invalidate_short_frame_cache("voice-enhance-paths-updated");
         }
+    }
+
+    /// Hand off a freshly snapshotted render-replace cache key → sidecar
+    /// path map from `RenderReplaceCache::paths`. Triggers the same
+    /// pipeline invalidation the other sidecar caches do so
+    /// newly-baked clips start using the sidecar on the next rebuild.
+    pub fn update_render_replace_paths(&mut self, paths: HashMap<String, String>) {
+        if self.render_replace_paths != paths {
+            self.render_replace_paths = paths;
+            self.prewarmed_boundary_ns = None;
+            self.invalidate_short_frame_cache("render-replace-paths-updated");
+            // Newly-arrived sidecars may now apply to clips already
+            // loaded — re-neutralize so the next pipeline activity
+            // sees zeroed baked-scope fields on those clips.
+            self.neutralize_baked_effects_for_sidecar_clips();
+        }
+    }
+
+    /// Walk `self.clips` + `self.audio_clips` and zero out the baked-scope
+    /// effect fields on any clip whose render-replace sidecar is ready
+    /// for its current signature. The sidecar already contains those
+    /// effects baked in, so re-applying them in the live GStreamer
+    /// chain would double-apply. Called after every clip-set load and
+    /// after `update_render_replace_paths` so incoming sidecars take
+    /// effect without a full pipeline rebuild.
+    fn neutralize_baked_effects_for_sidecar_clips(&mut self) {
+        let paths = self.render_replace_paths.clone();
+        if paths.is_empty() {
+            return;
+        }
+        let neutralize = |c: &mut ProgramClip, paths: &HashMap<String, String>| {
+            if !c.render_replace_enabled {
+                return;
+            }
+            let key = crate::media::render_replace_cache::cache_key_for_program_clip_fields(
+                &c.source_path,
+                c.source_in_ns,
+                c.source_out_ns,
+                c.brightness,
+                c.contrast,
+                c.saturation,
+                c.temperature,
+                c.tint,
+                c.exposure,
+                c.black_point,
+                c.shadows,
+                c.highlights,
+                c.denoise,
+                c.sharpness,
+                c.blur,
+                &c.lut_paths,
+                &c.frei0r_effects,
+                &c.brightness_keyframes,
+                &c.contrast_keyframes,
+                &c.saturation_keyframes,
+                &c.temperature_keyframes,
+                &c.tint_keyframes,
+            );
+            let sidecar_ready = paths
+                .get(&key)
+                .map(|p| {
+                    std::fs::metadata(p)
+                        .ok()
+                        .filter(|m| m.len() > 0)
+                        .is_some()
+                })
+                .unwrap_or(false);
+            if !sidecar_ready {
+                return;
+            }
+            // Zero all Phase 1b baked-scope fields so the live GStreamer
+            // chain runs as passthrough for them. The sidecar replaces
+            // `source_path` upstream via resolve_source_path_for_clip.
+            c.brightness = 0.0;
+            c.contrast = 1.0;
+            c.saturation = 1.0;
+            c.temperature = 6500.0;
+            c.tint = 0.0;
+            c.exposure = 0.0;
+            c.black_point = 0.0;
+            c.shadows = 0.0;
+            c.highlights = 0.0;
+            c.denoise = 0.0;
+            c.sharpness = 0.0;
+            c.blur = 0.0;
+            c.brightness_keyframes.clear();
+            c.contrast_keyframes.clear();
+            c.saturation_keyframes.clear();
+            c.temperature_keyframes.clear();
+            c.tint_keyframes.clear();
+            c.lut_paths.clear();
+            c.frei0r_effects.clear();
+        };
+        for c in self.clips.iter_mut() {
+            neutralize(c, &paths);
+        }
+        for c in self.audio_clips.iter_mut() {
+            neutralize(c, &paths);
+        }
+    }
+
+    /// Look up the render-replace sidecar path for `clip` using the
+    /// live ProgramClip field view. Returns `None` when the cache
+    /// does not have an entry for this clip's current signature, when
+    /// the entry's file has been evicted from disk, or when
+    /// `render_replace_enabled` is false on the clip itself.
+    fn render_replace_sidecar_path(&self, clip: &ProgramClip) -> Option<String> {
+        if !clip.render_replace_enabled || self.render_replace_paths.is_empty() {
+            return None;
+        }
+        let key = crate::media::render_replace_cache::cache_key_for_program_clip_fields(
+            &clip.source_path,
+            clip.source_in_ns,
+            clip.source_out_ns,
+            clip.brightness,
+            clip.contrast,
+            clip.saturation,
+            clip.temperature,
+            clip.tint,
+            clip.exposure,
+            clip.black_point,
+            clip.shadows,
+            clip.highlights,
+            clip.denoise,
+            clip.sharpness,
+            clip.blur,
+            &clip.lut_paths,
+            &clip.frei0r_effects,
+            &clip.brightness_keyframes,
+            &clip.contrast_keyframes,
+            &clip.saturation_keyframes,
+            &clip.temperature_keyframes,
+            &clip.tint_keyframes,
+        );
+        self.render_replace_paths.get(&key).and_then(|p| {
+            std::fs::metadata(p)
+                .ok()
+                .filter(|m| m.len() > 0)
+                .map(|_| p.clone())
+        })
     }
 
     /// Hand off a freshly snapshotted clip-id → AI frame-interpolation
@@ -3634,6 +3793,7 @@ impl ProgramPlayer {
         let (audio, video): (Vec<_>, Vec<_>) = clips.into_iter().partition(|c| c.is_audio_only);
         self.audio_clips = audio;
         self.clips = video;
+        self.neutralize_baked_effects_for_sidecar_clips();
         let max_track_index = self
             .clips
             .iter()
@@ -3673,6 +3833,7 @@ impl ProgramPlayer {
         let (audio, video): (Vec<_>, Vec<_>) = clips.into_iter().partition(|c| c.is_audio_only);
         self.audio_clips = audio;
         self.clips = video;
+        self.neutralize_baked_effects_for_sidecar_clips();
         let max_track_index = self
             .clips
             .iter()
@@ -6871,6 +7032,23 @@ impl ProgramPlayer {
                 return (path, false, key, true);
             }
             return (clip.source_path.clone(), false, key, false);
+        }
+
+        // Render-and-Replace sidecar: highest precedence over all other
+        // sidecars because the baked frames already include whatever the
+        // other sidecars would have applied (for Phase 1b's baked scope).
+        // When the bake is ready for this clip's current signature, play
+        // it directly; the slot builder neutralizes the baked-scope
+        // effect fields so they do not double-apply.
+        if clip.render_replace_enabled && !self.render_replace_paths.is_empty() {
+            // Rebuild the signature from the live ProgramClip fields so
+            // the key exactly matches what the cache layer produced. The
+            // ProgramClip view holds the subset of Clip fields the Phase
+            // 1b baked-scope uses; unknown fields (HSL qualifier, masks,
+            // etc. — not yet in baked scope) are excluded on both sides.
+            if let Some(rr_path) = self.render_replace_sidecar_path(clip) {
+                return (rr_path, false, String::new(), false);
+            }
         }
 
         // AI frame-interpolation sidecar takes priority over the original
@@ -16072,6 +16250,7 @@ mod tests {
             volume: 1.0,
             voice_isolation: 0.0,
             voice_enhance: false,
+            render_replace_enabled: false,
             voice_enhance_strength: 0.5,
             voice_isolation_pad_ns: 80_000_000,
             voice_isolation_fade_ns: 25_000_000,

@@ -29,6 +29,13 @@ pub(crate) struct UltimateSliceClipOtioMetadata {
     /// 7-band match EQ from audio matching (mic-match correction).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) match_eq_bands: Option<Vec<EqBand>>,
+    /// Render-and-Replace flag (Phase 1 foundation). When true, the
+    /// RenderReplaceCache bakes this clip's primary pixel-level effect
+    /// stack into a ProRes sidecar; the live effect chain is bypassed
+    /// at playback. Only serialized when `true` so legacy projects
+    /// don't grow on round-trip.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) render_replace_enabled: Option<bool>,
     /// One-knob "Enhance Voice" toggle (FFmpeg HPF + denoise + EQ + compressor
     /// chain, applied at export only). Defaults to false.
     #[serde(skip_serializing_if = "Option::is_none")]

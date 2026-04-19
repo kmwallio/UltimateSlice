@@ -575,6 +575,11 @@ pub struct InspectorView {
     pub selected_motion_tracker_id: Rc<RefCell<Option<String>>>,
     pub tracking_tracker_ids: Rc<RefCell<Vec<Option<String>>>>,
     pub tracking_reference_choices: Rc<RefCell<Vec<Option<MotionTrackerReference>>>>,
+    // Render-and-Replace toggle (Phase 1b). Lives above the Frei0r
+    // effects section since the bake covers color grade + frei0r +
+    // LUTs + blur/denoise/sharpness.
+    pub render_replace_check: CheckButton,
+    pub render_replace_status_label: Label,
     // Applied frei0r effects
     pub frei0r_effects_section: GBox,
     pub frei0r_effects_list: GBox,
@@ -2537,6 +2542,19 @@ impl InspectorView {
                 );
                 self.volume_slider.set_value(linear_to_db_volume(vol_val));
                 self.voice_enhance_check.set_active(c.voice_enhance);
+                // Render-and-Replace only applies to file-backed clip
+                // kinds. Hide the toggle for Compound / Multicam /
+                // Title / Adjustment / Drawing where ffmpeg has no
+                // source file to read. Clearing the flag on unsupported
+                // kinds also protects against stale OTIO imports.
+                let bakeable = crate::media::render_replace_cache::is_bakeable_kind(&c.kind);
+                self.render_replace_check.set_visible(bakeable);
+                self.render_replace_status_label.set_visible(false);
+                if bakeable {
+                    self.render_replace_check.set_active(c.render_replace_enabled);
+                } else {
+                    self.render_replace_check.set_active(false);
+                }
                 self.voice_enhance_strength_slider
                     .set_value((c.voice_enhance_strength * 100.0) as f64);
                 self.voice_enhance_strength_slider
@@ -3072,6 +3090,9 @@ impl InspectorView {
                 self.highlights_slider.set_value(0.0);
                 self.volume_slider.set_value(0.0);
                 self.voice_enhance_check.set_active(false);
+                self.render_replace_check.set_active(false);
+                self.render_replace_check.set_visible(true);
+                self.render_replace_status_label.set_visible(false);
                 self.voice_enhance_strength_slider.set_value(50.0);
                 set_slider_row_sensitive(&self.voice_enhance_strength_slider, false);
                 self.voice_isolation_slider.set_value(0.0);
@@ -4629,6 +4650,30 @@ pub fn build_inspector(
     tracking_binding_status_label.add_css_class("dim-label");
     tracking_inner.append(&tracking_binding_status_label);
 
+    // ── Render-and-Replace (Phase 1b) ─────────────────────────────────────
+    // Bakes the clip's baked-scope effect stack (color grade, LUTs,
+    // frei0r, blur/denoise/sharpness) into a ProRes sidecar so heavy
+    // effect chains stop re-computing per frame. Sits above the Frei0r
+    // chain since those effects are part of the baked scope.
+    let render_replace_section = GBox::new(Orientation::Vertical, 4);
+    render_replace_section.append(&Separator::new(Orientation::Horizontal));
+    let render_replace_check = CheckButton::with_label("Render and Replace");
+    render_replace_check.set_tooltip_text(Some(
+        "Bake this clip's color grade, LUT stack, frei0r effects, and \
+         blur / denoise / sharpness into a high-quality ProRes sidecar \
+         so playback stops re-computing them every frame. Transforms, \
+         opacity, transitions, and speed ramps stay editable. Changing \
+         any baked effect invalidates the sidecar and a fresh bake is \
+         queued in the background.",
+    ));
+    render_replace_section.append(&render_replace_check);
+    let render_replace_status_label = Label::new(None);
+    render_replace_status_label.set_halign(gtk::Align::Start);
+    render_replace_status_label.add_css_class("dim-label");
+    render_replace_status_label.set_visible(false);
+    render_replace_section.append(&render_replace_status_label);
+    content_box.append(&render_replace_section);
+
     // ── Applied Frei0r Effects section (Video + Image only) ──────────────
     let frei0r_effects_section = GBox::new(Orientation::Vertical, 8);
     content_box.append(&frei0r_effects_section);
@@ -6079,6 +6124,35 @@ pub fn build_inspector(
                     clip.motion_blur_shutter_angle = v;
                 }
                 proj.dirty = true;
+            }
+        });
+    }
+
+    // Wire Render-and-Replace toggle. Flipping it marks the clip for
+    // baking; the cache request kicks via `on_clip_changed` → the
+    // window-side project walk. Preview swap + effect suppression
+    // happens automatically once the bake completes (Program Monitor
+    // neutralizes baked-scope fields on sidecar-ready clips).
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_clip_changed = on_clip_changed.clone();
+        render_replace_check.connect_toggled(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let enabled = btn.is_active();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.render_replace_enabled = enabled;
+                    }
+                    proj.dirty = true;
+                }
+                on_clip_changed();
             }
         });
     }
@@ -10947,6 +11021,8 @@ pub fn build_inspector(
         voice_enhance_strength_slider,
         voice_enhance_status_label,
         voice_enhance_retry_btn,
+        render_replace_check,
+        render_replace_status_label,
         voice_isolation_slider,
         vi_pad_slider,
         vi_fade_slider,

@@ -540,6 +540,11 @@ pub enum McpCommand {
         strength: Option<f64>,
         reply: SyncSender<Value>,
     },
+    SetClipRenderReplace {
+        clip_id: String,
+        enabled: bool,
+        reply: SyncSender<Value>,
+    },
     SetClipSubtitleVisible {
         clip_id: String,
         visible: bool,
