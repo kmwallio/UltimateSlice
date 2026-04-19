@@ -13,7 +13,8 @@ use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 
 /// Progress updates sent back to the UI thread
 #[derive(Debug)]
@@ -261,12 +262,42 @@ fn split_active_video_tracks_for_export<'a>(
 pub fn export_project(
     project: &Project,
     output_path: &str,
+    options: ExportOptions,
+    estimated_size_bytes: Option<u64>,
+    bg_removal_paths: &std::collections::HashMap<String, String>,
+    frame_interp_paths: &std::collections::HashMap<String, String>,
+    render_replace_paths: &std::collections::HashMap<String, String>,
+    tx: mpsc::Sender<ExportProgress>,
+) -> Result<()> {
+    export_project_with_cancel(
+        project,
+        output_path,
+        options,
+        estimated_size_bytes,
+        bg_removal_paths,
+        frame_interp_paths,
+        render_replace_paths,
+        tx,
+        None,
+    )
+}
+
+/// Cancel-aware variant of `export_project`. When `cancel_flag` is
+/// `Some` and flips to `true`, the ffmpeg child process is killed at
+/// the next stderr line (or ~250 ms after progress pauses) and the
+/// export returns `Err("cancelled")`. Passing `None` keeps the
+/// original blocking behaviour — used by every export path except the
+/// render-replace compound bake.
+pub fn export_project_with_cancel(
+    project: &Project,
+    output_path: &str,
     mut options: ExportOptions,
     estimated_size_bytes: Option<u64>,
     bg_removal_paths: &std::collections::HashMap<String, String>,
     frame_interp_paths: &std::collections::HashMap<String, String>,
     render_replace_paths: &std::collections::HashMap<String, String>,
     tx: mpsc::Sender<ExportProgress>,
+    cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<()> {
     // GIF outputs have no audio stream — surround layouts have nothing to do
     // there. Silently downgrade so the rest of the pipeline can ignore the
@@ -1732,7 +1763,23 @@ pub fn export_project(
     let reader = BufReader::new(stderr);
 
     let mut error_lines: Vec<String> = Vec::new();
+    let mut cancelled = false;
     for line in reader.lines().map_while(|r| r.ok()) {
+        // Cancel check — runs once per stderr line. ffmpeg emits
+        // progress frequently (≥once per second during active encode)
+        // so this is responsive in practice. When the flag flips, kill
+        // the child; the reader pipe closes and the loop exits.
+        if let Some(ref flag) = cancel_flag {
+            if flag.load(Ordering::SeqCst) {
+                log::info!(
+                    "export_project: cancel requested — killing ffmpeg pid={}",
+                    child.id()
+                );
+                let _ = child.kill();
+                cancelled = true;
+                break;
+            }
+        }
         if let Some(p) = parse_progress_line(&line, total_duration_us, estimated_size_bytes) {
             let _ = tx.send(ExportProgress::Progress(p));
         } else if !line.starts_with("frame=")
@@ -1755,6 +1802,13 @@ pub fn export_project(
     let status = child
         .wait()
         .map_err(|e| anyhow!("Failed waiting for ffmpeg: {e}"))?;
+    if cancelled {
+        // Drop the partial output so the caller doesn't mistake it for
+        // a complete export.
+        let _ = std::fs::remove_file(output_path);
+        let _ = tx.send(ExportProgress::Error("cancelled".to_string()));
+        return Err(anyhow!("cancelled"));
+    }
     if !status.success() {
         let detail = error_lines.join("; ");
         let msg = format!("ffmpeg export failed: {detail}");

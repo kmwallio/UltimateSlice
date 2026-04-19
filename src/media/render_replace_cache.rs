@@ -1313,6 +1313,7 @@ fn run_render_replace_job(job: RenderReplaceJob) -> JobOutcome {
                 &bg_removal_paths,
                 &frame_interp_paths,
                 &nested_render_replace_paths,
+                cancel_flag.clone(),
             );
             if cancel_flag.load(Ordering::SeqCst) {
                 JobOutcome::Cancelled
@@ -1435,6 +1436,7 @@ fn run_compound_bake(
     bg_removal_paths: &HashMap<String, String>,
     frame_interp_paths: &HashMap<String, String>,
     nested_render_replace_paths: &HashMap<String, String>,
+    cancel_flag: Arc<AtomicBool>,
 ) -> bool {
     use crate::media::export::{
         AudioChannelLayout, AudioCodec, Container, ExportOptions, VideoCodec,
@@ -1456,9 +1458,11 @@ fn run_compound_bake(
     };
     // The export pipeline takes an mpsc progress channel; we discard
     // progress events because the cache only cares about the final
-    // success/failure.
+    // success/failure. The cancel flag threads through so a mid-bake
+    // Cancel click kills the compound export's ffmpeg subprocess at
+    // the next stderr line (same granularity as leaf bakes).
     let (tx, _rx) = mpsc::channel();
-    match crate::media::export::export_project(
+    match crate::media::export::export_project_with_cancel(
         synthetic_project,
         output_path,
         options,
@@ -1467,6 +1471,7 @@ fn run_compound_bake(
         frame_interp_paths,
         nested_render_replace_paths,
         tx,
+        Some(cancel_flag),
     ) {
         Ok(()) => true,
         Err(e) => {
