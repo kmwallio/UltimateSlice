@@ -19089,6 +19089,20 @@ pub fn build_window(
                     prog_player.borrow_mut().update_proxy_paths(paths);
                 }
             }
+            // Refresh the timeline widget's proxy-badge state. Cheap:
+            // `ready_source_paths` is a HashMap walk over whatever
+            // `proxy_cache.proxies` already holds. Runs every 500 ms
+            // regardless of whether anything changed; the draw path
+            // only consults the set when a clip's source matches,
+            // and the widget queue_draw fires independently — so this
+            // just keeps the set in sync without per-edit plumbing.
+            {
+                let ready = proxy_cache.borrow().ready_source_paths();
+                let enabled = effective_proxy_enabled.get();
+                let mut ts = timeline_state_stt.borrow_mut();
+                ts.proxy_ready_sources = ready;
+                ts.proxy_preview_enabled = enabled;
+            }
             // Auto-reload source preview when its proxy completes.
             let source_proxy_enabled = preferences_state.borrow().proxy_mode.is_enabled();
             if source_proxy_enabled && !resolved.is_empty() {

@@ -396,6 +396,25 @@ impl ProxyCache {
         self.proxies.get(&proxy_key(source_path, lut_path))
     }
 
+    /// Return the set of source paths that have at least one ready
+    /// proxy entry in this cache. Recovers the source-path prefix by
+    /// splitting each composite key on the first `|` (the separator
+    /// used by `proxy_key` for LUT/vidstab variant suffixes). Useful
+    /// for UI surfaces that want to flag "has proxy" without
+    /// threading the full cache map through — e.g. the timeline
+    /// widget's Proxy badge.
+    pub fn ready_source_paths(&self) -> HashSet<String> {
+        self.proxies
+            .keys()
+            .map(|k| {
+                match k.split_once('|') {
+                    Some((src, _)) => src.to_string(),
+                    None => k.clone(),
+                }
+            })
+            .collect()
+    }
+
     /// Clear all in-memory cached and pending entries (disk files are preserved).
     /// Call this when the proxy scale changes so clips are re-requested at the new size.
     pub fn invalidate_all(&mut self) {
@@ -1662,6 +1681,43 @@ mod tests {
         let path = sidecar_dir.join("clip.proxy_half.mp4");
         let _ = std::fs::write(&path, b"test");
         path.to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn ready_source_paths_recovers_source_prefix_from_composite_keys() {
+        let mut cache = ProxyCache::new();
+        // Bare source-only key (no LUT, no vidstab)
+        cache.proxies.insert(
+            "/tmp/clip-a.mp4".to_string(),
+            "/tmp/proxy-a.mp4".to_string(),
+        );
+        // Source + LUT variant
+        cache.proxies.insert(
+            "/tmp/clip-b.mp4|lut:/tmp/look.cube".to_string(),
+            "/tmp/proxy-b.mp4".to_string(),
+        );
+        // Source + LUT + vidstab variant (same source as previous, should collapse)
+        cache.proxies.insert(
+            "/tmp/clip-b.mp4|lut:/tmp/look.cube|vs:0.50".to_string(),
+            "/tmp/proxy-b-vs.mp4".to_string(),
+        );
+        // Source + vidstab only (no LUT)
+        cache.proxies.insert(
+            "/tmp/clip-c.mp4|vs:0.30".to_string(),
+            "/tmp/proxy-c.mp4".to_string(),
+        );
+
+        let ready = cache.ready_source_paths();
+        assert!(ready.contains("/tmp/clip-a.mp4"));
+        assert!(ready.contains("/tmp/clip-b.mp4"));
+        assert!(ready.contains("/tmp/clip-c.mp4"));
+        assert_eq!(ready.len(), 3);
+    }
+
+    #[test]
+    fn ready_source_paths_is_empty_when_no_proxies_ready() {
+        let cache = ProxyCache::new();
+        assert!(cache.ready_source_paths().is_empty());
     }
 
     #[test]

@@ -665,6 +665,16 @@ pub struct TimelineState {
     pub missing_media_paths: HashSet<String>,
     /// Set of source paths whose media is detected as HDR (PQ/HLG).
     pub hdr_media_paths: HashSet<String>,
+    /// Source paths with at least one ready proxy in `ProxyCache`.
+    /// Drives the "PROXY" badge on timeline clips. Refreshed from
+    /// window.rs whenever `proxy_cache.proxies` is pushed to the
+    /// ProgramPlayer.
+    pub proxy_ready_sources: HashSet<String>,
+    /// Whether the global "use proxies for preview" toggle is on.
+    /// Gates the PROXY badge — we only surface it when proxies are
+    /// actively being used, otherwise the badge is misleading
+    /// (proxies can be ready on disk without being consulted).
+    pub proxy_preview_enabled: bool,
     /// Callback fired when user presses the match-color shortcut (Ctrl+Alt+M).
     pub on_match_color: Option<Rc<dyn Fn()>>,
     /// Callback fired when user presses the match-frame shortcut (F).
@@ -761,6 +771,8 @@ impl TimelineState {
             on_tool_changed: None,
             missing_media_paths: HashSet::new(),
             hdr_media_paths: HashSet::new(),
+            proxy_ready_sources: HashSet::new(),
+            proxy_preview_enabled: false,
             on_match_color: None,
             on_match_frame: None,
             on_create_multicam: None,
@@ -10876,6 +10888,14 @@ fn draw_clip(
             (clip.speed - 1.0).abs() > 0.01 || clip.reverse || !clip.speed_keyframes.is_empty();
         let has_lut_badge = !clip.lut_paths.is_empty();
         let has_hdr_badge = st.hdr_media_paths.contains(&clip.source_path);
+        // "PROXY" badge: show when the global proxy toggle is on AND a
+        // ready proxy exists for this clip's source. This indicates
+        // the preview is actively playing back the smaller proxy
+        // file rather than the full-resolution original — important
+        // for users reviewing proxy-vs-original output parity.
+        let has_proxy_badge = st.proxy_preview_enabled
+            && !clip.source_path.is_empty()
+            && st.proxy_ready_sources.contains(&clip.source_path);
         let has_missing_badge = clip.kind != crate::model::clip::ClipKind::Title
             && clip.kind != crate::model::clip::ClipKind::Adjustment
             && clip.kind != crate::model::clip::ClipKind::Compound
@@ -10969,6 +10989,24 @@ fn draw_clip(
                 rounded_rect(cr, bx - 2.0, by - 11.0, ext.width() + 4.0, 14.0, 2.0);
                 cr.fill().ok();
                 cr.set_source_rgb(1.0, 0.6, 0.1); // Orange for HDR
+                let _ = cr.move_to(bx, by);
+                let _ = cr.show_text(badge);
+                badge_right = bx - 8.0;
+            }
+        }
+
+        // PROXY badge: shows the preview is resolving to a reduced-
+        // resolution proxy rather than the full-res original.
+        if has_proxy_badge && cw > 110.0 {
+            let badge = "PROXY";
+            cr.set_font_size(10.0);
+            if let Ok(ext) = cr.text_extents(badge) {
+                let bx = badge_right - ext.width();
+                let by = cy + 14.0;
+                cr.set_source_rgba(0.0, 0.0, 0.0, 0.55);
+                rounded_rect(cr, bx - 2.0, by - 11.0, ext.width() + 4.0, 14.0, 2.0);
+                cr.fill().ok();
+                cr.set_source_rgb(0.55, 0.85, 1.0); // Soft blue
                 let _ = cr.move_to(bx, by);
                 let _ = cr.show_text(badge);
                 badge_right = bx - 8.0;
