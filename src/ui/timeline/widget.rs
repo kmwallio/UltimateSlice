@@ -6499,49 +6499,14 @@ pub fn build_timeline(
             clip_context_pop.popdown();
             track_context_pop.popdown();
 
-            if ruler_hit_test(&st, y) {
-                if button == 3 {
-                    // Right-click in ruler → remove nearest marker within 8px
-                    let ns = st.x_to_ns(x);
-                    let threshold = (8.0 / st.pixels_per_second * NS_PER_SECOND) as u64;
-                    let to_remove = {
-                        let proj = st.project.borrow();
-                        proj.markers
-                            .iter()
-                            .filter(|m| m.position_ns.abs_diff(ns) <= threshold)
-                            .min_by_key(|m| m.position_ns.abs_diff(ns))
-                            .map(|m| m.id.clone())
-                    };
-                    let marker_removed = if let Some(id) = to_remove {
-                        let marker = {
-                            let proj = st.project.borrow();
-                            proj.markers.iter().find(|m| m.id == id).cloned()
-                        };
-                        if let Some(marker) = marker {
-                            let proj_rc = st.project.clone();
-                            let mut proj = proj_rc.borrow_mut();
-                            st.history.execute(
-                                Box::new(crate::undo::RemoveMarkerCommand { marker }),
-                                &mut proj,
-                            );
-                            true
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    };
-                    st.set_playhead_visual(ns);
-                    let seek_cb = st.on_seek.clone();
-                    drop(st);
-                    if marker_removed {
-                        TimelineState::notify_project_changed(&state);
-                    }
-                    if let Some(cb) = seek_cb {
-                        cb(ns);
-                    }
-                }
-            } else if button == 1 {
+            // Ruler clicks are handled by the dedicated ruler widget
+            // (see `build_timeline_ruler`). The main timeline area
+            // starts at its own local y=0 directly below the ruler,
+            // so clicks here should never be treated as ruler events.
+            // Previously a stale `ruler_hit_test(&st, y)` guard here
+            // stole the top 24px of the first track and moved the
+            // playhead instead of selecting a clip.
+            if button == 1 {
                 // Double-click on the track label area → open rename popover.
                 // Must run before any other left-click handling so it doesn't
                 // also seek/scrub or trigger compound drill-down.
@@ -6922,22 +6887,11 @@ pub fn build_timeline(
                     return;
                 }
                 let mut st = state.borrow_mut();
-                if ruler_hit_test(&st, y) {
-                    // On drag-begin in ruler: record start offset for panning;
-                    // also seek playhead to clicked position.
-                    let ns = st.x_to_ns(x);
-                    st.set_playhead_visual(ns);
-                    st.ruler_pan_start_offset = st.scroll_offset;
-                    let seek_cb = st.on_seek.clone();
-                    drop(st);
-                    if let Some(cb) = seek_cb {
-                        cb(ns);
-                    }
-                    if let Some(a) = area_weak.upgrade() {
-                        a.queue_draw();
-                    }
-                    return;
-                }
+                // Ruler drag is handled by the ruler widget's own
+                // drag gesture — see build_timeline_ruler. The main
+                // timeline area's y=0 is below the ruler, so we
+                // never need to reinterpret a small-y drag as a
+                // ruler scrub here.
                 if st.music_generation_armed_track_id.is_some() {
                     let started = st.begin_music_generation_region_drag(x, y);
                     drop(st);
@@ -7157,7 +7111,6 @@ pub fn build_timeline(
                         }
                     }
                 } else if x < TRACK_LABEL_WIDTH
-                    && !ruler_hit_test(&st, y)
                     && st.solo_badge_hit_track_index(x, y).is_none()
                     && st.duck_badge_hit_track_index(x, y).is_none()
                     && st.mute_badge_hit_track_index(x, y).is_none()
@@ -7185,7 +7138,7 @@ pub fn build_timeline(
                             target_idx: track_idx,
                         };
                     }
-                } else if st.active_tool == ActiveTool::Select && !ruler_hit_test(&st, y) {
+                } else if st.active_tool == ActiveTool::Select {
                     let mods = gesture.current_event_state();
                     let additive = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK)
                         || mods.contains(gtk::gdk::ModifierType::META_MASK);
@@ -7201,38 +7154,9 @@ pub fn build_timeline(
                 let (start_x, start_y) = gesture.start_point().unwrap_or((0.0, 0.0));
                 let current_x = start_x + offset_x;
                 let current_y = start_y + offset_y;
-                let button = gesture.current_button();
-
-                let ruler_drag = {
-                    let st = state.borrow();
-                    ruler_hit_test(&st, start_y)
-                };
-                if ruler_drag {
-                    if button == 2 || button == 3 {
-                        // Middle/right drag on ruler = pan timeline.
-                        let mut st = state.borrow_mut();
-                        st.scroll_offset = (st.ruler_pan_start_offset - offset_x).max(0.0);
-                        st.user_scroll_cooldown_until =
-                            Some(std::time::Instant::now() + std::time::Duration::from_millis(600));
-                        if let Some(a) = area_weak.upgrade() {
-                            a.queue_draw();
-                        }
-                    } else {
-                        // Left drag on ruler = continuous scrubbing.
-                        let mut st = state.borrow_mut();
-                        let ns = st.x_to_ns(current_x);
-                        st.set_playhead_visual(ns);
-                        let seek_cb = st.on_seek.clone();
-                        drop(st);
-                        if let Some(cb) = seek_cb {
-                            cb(ns);
-                        }
-                        if let Some(a) = area_weak.upgrade() {
-                            a.queue_draw();
-                        }
-                    }
-                    return;
-                }
+                // Ruler scrub + pan drags are handled by the ruler
+                // widget's own drag gesture (build_timeline_ruler);
+                // this code path never sees ruler events.
 
                 let current_ns = {
                     let st = state.borrow();
@@ -12496,6 +12420,51 @@ mod tests {
             track_id,
             ids,
         )
+    }
+
+    #[test]
+    fn hit_test_resolves_top_of_first_track_not_the_ruler() {
+        // Regression: the ruler lives in a separate DrawingArea, so
+        // the main timeline area's y=0 is the top of track 0. A
+        // click at y<RULER_HEIGHT must still resolve to a clip on
+        // track 0, not fall through to a "ruler" code path that
+        // moves the playhead. (The legacy `ruler_hit_test` guard
+        // inside the timeline area's click handler was stealing the
+        // top ~24 px of the first row before this fix.)
+        let (st, _track_id, ids) = timeline_state_with_video_clips(&[("A", 0)]);
+        {
+            let mut proj = st.project.borrow_mut();
+            for t in &mut proj.tracks {
+                for c in &mut t.clips {
+                    if c.id == "A" {
+                        // A 200-pixel-wide clip starting at x=50 at default
+                        // pixels_per_second — values are incidental; we only
+                        // need the clip to span the x we'll hit-test below.
+                        c.source_out = c.source_in + 10_000_000_000;
+                    }
+                }
+            }
+        }
+        // Pixels-per-second default is something like 50 in test state;
+        // anchor the probe x to clip A's range unconditionally by
+        // converting through the timeline's own helpers.
+        let probe_ns = 2_000_000_000u64;
+        let probe_x = st.ns_to_x(probe_ns) + 4.0;
+        // Sample several y values below RULER_HEIGHT (inside the top
+        // of track 0's visual band) and confirm each resolves to the
+        // same clip.
+        for &y in &[1.0, 5.0, 12.0, RULER_HEIGHT - 0.5] {
+            let hit = st.hit_test(probe_x, y);
+            assert!(
+                hit.is_some(),
+                "click at y={y} (below RULER_HEIGHT={RULER_HEIGHT}) must hit the top of track 0, not the ruler"
+            );
+            assert_eq!(
+                hit.unwrap().clip_id,
+                ids[0],
+                "hit_test should resolve to clip A"
+            );
+        }
     }
 
     #[test]
