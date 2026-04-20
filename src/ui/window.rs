@@ -15777,12 +15777,24 @@ pub fn build_window(
             // Snapshot marks + parent pointer under short borrows so
             // the mutation below doesn't have to juggle nested
             // RefCell locks.
+            //
+            // Loading a source resets marks to `in=0, out=duration`
+            // so the scrubber bar has a visible range. That defaulted
+            // state is indistinguishable from "user deliberately
+            // marked the whole clip", so we also check that the
+            // marked range is *tighter* than the full source range
+            // — otherwise creating a "subclip" would just clone the
+            // parent, which is what the user saw and reported.
             let marks_snapshot: Option<(String, u64, u64)> = {
                 let marks = source_marks.borrow();
-                if marks.path.is_empty() || marks.in_ns >= marks.out_ns {
-                    None
-                } else {
+                let has_valid_range =
+                    !marks.path.is_empty() && marks.in_ns < marks.out_ns;
+                let covers_full_source = marks.in_ns == 0
+                    && marks.out_ns == marks.duration_ns;
+                if has_valid_range && !covers_full_source {
                     Some((marks.path.clone(), marks.in_ns, marks.out_ns))
+                } else {
+                    None
                 }
             };
             let (marks_path, in_ns, out_ns) = match marks_snapshot {
@@ -15791,7 +15803,9 @@ pub fn build_window(
                     if let Some(win) = window_weak.upgrade() {
                         show_window_status_toast(
                             &win,
-                            "Set Mark In (I) and Mark Out (O) on the source monitor first.",
+                            "Set Mark In (I) and Mark Out (O) on the source monitor first \
+                             — the current marks cover the whole clip, so the subclip would \
+                             be identical to the parent.",
                             ToastSeverity::Info,
                         );
                     }
