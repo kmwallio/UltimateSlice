@@ -163,7 +163,7 @@ fn refresh_collection_picker(
 /// * `preferences_state`  – shared preferences; read for proxy mode/scale
 pub fn build_media_browser(
     library: Rc<RefCell<MediaLibrary>>,
-    on_source_selected: Rc<dyn Fn(String, u64)>,
+    on_source_selected: Rc<dyn Fn(String, u64, Option<(u64, u64)>)>,
     on_reverse_match_frame: Rc<dyn Fn(String)>,
     on_relink_media: Rc<dyn Fn()>,
     on_create_multicam_from_browser: Rc<dyn Fn(Vec<String>)>,
@@ -1538,11 +1538,25 @@ pub fn build_media_browser(
                             let dur = item.duration_ns;
                             let is_missing = item.is_missing;
                             let has_backing_file = item.has_backing_file();
+                            // For subclips, pass the subclip window so the
+                            // source monitor's marks get scoped to the
+                            // range. Without this, selecting a subclip
+                            // left marks at 0..parent_duration and any
+                            // drag from the source monitor placed the
+                            // full parent clip on the timeline.
+                            let subclip_window = if item.is_subclip() {
+                                Some((
+                                    item.effective_source_in_ns(),
+                                    item.effective_source_out_ns(),
+                                ))
+                            } else {
+                                None
+                            };
                             drop(lib);
                             drop(entries);
                             header_relink_btn.set_visible(has_backing_file && is_missing);
                             if has_backing_file {
-                                on_source_selected(path, dur);
+                                on_source_selected(path, dur, subclip_window);
                             }
                             return;
                         }
@@ -1770,9 +1784,7 @@ pub fn build_media_browser(
                             }
                             let payload = format!(
                                 "{}|{}|{}",
-                                item.source_path,
-                                item.effective_duration_ns(),
-                                item.id
+                                item.source_path, item.duration_ns, item.id
                             );
                             let val = glib::Value::from(&payload);
                             for ctrl in w.observe_controllers().into_iter().flatten() {
@@ -2093,13 +2105,16 @@ fn make_grid_item(
     search_text: &str,
 ) -> FlowBoxChild {
     let path = item.source_path.clone();
-    // Subclips carry the parent's total duration in `duration_ns` but only
-    // play their window; use effective_duration_ns so the drag payload
-    // matches the time the dropped clip will actually occupy, and offset
-    // hover-scrub math by the subclip's in-point so scrubbing the card
-    // traverses the subclip window instead of the parent file.
-    let duration_ns = item.effective_duration_ns();
-    let source_in_offset_ns = item.effective_source_in_ns();
+    // Use the full source duration for the drag payload (the drop
+    // handler's `media_duration_ns` expects source-file-length so
+    // clip-trim bounds reconcile with absolute `source_in`/`source_out`
+    // on the Clip) and for playbin/seek span. Hover-scrub is scoped
+    // separately to the subclip window via `hover_{start,span}_ns` so
+    // thumbnails across the card traverse the subclip range, not the
+    // whole parent file.
+    let duration_ns = item.duration_ns;
+    let hover_start_ns = item.effective_source_in_ns();
+    let hover_span_ns = item.effective_duration_ns();
     let is_missing = item.is_missing;
     let is_audio_only = item.is_audio_only;
     let has_backing_file = item.has_backing_file();
@@ -2111,7 +2126,7 @@ fn make_grid_item(
     // to extract; trying causes noisy ffmpeg "Output file does not contain any
     // stream" errors.
     if has_backing_file && duration_ns > 0 && !is_audio_only {
-        thumb_cache.borrow_mut().request(&path, source_in_offset_ns);
+        thumb_cache.borrow_mut().request(&path, hover_start_ns);
     }
 
     let cell = GBox::new(Orientation::Vertical, 2);
@@ -2202,7 +2217,7 @@ fn make_grid_item(
                     return;
                 }
             }
-            if let Some(surf) = cache.get(&path_owned, source_in_offset_ns) {
+            if let Some(surf) = cache.get(&path_owned, hover_start_ns) {
                 let sx = w as f64 / THUMB_W as f64;
                 let sy = h as f64 / THUMB_H as f64;
                 cr.scale(sx, sy);
@@ -2232,8 +2247,8 @@ fn make_grid_item(
             motion.connect_motion(move |_ctrl, x, _y| {
                 let width = thumb_area_inner.width().max(1) as f64;
                 let frac = (x / width).clamp(0.0, 1.0);
-                let raw_t = source_in_offset_ns
-                    + (frac * duration_ns as f64).round() as u64;
+                let raw_t = hover_start_ns
+                    + (frac * hover_span_ns as f64).round() as u64;
                 let bucket =
                     crate::media::thumb_cache::quantize_hover_scrub_time_ns(raw_t);
                 if scrub_time_ns.get() != Some(bucket) {

@@ -2398,7 +2398,7 @@ pub(crate) fn apply_collected_files_manifest_to_project_state(
     project: &Rc<RefCell<Project>>,
     library: &Rc<RefCell<MediaLibrary>>,
     source_marks: &Rc<RefCell<crate::model::media_library::SourceMarks>>,
-    on_source_selected: &Rc<dyn Fn(String, u64)>,
+    on_source_selected: &Rc<dyn Fn(String, u64, Option<(u64, u64)>)>,
     on_project_changed: &Rc<dyn Fn()>,
     manifest: &crate::fcpxml::writer::CollectFilesManifest,
 ) -> crate::fcpxml::writer::ApplyCollectedFilesResult {
@@ -2433,7 +2433,7 @@ pub(crate) fn apply_collected_files_manifest_to_project_state(
             .find(|item| item.source_path == new_path)
             .map(|item| item.duration_ns)
             .unwrap_or_else(|| source_marks.borrow().duration_ns);
-        on_source_selected(new_path, duration_ns);
+        on_source_selected(new_path, duration_ns, None);
     }
     on_project_changed();
     summary
@@ -15325,7 +15325,7 @@ pub fn build_window(
     });
 
     // ── on_source_selected: loads clip into player + resets source_marks ──
-    let on_source_selected: Rc<dyn Fn(String, u64)> = {
+    let on_source_selected: Rc<dyn Fn(String, u64, Option<(u64, u64)>)> = {
         let player = player.clone();
         let source_marks = source_marks.clone();
         let source_monitor_panel = source_monitor_panel.clone();
@@ -15340,7 +15340,7 @@ pub fn build_window(
         let source_keyword_entry = source_keyword_entry.clone();
         let refresh_source_keyword_picker = refresh_source_keyword_picker.clone();
         let refresh_source_patch_controls = refresh_source_patch_controls.clone();
-        Rc::new(move |path: String, duration_ns: u64| {
+        Rc::new(move |path: String, duration_ns: u64, subclip_window: Option<(u64, u64)>| {
             // Show the source preview now that a clip is selected
             source_monitor_panel.set_visible(true);
             // Update the clip name label
@@ -15350,11 +15350,20 @@ pub fn build_window(
                 .unwrap_or(&path)
                 .to_string();
             clip_name_label.set_text(&name);
-            // Guard against duplicate selection-changed emissions for the same
-            // item; avoid redundant playbin reconfiguration.
-            let should_reload = {
+            // Reload playbin only when the file actually changes (expensive).
+            // Reset marks when the *logical selection* changes — same file
+            // but a different subclip window still needs the scrubber's
+            // I/O markers and display position to move.
+            let (should_reload, should_reset_marks) = {
                 let m = source_marks.borrow();
-                m.path != path
+                let path_changed = m.path != path;
+                let window_changed = match subclip_window {
+                    Some((in_ns, out_ns)) => {
+                        m.in_ns != in_ns || m.out_ns != out_ns
+                    }
+                    None => false,
+                };
+                (path_changed, path_changed || window_changed)
             };
             let source_info = {
                 let lib = library.borrow();
@@ -15400,10 +15409,24 @@ pub fn build_window(
             let mut m = source_marks.borrow_mut();
             m.path = path;
             m.duration_ns = duration_ns;
-            if should_reload {
-                m.in_ns = 0;
-                m.out_ns = duration_ns;
-                m.display_pos_ns = 0;
+            if should_reset_marks {
+                match subclip_window {
+                    Some((in_ns, out_ns)) => {
+                        // Subclip selection: scope marks to the subclip
+                        // window so a drag from the source monitor (or a
+                        // drop that falls back to marks because the
+                        // library payload was missing) places the clip
+                        // with the subclip range already applied.
+                        m.in_ns = in_ns;
+                        m.out_ns = out_ns;
+                        m.display_pos_ns = in_ns;
+                    }
+                    None => {
+                        m.in_ns = 0;
+                        m.out_ns = duration_ns;
+                        m.display_pos_ns = 0;
+                    }
+                }
             }
             m.is_audio_only = source_info.is_audio_only;
             m.has_audio = source_info.has_audio;
@@ -15474,7 +15497,7 @@ pub fn build_window(
                     .unwrap_or(clip_instance.source_out)
             };
             // Load the source clip in the source monitor.
-            on_source_selected(source_path, duration_ns);
+            on_source_selected(source_path, duration_ns, None);
             // Compute the source position matching the playhead.
             let source_pos = clip_instance.source_in
                 + playhead_ns.saturating_sub(clip_instance.root_timeline_start);
@@ -16098,7 +16121,7 @@ pub fn build_window(
                                 .find(|item| item.source_path == new_path_str)
                                 .map(|item| item.duration_ns)
                                 .unwrap_or_else(|| source_marks.borrow().duration_ns);
-                            on_source_selected(new_path_str.clone(), duration_ns);
+                            on_source_selected(new_path_str.clone(), duration_ns, None);
                         }
                     }
 
@@ -16199,7 +16222,7 @@ pub fn build_window(
                             .find(|item| item.source_path == new_path)
                             .map(|item| item.duration_ns)
                             .unwrap_or_else(|| source_marks.borrow().duration_ns);
-                        on_source_selected(new_path, duration_ns);
+                        on_source_selected(new_path, duration_ns, None);
                     }
 
                     // Refresh availability + project changed + belt-and-suspenders
@@ -21241,7 +21264,7 @@ fn handle_mcp_command(
     tracking_job_key_by_clip: &Rc<RefCell<HashMap<String, String>>>,
     on_close_preview: &Rc<dyn Fn()>,
     source_marks: &Rc<RefCell<crate::model::media_library::SourceMarks>>,
-    on_source_selected: &Rc<dyn Fn(String, u64)>,
+    on_source_selected: &Rc<dyn Fn(String, u64, Option<(u64, u64)>)>,
     on_project_changed: &Rc<dyn Fn()>,
     on_project_changed_full: &Rc<dyn Fn()>,
     capture_workspace_arrangement: &Rc<dyn Fn() -> crate::ui_state::WorkspaceArrangement>,

@@ -76,7 +76,7 @@ pub(crate) fn handle_mcp_command(
     tracking_job_key_by_clip: &Rc<RefCell<HashMap<String, String>>>,
     on_close_preview: &Rc<dyn Fn()>,
     source_marks: &Rc<RefCell<crate::model::media_library::SourceMarks>>,
-    on_source_selected: &Rc<dyn Fn(String, u64)>,
+    on_source_selected: &Rc<dyn Fn(String, u64, Option<(u64, u64)>)>,
     on_project_changed: &Rc<dyn Fn()>,
     on_project_changed_full: &Rc<dyn Fn()>,
     capture_workspace_arrangement: &Rc<dyn Fn() -> crate::ui_state::WorkspaceArrangement>,
@@ -5990,7 +5990,19 @@ pub(crate) fn handle_mcp_command(
             match item {
                 Some(media_item) => {
                     if media_item.has_backing_file() {
-                        on_source_selected(media_item.source_path.clone(), media_item.duration_ns);
+                        let subclip_window = if media_item.is_subclip() {
+                            Some((
+                                media_item.effective_source_in_ns(),
+                                media_item.effective_source_out_ns(),
+                            ))
+                        } else {
+                            None
+                        };
+                        on_source_selected(
+                            media_item.source_path.clone(),
+                            media_item.duration_ns,
+                            subclip_window,
+                        );
                         reply
                             .send(json!({
                                 "ok": true,
@@ -6063,7 +6075,7 @@ pub(crate) fn handle_mcp_command(
                                 .find(|item| item.source_path == instance.source_path)
                                 .map(|item| item.duration_ns)
                                 .unwrap_or(instance.source_out);
-                            on_source_selected(instance.source_path.clone(), duration_ns);
+                            on_source_selected(instance.source_path.clone(), duration_ns, None);
                             let source_pos = (instance.source_in
                                 + playhead_ns.saturating_sub(instance.root_timeline_start))
                             .min(instance.source_out)
