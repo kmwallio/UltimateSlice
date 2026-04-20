@@ -865,6 +865,30 @@ pub fn build_media_browser(
                 flow_box_paths_ctx.borrow().get(idx).cloned()
             });
 
+            // If the user right-clicked a media item that isn't
+            // part of the current selection, select it first.
+            // Matches standard desktop UX (Finder / FCP / etc.) —
+            // without this step, right-click actions like
+            // "Create Subclip from In/Out…" / "Convert LTC" /
+            // "Remove from Library" silently skip because they
+            // key off `flow_box.selected_children()` and the
+            // clicked-but-unselected item never reaches the
+            // media-actions branch. Preserves multi-select:
+            // right-click inside an existing multi-selection
+            // doesn't collapse it.
+            if let (Some(ref fbc), Some(FlowBoxEntry::Media { .. })) =
+                (clicked_child.as_ref(), clicked_entry.as_ref())
+            {
+                let already_selected = flow_box_ctx
+                    .selected_children()
+                    .iter()
+                    .any(|c| c.index() == fbc.index());
+                if !already_selected {
+                    flow_box_ctx.unselect_all();
+                    flow_box_ctx.select_child(*fbc);
+                }
+            }
+
             // Build popover menu
             let popover = gtk::Popover::new();
             popover.set_has_arrow(false);
