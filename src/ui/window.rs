@@ -5763,6 +5763,67 @@ fn clip_to_program_clips(
     // compositing path on top of the sidecar frames. If the sidecar
     // isn't ready yet, fall through to the flatten path so preview
     // keeps working during the bake.
+    // Multicam Render-and-Replace short-circuit: when a baked
+    // sidecar is ready for this multicam's current signature, play
+    // it as a single flat video clip. The clip's own transform /
+    // opacity / blend / transitions / crop / speed stay live on top
+    // of the baked frames (same model as compound bakes). If the
+    // sidecar isn't ready, fall through to the normal
+    // multicam-flattening path so preview keeps working during the
+    // bake.
+    if c.kind == ClipKind::Multicam && c.render_replace_enabled {
+        let sig = crate::media::render_replace_cache::cache_key_for_multicam(c);
+        if let Some(sidecar_path) = render_replace_paths.get(&sig).and_then(|p| {
+            std::fs::metadata(p).ok().filter(|m| m.len() > 0).map(|_| p.clone())
+        }) {
+            let internal_dur = c.source_out.saturating_sub(c.source_in);
+            let mut file_backed = c.clone();
+            file_backed.kind = ClipKind::Video;
+            file_backed.source_path = sidecar_path;
+            file_backed.source_in = c.source_in;
+            file_backed.source_out = c.source_in.saturating_add(internal_dur);
+            file_backed.multicam_angles = None;
+            file_backed.multicam_switches = None;
+            // Clip-level color + LUT + denoise / sharpness / blur
+            // were inherited into each baked angle segment, so
+            // suppress them here to avoid double-apply on the flat
+            // sidecar. Live scope (transform, opacity, transitions,
+            // speed, etc.) stays.
+            file_backed.brightness = 0.0;
+            file_backed.contrast = 1.0;
+            file_backed.saturation = 1.0;
+            file_backed.temperature = 6500.0;
+            file_backed.tint = 0.0;
+            file_backed.exposure = 0.0;
+            file_backed.black_point = 0.0;
+            file_backed.shadows = 0.0;
+            file_backed.highlights = 0.0;
+            file_backed.denoise = 0.0;
+            file_backed.sharpness = 0.0;
+            file_backed.blur = 0.0;
+            file_backed.lut_paths.clear();
+            return clip_to_program_clips(
+                &file_backed,
+                audio_only,
+                duck,
+                duck_amount_db,
+                track_index,
+                suppress_embedded_audio_ids,
+                timeline_offset,
+                depth,
+                project_fps_num,
+                project_fps_den,
+                track_muted,
+                track_gain_linear,
+                track_pan,
+                hdr_paths,
+                render_replace_paths,
+            );
+        }
+        // Sidecar not ready — fall through to the normal multicam-
+        // flattening path.
+    }
+
     if c.kind == ClipKind::Compound && c.render_replace_enabled {
         let sig = crate::media::render_replace_cache::cache_key_for_compound(c);
         if let Some(sidecar_path) = render_replace_paths.get(&sig).and_then(|p| {
@@ -16916,6 +16977,15 @@ pub fn build_window(
                                         match clip.kind {
                                             crate::model::clip::ClipKind::Compound => {
                                                 cache.request_compound_with_parent(
+                                                    clip,
+                                                    parent_w,
+                                                    parent_h,
+                                                    parent_fps_num,
+                                                    parent_fps_den,
+                                                );
+                                            }
+                                            crate::model::clip::ClipKind::Multicam => {
+                                                cache.request_multicam_with_parent(
                                                     clip,
                                                     parent_w,
                                                     parent_h,

@@ -268,7 +268,98 @@ impl RenderReplaceCache {
     pub fn request(&mut self, clip: &Clip) {
         match clip.kind {
             ClipKind::Compound => self.request_compound(clip),
+            ClipKind::Multicam => self.request_multicam(clip),
             _ => self.request_leaf(clip),
+        }
+    }
+
+    /// Multicam bake request (default project dims — used when the
+    /// window-side walker doesn't have parent res handy). The
+    /// recommended entry point is `request_multicam_with_parent`.
+    fn request_multicam(&mut self, multicam: &Clip) {
+        self.request_multicam_with_parent(multicam, 1920, 1080, 24, 1);
+    }
+
+    /// Multicam bake request with parent project dims/fps. Same
+    /// contract as `request_compound_with_parent`: compute the
+    /// cache key, short-circuit on a hit / in-flight / failed, else
+    /// build a synthetic Project wrapping the multicam clip and
+    /// enqueue a Compound-variant job (the export pipeline already
+    /// handles multicam flattening inside `flatten_clips`, so the
+    /// job output is a flat MOV with angle cuts + per-angle grades
+    /// + per-angle volumes pre-applied).
+    pub fn request_multicam_with_parent(
+        &mut self,
+        multicam: &Clip,
+        parent_width: u32,
+        parent_height: u32,
+        parent_fps_num: u32,
+        parent_fps_den: u32,
+    ) {
+        if multicam.kind != ClipKind::Multicam {
+            return;
+        }
+        // Empty-angle guard — matches the synthetic-project builder's
+        // short-circuit.
+        let has_angles = multicam
+            .multicam_angles
+            .as_ref()
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+        if !has_angles {
+            return;
+        }
+        let key = cache_key_for_multicam(multicam);
+        if self.paths.contains_key(&key) {
+            if let Some(p) = self.paths.get(&key) {
+                touch_mtime(p);
+            }
+            return;
+        }
+        if self.pending.contains(&key) || self.failed.contains(&key) {
+            return;
+        }
+        let output_path = self.output_path_for_key(&key);
+        if Path::new(&output_path).exists() && file_is_ready(&output_path) {
+            log::info!(
+                "RenderReplaceCache: found existing multicam sidecar for key={}",
+                key
+            );
+            touch_mtime(&output_path);
+            self.paths.insert(key, output_path);
+            return;
+        } else if Path::new(&output_path).exists() {
+            let _ = std::fs::remove_file(&output_path);
+        }
+        self.evict_if_oversized();
+        let synthetic_project = match build_synthetic_project_for_multicam(
+            multicam,
+            parent_width,
+            parent_height,
+            parent_fps_num,
+            parent_fps_den,
+        ) {
+            Some(p) => p,
+            None => return,
+        };
+        self.total_requested += 1;
+        self.pending.insert(key.clone());
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        self.cancel_tokens.insert(key.clone(), cancel_flag.clone());
+        if let Some(ref tx) = self.work_tx {
+            // Route through the existing Compound job variant. The
+            // worker dispatches by RenderReplaceJob variant and the
+            // Compound variant uses export_project — the same route
+            // that flattens multicam clips end-to-end.
+            let _ = tx.send(RenderReplaceJob::Compound {
+                cache_key: key,
+                synthetic_project,
+                output_path,
+                bg_removal_paths: self.bg_removal_paths.clone(),
+                frame_interp_paths: self.frame_interp_paths.clone(),
+                nested_render_replace_paths: self.paths.clone(),
+                cancel_flag,
+            });
         }
     }
 
@@ -1001,6 +1092,75 @@ pub fn cache_key_for_compound(compound: &Clip) -> String {
     format!("rr_compound_{:016x}", hasher.finish())
 }
 
+/// Multicam signature: folds every angle's identity + source window +
+/// per-angle audio / colour / LUT settings, every angle-switch
+/// (position + angle index), plus the clip-level colour + LUT stack
+/// that `flatten_clips` inherits into per-angle video segments when
+/// the angle itself has no override. Excludes the multicam's OWN
+/// transform / opacity / blend / crop / speed / transitions — those
+/// stay live on top of the baked frames (same mental model as
+/// compound bakes).
+pub fn cache_key_for_multicam(multicam: &Clip) -> String {
+    let mut hasher = crate::media::cache_key::CacheKeyHasher::new();
+    hasher.add("multicam");
+    hasher.add(multicam.source_in).add(multicam.source_out);
+    // Clip-level color + LUT + denoise / sharpness / blur. `flatten_
+    // clips` inherits these into each video segment when the angle
+    // has no explicit override (see `export.rs::flatten_clips`
+    // multicam branch), so changes to any of them must invalidate.
+    hasher
+        .add((multicam.brightness * 10_000.0) as i64)
+        .add((multicam.contrast * 10_000.0) as i64)
+        .add((multicam.saturation * 10_000.0) as i64)
+        .add((multicam.temperature * 10.0) as i64)
+        .add((multicam.tint * 10_000.0) as i64)
+        .add((multicam.exposure * 10_000.0) as i64)
+        .add((multicam.black_point * 10_000.0) as i64)
+        .add((multicam.shadows * 10_000.0) as i64)
+        .add((multicam.highlights * 10_000.0) as i64)
+        .add((multicam.denoise * 10_000.0) as i64)
+        .add((multicam.sharpness * 10_000.0) as i64)
+        .add((multicam.blur * 10_000.0) as i64);
+    for lut in &multicam.lut_paths {
+        hasher.add(lut.as_str());
+    }
+    // Per-angle fields. Order is stable via the multicam_angles Vec
+    // — adding / removing / reordering angles flips the signature.
+    if let Some(ref angles) = multicam.multicam_angles {
+        hasher.add("angles").add(angles.len() as u32);
+        for (idx, a) in angles.iter().enumerate() {
+            hasher
+                .add(idx as u32)
+                .add(a.id.as_str())
+                .add(a.source_path.as_str())
+                .add_source_fingerprint(a.source_path.as_str())
+                .add(a.source_in)
+                .add(a.source_out)
+                .add(a.sync_offset_ns)
+                .add(if a.muted { 1u8 } else { 0u8 })
+                .add((a.volume * 10_000.0) as i64)
+                .add((a.brightness * 10_000.0) as i64)
+                .add((a.contrast * 10_000.0) as i64)
+                .add((a.saturation * 10_000.0) as i64)
+                .add((a.temperature * 10.0) as i64)
+                .add((a.tint * 10_000.0) as i64);
+            for lut in &a.lut_paths {
+                hasher.add(lut.as_str());
+            }
+        }
+    }
+    // Angle switches — the schedule of which angle is active when.
+    // Edits here literally change which pixels land in the sidecar,
+    // so fold every switch entry.
+    if let Some(ref switches) = multicam.multicam_switches {
+        hasher.add("switches").add(switches.len() as u32);
+        for sw in switches {
+            hasher.add(sw.position_ns).add(sw.angle_index as u32);
+        }
+    }
+    format!("rr_multicam_{:016x}", hasher.finish())
+}
+
 fn fold_compound_tracks(
     hasher: &mut crate::media::cache_key::CacheKeyHasher,
     tracks: &[crate::model::track::Track],
@@ -1199,6 +1359,79 @@ fn fold_clip_masks(
 /// master_gain_db = 0 (don't apply project-level gain inside a
 /// compound bake), no markers, no audio buses, no FCPXML unknown
 /// passthrough (this project is thrown away after the export finishes).
+/// Build a minimal synthetic Project wrapping a multicam clip so the
+/// export pipeline's `flatten_clips` (which already knows how to
+/// decompose multicams into sequential video segments + per-angle
+/// audio) produces a flat MOV with angle cuts + per-angle grades /
+/// volumes pre-applied. The multicam's OWN transform / opacity /
+/// blend / crop / speed / transitions stay live on top of the baked
+/// frames — they're preserved on the original clip and applied by
+/// the normal compositing path at playback, same as compound bakes.
+///
+/// Returns `None` for a multicam with no angles (nothing to bake).
+pub fn build_synthetic_project_for_multicam(
+    multicam: &Clip,
+    parent_width: u32,
+    parent_height: u32,
+    parent_fps_num: u32,
+    parent_fps_den: u32,
+) -> Option<Project> {
+    let angles = multicam.multicam_angles.as_ref()?;
+    if angles.is_empty() {
+        return None;
+    }
+    let mut synthetic = Project::new(format!("Multicam bake: {}", multicam.label));
+    synthetic.width = parent_width.max(1);
+    synthetic.height = parent_height.max(1);
+    synthetic.frame_rate = crate::model::project::FrameRate {
+        numerator: parent_fps_num.max(1),
+        denominator: parent_fps_den.max(1),
+    };
+    // One video track, one clip: the multicam itself at
+    // timeline_start=0 with its natural source_in/source_out. The
+    // compositing-level fields the export doesn't need (transform,
+    // opacity, blend, transitions, speed, reverse, compound_tracks)
+    // are neutralised so the baked frames are the raw angle-
+    // switched output — the original multicam clip keeps those
+    // fields so they apply live at playback.
+    let mut baked_clip = multicam.clone();
+    baked_clip.timeline_start = 0;
+    // Preserve the multicam's internal window (source_in/source_out)
+    // because flatten_clips uses it to trim segment ranges. That
+    // matches the compound-bake contract: bake the "inside",
+    // windowed by the user's razor cuts.
+    baked_clip.scale = 1.0;
+    baked_clip.position_x = 0.0;
+    baked_clip.position_y = 0.0;
+    baked_clip.rotate = 0;
+    baked_clip.opacity = 1.0;
+    baked_clip.crop_left = 0;
+    baked_clip.crop_right = 0;
+    baked_clip.crop_top = 0;
+    baked_clip.crop_bottom = 0;
+    baked_clip.flip_h = false;
+    baked_clip.flip_v = false;
+    baked_clip.speed = 1.0;
+    baked_clip.reverse = false;
+    baked_clip.outgoing_transition = crate::model::transition::OutgoingTransition::default();
+    baked_clip.blend_mode = crate::model::clip::BlendMode::Normal;
+    // Subtitles stay live on top of the compound preview, so skip
+    // them here too — same rationale as build_synthetic_project_
+    // for_compound: late-pass workflow.
+    baked_clip.subtitle_visible = false;
+
+    let mut video_track = crate::model::track::Track::new_video("Multicam");
+    video_track.clips.push(baked_clip);
+    synthetic.tracks = vec![video_track];
+    synthetic.markers.clear();
+    synthetic.master_gain_db = 0.0;
+    synthetic.reference_stills.clear();
+    synthetic.dirty = false;
+    synthetic.file_path = None;
+
+    Some(synthetic)
+}
+
 pub fn build_synthetic_project_for_compound(
     compound: &Clip,
     parent_width: u32,
@@ -1313,6 +1546,35 @@ pub fn materialize_clip_with_sidecar(
             // For compounds the OWN top-level color is LIVE by design
             // — do NOT neutralize these fields. The baked sidecar
             // contains only the INTERNAL content's effects.
+            Some(out)
+        }
+        ClipKind::Multicam => {
+            let key = cache_key_for_multicam(clip);
+            let sidecar = render_replace_paths.get(&key)?;
+            if !file_exists_and_nonempty(sidecar) {
+                return None;
+            }
+            let mut out = clip.clone();
+            // Multicam bakes cover the full internal duration. The
+            // source_in/source_out window the user razor-cut stays
+            // live: we point at the sidecar but keep the window
+            // offsets so export + preview trim the right range.
+            // Matches the compound-bake convention.
+            let internal_dur = clip.source_out.saturating_sub(clip.source_in);
+            out.kind = ClipKind::Video;
+            out.source_path = sidecar.clone();
+            out.source_in = clip.source_in;
+            out.source_out = clip.source_in.saturating_add(internal_dur);
+            // Clear multicam-specific fields so downstream flatten
+            // logic treats this as a flat video clip. Per-angle
+            // grades / LUTs / volumes are already baked into the
+            // sidecar pixels and audio.
+            out.multicam_angles = None;
+            out.multicam_switches = None;
+            // Neutralise clip-level color + LUT stack — they were
+            // inherited into per-angle segments during the bake, so
+            // re-applying them at playback would double up.
+            neutralize_baked_fields(&mut out);
             Some(out)
         }
         _ => None,
@@ -1510,14 +1772,23 @@ fn build_bake_video_filter(clip: &Clip) -> String {
 /// Compound clips bake via the full export pipeline on a synthetic
 /// Project (Phase 2). File-backed leaf kinds (Video / Image / Audio)
 /// bake via the inline ffmpeg filter chain (Phase 1b). Multicam
-/// clips choose among angles, titles / adjustments are synthetic, and
-/// drawings already have their own render cache — those stay out of
-/// scope. For leaf kinds, callers should also check `source_path` is
-/// non-empty before requesting a bake.
+/// Multicam clips bake via the same synthetic-Project → export_project
+/// route as compound clips: the export pipeline's `flatten_clips`
+/// already decomposes a multicam into per-angle video segments + per-
+/// angle audio clips, so wrapping one in a minimal Project gives us a
+/// flat MOV with angle cuts + per-angle volumes / grades / LUTs
+/// pre-applied. Titles / adjustments are synthetic and drawings have
+/// their own render cache — those stay out of scope. For leaf kinds,
+/// callers should also check `source_path` is non-empty before
+/// requesting a bake.
 pub fn is_bakeable_kind(kind: &ClipKind) -> bool {
     matches!(
         kind,
-        ClipKind::Video | ClipKind::Image | ClipKind::Audio | ClipKind::Compound
+        ClipKind::Video
+            | ClipKind::Image
+            | ClipKind::Audio
+            | ClipKind::Compound
+            | ClipKind::Multicam
     )
 }
 
@@ -2671,9 +2942,181 @@ mod tests {
         assert!(is_bakeable_kind(&ClipKind::Image));
         assert!(is_bakeable_kind(&ClipKind::Audio));
         assert!(is_bakeable_kind(&ClipKind::Compound)); // Phase 2
-        assert!(!is_bakeable_kind(&ClipKind::Multicam));
+        assert!(is_bakeable_kind(&ClipKind::Multicam)); // Phase 3
         assert!(!is_bakeable_kind(&ClipKind::Title));
         assert!(!is_bakeable_kind(&ClipKind::Adjustment));
         assert!(!is_bakeable_kind(&ClipKind::Drawing));
+    }
+
+    // ── Multicam signature + synthesis tests ─────────────────────────
+    fn make_multicam_with_two_angles() -> Clip {
+        use crate::model::clip::{AngleSwitch, MulticamAngle};
+        let angles = vec![
+            MulticamAngle {
+                id: "a0".into(),
+                label: "Cam A".into(),
+                source_path: "/tmp/cam-a.mp4".into(),
+                source_in: 0,
+                source_out: 10_000_000_000,
+                sync_offset_ns: 0,
+                source_timecode_base_ns: None,
+                media_duration_ns: Some(10_000_000_000),
+                volume: 1.0,
+                muted: false,
+                brightness: 0.0,
+                contrast: 1.0,
+                saturation: 1.0,
+                temperature: 6500.0,
+                tint: 0.0,
+                lut_paths: vec![],
+            },
+            MulticamAngle {
+                id: "a1".into(),
+                label: "Cam B".into(),
+                source_path: "/tmp/cam-b.mp4".into(),
+                source_in: 0,
+                source_out: 10_000_000_000,
+                sync_offset_ns: 0,
+                source_timecode_base_ns: None,
+                media_duration_ns: Some(10_000_000_000),
+                volume: 0.0,
+                muted: true,
+                brightness: 0.0,
+                contrast: 1.0,
+                saturation: 1.0,
+                temperature: 6500.0,
+                tint: 0.0,
+                lut_paths: vec![],
+            },
+        ];
+        let mut mc = Clip::new_multicam(0, angles);
+        mc.multicam_switches = Some(vec![AngleSwitch {
+            position_ns: 3_000_000_000,
+            angle_index: 1,
+        }]);
+        mc
+    }
+
+    #[test]
+    fn multicam_signature_stable_across_live_scope_edits() {
+        // The multicam's OWN transform / opacity / blend / crop /
+        // speed / transitions / label are live and must not
+        // invalidate the bake (mirrors the compound contract).
+        let a = make_multicam_with_two_angles();
+        let mut b = a.clone();
+        b.timeline_start = 12_000_000_000;
+        b.label = "Renamed".into();
+        b.scale = 2.0;
+        b.position_x = 0.3;
+        b.opacity = 0.5;
+        b.rotate = 45;
+        b.crop_left = 100;
+        b.speed = 1.5;
+        assert_eq!(cache_key_for_multicam(&a), cache_key_for_multicam(&b));
+    }
+
+    #[test]
+    fn multicam_signature_flips_on_angle_switch_edit() {
+        use crate::model::clip::AngleSwitch;
+        let a = make_multicam_with_two_angles();
+        let mut b = a.clone();
+        if let Some(ref mut sw) = b.multicam_switches {
+            sw.push(AngleSwitch {
+                position_ns: 7_000_000_000,
+                angle_index: 0,
+            });
+        }
+        assert_ne!(
+            cache_key_for_multicam(&a),
+            cache_key_for_multicam(&b),
+            "adding an angle switch changes which pixels land in the sidecar"
+        );
+    }
+
+    #[test]
+    fn multicam_signature_flips_on_per_angle_volume_edit() {
+        let a = make_multicam_with_two_angles();
+        let mut b = a.clone();
+        if let Some(ref mut angles) = b.multicam_angles {
+            angles[0].volume = 0.5;
+        }
+        assert_ne!(
+            cache_key_for_multicam(&a),
+            cache_key_for_multicam(&b),
+            "per-angle volume is applied during bake; edits must invalidate"
+        );
+    }
+
+    #[test]
+    fn multicam_signature_flips_on_per_angle_mute_toggle() {
+        let a = make_multicam_with_two_angles();
+        let mut b = a.clone();
+        if let Some(ref mut angles) = b.multicam_angles {
+            angles[0].muted = true;
+        }
+        assert_ne!(cache_key_for_multicam(&a), cache_key_for_multicam(&b));
+    }
+
+    #[test]
+    fn multicam_signature_flips_on_clip_level_color() {
+        let a = make_multicam_with_two_angles();
+        let mut b = a.clone();
+        b.brightness = 0.25;
+        assert_ne!(
+            cache_key_for_multicam(&a),
+            cache_key_for_multicam(&b),
+            "clip-level color inherits into each angle segment — edits must invalidate"
+        );
+    }
+
+    #[test]
+    fn build_synthetic_project_for_multicam_returns_single_track_single_clip() {
+        let mc = make_multicam_with_two_angles();
+        let synth = build_synthetic_project_for_multicam(&mc, 1920, 1080, 24, 1).unwrap();
+        assert_eq!(synth.tracks.len(), 1);
+        assert_eq!(synth.tracks[0].clips.len(), 1);
+        // The wrapped clip keeps its multicam identity so export's
+        // flatten_clips decomposes it into per-angle segments +
+        // per-angle audio at render time.
+        assert_eq!(synth.tracks[0].clips[0].kind, ClipKind::Multicam);
+        // Compositing-level fields are neutralised so the baked
+        // pixels are raw angle-switched output.
+        assert_eq!(synth.tracks[0].clips[0].scale, 1.0);
+        assert_eq!(synth.tracks[0].clips[0].opacity, 1.0);
+        assert_eq!(synth.tracks[0].clips[0].rotate, 0);
+    }
+
+    #[test]
+    fn build_synthetic_project_for_multicam_returns_none_when_empty() {
+        // A multicam with no angles is a no-op bake — must early-out
+        // rather than construct an empty synthetic project that
+        // would confuse the exporter.
+        let mut mc = make_multicam_with_two_angles();
+        mc.multicam_angles = Some(vec![]);
+        assert!(build_synthetic_project_for_multicam(&mc, 1920, 1080, 24, 1).is_none());
+        mc.multicam_angles = None;
+        assert!(build_synthetic_project_for_multicam(&mc, 1920, 1080, 24, 1).is_none());
+    }
+
+    #[test]
+    fn materialize_clip_with_sidecar_substitutes_multicam_for_flat_video() {
+        let tmp = tempfile::NamedTempFile::new().expect("temp file");
+        std::fs::write(tmp.path(), b"multicam-sidecar").expect("write");
+        let sidecar_path = tmp.path().to_string_lossy().to_string();
+        let mut mc = make_multicam_with_two_angles();
+        mc.render_replace_enabled = true;
+        let key = cache_key_for_multicam(&mc);
+        let mut paths = HashMap::new();
+        paths.insert(key, sidecar_path.clone());
+
+        let out = materialize_clip_with_sidecar(&mc, &paths).expect("substitution fires");
+        assert_eq!(out.kind, ClipKind::Video);
+        assert_eq!(out.source_path, sidecar_path);
+        assert!(out.multicam_angles.is_none());
+        assert!(out.multicam_switches.is_none());
+        // Baked-scope fields neutralised so live pipeline doesn't
+        // double-apply clip-level color on top of sidecar pixels.
+        assert_eq!(out.brightness, 0.0);
+        assert!(out.lut_paths.is_empty());
     }
 }
