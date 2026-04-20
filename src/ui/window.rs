@@ -2917,6 +2917,44 @@ pub(crate) struct AppliedLtcConversion {
     pub(crate) frame_rate: FrameRate,
 }
 
+/// Library-side LTC context builder — used when the user triggers
+/// Convert LTC Audio to Timecode on a Media Library item that may
+/// not yet be on the timeline. Decodes over the full source
+/// duration because there's no clip window to honour.
+pub(crate) fn resolve_ltc_conversion_context_from_library(
+    library: &MediaLibrary,
+    project: &Project,
+    source_path: &str,
+    frame_rate_override: Option<FrameRate>,
+) -> Result<LtcConversionContext, String> {
+    let item = library
+        .items
+        .iter()
+        .find(|i| i.source_path == source_path)
+        .ok_or_else(|| "Source is not in the Media Library.".to_string())?;
+    if item.source_path.is_empty() {
+        return Err("Selected item does not reference source media.".to_string());
+    }
+    if !item.has_audio {
+        return Err("Selected item has no audio stream to decode LTC from.".to_string());
+    }
+    let duration_ns = item.duration_ns;
+    if duration_ns == 0 {
+        return Err("Selected item has zero-length source media.".to_string());
+    }
+    Ok(LtcConversionContext {
+        source_path: item.source_path.clone(),
+        source_in: 0,
+        source_out: duration_ns,
+        frame_rate: resolve_ltc_frame_rate_for_source(
+            library,
+            project,
+            &item.source_path,
+            frame_rate_override,
+        ),
+    })
+}
+
 pub(crate) fn resolve_ltc_conversion_context(
     project: &Project,
     library: &MediaLibrary,
@@ -11628,6 +11666,13 @@ pub fn build_window(
         ));
     }
 
+    // Slot for the library-side Convert LTC callback. Filled below
+    // once ltc_rx exists. build_media_browser dispatches into this
+    // slot via a thin trampoline so the browser doesn't need direct
+    // access to ltc_rx / project / library.
+    let on_convert_library_ltc_impl: Rc<RefCell<Option<Rc<dyn Fn(String)>>>> =
+        Rc::new(RefCell::new(None));
+
     // Wire on_convert_ltc_to_timecode — decode LTC in the background and apply
     // source timecode + channel routing on the main thread.
     {
@@ -11687,7 +11732,11 @@ pub fn build_window(
                 glib::ControlFlow::Continue
             });
         }
-        timeline_state.borrow_mut().on_convert_ltc_to_timecode = Some(Rc::new(
+        timeline_state.borrow_mut().on_convert_ltc_to_timecode = Some(Rc::new({
+            let project = project.clone();
+            let library = library.clone();
+            let window_weak = window_weak.clone();
+            let ltc_rx = ltc_rx.clone();
             move |clip_id: String,
                   selection: crate::media::ltc::LtcChannelSelection,
                   frame_rate_override: Option<FrameRate>| {
@@ -11732,8 +11781,69 @@ pub fn build_window(
                     .map(|decode| PreparedLtcConversion { context, decode });
                     let _ = tx.send(result);
                 });
-            },
-        ));
+            }
+        }));
+
+        // Media-Library-triggered LTC conversion: same background-decode
+        // pipeline as the timeline-clip path above, but the context is
+        // resolved from a library item (no clip_id, full source range,
+        // frame rate from the item or project). Shared `ltc_rx` means
+        // we can only run one LTC decode at a time across either entry
+        // point — matches the existing single-in-flight contract.
+        *on_convert_library_ltc_impl.borrow_mut() = Some(Rc::new({
+            let project = project.clone();
+            let library = library.clone();
+            let window_weak = window_weak.clone();
+            let ltc_rx = ltc_rx.clone();
+            move |source_path: String| {
+                if ltc_rx.borrow().is_some() {
+                    return;
+                }
+                let context = {
+                    let proj = project.borrow();
+                    let lib = library.borrow();
+                    resolve_ltc_conversion_context_from_library(
+                        &lib,
+                        &proj,
+                        &source_path,
+                        None,
+                    )
+                };
+                let context = match context {
+                    Ok(context) => context,
+                    Err(message) => {
+                        if let Some(win) = window_weak.upgrade() {
+                            flash_window_status_title(
+                                &win,
+                                &project,
+                                &format!("LTC conversion failed: {message}"),
+                            );
+                        }
+                        return;
+                    }
+                };
+                if let Some(win) = window_weak.upgrade() {
+                    show_window_status_toast(
+                        &win,
+                        "Converting LTC to source timecode…",
+                        ToastSeverity::Info,
+                    );
+                }
+                let (tx, rx) = std::sync::mpsc::channel();
+                *ltc_rx.borrow_mut() = Some(rx);
+                std::thread::spawn(move || {
+                    let result = crate::media::ltc::decode_ltc_from_clip(
+                        &context.source_path,
+                        context.source_in,
+                        context.source_out,
+                        crate::media::ltc::LtcChannelSelection::Auto,
+                        &context.frame_rate,
+                    )
+                    .map(|decode| PreparedLtcConversion { context, decode });
+                    let _ = tx.send(result);
+                });
+            }
+        }));
     }
 
     {
@@ -15535,6 +15645,99 @@ pub fn build_window(
             project.borrow().count_clips_using_source_paths(paths)
         })
     };
+    let on_convert_library_ltc: Rc<dyn Fn(String)> = {
+        let slot = on_convert_library_ltc_impl.clone();
+        Rc::new(move |path: String| {
+            if let Some(cb) = slot.borrow().as_ref().cloned() {
+                cb(path);
+            }
+        })
+    };
+
+    // Place Aligned by Timecode: media-browser button invoked when
+    // 2+ library items selected and every one has decoded TC. We
+    // look up each item's (duration, TC base), pick the earliest
+    // TC as anchor (timeline-start 0), and drop each clip on a new
+    // video track at timeline_start = (item.tc - anchor.tc),
+    // clamp-to-zero if negative (matches sync-by-timecode math).
+    let on_place_aligned_by_timecode: Rc<dyn Fn(Vec<String>)> = {
+        let project = project.clone();
+        let library = library.clone();
+        let on_project_changed = on_project_changed.clone();
+        Rc::new(move |source_paths: Vec<String>| {
+            if source_paths.len() < 2 {
+                return;
+            }
+            // Collect (source_path, duration, tc_base) per item,
+            // skipping any that lost their TC between selection
+            // and click (shouldn't happen in practice but guards
+            // against a race).
+            let members: Vec<(String, u64, u64)> = {
+                let lib = library.borrow();
+                source_paths
+                    .iter()
+                    .filter_map(|path| {
+                        lib.items
+                            .iter()
+                            .find(|i| &i.source_path == path)
+                            .and_then(|i| {
+                                i.source_timecode_base_ns
+                                    .map(|tc| (i.source_path.clone(), i.duration_ns, tc))
+                            })
+                    })
+                    .collect()
+            };
+            if members.len() < 2 {
+                return;
+            }
+            // Anchor = earliest TC (deterministic tie-break on
+            // source_path for stability).
+            let anchor_tc = members
+                .iter()
+                .map(|(_, _, tc)| *tc)
+                .min()
+                .unwrap_or(0);
+            let mut proposed: Vec<(String, u64, i128)> = members
+                .iter()
+                .map(|(path, dur, tc)| {
+                    (
+                        path.clone(),
+                        *dur,
+                        i128::from(*tc) - i128::from(anchor_tc),
+                    )
+                })
+                .collect();
+            if let Some(min_start) = proposed.iter().map(|(_, _, s)| *s).min() {
+                if min_start < 0 {
+                    let shift = -min_start;
+                    for (_, _, s) in &mut proposed {
+                        *s += shift;
+                    }
+                }
+            }
+            // Drop clips onto the first video track. Users can move
+            // them to dedicated tracks afterward if they prefer one
+            // clip per track — the "aligned" contract is about
+            // timeline_start, not about track assignment.
+            {
+                let mut proj = project.borrow_mut();
+                let Some(track) = proj.tracks.iter_mut().find(|t| t.is_video()) else {
+                    return;
+                };
+                for (path, dur, start) in proposed {
+                    let clip = crate::model::clip::Clip::new(
+                        path,
+                        dur,
+                        start.max(0) as u64,
+                        crate::model::clip::ClipKind::Video,
+                    );
+                    track.add_clip(clip);
+                }
+                proj.dirty = true;
+            }
+            on_project_changed();
+        })
+    };
     let (browser, clear_media_selection, force_rebuild_media_browser) =
         media_browser::build_media_browser(
             library.clone(),
@@ -15544,6 +15747,8 @@ pub fn build_window(
             on_create_multicam_from_browser,
             on_library_changed.clone(),
             on_check_library_usage,
+            on_convert_library_ltc,
+            on_place_aligned_by_timecode,
             proxy_cache.clone(),
             preferences_state.clone(),
         );

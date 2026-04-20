@@ -175,6 +175,19 @@ pub fn build_media_browser(
     // window.rs by walking Project::tracks recursively (including
     // compound_tracks).
     on_check_library_usage: Rc<dyn Fn(&[String]) -> usize>,
+    // Kick off Convert LTC Audio to Timecode for a library item.
+    // Runs the decode on a background thread (same pipeline as the
+    // timeline-clip action) and populates source_timecode_base_ns
+    // on the matching MediaItem + any timeline clips using the
+    // same source when it finishes.
+    on_convert_library_ltc: Rc<dyn Fn(String)>,
+    // Place the given library source paths on the timeline at
+    // positions aligned by their decoded source timecode. Invoked
+    // from a dedicated button shown only when 2+ library items are
+    // selected and all of them have decoded TC. Implemented in
+    // window.rs by computing anchor = earliest TC, then
+    // new_timeline_start = (item.tc - anchor.tc) for each.
+    on_place_aligned_by_timecode: Rc<dyn Fn(Vec<String>)>,
     proxy_cache: Rc<RefCell<ProxyCache>>,
     preferences_state: Rc<RefCell<PreferencesState>>,
 ) -> (GBox, Rc<dyn Fn()>, Rc<dyn Fn()>) {
@@ -766,6 +779,22 @@ pub fn build_media_browser(
     ));
     vbox.append(&multicam_btn);
 
+    // "Place Aligned by Timecode" — parallel to Create Multicam
+    // Clip. Visible when 2+ library items are selected and every
+    // one has decoded source timecode. Drops them on a fresh
+    // timeline lane at positions aligned by their decoded TC
+    // (earliest-TC member becomes the anchor at timeline_start=0;
+    // others shift by TC delta). Lets users skip the
+    // select-both-on-timeline → right-click → Sync dance when all
+    // the TC is already in the library.
+    let place_aligned_btn = Button::with_label("Place Aligned by Timecode");
+    place_aligned_btn.add_css_class("suggested-action");
+    place_aligned_btn.set_margin_start(8);
+    place_aligned_btn.set_margin_end(8);
+    place_aligned_btn.set_margin_bottom(4);
+    place_aligned_btn.set_visible(false);
+    vbox.append(&place_aligned_btn);
+
     // Populate from existing library items (e.g. after project load).
     rebuild_flowbox_binned(
         &flow_box,
@@ -793,6 +822,7 @@ pub fn build_media_browser(
         let on_library_changed_ctx = on_library_changed.clone();
         let on_reverse_match_frame_ctx = on_reverse_match_frame.clone();
         let on_check_library_usage_ctx = on_check_library_usage.clone();
+        let on_convert_library_ltc_ctx = on_convert_library_ltc.clone();
         let rclick = gtk::GestureClick::new();
         rclick.set_button(3); // right button
         rclick.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -1135,6 +1165,41 @@ pub fn build_media_browser(
                             });
                         }
 
+                        // Convert LTC Audio to Timecode — single-select
+                        // only, requires a backing file with an audio
+                        // stream. Populates source_timecode_base_ns on
+                        // the matching MediaItem (and any already-on-
+                        // timeline clips using that source). Lets the
+                        // user pre-decode before dragging clips in.
+                        let convert_ltc_path: Option<String> = if selected_ids.len() == 1 {
+                            let lib = library_ctx.borrow();
+                            lib.items
+                                .iter()
+                                .find(|i| {
+                                    i.id == selected_ids[0]
+                                        && i.has_audio
+                                        && i.has_backing_file()
+                                })
+                                .map(|i| i.source_path.clone())
+                        } else {
+                            None
+                        };
+                        if let Some(source_path) = convert_ltc_path {
+                            let convert_btn =
+                                add_menu_item(&menu_box, "Convert LTC Audio to Timecode…");
+                            convert_btn.set_tooltip_text(Some(
+                                "Decode LTC from this item's audio and store it as \
+                                 source timecode metadata. Works before the item is on the timeline.",
+                            ));
+                            let popover = popover.clone();
+                            let on_convert_library_ltc =
+                                on_convert_library_ltc_ctx.clone();
+                            convert_btn.connect_clicked(move |_| {
+                                popover.popdown();
+                                on_convert_library_ltc(source_path.clone());
+                            });
+                        }
+
                         // Remove from Library — also surfaces a
                         // confirmation dialog when timeline clips
                         // reference the item(s), so users don't
@@ -1348,19 +1413,42 @@ pub fn build_media_browser(
         let on_source_selected = on_source_selected.clone();
         let header_relink_btn = header_relink_btn.clone();
         let multicam_btn = multicam_btn.clone();
+        let place_aligned_btn = place_aligned_btn.clone();
         let flow_box_paths_for_sel = flow_box_paths.clone();
         flow_box.connect_selected_children_changed(move |fb| {
             let selected = fb.selected_children();
             // Count only media selections (not bins) for multicam
             let entries = flow_box_paths_for_sel.borrow();
-            let media_count = selected
+            let media_ids: Vec<String> = selected
                 .iter()
-                .filter(|c| {
+                .filter_map(|c| {
                     let idx = c.index() as usize;
-                    matches!(entries.get(idx), Some(FlowBoxEntry::Media { .. }))
+                    match entries.get(idx) {
+                        Some(FlowBoxEntry::Media { item_id, .. }) => Some(item_id.clone()),
+                        _ => None,
+                    }
                 })
-                .count();
+                .collect();
+            let media_count = media_ids.len();
             multicam_btn.set_visible(media_count >= 2);
+            // Place-Aligned-by-Timecode: visible only when every
+            // selected item has decoded TC AND at least 2 are
+            // selected. Anything missing TC keeps the button
+            // hidden — we don't show a disabled state here because
+            // the convert-LTC path is right-click-per-item, so a
+            // visible-disabled state on this sidebar button would
+            // be confusing about what to fix.
+            let all_have_tc = media_count >= 2 && {
+                let lib = library.borrow();
+                media_ids.iter().all(|id| {
+                    lib.items
+                        .iter()
+                        .find(|i| &i.id == id)
+                        .map(|i| i.source_timecode_base_ns.is_some())
+                        .unwrap_or(false)
+                })
+            };
+            place_aligned_btn.set_visible(all_have_tc);
             if let Some(child) = selected.first() {
                 let idx = child.index() as usize;
                 match entries.get(idx) {
@@ -1390,6 +1478,41 @@ pub fn build_media_browser(
                 }
             } else {
                 header_relink_btn.set_visible(false);
+            }
+        });
+    }
+
+    // "Place Aligned by Timecode" click handler.
+    {
+        let library = library.clone();
+        let flow_box = flow_box.clone();
+        let on_place_aligned = on_place_aligned_by_timecode.clone();
+        let flow_box_paths_for_pa = flow_box_paths.clone();
+        place_aligned_btn.connect_clicked(move |_| {
+            let selected = flow_box.selected_children();
+            let entries = flow_box_paths_for_pa.borrow();
+            let lib = library.borrow();
+            let paths: Vec<String> = selected
+                .iter()
+                .filter_map(|child| {
+                    let idx = child.index() as usize;
+                    match entries.get(idx) {
+                        Some(FlowBoxEntry::Media { item_id, .. }) => lib
+                            .items
+                            .iter()
+                            .find(|i| &i.id == item_id)
+                            .filter(|i| {
+                                i.has_backing_file() && i.source_timecode_base_ns.is_some()
+                            })
+                            .map(|i| i.source_path.clone()),
+                        _ => None,
+                    }
+                })
+                .collect();
+            drop(lib);
+            drop(entries);
+            if paths.len() >= 2 {
+                on_place_aligned(paths);
             }
         });
     }
