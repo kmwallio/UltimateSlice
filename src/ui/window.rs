@@ -15362,6 +15362,17 @@ pub fn build_window(
                 lookup_source_placement_info(&lib.items, &proj, &path)
             };
             if should_reload {
+                // Grab keyboard focus on the source monitor so
+                // single-key shortcuts (I / O for Mark In/Out,
+                // space for play/pause, J/K/L for shuttle) route
+                // to its EventControllerKey. Without this, clicking
+                // a library item leaves focus on the FlowBox and
+                // the shortcuts silently do nothing — which is
+                // what made every subclip come out full-range.
+                // Only runs on an actual source change so re-
+                // selecting the same item doesn't yank focus away
+                // from (e.g.) a search box the user is typing in.
+                source_monitor_panel.grab_focus();
                 let proxy_mode = preferences_state.borrow().proxy_mode.clone();
                 reload_source_preview_selection(
                     &path,
