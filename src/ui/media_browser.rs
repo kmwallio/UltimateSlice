@@ -181,6 +181,15 @@ pub fn build_media_browser(
     // on the matching MediaItem + any timeline clips using the
     // same source when it finishes.
     on_convert_library_ltc: Rc<dyn Fn(String)>,
+    // Create a subclip from the source monitor's current In/Out
+    // marks against the given parent library item id. Invoked from
+    // the right-click menu when the user has exactly one top-level
+    // item selected that matches the source-monitor path AND the
+    // marks are valid. The callback is responsible for reading
+    // SourceMarks, constructing a MediaItem via
+    // MediaItem::new_subclip, pushing it onto the library, and
+    // firing on_library_changed.
+    on_create_subclip_from_marks: Rc<dyn Fn(String)>,
     // Place the given library source paths on the timeline at
     // positions aligned by their decoded source timecode. Invoked
     // from a dedicated button shown only when 2+ library items are
@@ -823,6 +832,7 @@ pub fn build_media_browser(
         let on_reverse_match_frame_ctx = on_reverse_match_frame.clone();
         let on_check_library_usage_ctx = on_check_library_usage.clone();
         let on_convert_library_ltc_ctx = on_convert_library_ltc.clone();
+        let on_create_subclip_from_marks_ctx = on_create_subclip_from_marks.clone();
         let rclick = gtk::GestureClick::new();
         rclick.set_button(3); // right button
         rclick.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -1163,6 +1173,51 @@ pub fn build_media_browser(
                                     &on_library_changed,
                                 );
                             });
+                        }
+
+                        // Create Subclip from Source Monitor Marks —
+                        // single-select only, the item must not
+                        // already be a subclip (we don't nest
+                        // subclips; a range-of-a-range is redundant
+                        // and makes the parent_id graph deeper than
+                        // needed), and the source monitor must be
+                        // showing THIS item with valid In < Out.
+                        // When the button is visible the user knows
+                        // the preconditions were already met; the
+                        // window.rs-side callback re-checks everything
+                        // defensively.
+                        if selected_ids.len() == 1 {
+                            let subclip_source_id: Option<String> = {
+                                let lib = library_ctx.borrow();
+                                lib.items
+                                    .iter()
+                                    .find(|i| {
+                                        i.id == selected_ids[0]
+                                            && !i.is_subclip()
+                                            && i.has_backing_file()
+                                    })
+                                    .map(|i| i.id.clone())
+                            };
+                            if let Some(parent_id) = subclip_source_id {
+                                let subclip_btn = add_menu_item(
+                                    &menu_box,
+                                    "Create Subclip from In/Out…",
+                                );
+                                subclip_btn.set_tooltip_text(Some(
+                                    "Create a virtual subclip from the source monitor's \
+                                     Mark In / Mark Out. The subclip shares the parent's \
+                                     source file but carries its own In/Out window, label, \
+                                     and timecode — drop it onto the timeline and it lands \
+                                     with the window already applied.",
+                                ));
+                                let popover = popover.clone();
+                                let on_create_subclip =
+                                    on_create_subclip_from_marks_ctx.clone();
+                                subclip_btn.connect_clicked(move |_| {
+                                    popover.popdown();
+                                    on_create_subclip(parent_id.clone());
+                                });
+                            }
                         }
 
                         // Convert LTC Audio to Timecode — single-select
@@ -2239,6 +2294,20 @@ fn make_grid_item(
     offline_label.set_visible(is_missing);
     cell.append(&offline_label);
 
+    // Subclip badge — visually differentiates range-of-source items
+    // from top-level library entries. Shown unconditionally on
+    // subclips (never OFF when parent_id is set).
+    if item.is_subclip() {
+        let subclip_label = Label::new(Some("SUBCLIP"));
+        subclip_label.set_halign(gtk::Align::Center);
+        // Reuse the keyword-summary badge CSS — it's a subtle tag-
+        // style pill that reads well next to the rating / offline
+        // badges above. Plenty of room to promote to a dedicated
+        // class later if the design wants more contrast.
+        subclip_label.add_css_class("media-keyword-summary");
+        cell.append(&subclip_label);
+    }
+
     let child = FlowBoxChild::new();
     child.set_child(Some(&cell));
     let tooltip = media_tooltip_text(item, Some(search_text));
@@ -2247,11 +2316,19 @@ fn make_grid_item(
         child.add_css_class("media-missing-item");
     }
     if has_backing_file {
-        // Drag source: payload = "{source_path}|{duration_ns}"
+        // Drag source payload: `"{source_path}|{duration_ns}|{item_id}"`.
+        // The trailing `|{item_id}` was added when subclips shipped —
+        // the drop target can look up the MediaItem by id to read
+        // its subclip source_in/source_out so dropped subclips land
+        // with the correct window already applied. Legacy two-part
+        // payloads (pre-subclip saves / external drops) still parse
+        // because the receiver splits on `|` and treats a missing
+        // third component as "no specific item, use source monitor
+        // marks or full range".
         let drag_src = gtk::DragSource::new();
         drag_src.set_actions(gdk4::DragAction::COPY);
         drag_src.set_exclusive(false);
-        let payload = format!("{}|{duration_ns}", item.source_path);
+        let payload = format!("{}|{duration_ns}|{}", item.source_path, item.id);
         let val = glib::Value::from(&payload);
         drag_src.set_content(Some(&gdk4::ContentProvider::for_value(&val)));
         child.add_controller(drag_src);

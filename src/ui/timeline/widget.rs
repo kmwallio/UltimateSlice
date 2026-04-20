@@ -602,7 +602,14 @@ pub struct TimelineState {
     /// Called with `true` when playback starts, `false` when it stops.
     pub on_extraction_pause: Option<Rc<dyn Fn(bool)>>,
     /// Called when a clip is dropped from the media browser: (source_path, duration_ns, track_idx, timeline_start_ns)
-    pub on_drop_clip: Option<Rc<dyn Fn(String, u64, usize, u64)>>,
+    // Called when a library item is dropped onto the timeline.
+    // Args: `(source_path, duration_ns, item_id, track_idx,
+    // timeline_start_ns)`. `item_id` is `Some` when the drag
+    // originated from a library card (since subclips); `None` for
+    // legacy payloads and external drops. The receiver uses
+    // `item_id` to look up the MediaItem and honour any subclip
+    // `source_in/source_out` window.
+    pub on_drop_clip: Option<Rc<dyn Fn(String, u64, Option<String>, usize, u64)>>,
     /// Called when files are dropped from an external file manager: (file_paths, track_idx, timeline_start_ns)
     pub on_drop_external_files: Option<Rc<dyn Fn(Vec<String>, usize, u64)>>,
     /// Lightweight callback fired immediately when clip selection changes (no pipeline rebuild).
@@ -8971,13 +8978,24 @@ pub fn build_timeline(
                     }
                     state.borrow_mut().hover_transition_pair = None;
                 } else {
-                    // Internal payload format: "{source_path}|{duration_ns}"
-                    let mut parts = payload.splitn(2, '|');
+                    // Internal payload format:
+                    //   `"{source_path}|{duration_ns}|{item_id?}"`
+                    // The trailing `item_id` was added when subclips
+                    // shipped so the receiver can look up the
+                    // MediaItem by id and honour its subclip
+                    // `source_in/source_out` window. Two-part
+                    // payloads (legacy + external drops) still
+                    // parse with item_id=None.
+                    let mut parts = payload.splitn(3, '|');
                     let source_path = match parts.next() {
                         Some(p) => p.to_string(),
                         None => return false,
                     };
                     let duration_ns: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+                    let item_id: Option<String> = parts
+                        .next()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
 
                     let (track_idx, timeline_start_ns) = {
                         let st = state.borrow();
@@ -8988,7 +9006,7 @@ pub fn build_timeline(
 
                     let cb = state.borrow().on_drop_clip.clone();
                     if let Some(cb) = cb {
-                        cb(source_path, duration_ns, track_idx, timeline_start_ns);
+                        cb(source_path, duration_ns, item_id, track_idx, timeline_start_ns);
                     }
                     state.borrow_mut().hover_transition_pair = None;
                 }

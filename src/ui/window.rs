@@ -11009,10 +11009,32 @@ pub fn build_window(
         let source_marks = source_marks.clone();
         let timeline_state_for_drop = timeline_state.clone();
         timeline_state.borrow_mut().on_drop_clip = Some(Rc::new(
-            move |source_path, duration_ns, track_idx, timeline_start_ns| {
+            move |source_path, duration_ns, item_id, track_idx, timeline_start_ns| {
                 let magnetic_mode = timeline_state_for_drop.borrow().magnetic_mode;
                 let source_monitor_auto_link_av =
                     preferences_state.borrow().source_monitor_auto_link_av;
+                // Look up the source MediaItem by the id the drag
+                // payload carried. When present AND the item is a
+                // subclip, its effective in/out wins — a dropped
+                // subclip lands with its subclip window pre-applied
+                // regardless of whether the source monitor still
+                // shows marks for a different clip.
+                let library_subclip_range: Option<(u64, u64, Option<u64>)> = item_id
+                    .as_ref()
+                    .and_then(|id| {
+                        let lib = library.borrow();
+                        lib.items.iter().find(|i| &i.id == id).and_then(|i| {
+                            if i.is_subclip() {
+                                Some((
+                                    i.effective_source_in_ns(),
+                                    i.effective_source_out_ns(),
+                                    i.source_timecode_base_ns,
+                                ))
+                            } else {
+                                None
+                            }
+                        })
+                    });
                 let source_info = {
                     let marks = source_marks.borrow();
                     if marks.path == source_path {
@@ -11021,19 +11043,37 @@ pub fn build_window(
                             has_audio: marks.has_audio,
                             is_image: marks.is_image,
                             is_animated_svg: marks.is_animated_svg,
-                            source_timecode_base_ns: marks.source_timecode_base_ns,
+                            // For subclip drops use the subclip's
+                            // TC base (already offset by its in
+                            // point during subclip creation); the
+                            // source-monitor marks are about a
+                            // different range.
+                            source_timecode_base_ns: library_subclip_range
+                                .and_then(|(_, _, tc)| tc)
+                                .or(marks.source_timecode_base_ns),
                             audio_channel_mode: marks.audio_channel_mode,
                         }
                     } else {
                         let lib = library.borrow();
                         let proj = project.borrow();
-                        lookup_source_placement_info(&lib.items, &proj, &source_path)
+                        let mut info = lookup_source_placement_info(&lib.items, &proj, &source_path);
+                        if let Some((_, _, tc)) = library_subclip_range {
+                            if let Some(tc) = tc {
+                                info.source_timecode_base_ns = Some(tc);
+                            }
+                        }
+                        info
                     }
                 };
                 let mut proj = project.borrow_mut();
-                // If the source monitor has in/out marks for this clip, use them;
-                // otherwise fall back to the full source range.
-                let (src_in, src_out) = {
+                // Resolution order for the clip's source window:
+                //   1. Subclip range from the dragged library item
+                //      (when the drag came from a subclip card).
+                //   2. Source-monitor Mark In/Out for THIS source.
+                //   3. Full-source fallback 0..duration_ns.
+                let (src_in, src_out) = if let Some((in_ns, out_ns, _)) = library_subclip_range {
+                    (in_ns, out_ns)
+                } else {
                     let marks = source_marks.borrow();
                     if marks.path == source_path && marks.in_ns < marks.out_ns {
                         (marks.in_ns, marks.out_ns)
@@ -15715,6 +15755,103 @@ pub fn build_window(
         })
     };
 
+    // Create a subclip from the source monitor's current In/Out
+    // marks under the given parent MediaItem id. Invoked from the
+    // library right-click menu. Re-validates preconditions
+    // defensively: (a) parent exists and isn't itself a subclip;
+    // (b) source monitor is showing the parent's source_path;
+    // (c) marks are valid (in < out). Builds the subclip via
+    // MediaItem::new_subclip (which inherits codec metadata + TC
+    // base + offsets TC by the in-point) and pushes it onto the
+    // library. Auto-labels "{parent label} (I..O)" in HH:MM:SS:FF
+    // so multiple subclips of the same source stay distinguishable
+    // at a glance; users can rename later.
+    let on_create_subclip_from_marks: Rc<dyn Fn(String)> = {
+        let library = library.clone();
+        let source_marks = source_marks.clone();
+        let project = project.clone();
+        let on_library_changed = on_library_changed.clone();
+        let window_weak = window.downgrade();
+        Rc::new(move |parent_id: String| {
+            let fr = project.borrow().frame_rate.clone();
+            // Snapshot marks + parent pointer under short borrows so
+            // the mutation below doesn't have to juggle nested
+            // RefCell locks.
+            let marks_snapshot: Option<(String, u64, u64)> = {
+                let marks = source_marks.borrow();
+                if marks.path.is_empty() || marks.in_ns >= marks.out_ns {
+                    None
+                } else {
+                    Some((marks.path.clone(), marks.in_ns, marks.out_ns))
+                }
+            };
+            let (marks_path, in_ns, out_ns) = match marks_snapshot {
+                Some(s) => s,
+                None => {
+                    if let Some(win) = window_weak.upgrade() {
+                        show_window_status_toast(
+                            &win,
+                            "Set Mark In (I) and Mark Out (O) on the source monitor first.",
+                            ToastSeverity::Info,
+                        );
+                    }
+                    return;
+                }
+            };
+
+            // Parent lookup + subclip construction happens inside a
+            // single library borrow_mut so we don't observe a
+            // half-applied state if something else mutates
+            // concurrently.
+            let (new_label, subclip) = {
+                let lib = library.borrow();
+                let Some(parent) = lib.items.iter().find(|i| i.id == parent_id) else {
+                    return;
+                };
+                if parent.is_subclip() {
+                    // Nested subclips aren't allowed by the menu-
+                    // gating, but guard again in case the menu state
+                    // was stale.
+                    return;
+                }
+                if parent.source_path != marks_path {
+                    // Source monitor moved off this item between
+                    // menu open and click.
+                    if let Some(win) = window_weak.upgrade() {
+                        show_window_status_toast(
+                            &win,
+                            "Load this item in the source monitor before creating a subclip.",
+                            ToastSeverity::Info,
+                        );
+                    }
+                    return;
+                }
+                let label_prefix = if parent.label.is_empty() {
+                    "Subclip".to_string()
+                } else {
+                    parent.label.clone()
+                };
+                let in_tc = crate::ui::timecode::format_ns_as_timecode(in_ns, &fr);
+                let out_tc = crate::ui::timecode::format_ns_as_timecode(out_ns, &fr);
+                let label = format!("{label_prefix} ({in_tc}–{out_tc})");
+                let subclip = crate::model::media_library::MediaItem::new_subclip(
+                    parent, in_ns, out_ns, label.clone(),
+                );
+                (label, subclip)
+            };
+
+            library.borrow_mut().items.push(subclip);
+            on_library_changed();
+            if let Some(win) = window_weak.upgrade() {
+                show_window_status_toast(
+                    &win,
+                    &format!("Created subclip \"{new_label}\""),
+                    ToastSeverity::Success,
+                );
+            }
+        })
+    };
+
     // Place Aligned by Timecode: media-browser button invoked when
     // 2+ library items selected and every one has decoded TC. We
     // look up each item's (duration, TC base), pick the earliest
@@ -15809,6 +15946,7 @@ pub fn build_window(
             on_library_changed.clone(),
             on_check_library_usage,
             on_convert_library_ltc,
+            on_create_subclip_from_marks,
             on_place_aligned_by_timecode,
             proxy_cache.clone(),
             preferences_state.clone(),

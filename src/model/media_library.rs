@@ -392,6 +392,19 @@ pub struct MediaItem {
     pub transcript_windows: Vec<MediaTranscriptWindow>,
     /// Runtime-only CLIP-style frame embeddings for semantic visual search.
     pub visual_embedding: Option<MediaVisualEmbedding>,
+    /// When set, this item is a **subclip** cut from another library
+    /// item's source range. The value is the parent item's `id`.
+    /// Subclips share the parent's `source_path` + codec metadata
+    /// but carry their own In/Out window (via
+    /// `subclip_source_in_ns` / `subclip_source_out_ns`) and their
+    /// own label. Top-level items leave this `None`.
+    pub parent_id: Option<String>,
+    /// In-point within the source (ns) for a subclip. Ignored when
+    /// `parent_id` is `None` — top-level items represent the full
+    /// source, so their effective range is `0..duration_ns`.
+    pub subclip_source_in_ns: u64,
+    /// Out-point within the source (ns) for a subclip.
+    pub subclip_source_out_ns: u64,
 }
 
 impl MediaItem {
@@ -430,7 +443,83 @@ impl MediaItem {
             auto_tags_indexed: false,
             transcript_windows: Vec::new(),
             visual_embedding: None,
+            parent_id: None,
+            subclip_source_in_ns: 0,
+            subclip_source_out_ns: 0,
         }
+    }
+
+    /// Construct a subclip MediaItem that shares its parent's
+    /// `source_path` + codec metadata but carries its own In/Out
+    /// window, label, and fresh id. Media-library code that branches
+    /// on `is_subclip()` (drag payload, card badge, FCPXML save,
+    /// restore match-by-id) relies on `parent_id` being `Some` to
+    /// route correctly, so always go through this constructor when
+    /// creating subclips.
+    pub fn new_subclip(parent: &MediaItem, in_ns: u64, out_ns: u64, label: String) -> Self {
+        let (clamped_in, clamped_out) = clamp_subclip_range(parent.duration_ns, in_ns, out_ns);
+        let mut item = Self::new(parent.source_path.clone(), parent.duration_ns);
+        item.label = label;
+        item.is_audio_only = parent.is_audio_only;
+        item.has_audio = parent.has_audio;
+        item.is_image = parent.is_image;
+        item.is_animated_svg = parent.is_animated_svg;
+        item.video_width = parent.video_width;
+        item.video_height = parent.video_height;
+        item.frame_rate_num = parent.frame_rate_num;
+        item.frame_rate_den = parent.frame_rate_den;
+        item.codec_summary = parent.codec_summary.clone();
+        item.hdr_colorimetry = parent.hdr_colorimetry.clone();
+        item.file_size_bytes = parent.file_size_bytes;
+        item.clip_kind = parent.clip_kind.clone();
+        // Subclip timecode = parent TC base shifted by the subclip's
+        // in-point, so "go to start of subclip" shows the correct
+        // TC on the HUD / in the Inspector's Source TC row.
+        item.source_timecode_base_ns = parent.source_timecode_base_ns.map(|b| b + clamped_in);
+        item.bin_id = parent.bin_id.clone();
+        item.parent_id = Some(parent.id.clone());
+        item.subclip_source_in_ns = clamped_in;
+        item.subclip_source_out_ns = clamped_out;
+        item
+    }
+
+    /// True when this item is a subclip (has a parent_id).
+    pub fn is_subclip(&self) -> bool {
+        self.parent_id.is_some()
+    }
+
+    /// Effective in-point within the source media. Top-level items
+    /// always return 0; subclips return their stored
+    /// `subclip_source_in_ns`. Drag-to-timeline + UI consumers
+    /// should use this instead of reading `subclip_source_in_ns`
+    /// directly so they don't need to branch on `is_subclip()`.
+    pub fn effective_source_in_ns(&self) -> u64 {
+        if self.is_subclip() {
+            self.subclip_source_in_ns
+        } else {
+            0
+        }
+    }
+
+    /// Effective out-point within the source media. Top-level items
+    /// return `duration_ns`; subclips return `subclip_source_out_ns`.
+    pub fn effective_source_out_ns(&self) -> u64 {
+        if self.is_subclip() {
+            self.subclip_source_out_ns
+        } else {
+            self.duration_ns
+        }
+    }
+
+    /// Effective playable duration. `duration_ns` on the struct is
+    /// always the *full* source duration even for subclips (that's
+    /// what the codec-layer probe returns, and we don't want to
+    /// re-probe just because the user cut a subclip), so use this
+    /// accessor wherever UI needs to show "how long will this play
+    /// for" — library cards, drop-to-timeline, etc.
+    pub fn effective_duration_ns(&self) -> u64 {
+        self.effective_source_out_ns()
+            .saturating_sub(self.effective_source_in_ns())
     }
 
     pub fn has_backing_file(&self) -> bool {
@@ -1209,8 +1298,31 @@ struct SavedMediaAnnotations {
     auto_tags_indexed: bool,
 }
 
+/// Clamp a requested subclip range against the parent's duration.
+/// Also enforces `in < out` with a 1-frame minimum (at 24 fps) so
+/// a miskeyed Mark O onto the same frame as Mark I produces a
+/// valid (if tiny) subclip rather than a zero-length one.
+pub fn clamp_subclip_range(parent_duration_ns: u64, in_ns: u64, out_ns: u64) -> (u64, u64) {
+    const MIN_WINDOW_NS: u64 = 1_000_000_000 / 24;
+    let max = parent_duration_ns.max(MIN_WINDOW_NS);
+    // Reserve at least one 24-fps frame between in and max so the
+    // clamp below is always valid. If the requested in-point is
+    // closer to the end than one frame, pull it back.
+    let in_clamped = in_ns.min(max.saturating_sub(MIN_WINDOW_NS));
+    let min_out = in_clamped.saturating_add(MIN_WINDOW_NS);
+    let out_clamped = out_ns.clamp(min_out, max);
+    (in_clamped, out_clamped)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct SavedLibraryItem {
+    // Stable library-item id. Persisted so subclips can store
+    // `parent_id` references across save/reload cycles. Older
+    // projects that predate this field deserialize with an empty
+    // string, in which case we fall back to the existing
+    // path-based match-or-insert logic.
+    #[serde(default)]
+    pub id: String,
     pub source_path: String,
     #[serde(default)]
     pub duration_ns: u64,
@@ -1240,11 +1352,23 @@ struct SavedLibraryItem {
     pub hdr_colorimetry: Option<String>,
     #[serde(default)]
     pub file_size_bytes: Option<u64>,
+    /// Subclip parent reference. `None` (or absent on older saves)
+    /// means this is a top-level library item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    /// Subclip in-point within the source. Ignored when `parent_id`
+    /// is absent — top-level items cover `0..duration_ns`.
+    #[serde(default)]
+    pub subclip_source_in_ns: u64,
+    /// Subclip out-point within the source.
+    #[serde(default)]
+    pub subclip_source_out_ns: u64,
 }
 
 impl SavedLibraryItem {
     fn from_media_item(item: &MediaItem) -> Option<Self> {
         item.has_backing_file().then(|| Self {
+            id: item.id.clone(),
             source_path: item.source_path.clone(),
             duration_ns: item.duration_ns,
             label: item.label.clone(),
@@ -1260,6 +1384,9 @@ impl SavedLibraryItem {
             codec_summary: item.codec_summary.clone(),
             hdr_colorimetry: item.hdr_colorimetry.clone(),
             file_size_bytes: item.file_size_bytes,
+            parent_id: item.parent_id.clone(),
+            subclip_source_in_ns: item.subclip_source_in_ns,
+            subclip_source_out_ns: item.subclip_source_out_ns,
         })
     }
 
@@ -1284,10 +1411,20 @@ impl SavedLibraryItem {
         item.file_size_bytes = self.file_size_bytes;
         item.is_missing = source_path_exists(&item.source_path);
         item.is_missing = !item.is_missing;
+        item.parent_id = self.parent_id.clone();
+        item.subclip_source_in_ns = self.subclip_source_in_ns;
+        item.subclip_source_out_ns = self.subclip_source_out_ns;
     }
 
     fn into_media_item(self) -> MediaItem {
         let mut item = MediaItem::new(self.source_path, self.duration_ns);
+        // Preserve the saved id when present so subclip parent_id
+        // references across save/reload remain valid. Empty id from
+        // pre-subclips saves falls through to the fresh Uuid from
+        // MediaItem::new (existing behaviour).
+        if !self.id.trim().is_empty() {
+            item.id = self.id;
+        }
         if !self.label.trim().is_empty() {
             item.label = self.label;
         }
@@ -1303,6 +1440,9 @@ impl SavedLibraryItem {
         item.codec_summary = self.codec_summary;
         item.hdr_colorimetry = self.hdr_colorimetry;
         item.file_size_bytes = self.file_size_bytes;
+        item.parent_id = self.parent_id;
+        item.subclip_source_in_ns = self.subclip_source_in_ns;
+        item.subclip_source_out_ns = self.subclip_source_out_ns;
         item
     }
 }
@@ -1390,12 +1530,37 @@ pub fn apply_bins_from_project(
     if let Some(ref library_items_json) = project.parsed_library_items_json {
         if let Ok(saved_items) = serde_json::from_str::<Vec<SavedLibraryItem>>(library_items_json) {
             for saved in saved_items {
-                if let Some(item) = lib
-                    .items
-                    .iter_mut()
-                    .find(|item| item.matches_library_key(&saved.source_path))
-                {
-                    saved.apply_to_item(item);
+                // ID-first match so saved subclips deterministically
+                // re-bind to the correct in-memory item (multiple
+                // items can share a source_path once subclips exist,
+                // and path-only matching would clobber the wrong
+                // one). Fall back to path-based match when the save
+                // predates the `id` field (empty string) or when no
+                // id match is found — this keeps restore working
+                // for legacy projects and for the common case where
+                // the media-probe path has already populated a
+                // top-level item from an auto-import.
+                // Resolve an existing item to update in two stages so
+                // the borrow checker can reason about each
+                // independently: first look for an id match (when
+                // saved has an id), then fall back to a
+                // source-path match restricted to top-level items
+                // on both sides — subclips share a source_path with
+                // their parent and must not collide.
+                let saved_has_id = !saved.id.trim().is_empty();
+                let mut existing_idx: Option<usize> = None;
+                if saved_has_id {
+                    existing_idx = lib.items.iter().position(|item| item.id == saved.id);
+                }
+                if existing_idx.is_none() {
+                    existing_idx = lib.items.iter().position(|item| {
+                        item.parent_id.is_none()
+                            && saved.parent_id.is_none()
+                            && item.matches_library_key(&saved.source_path)
+                    });
+                }
+                if let Some(idx) = existing_idx {
+                    saved.apply_to_item(&mut lib.items[idx]);
                 } else {
                     lib.items.push(saved.into_media_item());
                 }
@@ -1560,6 +1725,9 @@ mod tests {
             auto_tags_indexed: false,
             transcript_windows: Vec::new(),
             visual_embedding: None,
+            parent_id: None,
+            subclip_source_in_ns: 0,
+            subclip_source_out_ns: 0,
         }
     }
 
@@ -1643,6 +1811,104 @@ mod tests {
 
         assert!(lib.find_bin(&bin.id).is_some());
         assert!(lib.find_bin("nonexistent").is_none());
+    }
+
+    #[test]
+    fn clamp_subclip_range_enforces_minimum_and_bounds() {
+        // Out beyond parent duration clamps to duration.
+        let (in_ns, out_ns) = clamp_subclip_range(10_000_000_000, 1_000_000_000, 20_000_000_000);
+        assert_eq!(in_ns, 1_000_000_000);
+        assert_eq!(out_ns, 10_000_000_000);
+        // Out == in bumps out to in + 1 frame (at 24 fps = ~41.67ms).
+        let (in_ns, out_ns) = clamp_subclip_range(10_000_000_000, 5_000_000_000, 5_000_000_000);
+        assert_eq!(in_ns, 5_000_000_000);
+        assert!(out_ns > 5_000_000_000);
+        // In beyond duration pulls back so there's room for at
+        // least a 1-frame (24 fps) window.
+        let (in_ns, out_ns) = clamp_subclip_range(10_000_000_000, 99_000_000_000, 99_000_000_000);
+        assert!(in_ns <= 10_000_000_000 - (1_000_000_000 / 24));
+        assert!(out_ns > in_ns);
+        assert!(out_ns <= 10_000_000_000);
+    }
+
+    #[test]
+    fn new_subclip_inherits_metadata_and_offsets_timecode() {
+        let mut parent = MediaItem::new("/tmp/parent.mp4", 60_000_000_000);
+        parent.source_timecode_base_ns = Some(50_000_000_000);
+        parent.has_audio = true;
+        parent.video_width = Some(1920);
+        parent.video_height = Some(1080);
+        parent.codec_summary = Some("H.264".into());
+
+        let sub = MediaItem::new_subclip(
+            &parent,
+            10_000_000_000,
+            20_000_000_000,
+            "Highlight".into(),
+        );
+
+        assert!(sub.is_subclip());
+        assert_eq!(sub.parent_id.as_deref(), Some(parent.id.as_str()));
+        assert_eq!(sub.source_path, parent.source_path);
+        assert_eq!(sub.subclip_source_in_ns, 10_000_000_000);
+        assert_eq!(sub.subclip_source_out_ns, 20_000_000_000);
+        assert_eq!(sub.effective_source_in_ns(), 10_000_000_000);
+        assert_eq!(sub.effective_source_out_ns(), 20_000_000_000);
+        assert_eq!(sub.effective_duration_ns(), 10_000_000_000);
+        // TC base offset by in-point so "start of subclip" shows correct TC.
+        assert_eq!(sub.source_timecode_base_ns, Some(60_000_000_000));
+        // Codec metadata inherits.
+        assert_eq!(sub.has_audio, true);
+        assert_eq!(sub.video_width, Some(1920));
+        assert_eq!(sub.codec_summary.as_deref(), Some("H.264"));
+        // Subclip gets its own id.
+        assert_ne!(sub.id, parent.id);
+    }
+
+    #[test]
+    fn top_level_item_is_not_subclip_and_returns_full_range() {
+        let item = MediaItem::new("/tmp/foo.mp4", 30_000_000_000);
+        assert!(!item.is_subclip());
+        assert_eq!(item.effective_source_in_ns(), 0);
+        assert_eq!(item.effective_source_out_ns(), 30_000_000_000);
+        assert_eq!(item.effective_duration_ns(), 30_000_000_000);
+    }
+
+    #[test]
+    fn saved_library_item_round_trip_preserves_subclip_fields() {
+        let mut parent = MediaItem::new("/tmp/parent.mp4", 60_000_000_000);
+        parent.has_audio = true;
+        let sub = MediaItem::new_subclip(&parent, 5_000_000_000, 25_000_000_000, "Take".into());
+        let saved = SavedLibraryItem::from_media_item(&sub).expect("backing-file subclip");
+        let json = serde_json::to_string(&saved).expect("serialize");
+        let restored: SavedLibraryItem =
+            serde_json::from_str(&json).expect("deserialize");
+        let restored_item = restored.into_media_item();
+        assert!(restored_item.is_subclip());
+        assert_eq!(restored_item.parent_id, Some(parent.id.clone()));
+        assert_eq!(restored_item.subclip_source_in_ns, 5_000_000_000);
+        assert_eq!(restored_item.subclip_source_out_ns, 25_000_000_000);
+        assert_eq!(restored_item.id, sub.id, "stable id preserved");
+        assert_eq!(restored_item.label, "Take");
+    }
+
+    #[test]
+    fn legacy_saved_item_without_id_field_deserializes_with_fresh_id() {
+        // Pre-subclip saves didn't persist `id`. Deserialization
+        // must default to empty, and into_media_item must assign a
+        // fresh Uuid rather than keeping the empty string. This is
+        // the path that keeps old .uspxml files loading.
+        let legacy_json = r#"{
+            "source_path": "/tmp/legacy.mp4",
+            "duration_ns": 1000000000,
+            "label": "Old"
+        }"#;
+        let saved: SavedLibraryItem = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(saved.id, "");
+        let item = saved.into_media_item();
+        assert!(!item.id.is_empty(), "fresh Uuid when saved id was absent");
+        assert_eq!(item.label, "Old");
+        assert!(!item.is_subclip());
     }
 
     #[test]
