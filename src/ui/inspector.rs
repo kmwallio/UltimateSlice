@@ -298,6 +298,13 @@ pub struct InspectorView {
     pub out_value: Label,
     pub dur_value: Label,
     pub pos_value: Label,
+    /// Displays the clip's decoded source timecode base (from
+    /// Convert LTC Audio to Timecode, BWF bext time_reference, or
+    /// an FCPXML `start` attr). Reads "—" when no timecode has been
+    /// decoded yet, with a tooltip suggesting Convert LTC so the
+    /// user can tell at a glance whether "Sync Selected Clips by
+    /// Timecode" will be enabled.
+    pub source_tc_value: Label,
     /// Which clip is currently shown (kept in sync by update())
     pub selected_clip_id: Rc<RefCell<Option<String>>>,
     pub clip_color_label_combo: gtk4::DropDown,
@@ -2398,6 +2405,20 @@ impl InspectorView {
                 self.out_value.set_text(&ns_to_timecode(c.source_out));
                 self.dur_value.set_text(&ns_to_timecode(c.duration()));
                 self.pos_value.set_text(&ns_to_timecode(c.timeline_start));
+                // Source TC: show decoded base at source_in offset when
+                // present, else flag the absence so the user knows to
+                // run Convert LTC.
+                match c.source_timecode_start_ns() {
+                    Some(tc_ns) => {
+                        self.source_tc_value.set_text(&ns_to_timecode(tc_ns));
+                        self.source_tc_value.add_css_class("dim-label");
+                    }
+                    None => {
+                        self.source_tc_value
+                            .set_text("— (none; run Convert LTC)");
+                        self.source_tc_value.add_css_class("dim-label");
+                    }
+                }
                 let current_transition = &c.outgoing_transition;
                 let current_kind_id =
                     if is_supported_transition_kind(current_transition.kind_trimmed()) {
@@ -3058,6 +3079,7 @@ impl InspectorView {
                     &self.out_value,
                     &self.dur_value,
                     &self.pos_value,
+                    &self.source_tc_value,
                 ] {
                     l.set_text("—");
                 }
@@ -3582,6 +3604,19 @@ pub fn build_inspector(
     row_label(&content_box, "Timeline Start");
     let pos_value = value_label("—");
     content_box.append(&pos_value);
+
+    // Source TC base — verifies Convert LTC / BWF bext / FCPXML
+    // `start` actually populated decoded timecode metadata on the
+    // clip. Gates "Sync Selected Clips by Timecode" in the timeline
+    // clip-context menu.
+    row_label(&content_box, "Source TC");
+    let source_tc_value = value_label("—");
+    source_tc_value.set_tooltip_text(Some(
+        "Decoded source timecode (from Convert LTC Audio to Timecode, \
+         BWF bext time_reference on WAV imports, or an FCPXML start attr). \
+         Required for Sync Selected Clips by Timecode to enable.",
+    ));
+    content_box.append(&source_tc_value);
 
     // ── Transition section ───────────────────────────────────────────────────
     let transition_section = GBox::new(Orientation::Vertical, 8);
@@ -11028,6 +11063,7 @@ pub fn build_inspector(
         out_value,
         dur_value,
         pos_value,
+        source_tc_value,
         selected_clip_id,
         clip_color_label_combo,
         brightness_slider,

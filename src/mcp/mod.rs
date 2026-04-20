@@ -839,6 +839,15 @@ pub enum McpCommand {
         replace_audio: bool,
         reply: SyncSender<Value>,
     },
+    /// Align clips by their decoded source timecode (no grouping
+    /// required). Every clip_id must already have
+    /// `source_timecode_base_ns` populated — run
+    /// `convert_ltc_to_timecode` first, or re-import the file so
+    /// the BWF bext / video-tmcd probe fills it in.
+    SyncClipsByTimecode {
+        clip_ids: Vec<String>,
+        reply: SyncSender<Value>,
+    },
     CopyClipColorGrade {
         clip_id: String,
         reply: SyncSender<Value>,

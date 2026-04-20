@@ -228,14 +228,20 @@ pub fn probe_media_metadata(path: &str) -> MediaProbeMetadata {
     // Resolution order:
     //   1. Video-stream `timecode` tag (MOV/MP4 embedded timecode track —
     //      what cameras write).
-    //   2. BWF bext `time_reference` format tag (audio-only WAV from
+    //   2. Format-level `timecode` tag (some MXF / specialized MP4
+    //      wrappers put the TC at the container level instead of
+    //      the stream, so stream_tags=timecode comes back empty).
+    //   3. BWF bext `time_reference` format tag (audio-only WAV from
     //      field recorders — Sound Devices / Zaxcom / Tascam all
     //      write this). The value is samples-since-midnight at the
     //      file's own sample rate, not 48k as sometimes assumed.
-    //   3. Container creation time, used only as a weak fallback.
+    //   4. Container creation time, used only as a weak fallback.
     let file_path = uri.strip_prefix("file://").unwrap_or(&uri);
     let source_timecode_base_ns =
         extract_embedded_timecode(file_path, frame_rate_num, frame_rate_den)
+            .or_else(|| {
+                extract_format_timecode(file_path, frame_rate_num, frame_rate_den)
+            })
             .or_else(|| {
                 if is_audio_only {
                     extract_bwf_time_reference_ns(file_path)
@@ -294,6 +300,39 @@ fn extract_embedded_timecode(path: &str, fps_num: u32, fps_den: u32) -> Option<u
         return None;
     }
 
+    parse_timecode_to_ns(tc_string, fps_num, fps_den)
+}
+
+/// Fallback for containers that write timecode at the format level
+/// rather than on a stream (some MXF / specialized MP4 wrappers).
+/// Queries `format_tags=timecode` — ffprobe returns `HH:MM:SS:FF`
+/// when present, which we then convert to nanoseconds using the
+/// video frame rate the caller already resolved. Returns `None`
+/// when absent, which is the common case for files where the
+/// stream-level `timecode` tag was found (that path ran first).
+fn extract_format_timecode(path: &str, fps_num: u32, fps_den: u32) -> Option<u64> {
+    use std::process::Command;
+
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "quiet",
+            "-show_entries",
+            "format_tags=timecode",
+            "-of",
+            "csv=p=0",
+            path,
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let tc_string = String::from_utf8_lossy(&output.stdout);
+    let tc_string = tc_string.trim();
+    if tc_string.is_empty() {
+        return None;
+    }
     parse_timecode_to_ns(tc_string, fps_num, fps_den)
 }
 

@@ -2076,6 +2076,21 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "sync_clips_by_timecode",
+            "description": "Align two or more timeline clips by their decoded source timecode (no grouping required). Every clip must already have source_timecode_base_ns populated — set by convert_ltc_to_timecode on clips carrying an LTC audio signal, by the import probe for files with video-stream or BWF bext timecode, or imported from an FCPXML start attr. Anchor is the first clip in clip_ids when it has timecode, otherwise the earliest-timecode member. Non-anchor members shift so their timeline delta matches their timecode delta; clamp-to-zero if math would go negative.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Two or more clip ids to align. First id (when it has timecode) is used as the anchor and stays put; others shift to align timecodes."
+                    }
+                },
+                "required": ["clip_ids"]
+            }
+        },
+        {
             "name": "copy_clip_color_grade",
             "description": "Copy color grading values from a clip into an internal clipboard. The copied grade can then be pasted onto other clips with paste_clip_color_grade. Copies static values only (brightness, contrast, saturation, temperature, tint, exposure, black_point, shadows, midtones, highlights, warmth/tint per tonal region, denoise, sharpness, lut_paths).",
             "inputSchema": {
@@ -4024,6 +4039,17 @@ fn dispatch_tool_payload(
                 .get("replace_audio")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
+            reply: tx,
+        },
+        "sync_clips_by_timecode" => McpCommand::SyncClipsByTimecode {
+            clip_ids: args["clip_ids"]
+                .as_array()
+                .map(|ids| {
+                    ids.iter()
+                        .filter_map(|id| id.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default(),
             reply: tx,
         },
         "copy_clip_color_grade" => McpCommand::CopyClipColorGrade {

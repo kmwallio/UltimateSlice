@@ -1980,6 +1980,122 @@ pub(crate) fn handle_mcp_command(
             }
         }
 
+        McpCommand::SyncClipsByTimecode { clip_ids, reply } => {
+            if clip_ids.len() < 2 {
+                reply
+                    .send(json!({"success": false, "error": "Need at least 2 clip ids"}))
+                    .ok();
+                return;
+            }
+
+            // Collect (id, timeline_start, source_tc_start) — the
+            // anchor-picking + shift math mirrors
+            // TimelineState::sync_selected_clips_by_timecode.
+            let members: Vec<(String, u64, u64)> = {
+                let proj = project.borrow();
+                clip_ids
+                    .iter()
+                    .filter_map(|id| {
+                        proj.tracks
+                            .iter()
+                            .flat_map(|t| t.clips.iter())
+                            .find(|c| &c.id == id)
+                            .and_then(|c| {
+                                c.source_timecode_start_ns()
+                                    .map(|tc| (c.id.clone(), c.timeline_start, tc))
+                            })
+                    })
+                    .collect()
+            };
+            let total = clip_ids.len();
+            let with_tc = members.len();
+            if with_tc < 2 {
+                reply
+                    .send(json!({
+                        "success": false,
+                        "error": format!(
+                            "Need 2+ clips with decoded source timecode; {with_tc} of {total} provided ids had it. \
+                             Run convert_ltc_to_timecode on the missing ones first, or re-import them so the \
+                             BWF bext / video-tmcd probe can fill in source_timecode_base_ns."
+                        ),
+                    }))
+                    .ok();
+                return;
+            }
+
+            // Anchor: first provided id when it has TC, else
+            // earliest-TC member (deterministic tie-break on
+            // timeline_start).
+            let primary_id = clip_ids.first().cloned();
+            let anchor = members
+                .iter()
+                .find(|(id, _, _)| primary_id.as_deref() == Some(id.as_str()))
+                .or_else(|| {
+                    members
+                        .iter()
+                        .min_by_key(|(_, timeline_start, tc)| (*tc, *timeline_start))
+                });
+            let Some((_, anchor_timeline_start, anchor_tc)) = anchor else {
+                reply
+                    .send(json!({"success": false, "error": "Could not choose an anchor clip"}))
+                    .ok();
+                return;
+            };
+            let anchor_timeline_start = *anchor_timeline_start;
+            let anchor_tc = *anchor_tc;
+
+            let mut proposed: Vec<(String, i128)> = members
+                .iter()
+                .map(|(id, _, tc)| {
+                    (
+                        id.clone(),
+                        i128::from(anchor_timeline_start) + i128::from(*tc)
+                            - i128::from(anchor_tc),
+                    )
+                })
+                .collect();
+            if let Some(min_start) = proposed.iter().map(|(_, s)| *s).min() {
+                if min_start < 0 {
+                    let shift = -min_start;
+                    for (_, s) in &mut proposed {
+                        *s += shift;
+                    }
+                }
+            }
+            let assignments: HashMap<String, u64> = proposed
+                .into_iter()
+                .map(|(id, s)| (id, s.max(0) as u64))
+                .collect();
+
+            let mut result_rows = Vec::new();
+            {
+                let mut proj = project.borrow_mut();
+                for track in &mut proj.tracks {
+                    for clip in &mut track.clips {
+                        if let Some(&new_start) = assignments.get(&clip.id) {
+                            let old = clip.timeline_start;
+                            clip.timeline_start = new_start;
+                            result_rows.push(json!({
+                                "clip_id": clip.id.clone(),
+                                "old_timeline_start_ns": old,
+                                "new_timeline_start_ns": new_start,
+                            }));
+                        }
+                    }
+                }
+                proj.dirty = true;
+            }
+            on_project_changed();
+            reply
+                .send(json!({
+                    "success": true,
+                    "with_timecode_count": with_tc,
+                    "total_count": total,
+                    "results": result_rows,
+                }))
+                .ok();
+        }
+
         McpCommand::CopyClipColorGrade { clip_id, reply } => {
             let mut ts = timeline_state.borrow_mut();
             // Temporarily set selected clip for the copy operation
