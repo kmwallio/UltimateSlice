@@ -4,7 +4,7 @@ The **Media Library** panel (left side) holds all imported source clips availabl
 
 ## Importing Media
 
-1. When the library is empty, click the **+ Import Media…** button in the library panel.
+1. When the library is empty, use the centered **Import Media…** action in the library panel.
 2. Once media has been imported, use the **+** button next to the **Media Library** title to import more files.
 3. Choose one or more video, audio, or image files from the file chooser.
 4. Imported items appear as thumbnail cards showing the clip name and, once probing completes, compact media metadata.
@@ -14,6 +14,8 @@ The **Media Library** panel (left side) holds all imported source clips availabl
 8. If a source path is unavailable on disk, the media card shows an **OFFLINE** badge and warning outline.
 
 You can also drag files directly from your file manager into the **Media Library** pane to import them.
+
+While the library is empty, the panel keeps that import action centered so the first step stays obvious on a fresh project.
 
 Supported formats depend on your installed GStreamer plugins (any format `playbin` can decode). Still images are supported natively.
 
@@ -49,6 +51,13 @@ Bins are saved with your project and restored when you reopen it.
 - The clip name is shown above the source monitor preview.
 - Title and other non-file-backed browser cards remain visible/searchable and can still be organized into bins, but they do not load the Source Monitor because they have no source file to preview.
 
+## Reverse Match Frame
+
+- **Right-click** a single **source-backed** library item and choose **Reverse Match Frame…** to find everywhere that source appears on the timeline.
+- The results list includes root timeline uses plus clips nested inside compound timelines.
+- Each result shows its project / compound breadcrumb plus the matching timecode; click a result to jump the timeline there and select the clip.
+- MCP automation can use the same lookup with `reverse_match_frame(path)`.
+
 ## Metadata and Filtering
 
 - Each media card now shows compact metadata beneath the clip name when available:
@@ -56,11 +65,15 @@ Bins are saved with your project and restored when you reopen it.
   - **Audio-only**: audio-only indicator text, codec summary, duration, file size
   - **Still images**: resolution, image type, default duration, file size
 - Timeline-native cards with no backing file show their clip type instead of file metadata. Title cards use the current title text as the main card label and remain searchable by that text.
-- Favorite/reject ratings appear directly on media cards, and keyword ranges show a compact summary line when the clip has saved ranges.
+- Favorite/reject ratings appear directly on media cards, keyword ranges show a compact summary line when the clip has saved ranges, and contextual auto-tags show a **Tags:** summary line once generated.
 - Hover a media card to see the full source path plus expanded metadata details in the tooltip, including rating and individual keyword ranges when present.
-- Use the **filter search** field to match clip names, title text, file paths, codec text, keyword labels, or stored spoken transcript text from subtitle-generation workflows.
+- Use the **filter search** field to match clip names, title text, file paths, codec text, keyword labels, contextual auto-tags, stored spoken transcript text from subtitle-generation workflows, or cached CLIP-style visual-search embeddings for video/still-image media.
+- Contextual auto-tags currently cover shot type (**wide / medium / close-up**), setting (**indoor / outdoor**), time of day (**day / night**), and a small set of common subjects such as **person**, **crowd**, **car**, **building**, **screen**, **text**, **nature**, and **animal**.
+- When the current query matches an auto-tag, matching clips show a short **Tags:** hint on the card and the tooltip includes the matched tag category plus confidence.
 - When the current query matches spoken content, matching clips show a short **Spoken:** hint on the card and the tooltip includes the matched transcript excerpt plus the clip's transcript-segment count.
-- If **Preferences → Models → AI index in background** is enabled, eligible audio-backed library items with no transcript cache are queued automatically after import/open so older projects can backfill spoken-content search without manually regenerating subtitles for every clip. The preference is disabled by default.
+- When the current query matches a visual embedding, matching clips show a short **Visual:** hint on the card and the tooltip includes the closest matching frame time from that clip.
+- If **Preferences → Models → AI index in background** is enabled, eligible audio-backed items can be queued for transcript indexing and eligible video/still-image items can be queued for visual-search embedding generation after import/open. If **Preferences → Models → Auto-tag visual media** is also enabled, clips with visual embeddings are then queued for persistent contextual auto-tagging. Both preferences are disabled by default.
+- The preferred visual-search model install location is `~/.local/share/ultimateslice/models/clip-search/` containing `image_encoder.onnx`, `text_encoder.onnx`, and `tokenizer.json`. Alternate directory names `clip_search/`, `clip-vit/`, and `clip_vit/` are also accepted.
 - Use the **type** dropdown to focus on video, audio, images, or offline clips.
 - Use the **size** dropdown to narrow the current browser scope to SD-or-smaller, HD, Full HD, or 4K+ media.
 - Use the **FPS** dropdown to narrow the current browser scope to 24 fps-or-less, 25-30 fps, 31-59 fps, or 60+ fps clips.
@@ -80,11 +93,11 @@ Bins are saved with your project and restored when you reopen it.
 ## Smart Collections
 
 - Use the **Collections** picker in the filter bar to recall saved project-wide media queries.
-- Click the **save** button next to the picker to store the current search/type/size/FPS/rating filter combination as a smart collection, including transcript-aware search text.
+- Click the **save** button next to the picker to store the current search/type/size/FPS/rating filter combination as a smart collection, including transcript-aware, auto-tag-aware, or visual-search text.
 - Selecting a smart collection switches the browser to a flat **All Media**-style view across the whole project, even if you were previously inside a bin.
 - Use the **rename** and **delete** buttons next to the picker to manage the selected collection.
 - Smart collections are saved with your project, round-trip through UltimateSlice's FCPXML vendor metadata, and are available to automation through the MCP `list_collections`, `create_collection`, `update_collection`, and `delete_collection` tools.
-- MCP `list_library` now includes each item's stable `library_key`, rating, keyword ranges, transcript metadata, and optional `search_match` details when called with `search_text`; browser annotations can be automated with `set_media_rating`, `add_media_keyword_range`, `update_media_keyword_range`, and `delete_media_keyword_range`.
+- MCP `list_library` now includes each item's stable `library_key`, rating, keyword ranges, `auto_tags`, `auto_tags_indexed`, transcript metadata, and optional `search_match` details when called with `search_text`; browser annotations can be automated with `set_media_rating`, `add_media_keyword_range`, `update_media_keyword_range`, and `delete_media_keyword_range`.
 
 ## Adding Clips to the Timeline
 
@@ -111,10 +124,11 @@ Bins are saved with your project and restored when you reopen it.
 - Creating a new project or opening a different project clears the current library view first, then loads that project's media list.
 - Thumbnails are generated asynchronously and refresh automatically as they become available (no manual panel/window resize needed).
 - Source timecode (from camera creation timestamps) is automatically extracted during import and used for timecode-based alignment of grouped clips without manual entry.
-- When the library is empty, the panel shows a short hint reminding you that you can import or drag files to begin.
+- When the library is empty, the panel switches to a centered first-run state with the main **Import Media…** action and a reminder that you can also drag files in directly.
 
 ## Relinking offline media
 
 - Use **Relink…** in the main toolbar to recover missing source files.
+- Use **Export ▼ → Project Health…** when you want an overview of all offline paths plus generated cache usage before relinking.
 - Choose a folder to scan. UltimateSlice searches recursively and remaps missing paths by filename, then breaks ties using deepest tail-path match.
 - The relink pass reports how many items were remapped and how many remain unresolved.

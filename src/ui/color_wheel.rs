@@ -6,7 +6,9 @@
 use gtk4::prelude::*;
 use gtk4::{self as gtk, DrawingArea, Orientation, Scale};
 use std::cell::{Cell, RefCell};
-use std::f64::consts::{PI, TAU};
+#[cfg(test)]
+use std::f64::consts::PI;
+use std::f64::consts::TAU;
 use std::rc::Rc;
 
 // ── HSV ↔ RGB conversion ────────────────────────────────────────────

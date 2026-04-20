@@ -29,6 +29,13 @@ pub(crate) struct UltimateSliceClipOtioMetadata {
     /// 7-band match EQ from audio matching (mic-match correction).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) match_eq_bands: Option<Vec<EqBand>>,
+    /// Render-and-Replace flag (Phase 1 foundation). When true, the
+    /// RenderReplaceCache bakes this clip's primary pixel-level effect
+    /// stack into a ProRes sidecar; the live effect chain is bypassed
+    /// at playback. Only serialized when `true` so legacy projects
+    /// don't grow on round-trip.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) render_replace_enabled: Option<bool>,
     /// One-knob "Enhance Voice" toggle (FFmpeg HPF + denoise + EQ + compressor
     /// chain, applied at export only). Defaults to false.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -384,6 +391,12 @@ pub(crate) struct UltimateSliceTrackOtioMetadata {
     /// Timeline track height preset (small / medium / large).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) height_preset: Option<String>,
+    /// Track-level gain in dB (post-clip volume multiplier). `None` means unity (0.0 dB).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) gain_db: Option<f64>,
+    /// Track-level stereo pan (−1.0 to +1.0). `None` means center (0.0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) pan: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -398,6 +411,32 @@ pub(crate) struct UltimateSliceProjectOtioMetadata {
     /// gain any new bytes on round-trip.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) master_gain_db: Option<f64>,
+    /// Dialogue bus gain in dB.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) dialogue_bus_gain_db: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) dialogue_bus_muted: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) dialogue_bus_soloed: Option<bool>,
+    /// Effects bus gain in dB.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) effects_bus_gain_db: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) effects_bus_muted: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) effects_bus_soloed: Option<bool>,
+    /// Music bus gain in dB.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) music_bus_gain_db: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) music_bus_muted: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) music_bus_soloed: Option<bool>,
+    /// Program Monitor reference stills pinned for A/B-compare. Empty means
+    /// "not authored" and is skipped on serialization so legacy projects
+    /// don't grow on round-trip.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub(crate) reference_stills: Vec<crate::model::project::ReferenceStill>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -412,6 +451,8 @@ pub(crate) struct UltimateSliceTransitionOtioMetadata {
 pub(crate) struct UltimateSliceMarkerOtioMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) color_rgba: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) notes: Option<String>,
 }
 
 fn wrap_section<T: Serialize>(section: &str, payload: &T) -> Value {

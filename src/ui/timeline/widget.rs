@@ -24,10 +24,14 @@ use std::rc::Rc;
 const TRACK_HEIGHT: f64 = 60.0;
 const TRACK_HEIGHT_SMALL: f64 = 44.0;
 const TRACK_HEIGHT_LARGE: f64 = 84.0;
-const TRACK_LABEL_WIDTH: f64 = 110.0;
+const TRACK_RESIZE_HANDLE_HALF_HEIGHT: f64 = 6.0;
+const TRACK_LABEL_WIDTH: f64 = 140.0;
 const TRACK_LABEL_METER_WIDTH: f64 = 18.0;
 const TRACK_LABEL_SOLO_BADGE_WIDTH: f64 = 16.0;
 const TRACK_LABEL_SOLO_BADGE_HEIGHT: f64 = 14.0;
+/// Badge constants reused for Mute and Lock badges (same size as Solo/Duck).
+const TRACK_LABEL_BADGE_WIDTH: f64 = 16.0;
+const TRACK_LABEL_BADGE_HEIGHT: f64 = 14.0;
 const RULER_HEIGHT: f64 = 24.0;
 const PIXELS_PER_SECOND_DEFAULT: f64 = 100.0;
 use crate::units::NS_PER_SECOND_F as NS_PER_SECOND;
@@ -55,6 +59,100 @@ fn track_row_height(track: &crate::model::track::Track) -> f64 {
         crate::model::track::TrackHeightPreset::Small => TRACK_HEIGHT_SMALL,
         crate::model::track::TrackHeightPreset::Medium => TRACK_HEIGHT,
         crate::model::track::TrackHeightPreset::Large => TRACK_HEIGHT_LARGE,
+    }
+}
+
+fn track_height_preset_for_height(height: f64) -> crate::model::track::TrackHeightPreset {
+    let small_medium_mid = (TRACK_HEIGHT_SMALL + TRACK_HEIGHT) * 0.5;
+    let medium_large_mid = (TRACK_HEIGHT + TRACK_HEIGHT_LARGE) * 0.5;
+    if height <= small_medium_mid {
+        crate::model::track::TrackHeightPreset::Small
+    } else if height <= medium_large_mid {
+        crate::model::track::TrackHeightPreset::Medium
+    } else {
+        crate::model::track::TrackHeightPreset::Large
+    }
+}
+
+fn track_resize_hit_track_index_in_tracks(
+    tracks: &[crate::model::track::Track],
+    y: f64,
+) -> Option<usize> {
+    if y < 0.0 {
+        return None;
+    }
+    let mut row_top = 0.0;
+    for &logical_idx in &visual_order(tracks) {
+        let height = track_row_height(&tracks[logical_idx]);
+        let boundary_y = row_top + height;
+        if y >= boundary_y - TRACK_RESIZE_HANDLE_HALF_HEIGHT
+            && y <= boundary_y + TRACK_RESIZE_HANDLE_HALF_HEIGHT
+        {
+            return Some(logical_idx);
+        }
+        row_top += height;
+    }
+    None
+}
+
+fn build_track_color_swatch_button(color: crate::model::track::TrackColorLabel) -> gtk::Button {
+    let btn = gtk::Button::new();
+    btn.set_size_request(18, 18);
+    btn.add_css_class("flat");
+    if let Some((r, g, b)) = color.rgb() {
+        let swatch = gtk::DrawingArea::new();
+        swatch.set_content_width(12);
+        swatch.set_content_height(12);
+        swatch.set_halign(gtk::Align::Center);
+        swatch.set_valign(gtk::Align::Center);
+        swatch.set_draw_func(move |_area, cr, width, height| {
+            let cx = width as f64 * 0.5;
+            let cy = height as f64 * 0.5;
+            let radius = width.min(height) as f64 * 0.35;
+            cr.set_source_rgb(r, g, b);
+            cr.arc(cx, cy, radius, 0.0, std::f64::consts::TAU);
+            cr.fill().ok();
+        });
+        btn.set_child(Some(&swatch));
+        btn.set_tooltip_text(Some(color.label()));
+    } else {
+        let label = gtk::Label::new(Some("⊘"));
+        label.add_css_class("dim-label");
+        btn.set_child(Some(&label));
+        btn.set_tooltip_text(Some("None"));
+    }
+    btn
+}
+
+fn active_drag_clip_ids(drag_op: &DragOp) -> HashSet<String> {
+    match drag_op {
+        DragOp::MoveClip { move_clip_ids, .. } => move_clip_ids.iter().cloned().collect(),
+        DragOp::TrimIn { clip_id, .. } | DragOp::TrimOut { clip_id, .. } => {
+            std::iter::once(clip_id.clone()).collect()
+        }
+        _ => HashSet::new(),
+    }
+}
+
+fn drag_preview_range_label(start_ns: u64, end_ns: u64) -> String {
+    let start = format_timecode(start_ns as f64 / NS_PER_SECOND, 0.1);
+    let end = format_timecode(end_ns as f64 / NS_PER_SECOND, 0.1);
+    format!("In {start}  Out {end}")
+}
+
+fn drag_preview_badge_text(drag_op: &DragOp, clip: &crate::model::clip::Clip) -> Option<String> {
+    match drag_op {
+        DragOp::MoveClip { clip_id, .. }
+        | DragOp::TrimIn { clip_id, .. }
+        | DragOp::TrimOut { clip_id, .. }
+            if clip.id == *clip_id =>
+        {
+            Some(drag_preview_range_label(
+                clip.timeline_start,
+                clip.timeline_end(),
+            ))
+        }
+        _ => None,
     }
 }
 
@@ -99,26 +197,22 @@ fn track_row_top(project: &crate::model::project::Project, track_idx: usize) -> 
 }
 
 fn timeline_content_height(project: &crate::model::project::Project) -> f64 {
-    RULER_HEIGHT + project.tracks.iter().map(track_row_height).sum::<f64>()
+    project.tracks.iter().map(track_row_height).sum::<f64>()
 }
 
 fn timeline_content_height_for_tracks(tracks: &[crate::model::track::Track]) -> f64 {
-    RULER_HEIGHT + tracks.iter().map(track_row_height).sum::<f64>()
-}
-
-fn pinned_ruler_top(st: &TimelineState) -> f64 {
-    st.vertical_scroll_offset.max(0.0)
+    tracks.iter().map(track_row_height).sum::<f64>()
 }
 
 fn ruler_hit_test(st: &TimelineState, y: f64) -> bool {
-    let top = pinned_ruler_top(st);
-    y >= top && y < top + RULER_HEIGHT
+    let _ = st;
+    y >= 0.0 && y < RULER_HEIGHT
 }
 
 fn track_row_top_in_tracks(tracks: &[crate::model::track::Track], track_idx: usize) -> f64 {
     let order = visual_order(tracks);
     let visual_pos = order.iter().position(|&i| i == track_idx);
-    let mut y = RULER_HEIGHT;
+    let mut y = 0.0;
     if let Some(vp) = visual_pos {
         for &i in order.iter().take(vp) {
             y += track_row_height(&tracks[i]);
@@ -128,10 +222,10 @@ fn track_row_top_in_tracks(tracks: &[crate::model::track::Track], track_idx: usi
 }
 
 fn track_index_at_y_in_tracks(tracks: &[crate::model::track::Track], y: f64) -> Option<usize> {
-    if y <= RULER_HEIGHT {
+    if y < 0.0 {
         return None;
     }
-    let mut row_top = RULER_HEIGHT;
+    let mut row_top = 0.0;
     for &logical_idx in &visual_order(tracks) {
         let h = track_row_height(&tracks[logical_idx]);
         if y >= row_top && y < row_top + h {
@@ -223,6 +317,12 @@ enum DragOp {
         track_idx: usize,
         target_idx: usize,
     },
+    /// Resizing a track row by dragging its bottom boundary.
+    ResizeTrackHeight {
+        track_idx: usize,
+        original_preset: crate::model::track::TrackHeightPreset,
+        original_height: f64,
+    },
     /// Moving one or more keyframe time-columns (all lanes at selected times) on a clip.
     MoveKeyframeColumns {
         clip_id: String,
@@ -237,6 +337,49 @@ enum DragOp {
 struct TimelineClipboard {
     clip: Clip,
     source_track_id: String,
+}
+
+/// Inspector clipboard holding the most recently copied property or
+/// bundle. Captured by right-click **Copy …** actions and consumed by
+/// **Paste …** / **Paste … to all selected clips**.
+///
+/// Phase 1 shipped only `Scalar` (one numeric slider). Phase 2 adds
+/// bundles that cover the most common "apply the same look/setup to
+/// another clip" workflows: creative effect chains, audio effect
+/// chains, LUT stacks, EQ bands, blend mode, flip toggles, chroma key,
+/// and AI background removal.
+#[derive(Debug, Clone)]
+pub enum PropertyClipboard {
+    Scalar {
+        property: crate::ui::clip_property::ClipProperty,
+        value: f64,
+    },
+    Flip {
+        axis: FlipAxis,
+        value: bool,
+    },
+    BlendMode(crate::model::clip::BlendMode),
+    LutPaths(Vec<String>),
+    Frei0rChain(Vec<crate::model::clip::Frei0rEffect>),
+    LadspaChain(Vec<crate::model::clip::LadspaEffect>),
+    EqBands([crate::model::clip::EqBand; 3]),
+    ChromaKey {
+        enabled: bool,
+        color: u32,
+        tolerance: f32,
+        softness: f32,
+    },
+    BgRemoval {
+        enabled: bool,
+        threshold: f64,
+    },
+}
+
+/// Which axis a [`PropertyClipboard::Flip`] payload refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlipAxis {
+    Horizontal,
+    Vertical,
 }
 
 /// Clipboard holding only color-grading static values (no keyframes).
@@ -417,6 +560,22 @@ fn snap_to_candidates(
     }
 }
 
+fn format_history_feedback_label(label: &str) -> String {
+    let mut chars = label.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    let rest = chars.as_str();
+    let next = chars.next();
+    if first.is_uppercase() && next.map(|c| c.is_lowercase()).unwrap_or(false) {
+        let mut lowered = first.to_lowercase().collect::<String>();
+        lowered.push_str(rest);
+        lowered
+    } else {
+        label.to_string()
+    }
+}
+
 /// Shared state for the timeline widget
 pub struct TimelineState {
     pub project: Rc<RefCell<Project>>,
@@ -435,13 +594,22 @@ pub struct TimelineState {
     pub on_seek: Option<Rc<dyn Fn(u64)>>,
     /// Callback fired when project changes — use Rc so it can be cloned out before releasing the RefMut
     pub on_project_changed: Option<Rc<dyn Fn()>>,
+    /// Callback fired after an undo/redo action completes, with a ready-to-display message.
+    pub on_history_feedback: Option<Rc<dyn Fn(String)>>,
     /// Callback fired when the user presses Space to toggle play/pause
     pub on_play_pause: Option<Rc<dyn Fn()>>,
     /// Callback to pause/resume background thumbnail+waveform extraction during playback.
     /// Called with `true` when playback starts, `false` when it stops.
     pub on_extraction_pause: Option<Rc<dyn Fn(bool)>>,
     /// Called when a clip is dropped from the media browser: (source_path, duration_ns, track_idx, timeline_start_ns)
-    pub on_drop_clip: Option<Rc<dyn Fn(String, u64, usize, u64)>>,
+    // Called when a library item is dropped onto the timeline.
+    // Args: `(source_path, duration_ns, item_id, track_idx,
+    // timeline_start_ns)`. `item_id` is `Some` when the drag
+    // originated from a library card (since subclips); `None` for
+    // legacy payloads and external drops. The receiver uses
+    // `item_id` to look up the MediaItem and honour any subclip
+    // `source_in/source_out` window.
+    pub on_drop_clip: Option<Rc<dyn Fn(String, u64, Option<String>, usize, u64)>>,
     /// Called when files are dropped from an external file manager: (file_paths, track_idx, timeline_start_ns)
     pub on_drop_external_files: Option<Rc<dyn Fn(Vec<String>, usize, u64)>>,
     /// Lightweight callback fired immediately when clip selection changes (no pipeline rebuild).
@@ -477,6 +645,11 @@ pub struct TimelineState {
     clipboard: Option<TimelineClipboard>,
     /// Color-grade-only clipboard for copy/paste color grading between clips.
     pub color_grade_clipboard: Option<ColorGradeClipboard>,
+    /// Single-property clipboard for the Inspector right-click Copy / Paste
+    /// this property action. Holds the last scalar value read via
+    /// [`ClipProperty::read`] and is applied back via
+    /// [`ClipProperty::write`] on paste.
+    pub property_clipboard: Option<PropertyClipboard>,
     /// Multi-selection set (primary selection remains in `selected_clip_id`).
     selected_clip_ids: HashSet<String>,
     /// Anchor clip used for Shift+click range selection.
@@ -497,6 +670,18 @@ pub struct TimelineState {
     pub on_tool_changed: Option<Rc<dyn Fn(ActiveTool)>>,
     /// Set of source paths currently resolved as missing/offline.
     pub missing_media_paths: HashSet<String>,
+    /// Set of source paths whose media is detected as HDR (PQ/HLG).
+    pub hdr_media_paths: HashSet<String>,
+    /// Source paths with at least one ready proxy in `ProxyCache`.
+    /// Drives the "PROXY" badge on timeline clips. Refreshed from
+    /// window.rs whenever `proxy_cache.proxies` is pushed to the
+    /// ProgramPlayer.
+    pub proxy_ready_sources: HashSet<String>,
+    /// Whether the global "use proxies for preview" toggle is on.
+    /// Gates the PROXY badge — we only surface it when proxies are
+    /// actively being used, otherwise the badge is misleading
+    /// (proxies can be ready on disk without being consulted).
+    pub proxy_preview_enabled: bool,
     /// Callback fired when user presses the match-color shortcut (Ctrl+Alt+M).
     pub on_match_color: Option<Rc<dyn Fn()>>,
     /// Callback fired when user presses the match-frame shortcut (F).
@@ -519,6 +704,28 @@ pub struct TimelineState {
     /// While set to a future `Instant`, auto-scroll is suspended so the user's
     /// manual scroll/pan wins. Bumped whenever the user scrolls or pan-drags.
     pub user_scroll_cooldown_until: Option<std::time::Instant>,
+    /// Weak reference to the minimap DrawingArea (if wired).
+    /// Used to queue_draw the minimap whenever the main timeline repaints.
+    pub minimap_widget: Option<glib::object::WeakRef<DrawingArea>>,
+    /// Active hover-scrub preview target. `None` when the cursor is not
+    /// over a preview-able clip body. Cleared on mouse leave, drag start,
+    /// scroll, or playhead seek so a stale preview never lingers. Purely
+    /// ephemeral view state — not persisted.
+    pub hover_scrub: Option<HoverScrubPreview>,
+}
+
+/// Per-frame payload for the timeline hover-scrub floating preview. The
+/// `source_time_ns` is already quantized to a hover bucket; the motion
+/// handler avoids writing this struct twice inside the same bucket/clip
+/// so redraws stay tied to meaningful changes.
+#[derive(Clone, Debug)]
+pub struct HoverScrubPreview {
+    pub clip_id: String,
+    pub source_path: String,
+    pub source_time_ns: u64,
+    pub cursor_x: f64,
+    pub cursor_y: f64,
+    pub display_timecode: String,
 }
 
 impl TimelineState {
@@ -537,6 +744,7 @@ impl TimelineState {
             ruler_pan_start_offset: 0.0,
             on_seek: None,
             on_project_changed: None,
+            on_history_feedback: None,
             on_play_pause: None,
             on_extraction_pause: None,
             on_drop_clip: None,
@@ -558,6 +766,7 @@ impl TimelineState {
             show_track_audio_levels: true,
             clipboard: None,
             color_grade_clipboard: None,
+            property_clipboard: None,
             selected_clip_ids: HashSet::new(),
             selection_anchor_clip_id: None,
             marquee_selection: None,
@@ -568,6 +777,9 @@ impl TimelineState {
             music_generation_overlays: Vec::new(),
             on_tool_changed: None,
             missing_media_paths: HashSet::new(),
+            hdr_media_paths: HashSet::new(),
+            proxy_ready_sources: HashSet::new(),
+            proxy_preview_enabled: false,
             on_match_color: None,
             on_match_frame: None,
             on_create_multicam: None,
@@ -576,6 +788,8 @@ impl TimelineState {
             timeline_autoscroll: crate::ui_state::AutoScrollMode::default(),
             user_scroll_cooldown_until: None,
             active_snap_hit: None,
+            minimap_widget: None,
+            hover_scrub: None,
         }
     }
 
@@ -640,6 +854,146 @@ impl TimelineState {
         (secs.max(0.0) * NS_PER_SECOND) as u64
     }
 
+    /// Compute or update the hover-scrub preview target at widget
+    /// coordinates `(x, y)`. Returns `Some(source_path)` when a fresh
+    /// thumbnail request should be kicked for the new target — the caller
+    /// is responsible for calling `thumb_cache.request(...)`. Returns
+    /// `None` when nothing changed (same bucket + same clip) or when the
+    /// cursor is not over a scrubbable clip body.
+    pub fn update_hover_scrub_at(&mut self, x: f64, y: f64) -> Option<String> {
+        // Suppress hover preview during any active drag — the user is
+        // moving/trimming a clip and an overlay panel on top of the drag
+        // would be distracting and visually conflict with the drag ghost.
+        if !matches!(self.drag_op, DragOp::None) {
+            if self.hover_scrub.is_some() {
+                self.hover_scrub = None;
+            }
+            return None;
+        }
+        // Cursor must be inside the content area (not over ruler or track label).
+        if x < TRACK_LABEL_WIDTH || y < RULER_HEIGHT + self.breadcrumb_bar_height() {
+            if self.hover_scrub.is_some() {
+                self.hover_scrub = None;
+            }
+            return None;
+        }
+        let Some(track_idx) = self.track_index_at_y(y) else {
+            if self.hover_scrub.is_some() {
+                self.hover_scrub = None;
+            }
+            return None;
+        };
+        // Resolve (clip_id, source_path, quantized source_time_ns, timecode)
+        // inside a scoped block so the project borrow lives only for the
+        // lookup — the caller may then mutate `self.hover_scrub` safely.
+        #[derive(Default)]
+        struct HoverResolve {
+            clip_id: String,
+            source_path: String,
+            source_time_ns: u64,
+            display_timecode: String,
+        }
+        let resolved: Option<HoverResolve> = {
+            let proj = self.project.borrow();
+            let editing_tracks = self.resolve_editing_tracks(&proj);
+            let mut out: Option<HoverResolve> = None;
+            if let Some(track) = editing_tracks.get(track_idx) {
+                let hit = track.clips.iter().find(|clip| {
+                    let cx = self.ns_to_x(clip.timeline_start);
+                    let cw = (clip.duration() as f64 / NS_PER_SECOND)
+                        * self.pixels_per_second;
+                    x >= cx && x <= cx + cw
+                });
+                if let Some(clip) = hit {
+                    let scrubbable = matches!(
+                        clip.kind,
+                        crate::model::clip::ClipKind::Video
+                            | crate::model::clip::ClipKind::Image
+                            | crate::model::clip::ClipKind::Compound
+                    );
+                    if scrubbable {
+                        let local_ns = self
+                            .x_to_ns(x)
+                            .saturating_sub(clip.timeline_start)
+                            .min(clip.duration().saturating_sub(1));
+                        if let Some(sample) =
+                            timeline_thumbnail_sample_for_clip(clip, local_ns)
+                        {
+                            let source_time_ns =
+                                crate::media::thumb_cache::quantize_hover_scrub_time_ns(
+                                    sample.sample_time_ns,
+                                );
+                            let display_timecode =
+                                crate::ui::timecode::format_ns_as_timecode(
+                                    source_time_ns,
+                                    &proj.frame_rate,
+                                );
+                            out = Some(HoverResolve {
+                                clip_id: clip.id.clone(),
+                                source_path: sample.source_path,
+                                source_time_ns,
+                                display_timecode,
+                            });
+                        }
+                    }
+                }
+            }
+            out
+        };
+        let Some(HoverResolve {
+            clip_id,
+            source_path,
+            source_time_ns,
+            display_timecode,
+        }) = resolved
+        else {
+            if self.hover_scrub.is_some() {
+                self.hover_scrub = None;
+            }
+            return None;
+        };
+
+        let needs_request = match &self.hover_scrub {
+            Some(existing)
+                if existing.clip_id == clip_id
+                    && existing.source_path == source_path
+                    && existing.source_time_ns == source_time_ns =>
+            {
+                // Same bucket + same clip — but still update cursor (x, y)
+                // so the floating preview tracks the cursor without a
+                // flash-to-rerequest round trip.
+                let mut updated = existing.clone();
+                updated.cursor_x = x;
+                updated.cursor_y = y;
+                self.hover_scrub = Some(updated);
+                None
+            }
+            _ => {
+                self.hover_scrub = Some(HoverScrubPreview {
+                    clip_id,
+                    source_path: source_path.clone(),
+                    source_time_ns,
+                    cursor_x: x,
+                    cursor_y: y,
+                    display_timecode,
+                });
+                Some(source_path)
+            }
+        };
+        needs_request
+    }
+
+    /// Clear any active hover-scrub preview. Returns true when the state
+    /// actually changed (useful for deciding whether to `queue_draw`).
+    pub fn clear_hover_scrub(&mut self) -> bool {
+        if self.hover_scrub.is_some() {
+            self.hover_scrub = None;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Fire `on_project_changed` with no `TimelineState` borrow held.
     ///
     /// **Why this exists:** GTK4 callbacks run inside `extern "C"` trampolines
@@ -669,8 +1023,11 @@ impl TimelineState {
     fn track_index_at_y(&self, y: f64) -> Option<usize> {
         let project = self.project.borrow();
         let editing_tracks = self.resolve_editing_tracks(&project);
-        // Subtract breadcrumb bar height so hit-testing aligns with drawing
-        track_index_at_y_in_tracks(editing_tracks, y - self.breadcrumb_bar_height())
+        // Convert widget y to content y accounting for vertical scroll
+        track_index_at_y_in_tracks(
+            editing_tracks,
+            y + self.vertical_scroll_offset - self.breadcrumb_bar_height(),
+        )
     }
 
     pub fn arm_music_generation_region(&mut self, track_id: String) {
@@ -829,10 +1186,11 @@ impl TimelineState {
             track_row_top_in_tracks(editing_tracks, track_idx) + self.breadcrumb_bar_height();
         let badge_x = track_label_solo_badge_x(self.show_track_audio_levels);
         let badge_y = row_y + 6.0;
+        let content_y = y + self.vertical_scroll_offset;
         if x >= badge_x
             && x <= badge_x + TRACK_LABEL_SOLO_BADGE_WIDTH
-            && y >= badge_y
-            && y <= badge_y + TRACK_LABEL_SOLO_BADGE_HEIGHT
+            && content_y >= badge_y
+            && content_y <= badge_y + TRACK_LABEL_SOLO_BADGE_HEIGHT
         {
             Some(track_idx)
         } else {
@@ -850,13 +1208,13 @@ impl TimelineState {
         }
         let row_y =
             track_row_top_in_tracks(editing_tracks, track_idx) + self.breadcrumb_bar_height();
-        let solo_x = track_label_solo_badge_x(self.show_track_audio_levels);
-        let badge_x = solo_x - TRACK_LABEL_SOLO_BADGE_WIDTH - 2.0;
+        let badge_x = track_label_duck_badge_x(self.show_track_audio_levels);
         let badge_y = row_y + 6.0;
+        let content_y = y + self.vertical_scroll_offset;
         if x >= badge_x
-            && x <= badge_x + TRACK_LABEL_SOLO_BADGE_WIDTH
-            && y >= badge_y
-            && y <= badge_y + TRACK_LABEL_SOLO_BADGE_HEIGHT
+            && x <= badge_x + TRACK_LABEL_BADGE_WIDTH
+            && content_y >= badge_y
+            && content_y <= badge_y + TRACK_LABEL_BADGE_HEIGHT
         {
             Some(track_idx)
         } else {
@@ -867,7 +1225,8 @@ impl TimelineState {
     fn toggle_track_duck_by_index(&mut self, track_idx: usize) -> bool {
         let (track_id, old_duck) = {
             let proj = self.project.borrow();
-            let Some(track) = proj.tracks.get(track_idx) else {
+            let editing_tracks = self.resolve_editing_tracks(&proj);
+            let Some(track) = editing_tracks.get(track_idx) else {
                 return false;
             };
             (track.id.clone(), track.duck)
@@ -882,10 +1241,175 @@ impl TimelineState {
         true
     }
 
+    fn mute_badge_hit_track_index(&self, x: f64, y: f64) -> Option<usize> {
+        let track_idx = self.track_index_at_y(y)?;
+        let project = self.project.borrow();
+        let editing_tracks = self.resolve_editing_tracks(&project);
+        let row_y =
+            track_row_top_in_tracks(editing_tracks, track_idx) + self.breadcrumb_bar_height();
+        let badge_x = track_label_mute_badge_x(self.show_track_audio_levels);
+        let badge_y = row_y + 6.0;
+        let content_y = y + self.vertical_scroll_offset;
+        if x >= badge_x
+            && x <= badge_x + TRACK_LABEL_BADGE_WIDTH
+            && content_y >= badge_y
+            && content_y <= badge_y + TRACK_LABEL_BADGE_HEIGHT
+        {
+            Some(track_idx)
+        } else {
+            None
+        }
+    }
+
+    fn lock_badge_hit_track_index(&self, x: f64, y: f64) -> Option<usize> {
+        let track_idx = self.track_index_at_y(y)?;
+        let project = self.project.borrow();
+        let editing_tracks = self.resolve_editing_tracks(&project);
+        let row_y =
+            track_row_top_in_tracks(editing_tracks, track_idx) + self.breadcrumb_bar_height();
+        let badge_x = track_label_lock_badge_x(self.show_track_audio_levels);
+        let badge_y = row_y + 6.0;
+        let content_y = y + self.vertical_scroll_offset;
+        if x >= badge_x
+            && x <= badge_x + TRACK_LABEL_BADGE_WIDTH
+            && content_y >= badge_y
+            && content_y <= badge_y + TRACK_LABEL_BADGE_HEIGHT
+        {
+            Some(track_idx)
+        } else {
+            None
+        }
+    }
+
+    fn track_resize_hit_track_index(&self, x: f64, y: f64) -> Option<usize> {
+        if !(0.0..=TRACK_LABEL_WIDTH).contains(&x) {
+            return None;
+        }
+        let project = self.project.borrow();
+        let editing_tracks = self.resolve_editing_tracks(&project);
+        track_resize_hit_track_index_in_tracks(
+            editing_tracks,
+            y + self.vertical_scroll_offset - self.breadcrumb_bar_height(),
+        )
+    }
+
+    fn toggle_track_mute_by_index(&mut self, track_idx: usize) -> bool {
+        let (track_id, old_muted) = {
+            let proj = self.project.borrow();
+            let editing_tracks = self.resolve_editing_tracks(&proj);
+            let Some(track) = editing_tracks.get(track_idx) else {
+                return false;
+            };
+            (track.id.clone(), track.muted)
+        };
+        let mut proj = self.project.borrow_mut();
+        self.history.execute(
+            Box::new(crate::undo::set_track_muted_cmd(
+                track_id, old_muted, !old_muted,
+            )),
+            &mut proj,
+        );
+        true
+    }
+
+    fn toggle_track_lock_by_index(&mut self, track_idx: usize) -> bool {
+        let (track_id, old_locked) = {
+            let proj = self.project.borrow();
+            let editing_tracks = self.resolve_editing_tracks(&proj);
+            let Some(track) = editing_tracks.get(track_idx) else {
+                return false;
+            };
+            (track.id.clone(), track.locked)
+        };
+        let mut proj = self.project.borrow_mut();
+        self.history.execute(
+            Box::new(crate::undo::set_track_locked_cmd(
+                track_id,
+                old_locked,
+                !old_locked,
+            )),
+            &mut proj,
+        );
+        true
+    }
+
+    fn toggle_selected_track_mute(&mut self) -> bool {
+        let Some(track_id) = self.selected_track_id.clone() else {
+            return false;
+        };
+        let old_muted = {
+            let proj = self.project.borrow();
+            let editing_tracks = self.resolve_editing_tracks(&proj);
+            let Some(track) = editing_tracks.iter().find(|t| t.id == track_id) else {
+                return false;
+            };
+            track.muted
+        };
+        let mut proj = self.project.borrow_mut();
+        self.history.execute(
+            Box::new(crate::undo::set_track_muted_cmd(
+                track_id, old_muted, !old_muted,
+            )),
+            &mut proj,
+        );
+        true
+    }
+
+    fn toggle_selected_track_lock(&mut self) -> bool {
+        let Some(track_id) = self.selected_track_id.clone() else {
+            return false;
+        };
+        let old_locked = {
+            let proj = self.project.borrow();
+            let editing_tracks = self.resolve_editing_tracks(&proj);
+            let Some(track) = editing_tracks.iter().find(|t| t.id == track_id) else {
+                return false;
+            };
+            track.locked
+        };
+        let mut proj = self.project.borrow_mut();
+        self.history.execute(
+            Box::new(crate::undo::set_track_locked_cmd(
+                track_id,
+                old_locked,
+                !old_locked,
+            )),
+            &mut proj,
+        );
+        true
+    }
+
+    fn set_track_color_label_by_index(
+        &mut self,
+        track_idx: usize,
+        color: crate::model::track::TrackColorLabel,
+    ) -> bool {
+        let (track_id, old_color) = {
+            let proj = self.project.borrow();
+            let editing_tracks = self.resolve_editing_tracks(&proj);
+            let Some(track) = editing_tracks.get(track_idx) else {
+                return false;
+            };
+            (track.id.clone(), track.color_label)
+        };
+        if old_color == color {
+            return false;
+        }
+        let mut proj = self.project.borrow_mut();
+        self.history.execute(
+            Box::new(crate::undo::set_track_color_label_cmd(
+                track_id, old_color, color,
+            )),
+            &mut proj,
+        );
+        true
+    }
+
     fn toggle_track_solo_by_index(&mut self, track_idx: usize) -> bool {
         let (track_id, old_solo) = {
             let proj = self.project.borrow();
-            let Some(track) = proj.tracks.get(track_idx) else {
+            let editing_tracks = self.resolve_editing_tracks(&proj);
+            let Some(track) = editing_tracks.get(track_idx) else {
                 return false;
             };
             (track.id.clone(), track.soloed)
@@ -907,7 +1431,8 @@ impl TimelineState {
         };
         let old_solo = {
             let proj = self.project.borrow();
-            let Some(track) = proj.tracks.iter().find(|t| t.id == track_id) else {
+            let editing_tracks = self.resolve_editing_tracks(&proj);
+            let Some(track) = editing_tracks.iter().find(|t| t.id == track_id) else {
                 return false;
             };
             track.soloed
@@ -958,27 +1483,58 @@ impl TimelineState {
         track_idx: usize,
         preset: crate::model::track::TrackHeightPreset,
     ) -> bool {
-        let mut proj = self.project.borrow_mut();
-        let Some(track) = proj.tracks.get_mut(track_idx) else {
-            return false;
+        let track_id = {
+            let proj = self.project.borrow();
+            let editing_tracks = self.resolve_editing_tracks(&proj);
+            let Some(track) = editing_tracks.get(track_idx) else {
+                return false;
+            };
+            if track.height_preset == preset {
+                return false;
+            }
+            track.id.clone()
         };
-        if track.height_preset == preset {
-            return false;
+        let mut proj = self.project.borrow_mut();
+        if let Some(track) = proj.track_mut(&track_id) {
+            track.height_preset = preset;
         }
-        track.height_preset = preset;
-        self.selected_track_id = Some(track.id.clone());
+        self.selected_track_id = Some(track_id);
         proj.dirty = true;
         true
     }
 
-    pub fn undo(&mut self) {
+    pub fn undo(&mut self) -> bool {
         let mut proj = self.project.borrow_mut();
-        self.history.undo(&mut proj);
+        let description = self.history.undo_with_description(&mut proj);
+        drop(proj);
+        if let Some(description) = description {
+            if let Some(cb) = self.on_history_feedback.clone() {
+                cb(format!(
+                    "Undid: {}",
+                    format_history_feedback_label(&description)
+                ));
+            }
+            true
+        } else {
+            false
+        }
     }
 
-    pub fn redo(&mut self) {
+    pub fn redo(&mut self) -> bool {
         let mut proj = self.project.borrow_mut();
-        self.history.redo(&mut proj);
+        let description = self.history.redo_with_description(&mut proj);
+        drop(proj);
+        if let Some(description) = description {
+            if let Some(cb) = self.on_history_feedback.clone() {
+                cb(format!(
+                    "Redid: {}",
+                    format_history_feedback_label(&description)
+                ));
+            }
+            true
+        } else {
+            false
+        }
     }
 
     /// Delete the currently selected clip
@@ -1396,6 +1952,7 @@ impl TimelineState {
         true
     }
 
+    #[allow(dead_code)]
     fn selected_group_ids(&self) -> HashSet<String> {
         let target_ids = self.selected_ids_or_primary();
         if target_ids.is_empty() {
@@ -1411,6 +1968,12 @@ impl TimelineState {
             .collect()
     }
 
+    /// Legacy grouped-only align path. Kept for regression coverage;
+    /// the UI button now calls `sync_selected_clips_by_timecode`
+    /// (strict superset) instead. MCP continues to use the
+    /// standalone helper in `src/ui/window.rs`
+    /// (`align_grouped_clips_by_timecode_in_project`).
+    #[allow(dead_code)]
     pub fn align_selected_groups_by_timecode(&mut self) -> bool {
         let target_groups = self.selected_group_ids();
         if target_groups.is_empty() {
@@ -1535,6 +2098,156 @@ impl TimelineState {
         true
     }
 
+    /// Align every clip in the current multi-selection by their decoded
+    /// source timecode. Strict superset of `align_selected_groups_by_timecode`:
+    /// does not require clips to share a `group_id`. Anchor picking
+    /// matches the grouped path — primary-selected if it has TC, else
+    /// earliest-timecode (lowest `source_timecode_start_ns`; ties broken
+    /// by earliest `timeline_start` for determinism despite HashSet
+    /// iteration order).
+    ///
+    /// Every selected clip must have `source_timecode_start_ns()`
+    /// populated (`source_timecode_base_ns` set via Convert LTC Audio
+    /// to Timecode, FCPXML `start` attr, or the
+    /// `us:source-timecode-base-ns` vendor attr). Clips missing TC are
+    /// silently skipped — the UI gating blocks the whole action when
+    /// any selected clip lacks TC, so in practice this function only
+    /// runs on fully-populated selections, but the skip keeps the
+    /// helper robust if called directly.
+    ///
+    /// All per-track snapshots are wrapped in a single
+    /// `CompoundEditCommand` so Ctrl+Z reverts the whole batch in one
+    /// step (matches `paste_color_grade_to_all_selected`).
+    pub fn sync_selected_clips_by_timecode(&mut self) -> bool {
+        let target_ids = self.selected_ids_or_primary();
+        if target_ids.len() < 2 {
+            return false;
+        }
+
+        let assignments: HashMap<String, u64> = {
+            let proj = self.project.borrow();
+            let primary = self.selected_clip_id.as_deref();
+
+            // Gather (id, timeline_start, source_tc_start) for every
+            // selected clip that has TC. Tuples are sortable so anchor
+            // selection stays deterministic independent of the
+            // HashSet iteration order of `target_ids`.
+            let mut members: Vec<(String, u64, u64)> = proj
+                .tracks
+                .iter()
+                .flat_map(|track| track.clips.iter())
+                .filter(|clip| target_ids.contains(&clip.id))
+                .filter_map(|clip| {
+                    clip.source_timecode_start_ns()
+                        .map(|tc| (clip.id.clone(), clip.timeline_start, tc))
+                })
+                .collect();
+
+            if members.len() < 2 {
+                return false;
+            }
+
+            // Stable sort so `min_by_key` / the primary lookup see a
+            // canonical ordering regardless of track iteration order.
+            members.sort_by_key(|(id, _, _)| id.clone());
+
+            let anchor = members
+                .iter()
+                .find(|(id, _, _)| Some(id.as_str()) == primary)
+                .or_else(|| {
+                    members
+                        .iter()
+                        .min_by_key(|(_, timeline_start, tc)| (*tc, *timeline_start))
+                });
+            let Some((_, anchor_timeline_start, anchor_tc)) = anchor else {
+                return false;
+            };
+            let anchor_timeline_start = *anchor_timeline_start;
+            let anchor_tc = *anchor_tc;
+
+            let mut proposed: Vec<(String, i128)> = members
+                .iter()
+                .map(|(id, _, tc)| {
+                    (
+                        id.clone(),
+                        i128::from(anchor_timeline_start) + i128::from(*tc)
+                            - i128::from(anchor_tc),
+                    )
+                })
+                .collect();
+
+            // Clamp-to-zero: if any proposed start went negative, shift
+            // the entire set right so the earliest lands at 0. Same
+            // behavior as `align_selected_groups_by_timecode`.
+            if let Some(min_start) = proposed.iter().map(|(_, s)| *s).min() {
+                if min_start < 0 {
+                    let shift = -min_start;
+                    for (_, s) in &mut proposed {
+                        *s += shift;
+                    }
+                }
+            }
+
+            proposed
+                .into_iter()
+                .map(|(id, s)| (id, s.max(0) as u64))
+                .collect()
+        };
+
+        if assignments.is_empty() {
+            return false;
+        }
+
+        let per_track: Vec<(String, Vec<Clip>, Vec<Clip>)> = {
+            let proj = self.project.borrow();
+            let editing_tracks = self.resolve_editing_tracks(&proj);
+            editing_tracks
+                .iter()
+                .filter_map(|track| {
+                    let old_clips = track.clips.clone();
+                    let mut new_clips = old_clips.clone();
+                    let mut changed = false;
+                    for clip in &mut new_clips {
+                        if let Some(new_start) = assignments.get(&clip.id) {
+                            if clip.timeline_start != *new_start {
+                                clip.timeline_start = *new_start;
+                                changed = true;
+                            }
+                        }
+                    }
+                    if changed {
+                        Some((track.id.clone(), old_clips, new_clips))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        if per_track.is_empty() {
+            return false;
+        }
+
+        let children: Vec<Box<dyn crate::undo::EditCommand>> = per_track
+            .into_iter()
+            .map(|(track_id, old_clips, new_clips)| {
+                Box::new(SetTrackClipsCommand {
+                    track_id,
+                    old_clips,
+                    new_clips,
+                    label: "Sync by timecode".to_string(),
+                }) as Box<dyn crate::undo::EditCommand>
+            })
+            .collect();
+        let cmd = crate::undo::CompoundEditCommand {
+            children,
+            description: "Sync Selected Clips by Timecode".to_string(),
+        };
+        let mut proj = self.project.borrow_mut();
+        self.history.execute(Box::new(cmd), &mut proj);
+        true
+    }
+
     fn can_link_selected_clips(&self) -> bool {
         self.selected_ids_or_primary().len() >= 2
     }
@@ -1559,6 +2272,7 @@ impl TimelineState {
             })
     }
 
+    #[allow(dead_code)]
     fn can_align_selected_groups_by_timecode(&self) -> bool {
         let target_groups = self.selected_group_ids();
         if target_groups.is_empty() {
@@ -1586,6 +2300,31 @@ impl TimelineState {
             }
         }
         found_group
+    }
+
+    /// Returns `(visible, with_tc_count, total_count)` for the
+    /// "Sync Selected Clips by Timecode" menu entry. The button is
+    /// *visible* whenever 2+ clips are selected (so the user
+    /// discovers the feature even before running Convert LTC) and
+    /// *actionable* only when `with_tc_count == total_count`. A
+    /// disabled-state tooltip uses the two counts to tell the user
+    /// how many clips still need Convert LTC.
+    fn can_sync_selected_clips_by_timecode(&self) -> (bool, usize, usize) {
+        let ids = self.selected_ids_or_primary();
+        let total = ids.len();
+        if total < 2 {
+            return (false, 0, total);
+        }
+        let proj = self.project.borrow();
+        let mut with_tc = 0usize;
+        for clip_id in &ids {
+            if let Some(clip) = proj.clip_ref(clip_id) {
+                if clip.source_timecode_start_ns().is_some() {
+                    with_tc += 1;
+                }
+            }
+        }
+        (true, with_tc, total)
     }
 
     /// Returns true when 2+ selected clips could be synced by audio.
@@ -1657,12 +2396,18 @@ impl TimelineState {
     }
 
     fn clip_context_menu_actionability(&self) -> ClipContextMenuActionability {
+        let (sync_tc_visible, sync_tc_with, sync_tc_total) =
+            self.can_sync_selected_clips_by_timecode();
+        let sync_tc_missing = sync_tc_total.saturating_sub(sync_tc_with);
         ClipContextMenuActionability {
             join_through_edit: self.can_join_selected_through_edit(),
             freeze_frame: self.can_create_freeze_frame_at_playhead(),
             link_selected: self.can_link_selected_clips(),
             unlink_selected: self.can_unlink_selected_clips(),
-            align_grouped: self.can_align_selected_groups_by_timecode(),
+            sync_timecode_visible: sync_tc_visible,
+            sync_timecode_actionable: sync_tc_visible && sync_tc_missing == 0,
+            sync_timecode_missing_count: sync_tc_missing,
+            sync_timecode_total_count: sync_tc_total,
             sync_audio: self.can_sync_selected_clips_by_audio(),
             sync_replace_audio: self.can_sync_selected_clips_by_audio(),
             remove_silent_parts: self.can_remove_silent_parts(),
@@ -2187,6 +2932,170 @@ impl TimelineState {
         true
     }
 
+    /// Flip `render_replace_enabled` on every clip in the current
+    /// multi-selection. Bakeable-kind clips (Video / Image / Audio /
+    /// Compound) get the new value; non-bakeable kinds (Title /
+    /// Adjustment / Multicam / Drawing) are silently skipped so the
+    /// batch doesn't churn the cache on things it can't bake anyway.
+    /// Same per-track `SetTrackClipsCommand` + `CompoundEditCommand`
+    /// pattern as `paste_color_grade_to_all_selected`, so one Ctrl+Z
+    /// undoes the whole batch. Returns true when at least one clip
+    /// changed.
+    pub fn set_render_replace_for_all_selected(&mut self, enabled: bool) -> bool {
+        let target_ids: HashSet<String> = if self.selected_clip_ids.is_empty() {
+            self.selected_clip_id
+                .iter()
+                .cloned()
+                .collect::<HashSet<String>>()
+        } else {
+            self.selected_clip_ids.clone()
+        };
+        if target_ids.is_empty() {
+            return false;
+        }
+        let per_track: Vec<(String, Vec<Clip>, Vec<Clip>)> = {
+            let proj = self.project.borrow();
+            let editing_tracks = self.resolve_editing_tracks(&proj);
+            editing_tracks
+                .iter()
+                .filter_map(|track| {
+                    let touches_track = track.clips.iter().any(|c| target_ids.contains(&c.id));
+                    if !touches_track {
+                        return None;
+                    }
+                    let old_clips = track.clips.clone();
+                    let mut new_clips = old_clips.clone();
+                    let mut any_changed = false;
+                    for clip in new_clips.iter_mut() {
+                        if !target_ids.contains(&clip.id) {
+                            continue;
+                        }
+                        if !crate::media::render_replace_cache::is_bakeable_kind(&clip.kind) {
+                            continue;
+                        }
+                        if clip.render_replace_enabled != enabled {
+                            clip.render_replace_enabled = enabled;
+                            any_changed = true;
+                        }
+                    }
+                    if any_changed {
+                        Some((track.id.clone(), old_clips, new_clips))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+        if per_track.is_empty() {
+            return false;
+        }
+        let label = if enabled {
+            "Enable Render and Replace"
+        } else {
+            "Disable Render and Replace"
+        };
+        let children: Vec<Box<dyn crate::undo::EditCommand>> = per_track
+            .into_iter()
+            .map(|(track_id, old_clips, new_clips)| {
+                Box::new(SetTrackClipsCommand {
+                    track_id,
+                    old_clips,
+                    new_clips,
+                    label: label.to_string(),
+                }) as Box<dyn crate::undo::EditCommand>
+            })
+            .collect();
+        let cmd = crate::undo::CompoundEditCommand {
+            children,
+            description: format!("{label} (batch)"),
+        };
+        let mut proj = self.project.borrow_mut();
+        self.history.execute(Box::new(cmd), &mut proj);
+        true
+    }
+
+    /// Paste the color grade clipboard onto every selected clip. Each
+    /// affected track gets a single `SetTrackClipsCommand` child, and
+    /// the whole batch is wrapped in one [`CompoundEditCommand`] so a
+    /// single Ctrl+Z reverses the operation across every track. Returns
+    /// true if at least one clip was actually changed.
+    pub fn paste_color_grade_to_all_selected(&mut self) -> bool {
+        let Some(grade) = self.color_grade_clipboard.clone() else {
+            return false;
+        };
+        let target_ids: HashSet<String> = if self.selected_clip_ids.is_empty() {
+            self.selected_clip_id
+                .iter()
+                .cloned()
+                .collect::<HashSet<String>>()
+        } else {
+            self.selected_clip_ids.clone()
+        };
+        if target_ids.is_empty() {
+            return false;
+        }
+
+        // Build one SetTrackClipsCommand per affected track. Visit each
+        // track only once so clips on the same track share a single
+        // old_clips snapshot / new_clips replacement.
+        let per_track: Vec<(String, Vec<Clip>, Vec<Clip>)> = {
+            let proj = self.project.borrow();
+            let editing_tracks = self.resolve_editing_tracks(&proj);
+            editing_tracks
+                .iter()
+                .filter_map(|track| {
+                    let touches_track = track.clips.iter().any(|c| target_ids.contains(&c.id));
+                    if !touches_track {
+                        return None;
+                    }
+                    let old_clips = track.clips.clone();
+                    let mut new_clips = old_clips.clone();
+                    let mut any_changed = false;
+                    for clip in new_clips.iter_mut() {
+                        if target_ids.contains(&clip.id) && grade.apply_to(clip) {
+                            any_changed = true;
+                        }
+                    }
+                    if any_changed {
+                        Some((track.id.clone(), old_clips, new_clips))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        if per_track.is_empty() {
+            return false;
+        }
+
+        let children: Vec<Box<dyn crate::undo::EditCommand>> = per_track
+            .into_iter()
+            .map(|(track_id, old_clips, new_clips)| {
+                Box::new(SetTrackClipsCommand {
+                    track_id,
+                    old_clips,
+                    new_clips,
+                    label: "Paste color grade".to_string(),
+                }) as Box<dyn crate::undo::EditCommand>
+            })
+            .collect();
+        let cmd = crate::undo::CompoundEditCommand {
+            children,
+            description: "Paste color grade to selected".to_string(),
+        };
+        let mut proj = self.project.borrow_mut();
+        self.history.execute(Box::new(cmd), &mut proj);
+        true
+    }
+
+    /// Public read-only view onto the multi-selection set. Consumers that
+    /// need to iterate currently-selected clips should use this rather
+    /// than reaching into the private field directly.
+    pub fn selected_clip_ids(&self) -> &HashSet<String> {
+        &self.selected_clip_ids
+    }
+
     fn clear_clip_selection(&mut self) {
         self.selected_clip_id = None;
         self.selected_clip_ids.clear();
@@ -2576,6 +3485,50 @@ impl TimelineState {
     pub fn set_playhead_visual(&mut self, visual_ns: u64) -> u64 {
         self.playhead_ns = self.root_playhead_from_internal_ns(visual_ns);
         visual_ns
+    }
+
+    /// Focus a specific clip instance, optionally entering compound edit
+    /// context first and revealing the target time in the viewport.
+    pub fn focus_clip_instance(
+        &mut self,
+        clip_id: String,
+        track_id: String,
+        compound_path_ids: Vec<String>,
+        visual_timeline_ns: u64,
+        viewport_width: Option<f64>,
+    ) {
+        if self.compound_nav_stack != compound_path_ids {
+            if compound_path_ids.is_empty() {
+                self.exit_compound_to_root();
+            } else {
+                if self.compound_nav_stack.is_empty() {
+                    self.compound_saved_scroll = Some(self.scroll_offset);
+                }
+                self.compound_nav_stack = compound_path_ids;
+                self.selected_clip_id = None;
+                self.selected_clip_ids.clear();
+                self.selected_track_id = None;
+                self.clear_keyframe_selection();
+                self.scroll_offset = 0.0;
+            }
+        }
+        self.set_single_clip_selection(clip_id, track_id);
+        self.set_playhead_visual(visual_timeline_ns);
+        if let Some(viewport_width) = viewport_width {
+            self.reveal_visual_time(visual_timeline_ns, viewport_width);
+        }
+    }
+
+    fn reveal_visual_time(&mut self, visual_timeline_ns: u64, viewport_width: f64) {
+        let usable_w = (viewport_width - TRACK_LABEL_WIDTH).max(100.0);
+        let target_x = TRACK_LABEL_WIDTH
+            + (visual_timeline_ns as f64 / NS_PER_SECOND) * self.pixels_per_second;
+        let left_edge = self.scroll_offset + TRACK_LABEL_WIDTH;
+        let right_edge = left_edge + usable_w;
+        if target_x < left_edge || target_x > right_edge {
+            let target_local_x = TRACK_LABEL_WIDTH + usable_w * 0.25;
+            self.scroll_offset = (target_x - target_local_x).max(0.0);
+        }
     }
 
     /// Resolve the currently-editing tracks based on the navigation stack.
@@ -3038,29 +3991,11 @@ impl TimelineState {
         };
         let compound_track_id = compound_track_id.unwrap();
         let _compound_track_idx = compound_track_idx.unwrap();
-        let compound_start = compound.timeline_start;
-        let compound_source_in = compound.source_in;
-        let compound_source_out = compound.source_out;
-        let internal_tracks = match compound.compound_tracks {
-            Some(ref t) => t.clone(),
-            None => return false,
-        };
-
-        // Helper: rebase an internal clip to the parent timeline, accounting
-        // for source_in (non-zero after a razor cut) and clipping to the
-        // visible [source_in, source_out] window. Skip / trim / keyframe and
-        // subtitle rebasing all happen inside `Clip::rebase_to_window`.
-        let rebase_clip = |clip: Clip| -> Option<Clip> {
-            let mut clip = clip.rebase_to_window(compound_source_in, compound_source_out)?;
-            // After windowing, timeline_start >= source_in, so this
-            // subtraction is safe. Add compound's parent position to get
-            // the absolute timeline position without u64 underflow.
-            clip.timeline_start = clip
-                .timeline_start
-                .saturating_sub(compound_source_in)
-                .saturating_add(compound_start);
-            Some(clip)
-        };
+        if compound.compound_tracks.is_none() {
+            return false;
+        }
+        let flattened_children =
+            crate::model::compound_flattening::flatten_compound_children(&compound, 0);
 
         // Build changes: remove compound from its track, add internal clips back
         let mut changes = Vec::new();
@@ -3079,13 +4014,9 @@ impl TimelineState {
             .collect();
 
         // Add rebased internal video clips to compound's track
-        for int_track in &internal_tracks {
-            if int_track.is_video() {
-                for clip in int_track.clips.clone() {
-                    if let Some(rebased) = rebase_clip(clip) {
-                        new_clips.push(rebased);
-                    }
-                }
+        for child in &flattened_children {
+            if !child.is_audio_track {
+                new_clips.push(child.clip.clone());
             }
         }
         new_clips.sort_by_key(|c| c.timeline_start);
@@ -3096,11 +4027,10 @@ impl TimelineState {
         });
 
         // Handle internal audio clips — find first audio track or skip
-        let audio_clips: Vec<Clip> = internal_tracks
-            .iter()
-            .filter(|t| t.is_audio())
-            .flat_map(|t| t.clips.clone())
-            .filter_map(|c| rebase_clip(c))
+        let audio_clips: Vec<Clip> = flattened_children
+            .into_iter()
+            .filter(|child| child.is_audio_track)
+            .map(|child| child.clip)
             .collect();
 
         if !audio_clips.is_empty() {
@@ -3602,8 +4532,9 @@ impl TimelineState {
     fn clips_in_rect(&self, x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<(String, String)> {
         let left = x0.min(x1).max(TRACK_LABEL_WIDTH);
         let right = x0.max(x1);
-        let top = y0.min(y1).max(RULER_HEIGHT);
-        let bottom = y0.max(y1);
+        // Convert widget y to content y (accounting for vertical scroll)
+        let top = y0.min(y1).max(0.0) + self.vertical_scroll_offset;
+        let bottom = y0.max(y1) + self.vertical_scroll_offset;
         if right <= left || bottom <= top {
             return Vec::new();
         }
@@ -3697,7 +4628,7 @@ impl TimelineState {
         let proj = self.project.borrow();
         let editing_tracks = self.resolve_editing_tracks(&proj);
         let track = editing_tracks.get(track_idx)?;
-        let mut row_top = RULER_HEIGHT;
+        let mut row_top = 0.0;
         for (i, t) in editing_tracks.iter().enumerate() {
             if i == track_idx {
                 break;
@@ -3706,6 +4637,8 @@ impl TimelineState {
         }
         let ch = track_row_height(track);
         let cy = row_top;
+        // Convert widget y to content y for comparison against row positions
+        let content_y = y + self.vertical_scroll_offset - self.breadcrumb_bar_height();
         let hit_tolerance = 4.0; // px tolerance for x
         for clip in &track.clips {
             let cx = self.ns_to_x(clip.timeline_start);
@@ -3723,7 +4656,7 @@ impl TimelineState {
             let keyframe_lanes = clip_keyframe_lanes(clip);
             for (row, (keyframes, _property_label, _color)) in keyframe_lanes.iter().enumerate() {
                 let marker_y = base_y + row as f64 * row_pitch;
-                if y < marker_y || y > marker_y + marker_h {
+                if content_y < marker_y || content_y > marker_y + marker_h {
                     continue;
                 }
                 for kf in *keyframes {
@@ -3763,6 +4696,25 @@ impl TimelineState {
             "Clip: {}\nKeyframe at {}\nImpacts: {}",
             hit.clip_label, timeline_label, impacted
         ))
+    }
+
+    fn badge_tooltip_text(&self, x: f64, y: f64) -> Option<&'static str> {
+        if self.track_resize_hit_track_index(x, y).is_some() {
+            return Some("Drag to resize track");
+        }
+        if self.solo_badge_hit_track_index(x, y).is_some() {
+            return Some("Solo (S)");
+        }
+        if self.duck_badge_hit_track_index(x, y).is_some() {
+            return Some("Duck — auto-lower volume when dialogue is present");
+        }
+        if self.mute_badge_hit_track_index(x, y).is_some() {
+            return Some("Mute (M) — silence this track in playback and export");
+        }
+        if self.lock_badge_hit_track_index(x, y).is_some() {
+            return Some("Lock (Shift+L) — prevent edits on this track");
+        }
+        None
     }
 
     /// Find which clip and track are at a given (x, y) coordinate.
@@ -4406,7 +5358,20 @@ struct ClipContextMenuActionability {
     freeze_frame: bool,
     link_selected: bool,
     unlink_selected: bool,
-    align_grouped: bool,
+    /// True when the "Sync Selected Clips by Timecode" button should
+    /// be visible (2+ clips selected). Keeps the menu entry
+    /// discoverable even when clips don't yet have decoded timecode
+    /// — the disabled tooltip tells the user to run Convert LTC.
+    sync_timecode_visible: bool,
+    /// True when every visible-selection member has
+    /// `source_timecode_start_ns()` populated. Drives the button's
+    /// sensitivity.
+    sync_timecode_actionable: bool,
+    /// Number of selected clips missing decoded timecode — surfaced
+    /// in the disabled-state tooltip ("N of M selected clips…").
+    sync_timecode_missing_count: usize,
+    /// Total number of clips in the current multi-selection.
+    sync_timecode_total_count: usize,
     sync_audio: bool,
     sync_replace_audio: bool,
     remove_silent_parts: bool,
@@ -4424,7 +5389,10 @@ impl ClipContextMenuActionability {
             || self.freeze_frame
             || self.link_selected
             || self.unlink_selected
-            || self.align_grouped
+            // Visible (not actionable) counts — the menu stays open so
+            // the user sees the "N of M missing timecode" tooltip and
+            // knows what to do next.
+            || self.sync_timecode_visible
             || self.sync_audio
             || self.sync_replace_audio
             || self.remove_silent_parts
@@ -4462,7 +5430,27 @@ fn apply_clip_context_menu_actionability(
     set_state(btn_freeze_frame, actionability.freeze_frame);
     set_state(btn_link_selected, actionability.link_selected);
     set_state(btn_unlink_selected, actionability.unlink_selected);
-    set_state(btn_align_grouped, actionability.align_grouped);
+    // Sync-by-timecode button is driven out-of-band: visible whenever
+    // 2+ clips are selected (discoverability) but only sensitive when
+    // every selected clip has decoded timecode. When visible-but-
+    // disabled, the tooltip tells the user exactly how many clips
+    // still need Convert LTC Audio to Timecode.
+    btn_align_grouped.set_visible(actionability.sync_timecode_visible);
+    btn_align_grouped.set_sensitive(actionability.sync_timecode_actionable);
+    if actionability.sync_timecode_visible && !actionability.sync_timecode_actionable {
+        let missing = actionability.sync_timecode_missing_count;
+        let total = actionability.sync_timecode_total_count;
+        btn_align_grouped.set_tooltip_text(Some(&format!(
+            "{missing} of {total} selected clips are missing decoded timecode. \
+             Run 'Convert LTC Audio to Timecode' on each first."
+        )));
+    } else {
+        btn_align_grouped.set_tooltip_text(Some(
+            "Align selected clips using decoded source timecode. \
+             Works on any multi-selection where every clip has timecode \
+             (from Convert LTC or imported via FCPXML).",
+        ));
+    }
     set_state(btn_sync_audio, actionability.sync_audio);
     set_state(btn_sync_replace_audio, actionability.sync_replace_audio);
     set_state(btn_remove_silent_parts, actionability.remove_silent_parts);
@@ -4475,32 +5463,56 @@ fn apply_clip_context_menu_actionability(
     actionability.any()
 }
 
-/// Build and return the timeline `DrawingArea` widget.
-pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
+/// Build and return the scrollable track-stack `DrawingArea`.
+pub fn build_timeline(
+    state: Rc<RefCell<TimelineState>>,
+    ruler_area: Rc<RefCell<Option<DrawingArea>>>,
+) -> DrawingArea {
     let area = DrawingArea::new();
-    area.set_vexpand(false);
+    area.set_vexpand(true);
     area.set_hexpand(true);
-    let initial_content_height = {
-        let st = state.borrow();
-        let proj = st.project.borrow();
-        timeline_content_height(&proj).ceil() as i32
-    };
-    area.set_content_height(initial_content_height.max(1));
+    area.set_halign(gtk::Align::Fill);
     area.set_focusable(true);
     area.set_has_tooltip(true);
     {
         let state = state.clone();
         area.connect_query_tooltip(move |_area, x, y, _keyboard_mode, tooltip| {
-            let text = state
-                .borrow()
-                .keyframe_marker_tooltip_text(x as f64, y as f64);
-            if let Some(text) = text {
+            let st = state.borrow();
+            if let Some(text) = st.badge_tooltip_text(x as f64, y as f64) {
+                tooltip.set_text(Some(text));
+                return true;
+            }
+            if let Some(text) = st.keyframe_marker_tooltip_text(x as f64, y as f64) {
                 tooltip.set_text(Some(&text));
-                true
-            } else {
-                false
+                return true;
+            }
+            false
+        });
+    }
+    {
+        let state = state.clone();
+        let area_weak = area.downgrade();
+        let motion = gtk::EventControllerMotion::new();
+        motion.connect_motion(move |_controller, x, y| {
+            let cursor_name = {
+                let st = state.borrow();
+                if st.track_resize_hit_track_index(x, y).is_some() {
+                    Some("row-resize")
+                } else {
+                    None
+                }
+            };
+            if let Some(area) = area_weak.upgrade() {
+                area.set_cursor_from_name(cursor_name);
             }
         });
+        let area_weak = area.downgrade();
+        motion.connect_leave(move |_controller| {
+            if let Some(area) = area_weak.upgrade() {
+                area.set_cursor_from_name(None);
+            }
+        });
+        area.add_controller(motion);
     }
 
     let thumb_cache = Rc::new(RefCell::new(
@@ -4510,6 +5522,60 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
     let wave_cache = Rc::new(RefCell::new(
         crate::media::waveform_cache::WaveformCache::new(),
     ));
+
+    // Hover-scrub preview: a second motion controller (additive to the
+    // existing cursor-change controller above). Mouse motion inside a
+    // scrubbable clip body updates TimelineState.hover_scrub, kicks a
+    // thumbnail request for the new source-time bucket, and queues a
+    // redraw. Leave clears the preview. Placed here so we can capture
+    // `thumb_cache` for the request side of the feedback loop.
+    {
+        let state_motion = state.clone();
+        let area_motion = area.downgrade();
+        let thumb_cache_motion = thumb_cache.clone();
+        let hover_motion = gtk::EventControllerMotion::new();
+        hover_motion.connect_motion(move |_ctrl, x, y| {
+            let (needs_request, do_queue_draw) = {
+                let mut st = state_motion.borrow_mut();
+                let req = st.update_hover_scrub_at(x, y);
+                // Request a redraw on every motion event where hover_scrub
+                // is populated so the floating preview's cursor anchor
+                // tracks the cursor smoothly. When hover_scrub is None
+                // after the update (cursor off a scrubbable clip), a
+                // redraw is only needed if the preview was just cleared.
+                let redraw = st.hover_scrub.is_some() || req.is_some();
+                (req, redraw)
+            };
+            if let Some(source_path) = needs_request {
+                // Pull the time_ns we just stored out of hover_scrub.
+                let bucket_time = state_motion
+                    .borrow()
+                    .hover_scrub
+                    .as_ref()
+                    .map(|h| h.source_time_ns)
+                    .unwrap_or(0);
+                thumb_cache_motion
+                    .borrow_mut()
+                    .request(&source_path, bucket_time);
+            }
+            if do_queue_draw {
+                if let Some(area) = area_motion.upgrade() {
+                    area.queue_draw();
+                }
+            }
+        });
+        let state_leave = state.clone();
+        let area_leave = area.downgrade();
+        hover_motion.connect_leave(move |_ctrl| {
+            let cleared = state_leave.borrow_mut().clear_hover_scrub();
+            if cleared {
+                if let Some(area) = area_leave.upgrade() {
+                    area.queue_draw();
+                }
+            }
+        });
+        area.add_controller(hover_motion);
+    }
 
     let clip_context_pop = gtk::Popover::new();
     clip_context_pop.set_parent(&area);
@@ -4534,10 +5600,15 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
     let btn_unlink_selected = gtk::Button::with_label("Unlink Selected Clips");
     btn_unlink_selected.add_css_class("flat");
     btn_unlink_selected.set_tooltip_text(Some("Unlink the current selection (Ctrl+Shift+L)"));
-    let btn_align_grouped = gtk::Button::with_label("Align Grouped Clips by Timecode");
+    let btn_align_grouped = gtk::Button::with_label("Sync Selected Clips by Timecode");
     btn_align_grouped.add_css_class("flat");
+    // Tooltip defaults to the enabled-state copy; the per-selection
+    // actionability pass swaps to a "N of M missing" message when any
+    // selected clip doesn't have decoded timecode yet.
     btn_align_grouped.set_tooltip_text(Some(
-        "Align grouped clips using stored source timecode metadata when available",
+        "Align selected clips using decoded source timecode. \
+         Works on any multi-selection where every clip has timecode \
+         (from Convert LTC or imported via FCPXML).",
     ));
     let btn_sync_audio = gtk::Button::with_label("Sync Selected Clips by Audio");
     btn_sync_audio.add_css_class("flat");
@@ -4656,6 +5727,34 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         "Arm a one-shot drag on empty audio-track space to define a MusicGen region (1–30s)",
     ));
     track_context_box.append(&btn_generate_music_region);
+
+    // --- Track Color submenu ---
+    let color_label_section = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let color_separator = gtk::Separator::new(gtk::Orientation::Horizontal);
+    color_separator.set_margin_top(4);
+    color_separator.set_margin_bottom(2);
+    color_label_section.append(&color_separator);
+    let color_header = gtk::Label::new(Some("Track Color"));
+    color_header.set_halign(gtk::Align::Start);
+    color_header.add_css_class("dim-label");
+    color_header.set_margin_start(6);
+    color_label_section.append(&color_header);
+    let color_row = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+    color_row.set_margin_start(4);
+    color_row.set_margin_top(2);
+    color_row.set_margin_bottom(2);
+    let track_color_buttons: Vec<(gtk::Button, crate::model::track::TrackColorLabel)> =
+        crate::model::track::TrackColorLabel::ALL
+            .iter()
+            .map(|&color| {
+                let btn = build_track_color_swatch_button(color);
+                color_row.append(&btn);
+                (btn, color)
+            })
+            .collect();
+    color_label_section.append(&color_row);
+    track_context_box.append(&color_label_section);
+
     track_context_pop.set_child(Some(&track_context_box));
     let track_context_track_idx: Rc<RefCell<Option<usize>>> = Rc::new(RefCell::new(None));
 
@@ -4848,7 +5947,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         let pop_weak = clip_context_pop.downgrade();
         btn_align_grouped.connect_clicked(move |_| {
             let mut st = state.borrow_mut();
-            let changed = st.align_selected_groups_by_timecode();
+            let changed = st.sync_selected_clips_by_timecode();
             drop(st);
             if let Some(pop) = pop_weak.upgrade() {
                 pop.popdown();
@@ -5147,6 +6246,31 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         });
     }
 
+    // Track color button handlers
+    for (btn, color) in track_color_buttons {
+        let state = state.clone();
+        let area_weak = area.downgrade();
+        let pop_weak = track_context_pop.downgrade();
+        let track_context_track_idx = track_context_track_idx.clone();
+        btn.connect_clicked(move |_| {
+            let track_idx = *track_context_track_idx.borrow();
+            let mut st = state.borrow_mut();
+            let changed = track_idx
+                .map(|idx| st.set_track_color_label_by_index(idx, color))
+                .unwrap_or(false);
+            drop(st);
+            if let Some(pop) = pop_weak.upgrade() {
+                pop.popdown();
+            }
+            if changed {
+                TimelineState::notify_project_changed(&state);
+                if let Some(a) = area_weak.upgrade() {
+                    a.queue_draw();
+                }
+            }
+        });
+    }
+
     // Rename Track button handler — closes the context menu and opens the
     // rename popover, anchored at the track's left-side label area.
     {
@@ -5170,8 +6294,9 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     return;
                 };
                 let track_id = track.id.clone();
-                let row_top =
-                    track_row_top_in_tracks(editing_tracks, idx) + st.breadcrumb_bar_height();
+                let row_top = track_row_top_in_tracks(editing_tracks, idx)
+                    + st.breadcrumb_bar_height()
+                    - st.vertical_scroll_offset;
                 let row_height = track_row_height(track);
                 let rect = gtk::gdk::Rectangle::new(
                     0,
@@ -5300,20 +6425,22 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         let state = state.clone();
         let thumb_cache = thumb_cache.clone();
         let wave_cache = wave_cache.clone();
+        let ruler_area = ruler_area.clone();
         area.set_draw_func(move |area, cr, width, height| {
             let mut tcache = thumb_cache.borrow_mut();
             tcache.poll();
             let mut wcache = wave_cache.borrow_mut();
             wcache.poll();
             let st = state.borrow();
-            let content_height = {
-                let proj = st.project.borrow();
-                let editing_tracks = st.resolve_editing_tracks(&proj);
-                (timeline_content_height_for_tracks(editing_tracks) + st.breadcrumb_bar_height())
-                    .ceil() as i32
-            };
-            area.set_content_height(content_height.max(1));
-            draw_timeline(cr, width, height, &st, &mut tcache, &mut wcache);
+            draw_timeline(cr, width, height, &st, &mut tcache, &mut wcache, false);
+            if let Some(ruler) = ruler_area.borrow().as_ref() {
+                ruler.queue_draw();
+            }
+            if let Some(ref weak) = st.minimap_widget {
+                if let Some(m) = weak.upgrade() {
+                    m.queue_draw();
+                }
+            }
         });
     }
 
@@ -5325,8 +6452,8 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
         let wave_cache = wave_cache.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
             let thumbs_done = thumb_cache.borrow_mut().poll();
-            wave_cache.borrow_mut().poll();
-            if thumbs_done {
+            let waves_done = wave_cache.borrow_mut().poll();
+            if thumbs_done || waves_done {
                 if let Some(a) = area_weak.upgrade() {
                     a.queue_draw();
                 }
@@ -5379,49 +6506,32 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             clip_context_pop.popdown();
             track_context_pop.popdown();
 
-            if ruler_hit_test(&st, y) {
-                if button == 3 {
-                    // Right-click in ruler → remove nearest marker within 8px
-                    let ns = st.x_to_ns(x);
-                    let threshold = (8.0 / st.pixels_per_second * NS_PER_SECOND) as u64;
-                    let to_remove = {
-                        let proj = st.project.borrow();
-                        proj.markers
-                            .iter()
-                            .filter(|m| m.position_ns.abs_diff(ns) <= threshold)
-                            .min_by_key(|m| m.position_ns.abs_diff(ns))
-                            .map(|m| m.id.clone())
-                    };
-                    if let Some(id) = to_remove {
-                        st.project.borrow_mut().remove_marker(&id);
-                        drop(st);
-                        TimelineState::notify_project_changed(&state);
-                    }
-                } else {
-                    // Left-click in ruler → seek
-                    let ns = st.x_to_ns(x);
-                    st.set_playhead_visual(ns);
-                    let seek_cb = st.on_seek.clone();
-                    drop(st);
-                    if let Some(cb) = seek_cb {
-                        cb(ns);
-                    }
-                }
-            } else if button == 1 {
+            // Ruler clicks are handled by the dedicated ruler widget
+            // (see `build_timeline_ruler`). The main timeline area
+            // starts at its own local y=0 directly below the ruler,
+            // so clicks here should never be treated as ruler events.
+            // Previously a stale `ruler_hit_test(&st, y)` guard here
+            // stole the top 24px of the first track and moved the
+            // playhead instead of selecting a clip.
+            if button == 1 {
                 // Double-click on the track label area → open rename popover.
                 // Must run before any other left-click handling so it doesn't
                 // also seek/scrub or trigger compound drill-down.
                 if n_press == 2
                     && x < TRACK_LABEL_WIDTH
+                    && st.track_resize_hit_track_index(x, y).is_none()
                     && st.solo_badge_hit_track_index(x, y).is_none()
                     && st.duck_badge_hit_track_index(x, y).is_none()
+                    && st.mute_badge_hit_track_index(x, y).is_none()
+                    && st.lock_badge_hit_track_index(x, y).is_none()
                 {
                     let resolved = st.track_index_at_y(y).and_then(|track_idx| {
                         let proj = st.project.borrow();
                         let editing_tracks = st.resolve_editing_tracks(&proj);
                         editing_tracks.get(track_idx).map(|track| {
                             let row_top = track_row_top_in_tracks(editing_tracks, track_idx)
-                                + st.breadcrumb_bar_height();
+                                + st.breadcrumb_bar_height()
+                                - st.vertical_scroll_offset;
                             let row_height = track_row_height(track);
                             (
                                 track.id.clone(),
@@ -5481,6 +6591,34 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                             let changed = st
                                 .duck_badge_hit_track_index(x, y)
                                 .map(|track_idx| st.toggle_track_duck_by_index(track_idx))
+                                .unwrap_or(false);
+                            drop(st);
+                            if changed {
+                                TimelineState::notify_project_changed(&state);
+                            }
+                            if let Some(a) = area_weak.upgrade() {
+                                a.queue_draw();
+                            }
+                            return;
+                        }
+                        if st.mute_badge_hit_track_index(x, y).is_some() {
+                            let changed = st
+                                .mute_badge_hit_track_index(x, y)
+                                .map(|track_idx| st.toggle_track_mute_by_index(track_idx))
+                                .unwrap_or(false);
+                            drop(st);
+                            if changed {
+                                TimelineState::notify_project_changed(&state);
+                            }
+                            if let Some(a) = area_weak.upgrade() {
+                                a.queue_draw();
+                            }
+                            return;
+                        }
+                        if st.lock_badge_hit_track_index(x, y).is_some() {
+                            let changed = st
+                                .lock_badge_hit_track_index(x, y)
+                                .map(|track_idx| st.toggle_track_lock_by_index(track_idx))
                                 .unwrap_or(false);
                             drop(st);
                             if changed {
@@ -5637,6 +6775,8 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     if x < TRACK_LABEL_WIDTH
                         && st.solo_badge_hit_track_index(x, y).is_none()
                         && st.duck_badge_hit_track_index(x, y).is_none()
+                        && st.mute_badge_hit_track_index(x, y).is_none()
+                        && st.lock_badge_hit_track_index(x, y).is_none()
                     {
                         if let Some(track_idx) = st.track_index_at_y(y) {
                             let selected = {
@@ -5673,9 +6813,24 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         // Right-click clip → keep current selection if already selected, otherwise
                         // select just the clicked clip before showing clip actions.
                         let hit = st.hit_test(x, y);
-                        if let Some(h) = hit {
+                        let actionability_info = if let Some(ref h) = hit {
                             st.prepare_clip_context_menu_selection(&h.clip_id, &h.track_id);
-                            let actionability = st.clip_context_menu_actionability();
+                            Some(st.clip_context_menu_actionability())
+                        } else {
+                            None
+                        };
+                        sel_cb = st.on_clip_selected.clone();
+                        new_sel = st.selected_clip_id.clone();
+                        // Must drop the mutable state borrow BEFORE calling
+                        // `apply_clip_context_menu_actionability`: that helper
+                        // calls `set_tooltip_text` on the Sync-by-Timecode
+                        // button, which synchronously re-emits the widget's
+                        // query-tooltip signal. Our `connect_query_tooltip`
+                        // handler at the top of `build_timeline` borrows
+                        // state, so holding `borrow_mut()` across the call
+                        // would panic "already mutably borrowed".
+                        drop(st);
+                        if let Some(actionability) = actionability_info {
                             if apply_clip_context_menu_actionability(
                                 &btn_join_through_edit,
                                 &btn_freeze_frame,
@@ -5699,11 +6854,11 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                                 show_context_menu = true;
                             }
                         }
-                        sel_cb = st.on_clip_selected.clone();
-                        new_sel = st.selected_clip_id.clone();
                     }
 
-                    drop(st);
+                    // `st` was explicitly dropped above when the right-click
+                    // actionability path ran; other branches of this
+                    // button == 3 block still own `st` at this point.
                     if let Some(cb) = sel_cb {
                         cb(new_sel);
                     }
@@ -5739,22 +6894,11 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     return;
                 }
                 let mut st = state.borrow_mut();
-                if ruler_hit_test(&st, y) {
-                    // On drag-begin in ruler: record start offset for panning;
-                    // also seek playhead to clicked position.
-                    let ns = st.x_to_ns(x);
-                    st.set_playhead_visual(ns);
-                    st.ruler_pan_start_offset = st.scroll_offset;
-                    let seek_cb = st.on_seek.clone();
-                    drop(st);
-                    if let Some(cb) = seek_cb {
-                        cb(ns);
-                    }
-                    if let Some(a) = area_weak.upgrade() {
-                        a.queue_draw();
-                    }
-                    return;
-                }
+                // Ruler drag is handled by the ruler widget's own
+                // drag gesture — see build_timeline_ruler. The main
+                // timeline area's y=0 is below the ruler, so we
+                // never need to reinterpret a small-y drag as a
+                // ruler scrub here.
                 if st.music_generation_armed_track_id.is_some() {
                     let started = st.begin_music_generation_region_drag(x, y);
                     drop(st);
@@ -5974,18 +7118,34 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         }
                     }
                 } else if x < TRACK_LABEL_WIDTH
-                    && !ruler_hit_test(&st, y)
                     && st.solo_badge_hit_track_index(x, y).is_none()
                     && st.duck_badge_hit_track_index(x, y).is_none()
+                    && st.mute_badge_hit_track_index(x, y).is_none()
+                    && st.lock_badge_hit_track_index(x, y).is_none()
                 {
-                    // Drag started in track label area → track reorder
-                    if let Some(track_idx) = st.track_index_at_y(y) {
+                    if let Some(track_idx) = st.track_resize_hit_track_index(x, y) {
+                        let track_resize_info = {
+                            let project = st.project.borrow();
+                            let editing_tracks = st.resolve_editing_tracks(&project);
+                            editing_tracks
+                                .get(track_idx)
+                                .map(|track| (track.height_preset, track_row_height(track)))
+                        };
+                        if let Some((original_preset, original_height)) = track_resize_info {
+                            st.drag_op = DragOp::ResizeTrackHeight {
+                                track_idx,
+                                original_preset,
+                                original_height,
+                            };
+                        }
+                    } else if let Some(track_idx) = st.track_index_at_y(y) {
+                        // Drag started in track label area → track reorder
                         st.drag_op = DragOp::ReorderTrack {
                             track_idx,
                             target_idx: track_idx,
                         };
                     }
-                } else if st.active_tool == ActiveTool::Select && !ruler_hit_test(&st, y) {
+                } else if st.active_tool == ActiveTool::Select {
                     let mods = gesture.current_event_state();
                     let additive = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK)
                         || mods.contains(gtk::gdk::ModifierType::META_MASK);
@@ -6001,38 +7161,9 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 let (start_x, start_y) = gesture.start_point().unwrap_or((0.0, 0.0));
                 let current_x = start_x + offset_x;
                 let current_y = start_y + offset_y;
-                let button = gesture.current_button();
-
-                let ruler_drag = {
-                    let st = state.borrow();
-                    ruler_hit_test(&st, start_y)
-                };
-                if ruler_drag {
-                    if button == 2 || button == 3 {
-                        // Middle/right drag on ruler = pan timeline.
-                        let mut st = state.borrow_mut();
-                        st.scroll_offset = (st.ruler_pan_start_offset - offset_x).max(0.0);
-                        st.user_scroll_cooldown_until =
-                            Some(std::time::Instant::now() + std::time::Duration::from_millis(600));
-                        if let Some(a) = area_weak.upgrade() {
-                            a.queue_draw();
-                        }
-                    } else {
-                        // Left drag on ruler = continuous scrubbing.
-                        let mut st = state.borrow_mut();
-                        let ns = st.x_to_ns(current_x);
-                        st.set_playhead_visual(ns);
-                        let seek_cb = st.on_seek.clone();
-                        drop(st);
-                        if let Some(cb) = seek_cb {
-                            cb(ns);
-                        }
-                        if let Some(a) = area_weak.upgrade() {
-                            a.queue_draw();
-                        }
-                    }
-                    return;
-                }
+                // Ruler scrub + pan drags are handled by the ruler
+                // widget's own drag gesture (build_timeline_ruler);
+                // this code path never sees ruler events.
 
                 let current_ns = {
                     let st = state.borrow();
@@ -6593,6 +7724,16 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                             *target_idx = new_target;
                         }
                     }
+                    DragOp::ResizeTrackHeight {
+                        track_idx,
+                        original_height,
+                        ..
+                    } => {
+                        let requested_height = (original_height + offset_y)
+                            .clamp(TRACK_HEIGHT_SMALL, TRACK_HEIGHT_LARGE);
+                        let preset = track_height_preset_for_height(requested_height);
+                        st.set_track_height_preset_by_index(track_idx, preset);
+                    }
                     DragOp::MoveKeyframeColumns {
                         ref clip_id,
                         ref track_id,
@@ -6681,7 +7822,22 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                 let music_generation_outcome = st.finish_music_generation_region_drag();
                 let drag_op = std::mem::replace(&mut st.drag_op, DragOp::None);
                 st.active_snap_hit = None;
-                let should_notify_project = !matches!(&drag_op, DragOp::None);
+                let should_notify_project = match &drag_op {
+                    DragOp::None => false,
+                    DragOp::ResizeTrackHeight {
+                        track_idx,
+                        original_preset,
+                        ..
+                    } => {
+                        let project = st.project.borrow();
+                        let editing_tracks = st.resolve_editing_tracks(&project);
+                        editing_tracks
+                            .get(*track_idx)
+                            .map(|track| track.height_preset != *original_preset)
+                            .unwrap_or(false)
+                    }
+                    _ => true,
+                };
                 let had_marquee = st.marquee_selection.is_some();
                 if had_marquee {
                     st.end_marquee_selection();
@@ -7110,6 +8266,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                             }
                         }
                     }
+                    DragOp::ResizeTrackHeight { .. } => {}
                     DragOp::MoveKeyframeColumns {
                         ref track_id,
                         ref original_track_clips,
@@ -7218,18 +8375,15 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
 
             let handled = match key {
                 Key::z if ctrl && !shift => {
-                    st.undo();
-                    notify_project = true;
+                    notify_project = st.undo();
                     true
                 }
                 Key::z if ctrl && shift => {
-                    st.redo();
-                    notify_project = true;
+                    notify_project = st.redo();
                     true
                 }
                 Key::y if ctrl => {
-                    st.redo();
-                    notify_project = true;
+                    notify_project = st.redo();
                     true
                 }
                 Key::a | Key::A if ctrl => {
@@ -7250,6 +8404,13 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                         return glib::Propagation::Stop;
                     }
                     false
+                }
+                Key::v | Key::V if ctrl && alt && shift => {
+                    let changed = st.paste_color_grade_to_all_selected();
+                    if changed {
+                        notify_project = true;
+                    }
+                    changed
                 }
                 Key::v | Key::V if ctrl && alt => {
                     let changed = st.paste_color_grade();
@@ -7485,6 +8646,22 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     }
                     changed
                 }
+                Key::m | Key::M if !ctrl && !alt => {
+                    // M = toggle mute on selected track
+                    let changed = st.toggle_selected_track_mute();
+                    if changed {
+                        notify_project = true;
+                    }
+                    changed
+                }
+                Key::l | Key::L if shift && !ctrl && !alt => {
+                    // Shift+L = toggle lock on selected track
+                    let changed = st.toggle_selected_track_lock();
+                    if changed {
+                        notify_project = true;
+                    }
+                    changed
+                }
                 Key::b | Key::B => {
                     // B = Blade/Razor
                     st.active_tool = if st.active_tool == ActiveTool::Razor {
@@ -7617,17 +8794,30 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
             let ctrl_held = ctrl
                 .current_event_state()
                 .contains(gtk::gdk::ModifierType::CONTROL_MASK);
-            // Ctrl+scroll OR pure vertical scroll = zoom
-            // Horizontal scroll (dx dominant, e.g. Shift+scroll or trackpad) = pan
-            if dx.abs() > dy.abs() {
-                // Horizontal pan
+            if ctrl_held {
+                // Ctrl+scroll = zoom
+                let factor = if dy < 0.0 { 1.1 } else { 0.9 };
+                st.pixels_per_second = (st.pixels_per_second * factor).clamp(10.0, 2000.0);
+            } else if dx.abs() > dy.abs() {
+                // Horizontal pan (Shift+scroll or trackpad horizontal swipe)
                 st.scroll_offset = (st.scroll_offset + dx * 20.0).max(0.0);
                 st.user_scroll_cooldown_until =
                     Some(std::time::Instant::now() + std::time::Duration::from_millis(600));
-            } else if ctrl_held || dy.abs() > 0.0 {
-                // Zoom (Ctrl+scroll or plain vertical scroll)
-                let factor = if dy < 0.0 { 1.1 } else { 0.9 };
-                st.pixels_per_second = (st.pixels_per_second * factor).clamp(10.0, 2000.0);
+            } else if dy.abs() > 0.0 {
+                // Vertical track scrolling
+                let viewport_h = area_weak
+                    .upgrade()
+                    .map(|a| a.height() as f64)
+                    .unwrap_or(0.0);
+                let max_scroll = {
+                    let proj = st.project.borrow();
+                    let editing_tracks = st.resolve_editing_tracks(&proj);
+                    let content_h = timeline_content_height_for_tracks(editing_tracks)
+                        + st.breadcrumb_bar_height();
+                    (content_h - viewport_h).max(0.0)
+                };
+                st.vertical_scroll_offset =
+                    (st.vertical_scroll_offset + dy * 20.0).clamp(0.0, max_scroll);
             }
             if let Some(a) = area_weak.upgrade() {
                 a.queue_draw();
@@ -7788,13 +8978,24 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
                     }
                     state.borrow_mut().hover_transition_pair = None;
                 } else {
-                    // Internal payload format: "{source_path}|{duration_ns}"
-                    let mut parts = payload.splitn(2, '|');
+                    // Internal payload format:
+                    //   `"{source_path}|{duration_ns}|{item_id?}"`
+                    // The trailing `item_id` was added when subclips
+                    // shipped so the receiver can look up the
+                    // MediaItem by id and honour its subclip
+                    // `source_in/source_out` window. Two-part
+                    // payloads (legacy + external drops) still
+                    // parse with item_id=None.
+                    let mut parts = payload.splitn(3, '|');
                     let source_path = match parts.next() {
                         Some(p) => p.to_string(),
                         None => return false,
                     };
                     let duration_ns: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+                    let item_id: Option<String> = parts
+                        .next()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
 
                     let (track_idx, timeline_start_ns) = {
                         let st = state.borrow();
@@ -7805,7 +9006,7 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
 
                     let cb = state.borrow().on_drop_clip.clone();
                     if let Some(cb) = cb {
-                        cb(source_path, duration_ns, track_idx, timeline_start_ns);
+                        cb(source_path, duration_ns, item_id, track_idx, timeline_start_ns);
                     }
                     state.borrow_mut().hover_transition_pair = None;
                 }
@@ -7821,6 +9022,415 @@ pub fn build_timeline(state: Rc<RefCell<TimelineState>>) -> DrawingArea {
     area
 }
 
+pub fn build_timeline_ruler(
+    state: Rc<RefCell<TimelineState>>,
+    timeline_area: DrawingArea,
+) -> DrawingArea {
+    let ruler = DrawingArea::new();
+    ruler.set_content_height(RULER_HEIGHT.ceil() as i32);
+    ruler.set_vexpand(false);
+    ruler.set_hexpand(true);
+    ruler.set_focusable(true);
+
+    {
+        let state = state.clone();
+        ruler.set_draw_func(move |_area, cr, width, height| {
+            let st = state.borrow();
+            let w = width as f64;
+            let h = height as f64;
+            let (bg_r, bg_g, bg_b) = crate::ui::colors::COLOR_TIMELINE_BG;
+            cr.set_source_rgb(bg_r, bg_g, bg_b);
+            cr.paint().ok();
+            draw_ruler(cr, w, &st, 0.0);
+            let ph_x = st.ns_to_x(st.editing_playhead_ns());
+            if h > 0.0 {
+                draw_ruler_playhead_marker(cr, ph_x, 0.0);
+            }
+        });
+    }
+
+    {
+        let state = state.clone();
+        let timeline_area = timeline_area.clone();
+        let ruler_weak = ruler.downgrade();
+        let click = GestureClick::new();
+        click.connect_pressed(move |gesture, _n_press, x, y| {
+            timeline_area.grab_focus();
+            if !ruler_hit_test(&state.borrow(), y) || state.borrow().loading {
+                return;
+            }
+            let button = gesture.current_button();
+            let mut st = state.borrow_mut();
+            if button == 3 {
+                let ns = st.x_to_ns(x);
+                let threshold = (8.0 / st.pixels_per_second * NS_PER_SECOND) as u64;
+                let to_remove = {
+                    let proj = st.project.borrow();
+                    proj.markers
+                        .iter()
+                        .filter(|m| m.position_ns.abs_diff(ns) <= threshold)
+                        .min_by_key(|m| m.position_ns.abs_diff(ns))
+                        .map(|m| m.id.clone())
+                };
+                if let Some(id) = to_remove {
+                    let marker = {
+                        let proj = st.project.borrow();
+                        proj.markers.iter().find(|m| m.id == id).cloned()
+                    };
+                    if let Some(marker) = marker {
+                        let proj_rc = st.project.clone();
+                        let mut proj = proj_rc.borrow_mut();
+                        st.history.execute(
+                            Box::new(crate::undo::RemoveMarkerCommand { marker }),
+                            &mut proj,
+                        );
+                    }
+                    drop(st);
+                    TimelineState::notify_project_changed(&state);
+                } else {
+                    drop(st);
+                }
+            } else {
+                let ns = st.x_to_ns(x);
+                st.set_playhead_visual(ns);
+                let seek_cb = st.on_seek.clone();
+                drop(st);
+                if let Some(cb) = seek_cb {
+                    cb(ns);
+                }
+            }
+            timeline_area.queue_draw();
+            if let Some(r) = ruler_weak.upgrade() {
+                r.queue_draw();
+            }
+        });
+        ruler.add_controller(click);
+    }
+
+    {
+        let state = state.clone();
+        let timeline_area = timeline_area.clone();
+        let ruler_weak = ruler.downgrade();
+        let drag = GestureDrag::new();
+        drag.connect_drag_begin({
+            let state = state.clone();
+            let timeline_area = timeline_area.clone();
+            let ruler_weak = ruler_weak.clone();
+            move |_gesture, x, y| {
+                if state.borrow().loading || !ruler_hit_test(&state.borrow(), y) {
+                    return;
+                }
+                timeline_area.grab_focus();
+                let mut st = state.borrow_mut();
+                let ns = st.x_to_ns(x);
+                st.set_playhead_visual(ns);
+                st.ruler_pan_start_offset = st.scroll_offset;
+                let seek_cb = st.on_seek.clone();
+                drop(st);
+                if let Some(cb) = seek_cb {
+                    cb(ns);
+                }
+                timeline_area.queue_draw();
+                if let Some(r) = ruler_weak.upgrade() {
+                    r.queue_draw();
+                }
+            }
+        });
+        drag.connect_drag_update(move |gesture, offset_x, _offset_y| {
+            let (start_x, _start_y) = gesture.start_point().unwrap_or((0.0, 0.0));
+            let current_x = start_x + offset_x;
+            let button = gesture.current_button();
+            if button == 2 || button == 3 {
+                let mut st = state.borrow_mut();
+                st.scroll_offset = (st.ruler_pan_start_offset - offset_x).max(0.0);
+                st.user_scroll_cooldown_until =
+                    Some(std::time::Instant::now() + std::time::Duration::from_millis(600));
+                drop(st);
+            } else {
+                let mut st = state.borrow_mut();
+                let ns = st.x_to_ns(current_x);
+                st.set_playhead_visual(ns);
+                let seek_cb = st.on_seek.clone();
+                drop(st);
+                if let Some(cb) = seek_cb {
+                    cb(ns);
+                }
+            }
+            timeline_area.queue_draw();
+            if let Some(r) = ruler_weak.upgrade() {
+                r.queue_draw();
+            }
+        });
+        ruler.add_controller(drag);
+    }
+
+    ruler
+}
+
+// ── Mini-map / overview strip ──────────────────────────────────────────
+
+/// Height of the mini-map strip in logical pixels.
+const MINIMAP_HEIGHT: f64 = 28.0;
+/// Horizontal left gutter in the mini-map (mirrors track label width at
+/// a reduced size for visual alignment).
+const MINIMAP_GUTTER: f64 = 24.0;
+
+/// Compute the total duration in nanoseconds across the currently-editing
+/// tracks (respecting compound drill-down).
+fn total_duration_ns(st: &TimelineState) -> u64 {
+    let proj = st.project.borrow();
+    let tracks = st.resolve_editing_tracks(&proj);
+    tracks
+        .iter()
+        .flat_map(|t| t.clips.iter())
+        .map(|c| c.timeline_start + c.duration())
+        .max()
+        .unwrap_or(0)
+}
+
+/// Cairo paint for the mini-map overview strip.
+fn draw_minimap(cr: &gtk::cairo::Context, width: f64, height: f64, st: &TimelineState) {
+    // Background
+    cr.set_source_rgb(0.10, 0.10, 0.12);
+    cr.paint().ok();
+
+    let total_ns = total_duration_ns(st);
+    if total_ns == 0 {
+        return;
+    }
+
+    let usable_w = (width - MINIMAP_GUTTER).max(1.0);
+    let minimap_pps = usable_w / (total_ns as f64 / NS_PER_SECOND);
+
+    let proj = st.project.borrow();
+    let tracks = st.resolve_editing_tracks(&proj);
+    let order = visual_order(tracks);
+    let track_count = order.len().max(1);
+    let lane_h = ((height - 2.0) / track_count as f64).clamp(1.0, 6.0);
+    let total_lanes_h = lane_h * track_count as f64;
+    let lanes_top = (height - total_lanes_h) / 2.0;
+
+    // Draw clip rectangles
+    for (vis_idx, &logical_idx) in order.iter().enumerate() {
+        let track = &tracks[logical_idx];
+        let lane_y = lanes_top + vis_idx as f64 * lane_h;
+        for clip in &track.clips {
+            let cx = MINIMAP_GUTTER + (clip.timeline_start as f64 / NS_PER_SECOND) * minimap_pps;
+            let cw = ((clip.duration() as f64 / NS_PER_SECOND) * minimap_pps).max(1.0);
+            let (r, g, b) = clip_fill_color(clip, track.kind.clone());
+            cr.set_source_rgba(r, g, b, 0.85);
+            cr.rectangle(cx, lane_y, cw, (lane_h - 0.5).max(1.0));
+            cr.fill().ok();
+        }
+    }
+
+    // Track lane separator lines
+    if track_count > 1 {
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.08);
+        cr.set_line_width(0.5);
+        for vis_idx in 1..track_count {
+            let y = (lanes_top + vis_idx as f64 * lane_h).round() + 0.25;
+            cr.move_to(MINIMAP_GUTTER, y);
+            cr.line_to(width, y);
+        }
+        cr.stroke().ok();
+    }
+
+    // Viewport rectangle
+    let visible_width = width; // the main timeline viewport width
+    let view_left_ns = (st.scroll_offset / st.pixels_per_second) * NS_PER_SECOND;
+    let view_right_ns = ((st.scroll_offset + visible_width) / st.pixels_per_second) * NS_PER_SECOND;
+    let vp_x = MINIMAP_GUTTER + (view_left_ns / NS_PER_SECOND) * minimap_pps;
+    let vp_w = ((view_right_ns - view_left_ns) / NS_PER_SECOND) * minimap_pps;
+    let vp_x = vp_x.max(MINIMAP_GUTTER);
+    let vp_w = vp_w.min(usable_w);
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.12);
+    cr.rectangle(vp_x, 0.0, vp_w, height);
+    cr.fill().ok();
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.45);
+    cr.set_line_width(1.0);
+    cr.rectangle(vp_x + 0.5, 0.5, vp_w - 1.0, height - 1.0);
+    cr.stroke().ok();
+
+    // Playhead
+    let ph_ns = st.editing_playhead_ns();
+    let ph_x = MINIMAP_GUTTER + (ph_ns as f64 / NS_PER_SECOND) * minimap_pps;
+    if ph_x >= MINIMAP_GUTTER && ph_x <= width {
+        cr.set_source_rgba(1.0, 0.3, 0.3, 0.9);
+        cr.set_line_width(1.5);
+        cr.move_to(ph_x, 0.0);
+        cr.line_to(ph_x, height);
+        cr.stroke().ok();
+    }
+
+    // Subtle top/bottom border
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.06);
+    cr.set_line_width(1.0);
+    cr.move_to(0.0, height - 0.5);
+    cr.line_to(width, height - 0.5);
+    cr.stroke().ok();
+}
+
+/// Build the mini-map DrawingArea with click-to-pan and drag-to-scroll
+/// gesture controllers. Returns the DrawingArea (initially hidden).
+pub fn build_timeline_minimap(
+    state: Rc<RefCell<TimelineState>>,
+    timeline_area: DrawingArea,
+    ruler: DrawingArea,
+) -> DrawingArea {
+    let minimap = DrawingArea::new();
+    minimap.set_content_height(MINIMAP_HEIGHT.ceil() as i32);
+    minimap.set_vexpand(false);
+    minimap.set_hexpand(true);
+    minimap.set_visible(false);
+
+    // Draw function
+    {
+        let state = state.clone();
+        minimap.set_draw_func(move |_area, cr, width, height| {
+            let st = state.borrow();
+            draw_minimap(cr, width as f64, height as f64, &st);
+        });
+    }
+
+    // Helper: convert an x-coordinate in the minimap to a timeline ns position.
+    let minimap_x_to_ns = {
+        let state = state.clone();
+        move |x: f64, minimap_width: f64| -> u64 {
+            let st = state.borrow();
+            let total_ns = total_duration_ns(&st);
+            if total_ns == 0 {
+                return 0;
+            }
+            let usable_w = (minimap_width - MINIMAP_GUTTER).max(1.0);
+            let frac = ((x - MINIMAP_GUTTER) / usable_w).clamp(0.0, 1.0);
+            (frac * total_ns as f64) as u64
+        }
+    };
+
+    // Click: center viewport on clicked position. Ctrl+Click: seek playhead.
+    // Double-click: zoom to fit entire project.
+    {
+        let state = state.clone();
+        let timeline_area = timeline_area.clone();
+        let ruler = ruler.clone();
+        let minimap_weak = minimap.downgrade();
+        let x_to_ns = minimap_x_to_ns.clone();
+        let click = GestureClick::new();
+        click.connect_pressed(move |gesture, n_press, x, _y| {
+            let minimap_width = minimap_weak
+                .upgrade()
+                .map(|m| m.width() as f64)
+                .unwrap_or(800.0);
+
+            if n_press == 2 {
+                // Double-click: zoom to fit entire project
+                let st_ref = state.borrow();
+                let total_ns = total_duration_ns(&st_ref);
+                drop(st_ref);
+                if total_ns == 0 {
+                    return;
+                }
+                let total_secs = total_ns as f64 / NS_PER_SECOND;
+                let viewport_w = timeline_area.width() as f64;
+                let usable_viewport = (viewport_w - TRACK_LABEL_WIDTH).max(100.0);
+                // Add 5% padding so clips don't touch the right edge
+                let pps = (usable_viewport / (total_secs * 1.05)).clamp(10.0, 2000.0);
+                let mut st = state.borrow_mut();
+                st.pixels_per_second = pps;
+                st.scroll_offset = 0.0;
+                st.user_scroll_cooldown_until =
+                    Some(std::time::Instant::now() + std::time::Duration::from_millis(600));
+                drop(st);
+            } else {
+                let ns = x_to_ns(x, minimap_width);
+                let modifiers = gesture.current_event_state();
+                let ctrl = modifiers.contains(gdk4::ModifierType::CONTROL_MASK);
+
+                let mut st = state.borrow_mut();
+                if ctrl {
+                    // Seek playhead
+                    st.set_playhead_visual(ns);
+                    let seek_cb = st.on_seek.clone();
+                    drop(st);
+                    if let Some(cb) = seek_cb {
+                        cb(ns);
+                    }
+                } else {
+                    // Center viewport on clicked position
+                    let visible_secs = minimap_width / st.pixels_per_second;
+                    let target_secs = ns as f64 / NS_PER_SECOND;
+                    let new_offset = (target_secs - visible_secs / 2.0) * st.pixels_per_second;
+                    st.scroll_offset = new_offset.max(0.0);
+                    st.user_scroll_cooldown_until =
+                        Some(std::time::Instant::now() + std::time::Duration::from_millis(600));
+                    drop(st);
+                }
+            }
+            timeline_area.queue_draw();
+            ruler.queue_draw();
+            if let Some(m) = minimap_weak.upgrade() {
+                m.queue_draw();
+            }
+        });
+        minimap.add_controller(click);
+    }
+
+    // Drag: pan viewport by dragging on the minimap.
+    {
+        let state = state.clone();
+        let timeline_area = timeline_area.clone();
+        let ruler = ruler.clone();
+        let minimap_weak = minimap.downgrade();
+        let drag = GestureDrag::new();
+        let drag_start_offset: Rc<std::cell::Cell<f64>> = Rc::new(std::cell::Cell::new(0.0));
+        {
+            let state = state.clone();
+            let drag_start_offset = drag_start_offset.clone();
+            drag.connect_drag_begin(move |_gesture, _x, _y| {
+                let st = state.borrow();
+                drag_start_offset.set(st.scroll_offset);
+            });
+        }
+        {
+            let state = state.clone();
+            let drag_start_offset = drag_start_offset.clone();
+            let timeline_area = timeline_area.clone();
+            let ruler = ruler.clone();
+            let minimap_weak = minimap_weak.clone();
+            drag.connect_drag_update(move |_gesture, offset_x, _offset_y| {
+                let minimap_width = minimap_weak
+                    .upgrade()
+                    .map(|m| m.width() as f64)
+                    .unwrap_or(800.0);
+                let st_ref = state.borrow();
+                let total_ns = total_duration_ns(&st_ref);
+                drop(st_ref);
+                if total_ns == 0 {
+                    return;
+                }
+                let usable_w = (minimap_width - MINIMAP_GUTTER).max(1.0);
+                let minimap_pps = usable_w / (total_ns as f64 / NS_PER_SECOND);
+                let mut st = state.borrow_mut();
+                // Convert minimap pixel offset to main-timeline pixel offset
+                let main_offset_px = offset_x * (st.pixels_per_second / minimap_pps);
+                st.scroll_offset = (drag_start_offset.get() + main_offset_px).max(0.0);
+                st.user_scroll_cooldown_until =
+                    Some(std::time::Instant::now() + std::time::Duration::from_millis(600));
+                drop(st);
+                timeline_area.queue_draw();
+                ruler.queue_draw();
+                if let Some(m) = minimap_weak.upgrade() {
+                    m.queue_draw();
+                }
+            });
+        }
+        minimap.add_controller(drag);
+    }
+
+    minimap
+}
+
 pub fn export_timeline_snapshot_png(
     state: &TimelineState,
     width: i32,
@@ -7834,7 +9444,7 @@ pub fn export_timeline_snapshot_png(
     let cr = gtk::cairo::Context::new(&surface).map_err(|e| e.to_string())?;
     let mut cache = crate::media::thumb_cache::ThumbnailCache::new();
     let mut wcache = crate::media::waveform_cache::WaveformCache::new();
-    draw_timeline(&cr, width, height, state, &mut cache, &mut wcache);
+    draw_timeline(&cr, width, height, state, &mut cache, &mut wcache, true);
     drop(cr);
     surface.flush();
     let stride = surface.stride() as usize;
@@ -7854,6 +9464,7 @@ fn draw_timeline(
     st: &TimelineState,
     cache: &mut crate::media::thumb_cache::ThumbnailCache,
     wcache: &mut crate::media::waveform_cache::WaveformCache,
+    draw_ruler_overlay: bool,
 ) {
     let w = width as f64;
     let h = height as f64;
@@ -7864,17 +9475,22 @@ fn draw_timeline(
     cr.paint().ok();
 
     // Compound breadcrumb bar (when drilled into a compound clip)
+    let overlay_top = if draw_ruler_overlay {
+        RULER_HEIGHT
+    } else {
+        0.0
+    };
     let breadcrumb_height = if st.is_editing_compound() {
         let bar_h = 22.0;
         cr.save().ok();
-        cr.rectangle(0.0, RULER_HEIGHT, w, bar_h);
+        cr.rectangle(0.0, overlay_top, w, bar_h);
         cr.set_source_rgb(0.18, 0.50, 0.48);
         let _ = cr.fill();
         cr.set_source_rgba(1.0, 1.0, 1.0, 0.95);
         cr.set_font_size(11.0);
         let labels = st.compound_breadcrumb_labels();
         let breadcrumb_text = labels.join(" > ");
-        let _ = cr.move_to(8.0, RULER_HEIGHT + 15.0);
+        let _ = cr.move_to(8.0, overlay_top + 15.0);
         let _ = cr.show_text(&format!("{breadcrumb_text}  (Esc to go back)"));
         cr.restore().ok();
         bar_h
@@ -7887,44 +9503,80 @@ fn draw_timeline(
     let linked_peer_highlight_ids = st.linked_peer_highlight_ids();
     let proj = st.project.borrow();
     let editing_tracks = st.resolve_editing_tracks(&proj);
-    let ruler_top = pinned_ruler_top(st);
-    let ruler_bottom = ruler_top + RULER_HEIGHT;
-    let mut y = RULER_HEIGHT + breadcrumb_height;
+    let has_any_clips = editing_tracks.iter().any(|track| !track.clips.is_empty());
+    let ruler_top = 0.0;
+    let track_content_top = overlay_top + breadcrumb_height;
+    // For screen drawing, apply vertical scroll; for PNG export, don't scroll.
+    let effective_scroll = if draw_ruler_overlay {
+        0.0
+    } else {
+        let total_content = timeline_content_height_for_tracks(editing_tracks);
+        let visible = (h - track_content_top).max(0.0);
+        st.vertical_scroll_offset
+            .clamp(0.0, (total_content - visible).max(0.0))
+    };
+    // Clip to the track area so scrolled tracks don't overdraw the breadcrumb/ruler.
+    cr.save().ok();
+    cr.rectangle(0.0, track_content_top, w, (h - track_content_top).max(0.0));
+    cr.clip();
+    let mut y = track_content_top - effective_scroll;
     for &logical_idx in &visual_order(editing_tracks) {
         let track = &editing_tracks[logical_idx];
         let track_height = track_row_height(track);
-        draw_track_row(
-            cr,
-            w,
-            y,
-            track_height,
-            logical_idx,
-            track,
-            st,
-            &grouped_peer_highlight_ids,
-            &linked_peer_highlight_ids,
-            cache,
-            wcache,
-        );
+        // Skip tracks entirely outside the visible area
+        if y + track_height > track_content_top && y < h {
+            draw_track_row(
+                cr,
+                w,
+                y,
+                track_height,
+                logical_idx,
+                track,
+                st,
+                &grouped_peer_highlight_ids,
+                &linked_peer_highlight_ids,
+                cache,
+                wcache,
+            );
+        }
         y += track_height;
     }
+    cr.restore().ok();
+
+    if !has_any_clips {
+        draw_timeline_empty_state(cr, w, h, track_content_top);
+    }
+
+    draw_drag_preview_overlays(
+        cr,
+        w,
+        h,
+        track_content_top,
+        effective_scroll,
+        editing_tracks,
+        st,
+        &grouped_peer_highlight_ids,
+        &linked_peer_highlight_ids,
+        cache,
+        wcache,
+    );
 
     // Playhead (clipped to content area so it doesn't overdraw track labels)
     // When inside a compound, translate the main-timeline playhead to the
     // compound's internal time so it aligns with the internal clips.
     let ph_x = st.ns_to_x(st.editing_playhead_ns());
-    if ruler_bottom < h {
+    if track_content_top < h {
         cr.save().ok();
         cr.rectangle(
             TRACK_LABEL_WIDTH,
-            ruler_bottom,
+            track_content_top,
             w - TRACK_LABEL_WIDTH,
-            h - ruler_bottom,
+            h - track_content_top,
         );
         cr.clip();
         cr.set_source_rgb(1.0, 0.3, 0.3);
         cr.set_line_width(2.0);
-        cr.move_to(ph_x, ruler_bottom);
+        cr.move_to(ph_x, track_content_top);
         cr.line_to(ph_x, h);
         cr.stroke().ok();
         cr.restore().ok();
@@ -7941,7 +9593,7 @@ fn draw_timeline(
                 cr.set_source_rgba(1.0, 0.82, 0.2, 0.9);
                 cr.set_line_width(1.5);
                 cr.set_dash(&[4.0, 3.0], 0.0);
-                cr.move_to(sx, ruler_bottom);
+                cr.move_to(sx, track_content_top);
                 cr.line_to(sx, h);
                 cr.stroke().ok();
                 cr.set_dash(&[], 0.0);
@@ -7959,7 +9611,7 @@ fn draw_timeline(
                 let bh = 16.0;
                 let bw = te.width() + pad * 2.0;
                 let bx = sx + 4.0;
-                let by = ruler_bottom + 4.0;
+                let by = track_content_top + 4.0;
                 rounded_rect(cr, bx, by, bw, bh, 3.0);
                 cr.set_source_rgba(1.0, 0.82, 0.2, 0.95);
                 cr.fill().ok();
@@ -7978,7 +9630,7 @@ fn draw_timeline(
         ActiveTool::Slide => Some("⇔ Slide (U to toggle)"),
         _ => None,
     };
-    let mut indicator_y = ruler_bottom + 16.0;
+    let mut indicator_y = track_content_top + 16.0;
     if let Some(label) = tool_label {
         cr.set_source_rgb(1.0, 0.8, 0.0);
         cr.set_font_size(12.0);
@@ -8002,8 +9654,9 @@ fn draw_timeline(
         );
     }
 
-    let track_row_y =
-        |track_idx: usize| track_row_top_in_tracks(editing_tracks, track_idx) + breadcrumb_height;
+    let track_row_y = |track_idx: usize| {
+        track_row_top_in_tracks(editing_tracks, track_idx) + track_content_top - effective_scroll
+    };
     if let Some(armed_track_id) = &st.music_generation_armed_track_id {
         if let Some((track_idx, track)) = editing_tracks
             .iter()
@@ -8112,8 +9765,9 @@ fn draw_timeline(
     } = &st.drag_op
     {
         if track_idx != target_idx {
-            let target_top =
-                track_row_top_in_tracks(editing_tracks, *target_idx) + breadcrumb_height;
+            let target_top = track_row_top_in_tracks(editing_tracks, *target_idx)
+                + track_content_top
+                - effective_scroll;
             let target_height = editing_tracks
                 .get(*target_idx)
                 .map(track_row_height)
@@ -8143,7 +9797,7 @@ fn draw_timeline(
     if let Some(m) = &st.marquee_selection {
         let left = m.start_x.min(m.current_x).max(TRACK_LABEL_WIDTH);
         let right = m.start_x.max(m.current_x);
-        let top = m.start_y.min(m.current_y).max(RULER_HEIGHT);
+        let top = m.start_y.min(m.current_y).max(overlay_top);
         let bottom = m.start_y.max(m.current_y);
         if right > left && bottom > top {
             cr.set_source_rgba(0.25, 0.55, 1.0, 0.18);
@@ -8172,7 +9826,8 @@ fn draw_timeline(
                     let left = x0.min(x1).max(TRACK_LABEL_WIDTH);
                     let right = x0.max(x1);
                     let top = track_row_top_in_tracks(editing_tracks, track_idx)
-                        + breadcrumb_height
+                        + track_content_top
+                        - effective_scroll
                         + 2.0;
                     let bottom = top + track_row_height(track) - 4.0;
                     if right > left && bottom > top {
@@ -8189,8 +9844,117 @@ fn draw_timeline(
         }
     }
 
-    draw_ruler(cr, w, st, ruler_top);
-    draw_ruler_playhead_marker(cr, ph_x, ruler_top);
+    // Hover-scrub floating preview. Painted near the cursor (above-right
+    // when possible) with the scrubbed frame + source timecode. Missing
+    // cache entry → skip rendering (the motion handler already kicked a
+    // request and the 200 ms poll timer will queue a redraw when it's
+    // ready). Only visible while not dragging — starts of drags clear
+    // hover_scrub elsewhere.
+    if let Some(ref hover) = st.hover_scrub {
+        if let Some(surface) = cache.get(&hover.source_path, hover.source_time_ns) {
+            const PREVIEW_W: f64 = 200.0;
+            const PREVIEW_H: f64 = 128.0; // 112 for frame + ~16 for timecode strip
+            const FRAME_H: f64 = 112.0;
+            const MARGIN: f64 = 12.0;
+
+            // Anchor above-and-right of the cursor by default. Clamp to
+            // widget bounds so the preview never falls off-screen.
+            let mut panel_x = hover.cursor_x + MARGIN;
+            let mut panel_y = hover.cursor_y - PREVIEW_H - MARGIN;
+            if panel_x + PREVIEW_W > w - 4.0 {
+                panel_x = hover.cursor_x - PREVIEW_W - MARGIN;
+            }
+            if panel_y < 4.0 {
+                panel_y = hover.cursor_y + MARGIN;
+            }
+            panel_x = panel_x.clamp(4.0, (w - PREVIEW_W - 4.0).max(4.0));
+            panel_y = panel_y.clamp(4.0, (h - PREVIEW_H - 4.0).max(4.0));
+
+            // Backdrop with subtle rounded corners (manual path — avoids
+            // pulling in a helper just for this).
+            let radius = 6.0;
+            cr.save().ok();
+            cr.new_path();
+            cr.arc(
+                panel_x + radius,
+                panel_y + radius,
+                radius,
+                std::f64::consts::PI,
+                1.5 * std::f64::consts::PI,
+            );
+            cr.arc(
+                panel_x + PREVIEW_W - radius,
+                panel_y + radius,
+                radius,
+                1.5 * std::f64::consts::PI,
+                2.0 * std::f64::consts::PI,
+            );
+            cr.arc(
+                panel_x + PREVIEW_W - radius,
+                panel_y + PREVIEW_H - radius,
+                radius,
+                0.0,
+                0.5 * std::f64::consts::PI,
+            );
+            cr.arc(
+                panel_x + radius,
+                panel_y + PREVIEW_H - radius,
+                radius,
+                0.5 * std::f64::consts::PI,
+                std::f64::consts::PI,
+            );
+            cr.close_path();
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.88);
+            cr.fill_preserve().ok();
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.35);
+            cr.set_line_width(1.0);
+            cr.stroke().ok();
+            cr.restore().ok();
+
+            // Scaled thumbnail. ThumbnailCache returns 160×90; we render
+            // into a 200×112 slot with aspect-preserving letterbox fit.
+            let thumb_area_w = PREVIEW_W - 8.0;
+            let thumb_area_h = FRAME_H - 8.0;
+            let frame_x = panel_x + 4.0;
+            let frame_y = panel_y + 4.0;
+            const SRC_W: f64 = 160.0;
+            const SRC_H: f64 = 90.0;
+            let scale = (thumb_area_w / SRC_W).min(thumb_area_h / SRC_H);
+            let draw_w = SRC_W * scale;
+            let draw_h = SRC_H * scale;
+            let draw_x = frame_x + (thumb_area_w - draw_w) * 0.5;
+            let draw_y = frame_y + (thumb_area_h - draw_h) * 0.5;
+            cr.save().ok();
+            cr.translate(draw_x, draw_y);
+            cr.scale(scale, scale);
+            let _ = cr.set_source_surface(surface, 0.0, 0.0);
+            cr.paint().ok();
+            cr.restore().ok();
+
+            // Timecode label.
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.95);
+            cr.select_font_face(
+                "Sans",
+                gtk::cairo::FontSlant::Normal,
+                gtk::cairo::FontWeight::Normal,
+            );
+            cr.set_font_size(11.0);
+            let tc = &hover.display_timecode;
+            let extents = cr.text_extents(tc).unwrap_or_else(|_| {
+                cr.text_extents("00:00:00:00")
+                    .expect("fallback text extents")
+            });
+            let text_x = panel_x + (PREVIEW_W - extents.x_advance()) * 0.5;
+            let text_y = panel_y + PREVIEW_H - 4.0;
+            cr.move_to(text_x, text_y);
+            cr.show_text(tc).ok();
+        }
+    }
+
+    if draw_ruler_overlay {
+        draw_ruler(cr, w, st, ruler_top);
+        draw_ruler_playhead_marker(cr, ph_x, ruler_top);
+    }
 }
 
 fn clamp_slide_delta(
@@ -8357,6 +10121,7 @@ fn draw_track_row(
     cache: &mut crate::media::thumb_cache::ThumbnailCache,
     wcache: &mut crate::media::waveform_cache::WaveformCache,
 ) {
+    let active_drag_ids = active_drag_clip_ids(&st.drag_op);
     let (r, g, b) = match track.kind {
         TrackKind::Video => (0.16, 0.16, 0.18),
         TrackKind::Audio => (0.14, 0.16, 0.18),
@@ -8372,6 +10137,9 @@ fn draw_track_row(
 
     // Draw clips first (they may overlap into label column before clipping)
     for clip in &track.clips {
+        if active_drag_ids.contains(&clip.id) {
+            continue;
+        }
         draw_clip(
             cr,
             width,
@@ -8394,6 +10162,9 @@ fn draw_track_row(
 
     // Draw transition markers (clip -> next clip) after clip bodies.
     for clip in &track.clips {
+        if active_drag_ids.contains(&clip.id) {
+            continue;
+        }
         if clip.outgoing_transition.is_active() {
             let ex = st.ns_to_x(clip.timeline_end());
             let marker_w = 10.0;
@@ -8401,6 +10172,48 @@ fn draw_track_row(
             cr.rectangle(ex - marker_w / 2.0, y + 4.0, marker_w, track_height - 8.0);
             cr.fill().ok();
         }
+    }
+
+    // Muted-track dimming overlay on clip content area
+    if track.muted {
+        cr.set_source_rgba(0.0, 0.0, 0.0, 0.35);
+        cr.rectangle(
+            TRACK_LABEL_WIDTH,
+            y,
+            width - TRACK_LABEL_WIDTH,
+            track_height,
+        );
+        cr.fill().ok();
+    }
+
+    // Locked-track hatch overlay on clip content area
+    if track.locked {
+        cr.save().ok();
+        cr.rectangle(
+            TRACK_LABEL_WIDTH,
+            y,
+            width - TRACK_LABEL_WIDTH,
+            track_height,
+        );
+        cr.clip();
+        cr.set_source_rgba(0.6, 0.4, 0.1, 0.12);
+        cr.set_line_width(1.0);
+        let step = 8.0;
+        let x0 = TRACK_LABEL_WIDTH;
+        let x1 = width;
+        let y0 = y;
+        let y1 = y + track_height;
+        let mut d = x0 - track_height;
+        while d < x1 {
+            cr.move_to(d.max(x0), y0.max(y0 + (d - x0).min(0.0)));
+            cr.line_to(
+                (d + track_height).min(x1),
+                y1.min(y0 + (d + track_height - x0).max(0.0)),
+            );
+            d += step;
+        }
+        cr.stroke().ok();
+        cr.restore().ok();
     }
 
     // Draw label column on top so it stays visible when timeline is scrolled
@@ -8413,16 +10226,37 @@ fn draw_track_row(
     cr.rectangle(0.0, y, TRACK_LABEL_WIDTH, track_height);
     cr.fill().ok();
 
-    // Active track accent bar
+    // Active track accent bar (uses track color when set)
     if is_active {
-        cr.set_source_rgb(0.3, 0.55, 0.95);
+        let (ar, ag, ab) = track.color_label.rgb().unwrap_or((0.3, 0.55, 0.95));
+        cr.set_source_rgb(ar, ag, ab);
         cr.rectangle(0.0, y, 3.0, track_height);
         cr.fill().ok();
     }
 
+    // Drag handle glyph
+    cr.set_source_rgb(0.45, 0.45, 0.5);
+    cr.set_font_size(10.0);
+    let _ = cr.move_to(5.0, y + track_height / 2.0 + 3.0);
+    let _ = cr.show_text("⠿");
+
+    // Per-track color swatch (10×10 dot left of track name)
+    let name_x;
+    if let Some((cr_r, cr_g, cr_b)) = track.color_label.rgb() {
+        let dot_x = 18.0;
+        let dot_y = y + track_height / 2.0 - 1.0;
+        let dot_r = 5.0;
+        cr.set_source_rgb(cr_r, cr_g, cr_b);
+        cr.arc(dot_x, dot_y, dot_r, 0.0, 2.0 * std::f64::consts::PI);
+        cr.fill().ok();
+        name_x = 28.0;
+    } else {
+        name_x = 18.0;
+    }
+
     cr.set_source_rgb(0.8, 0.8, 0.8);
     cr.set_font_size(11.0);
-    let _ = cr.move_to(6.0, y + track_height / 2.0 + 4.0);
+    let _ = cr.move_to(name_x, y + track_height / 2.0 + 4.0);
     let _ = cr.show_text(&track.label);
 
     // Audio role label (below track name, dimmed).
@@ -8436,12 +10270,34 @@ fn draw_track_row(
         };
         cr.set_source_rgb(role_r, role_g, role_b);
         cr.set_font_size(9.0);
-        let _ = cr.move_to(6.0, y + track_height / 2.0 + 15.0);
+        let _ = cr.move_to(name_x, y + track_height / 2.0 + 15.0);
         let _ = cr.show_text(role_label);
     }
 
+    // --- Badge row: [D] [M] [S] [L] from left to right ---
+    let badge_y = y + 6.0;
+
+    // Lock badge (rightmost)
+    let lock_x = track_label_lock_badge_x(st.show_track_audio_levels);
+    if track.locked {
+        cr.set_source_rgb(0.85, 0.5, 0.15);
+    } else {
+        cr.set_source_rgb(0.35, 0.35, 0.4);
+    }
+    cr.rectangle(
+        lock_x,
+        badge_y,
+        TRACK_LABEL_BADGE_WIDTH,
+        TRACK_LABEL_BADGE_HEIGHT,
+    );
+    cr.fill().ok();
+    cr.set_source_rgb(0.1, 0.1, 0.12);
+    cr.set_font_size(10.0);
+    let _ = cr.move_to(lock_x + 4.5, badge_y + TRACK_LABEL_BADGE_HEIGHT - 3.0);
+    let _ = cr.show_text("L");
+
+    // Solo badge (second from right)
     let solo_x = track_label_solo_badge_x(st.show_track_audio_levels);
-    let solo_y = y + 6.0;
     if track.soloed {
         cr.set_source_rgb(0.9, 0.75, 0.2);
     } else {
@@ -8449,20 +10305,38 @@ fn draw_track_row(
     }
     cr.rectangle(
         solo_x,
-        solo_y,
-        TRACK_LABEL_SOLO_BADGE_WIDTH,
-        TRACK_LABEL_SOLO_BADGE_HEIGHT,
+        badge_y,
+        TRACK_LABEL_BADGE_WIDTH,
+        TRACK_LABEL_BADGE_HEIGHT,
     );
     cr.fill().ok();
     cr.set_source_rgb(0.1, 0.1, 0.12);
     cr.set_font_size(10.0);
-    let _ = cr.move_to(solo_x + 4.5, solo_y + TRACK_LABEL_SOLO_BADGE_HEIGHT - 3.0);
+    let _ = cr.move_to(solo_x + 4.5, badge_y + TRACK_LABEL_BADGE_HEIGHT - 3.0);
     let _ = cr.show_text("S");
+
+    // Mute badge
+    let mute_x = track_label_mute_badge_x(st.show_track_audio_levels);
+    if track.muted {
+        cr.set_source_rgb(0.85, 0.25, 0.25);
+    } else {
+        cr.set_source_rgb(0.35, 0.35, 0.4);
+    }
+    cr.rectangle(
+        mute_x,
+        badge_y,
+        TRACK_LABEL_BADGE_WIDTH,
+        TRACK_LABEL_BADGE_HEIGHT,
+    );
+    cr.fill().ok();
+    cr.set_source_rgb(0.1, 0.1, 0.12);
+    cr.set_font_size(10.0);
+    let _ = cr.move_to(mute_x + 4.0, badge_y + TRACK_LABEL_BADGE_HEIGHT - 3.0);
+    let _ = cr.show_text("M");
 
     // Duck badge (only for audio tracks).
     if track.is_audio() {
-        let duck_x = solo_x - TRACK_LABEL_SOLO_BADGE_WIDTH - 2.0;
-        let duck_y = solo_y;
+        let duck_x = track_label_duck_badge_x(st.show_track_audio_levels);
         if track.duck {
             cr.set_source_rgb(0.2, 0.7, 0.9);
         } else {
@@ -8470,14 +10344,14 @@ fn draw_track_row(
         }
         cr.rectangle(
             duck_x,
-            duck_y,
-            TRACK_LABEL_SOLO_BADGE_WIDTH,
-            TRACK_LABEL_SOLO_BADGE_HEIGHT,
+            badge_y,
+            TRACK_LABEL_BADGE_WIDTH,
+            TRACK_LABEL_BADGE_HEIGHT,
         );
         cr.fill().ok();
         cr.set_source_rgb(0.1, 0.1, 0.12);
         cr.set_font_size(10.0);
-        let _ = cr.move_to(duck_x + 4.5, duck_y + TRACK_LABEL_SOLO_BADGE_HEIGHT - 3.0);
+        let _ = cr.move_to(duck_x + 4.5, badge_y + TRACK_LABEL_BADGE_HEIGHT - 3.0);
         let _ = cr.show_text("D");
     }
 
@@ -8500,6 +10374,17 @@ fn draw_track_row(
             right_db,
         );
     }
+
+    // Subtle bottom-edge resize affordance for direct track height dragging.
+    let handle_center_x = TRACK_LABEL_WIDTH * 0.5;
+    let handle_y = y + track_height - 6.0;
+    cr.set_source_rgba(0.82, 0.82, 0.88, 0.28);
+    cr.set_line_width(1.2);
+    cr.move_to(handle_center_x - 10.0, handle_y - 2.0);
+    cr.line_to(handle_center_x + 10.0, handle_y - 2.0);
+    cr.move_to(handle_center_x - 10.0, handle_y + 1.0);
+    cr.line_to(handle_center_x + 10.0, handle_y + 1.0);
+    cr.stroke().ok();
 
     cr.set_source_rgb(0.1, 0.1, 0.12);
     cr.set_line_width(1.0);
@@ -8571,11 +10456,25 @@ fn draw_through_edit_boundary_indicators(
 }
 
 fn track_label_solo_badge_x(show_track_audio_levels: bool) -> f64 {
+    // Badge layout right-to-left: [D] [M] [S] [L]
+    // Lock is rightmost, solo is second from right
+    track_label_lock_badge_x(show_track_audio_levels) - TRACK_LABEL_BADGE_WIDTH - 2.0
+}
+
+fn track_label_lock_badge_x(show_track_audio_levels: bool) -> f64 {
     if show_track_audio_levels {
-        TRACK_LABEL_WIDTH - TRACK_LABEL_METER_WIDTH - TRACK_LABEL_SOLO_BADGE_WIDTH - 12.0
+        TRACK_LABEL_WIDTH - TRACK_LABEL_METER_WIDTH - TRACK_LABEL_BADGE_WIDTH - 12.0
     } else {
-        TRACK_LABEL_WIDTH - TRACK_LABEL_SOLO_BADGE_WIDTH - 8.0
+        TRACK_LABEL_WIDTH - TRACK_LABEL_BADGE_WIDTH - 8.0
     }
+}
+
+fn track_label_mute_badge_x(show_track_audio_levels: bool) -> f64 {
+    track_label_solo_badge_x(show_track_audio_levels) - TRACK_LABEL_BADGE_WIDTH - 2.0
+}
+
+fn track_label_duck_badge_x(show_track_audio_levels: bool) -> f64 {
+    track_label_mute_badge_x(show_track_audio_levels) - TRACK_LABEL_BADGE_WIDTH - 2.0
 }
 
 fn draw_track_label_meter(
@@ -8961,14 +10860,7 @@ fn draw_clip(
     }
 
     // ── Thumbnail strip for video clips ──────────────────────────────────
-    if track.is_video()
-        && clip.kind != crate::model::clip::ClipKind::Title
-        && clip.kind != crate::model::clip::ClipKind::Adjustment
-        && clip.kind != crate::model::clip::ClipKind::Compound
-        && clip.kind != crate::model::clip::ClipKind::Multicam
-        && clip.kind != crate::model::clip::ClipKind::Audition
-        && cw > 20.0
-    {
+    if track.is_video() && timeline_clip_supports_thumbnails(clip) && cw > 20.0 {
         const THUMB_ASPECT: f64 = 160.0 / 90.0;
         const MAX_THUMB_TILES_PER_CLIP: usize = 6;
         const MAX_NEW_THUMB_REQUESTS_PER_CLIP_PER_DRAW: usize = 2;
@@ -8979,7 +10871,6 @@ fn draw_clip(
         let inner_h = (ch - 2.0).max(0.0);
 
         if inner_w > 1.0 && inner_h > 1.0 {
-            let src_span = clip.source_duration();
             let scale_y = inner_h / 90.0;
 
             cr.save().ok();
@@ -9000,59 +10891,53 @@ fn draw_clip(
                     let draw_w = (x1 - x0).max(1.0);
                     let mid = (f0 + f1) * 0.5;
 
-                    let src_offset = if src_span <= 1 {
-                        0
-                    } else {
-                        ((mid * src_span as f64) as u64).min(src_span - 1)
-                    };
-                    let sample_time =
-                        if clip.kind == crate::model::clip::ClipKind::Image && !clip.animated_svg {
-                            0
-                        } else {
-                            clip.source_in + src_offset
-                        };
-
-                    if let Some(surf) = cache.get(&clip.source_path, sample_time) {
-                        cr.save().ok();
-                        cr.rectangle(x0, inner_y, draw_w, inner_h);
-                        cr.clip();
-                        cr.translate(x0, inner_y);
-                        cr.scale(draw_w / 160.0, scale_y);
-                        cr.set_source_surface(surf, 0.0, 0.0).ok();
-                        cr.paint_with_alpha(0.75).ok();
-                        cr.restore().ok();
-                    } else if requested_this_draw < MAX_NEW_THUMB_REQUESTS_PER_CLIP_PER_DRAW {
-                        cache.request(&clip.source_path, sample_time);
-                        requested_this_draw += 1;
+                    let sample_local_ns = clip_local_sample_time(
+                        clip.duration(),
+                        (mid * clip.duration() as f64) as u64,
+                    );
+                    if let Some(sample) = timeline_thumbnail_sample_for_clip(clip, sample_local_ns)
+                    {
+                        if let Some(surf) = cache.get(&sample.source_path, sample.sample_time_ns) {
+                            cr.save().ok();
+                            cr.rectangle(x0, inner_y, draw_w, inner_h);
+                            cr.clip();
+                            cr.translate(x0, inner_y);
+                            cr.scale(draw_w / 160.0, scale_y);
+                            cr.set_source_surface(surf, 0.0, 0.0).ok();
+                            cr.paint_with_alpha(0.75).ok();
+                            cr.restore().ok();
+                        } else if requested_this_draw < MAX_NEW_THUMB_REQUESTS_PER_CLIP_PER_DRAW {
+                            cache.request(&sample.source_path, sample.sample_time_ns);
+                            requested_this_draw += 1;
+                        }
                     }
                 }
             } else {
                 let draw_w = ((inner_h * THUMB_ASPECT).max(1.0)).min((inner_w * 0.5).max(1.0));
                 let mut requested_this_draw = 0usize;
-                let is_img = clip.kind == crate::model::clip::ClipKind::Image && !clip.animated_svg;
-                let start_time = if is_img { 0 } else { clip.source_in };
-                let end_time = if is_img {
-                    0
-                } else {
-                    clip.source_out.saturating_sub(1).max(clip.source_in)
-                };
                 let endpoints = [
-                    (inner_x, start_time),
-                    (inner_x + inner_w - draw_w, end_time),
+                    (inner_x, 0),
+                    (
+                        inner_x + inner_w - draw_w,
+                        clip_local_sample_time(clip.duration(), clip.duration()),
+                    ),
                 ];
-                for (x0, sample_time) in endpoints {
-                    if let Some(surf) = cache.get(&clip.source_path, sample_time) {
-                        cr.save().ok();
-                        cr.rectangle(x0, inner_y, draw_w, inner_h);
-                        cr.clip();
-                        cr.translate(x0, inner_y);
-                        cr.scale(draw_w / 160.0, scale_y);
-                        cr.set_source_surface(surf, 0.0, 0.0).ok();
-                        cr.paint_with_alpha(0.75).ok();
-                        cr.restore().ok();
-                    } else if requested_this_draw < MAX_NEW_THUMB_REQUESTS_PER_CLIP_PER_DRAW {
-                        cache.request(&clip.source_path, sample_time);
-                        requested_this_draw += 1;
+                for (x0, sample_local_ns) in endpoints {
+                    if let Some(sample) = timeline_thumbnail_sample_for_clip(clip, sample_local_ns)
+                    {
+                        if let Some(surf) = cache.get(&sample.source_path, sample.sample_time_ns) {
+                            cr.save().ok();
+                            cr.rectangle(x0, inner_y, draw_w, inner_h);
+                            cr.clip();
+                            cr.translate(x0, inner_y);
+                            cr.scale(draw_w / 160.0, scale_y);
+                            cr.set_source_surface(surf, 0.0, 0.0).ok();
+                            cr.paint_with_alpha(0.75).ok();
+                            cr.restore().ok();
+                        } else if requested_this_draw < MAX_NEW_THUMB_REQUESTS_PER_CLIP_PER_DRAW {
+                            cache.request(&sample.source_path, sample.sample_time_ns);
+                            requested_this_draw += 1;
+                        }
                     }
                 }
             }
@@ -9069,70 +10954,54 @@ fn draw_clip(
     // ── Waveform for audio clips ───────────────────────────────────────────
     if track.is_audio() && cw > 8.0 {
         wcache.request(&clip.source_path);
-        // Only compute peaks for the visible portion of the clip to avoid
-        // allocating/iterating over tens of thousands of off-screen pixels.
-        let vis_x0 = cx.max(TRACK_LABEL_WIDTH);
-        let vis_x1 = (cx + cw).min(view_width);
-        let vis_px = (vis_x1 - vis_x0).ceil().max(0.0) as usize;
-        if vis_px > 0 {
-            let src_span_ns = clip.source_duration() as f64;
-            let frac0 = ((vis_x0 - cx) / cw).clamp(0.0, 1.0);
-            let frac1 = ((vis_x1 - cx) / cw).clamp(0.0, 1.0);
-            let vis_src_in = clip.source_in + (frac0 * src_span_ns) as u64;
-            let vis_src_out = clip.source_in + (frac1 * src_span_ns) as u64;
-            if let Some(peaks) =
-                wcache.get_peaks(&clip.source_path, vis_src_in, vis_src_out, vis_px)
-            {
-                cr.save().ok();
-                rounded_rect(cr, cx + 1.0, cy + 1.0, cw - 2.0, ch - 2.0, 3.0);
-                cr.clip();
-                let mid = cy + ch / 2.0;
-                cr.set_line_width(1.0);
-                let volumes = compute_per_pixel_volumes(clip, frac0, frac1, vis_px);
-                draw_waveform_batched(cr, &peaks, vis_x0, mid, ch / 2.0 - 2.0, &volumes, 0.85);
-                draw_volume_envelope(cr, &volumes, vis_x0, mid, ch / 2.0 - 2.0);
-                cr.restore().ok();
-            }
+        if let Some(waveform) = visible_waveform_segment(clip, cx, cw, view_width, wcache) {
+            cr.save().ok();
+            rounded_rect(cr, cx + 1.0, cy + 1.0, cw - 2.0, ch - 2.0, 3.0);
+            cr.clip();
+            let mid = cy + ch / 2.0;
+            cr.set_line_width(1.0);
+            let volumes =
+                compute_per_pixel_volumes(clip, waveform.frac0, waveform.frac1, waveform.vis_px);
+            draw_waveform_batched(
+                cr,
+                &waveform.peaks,
+                waveform.vis_x0,
+                mid,
+                ch / 2.0 - 2.0,
+                &volumes,
+                0.85,
+            );
+            draw_volume_envelope(cr, &volumes, waveform.vis_x0, mid, ch / 2.0 - 2.0);
+            cr.restore().ok();
         }
     }
 
     // ── Waveform overlay for video clips (when preference enabled) ────────
     if track.is_video() && st.show_waveform_on_video && cw > 8.0 {
         wcache.request(&clip.source_path);
-        let vis_x0 = cx.max(TRACK_LABEL_WIDTH);
-        let vis_x1 = (cx + cw).min(view_width);
-        let vis_px = (vis_x1 - vis_x0).ceil().max(0.0) as usize;
-        if vis_px > 0 {
-            let src_span_ns = clip.source_duration() as f64;
-            let frac0 = ((vis_x0 - cx) / cw).clamp(0.0, 1.0);
-            let frac1 = ((vis_x1 - cx) / cw).clamp(0.0, 1.0);
-            let vis_src_in = clip.source_in + (frac0 * src_span_ns) as u64;
-            let vis_src_out = clip.source_in + (frac1 * src_span_ns) as u64;
-            if let Some(peaks) =
-                wcache.get_peaks(&clip.source_path, vis_src_in, vis_src_out, vis_px)
-            {
-                let wave_h = (ch * 0.40).max(6.0);
-                let wave_y = cy + ch - wave_h - 1.0;
-                cr.save().ok();
-                rounded_rect(cr, cx + 1.0, wave_y, cw - 2.0, wave_h, 2.0);
-                cr.clip();
-                cr.set_source_rgba(0.0, 0.0, 0.0, 0.45);
-                cr.paint().ok();
-                cr.set_line_width(1.0);
-                let wave_mid = wave_y + wave_h / 2.0;
-                let volumes = compute_per_pixel_volumes(clip, frac0, frac1, vis_px);
-                draw_waveform_batched(
-                    cr,
-                    &peaks,
-                    vis_x0,
-                    wave_mid,
-                    wave_h / 2.0 - 1.0,
-                    &volumes,
-                    0.9,
-                );
-                draw_volume_envelope(cr, &volumes, vis_x0, wave_mid, wave_h / 2.0 - 1.0);
-                cr.restore().ok();
-            }
+        if let Some(waveform) = visible_waveform_segment(clip, cx, cw, view_width, wcache) {
+            let wave_h = (ch * 0.40).max(6.0);
+            let wave_y = cy + ch - wave_h - 1.0;
+            cr.save().ok();
+            rounded_rect(cr, cx + 1.0, wave_y, cw - 2.0, wave_h, 2.0);
+            cr.clip();
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.45);
+            cr.paint().ok();
+            cr.set_line_width(1.0);
+            let wave_mid = wave_y + wave_h / 2.0;
+            let volumes =
+                compute_per_pixel_volumes(clip, waveform.frac0, waveform.frac1, waveform.vis_px);
+            draw_waveform_batched(
+                cr,
+                &waveform.peaks,
+                waveform.vis_x0,
+                wave_mid,
+                wave_h / 2.0 - 1.0,
+                &volumes,
+                0.9,
+            );
+            draw_volume_envelope(cr, &volumes, waveform.vis_x0, wave_mid, wave_h / 2.0 - 1.0);
+            cr.restore().ok();
         }
     }
 
@@ -9205,6 +11074,15 @@ fn draw_clip(
         let has_speed_badge =
             (clip.speed - 1.0).abs() > 0.01 || clip.reverse || !clip.speed_keyframes.is_empty();
         let has_lut_badge = !clip.lut_paths.is_empty();
+        let has_hdr_badge = st.hdr_media_paths.contains(&clip.source_path);
+        // "PROXY" badge: show when the global proxy toggle is on AND a
+        // ready proxy exists for this clip's source. This indicates
+        // the preview is actively playing back the smaller proxy
+        // file rather than the full-resolution original — important
+        // for users reviewing proxy-vs-original output parity.
+        let has_proxy_badge = st.proxy_preview_enabled
+            && !clip.source_path.is_empty()
+            && st.proxy_ready_sources.contains(&clip.source_path);
         let has_missing_badge = clip.kind != crate::model::clip::ClipKind::Title
             && clip.kind != crate::model::clip::ClipKind::Adjustment
             && clip.kind != crate::model::clip::ClipKind::Compound
@@ -9281,6 +11159,41 @@ fn draw_clip(
                 rounded_rect(cr, bx - 2.0, by - 11.0, ext.width() + 4.0, 14.0, 2.0);
                 cr.fill().ok();
                 cr.set_source_rgb(0.4, 0.8, 1.0);
+                let _ = cr.move_to(bx, by);
+                let _ = cr.show_text(badge);
+                badge_right = bx - 8.0;
+            }
+        }
+
+        // HDR badge: small "HDR" indicator when source is detected as HDR
+        if has_hdr_badge && cw > 60.0 {
+            let badge = "HDR";
+            cr.set_font_size(10.0);
+            if let Ok(ext) = cr.text_extents(badge) {
+                let bx = badge_right - ext.width();
+                let by = cy + 14.0;
+                cr.set_source_rgba(0.0, 0.0, 0.0, 0.55);
+                rounded_rect(cr, bx - 2.0, by - 11.0, ext.width() + 4.0, 14.0, 2.0);
+                cr.fill().ok();
+                cr.set_source_rgb(1.0, 0.6, 0.1); // Orange for HDR
+                let _ = cr.move_to(bx, by);
+                let _ = cr.show_text(badge);
+                badge_right = bx - 8.0;
+            }
+        }
+
+        // PROXY badge: shows the preview is resolving to a reduced-
+        // resolution proxy rather than the full-res original.
+        if has_proxy_badge && cw > 110.0 {
+            let badge = "PROXY";
+            cr.set_font_size(10.0);
+            if let Ok(ext) = cr.text_extents(badge) {
+                let bx = badge_right - ext.width();
+                let by = cy + 14.0;
+                cr.set_source_rgba(0.0, 0.0, 0.0, 0.55);
+                rounded_rect(cr, bx - 2.0, by - 11.0, ext.width() + 4.0, 14.0, 2.0);
+                cr.fill().ok();
+                cr.set_source_rgb(0.55, 0.85, 1.0); // Soft blue
                 let _ = cr.move_to(bx, by);
                 let _ = cr.show_text(badge);
                 badge_right = bx - 8.0;
@@ -9400,6 +11313,135 @@ fn collect_keyframe_property_labels_at_local_time(
                 .then_some(*label)
         })
         .collect()
+}
+
+fn draw_clip_with_alpha(
+    cr: &gtk::cairo::Context,
+    view_width: f64,
+    track_y: f64,
+    track_height: f64,
+    clip: &crate::model::clip::Clip,
+    track: &crate::model::track::Track,
+    st: &TimelineState,
+    grouped_peer_highlight_ids: &HashSet<String>,
+    linked_peer_highlight_ids: &HashSet<String>,
+    cache: &mut crate::media::thumb_cache::ThumbnailCache,
+    wcache: &mut crate::media::waveform_cache::WaveformCache,
+    alpha: f64,
+) {
+    cr.push_group();
+    draw_clip(
+        cr,
+        view_width,
+        track_y,
+        track_height,
+        clip,
+        track,
+        st,
+        grouped_peer_highlight_ids,
+        linked_peer_highlight_ids,
+        cache,
+        wcache,
+    );
+    cr.pop_group_to_source().ok();
+    cr.paint_with_alpha(alpha).ok();
+}
+
+fn draw_drag_preview_badge(
+    cr: &gtk::cairo::Context,
+    view_width: f64,
+    track_y: f64,
+    clip: &crate::model::clip::Clip,
+    st: &TimelineState,
+    label: &str,
+) {
+    let left = st.ns_to_x(clip.timeline_start).max(TRACK_LABEL_WIDTH);
+    let right = st.ns_to_x(clip.timeline_end()).min(view_width - 4.0);
+    if right <= left {
+        return;
+    }
+
+    cr.save().ok();
+    cr.select_font_face(
+        "sans",
+        gtk::cairo::FontSlant::Normal,
+        gtk::cairo::FontWeight::Bold,
+    );
+    cr.set_font_size(10.0);
+    let te = cr
+        .text_extents(label)
+        .unwrap_or_else(|_| cr.text_extents("X").unwrap());
+    let pad_x = 6.0;
+    let pad_y = 4.0;
+    let bw = te.width() + pad_x * 2.0;
+    let bh = te.height() + pad_y * 2.0;
+    let anchor_x = (left + right) * 0.5;
+    let min_x = TRACK_LABEL_WIDTH + 4.0;
+    let max_x = (view_width - bw - 4.0).max(min_x);
+    let bx = (anchor_x - bw * 0.5).clamp(min_x, max_x);
+    let by = (track_y - bh - 6.0).max(4.0);
+    rounded_rect(cr, bx, by, bw, bh, 4.0);
+    cr.set_source_rgba(0.08, 0.09, 0.12, 0.92);
+    cr.fill_preserve().ok();
+    cr.set_source_rgba(0.58, 0.76, 1.0, 0.95);
+    cr.set_line_width(1.0);
+    cr.stroke().ok();
+    cr.set_source_rgba(0.98, 0.98, 1.0, 0.98);
+    let tx = bx + pad_x - te.x_bearing();
+    let ty = by + pad_y + te.height();
+    cr.move_to(tx, ty);
+    let _ = cr.show_text(label);
+    cr.restore().ok();
+}
+
+fn draw_drag_preview_overlays(
+    cr: &gtk::cairo::Context,
+    view_width: f64,
+    view_height: f64,
+    track_content_top: f64,
+    effective_scroll: f64,
+    editing_tracks: &[crate::model::track::Track],
+    st: &TimelineState,
+    grouped_peer_highlight_ids: &HashSet<String>,
+    linked_peer_highlight_ids: &HashSet<String>,
+    cache: &mut crate::media::thumb_cache::ThumbnailCache,
+    wcache: &mut crate::media::waveform_cache::WaveformCache,
+) {
+    let active_drag_ids = active_drag_clip_ids(&st.drag_op);
+    if active_drag_ids.is_empty() {
+        return;
+    }
+
+    for (track_idx, track) in editing_tracks.iter().enumerate() {
+        let track_y = track_row_top_in_tracks(editing_tracks, track_idx) + track_content_top
+            - effective_scroll;
+        let track_height = track_row_height(track);
+        if track_y + track_height <= track_content_top || track_y >= view_height {
+            continue;
+        }
+        for clip in &track.clips {
+            if !active_drag_ids.contains(&clip.id) {
+                continue;
+            }
+            draw_clip_with_alpha(
+                cr,
+                view_width,
+                track_y,
+                track_height,
+                clip,
+                track,
+                st,
+                grouped_peer_highlight_ids,
+                linked_peer_highlight_ids,
+                cache,
+                wcache,
+                0.58,
+            );
+            if let Some(label) = drag_preview_badge_text(&st.drag_op, clip) {
+                draw_drag_preview_badge(cr, view_width, track_y, clip, st, &label);
+            }
+        }
+    }
 }
 
 fn collect_keyframe_local_times_in_range(
@@ -9605,6 +11647,57 @@ fn clip_fill_color(clip: &Clip, track_kind: TrackKind) -> (f64, f64, f64) {
     }
 }
 
+fn draw_timeline_empty_state(
+    cr: &gtk::cairo::Context,
+    width: f64,
+    height: f64,
+    track_content_top: f64,
+) {
+    let available_w = (width - TRACK_LABEL_WIDTH - 48.0).max(0.0);
+    let available_h = (height - track_content_top - 32.0).max(0.0);
+    if available_w < 220.0 || available_h < 84.0 {
+        return;
+    }
+
+    let box_w = available_w.min(560.0);
+    let box_h = available_h.clamp(96.0, 132.0);
+    let box_x = TRACK_LABEL_WIDTH + ((available_w - box_w) / 2.0).max(24.0);
+    let box_y = track_content_top + ((available_h - box_h) / 2.0).max(16.0);
+
+    cr.save().ok();
+    rounded_rect(cr, box_x, box_y, box_w, box_h, 10.0);
+    cr.set_source_rgba(0.18, 0.21, 0.28, 0.82);
+    cr.fill_preserve().ok();
+    cr.set_source_rgba(0.55, 0.72, 0.96, 0.88);
+    cr.set_line_width(1.6);
+    cr.set_dash(&[10.0, 7.0], 0.0);
+    cr.stroke().ok();
+    cr.set_dash(&[], 0.0);
+
+    cr.select_font_face(
+        "sans",
+        gtk::cairo::FontSlant::Normal,
+        gtk::cairo::FontWeight::Bold,
+    );
+    cr.set_font_size(18.0);
+    cr.set_source_rgb(0.95, 0.97, 1.0);
+    let _ = cr.move_to(box_x + 22.0, box_y + 32.0);
+    let _ = cr.show_text("Drop media here");
+
+    cr.select_font_face(
+        "sans",
+        gtk::cairo::FontSlant::Normal,
+        gtk::cairo::FontWeight::Normal,
+    );
+    cr.set_font_size(12.0);
+    cr.set_source_rgba(0.83, 0.86, 0.92, 0.96);
+    let _ = cr.move_to(box_x + 22.0, box_y + 58.0);
+    let _ = cr.show_text("Drag clips from Media Library or your file manager onto a track.");
+    let _ = cr.move_to(box_x + 22.0, box_y + 78.0);
+    let _ = cr.show_text("Import video, audio, or images in Media Library to get started.");
+    cr.restore().ok();
+}
+
 fn rounded_rect(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
     cr.new_sub_path();
     cr.arc(
@@ -9624,6 +11717,145 @@ fn rounded_rect(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64
         std::f64::consts::PI,
     );
     cr.close_path();
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TimelineThumbnailSample {
+    source_path: String,
+    sample_time_ns: u64,
+}
+
+fn timeline_clip_supports_thumbnails(clip: &Clip) -> bool {
+    matches!(
+        clip.kind,
+        crate::model::clip::ClipKind::Video
+            | crate::model::clip::ClipKind::Image
+            | crate::model::clip::ClipKind::Compound
+    )
+}
+
+fn clip_local_sample_time(duration_ns: u64, nominal_local_ns: u64) -> u64 {
+    if duration_ns <= 1 {
+        0
+    } else {
+        nominal_local_ns.min(duration_ns - 1)
+    }
+}
+
+fn timeline_thumbnail_sample_for_clip(
+    clip: &Clip,
+    sample_local_ns: u64,
+) -> Option<TimelineThumbnailSample> {
+    match clip.kind {
+        crate::model::clip::ClipKind::Compound => {
+            compound_thumbnail_sample_for_clip(clip, sample_local_ns, 0)
+        }
+        crate::model::clip::ClipKind::Video | crate::model::clip::ClipKind::Image => {
+            timeline_thumbnail_sample_for_source_clip(clip, sample_local_ns)
+        }
+        _ => None,
+    }
+}
+
+fn timeline_thumbnail_sample_for_source_clip(
+    clip: &Clip,
+    sample_local_ns: u64,
+) -> Option<TimelineThumbnailSample> {
+    if clip.source_path.trim().is_empty() {
+        return None;
+    }
+    let duration_ns = clip.duration();
+    if duration_ns == 0 {
+        return None;
+    }
+    let sample_local_ns = clip_local_sample_time(duration_ns, sample_local_ns);
+    let sample_time_ns = if clip.kind == crate::model::clip::ClipKind::Image && !clip.animated_svg {
+        0
+    } else {
+        let src_span = clip.source_duration();
+        let src_offset = if src_span <= 1 {
+            0
+        } else {
+            ((sample_local_ns as f64 / duration_ns as f64) * src_span as f64) as u64
+        };
+        clip.source_in + src_offset.min(src_span.saturating_sub(1))
+    };
+    Some(TimelineThumbnailSample {
+        source_path: clip.source_path.clone(),
+        sample_time_ns,
+    })
+}
+
+fn compound_thumbnail_sample_for_clip(
+    compound: &Clip,
+    sample_local_ns: u64,
+    depth: usize,
+) -> Option<TimelineThumbnailSample> {
+    if compound.kind != crate::model::clip::ClipKind::Compound || depth >= 16 {
+        return None;
+    }
+    let internal_tracks = compound.compound_tracks.as_ref()?;
+    for logical_idx in visual_order(internal_tracks) {
+        let track = &internal_tracks[logical_idx];
+        if !track.is_video() {
+            continue;
+        }
+        for inner_clip in &track.clips {
+            let Some(rebased) = crate::model::compound_flattening::rebase_clip_from_compound_window(
+                inner_clip,
+                0,
+                compound.source_in,
+                compound.source_out,
+            ) else {
+                continue;
+            };
+            let rebased_end = rebased.timeline_start.saturating_add(rebased.duration());
+            if sample_local_ns < rebased.timeline_start || sample_local_ns >= rebased_end {
+                continue;
+            }
+            let child_local_ns = sample_local_ns.saturating_sub(rebased.timeline_start);
+            if let Some(sample) = timeline_thumbnail_sample_for_clip(&rebased, child_local_ns) {
+                return Some(sample);
+            }
+        }
+    }
+    None
+}
+
+struct VisibleWaveformSegment {
+    peaks: Vec<f32>,
+    vis_x0: f64,
+    vis_px: usize,
+    frac0: f64,
+    frac1: f64,
+}
+
+fn visible_waveform_segment(
+    clip: &Clip,
+    cx: f64,
+    cw: f64,
+    view_width: f64,
+    wcache: &crate::media::waveform_cache::WaveformCache,
+) -> Option<VisibleWaveformSegment> {
+    let vis_x0 = cx.max(TRACK_LABEL_WIDTH);
+    let vis_x1 = (cx + cw).min(view_width);
+    let vis_px = (vis_x1 - vis_x0).ceil().max(0.0) as usize;
+    if vis_px == 0 {
+        return None;
+    }
+    let src_span_ns = clip.source_duration() as f64;
+    let frac0 = ((vis_x0 - cx) / cw).clamp(0.0, 1.0);
+    let frac1 = ((vis_x1 - cx) / cw).clamp(0.0, 1.0);
+    let vis_src_in = clip.source_in + (frac0 * src_span_ns) as u64;
+    let vis_src_out = clip.source_in + (frac1 * src_span_ns) as u64;
+    let peaks = wcache.get_peaks(&clip.source_path, vis_src_in, vis_src_out, vis_px)?;
+    Some(VisibleWaveformSegment {
+        peaks,
+        vis_x0,
+        vis_px,
+        frac0,
+        frac1,
+    })
 }
 
 /// Map a normalized peak amplitude (0.0–1.0) to an RGB color for waveform display.
@@ -10041,6 +12273,7 @@ mod tests {
     use super::*;
     use crate::model::clip::{Clip, ClipKind, KeyframeInterpolation, NumericKeyframe};
     use crate::model::project::Project;
+    use crate::model::track::Track;
     use std::cell::RefCell;
     use std::collections::{HashMap, HashSet};
     use std::rc::Rc;
@@ -10109,6 +12342,80 @@ mod tests {
         )
     }
 
+    #[test]
+    fn track_height_preset_for_height_snaps_to_existing_presets() {
+        assert_eq!(
+            track_height_preset_for_height(TRACK_HEIGHT_SMALL),
+            crate::model::track::TrackHeightPreset::Small
+        );
+        assert_eq!(
+            track_height_preset_for_height((TRACK_HEIGHT_SMALL + TRACK_HEIGHT) * 0.5),
+            crate::model::track::TrackHeightPreset::Small
+        );
+        assert_eq!(
+            track_height_preset_for_height(TRACK_HEIGHT),
+            crate::model::track::TrackHeightPreset::Medium
+        );
+        assert_eq!(
+            track_height_preset_for_height(TRACK_HEIGHT_LARGE),
+            crate::model::track::TrackHeightPreset::Large
+        );
+    }
+
+    #[test]
+    fn track_resize_hit_test_uses_row_boundaries() {
+        let mut video = Track::new_video("Video 1");
+        video.height_preset = crate::model::track::TrackHeightPreset::Large;
+        let mut audio = Track::new_audio("Audio 1");
+        audio.height_preset = crate::model::track::TrackHeightPreset::Small;
+        let tracks = vec![video, audio];
+
+        assert_eq!(
+            track_resize_hit_track_index_in_tracks(&tracks, 84.0),
+            Some(0)
+        );
+        assert_eq!(
+            track_resize_hit_track_index_in_tracks(&tracks, 128.0),
+            Some(1)
+        );
+        assert_eq!(track_resize_hit_track_index_in_tracks(&tracks, 24.0), None);
+    }
+
+    #[test]
+    fn active_drag_clip_ids_covers_move_and_trim_modes() {
+        let move_ids = active_drag_clip_ids(&DragOp::MoveClip {
+            clip_id: "primary".to_string(),
+            original_track_id: "track-a".to_string(),
+            current_track_id: "track-a".to_string(),
+            original_start: 0,
+            clip_offset_ns: 0,
+            original_track_clips: Vec::new(),
+            move_clip_ids: vec!["primary".to_string(), "linked".to_string()],
+            original_member_starts: vec![("primary".to_string(), 0), ("linked".to_string(), 10)],
+            original_tracks: Vec::new(),
+        });
+        assert!(move_ids.contains("primary"));
+        assert!(move_ids.contains("linked"));
+
+        let trim_ids = active_drag_clip_ids(&DragOp::TrimIn {
+            clip_id: "trimmed".to_string(),
+            track_id: "track-a".to_string(),
+            original_source_in: 0,
+            original_timeline_start: 0,
+            original_track_clips: Vec::new(),
+        });
+        assert_eq!(trim_ids.len(), 1);
+        assert!(trim_ids.contains("trimmed"));
+    }
+
+    #[test]
+    fn drag_preview_range_label_formats_timeline_in_and_out() {
+        assert_eq!(
+            drag_preview_range_label(1_200_000_000, 3_400_000_000),
+            "In 0:01.2  Out 0:03.4"
+        );
+    }
+
     fn timeline_state_with_audio_clips(
         spec: &[(&str, u64, u64)],
     ) -> (TimelineState, String, Vec<String>) {
@@ -10134,18 +12441,61 @@ mod tests {
     }
 
     #[test]
-    fn ruler_hit_test_tracks_vertical_scroll_offset() {
+    fn hit_test_resolves_top_of_first_track_not_the_ruler() {
+        // Regression: the ruler lives in a separate DrawingArea, so
+        // the main timeline area's y=0 is the top of track 0. A
+        // click at y<RULER_HEIGHT must still resolve to a clip on
+        // track 0, not fall through to a "ruler" code path that
+        // moves the playhead. (The legacy `ruler_hit_test` guard
+        // inside the timeline area's click handler was stealing the
+        // top ~24 px of the first row before this fix.)
+        let (st, _track_id, ids) = timeline_state_with_video_clips(&[("A", 0)]);
+        {
+            let mut proj = st.project.borrow_mut();
+            for t in &mut proj.tracks {
+                for c in &mut t.clips {
+                    if c.id == "A" {
+                        // A 200-pixel-wide clip starting at x=50 at default
+                        // pixels_per_second — values are incidental; we only
+                        // need the clip to span the x we'll hit-test below.
+                        c.source_out = c.source_in + 10_000_000_000;
+                    }
+                }
+            }
+        }
+        // Pixels-per-second default is something like 50 in test state;
+        // anchor the probe x to clip A's range unconditionally by
+        // converting through the timeline's own helpers.
+        let probe_ns = 2_000_000_000u64;
+        let probe_x = st.ns_to_x(probe_ns) + 4.0;
+        // Sample several y values below RULER_HEIGHT (inside the top
+        // of track 0's visual band) and confirm each resolves to the
+        // same clip.
+        for &y in &[1.0, 5.0, 12.0, RULER_HEIGHT - 0.5] {
+            let hit = st.hit_test(probe_x, y);
+            assert!(
+                hit.is_some(),
+                "click at y={y} (below RULER_HEIGHT={RULER_HEIGHT}) must hit the top of track 0, not the ruler"
+            );
+            assert_eq!(
+                hit.unwrap().clip_id,
+                ids[0],
+                "hit_test should resolve to clip A"
+            );
+        }
+    }
+
+    #[test]
+    fn ruler_hit_test_stays_in_fixed_header_band() {
         let mut state = TimelineState::new(Rc::new(RefCell::new(Project::new("Ruler tests"))));
         assert!(ruler_hit_test(&state, 0.0));
         assert!(ruler_hit_test(&state, RULER_HEIGHT - 0.5));
         assert!(!ruler_hit_test(&state, RULER_HEIGHT));
 
         state.vertical_scroll_offset = 180.0;
-        assert_eq!(pinned_ruler_top(&state), 180.0);
-        assert!(!ruler_hit_test(&state, 179.9));
-        assert!(ruler_hit_test(&state, 180.0));
-        assert!(ruler_hit_test(&state, 203.9));
-        assert!(!ruler_hit_test(&state, 204.0));
+        assert!(ruler_hit_test(&state, 0.0));
+        assert!(ruler_hit_test(&state, RULER_HEIGHT - 0.5));
+        assert!(!ruler_hit_test(&state, RULER_HEIGHT));
     }
 
     fn timeline_state_with_through_edit_track() -> (TimelineState, String) {
@@ -10614,7 +12964,10 @@ mod tests {
         assert!(actionability.freeze_frame);
         assert!(!actionability.link_selected);
         assert!(!actionability.unlink_selected);
-        assert!(!actionability.align_grouped);
+        // Single-clip selection hides the Sync-by-Timecode entry
+        // entirely — it requires 2+ for the button to even appear.
+        assert!(!actionability.sync_timecode_visible);
+        assert!(!actionability.sync_timecode_actionable);
         assert!(!actionability.sync_audio);
         assert!(actionability.remove_silent_parts);
         assert!(actionability.any());
@@ -10635,7 +12988,13 @@ mod tests {
         assert!(!actionability.freeze_frame);
         assert!(actionability.link_selected);
         assert!(!actionability.unlink_selected);
-        assert!(!actionability.align_grouped);
+        // 2+ clips selected without decoded timecode → the Sync by
+        // Timecode entry is visible (so the user discovers it) but
+        // disabled (no actionable TC on the members).
+        assert!(actionability.sync_timecode_visible);
+        assert!(!actionability.sync_timecode_actionable);
+        assert_eq!(actionability.sync_timecode_missing_count, 2);
+        assert_eq!(actionability.sync_timecode_total_count, 2);
         assert!(actionability.sync_audio);
         assert!(!actionability.remove_silent_parts);
         assert!(actionability.any());
@@ -10699,6 +13058,326 @@ mod tests {
             .collect();
         assert_eq!(starts.get(&ids_b[0]), Some(&4_000_000_000));
         assert_eq!(starts.get(&ids_b[1]), Some(&6_000_000_000));
+    }
+
+    #[test]
+    fn sync_selected_clips_by_timecode_aligns_ungrouped_selection() {
+        // Two clips on different tracks, NO shared group_id. The old
+        // grouped-align helper would've refused; the new sync helper
+        // aligns them.
+        let (mut st, track_a, track_b, ids_a, ids_b) = timeline_state_with_two_video_tracks(
+            &[("A", 0)],
+            &[("X", 3_000_000_000)],
+        );
+        {
+            let mut proj = st.project.borrow_mut();
+            for track in &mut proj.tracks {
+                for clip in &mut track.clips {
+                    if clip.id == ids_a[0] {
+                        clip.source_timecode_base_ns = Some(10_000_000_000);
+                    } else if clip.id == ids_b[0] {
+                        clip.source_timecode_base_ns = Some(12_500_000_000);
+                    }
+                }
+            }
+        }
+        let mut selected = HashSet::new();
+        selected.insert(ids_a[0].clone());
+        selected.insert(ids_b[0].clone());
+        st.set_selection_with_primary(ids_a[0].clone(), track_a.clone(), selected);
+
+        let (visible, with_tc, total) = st.can_sync_selected_clips_by_timecode();
+        assert!(visible);
+        assert_eq!(with_tc, 2);
+        assert_eq!(total, 2);
+
+        assert!(st.sync_selected_clips_by_timecode());
+
+        // Anchor is ids_a[0] (primary selected). Its timeline_start stays at 0.
+        // ids_b[0] shifts to 0 + (12.5s − 10s) = 2.5s.
+        let proj = st.project.borrow();
+        let starts: HashMap<String, u64> = proj
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .map(|c| (c.id.clone(), c.timeline_start))
+            .collect();
+        assert_eq!(starts.get(&ids_a[0]), Some(&0u64));
+        assert_eq!(starts.get(&ids_b[0]), Some(&2_500_000_000u64));
+        drop(proj);
+        let _ = track_b;
+    }
+
+    #[test]
+    fn sync_selected_clips_by_timecode_picks_earliest_tc_when_no_primary_has_tc() {
+        let (mut st, track_id, ids) = timeline_state_with_video_clips(&[
+            ("A", 5_000_000_000),
+            ("B", 10_000_000_000),
+            ("C", 15_000_000_000),
+        ]);
+        {
+            let mut proj = st.project.borrow_mut();
+            for track in &mut proj.tracks {
+                for clip in &mut track.clips {
+                    match clip.id.as_str() {
+                        "A" => clip.source_timecode_base_ns = Some(30_000_000_000),
+                        "B" => clip.source_timecode_base_ns = Some(10_000_000_000),
+                        "C" => clip.source_timecode_base_ns = Some(50_000_000_000),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        // Clear primary selected so anchor falls back to earliest TC.
+        // Set a 3-way multi-selection but make primary a non-existent id.
+        let mut selected = HashSet::new();
+        for id in &ids {
+            selected.insert(id.clone());
+        }
+        // Primary = "A" (its TC is 30s, highest — so it shouldn't win
+        // when we rely on the earliest-TC fallback. But primary DOES
+        // take precedence if present. To exercise the fallback, clear
+        // primary by calling the set helper with a dummy id then
+        // overwriting primary_clip_id to None.
+        st.set_selection_with_primary(ids[0].clone(), track_id.clone(), selected);
+        st.selected_clip_id = None;
+
+        assert!(st.sync_selected_clips_by_timecode());
+
+        // Earliest TC = B at 10s, its timeline_start was 10s. A shifts
+        // from TC 30s → +20s from B → new start 30s. C at TC 50s →
+        // +40s from B → new start 50s.
+        let proj = st.project.borrow();
+        let starts: HashMap<String, u64> = proj
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .map(|c| (c.id.clone(), c.timeline_start))
+            .collect();
+        assert_eq!(starts.get("B"), Some(&10_000_000_000u64));
+        assert_eq!(starts.get("A"), Some(&30_000_000_000u64));
+        assert_eq!(starts.get("C"), Some(&50_000_000_000u64));
+    }
+
+    #[test]
+    fn sync_selected_clips_by_timecode_respects_primary_selected_as_anchor() {
+        let (mut st, track_id, ids) = timeline_state_with_video_clips(&[
+            ("A", 2_000_000_000),
+            ("B", 8_000_000_000),
+        ]);
+        {
+            let mut proj = st.project.borrow_mut();
+            for track in &mut proj.tracks {
+                for clip in &mut track.clips {
+                    match clip.id.as_str() {
+                        "A" => clip.source_timecode_base_ns = Some(50_000_000_000),
+                        "B" => clip.source_timecode_base_ns = Some(10_000_000_000),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let mut selected = HashSet::new();
+        selected.insert(ids[0].clone());
+        selected.insert(ids[1].clone());
+        // B is primary even though its TC is earliest — primary wins.
+        st.set_selection_with_primary(ids[1].clone(), track_id.clone(), selected);
+
+        assert!(st.sync_selected_clips_by_timecode());
+
+        // B stays at its original timeline_start (8s). A shifts so
+        // that (A.new - B.anchor) == (A.tc - B.tc) = 40s → A.new = 48s.
+        let proj = st.project.borrow();
+        let starts: HashMap<String, u64> = proj
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .map(|c| (c.id.clone(), c.timeline_start))
+            .collect();
+        assert_eq!(starts.get("B"), Some(&8_000_000_000u64));
+        assert_eq!(starts.get("A"), Some(&48_000_000_000u64));
+    }
+
+    #[test]
+    fn sync_selected_clips_by_timecode_clamps_to_zero_when_math_goes_negative() {
+        // Anchor starts at 0, but A's TC is LATER than anchor's TC by
+        // 5s. Shifting A forward alone works fine. Test the negative-
+        // shift case: B has EARLIER TC than A, and A is primary. B
+        // would want to sit at A.start - (A.tc - B.tc) = 0 - 5s →
+        // negative. Clamp-to-zero shifts the whole set right by 5s.
+        let (mut st, track_id, ids) = timeline_state_with_video_clips(&[
+            ("A", 0),
+            ("B", 10_000_000_000),
+        ]);
+        {
+            let mut proj = st.project.borrow_mut();
+            for track in &mut proj.tracks {
+                for clip in &mut track.clips {
+                    match clip.id.as_str() {
+                        "A" => clip.source_timecode_base_ns = Some(20_000_000_000),
+                        "B" => clip.source_timecode_base_ns = Some(15_000_000_000),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let mut selected = HashSet::new();
+        selected.insert(ids[0].clone());
+        selected.insert(ids[1].clone());
+        st.set_selection_with_primary(ids[0].clone(), track_id.clone(), selected);
+
+        assert!(st.sync_selected_clips_by_timecode());
+
+        // Without clamp: A stays at 0, B goes to 0 - 5s (negative).
+        // With clamp: whole set shifts right by 5s. A lands at 5s,
+        // B lands at 0s.
+        let proj = st.project.borrow();
+        let starts: HashMap<String, u64> = proj
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .map(|c| (c.id.clone(), c.timeline_start))
+            .collect();
+        assert_eq!(starts.get("A"), Some(&5_000_000_000u64));
+        assert_eq!(starts.get("B"), Some(&0u64));
+    }
+
+    #[test]
+    fn can_sync_selected_clips_by_timecode_visible_but_not_actionable_when_tc_missing() {
+        let (mut st, track_id, ids) = timeline_state_with_video_clips(&[
+            ("A", 0),
+            ("B", 5_000_000_000),
+        ]);
+        {
+            let mut proj = st.project.borrow_mut();
+            for track in &mut proj.tracks {
+                for clip in &mut track.clips {
+                    if clip.id == "A" {
+                        clip.source_timecode_base_ns = Some(10_000_000_000);
+                    }
+                    // B deliberately missing TC.
+                }
+            }
+        }
+        let mut selected = HashSet::new();
+        selected.insert(ids[0].clone());
+        selected.insert(ids[1].clone());
+        st.set_selection_with_primary(ids[0].clone(), track_id, selected);
+
+        let (visible, with_tc, total) = st.can_sync_selected_clips_by_timecode();
+        assert!(visible, "2+ selected → entry visible");
+        assert_eq!(with_tc, 1, "only A has decoded timecode");
+        assert_eq!(total, 2);
+
+        // Sync call is a no-op when not every member has TC (the helper
+        // silently skips members without TC; with only one anchor+no
+        // targets the per-track diff is empty).
+        // The UI-layer gate already blocks this, but confirm the
+        // helper is also safe if called directly.
+        let _ = st.sync_selected_clips_by_timecode();
+    }
+
+    #[test]
+    fn can_sync_selected_clips_by_timecode_hidden_for_single_selection() {
+        let (mut st, track_id, ids) = timeline_state_with_video_clips(&[("A", 0)]);
+        {
+            let mut proj = st.project.borrow_mut();
+            for track in &mut proj.tracks {
+                for clip in &mut track.clips {
+                    clip.source_timecode_base_ns = Some(10_000_000_000);
+                }
+            }
+        }
+        st.set_single_clip_selection(ids[0].clone(), track_id);
+
+        let (visible, _, total) = st.can_sync_selected_clips_by_timecode();
+        assert!(!visible, "single selection hides the entry entirely");
+        assert_eq!(total, 1);
+    }
+
+    #[test]
+    fn sync_selected_clips_by_timecode_still_works_for_grouped_selection() {
+        // Regression: grouped multi-selection is a subset of plain
+        // multi-selection, so the new helper must still handle it.
+        let (mut st, _track_a, track_b, _ids_a, ids_b) = timeline_state_with_two_video_tracks(
+            &[("A", 0)],
+            &[("X", 4_000_000_000), ("Y", 9_000_000_000)],
+        );
+        {
+            let mut proj = st.project.borrow_mut();
+            let group_id = "g1".to_string();
+            if let Some(track) = proj.tracks.iter_mut().find(|t| t.id == track_b) {
+                for clip in &mut track.clips {
+                    if clip.id == ids_b[0] {
+                        clip.group_id = Some(group_id.clone());
+                        clip.source_timecode_base_ns = Some(10_000_000_000);
+                    } else if clip.id == ids_b[1] {
+                        clip.group_id = Some(group_id.clone());
+                        clip.source_timecode_base_ns = Some(12_000_000_000);
+                    }
+                }
+            }
+        }
+        // select_single expands to linked members — here we just
+        // manually build a 2-clip selection so the test doesn't
+        // depend on group-expansion behavior.
+        let mut selected = HashSet::new();
+        selected.insert(ids_b[0].clone());
+        selected.insert(ids_b[1].clone());
+        st.set_selection_with_primary(ids_b[0].clone(), track_b.clone(), selected);
+
+        assert!(st.sync_selected_clips_by_timecode());
+
+        // Same expected result as the legacy grouped test: anchor
+        // stays at its timeline_start; other shifts by the TC delta.
+        let proj = st.project.borrow();
+        let starts: HashMap<String, u64> = proj
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .filter(|c| c.id == ids_b[0] || c.id == ids_b[1])
+            .map(|c| (c.id.clone(), c.timeline_start))
+            .collect();
+        assert_eq!(starts.get(&ids_b[0]), Some(&4_000_000_000u64));
+        assert_eq!(starts.get(&ids_b[1]), Some(&6_000_000_000u64));
+    }
+
+    #[test]
+    fn sync_selected_clips_by_timecode_is_a_single_undo() {
+        let (mut st, track_id, ids) = timeline_state_with_video_clips(&[
+            ("A", 0),
+            ("B", 7_000_000_000),
+        ]);
+        {
+            let mut proj = st.project.borrow_mut();
+            for track in &mut proj.tracks {
+                for clip in &mut track.clips {
+                    match clip.id.as_str() {
+                        "A" => clip.source_timecode_base_ns = Some(10_000_000_000),
+                        "B" => clip.source_timecode_base_ns = Some(13_500_000_000),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let mut selected = HashSet::new();
+        selected.insert(ids[0].clone());
+        selected.insert(ids[1].clone());
+        st.set_selection_with_primary(ids[0].clone(), track_id, selected);
+
+        assert!(st.sync_selected_clips_by_timecode());
+        // One Ctrl+Z reverts BOTH clips back to their original
+        // timeline_start values, not just one.
+        assert!(st.undo());
+        let proj = st.project.borrow();
+        let starts: HashMap<String, u64> = proj
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .map(|c| (c.id.clone(), c.timeline_start))
+            .collect();
+        assert_eq!(starts.get("A"), Some(&0u64));
+        assert_eq!(starts.get("B"), Some(&7_000_000_000u64));
     }
 
     #[test]
@@ -10974,6 +13653,38 @@ mod tests {
     }
 
     #[test]
+    fn compound_thumbnail_uses_top_visible_video_child() {
+        let mut lower = Track::new_video("V1");
+        lower.add_clip(Clip::new("lower.mov", 8_000_000_000, 0, ClipKind::Video));
+        let mut upper = Track::new_video("V2");
+        upper.add_clip(Clip::new("upper.mov", 8_000_000_000, 0, ClipKind::Video));
+
+        let compound = Clip::new_compound(0, vec![lower, upper]);
+        let sample = compound_thumbnail_sample_for_clip(&compound, 2_000_000_000, 0)
+            .expect("top child thumbnail sample");
+
+        assert_eq!(sample.source_path, "upper.mov");
+        assert_eq!(sample.sample_time_ns, 2_000_000_000);
+    }
+
+    #[test]
+    fn compound_thumbnail_skips_title_overlay_and_falls_back_to_video() {
+        let mut lower = Track::new_video("V1");
+        lower.add_clip(Clip::new("base.mov", 8_000_000_000, 0, ClipKind::Video));
+        let mut upper = Track::new_video("V2");
+        let mut title = Clip::new("", 8_000_000_000, 0, ClipKind::Title);
+        title.label = "Title".to_string();
+        upper.add_clip(title);
+
+        let compound = Clip::new_compound(0, vec![lower, upper]);
+        let sample = compound_thumbnail_sample_for_clip(&compound, 1_000_000_000, 0)
+            .expect("fallback thumbnail sample");
+
+        assert_eq!(sample.source_path, "base.mov");
+        assert_eq!(sample.sample_time_ns, 1_000_000_000);
+    }
+
+    #[test]
     fn toggle_clip_selection_clears_removed_link_anchor() {
         let (mut st, track_a, track_b, ids_a, ids_b) = timeline_state_with_two_video_tracks(
             &[("A", 0)],
@@ -11174,6 +13885,42 @@ mod tests {
         assert!(!peers.contains(&ids_b[0]));
         assert!(!peers.contains(&ids_b[2]));
         assert!(!peers.contains(&ids_b[3]));
+    }
+
+    #[test]
+    fn set_render_replace_for_all_selected_applies_batch_to_multi_selection() {
+        let (mut st, _track_id, ids) = timeline_state_with_video_clips(&[
+            ("A", 0),
+            ("B", 1_000_000_000),
+            ("C", 2_000_000_000),
+        ]);
+        st.select_all_clips();
+        let changed = st.set_render_replace_for_all_selected(true);
+        assert!(changed);
+        {
+            let proj = st.project.borrow();
+            for id in &ids {
+                let clip = proj.clip_ref(id).expect("clip exists");
+                assert!(clip.render_replace_enabled, "{id} should be enabled");
+            }
+        }
+        // One Ctrl+Z reverts the whole batch.
+        st.undo();
+        let proj = st.project.borrow();
+        for id in &ids {
+            let clip = proj.clip_ref(id).expect("clip exists");
+            assert!(!clip.render_replace_enabled, "{id} should be reverted");
+        }
+    }
+
+    #[test]
+    fn set_render_replace_for_all_selected_is_noop_when_empty() {
+        let (mut st, _track_id, _ids) =
+            timeline_state_with_video_clips(&[("A", 0), ("B", 1_000_000_000)]);
+        // Clear any selection that select_all might have set.
+        let changed = st.set_render_replace_for_all_selected(true);
+        // No primary selection either → function returns false.
+        assert!(!changed);
     }
 
     #[test]

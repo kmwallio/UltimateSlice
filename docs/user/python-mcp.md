@@ -118,6 +118,22 @@ Useful playback-tuning toggles:
 
 `collect_project_files` leaves the current project paths unchanged by default; set `use_collected_locations_on_next_save` to `true` when you want the next project save/export to use the copied media paths.
 
+## Project Health MCP examples
+
+Get the current offline-media and cache snapshot:
+
+```bash
+python3 tools/mcp_call.py get_project_health '{}'
+```
+
+Clear one generated cache family:
+
+```bash
+python3 tools/mcp_call.py cleanup_project_cache '{"cache":"prerender"}'
+```
+
+Supported `cache` values: `proxy_local`, `proxy_sidecars`, `prerender`, `background_removal`, `frame_interpolation`, `voice_enhancement`, `clip_embeddings`, `auto_tags`.
+
 ## Workspace layout MCP examples
 
 List the live arrangement plus saved layouts:

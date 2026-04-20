@@ -3,11 +3,11 @@ use crate::media::proxy_cache::ProxyCache;
 use crate::media::thumb_cache::ThumbnailCache;
 use crate::model::clip::ClipKind;
 use crate::model::media_library::{
-    media_display_name, media_frame_rate_value, media_keyword_summary, media_matches_filters,
-    media_rating_text, media_search_match, media_transcript_state_key, non_file_clip_kind_text,
-    normalized_media_text, FrameRateFilter, MediaCollection, MediaFilterCriteria, MediaItem,
-    MediaKindFilter, MediaLibrary, MediaRating, MediaRatingFilter, MediaSearchField,
-    ResolutionFilter,
+    media_auto_tag_state_key, media_auto_tag_summary, media_display_name, media_frame_rate_value,
+    media_keyword_summary, media_matches_filters, media_rating_text, media_search_match,
+    media_transcript_state_key, non_file_clip_kind_text, normalized_media_text, FrameRateFilter,
+    MediaCollection, MediaFilterCriteria, MediaItem, MediaKindFilter, MediaLibrary, MediaRating,
+    MediaRatingFilter, MediaSearchField, ResolutionFilter,
 };
 use crate::ui_state::PreferencesState;
 use gdk4;
@@ -163,15 +163,49 @@ fn refresh_collection_picker(
 /// * `preferences_state`  – shared preferences; read for proxy mode/scale
 pub fn build_media_browser(
     library: Rc<RefCell<MediaLibrary>>,
-    on_source_selected: Rc<dyn Fn(String, u64)>,
+    on_source_selected: Rc<dyn Fn(String, u64, Option<(u64, u64)>)>,
+    on_reverse_match_frame: Rc<dyn Fn(String)>,
     on_relink_media: Rc<dyn Fn()>,
     on_create_multicam_from_browser: Rc<dyn Fn(Vec<String>)>,
     on_library_changed: Rc<dyn Fn()>,
+    // Given a set of source paths about to be removed from the
+    // library, return how many timeline clips reference them. Used
+    // to surface a "N timeline clips will go offline" warning in
+    // the Remove-from-Library confirmation dialog. Implemented in
+    // window.rs by walking Project::tracks recursively (including
+    // compound_tracks).
+    on_check_library_usage: Rc<dyn Fn(&[String]) -> usize>,
+    // Kick off Convert LTC Audio to Timecode for a library item.
+    // Runs the decode on a background thread (same pipeline as the
+    // timeline-clip action) and populates source_timecode_base_ns
+    // on the matching MediaItem + any timeline clips using the
+    // same source when it finishes.
+    on_convert_library_ltc: Rc<dyn Fn(String)>,
+    // Create a subclip from the source monitor's current In/Out
+    // marks against the given parent library item id. Invoked from
+    // the right-click menu when the user has exactly one top-level
+    // item selected that matches the source-monitor path AND the
+    // marks are valid. The callback is responsible for reading
+    // SourceMarks, constructing a MediaItem via
+    // MediaItem::new_subclip, pushing it onto the library, and
+    // firing on_library_changed.
+    on_create_subclip_from_marks: Rc<dyn Fn(String)>,
+    // Place the given library source paths on the timeline at
+    // positions aligned by their decoded source timecode. Invoked
+    // from a dedicated button shown only when 2+ library items are
+    // selected and all of them have decoded TC. Implemented in
+    // window.rs by computing anchor = earliest TC, then
+    // new_timeline_start = (item.tc - anchor.tc) for each.
+    on_place_aligned_by_timecode: Rc<dyn Fn(Vec<String>)>,
     proxy_cache: Rc<RefCell<ProxyCache>>,
     preferences_state: Rc<RefCell<PreferencesState>>,
 ) -> (GBox, Rc<dyn Fn()>, Rc<dyn Fn()>) {
     let vbox = GBox::new(Orientation::Vertical, 4);
     vbox.set_width_request(240);
+    let has_library_content = {
+        let lib = library.borrow();
+        !lib.items.is_empty() || !lib.bins.is_empty()
+    };
 
     // Header row: "Media Library" title + compact "+" button (shown when library is non-empty).
     let header_row = GBox::new(Orientation::Horizontal, 0);
@@ -195,7 +229,7 @@ pub fn build_media_browser(
     let header_import_btn = Button::from_icon_name("list-add-symbolic");
     header_import_btn.add_css_class("browser-header-import");
     header_import_btn.set_tooltip_text(Some("Import Media…"));
-    header_import_btn.set_visible(!library.borrow().items.is_empty());
+    header_import_btn.set_visible(has_library_content);
     header_row.append(&header_import_btn);
 
     let header_relink_btn = Button::with_label("Relink…");
@@ -228,7 +262,7 @@ pub fn build_media_browser(
     filter_box.set_margin_end(8);
     filter_box.set_margin_bottom(2);
     filter_box.add_css_class("media-filter-box");
-    filter_box.set_visible(!library.borrow().items.is_empty());
+    filter_box.set_visible(has_library_content);
 
     let filter_search = gtk::SearchEntry::new();
     filter_search.set_placeholder_text(Some("Filter name, path, codec, or keyword"));
@@ -306,22 +340,37 @@ pub fn build_media_browser(
     filter_box.append(&filter_row);
     vbox.append(&filter_box);
 
-    // Big import button — shown only when the library is empty.
-    let import_btn = Button::with_label("+ Import Media…");
-    import_btn.set_margin_start(8);
-    import_btn.set_margin_end(8);
-    import_btn.set_visible(library.borrow().items.is_empty());
-    vbox.append(&import_btn);
+    let content_stack = gtk::Stack::new();
+    content_stack.set_vexpand(true);
+    content_stack.set_hexpand(true);
 
-    let empty_hint = Label::new(Some("Import media or drag files here to start editing."));
-    empty_hint.set_halign(gtk::Align::Start);
-    empty_hint.set_xalign(0.0);
+    let empty_state_box = GBox::new(Orientation::Vertical, 10);
+    empty_state_box.set_vexpand(true);
+    empty_state_box.set_hexpand(true);
+    empty_state_box.set_valign(gtk::Align::Center);
+    empty_state_box.set_halign(gtk::Align::Center);
+    empty_state_box.set_margin_start(24);
+    empty_state_box.set_margin_end(24);
+    empty_state_box.set_margin_top(24);
+    empty_state_box.set_margin_bottom(24);
+
+    let import_btn = Button::with_label("Import Media…");
+    import_btn.add_css_class("suggested-action");
+    import_btn.set_halign(gtk::Align::Center);
+    import_btn.set_width_request(180);
+    empty_state_box.append(&import_btn);
+
+    let empty_hint = Label::new(Some(
+        "Import video, audio, or image files here, or drag files directly into the Media Library to start editing.",
+    ));
+    empty_hint.set_halign(gtk::Align::Center);
+    empty_hint.set_justify(gtk::Justification::Center);
+    empty_hint.set_xalign(0.5);
     empty_hint.set_wrap(true);
-    empty_hint.set_margin_start(8);
-    empty_hint.set_margin_end(8);
+    empty_hint.set_max_width_chars(36);
     empty_hint.add_css_class("panel-empty-state");
-    empty_hint.set_visible(library.borrow().items.is_empty());
-    vbox.append(&empty_hint);
+    empty_state_box.append(&empty_hint);
+    content_stack.add_named(&empty_state_box, Some("empty"));
 
     let scroll = ScrolledWindow::new();
     scroll.set_vexpand(true);
@@ -719,7 +768,13 @@ pub fn build_media_browser(
     }
 
     scroll.set_child(Some(&flow_box));
-    vbox.append(&scroll);
+    content_stack.add_named(&scroll, Some("library"));
+    content_stack.set_visible_child_name(if has_library_content {
+        "library"
+    } else {
+        "empty"
+    });
+    vbox.append(&content_stack);
 
     // "Create Multicam Clip" button — visible when 2+ media items are selected.
     let multicam_btn = Button::with_label("Create Multicam Clip");
@@ -732,6 +787,22 @@ pub fn build_media_browser(
         "Sync selected media by audio and create a multicam clip on the timeline",
     ));
     vbox.append(&multicam_btn);
+
+    // "Place Aligned by Timecode" — parallel to Create Multicam
+    // Clip. Visible when 2+ library items are selected and every
+    // one has decoded source timecode. Drops them on a fresh
+    // timeline lane at positions aligned by their decoded TC
+    // (earliest-TC member becomes the anchor at timeline_start=0;
+    // others shift by TC delta). Lets users skip the
+    // select-both-on-timeline → right-click → Sync dance when all
+    // the TC is already in the library.
+    let place_aligned_btn = Button::with_label("Place Aligned by Timecode");
+    place_aligned_btn.add_css_class("suggested-action");
+    place_aligned_btn.set_margin_start(8);
+    place_aligned_btn.set_margin_end(8);
+    place_aligned_btn.set_margin_bottom(4);
+    place_aligned_btn.set_visible(false);
+    vbox.append(&place_aligned_btn);
 
     // Populate from existing library items (e.g. after project load).
     rebuild_flowbox_binned(
@@ -758,6 +829,10 @@ pub fn build_media_browser(
         let all_media_btn_ctx = all_media_btn.clone();
         let filters_ctx = filters.clone();
         let on_library_changed_ctx = on_library_changed.clone();
+        let on_reverse_match_frame_ctx = on_reverse_match_frame.clone();
+        let on_check_library_usage_ctx = on_check_library_usage.clone();
+        let on_convert_library_ltc_ctx = on_convert_library_ltc.clone();
+        let on_create_subclip_from_marks_ctx = on_create_subclip_from_marks.clone();
         let rclick = gtk::GestureClick::new();
         rclick.set_button(3); // right button
         rclick.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -789,6 +864,30 @@ pub fn build_media_browser(
                 let idx = c.index() as usize;
                 flow_box_paths_ctx.borrow().get(idx).cloned()
             });
+
+            // If the user right-clicked a media item that isn't
+            // part of the current selection, select it first.
+            // Matches standard desktop UX (Finder / FCP / etc.) —
+            // without this step, right-click actions like
+            // "Create Subclip from In/Out…" / "Convert LTC" /
+            // "Remove from Library" silently skip because they
+            // key off `flow_box.selected_children()` and the
+            // clicked-but-unselected item never reaches the
+            // media-actions branch. Preserves multi-select:
+            // right-click inside an existing multi-selection
+            // doesn't collapse it.
+            if let (Some(ref fbc), Some(FlowBoxEntry::Media { .. })) =
+                (clicked_child.as_ref(), clicked_entry.as_ref())
+            {
+                let already_selected = flow_box_ctx
+                    .selected_children()
+                    .iter()
+                    .any(|c| c.index() == fbc.index());
+                if !already_selected {
+                    flow_box_ctx.unselect_all();
+                    flow_box_ctx.select_child(*fbc);
+                }
+            }
 
             // Build popover menu
             let popover = gtk::Popover::new();
@@ -981,6 +1080,26 @@ pub fn build_media_browser(
                     drop(entries);
 
                     if !selected_ids.is_empty() {
+                        let reverse_match_source_path = if selected_ids.len() == 1 {
+                            let lib = library_ctx.borrow();
+                            lib.items
+                                .iter()
+                                .find(|item| item.id == selected_ids[0] && item.has_backing_file())
+                                .map(|item| item.source_path.clone())
+                        } else {
+                            None
+                        };
+                        if let Some(source_path) = reverse_match_source_path {
+                            let reverse_match_btn =
+                                add_menu_item(&menu_box, "Reverse Match Frame…");
+                            let popover = popover.clone();
+                            let on_reverse_match_frame = on_reverse_match_frame_ctx.clone();
+                            reverse_match_btn.connect_clicked(move |_| {
+                                popover.popdown();
+                                on_reverse_match_frame(source_path.clone());
+                            });
+                        }
+
                         let favorite_btn = add_menu_item(&menu_box, "Mark Favorite");
                         {
                             let item_ids = selected_ids.clone();
@@ -1076,6 +1195,129 @@ pub fn build_media_browser(
                                     &all_media_btn,
                                     &filters,
                                     &on_library_changed,
+                                );
+                            });
+                        }
+
+                        // Create Subclip from Source Monitor Marks —
+                        // single-select only, the item must not
+                        // already be a subclip (we don't nest
+                        // subclips; a range-of-a-range is redundant
+                        // and makes the parent_id graph deeper than
+                        // needed), and the source monitor must be
+                        // showing THIS item with valid In < Out.
+                        // When the button is visible the user knows
+                        // the preconditions were already met; the
+                        // window.rs-side callback re-checks everything
+                        // defensively.
+                        if selected_ids.len() == 1 {
+                            let subclip_source_id: Option<String> = {
+                                let lib = library_ctx.borrow();
+                                lib.items
+                                    .iter()
+                                    .find(|i| {
+                                        i.id == selected_ids[0]
+                                            && !i.is_subclip()
+                                            && i.has_backing_file()
+                                    })
+                                    .map(|i| i.id.clone())
+                            };
+                            if let Some(parent_id) = subclip_source_id {
+                                let subclip_btn = add_menu_item(
+                                    &menu_box,
+                                    "Create Subclip from In/Out…",
+                                );
+                                subclip_btn.set_tooltip_text(Some(
+                                    "Create a virtual subclip from the source monitor's \
+                                     Mark In / Mark Out. The subclip shares the parent's \
+                                     source file but carries its own In/Out window, label, \
+                                     and timecode — drop it onto the timeline and it lands \
+                                     with the window already applied.",
+                                ));
+                                let popover = popover.clone();
+                                let on_create_subclip =
+                                    on_create_subclip_from_marks_ctx.clone();
+                                subclip_btn.connect_clicked(move |_| {
+                                    popover.popdown();
+                                    on_create_subclip(parent_id.clone());
+                                });
+                            }
+                        }
+
+                        // Convert LTC Audio to Timecode — single-select
+                        // only, requires a backing file with an audio
+                        // stream. Populates source_timecode_base_ns on
+                        // the matching MediaItem (and any already-on-
+                        // timeline clips using that source). Lets the
+                        // user pre-decode before dragging clips in.
+                        let convert_ltc_path: Option<String> = if selected_ids.len() == 1 {
+                            let lib = library_ctx.borrow();
+                            lib.items
+                                .iter()
+                                .find(|i| {
+                                    i.id == selected_ids[0]
+                                        && i.has_audio
+                                        && i.has_backing_file()
+                                })
+                                .map(|i| i.source_path.clone())
+                        } else {
+                            None
+                        };
+                        if let Some(source_path) = convert_ltc_path {
+                            let convert_btn =
+                                add_menu_item(&menu_box, "Convert LTC Audio to Timecode…");
+                            convert_btn.set_tooltip_text(Some(
+                                "Decode LTC from this item's audio and store it as \
+                                 source timecode metadata. Works before the item is on the timeline.",
+                            ));
+                            let popover = popover.clone();
+                            let on_convert_library_ltc =
+                                on_convert_library_ltc_ctx.clone();
+                            convert_btn.connect_clicked(move |_| {
+                                popover.popdown();
+                                on_convert_library_ltc(source_path.clone());
+                            });
+                        }
+
+                        // Remove from Library — also surfaces a
+                        // confirmation dialog when timeline clips
+                        // reference the item(s), so users don't
+                        // accidentally orphan clips on the timeline.
+                        let remove_btn = add_menu_item(&menu_box, "Remove from Library");
+                        {
+                            let item_ids = selected_ids.clone();
+                            let library = library_ctx.clone();
+                            let flow_box = flow_box_ctx.clone();
+                            let thumb_cache = thumb_cache_ctx.clone();
+                            let flow_box_paths = flow_box_paths_ctx.clone();
+                            let current_bin_id = current_bin_id_ctx.clone();
+                            let show_all_media = show_all_media_ctx.clone();
+                            let breadcrumb_bar = breadcrumb_bar_ctx.clone();
+                            let all_media_btn = all_media_btn_ctx.clone();
+                            let filters = filters_ctx.clone();
+                            let popover = popover.clone();
+                            let on_library_changed = on_library_changed_ctx.clone();
+                            let on_check_library_usage =
+                                on_check_library_usage_ctx.clone();
+                            remove_btn.connect_clicked(move |btn| {
+                                popover.popdown();
+                                let parent_window = btn
+                                    .root()
+                                    .and_then(|r| r.downcast::<gtk::Window>().ok());
+                                remove_items_from_library_with_confirm(
+                                    &item_ids,
+                                    &library,
+                                    &flow_box,
+                                    &thumb_cache,
+                                    &flow_box_paths,
+                                    &current_bin_id,
+                                    &show_all_media,
+                                    &breadcrumb_bar,
+                                    &all_media_btn,
+                                    &filters,
+                                    &on_library_changed,
+                                    &on_check_library_usage,
+                                    parent_window.as_ref(),
                                 );
                             });
                         }
@@ -1250,19 +1492,42 @@ pub fn build_media_browser(
         let on_source_selected = on_source_selected.clone();
         let header_relink_btn = header_relink_btn.clone();
         let multicam_btn = multicam_btn.clone();
+        let place_aligned_btn = place_aligned_btn.clone();
         let flow_box_paths_for_sel = flow_box_paths.clone();
         flow_box.connect_selected_children_changed(move |fb| {
             let selected = fb.selected_children();
             // Count only media selections (not bins) for multicam
             let entries = flow_box_paths_for_sel.borrow();
-            let media_count = selected
+            let media_ids: Vec<String> = selected
                 .iter()
-                .filter(|c| {
+                .filter_map(|c| {
                     let idx = c.index() as usize;
-                    matches!(entries.get(idx), Some(FlowBoxEntry::Media { .. }))
+                    match entries.get(idx) {
+                        Some(FlowBoxEntry::Media { item_id, .. }) => Some(item_id.clone()),
+                        _ => None,
+                    }
                 })
-                .count();
+                .collect();
+            let media_count = media_ids.len();
             multicam_btn.set_visible(media_count >= 2);
+            // Place-Aligned-by-Timecode: visible only when every
+            // selected item has decoded TC AND at least 2 are
+            // selected. Anything missing TC keeps the button
+            // hidden — we don't show a disabled state here because
+            // the convert-LTC path is right-click-per-item, so a
+            // visible-disabled state on this sidebar button would
+            // be confusing about what to fix.
+            let all_have_tc = media_count >= 2 && {
+                let lib = library.borrow();
+                media_ids.iter().all(|id| {
+                    lib.items
+                        .iter()
+                        .find(|i| &i.id == id)
+                        .map(|i| i.source_timecode_base_ns.is_some())
+                        .unwrap_or(false)
+                })
+            };
+            place_aligned_btn.set_visible(all_have_tc);
             if let Some(child) = selected.first() {
                 let idx = child.index() as usize;
                 match entries.get(idx) {
@@ -1273,11 +1538,25 @@ pub fn build_media_browser(
                             let dur = item.duration_ns;
                             let is_missing = item.is_missing;
                             let has_backing_file = item.has_backing_file();
+                            // For subclips, pass the subclip window so the
+                            // source monitor's marks get scoped to the
+                            // range. Without this, selecting a subclip
+                            // left marks at 0..parent_duration and any
+                            // drag from the source monitor placed the
+                            // full parent clip on the timeline.
+                            let subclip_window = if item.is_subclip() {
+                                Some((
+                                    item.effective_source_in_ns(),
+                                    item.effective_source_out_ns(),
+                                ))
+                            } else {
+                                None
+                            };
                             drop(lib);
                             drop(entries);
                             header_relink_btn.set_visible(has_backing_file && is_missing);
                             if has_backing_file {
-                                on_source_selected(path, dur);
+                                on_source_selected(path, dur, subclip_window);
                             }
                             return;
                         }
@@ -1292,6 +1571,41 @@ pub fn build_media_browser(
                 }
             } else {
                 header_relink_btn.set_visible(false);
+            }
+        });
+    }
+
+    // "Place Aligned by Timecode" click handler.
+    {
+        let library = library.clone();
+        let flow_box = flow_box.clone();
+        let on_place_aligned = on_place_aligned_by_timecode.clone();
+        let flow_box_paths_for_pa = flow_box_paths.clone();
+        place_aligned_btn.connect_clicked(move |_| {
+            let selected = flow_box.selected_children();
+            let entries = flow_box_paths_for_pa.borrow();
+            let lib = library.borrow();
+            let paths: Vec<String> = selected
+                .iter()
+                .filter_map(|child| {
+                    let idx = child.index() as usize;
+                    match entries.get(idx) {
+                        Some(FlowBoxEntry::Media { item_id, .. }) => lib
+                            .items
+                            .iter()
+                            .find(|i| &i.id == item_id)
+                            .filter(|i| {
+                                i.has_backing_file() && i.source_timecode_base_ns.is_some()
+                            })
+                            .map(|i| i.source_path.clone()),
+                        _ => None,
+                    }
+                })
+                .collect();
+            drop(lib);
+            drop(entries);
+            if paths.len() >= 2 {
+                on_place_aligned(paths);
             }
         });
     }
@@ -1341,8 +1655,7 @@ pub fn build_media_browser(
         let proxy_cache = proxy_cache.clone();
         let preferences_state = preferences_state.clone();
         let flow_box_paths = flow_box_paths.clone();
-        let empty_hint = empty_hint.clone();
-        let import_btn = import_btn.clone();
+        let content_stack = content_stack.clone();
         let header_import_btn = header_import_btn.clone();
         let thumb_redraw_scheduled = thumb_redraw_scheduled.clone();
         let current_bin_id = current_bin_id.clone();
@@ -1372,6 +1685,7 @@ pub fn build_media_browser(
                             item.frame_rate_den = result.frame_rate_den;
                             item.codec_summary = result.codec_summary.clone();
                             item.file_size_bytes = result.file_size_bytes;
+                            item.hdr_colorimetry = result.hdr_colorimetry.clone();
                             if item.source_timecode_base_ns.is_none() {
                                 item.source_timecode_base_ns = result.source_timecode_base_ns;
                             }
@@ -1468,7 +1782,10 @@ pub fn build_media_browser(
                                 child_widget = w.next_sibling();
                                 continue;
                             }
-                            let payload = format!("{}|{}", item.source_path, item.duration_ns);
+                            let payload = format!(
+                                "{}|{}|{}",
+                                item.source_path, item.duration_ns, item.id
+                            );
                             let val = glib::Value::from(&payload);
                             for ctrl in w.observe_controllers().into_iter().flatten() {
                                 if let Ok(ds) = ctrl.downcast::<gtk::DragSource>() {
@@ -1488,8 +1805,7 @@ pub fn build_media_browser(
 
             let lib = library.borrow();
             let has_content = !lib.items.is_empty() || !lib.bins.is_empty();
-            empty_hint.set_visible(!has_content);
-            import_btn.set_visible(!has_content);
+            content_stack.set_visible_child_name(if has_content { "library" } else { "empty" });
             header_import_btn.set_visible(has_content);
             all_media_btn.set_visible(!lib.bins.is_empty());
             filter_box.set_visible(has_content);
@@ -1789,7 +2105,16 @@ fn make_grid_item(
     search_text: &str,
 ) -> FlowBoxChild {
     let path = item.source_path.clone();
+    // Use the full source duration for the drag payload (the drop
+    // handler's `media_duration_ns` expects source-file-length so
+    // clip-trim bounds reconcile with absolute `source_in`/`source_out`
+    // on the Clip) and for playbin/seek span. Hover-scrub is scoped
+    // separately to the subclip window via `hover_{start,span}_ns` so
+    // thumbnails across the card traverse the subclip range, not the
+    // whole parent file.
     let duration_ns = item.duration_ns;
+    let hover_start_ns = item.effective_source_in_ns();
+    let hover_span_ns = item.effective_duration_ns();
     let is_missing = item.is_missing;
     let is_audio_only = item.is_audio_only;
     let has_backing_file = item.has_backing_file();
@@ -1801,7 +2126,7 @@ fn make_grid_item(
     // to extract; trying causes noisy ffmpeg "Output file does not contain any
     // stream" errors.
     if has_backing_file && duration_ns > 0 && !is_audio_only {
-        thumb_cache.borrow_mut().request(&path, 0);
+        thumb_cache.borrow_mut().request(&path, hover_start_ns);
     }
 
     let cell = GBox::new(Orientation::Vertical, 2);
@@ -1814,9 +2139,18 @@ fn make_grid_item(
     let thumb_area = DrawingArea::new();
     thumb_area.set_content_width(THUMB_W);
     thumb_area.set_content_height(THUMB_H);
+
+    // Hover-scrub state: None = show the static first-frame thumbnail
+    // (the cache.request(..., 0) call above already queued it). Some(t) =
+    // the cursor is inside the thumbnail and the draw_func should paint
+    // the frame at the corresponding source time instead. The value
+    // lives in a Cell so both the motion controller and the draw_func
+    // can read it cheaply every redraw.
+    let scrub_time_ns: Rc<Cell<Option<u64>>> = Rc::new(Cell::new(None));
     {
         let path_owned = path.clone();
         let thumb_cache = thumb_cache.clone();
+        let scrub_time_ns = scrub_time_ns.clone();
         thumb_area.set_draw_func(move |_, cr, w, h| {
             if !has_backing_file {
                 draw_non_file_placeholder(cr, w, h, clip_kind.as_ref());
@@ -1869,7 +2203,21 @@ fn make_grid_item(
                 return;
             }
             let cache = thumb_cache.borrow();
-            if let Some(surf) = cache.get(&path_owned, 0) {
+            // Hover-scrub: when the cursor is over this thumbnail, prefer
+            // the scrubbed frame. Fall back to the static t=0 frame if
+            // the hover frame hasn't been extracted yet — avoids flashing
+            // a placeholder during ffmpeg latency.
+            if let Some(t) = scrub_time_ns.get() {
+                if let Some(surf) = cache.get(&path_owned, t) {
+                    let sx = w as f64 / THUMB_W as f64;
+                    let sy = h as f64 / THUMB_H as f64;
+                    cr.scale(sx, sy);
+                    let _ = cr.set_source_surface(surf, 0.0, 0.0);
+                    cr.paint().ok();
+                    return;
+                }
+            }
+            if let Some(surf) = cache.get(&path_owned, hover_start_ns) {
                 let sx = w as f64 / THUMB_W as f64;
                 let sy = h as f64 / THUMB_H as f64;
                 cr.scale(sx, sy);
@@ -1883,6 +2231,48 @@ fn make_grid_item(
             cr.fill().ok();
         });
     }
+
+    // Mouse hover-scrub: mapping cursor x to a source time, quantized to
+    // ~100 ms buckets so repeated motion events at nearby pixels share
+    // cache entries. Only wire the controller when there is a meaningful
+    // duration to scrub — still images and audio-only items have nothing
+    // to preview.
+    if has_backing_file && duration_ns > 0 && !is_audio_only {
+        let motion = gtk::EventControllerMotion::new();
+        {
+            let scrub_time_ns = scrub_time_ns.clone();
+            let thumb_area_inner = thumb_area.clone();
+            let thumb_cache_inner = thumb_cache.clone();
+            let path_motion = path.clone();
+            motion.connect_motion(move |_ctrl, x, _y| {
+                let width = thumb_area_inner.width().max(1) as f64;
+                let frac = (x / width).clamp(0.0, 1.0);
+                let raw_t = hover_start_ns
+                    + (frac * hover_span_ns as f64).round() as u64;
+                let bucket =
+                    crate::media::thumb_cache::quantize_hover_scrub_time_ns(raw_t);
+                if scrub_time_ns.get() != Some(bucket) {
+                    scrub_time_ns.set(Some(bucket));
+                    thumb_cache_inner
+                        .borrow_mut()
+                        .request(&path_motion, bucket);
+                    thumb_area_inner.queue_draw();
+                }
+            });
+        }
+        {
+            let scrub_time_ns = scrub_time_ns.clone();
+            let thumb_area_inner = thumb_area.clone();
+            motion.connect_leave(move |_ctrl| {
+                if scrub_time_ns.get().is_some() {
+                    scrub_time_ns.set(None);
+                    thumb_area_inner.queue_draw();
+                }
+            });
+        }
+        thumb_area.add_controller(motion);
+    }
+
     cell.append(&thumb_area);
 
     let name_label = Label::new(Some(&display_name));
@@ -1931,6 +2321,15 @@ fn make_grid_item(
         cell.append(&keyword_label);
     }
 
+    if let Some(auto_tag_text) = media_auto_tag_card_text(item) {
+        let auto_tag_label = Label::new(Some(&auto_tag_text));
+        auto_tag_label.set_halign(gtk::Align::Center);
+        auto_tag_label.set_max_width_chars(26);
+        auto_tag_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        auto_tag_label.add_css_class("media-keyword-summary");
+        cell.append(&auto_tag_label);
+    }
+
     if let Some(search_hint) = media_search_hint(item, search_text) {
         let search_label = Label::new(Some(&search_hint));
         search_label.set_halign(gtk::Align::Center);
@@ -1946,6 +2345,20 @@ fn make_grid_item(
     offline_label.set_visible(is_missing);
     cell.append(&offline_label);
 
+    // Subclip badge — visually differentiates range-of-source items
+    // from top-level library entries. Shown unconditionally on
+    // subclips (never OFF when parent_id is set).
+    if item.is_subclip() {
+        let subclip_label = Label::new(Some("SUBCLIP"));
+        subclip_label.set_halign(gtk::Align::Center);
+        // Reuse the keyword-summary badge CSS — it's a subtle tag-
+        // style pill that reads well next to the rating / offline
+        // badges above. Plenty of room to promote to a dedicated
+        // class later if the design wants more contrast.
+        subclip_label.add_css_class("media-keyword-summary");
+        cell.append(&subclip_label);
+    }
+
     let child = FlowBoxChild::new();
     child.set_child(Some(&cell));
     let tooltip = media_tooltip_text(item, Some(search_text));
@@ -1954,11 +2367,19 @@ fn make_grid_item(
         child.add_css_class("media-missing-item");
     }
     if has_backing_file {
-        // Drag source: payload = "{source_path}|{duration_ns}"
+        // Drag source payload: `"{source_path}|{duration_ns}|{item_id}"`.
+        // The trailing `|{item_id}` was added when subclips shipped —
+        // the drop target can look up the MediaItem by id to read
+        // its subclip source_in/source_out so dropped subclips land
+        // with the correct window already applied. Legacy two-part
+        // payloads (pre-subclip saves / external drops) still parse
+        // because the receiver splits on `|` and treats a missing
+        // third component as "no specific item, use source monitor
+        // marks or full range".
         let drag_src = gtk::DragSource::new();
         drag_src.set_actions(gdk4::DragAction::COPY);
         drag_src.set_exclusive(false);
-        let payload = format!("{}|{duration_ns}", item.source_path);
+        let payload = format!("{}|{duration_ns}|{}", item.source_path, item.id);
         let val = glib::Value::from(&payload);
         drag_src.set_content(Some(&gdk4::ContentProvider::for_value(&val)));
         child.add_controller(drag_src);
@@ -2092,7 +2513,7 @@ fn build_expected_entries(
 
 fn media_display_key(item: &MediaItem) -> String {
     format!(
-        "{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
         item.id,
         item.source_path,
         item.is_missing,
@@ -2101,6 +2522,7 @@ fn media_display_key(item: &MediaItem) -> String {
         media_secondary_text(item).unwrap_or_default(),
         media_rating_text(item.rating).unwrap_or_default(),
         media_keyword_state_key(item),
+        media_auto_tag_state_key(item),
         media_transcript_state_key(item),
     )
 }
@@ -2163,11 +2585,17 @@ fn media_secondary_text(item: &MediaItem) -> Option<String> {
     if let Some(codec) = item.codec_summary.as_ref() {
         parts.push(codec.clone());
     }
-    if item.duration_ns > 0 {
-        parts.push(format_duration_short(item.duration_ns));
+    let display_duration_ns = item.effective_duration_ns();
+    if display_duration_ns > 0 {
+        parts.push(format_duration_short(display_duration_ns));
     }
-    if let Some(file_size_bytes) = item.file_size_bytes {
-        parts.push(format_file_size(file_size_bytes));
+    // Subclips reference the parent file so the on-disk size is the
+    // parent's — showing it on the subclip card is misleading ("0:02 • 576 MB"
+    // suggests a fat subclip). Only include file_size for top-level items.
+    if !item.is_subclip() {
+        if let Some(file_size_bytes) = item.file_size_bytes {
+            parts.push(format_file_size(file_size_bytes));
+        }
     }
     if parts.is_empty() {
         None
@@ -2178,6 +2606,10 @@ fn media_secondary_text(item: &MediaItem) -> Option<String> {
 
 fn media_keyword_card_text(item: &MediaItem) -> Option<String> {
     media_keyword_summary(item, 2).map(|summary| format!("Keywords: {summary}"))
+}
+
+fn media_auto_tag_card_text(item: &MediaItem) -> Option<String> {
+    media_auto_tag_summary(item, 3).map(|summary| format!("Tags: {summary}"))
 }
 
 fn media_keyword_state_key(item: &MediaItem) -> String {
@@ -2191,6 +2623,28 @@ fn media_keyword_state_key(item: &MediaItem) -> String {
         })
         .collect::<Vec<_>>()
         .join("|")
+}
+
+fn media_auto_tag_detail_lines(item: &MediaItem) -> Vec<String> {
+    item.auto_tags
+        .iter()
+        .map(|tag| {
+            let confidence = (tag.confidence * 100.0).round();
+            match tag.best_frame_time_ns {
+                Some(time_ns) => format!(
+                    "Tag: {} — {} ({confidence:.0}%) @ {}",
+                    tag.category.label(),
+                    tag.label,
+                    format_duration_short(time_ns)
+                ),
+                None => format!(
+                    "Tag: {} — {} ({confidence:.0}%)",
+                    tag.category.label(),
+                    tag.label
+                ),
+            }
+        })
+        .collect()
 }
 
 fn sort_media_items(items: &mut [&MediaItem], search_text: &str) {
@@ -2230,8 +2684,21 @@ fn media_keyword_detail_lines(item: &MediaItem) -> Vec<String> {
 
 fn media_search_hint(item: &MediaItem, search_text: &str) -> Option<String> {
     let search_match = media_search_match(item, search_text)?;
-    (search_match.field == MediaSearchField::Transcript)
-        .then(|| format!("Spoken: {}", search_match.excerpt.unwrap_or_default()))
+    match search_match.field {
+        MediaSearchField::Transcript => Some(format!(
+            "Spoken: {}",
+            search_match.excerpt.unwrap_or_default()
+        )),
+        MediaSearchField::AutoTag => Some(format!(
+            "Tags: {}",
+            search_match.excerpt.unwrap_or_default()
+        )),
+        MediaSearchField::Visual => Some(format!(
+            "Visual: {}",
+            search_match.excerpt.unwrap_or_default()
+        )),
+        _ => None,
+    }
 }
 
 fn media_tooltip_text(item: &MediaItem, search_text: Option<&str>) -> String {
@@ -2261,6 +2728,7 @@ fn media_tooltip_text(item: &MediaItem, search_text: Option<&str>) -> String {
             lines.push(format!("Rating: {rating_text}"));
         }
         lines.extend(media_keyword_detail_lines(item));
+        lines.extend(media_auto_tag_detail_lines(item));
         if let Some(search_text) = search_text.filter(|text| !text.trim().is_empty()) {
             if let Some(search_match) = media_search_match(item, search_text) {
                 lines.push(format!(
@@ -2288,19 +2756,30 @@ fn media_tooltip_text(item: &MediaItem, search_text: Option<&str>) -> String {
     if let Some(frame_rate) = media_frame_rate_text(item) {
         lines.push(format!("Frame rate: {frame_rate}"));
     }
-    if item.duration_ns > 0 {
+    let tooltip_duration_ns = item.effective_duration_ns();
+    if tooltip_duration_ns > 0 {
         lines.push(format!(
             "Duration: {}",
-            format_duration_short(item.duration_ns)
+            format_duration_short(tooltip_duration_ns)
         ));
     }
-    if let Some(file_size_bytes) = item.file_size_bytes {
-        lines.push(format!("Size: {}", format_file_size(file_size_bytes)));
+    if item.is_subclip() {
+        lines.push(format!(
+            "Subclip range: {} – {}",
+            format_duration_short(item.effective_source_in_ns()),
+            format_duration_short(item.effective_source_out_ns())
+        ));
+    }
+    if !item.is_subclip() {
+        if let Some(file_size_bytes) = item.file_size_bytes {
+            lines.push(format!("Size: {}", format_file_size(file_size_bytes)));
+        }
     }
     if let Some(rating_text) = media_rating_text(item.rating) {
         lines.push(format!("Rating: {rating_text}"));
     }
     lines.extend(media_keyword_detail_lines(item));
+    lines.extend(media_auto_tag_detail_lines(item));
     let transcript_segments = item
         .transcript_windows
         .iter()
@@ -2331,7 +2810,9 @@ fn media_search_field_label(field: MediaSearchField) -> &'static str {
         MediaSearchField::SourcePath => "file path",
         MediaSearchField::Codec => "codec",
         MediaSearchField::Keyword => "keyword",
+        MediaSearchField::AutoTag => "auto tag",
         MediaSearchField::Transcript => "spoken content",
+        MediaSearchField::Visual => "visual content",
     }
 }
 
@@ -3061,6 +3542,164 @@ fn delete_bin(
 }
 
 /// Move media items to a bin (or root if bin_id is None).
+/// Core removal: delete the given library items, purge any smart-
+/// collection pins that referenced them, and refresh the browser.
+/// Does NOT touch the timeline — any clips whose `source_path`
+/// matched one of the removed items will surface as OFFLINE (via
+/// the existing `is_missing` detection pass that runs on project
+/// reload). Cache entries (proxy / thumbnail / waveform / etc.)
+/// stay on disk and get cleaned up by the existing eviction /
+/// project-close paths.
+fn remove_items_from_library(
+    item_ids: &[String],
+    library: &Rc<RefCell<MediaLibrary>>,
+    flow_box: &FlowBox,
+    thumb_cache: &Rc<RefCell<ThumbnailCache>>,
+    flow_box_paths: &Rc<RefCell<Vec<FlowBoxEntry>>>,
+    current_bin_id: &Rc<RefCell<Option<String>>>,
+    show_all_media: &Rc<RefCell<bool>>,
+    breadcrumb_bar: &GBox,
+    all_media_btn: &Button,
+    filters: &Rc<RefCell<MediaFilterCriteria>>,
+    on_library_changed: &Rc<dyn Fn()>,
+) {
+    {
+        let mut lib = library.borrow_mut();
+        // Drop matching items from the master list.
+        lib.items.retain(|item| !item_ids.contains(&item.id));
+    }
+    refresh_bin_view(
+        library,
+        flow_box,
+        thumb_cache,
+        flow_box_paths,
+        current_bin_id,
+        show_all_media,
+        breadcrumb_bar,
+        all_media_btn,
+        filters,
+        on_library_changed,
+    );
+    on_library_changed();
+}
+
+/// User-facing entry point: check whether any selected item is used
+/// on the timeline; if so, ask for confirmation with the usage count
+/// before proceeding. If no timeline use, remove immediately.
+#[allow(clippy::too_many_arguments)]
+fn remove_items_from_library_with_confirm(
+    item_ids: &[String],
+    library: &Rc<RefCell<MediaLibrary>>,
+    flow_box: &FlowBox,
+    thumb_cache: &Rc<RefCell<ThumbnailCache>>,
+    flow_box_paths: &Rc<RefCell<Vec<FlowBoxEntry>>>,
+    current_bin_id: &Rc<RefCell<Option<String>>>,
+    show_all_media: &Rc<RefCell<bool>>,
+    breadcrumb_bar: &GBox,
+    all_media_btn: &Button,
+    filters: &Rc<RefCell<MediaFilterCriteria>>,
+    on_library_changed: &Rc<dyn Fn()>,
+    on_check_library_usage: &Rc<dyn Fn(&[String]) -> usize>,
+    parent: Option<&gtk::Window>,
+) {
+    if item_ids.is_empty() {
+        return;
+    }
+
+    // Collect the source paths for timeline-usage checking. Items
+    // without a backing file (e.g. generated media) can't be
+    // referenced by timeline clips' source_path, so they get
+    // skipped in the count.
+    let source_paths: Vec<String> = {
+        let lib = library.borrow();
+        lib.items
+            .iter()
+            .filter(|i| item_ids.contains(&i.id))
+            .map(|i| i.source_path.clone())
+            .filter(|p| !p.is_empty())
+            .collect()
+    };
+    let usage_count = if source_paths.is_empty() {
+        0
+    } else {
+        on_check_library_usage(&source_paths)
+    };
+
+    if usage_count == 0 {
+        // No timeline clips reference these items — straight removal.
+        remove_items_from_library(
+            item_ids,
+            library,
+            flow_box,
+            thumb_cache,
+            flow_box_paths,
+            current_bin_id,
+            show_all_media,
+            breadcrumb_bar,
+            all_media_btn,
+            filters,
+            on_library_changed,
+        );
+        return;
+    }
+
+    // Used on the timeline — surface a confirmation dialog.
+    let item_label = if item_ids.len() == 1 {
+        "1 item".to_string()
+    } else {
+        format!("{} items", item_ids.len())
+    };
+    let clip_label = if usage_count == 1 {
+        "1 timeline clip".to_string()
+    } else {
+        format!("{usage_count} timeline clips")
+    };
+    let message = format!(
+        "Remove {item_label} from the Media Library?\n\n\
+         {clip_label} on the timeline will be marked OFFLINE \
+         but will not be deleted. You can relink them later if you \
+         re-import the source file."
+    );
+
+    let dialog = gtk::AlertDialog::builder()
+        .message("Remove from Library")
+        .detail(&message)
+        .buttons(["Cancel", "Remove"])
+        .cancel_button(0)
+        .default_button(0)
+        .modal(true)
+        .build();
+
+    let item_ids = item_ids.to_vec();
+    let library = library.clone();
+    let flow_box = flow_box.clone();
+    let thumb_cache = thumb_cache.clone();
+    let flow_box_paths = flow_box_paths.clone();
+    let current_bin_id = current_bin_id.clone();
+    let show_all_media = show_all_media.clone();
+    let breadcrumb_bar = breadcrumb_bar.clone();
+    let all_media_btn = all_media_btn.clone();
+    let filters = filters.clone();
+    let on_library_changed = on_library_changed.clone();
+    dialog.choose(parent, gio::Cancellable::NONE, move |result| {
+        if let Ok(1) = result {
+            remove_items_from_library(
+                &item_ids,
+                &library,
+                &flow_box,
+                &thumb_cache,
+                &flow_box_paths,
+                &current_bin_id,
+                &show_all_media,
+                &breadcrumb_bar,
+                &all_media_btn,
+                &filters,
+                &on_library_changed,
+            );
+        }
+    });
+}
+
 fn move_items_to_bin(
     item_ids: &[String],
     bin_id: Option<String>,
@@ -3279,7 +3918,9 @@ fn delete_collection(
 mod tests {
     use super::*;
     use crate::model::clip::SubtitleSegment;
-    use crate::model::media_library::{MediaBin, MediaKeywordRange};
+    use crate::model::media_library::{
+        MediaAutoTag, MediaAutoTagCategory, MediaBin, MediaKeywordRange,
+    };
 
     fn make_video_item(path: &str) -> MediaItem {
         let mut item = MediaItem::new(path, 83_000_000_000);
@@ -3318,6 +3959,19 @@ mod tests {
         );
     }
 
+    fn add_auto_tag(
+        item: &mut MediaItem,
+        category: MediaAutoTagCategory,
+        label: &str,
+        confidence: f32,
+    ) {
+        let mut auto_tags = item.auto_tags.clone();
+        auto_tags.push(
+            MediaAutoTag::new(category, label, confidence, Some(1_000_000_000)).expect("auto tag"),
+        );
+        item.upsert_auto_tags(auto_tags);
+    }
+
     #[test]
     fn media_secondary_text_formats_codec_duration_and_size() {
         let item = make_video_item("/tmp/clip.mov");
@@ -3347,6 +4001,10 @@ mod tests {
         let keyword_key = media_display_key(&item);
         add_transcript(&mut item, "Find the sticker");
         assert_ne!(media_display_key(&item), keyword_key);
+
+        let transcript_key = media_display_key(&item);
+        add_auto_tag(&mut item, MediaAutoTagCategory::Setting, "outdoor", 0.81);
+        assert_ne!(media_display_key(&item), transcript_key);
     }
 
     #[test]
@@ -3362,6 +4020,10 @@ mod tests {
         let tooltip = media_tooltip_text(&item, None);
         assert!(tooltip.contains("Rating: Favorite"));
         assert!(tooltip.contains("Keyword: Close Up"));
+
+        add_auto_tag(&mut item, MediaAutoTagCategory::Subject, "person", 0.74);
+        let tooltip = media_tooltip_text(&item, None);
+        assert!(tooltip.contains("Tag: Subject — person"));
     }
 
     #[test]
@@ -3416,6 +4078,20 @@ mod tests {
         let tooltip = media_tooltip_text(&item, Some("sticker"));
         assert!(tooltip.contains("Search hit: spoken content"));
         assert!(tooltip.contains("Match: Find the [sticker]"));
+    }
+
+    #[test]
+    fn auto_tag_search_hint_and_tooltip_show_tag_match() {
+        let mut item = make_video_item("/tmp/outdoor.mov");
+        add_auto_tag(&mut item, MediaAutoTagCategory::Setting, "outdoor", 0.79);
+        add_auto_tag(&mut item, MediaAutoTagCategory::ShotType, "wide", 0.83);
+
+        let hint = media_search_hint(&item, "outdoor wide").expect("expected tag search hint");
+        assert!(hint.contains("Tags:"));
+
+        let tooltip = media_tooltip_text(&item, Some("outdoor wide"));
+        assert!(tooltip.contains("Search hit: auto tag"));
+        assert!(tooltip.contains("Match:"));
     }
 
     #[test]

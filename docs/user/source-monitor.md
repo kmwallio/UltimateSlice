@@ -10,8 +10,9 @@ The **Source Monitor** previews individual library clips before they are added t
 | Scrubber bar | Click to seek; In/Out markers shown in green/orange |
 | Timecode label | Current position / total duration |
 | In/Out timecode bar | Shows the selected range (In → Out) |
-| Play / Pause / Stop | Transport buttons |
-| Keyword range controls | Save the current In/Out selection as a named keyword range, or update/remove an existing range |
+| Play / Pause / Stop | Compact transport buttons plus **In** / **Out** actions |
+| Routing… | Opens Source-Record routing for video/audio placement |
+| Keywords expander | Reveals keyword-range editing only when you need it |
 | Close (`✕`) | Deselect current media item and hide the Source Monitor |
 
 ## Keyboard Shortcuts
@@ -46,7 +47,7 @@ Animated SVG sources render to a cached silent preview clip when selected. The c
 
 ## Keyword Ranges
 
-The Source Monitor now uses the current **In/Out** marks to author reusable keyword ranges on the selected source media item.
+Open the collapsed **Keywords** section beneath the Source Monitor controls to author reusable keyword ranges from the current **In/Out** marks.
 
 1. Load a source clip from the Media Library.
 2. Set **In** / **Out** to the range you want to tag.
@@ -91,9 +92,34 @@ Dragging directly from the Source Monitor video display also exports the current
 
 If an active track of the matching kind is highlighted in the timeline, that track is preferred; otherwise UltimateSlice falls back to the first matching track of that kind. If no matching track exists yet, UltimateSlice creates one automatically before placing the clip.
 
+## Source-Record Track Patching
+
+The Source Monitor now exposes Source-Record routing behind a compact **Routing…** button so the footer stays usable on smaller displays. Open the popover to choose separate video and audio targets.
+
+- **Auto** keeps the default routing behavior.
+  - **Video = Auto** targets the active matching video track, or the first video track.
+  - **Audio = Auto** follows the existing Source Monitor A/V behavior: audio-only sources target audio tracks, and A/V sources only auto-create a separate audio placement when **Source Monitor A/V auto-link** is enabled.
+- **Off** disables that lane for the next Append / Insert / Overwrite edit.
+- Choosing a specific track routes that lane explicitly to that track, even if another track is currently active.
+
+Examples:
+
+- **Video = Auto, Audio = Off** on a normal camera clip keeps the old single-video-clip placement.
+- **Video = Auto, Audio = Audio 2** forces a separate audio placement to **Audio 2** even when Source Monitor A/V auto-link is off.
+- **Video = Off, Audio = Audio 1** places only the source audio from an A/V clip.
+
+When both video and audio lanes are patched to active tracks:
+
+- with **Source Monitor A/V auto-link enabled**, UltimateSlice creates a linked pair;
+- with it **disabled**, UltimateSlice creates separate unlinked clips but still mutes the video clip's embedded audio so the sound is not doubled.
+
+Patch selections are **workspace-local** rather than saved into the project file. If a chosen track disappears because tracks were deleted, reordered, or a different project is opened, UltimateSlice falls back to **Auto** for that lane.
+
 ## Match Frame
 
 Press **F** on the timeline to load the selected clip's source into the Source Monitor and seek to the frame matching the current playhead position. The Source Monitor's In/Out points are set to the clip's source range. This is useful for quickly reviewing original footage from the assembled timeline.
+
+Match Frame also works when the selected clip lives inside a compound timeline, and the reverse workflow is available from the Media Library via **Reverse Match Frame…** when you want to start from a source clip and find every visible timeline use.
 
 Also available via the `match_frame` MCP tool.
 
@@ -109,7 +135,7 @@ For eligible sources with both video and audio streams, Insert and Overwrite fol
 - **Enabled**: creates a linked A/V pair across matching video and audio tracks, and mutes the video clip's embedded audio while the linked audio-track peer exists.
 - **Disabled**: uses single-clip placement behavior.
 
-Both operations target the active track (if its kind matches), or fall back to the first matching track of each required kind. If only one required track kind is available, UltimateSlice falls back to placing a single clip on that available track kind. If no compatible matching track exists for the placement, UltimateSlice creates the needed audio or video track automatically instead of skipping the edit. Both support full undo/redo.
+Both operations honor the current **Routing…** selections. In **Auto** mode they still target the active track (if its kind matches), or fall back to the first matching track of each required kind. If only one required track kind is available, UltimateSlice falls back to placing a single clip on that available track kind. If no compatible matching track exists for an active routed lane, UltimateSlice creates the needed audio or video track automatically instead of skipping the edit. Both support full undo/redo.
 
 ## Closing the Source Monitor
 

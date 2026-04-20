@@ -1,4 +1,4 @@
-use super::track::Track;
+use super::track::{AudioRole, Track};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -13,6 +13,9 @@ pub struct Marker {
     /// RGBA colour packed as 0xRRGGBBAA (default orange = 0xFF8C00FF)
     #[serde(default = "default_marker_color")]
     pub color: u32,
+    /// Optional longer notes for this marker
+    #[serde(default)]
+    pub notes: String,
 }
 
 fn default_marker_color() -> u32 {
@@ -34,9 +37,58 @@ impl Marker {
             position_ns,
             label: label.into(),
             color: default_marker_color(),
+            notes: String::new(),
         }
     }
 }
+
+/// A pinned reference still captured from the Program Monitor, used as the
+/// fixed side of the A/B compare wipe. Thumbnails are stored as PNGs under
+/// `$XDG_CACHE_HOME/ultimateslice/reference_stills/<id>.png`; the project
+/// stores only metadata + filename so the actual pixel data travels with
+/// the cache rather than bloating project XML.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReferenceStill {
+    pub id: String,
+    #[serde(default)]
+    pub label: String,
+    /// Timestamp (system-time ns since UNIX epoch) of capture — used for sort order.
+    #[serde(default)]
+    pub captured_at_ns: u64,
+    /// Timeline position (ns) the still was captured at. Purely informational.
+    #[serde(default)]
+    pub timeline_pos_ns: u64,
+    /// Captured pixel dimensions (for aspect-correct overlay scaling).
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+    /// Filename within the reference_stills cache directory
+    /// (e.g. `d4f2...png`). Not a full path.
+    #[serde(default)]
+    pub filename: String,
+    /// True if this still was captured with grading bypassed.
+    #[serde(default)]
+    pub ungraded: bool,
+}
+
+impl ReferenceStill {
+    pub fn new(label: impl Into<String>) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            label: label.into(),
+            captured_at_ns: 0,
+            timeline_pos_ns: 0,
+            width: 0,
+            height: 0,
+            filename: String::new(),
+            ungraded: false,
+        }
+    }
+}
+
+/// Maximum number of reference stills that can be pinned per project.
+pub const MAX_REFERENCE_STILLS: usize = 4;
 
 /// Frame rate as a rational number
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +133,128 @@ impl FrameRate {
     }
 }
 
+/// Screen corner for the project-level timecode burn-in overlay +
+/// export drawtext filter. Serialized as snake_case so FCPXML vendor
+/// attrs stay human-readable.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimecodeBurninPosition {
+    TopLeft,
+    TopCenter,
+    TopRight,
+    BottomLeft,
+    #[default]
+    BottomCenter,
+    BottomRight,
+}
+
+impl TimecodeBurninPosition {
+    pub const ALL: [TimecodeBurninPosition; 6] = [
+        TimecodeBurninPosition::TopLeft,
+        TimecodeBurninPosition::TopCenter,
+        TimecodeBurninPosition::TopRight,
+        TimecodeBurninPosition::BottomLeft,
+        TimecodeBurninPosition::BottomCenter,
+        TimecodeBurninPosition::BottomRight,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TimecodeBurninPosition::TopLeft => "Top Left",
+            TimecodeBurninPosition::TopCenter => "Top Center",
+            TimecodeBurninPosition::TopRight => "Top Right",
+            TimecodeBurninPosition::BottomLeft => "Bottom Left",
+            TimecodeBurninPosition::BottomCenter => "Bottom Center",
+            TimecodeBurninPosition::BottomRight => "Bottom Right",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TimecodeBurninPosition::TopLeft => "top_left",
+            TimecodeBurninPosition::TopCenter => "top_center",
+            TimecodeBurninPosition::TopRight => "top_right",
+            TimecodeBurninPosition::BottomLeft => "bottom_left",
+            TimecodeBurninPosition::BottomCenter => "bottom_center",
+            TimecodeBurninPosition::BottomRight => "bottom_right",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<TimecodeBurninPosition> {
+        Self::ALL.iter().copied().find(|p| p.as_str() == s)
+    }
+
+    /// Compute the top-left corner of a `(pill_w, pill_h)` rectangle
+    /// inside a canvas of `(canvas_w, canvas_h)` with a margin
+    /// (typically ~2% of the short edge). Centered positions center
+    /// horizontally; the top/bottom axis is always margin-based.
+    pub fn anchor(
+        self,
+        canvas_w: f64,
+        canvas_h: f64,
+        pill_w: f64,
+        pill_h: f64,
+        margin: f64,
+    ) -> (f64, f64) {
+        let (hx, vy) = match self {
+            TimecodeBurninPosition::TopLeft | TimecodeBurninPosition::BottomLeft => {
+                (margin, 0.0)
+            }
+            TimecodeBurninPosition::TopCenter | TimecodeBurninPosition::BottomCenter => {
+                ((canvas_w - pill_w) * 0.5, 0.0)
+            }
+            TimecodeBurninPosition::TopRight | TimecodeBurninPosition::BottomRight => {
+                (canvas_w - pill_w - margin, 0.0)
+            }
+        };
+        let y = match self {
+            TimecodeBurninPosition::TopLeft
+            | TimecodeBurninPosition::TopCenter
+            | TimecodeBurninPosition::TopRight => margin,
+            _ => canvas_h - pill_h - margin,
+        };
+        (hx, y + vy)
+    }
+}
+
+/// An audio submix bus. Each `AudioRole` (Dialogue, Effects, Music) has a
+/// corresponding bus that all tracks with that role feed into before reaching
+/// the master output. Tracks with `AudioRole::None` bypass the bus stage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioBus {
+    /// Bus gain in dB. 0.0 = unity (no change). Range: −60 to +12 dB.
+    #[serde(default)]
+    pub gain_db: f64,
+    /// When true, the entire bus (all tracks with this role) is silenced.
+    #[serde(default)]
+    pub muted: bool,
+    /// When true, only soloed buses produce output (bus-level solo).
+    #[serde(default)]
+    pub soloed: bool,
+}
+
+impl Default for AudioBus {
+    fn default() -> Self {
+        Self {
+            gain_db: 0.0,
+            muted: false,
+            soloed: false,
+        }
+    }
+}
+
+impl AudioBus {
+    /// Convert `gain_db` to a linear volume multiplier.
+    /// Returns 0.0 for ≤−100 dB (silence).
+    pub fn gain_linear(&self) -> f64 {
+        if self.gain_db <= -100.0 {
+            0.0
+        } else {
+            10.0_f64.powf(self.gain_db / 20.0)
+        }
+    }
+}
+
 /// The top-level project, containing all tracks and sequence settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
@@ -98,6 +272,29 @@ pub struct Project {
     /// project metadata. Default 0.0 = no-op. Clamped to ±24 dB on apply.
     #[serde(default)]
     pub master_gain_db: f64,
+    /// Dialogue submix bus (all tracks with `AudioRole::Dialogue`).
+    #[serde(default)]
+    pub dialogue_bus: AudioBus,
+    /// Effects submix bus (all tracks with `AudioRole::Effects`).
+    #[serde(default)]
+    pub effects_bus: AudioBus,
+    /// Music submix bus (all tracks with `AudioRole::Music`).
+    #[serde(default)]
+    pub music_bus: AudioBus,
+    /// Pinned reference stills for the Program Monitor A/B-compare wipe.
+    /// Capped at `MAX_REFERENCE_STILLS`. Saved in FCPXML as the
+    /// `us:reference-stills` vendor attr on the event element.
+    #[serde(default)]
+    pub reference_stills: Vec<ReferenceStill>,
+    /// Project-level timecode burn-in: when true, the Program Monitor
+    /// renders a timecode pill at `timecode_burnin_position` and
+    /// exports bake it into the output pixels via an ffmpeg drawtext
+    /// filter. Delivery specs frequently require this for review
+    /// masters.
+    #[serde(default)]
+    pub timecode_burnin_enabled: bool,
+    #[serde(default)]
+    pub timecode_burnin_position: TimecodeBurninPosition,
     /// Dirty flag — true if there are unsaved changes
     #[serde(skip)]
     pub dirty: bool,
@@ -164,6 +361,31 @@ pub struct MotionTrackerReference {
     pub sample_count: usize,
 }
 
+/// One visible source-backed clip instance anywhere in the project, including
+/// clips nested inside compound timelines.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceClipInstance {
+    pub clip_id: String,
+    pub clip_label: String,
+    pub track_id: String,
+    pub track_label: String,
+    /// The clip's start time inside the currently editing timeline context.
+    /// For root clips this is the normal timeline start; for nested clips this
+    /// is the full compound-internal timeline position.
+    pub timeline_start: u64,
+    pub timeline_end: u64,
+    /// Root-level timeline coordinates after rebasing compound windows.
+    pub root_timeline_start: u64,
+    pub root_timeline_end: u64,
+    pub source_path: String,
+    pub source_in: u64,
+    pub source_out: u64,
+    /// Ordered compound ids from outermost to innermost, excluding the clip.
+    pub compound_path_ids: Vec<String>,
+    /// Human-readable labels matching `compound_path_ids`.
+    pub compound_path_labels: Vec<String>,
+}
+
 impl Project {
     pub fn new(title: impl Into<String>) -> Self {
         let mut project = Self {
@@ -174,6 +396,12 @@ impl Project {
             tracks: Vec::new(),
             markers: Vec::new(),
             master_gain_db: 0.0,
+            dialogue_bus: AudioBus::default(),
+            effects_bus: AudioBus::default(),
+            music_bus: AudioBus::default(),
+            reference_stills: Vec::new(),
+            timecode_burnin_enabled: false,
+            timecode_burnin_position: TimecodeBurninPosition::default(),
             dirty: false,
             file_path: None,
             source_fcpxml: None,
@@ -209,6 +437,54 @@ impl Project {
 
     pub fn has_solo_tracks(&self) -> bool {
         self.tracks.iter().any(|t| t.soloed)
+    }
+
+    /// True if any audio bus has its `soloed` flag set.
+    pub fn has_solo_buses(&self) -> bool {
+        self.dialogue_bus.soloed || self.effects_bus.soloed || self.music_bus.soloed
+    }
+
+    /// Get the bus for a given audio role (None role has no bus).
+    pub fn bus_for_role(&self, role: &AudioRole) -> Option<&AudioBus> {
+        match role {
+            AudioRole::Dialogue => Some(&self.dialogue_bus),
+            AudioRole::Effects => Some(&self.effects_bus),
+            AudioRole::Music => Some(&self.music_bus),
+            AudioRole::None => None,
+        }
+    }
+
+    /// Get a mutable reference to the bus for a given audio role.
+    pub fn bus_for_role_mut(&mut self, role: &AudioRole) -> Option<&mut AudioBus> {
+        match role {
+            AudioRole::Dialogue => Some(&mut self.dialogue_bus),
+            AudioRole::Effects => Some(&mut self.effects_bus),
+            AudioRole::Music => Some(&mut self.music_bus),
+            AudioRole::None => None,
+        }
+    }
+
+    /// Linear gain multiplier for the bus of a given role.
+    /// Returns 1.0 (unity) for `AudioRole::None` (no bus).
+    pub fn bus_gain_linear(&self, role: &AudioRole) -> f64 {
+        self.bus_for_role(role)
+            .map(|b| b.gain_linear())
+            .unwrap_or(1.0)
+    }
+
+    /// Whether a track's bus is effectively active (not muted, and not
+    /// excluded by bus-level solo). `AudioRole::None` tracks are always
+    /// active at the bus level.
+    pub fn bus_is_active(&self, role: &AudioRole) -> bool {
+        match self.bus_for_role(role) {
+            None => true, // No bus for None role
+            Some(bus) => {
+                if bus.muted {
+                    return false;
+                }
+                !self.has_solo_buses() || bus.soloed
+            }
+        }
     }
 
     pub fn track_is_active_for_output(&self, track: &Track) -> bool {
@@ -301,6 +577,32 @@ impl Project {
         Self::find_clip_ref_recursive(&self.tracks, clip_id)
     }
 
+    /// Count every timeline clip (recursively including those inside
+    /// compound clips) whose `source_path` matches any entry in
+    /// `source_paths`. Used by the Media Library "Remove from
+    /// Library" confirmation dialog to tell the user how many
+    /// timeline clips will go offline if they proceed. Scans all
+    /// tracks; a single source may be referenced by multiple clips.
+    pub fn count_clips_using_source_paths(&self, source_paths: &[String]) -> usize {
+        fn walk(tracks: &[super::track::Track], paths: &[String], acc: &mut usize) {
+            for track in tracks {
+                for clip in &track.clips {
+                    if !clip.source_path.is_empty()
+                        && paths.iter().any(|p| p == &clip.source_path)
+                    {
+                        *acc += 1;
+                    }
+                    if let Some(ref inner) = clip.compound_tracks {
+                        walk(inner, paths, acc);
+                    }
+                }
+            }
+        }
+        let mut count = 0usize;
+        walk(&self.tracks, source_paths, &mut count);
+        count
+    }
+
     fn find_clip_ref_recursive<'a>(
         tracks: &'a [Track],
         clip_id: &str,
@@ -356,6 +658,187 @@ impl Project {
             }
         }
         None
+    }
+
+    pub fn clip_instance(&self, clip_id: &str) -> Option<SourceClipInstance> {
+        let mut compound_path_ids = Vec::new();
+        let mut compound_path_labels = Vec::new();
+        Self::find_clip_instance_recursive(
+            &self.tracks,
+            clip_id,
+            0,
+            &mut compound_path_ids,
+            &mut compound_path_labels,
+        )
+    }
+
+    fn find_clip_instance_recursive(
+        tracks: &[Track],
+        clip_id: &str,
+        absolute_origin_ns: i128,
+        compound_path_ids: &mut Vec<String>,
+        compound_path_labels: &mut Vec<String>,
+    ) -> Option<SourceClipInstance> {
+        for track in tracks {
+            for clip in &track.clips {
+                if clip.id == clip_id && !clip.source_path.is_empty() {
+                    let root_start = (absolute_origin_ns + i128::from(clip.timeline_start)).max(0);
+                    let root_end = (absolute_origin_ns + i128::from(clip.timeline_end())).max(0);
+                    return Some(SourceClipInstance {
+                        clip_id: clip.id.clone(),
+                        clip_label: clip.label.clone(),
+                        track_id: track.id.clone(),
+                        track_label: track.label.clone(),
+                        timeline_start: clip.timeline_start,
+                        timeline_end: clip.timeline_end(),
+                        root_timeline_start: root_start as u64,
+                        root_timeline_end: root_end as u64,
+                        source_path: clip.source_path.clone(),
+                        source_in: clip.source_in,
+                        source_out: clip.source_out,
+                        compound_path_ids: compound_path_ids.clone(),
+                        compound_path_labels: compound_path_labels.clone(),
+                    });
+                }
+                if clip.is_compound() {
+                    let Some(inner_tracks) = clip.compound_tracks.as_ref() else {
+                        continue;
+                    };
+                    let windowed_tracks = Self::window_tracks_for_compound(
+                        inner_tracks,
+                        clip.source_in,
+                        clip.source_out,
+                    );
+                    if windowed_tracks.iter().all(|track| track.clips.is_empty()) {
+                        continue;
+                    }
+                    compound_path_ids.push(clip.id.clone());
+                    compound_path_labels.push(clip.label.clone());
+                    let child_origin_ns = absolute_origin_ns + i128::from(clip.timeline_start)
+                        - i128::from(clip.source_in);
+                    let found = Self::find_clip_instance_recursive(
+                        &windowed_tracks,
+                        clip_id,
+                        child_origin_ns,
+                        compound_path_ids,
+                        compound_path_labels,
+                    );
+                    compound_path_ids.pop();
+                    compound_path_labels.pop();
+                    if found.is_some() {
+                        return found;
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    pub fn source_clip_instances(&self, source_path: &str) -> Vec<SourceClipInstance> {
+        if source_path.is_empty() {
+            return Vec::new();
+        }
+        let mut instances = Vec::new();
+        let mut compound_path_ids = Vec::new();
+        let mut compound_path_labels = Vec::new();
+        Self::collect_source_clip_instances_recursive(
+            &self.tracks,
+            source_path,
+            0,
+            &mut compound_path_ids,
+            &mut compound_path_labels,
+            &mut instances,
+        );
+        instances.sort_by_key(|instance| {
+            (
+                instance.root_timeline_start,
+                instance.compound_path_ids.len(),
+                instance.track_label.clone(),
+                instance.clip_id.clone(),
+            )
+        });
+        instances
+    }
+
+    fn collect_source_clip_instances_recursive(
+        tracks: &[Track],
+        source_path: &str,
+        absolute_origin_ns: i128,
+        compound_path_ids: &mut Vec<String>,
+        compound_path_labels: &mut Vec<String>,
+        instances: &mut Vec<SourceClipInstance>,
+    ) {
+        for track in tracks {
+            for clip in &track.clips {
+                if clip.source_path == source_path {
+                    let root_start = (absolute_origin_ns + i128::from(clip.timeline_start)).max(0);
+                    let root_end = (absolute_origin_ns + i128::from(clip.timeline_end())).max(0);
+                    instances.push(SourceClipInstance {
+                        clip_id: clip.id.clone(),
+                        clip_label: clip.label.clone(),
+                        track_id: track.id.clone(),
+                        track_label: track.label.clone(),
+                        timeline_start: clip.timeline_start,
+                        timeline_end: clip.timeline_end(),
+                        root_timeline_start: root_start as u64,
+                        root_timeline_end: root_end as u64,
+                        source_path: clip.source_path.clone(),
+                        source_in: clip.source_in,
+                        source_out: clip.source_out,
+                        compound_path_ids: compound_path_ids.clone(),
+                        compound_path_labels: compound_path_labels.clone(),
+                    });
+                }
+                if clip.is_compound() {
+                    let Some(inner_tracks) = clip.compound_tracks.as_ref() else {
+                        continue;
+                    };
+                    let windowed_tracks = Self::window_tracks_for_compound(
+                        inner_tracks,
+                        clip.source_in,
+                        clip.source_out,
+                    );
+                    if windowed_tracks.iter().all(|track| track.clips.is_empty()) {
+                        continue;
+                    }
+                    compound_path_ids.push(clip.id.clone());
+                    compound_path_labels.push(clip.label.clone());
+                    let child_origin_ns = absolute_origin_ns + i128::from(clip.timeline_start)
+                        - i128::from(clip.source_in);
+                    Self::collect_source_clip_instances_recursive(
+                        &windowed_tracks,
+                        source_path,
+                        child_origin_ns,
+                        compound_path_ids,
+                        compound_path_labels,
+                        instances,
+                    );
+                    compound_path_ids.pop();
+                    compound_path_labels.pop();
+                }
+            }
+        }
+    }
+
+    fn window_tracks_for_compound(
+        tracks: &[Track],
+        compound_source_in: u64,
+        compound_source_out: u64,
+    ) -> Vec<Track> {
+        tracks
+            .iter()
+            .cloned()
+            .map(|mut track| {
+                track.clips = track
+                    .clips
+                    .into_iter()
+                    .filter_map(|clip| {
+                        clip.rebase_to_window(compound_source_in, compound_source_out)
+                    })
+                    .collect();
+                track
+            })
+            .collect()
     }
 
     fn find_clip_mut_recursive<'a>(
@@ -480,6 +963,74 @@ impl Project {
 mod tests {
     use super::*;
     use crate::model::clip::{Clip, ClipKind, ClipMask, MotionTracker, TrackingBinding};
+
+    #[test]
+    fn count_clips_using_source_paths_counts_direct_and_nested_uses() {
+        // Build: one video track with two clips that share the target
+        // source, one compound clip whose internal track holds a
+        // third clip using the same source, plus an unrelated clip.
+        let mut project = Project::new("usage-count");
+        project.tracks.clear();
+        let mut video_track = crate::model::track::Track::new_video("V1");
+        let target_src = "/tmp/target.mp4".to_string();
+        video_track
+            .clips
+            .push(Clip::new(target_src.clone(), 1_000_000_000, 0, ClipKind::Video));
+        video_track.clips.push(Clip::new(
+            target_src.clone(),
+            1_000_000_000,
+            2_000_000_000,
+            ClipKind::Video,
+        ));
+        video_track.clips.push(Clip::new(
+            "/tmp/other.mp4",
+            1_000_000_000,
+            4_000_000_000,
+            ClipKind::Video,
+        ));
+        // Compound containing a clip that uses the target source.
+        let mut inner_track = crate::model::track::Track::new_video("Compound V1");
+        inner_track.clips.push(Clip::new(
+            target_src.clone(),
+            1_000_000_000,
+            0,
+            ClipKind::Video,
+        ));
+        let mut compound = Clip::new("", 5_000_000_000, 5_000_000_000, ClipKind::Compound);
+        compound.compound_tracks = Some(vec![inner_track]);
+        video_track.clips.push(compound);
+        project.tracks.push(video_track);
+
+        // 2 direct uses on video_track + 1 inside the compound = 3
+        let count = project.count_clips_using_source_paths(&[target_src.clone()]);
+        assert_eq!(count, 3);
+        // Unrelated source → 0
+        let count = project.count_clips_using_source_paths(&["/tmp/nope.mp4".to_string()]);
+        assert_eq!(count, 0);
+        // Two paths at once → 3 target + 1 other = 4
+        let count = project.count_clips_using_source_paths(&[
+            target_src,
+            "/tmp/other.mp4".to_string(),
+        ]);
+        assert_eq!(count, 4);
+    }
+
+    #[test]
+    fn count_clips_using_source_paths_ignores_empty_paths() {
+        // A compound clip has source_path="" by convention — it must
+        // not match the empty-path entry, otherwise every compound
+        // would look like a "use" of every item missing a source.
+        let mut project = Project::new("empty-path");
+        project.tracks.clear();
+        let mut t = crate::model::track::Track::new_video("V1");
+        t.clips.push(Clip::new("", 5_000_000_000, 0, ClipKind::Compound));
+        project.tracks.push(t);
+        assert_eq!(
+            project.count_clips_using_source_paths(&["".to_string()]),
+            0,
+            "empty source path in the query list must count zero, not every clip with source_path=\"\""
+        );
+    }
 
     #[test]
     fn test_project_new_defaults() {
@@ -740,6 +1291,67 @@ mod tests {
     }
 
     #[test]
+    fn test_clip_instance_finds_nested_clip_with_compound_context() {
+        let mut p = make_project_with_compound();
+        let compound = p.clip_mut("compound-1").unwrap();
+        compound.timeline_start = 10_000_000_000;
+        compound.source_in = 4_000_000_000;
+        compound.source_out = 9_000_000_000;
+
+        let instance = p
+            .clip_instance("inner-clip-1")
+            .expect("nested clip instance should be found");
+        assert_eq!(instance.track_label, "Inner V1");
+        assert_eq!(instance.timeline_start, 4_000_000_000);
+        assert_eq!(instance.timeline_end, 5_000_000_000);
+        assert_eq!(instance.root_timeline_start, 10_000_000_000);
+        assert_eq!(instance.root_timeline_end, 11_000_000_000);
+        assert_eq!(instance.compound_path_ids, vec!["compound-1".to_string()]);
+        assert_eq!(
+            instance.compound_path_labels,
+            vec!["Compound Clip".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_source_clip_instances_include_root_and_nested_visible_matches() {
+        let mut p = make_project_with_compound();
+        let mut root_match = Clip::new("inner.mp4", 2_000_000_000, 20_000_000_000, ClipKind::Video);
+        root_match.id = "root-match".into();
+        p.tracks[0].add_clip(root_match);
+        let compound = p.clip_mut("compound-1").unwrap();
+        compound.timeline_start = 10_000_000_000;
+        compound.source_in = 4_000_000_000;
+        compound.source_out = 9_000_000_000;
+
+        let instances = p.source_clip_instances("inner.mp4");
+        assert_eq!(instances.len(), 2);
+
+        assert_eq!(instances[0].clip_id, "inner-clip-1");
+        assert_eq!(instances[0].root_timeline_start, 10_000_000_000);
+        assert_eq!(
+            instances[0].compound_path_ids,
+            vec!["compound-1".to_string()]
+        );
+
+        assert_eq!(instances[1].clip_id, "root-match");
+        assert_eq!(instances[1].root_timeline_start, 20_000_000_000);
+        assert!(instances[1].compound_path_ids.is_empty());
+    }
+
+    #[test]
+    fn test_source_clip_instances_skip_compound_children_outside_visible_window() {
+        let mut p = make_project_with_compound();
+        let compound = p.clip_mut("compound-1").unwrap();
+        compound.timeline_start = 10_000_000_000;
+        compound.source_in = 5_000_000_000;
+        compound.source_out = 6_000_000_000;
+
+        let instances = p.source_clip_instances("inner.mp4");
+        assert!(instances.is_empty());
+    }
+
+    #[test]
     fn test_motion_tracker_references_collect_root_and_nested_trackers() {
         let mut p = make_project_with_compound();
         let mut root_tracker = MotionTracker::new("Root Track");
@@ -803,5 +1415,103 @@ mod tests {
         assert!(p.clip_ref("inner-clip-1").unwrap().masks[0]
             .tracking_binding
             .is_none());
+    }
+
+    #[test]
+    fn marker_notes_defaults_empty() {
+        let m = Marker::new(1_000_000_000, "Test");
+        assert_eq!(m.notes, "");
+        assert_eq!(m.color, 0xFF8C00FF);
+    }
+
+    #[test]
+    fn marker_serde_roundtrip_with_notes() {
+        let mut m = Marker::new(500_000_000, "Shot start");
+        m.notes = "Need to re-shoot".to_string();
+        let json = serde_json::to_string(&m).unwrap();
+        let m2: Marker = serde_json::from_str(&json).unwrap();
+        assert_eq!(m2.notes, "Need to re-shoot");
+        assert_eq!(m2.label, "Shot start");
+        assert_eq!(m2.position_ns, 500_000_000);
+    }
+
+    #[test]
+    fn marker_serde_backward_compat_no_notes() {
+        let json = r#"{"id":"abc","position_ns":100,"label":"Old","color":4278190335}"#;
+        let m: Marker = serde_json::from_str(json).unwrap();
+        assert_eq!(m.notes, "");
+    }
+
+    // ── AudioBus tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_audio_bus_default() {
+        let bus = AudioBus::default();
+        assert!((bus.gain_db - 0.0).abs() < f64::EPSILON);
+        assert!(!bus.muted);
+        assert!(!bus.soloed);
+        assert!((bus.gain_linear() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_audio_bus_gain_linear() {
+        let mut bus = AudioBus::default();
+        bus.gain_db = 6.0;
+        let linear = bus.gain_linear();
+        // 10^(6/20) ≈ 1.9953
+        assert!((linear - 1.9953).abs() < 0.001);
+        bus.gain_db = -100.0;
+        assert!((bus.gain_linear() - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_project_bus_for_role() {
+        let p = Project::new("Test");
+        assert!(p.bus_for_role(&AudioRole::Dialogue).is_some());
+        assert!(p.bus_for_role(&AudioRole::Effects).is_some());
+        assert!(p.bus_for_role(&AudioRole::Music).is_some());
+        assert!(p.bus_for_role(&AudioRole::None).is_none());
+    }
+
+    #[test]
+    fn test_project_has_solo_buses() {
+        let mut p = Project::new("Test");
+        assert!(!p.has_solo_buses());
+        p.dialogue_bus.soloed = true;
+        assert!(p.has_solo_buses());
+    }
+
+    #[test]
+    fn test_project_bus_is_active() {
+        let mut p = Project::new("Test");
+        // All buses active by default
+        assert!(p.bus_is_active(&AudioRole::Dialogue));
+        assert!(p.bus_is_active(&AudioRole::Effects));
+        assert!(p.bus_is_active(&AudioRole::Music));
+        assert!(p.bus_is_active(&AudioRole::None)); // always active
+
+        // Mute dialogue bus
+        p.dialogue_bus.muted = true;
+        assert!(!p.bus_is_active(&AudioRole::Dialogue));
+        assert!(p.bus_is_active(&AudioRole::Effects));
+
+        // Solo effects bus (while dialogue is muted)
+        p.dialogue_bus.muted = false;
+        p.effects_bus.soloed = true;
+        assert!(!p.bus_is_active(&AudioRole::Dialogue));
+        assert!(p.bus_is_active(&AudioRole::Effects));
+        assert!(!p.bus_is_active(&AudioRole::Music));
+        assert!(p.bus_is_active(&AudioRole::None));
+    }
+
+    #[test]
+    fn test_project_bus_gain_linear() {
+        let mut p = Project::new("Test");
+        assert!((p.bus_gain_linear(&AudioRole::Dialogue) - 1.0).abs() < 1e-9);
+        p.dialogue_bus.gain_db = -6.0;
+        let g = p.bus_gain_linear(&AudioRole::Dialogue);
+        assert!((g - 0.5012).abs() < 0.001);
+        // None role returns unity
+        assert!((p.bus_gain_linear(&AudioRole::None) - 1.0).abs() < 1e-9);
     }
 }

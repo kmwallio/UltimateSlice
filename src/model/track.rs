@@ -187,6 +187,85 @@ impl Default for TrackHeightPreset {
     }
 }
 
+/// Per-track color swatch — same palette as `ClipColorLabel` for visual
+/// consistency. Used for the accent bar and label-area dot in the track header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackColorLabel {
+    None,
+    Red,
+    Orange,
+    Yellow,
+    Green,
+    Teal,
+    Blue,
+    Purple,
+    Magenta,
+}
+
+impl Default for TrackColorLabel {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl TrackColorLabel {
+    /// RGB tuple for this color swatch. Returns `None` when the label is unset.
+    pub fn rgb(self) -> Option<(f64, f64, f64)> {
+        match self {
+            Self::None => Option::None,
+            Self::Red => Some((0.78, 0.27, 0.27)),
+            Self::Orange => Some((0.83, 0.49, 0.20)),
+            Self::Yellow => Some((0.78, 0.68, 0.20)),
+            Self::Green => Some((0.28, 0.66, 0.33)),
+            Self::Teal => Some((0.20, 0.63, 0.60)),
+            Self::Blue => Some((0.22, 0.48, 0.85)),
+            Self::Purple => Some((0.53, 0.38, 0.80)),
+            Self::Magenta => Some((0.78, 0.35, 0.68)),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Red => "Red",
+            Self::Orange => "Orange",
+            Self::Yellow => "Yellow",
+            Self::Green => "Green",
+            Self::Teal => "Teal",
+            Self::Blue => "Blue",
+            Self::Purple => "Purple",
+            Self::Magenta => "Magenta",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "red" => Self::Red,
+            "orange" => Self::Orange,
+            "yellow" => Self::Yellow,
+            "green" => Self::Green,
+            "teal" => Self::Teal,
+            "blue" => Self::Blue,
+            "purple" => Self::Purple,
+            "magenta" => Self::Magenta,
+            _ => Self::None,
+        }
+    }
+
+    pub const ALL: [TrackColorLabel; 9] = [
+        Self::None,
+        Self::Red,
+        Self::Orange,
+        Self::Yellow,
+        Self::Green,
+        Self::Teal,
+        Self::Blue,
+        Self::Purple,
+        Self::Magenta,
+    ];
+}
+
 /// A single horizontal lane in the timeline
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Track {
@@ -217,6 +296,17 @@ pub struct Track {
     /// export. Has no effect when the export channel layout is Stereo.
     #[serde(default)]
     pub surround_position: SurroundPositionOverride,
+    /// Per-track color swatch for the accent bar and label dot.
+    #[serde(default)]
+    pub color_label: TrackColorLabel,
+    /// Track-level gain in dB (post-clip volume multiplier). Default 0.0 dB (unity).
+    /// Applied after per-clip volume in both preview (audiomixer pad) and export.
+    #[serde(default)]
+    pub gain_db: f64,
+    /// Track-level stereo pan (−1.0 = hard left, 0.0 = center, +1.0 = hard right).
+    /// Applied after per-clip pan in both preview and export.
+    #[serde(default)]
+    pub pan: f64,
 }
 
 impl Track {
@@ -234,6 +324,9 @@ impl Track {
             duck: false,
             duck_amount_db: default_duck_amount_db(),
             surround_position: SurroundPositionOverride::default(),
+            color_label: TrackColorLabel::None,
+            gain_db: 0.0,
+            pan: 0.0,
         }
     }
 
@@ -251,6 +344,9 @@ impl Track {
             duck: false,
             duck_amount_db: default_duck_amount_db(),
             surround_position: SurroundPositionOverride::default(),
+            color_label: TrackColorLabel::None,
+            gain_db: 0.0,
+            pan: 0.0,
         }
     }
 
@@ -262,6 +358,16 @@ impl Track {
     /// True if this is an audio track.
     pub fn is_audio(&self) -> bool {
         self.kind == TrackKind::Audio
+    }
+
+    /// Convert track gain from dB to linear multiplier.
+    /// 0 dB → 1.0, +6 dB → ~2.0, −6 dB → ~0.5, −∞ (≤ −100) → 0.0.
+    pub fn gain_linear(&self) -> f64 {
+        if self.gain_db <= -100.0 {
+            0.0
+        } else {
+            10.0_f64.powf(self.gain_db / 20.0)
+        }
     }
 
     /// Add a clip and keep clips sorted by timeline position
@@ -414,5 +520,46 @@ mod tests {
         track.sort_clips();
         assert_eq!(track.clips[0].id, "A");
         assert_eq!(track.clips[1].id, "B");
+    }
+
+    #[test]
+    fn test_gain_linear_zero_db() {
+        let t = Track::new_audio("A1");
+        assert!((t.gain_linear() - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_gain_linear_plus_6() {
+        let mut t = Track::new_audio("A1");
+        t.gain_db = 6.0;
+        let linear = t.gain_linear();
+        assert!((linear - 1.9953).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_gain_linear_minus_6() {
+        let mut t = Track::new_audio("A1");
+        t.gain_db = -6.0;
+        let linear = t.gain_linear();
+        assert!((linear - 0.5012).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_gain_linear_negative_infinity() {
+        let mut t = Track::new_audio("A1");
+        t.gain_db = -100.0;
+        assert_eq!(t.gain_linear(), 0.0);
+        t.gain_db = -200.0;
+        assert_eq!(t.gain_linear(), 0.0);
+    }
+
+    #[test]
+    fn test_new_track_defaults() {
+        let v = Track::new_video("V1");
+        assert_eq!(v.gain_db, 0.0);
+        assert_eq!(v.pan, 0.0);
+        let a = Track::new_audio("A1");
+        assert_eq!(a.gain_db, 0.0);
+        assert_eq!(a.pan, 0.0);
     }
 }

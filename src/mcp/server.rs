@@ -306,6 +306,111 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_track_muted",
+            "description": "Mute or unmute a track. Muted tracks are silenced in playback and export.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string", "description": "Target track id from list_tracks." },
+                    "muted": { "type": "boolean", "description": "Whether the track should be muted." }
+                },
+                "required": ["track_id", "muted"]
+            }
+        },
+        {
+            "name": "set_track_gain",
+            "description": "Set the gain (volume) of a track in decibels. 0 dB is unity gain, negative values attenuate, positive values boost (max +12 dB). Values <= -100 dB are treated as -infinity (silence).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string", "description": "Target track id from list_tracks." },
+                    "gain_db": { "type": "number", "description": "Gain in decibels (-100 to +12)." }
+                },
+                "required": ["track_id", "gain_db"]
+            }
+        },
+        {
+            "name": "set_track_pan",
+            "description": "Set the stereo pan of a track. -1.0 is hard left, 0.0 is center, +1.0 is hard right.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string", "description": "Target track id from list_tracks." },
+                    "pan": { "type": "number", "description": "Pan position from -1.0 (left) to 1.0 (right)." }
+                },
+                "required": ["track_id", "pan"]
+            }
+        },
+        {
+            "name": "get_mixer_state",
+            "description": "Get the current mixer state for all tracks: gain, pan, muted, soloed, and audio role. Also includes bus state for each role (Dialogue, Effects, Music).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        },
+        {
+            "name": "set_bus_gain",
+            "description": "Set the gain (volume) of an audio bus in decibels. Buses group tracks by audio role (Dialogue, Effects, Music). 0 dB is unity gain.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "role": { "type": "string", "description": "Audio role: 'Dialogue', 'Effects', or 'Music'." },
+                    "gain_db": { "type": "number", "description": "Gain in decibels (-96 to +24)." }
+                },
+                "required": ["role", "gain_db"]
+            }
+        },
+        {
+            "name": "set_bus_muted",
+            "description": "Mute or unmute an audio bus. Muted buses silence all tracks in that role.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "role": { "type": "string", "description": "Audio role: 'Dialogue', 'Effects', or 'Music'." },
+                    "muted": { "type": "boolean", "description": "Whether the bus should be muted." }
+                },
+                "required": ["role", "muted"]
+            }
+        },
+        {
+            "name": "set_bus_soloed",
+            "description": "Solo or unsolo an audio bus. When any bus is soloed, only soloed buses are audible.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "role": { "type": "string", "description": "Audio role: 'Dialogue', 'Effects', or 'Music'." },
+                    "soloed": { "type": "boolean", "description": "Whether the bus should be soloed." }
+                },
+                "required": ["role", "soloed"]
+            }
+        },
+        {
+            "name": "set_track_locked",
+            "description": "Lock or unlock a track. Locked tracks cannot be edited.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string", "description": "Target track id from list_tracks." },
+                    "locked": { "type": "boolean", "description": "Whether the track should be locked." }
+                },
+                "required": ["track_id", "locked"]
+            }
+        },
+        {
+            "name": "set_track_color",
+            "description": "Set or clear the color label on a track. The accent bar and optional color swatch reflect this color.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "track_id": { "type": "string", "description": "Target track id from list_tracks." },
+                    "color": { "type": "string", "enum": ["none", "red", "orange", "yellow", "green", "teal", "blue", "purple", "magenta"], "description": "Color label name." }
+                },
+                "required": ["track_id", "color"]
+            }
+        },
+        {
             "name": "set_track_height_preset",
             "description": "Set timeline display height preset for a track by id ('small', 'medium', or 'large').",
             "inputSchema": {
@@ -326,6 +431,26 @@ fn tools_list() -> Value {
             "name": "get_preferences",
             "description": "Return current application preferences.",
             "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "get_project_health",
+            "description": "Return offline-media counts plus generated cache and installed-model disk usage for the current project.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "cleanup_project_cache",
+            "description": "Purge one generated cache family and reset its runtime path map so preview falls back cleanly until the cache is rebuilt.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "cache": {
+                        "type": "string",
+                        "enum": ["proxy_local", "proxy_sidecars", "prerender", "background_removal", "frame_interpolation", "voice_enhancement", "clip_embeddings", "auto_tags"],
+                        "description": "Generated cache family to purge."
+                    }
+                },
+                "required": ["cache"]
+            }
         },
         {
             "name": "set_hardware_acceleration",
@@ -909,11 +1034,11 @@ fn tools_list() -> Value {
         },
         {
             "name": "list_library",
-            "description": "List media-library items, or filter them by optional search text. Search text matches browser metadata plus any stored speech-to-text transcript content, and filtered results are returned in browser-style relevance order with match metadata.",
+            "description": "List media-library items, or filter them by optional search text. Search text matches browser metadata, any stored speech-to-text transcript content, and any cached visual-search embeddings, and filtered results are returned in browser-style relevance order with match metadata.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "search_text": { "type": "string", "description": "Optional metadata + transcript search query. When provided, only matching items are returned and each result includes search_match metadata." }
+                    "search_text": { "type": "string", "description": "Optional metadata + auto-tag + transcript + visual search query. When provided, only matching items are returned and each result includes search_match metadata." }
                 }
             }
         },
@@ -1199,6 +1324,18 @@ fn tools_list() -> Value {
                     "voice_isolation": { "type": "number", "description": "Isolation amount 0.0 to 1.0" }
                 },
                 "required": ["clip_id", "voice_isolation"]
+            }
+        },
+        {
+            "name": "set_clip_render_replace",
+            "description": "Toggle per-clip Render-and-Replace (Phase 1 foundation). When enabled, the RenderReplaceCache bakes this clip's primary pixel-level effect stack (color grade, LUT stack, frei0r effects, blur / denoise / sharpness) into a ProRes 422 HQ sidecar cached under $XDG_CACHE_HOME/ultimateslice/render_replace/. Phase 1 only persists the flag and signature; preview swap and effect-chain suppression land in Phase 1b.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id (from list_clips)." },
+                    "enabled": { "type": "boolean", "description": "Whether Render-and-Replace is on for this clip." }
+                },
+                "required": ["clip_id", "enabled"]
             }
         },
         {
@@ -1514,8 +1651,120 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_program_monitor_hud",
+            "description": "Show or hide the Program Monitor HUD overlay (timecode, frame number, fps, resolution, and cumulative dropped-frame count). Setting persists across sessions.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "enabled": { "type": "boolean", "description": "true to show the HUD, false to hide it." }
+                },
+                "required": ["enabled"]
+            }
+        },
+        {
+            "name": "set_program_monitor_aspect_mask",
+            "description": "Select the Program Monitor aspect-ratio mask preset. Letterboxes or pillarboxes the preview to the chosen delivery-format target. Use 'none' to disable. Setting persists across sessions.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "preset": {
+                        "type": "string",
+                        "enum": ["none", "cinemascope", "univisium", "academy", "standard", "square", "social_45", "vertical"],
+                        "description": "Aspect mask preset: none (off), cinemascope (2.39:1), univisium (2.00:1), academy (1.85:1), standard (4:3), square (1:1), social_45 (4:5), vertical (9:16)."
+                    }
+                },
+                "required": ["preset"]
+            }
+        },
+        {
+            "name": "set_program_monitor_timecode_burnin",
+            "description": "Toggle project-level timecode burn-in and/or choose the on-screen position. The Program Monitor draws a monospace timecode pill at the chosen corner, and exports bake the same timecode into output pixels via an ffmpeg drawtext filter. Position is one of top_left, top_center, top_right, bottom_left, bottom_center, bottom_right. Persists into the project's FCPXML (us:timecode-burnin-* vendor attrs).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "true to enable burn-in, false to disable. Omit to leave unchanged."
+                    },
+                    "position": {
+                        "type": "string",
+                        "enum": ["top_left", "top_center", "top_right", "bottom_left", "bottom_center", "bottom_right"],
+                        "description": "Corner anchor for the timecode pill. Omit to leave unchanged."
+                    }
+                }
+            }
+        },
+        {
+            "name": "set_program_monitor_ab_compare",
+            "description": "Control the Program Monitor A/B-compare wipe overlay. Arguments are all optional; any omitted field is left unchanged. Pass reference_still_id to activate a specific pinned still; pass clear_reference=true to deactivate without disabling the toggle.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "true to show the wipe, false to hide it. Omit to leave unchanged."
+                    },
+                    "midline_percent": {
+                        "type": "number",
+                        "description": "Midline position as a percentage (0..100) of canvas width. 50 = centered. Omit to leave unchanged."
+                    },
+                    "reference_still_id": {
+                        "type": "string",
+                        "description": "ID of a reference still (see list_reference_stills) to activate as the wipe reference. Omit to leave unchanged."
+                    },
+                    "clear_reference": {
+                        "type": "boolean",
+                        "description": "When true, clear any active reference still and turn the overlay off. Takes precedence over reference_still_id."
+                    }
+                }
+            }
+        },
+        {
+            "name": "capture_reference_still",
+            "description": "Capture the current Program Monitor composited frame as a reference still (max 4 per project). Returns the new still's id and cache PNG path. The still is automatically activated as the A/B-compare reference.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "label": {
+                        "type": "string",
+                        "description": "Optional human-readable label shown on the strip cell. Defaults to 'Still N'."
+                    }
+                }
+            }
+        },
+        {
+            "name": "list_reference_stills",
+            "description": "List all reference stills currently pinned in the project, with id, label, capture timestamp (ns since epoch), dimensions, cache filename, and whether the PNG is present on disk.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        },
+        {
+            "name": "delete_reference_still",
+            "description": "Delete a reference still by id. Removes the PNG from the cache directory and clears it from Program Monitor state if it was the active A/B reference.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "The reference still id (see list_reference_stills)." }
+                },
+                "required": ["id"]
+            }
+        },
+        {
             "name": "set_background_ai_indexing",
-            "description": "Enable or disable automatic background AI indexing for Media Library transcript search. When enabled, eligible audio-backed library items are queued one at a time for speech-to-text indexing when Whisper is available.",
+            "description": "Enable or disable automatic background AI indexing for Media Library search enrichment. When enabled, eligible library items are queued one at a time for transcript indexing (Whisper) and visual embedding generation (CLIP-style search) when the corresponding models are available.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "enabled": { "type": "boolean", "description": "true to enable, false to disable." }
+                },
+                "required": ["enabled"]
+            }
+        },
+        {
+            "name": "set_background_auto_tagging",
+            "description": "Enable or disable persistent contextual auto-tagging for Media Library items after visual-search embeddings are available.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1609,6 +1858,17 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "focus_clip_instance",
+            "description": "Focus a visible timeline clip instance by clip id, entering compound edit context first when that clip lives inside a compound.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Timeline clip id to focus. For nested clips, use an id returned by reverse_match_frame." }
+                },
+                "required": ["clip_id"]
+            }
+        },
+        {
             "name": "export_displayed_frame",
             "description": "Export the currently displayed program-monitor frame to an image file (binary PPM/P6 format).",
             "inputSchema": {
@@ -1681,6 +1941,17 @@ fn tools_list() -> Value {
                 "properties": {
                     "clip_id": { "type": "string", "description": "Optional clip ID to match. If omitted, uses the currently selected clip." }
                 }
+            }
+        },
+        {
+            "name": "reverse_match_frame",
+            "description": "Find every visible timeline instance of a media-library source path, including clips nested inside compounds.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path of the source-backed library item to look up." }
+                },
+                "required": ["path"]
             }
         },
         {
@@ -1799,6 +2070,21 @@ fn tools_list() -> Value {
                     "replace_audio": {
                         "type": "boolean",
                         "description": "When true, link all synced clips and mute the anchor clip's embedded audio so external audio replaces it. Default false."
+                    }
+                },
+                "required": ["clip_ids"]
+            }
+        },
+        {
+            "name": "sync_clips_by_timecode",
+            "description": "Align two or more timeline clips by their decoded source timecode (no grouping required). Every clip must already have source_timecode_base_ns populated — set by convert_ltc_to_timecode on clips carrying an LTC audio signal, by the import probe for files with video-stream or BWF bext timecode, or imported from an FCPXML start attr. Anchor is the first clip in clip_ids when it has timecode, otherwise the earliest-timecode member. Non-anchor members shift so their timeline delta matches their timecode delta; clamp-to-zero if math would go negative.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_ids": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Two or more clip ids to align. First id (when it has timecode) is used as the anchor and stays put; others shift to align timecodes."
                     }
                 },
                 "required": ["clip_ids"]
@@ -2351,6 +2637,51 @@ fn tools_list() -> Value {
                 },
                 "required": ["track_id"]
             }
+        },
+        {
+            "name": "list_markers",
+            "description": "List all project markers with id, label, position_ns, color (hex RGBA), and notes.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "add_marker",
+            "description": "Add a marker at the given position. Returns the new marker.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "position_ns": { "type": "integer", "description": "Timeline position in nanoseconds" },
+                    "label": { "type": "string", "description": "Marker label" },
+                    "color": { "type": "string", "description": "RGBA hex color, e.g. FF8C00FF (optional, default orange)" },
+                    "notes": { "type": "string", "description": "Optional notes text" }
+                },
+                "required": ["position_ns", "label"]
+            }
+        },
+        {
+            "name": "remove_marker",
+            "description": "Remove a marker by its ID.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "marker_id": { "type": "string", "description": "ID of the marker to remove" }
+                },
+                "required": ["marker_id"]
+            }
+        },
+        {
+            "name": "edit_marker",
+            "description": "Edit a marker's label, color, notes, or position. Only provided fields are changed.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "marker_id": { "type": "string", "description": "ID of the marker to edit" },
+                    "label": { "type": "string", "description": "New label (optional)" },
+                    "color": { "type": "string", "description": "New RGBA hex color (optional)" },
+                    "notes": { "type": "string", "description": "New notes text (optional)" },
+                    "position_ns": { "type": "integer", "description": "New position in nanoseconds (optional)" }
+                },
+                "required": ["marker_id"]
+            }
         }
     ]})
 }
@@ -2424,6 +2755,7 @@ fn is_cacheable_read_tool(name: &str) -> bool {
             | "get_playhead_position"
             | "get_performance_snapshot"
             | "get_preferences"
+            | "get_project_health"
             | "list_export_presets"
             | "list_workspace_layouts"
             | "list_library"
@@ -2507,6 +2839,47 @@ fn dispatch_tool_payload(
             duck: arg_bool!(args, "duck"),
             reply: tx,
         },
+        "set_track_muted" => McpCommand::SetTrackMuted {
+            track_id: arg_str!(args, "track_id"),
+            muted: arg_bool!(args, "muted"),
+            reply: tx,
+        },
+        "set_track_gain" => McpCommand::SetTrackGain {
+            track_id: arg_str!(args, "track_id"),
+            gain_db: arg_f64!(args, "gain_db", 0.0),
+            reply: tx,
+        },
+        "set_track_pan" => McpCommand::SetTrackPan {
+            track_id: arg_str!(args, "track_id"),
+            pan: arg_f64!(args, "pan", 0.0),
+            reply: tx,
+        },
+        "get_mixer_state" => McpCommand::GetMixerState { reply: tx },
+        "set_bus_gain" => McpCommand::SetBusGain {
+            role: arg_str!(args, "role"),
+            gain_db: arg_f64!(args, "gain_db", 0.0),
+            reply: tx,
+        },
+        "set_bus_muted" => McpCommand::SetBusMuted {
+            role: arg_str!(args, "role"),
+            muted: arg_bool!(args, "muted"),
+            reply: tx,
+        },
+        "set_bus_soloed" => McpCommand::SetBusSoloed {
+            role: arg_str!(args, "role"),
+            soloed: arg_bool!(args, "soloed"),
+            reply: tx,
+        },
+        "set_track_locked" => McpCommand::SetTrackLocked {
+            track_id: arg_str!(args, "track_id"),
+            locked: arg_bool!(args, "locked"),
+            reply: tx,
+        },
+        "set_track_color" => McpCommand::SetTrackColor {
+            track_id: arg_str!(args, "track_id"),
+            color: args["color"].as_str().unwrap_or("none").to_string(),
+            reply: tx,
+        },
         "set_track_height_preset" => McpCommand::SetTrackHeightPreset {
             track_id: arg_str!(args, "track_id"),
             height_preset: args["height_preset"]
@@ -2517,6 +2890,11 @@ fn dispatch_tool_payload(
         },
         "close_source_preview" => McpCommand::CloseSourcePreview { reply: tx },
         "get_preferences" => McpCommand::GetPreferences { reply: tx },
+        "get_project_health" => McpCommand::GetProjectHealth { reply: tx },
+        "cleanup_project_cache" => McpCommand::CleanupProjectCache {
+            cache: arg_str!(args, "cache"),
+            reply: tx,
+        },
         "set_hardware_acceleration" => McpCommand::SetHardwareAcceleration {
             enabled: arg_bool!(args, "enabled"),
             reply: tx,
@@ -3283,6 +3661,14 @@ fn dispatch_tool_payload(
             strength: args.get("strength").and_then(|v| v.as_f64()),
             reply: tx,
         },
+        "set_clip_render_replace" => McpCommand::SetClipRenderReplace {
+            clip_id: arg_str!(args, "clip_id"),
+            enabled: args
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            reply: tx,
+        },
         "set_clip_subtitle_visible" => McpCommand::SetClipSubtitleVisible {
             clip_id: arg_str!(args, "clip_id"),
             visible: args
@@ -3467,7 +3853,64 @@ fn dispatch_tool_payload(
             enabled: arg_bool!(args, "enabled"),
             reply: tx,
         },
+        "set_program_monitor_hud" => McpCommand::SetProgramMonitorHud {
+            enabled: arg_bool!(args, "enabled"),
+            reply: tx,
+        },
+        "set_program_monitor_aspect_mask" => McpCommand::SetProgramMonitorAspectMask {
+            preset: arg_str!(args, "preset", "none"),
+            reply: tx,
+        },
+        "set_program_monitor_timecode_burnin" => {
+            let enabled = args.get("enabled").and_then(|v| v.as_bool());
+            let position = args
+                .get("position")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            McpCommand::SetProgramMonitorTimecodeBurnin {
+                enabled,
+                position,
+                reply: tx,
+            }
+        }
+        "set_program_monitor_ab_compare" => {
+            let enabled = args.get("enabled").and_then(|v| v.as_bool());
+            let midline_percent = args
+                .get("midline_percent")
+                .and_then(|v| v.as_f64());
+            let reference_still_id = args
+                .get("reference_still_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let clear_reference = args
+                .get("clear_reference")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            McpCommand::SetProgramMonitorAbCompare {
+                enabled,
+                midline_percent,
+                reference_still_id,
+                clear_reference,
+                reply: tx,
+            }
+        }
+        "capture_reference_still" => McpCommand::CaptureReferenceStill {
+            label: args
+                .get("label")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            reply: tx,
+        },
+        "list_reference_stills" => McpCommand::ListReferenceStills { reply: tx },
+        "delete_reference_still" => McpCommand::DeleteReferenceStill {
+            id: arg_str!(args, "id", ""),
+            reply: tx,
+        },
         "set_background_ai_indexing" => McpCommand::SetBackgroundAiIndexing {
+            enabled: arg_bool!(args, "enabled"),
+            reply: tx,
+        },
+        "set_background_auto_tagging" => McpCommand::SetBackgroundAutoTagging {
             enabled: arg_bool!(args, "enabled"),
             reply: tx,
         },
@@ -3516,6 +3959,10 @@ fn dispatch_tool_payload(
             timeline_pos_ns: arg_u64!(args, "timeline_pos_ns", 0),
             reply: tx,
         },
+        "focus_clip_instance" => McpCommand::FocusClipInstance {
+            clip_id: arg_str!(args, "clip_id"),
+            reply: tx,
+        },
         "export_displayed_frame" => McpCommand::ExportDisplayedFrame {
             path: arg_str!(args, "path"),
             reply: tx,
@@ -3538,6 +3985,10 @@ fn dispatch_tool_payload(
                 .get("clip_id")
                 .and_then(|v| v.as_str())
                 .map(str::to_string),
+            reply: tx,
+        },
+        "reverse_match_frame" => McpCommand::ReverseMatchFrame {
+            path: arg_str!(args, "path"),
             reply: tx,
         },
         "list_backups" => McpCommand::ListBackups { reply: tx },
@@ -3588,6 +4039,17 @@ fn dispatch_tool_payload(
                 .get("replace_audio")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
+            reply: tx,
+        },
+        "sync_clips_by_timecode" => McpCommand::SyncClipsByTimecode {
+            clip_ids: args["clip_ids"]
+                .as_array()
+                .map(|ids| {
+                    ids.iter()
+                        .filter_map(|id| id.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default(),
             reply: tx,
         },
         "copy_clip_color_grade" => McpCommand::CopyClipColorGrade {
@@ -3917,6 +4379,45 @@ fn dispatch_tool_payload(
         },
         "reorder_by_script" => McpCommand::ReorderByScript {
             track_id: arg_str!(args, "track_id"),
+            reply: tx,
+        },
+        // ── Marker tools ─────────────────────────────────────────────────
+        "list_markers" => McpCommand::ListMarkers { reply: tx },
+        "add_marker" => McpCommand::AddMarker {
+            position_ns: args
+                .get("position_ns")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            label: arg_str!(args, "label"),
+            color: args
+                .get("color")
+                .and_then(|v| v.as_str())
+                .and_then(|s| u32::from_str_radix(s, 16).ok()),
+            notes: args
+                .get("notes")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            reply: tx,
+        },
+        "remove_marker" => McpCommand::RemoveMarker {
+            marker_id: arg_str!(args, "marker_id"),
+            reply: tx,
+        },
+        "edit_marker" => McpCommand::EditMarker {
+            marker_id: arg_str!(args, "marker_id"),
+            label: args
+                .get("label")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            color: args
+                .get("color")
+                .and_then(|v| v.as_str())
+                .and_then(|s| u32::from_str_radix(s, 16).ok()),
+            notes: args
+                .get("notes")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            position_ns: args.get("position_ns").and_then(|v| v.as_u64()),
             reply: tx,
         },
 
@@ -4421,6 +4922,53 @@ mod tests {
     }
 
     #[test]
+    fn call_tool_dispatches_get_project_health() {
+        let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
+        std::thread::spawn(move || {
+            let cmd = receiver.recv().expect("expected command");
+            match cmd {
+                McpCommand::GetProjectHealth { reply } => {
+                    reply.send(json!({"offline_paths": []})).ok();
+                }
+                _ => panic!("unexpected MCP command"),
+            }
+        });
+        let id = json!(10);
+        let params = json!({
+            "name": "get_project_health",
+            "arguments": {}
+        });
+        let mut cache = std::collections::HashMap::new();
+        let response = call_tool(&id, &params, &sender, &mut cache);
+        assert_eq!(response["id"], id);
+        assert_eq!(response["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn call_tool_dispatches_cleanup_project_cache() {
+        let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
+        std::thread::spawn(move || {
+            let cmd = receiver.recv().expect("expected command");
+            match cmd {
+                McpCommand::CleanupProjectCache { cache, reply } => {
+                    assert_eq!(cache, "proxy_local");
+                    reply.send(json!({"success": true})).ok();
+                }
+                _ => panic!("unexpected MCP command"),
+            }
+        });
+        let id = json!(11);
+        let params = json!({
+            "name": "cleanup_project_cache",
+            "arguments": { "cache": "proxy_local" }
+        });
+        let mut cache = std::collections::HashMap::new();
+        let response = call_tool(&id, &params, &sender, &mut cache);
+        assert_eq!(response["id"], id);
+        assert_eq!(response["error"], serde_json::Value::Null);
+    }
+
+    #[test]
     fn call_tool_dispatches_set_background_ai_indexing() {
         let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
         std::thread::spawn(move || {
@@ -4438,6 +4986,32 @@ mod tests {
         let id = json!(10);
         let params = json!({
             "name": "set_background_ai_indexing",
+            "arguments": { "enabled": true }
+        });
+        let mut cache = std::collections::HashMap::new();
+        let response = call_tool(&id, &params, &sender, &mut cache);
+        assert_eq!(response["id"], id);
+        assert_eq!(response["error"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn call_tool_dispatches_set_background_auto_tagging() {
+        let (sender, receiver) = std::sync::mpsc::channel::<McpCommand>();
+        std::thread::spawn(move || {
+            let cmd = receiver.recv().expect("expected command");
+            match cmd {
+                McpCommand::SetBackgroundAutoTagging { enabled, reply } => {
+                    assert!(enabled);
+                    reply
+                        .send(json!({"success": true, "background_auto_tagging": enabled}))
+                        .ok();
+                }
+                _ => panic!("unexpected MCP command"),
+            }
+        });
+        let id = json!(10);
+        let params = json!({
+            "name": "set_background_auto_tagging",
             "arguments": { "enabled": true }
         });
         let mut cache = std::collections::HashMap::new();

@@ -16,8 +16,8 @@ use gtk4::prelude::*;
 use gtk4::{self as gtk};
 
 use crate::media::script::{self, Script};
-use crate::media::script_align::{self, AlignmentResult, SceneMapping};
-use crate::media::script_assembly::{self, AssemblyPlan};
+use crate::media::script_align::{self, AlignmentResult};
+use crate::media::script_assembly;
 use crate::media::stt_cache::SttCache;
 use crate::model::clip::SubtitleSegment;
 use crate::model::media_library::MediaLibrary;

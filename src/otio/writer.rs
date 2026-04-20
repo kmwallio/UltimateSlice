@@ -228,6 +228,11 @@ fn write_otio_with_mode(
                 } else {
                     Some(clip.match_eq_bands.clone())
                 },
+                render_replace_enabled: if clip.render_replace_enabled {
+                    Some(true)
+                } else {
+                    None
+                },
                 voice_enhance: Some(clip.voice_enhance),
                 voice_enhance_strength: Some(clip.voice_enhance_strength as f64),
                 voice_isolation: Some(clip.voice_isolation as f64),
@@ -520,6 +525,16 @@ fn write_otio_with_mode(
             } else {
                 None
             },
+            gain_db: if track.gain_db != 0.0 {
+                Some(track.gain_db)
+            } else {
+                None
+            },
+            pan: if track.pan != 0.0 {
+                Some(track.pan)
+            } else {
+                None
+            },
         });
 
         otio_tracks.push(OtioTrack {
@@ -555,6 +570,11 @@ fn write_otio_with_mode(
                     color,
                     metadata: wrap_marker_metadata(&UltimateSliceMarkerOtioMetadata {
                         color_rgba: Some(format!("{:08X}", marker.color)),
+                        notes: if marker.notes.is_empty() {
+                            None
+                        } else {
+                            Some(marker.notes.clone())
+                        },
                     }),
                 });
             }
@@ -580,6 +600,52 @@ fn write_otio_with_mode(
             } else {
                 None
             },
+            dialogue_bus_gain_db: if project.dialogue_bus.gain_db.abs() > 1e-9 {
+                Some(project.dialogue_bus.gain_db)
+            } else {
+                None
+            },
+            dialogue_bus_muted: if project.dialogue_bus.muted {
+                Some(true)
+            } else {
+                None
+            },
+            dialogue_bus_soloed: if project.dialogue_bus.soloed {
+                Some(true)
+            } else {
+                None
+            },
+            effects_bus_gain_db: if project.effects_bus.gain_db.abs() > 1e-9 {
+                Some(project.effects_bus.gain_db)
+            } else {
+                None
+            },
+            effects_bus_muted: if project.effects_bus.muted {
+                Some(true)
+            } else {
+                None
+            },
+            effects_bus_soloed: if project.effects_bus.soloed {
+                Some(true)
+            } else {
+                None
+            },
+            music_bus_gain_db: if project.music_bus.gain_db.abs() > 1e-9 {
+                Some(project.music_bus.gain_db)
+            } else {
+                None
+            },
+            music_bus_muted: if project.music_bus.muted {
+                Some(true)
+            } else {
+                None
+            },
+            music_bus_soloed: if project.music_bus.soloed {
+                Some(true)
+            } else {
+                None
+            },
+            reference_stills: project.reference_stills.clone(),
         }),
     };
 
@@ -780,6 +846,7 @@ mod tests {
             position_ns: 2_000_000_000,
             label: "Chapter 1".into(),
             color: 0xFF0000FF, // red
+            notes: String::new(),
         });
 
         let json = write_otio(&p).unwrap();
@@ -906,5 +973,58 @@ mod tests {
             ),
             "../media/my%20file.mp4"
         );
+    }
+
+    #[test]
+    fn test_render_replace_enabled_round_trip_through_otio() {
+        let mut p = make_project();
+        let mut track = Track::new_video("V1");
+        let mut clip = Clip::new("/footage/graded.mov", 5_000_000_000, 0, ClipKind::Video);
+        clip.render_replace_enabled = true;
+        track.add_clip(clip);
+        p.tracks.push(track);
+
+        let json = write_otio(&p).unwrap();
+        let parsed = crate::otio::parser::parse_otio(&json).expect("parse");
+        let pc = &parsed.tracks[0].clips[0];
+        assert!(pc.render_replace_enabled, "flag survived OTIO round-trip");
+    }
+
+    #[test]
+    fn test_render_replace_disabled_not_serialized() {
+        // A clip with the default (false) render_replace_enabled should
+        // not cause the metadata attr to serialize, so legacy projects
+        // don't grow bytes on round-trip.
+        let mut p = make_project();
+        let mut track = Track::new_video("V1");
+        let clip = Clip::new("/footage/plain.mov", 5_000_000_000, 0, ClipKind::Video);
+        track.add_clip(clip);
+        p.tracks.push(track);
+
+        let json = write_otio(&p).unwrap();
+        assert!(
+            !json.contains("render_replace_enabled"),
+            "disabled flag should be omitted from OTIO JSON"
+        );
+    }
+
+    #[test]
+    fn test_reference_stills_round_trip_through_otio() {
+        let mut p = make_project();
+        let mut still = crate::model::project::ReferenceStill::new("Ref A");
+        still.width = 1280;
+        still.height = 720;
+        still.captured_at_ns = 10_000_000_000;
+        still.filename = format!("{}.png", still.id);
+        p.reference_stills.push(still.clone());
+
+        let json = write_otio(&p).unwrap();
+        let parsed = crate::otio::parser::parse_otio(&json).expect("parse");
+        assert_eq!(parsed.reference_stills.len(), 1);
+        assert_eq!(parsed.reference_stills[0].id, still.id);
+        assert_eq!(parsed.reference_stills[0].label, "Ref A");
+        assert_eq!(parsed.reference_stills[0].width, 1280);
+        assert_eq!(parsed.reference_stills[0].height, 720);
+        assert_eq!(parsed.reference_stills[0].filename, still.filename);
     }
 }

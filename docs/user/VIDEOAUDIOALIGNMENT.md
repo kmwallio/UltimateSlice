@@ -200,11 +200,11 @@ When more than two clips are selected, the first clip is the **anchor**. Each su
 
 ### Status feedback
 
-- During audio sync, the title bar shows "Syncing audio..." (sync runs on a background thread).
-- During LTC conversion, the title bar shows "Converting LTC to timecode..." while decoding runs in the background.
+- During audio sync, the bottom status bar shows ongoing progress while sync runs on a background thread.
+- During LTC conversion, a short in-app toast confirms that decoding has started while the background work runs.
 - On completion: "Audio sync complete" or "Audio sync failed — no reliable audio match found".
 - On LTC completion: "Converted LTC to HH:MM:SS:FF..." with the applied audio-routing outcome.
-- Status messages auto-clear after 3 seconds.
+- Toast messages auto-dismiss after a short delay.
 
 ### Undo
 

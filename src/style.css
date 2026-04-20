@@ -45,6 +45,112 @@ headerbar .title {
     font-weight: bold;
 }
 
+/* ── App toasts ──────────────────────────────────────────────────────────── */
+.app-toast {
+    background-color: rgba(24, 24, 28, 0.96);
+    border: 1px solid #3a3a42;
+    border-radius: 12px;
+    padding: 10px 14px;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+}
+
+.app-toast image {
+    min-width: 18px;
+    min-height: 18px;
+}
+
+.app-toast-label {
+    font-weight: 600;
+}
+
+.app-toast-info {
+    border-color: #3f76c1;
+}
+
+.app-toast-info image {
+    color: #6ea8ff;
+}
+
+.app-toast-success {
+    border-color: #2e8b57;
+}
+
+.app-toast-success image {
+    color: #68d391;
+}
+
+.app-toast-warning {
+    border-color: #b7791f;
+}
+
+.app-toast-warning image {
+    color: #f6ad55;
+}
+
+.app-toast-error {
+    border-color: #c53030;
+}
+
+.app-toast-error image {
+    color: #fc8181;
+}
+
+/* ── In-app onboarding tour ──────────────────────────────────────────────── */
+.onboarding-popover-card {
+    min-width: 320px;
+}
+
+.onboarding-step-title {
+    font-weight: 700;
+}
+
+.onboarding-step-body {
+    color: @theme_fg_color;
+}
+
+.onboarding-step-counter {
+    opacity: 0.85;
+}
+
+.onboarding-target {
+    box-shadow: 0 0 0 2px alpha(@accent_bg_color, 0.85);
+    border-radius: 12px;
+}
+
+/* ── Background job tray ──────────────────────────────────────────────────── */
+.job-tray-button-active {
+    border-color: #3f76c1;
+}
+
+.job-tray-popover {
+    min-width: 360px;
+}
+
+.job-tray-list {
+    min-width: 360px;
+}
+
+.job-tray-row {
+    padding: 8px 0;
+    border-bottom: 1px solid #2a2a2e;
+}
+
+.job-tray-title {
+    font-weight: 600;
+}
+
+.job-tray-detail {
+    font-size: 0.95em;
+}
+
+.job-tray-progress {
+    min-width: 180px;
+}
+
+.job-tray-empty {
+    padding: 12px 0;
+}
+
 /* ── Buttons (global) ───────────────────────────────────────────────────── */
 button {
     background-color: #333338;
@@ -348,6 +454,22 @@ entry:focus {
     padding: 6px 0;
 }
 
+.source-monitor-controls {
+    margin-left: 8px;
+    margin-right: 8px;
+}
+
+.source-monitor-controls-row {
+    background-color: transparent;
+}
+
+.source-keyword-expander {
+    background-color: #1e1e22;
+    border: 1px solid #333338;
+    border-radius: 4px;
+    padding: 4px 8px;
+}
+
 /* ── Timecode labels ────────────────────────────────────────────────────── */
 .timecode {
     font-family: monospace;
@@ -400,6 +522,28 @@ entry:focus {
     font-size: 14px;
     color: #aaaaaa;
 }
+.welcome-card {
+    background: rgba(255, 255, 255, 0.035);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 10px;
+    padding: 14px;
+}
+.welcome-hero-card {
+    background: rgba(92, 140, 255, 0.08);
+    border-color: rgba(92, 140, 255, 0.22);
+}
+.welcome-hero-project {
+    font-size: 20px;
+    font-weight: bold;
+}
+.welcome-card-summary {
+    font-size: 12px;
+    color: #c3c3cb;
+}
+.welcome-card-detail {
+    font-size: 11px;
+    color: #9797a0;
+}
 .welcome-section-header {
     font-size: 13px;
     font-weight: bold;
@@ -413,6 +557,17 @@ entry:focus {
 .welcome-tip {
     font-size: 11px;
     color: #888888;
+}
+.welcome-recovery-section {
+    background: alpha(@warning_color, 0.08);
+    border: 1px solid alpha(@warning_color, 0.3);
+    border-radius: 8px;
+    padding: 12px;
+}
+.welcome-recovery-header {
+    font-size: 13px;
+    font-weight: bold;
+    color: @warning_color;
 }
 
 .toolbar-separator {
@@ -707,6 +862,30 @@ scale slider:hover {
     background-color: #ffffff;
 }
 
+/* Compact spin-buttons alongside inspector sliders */
+spinbutton.inspector-spin {
+    min-width: 0;
+    padding: 0;
+    font-size: 0.85em;
+}
+spinbutton.inspector-spin text {
+    min-width: 36px;
+}
+spinbutton.inspector-spin button {
+    min-width: 16px;
+    min-height: 16px;
+    padding: 0;
+}
+
+/* Small circular reset-to-default button alongside inspector sliders */
+button.inspector-reset {
+    min-width: 20px;
+    min-height: 20px;
+    padding: 0;
+    margin: 0;
+    border-radius: 10px;
+}
+
 /* Check/radio controls used across settings panels */
 checkbutton,
 radiobutton {
@@ -824,4 +1003,57 @@ expander > title {
     background: #2a2a2e;
     padding: 1px 6px;
     border-radius: 4px;
+}
+
+/* Audio mixer panel */
+.mixer-panel {
+    background: #1a1a1d;
+}
+.mixer-channel-strip {
+    background: #222226;
+    border: 1px solid #2a2a2e;
+    border-radius: 4px;
+    padding: 4px;
+}
+.mixer-master {
+    border-color: #1565c0;
+}
+.mixer-label {
+    font-size: 0.85em;
+    font-weight: bold;
+}
+.mixer-role-badge {
+    font-size: 0.75em;
+    font-weight: bold;
+    color: #ccc;
+    background: #333;
+    border-radius: 3px;
+    padding: 0 4px;
+    margin: 2px 0;
+}
+.mixer-db-readout {
+    font-size: 0.8em;
+    font-family: monospace;
+    color: #bbb;
+}
+.mixer-fader trough {
+    min-width: 6px;
+}
+.mixer-pan trough {
+    min-height: 6px;
+}
+.mixer-mute,
+.mixer-solo {
+    font-size: 0.75em;
+    padding: 0 4px;
+    min-height: 20px;
+    min-width: 24px;
+}
+.mixer-mute:checked {
+    background: #c62828;
+    color: white;
+}
+.mixer-solo:checked {
+    background: #f9a825;
+    color: #1a1a1d;
 }

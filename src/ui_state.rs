@@ -1,6 +1,13 @@
 use crate::media::export::{AudioChannelLayout, AudioCodec, Container, ExportOptions, VideoCodec};
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
+
+thread_local! {
+    static EXPORT_QUEUE_RUNTIME_PROGRESS: RefCell<HashMap<String, f64>> =
+        RefCell::new(HashMap::new());
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProgramMonitorState {
@@ -25,10 +32,118 @@ pub struct ProgramMonitorState {
     /// Luminance threshold for zebra stripes (0.0–1.0, default 0.90 = 90 IRE).
     #[serde(default = "default_zebra_threshold")]
     pub zebra_threshold: f64,
+    /// Show HUD overlay (timecode, frame #, fps, resolution, dropped frames).
+    #[serde(default)]
+    pub show_hud: bool,
+    /// Aspect-ratio mask overlay preset on the Program Monitor.
+    #[serde(default)]
+    pub aspect_mask: AspectMaskPreset,
+    /// When true, the Program Monitor renders an A/B wipe overlay against
+    /// the currently selected reference still (`ab_reference_still_id`).
+    #[serde(default)]
+    pub ab_compare_enabled: bool,
+    /// Vertical midline position of the A/B wipe, as a percentage (0.0–100.0)
+    /// of the video canvas width. 50.0 = centred.
+    #[serde(default = "default_ab_midline")]
+    pub ab_midline_percent: f64,
+    /// Id of the active reference still used as the right-hand side of the
+    /// wipe. When `None` or pointing at a missing still, the overlay is a
+    /// no-op even if `ab_compare_enabled` is true.
+    #[serde(default)]
+    pub ab_reference_still_id: Option<String>,
+}
+
+/// Delivery-format letterbox/pillarbox preview selected from the Program
+/// Monitor **Overlays ▾** popover. `None` disables the overlay.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AspectMaskPreset {
+    #[default]
+    None,
+    /// 2.39:1 — modern anamorphic cinema master.
+    Cinemascope,
+    /// 2.00:1 — "Univisium" / modern streaming features.
+    Univisium,
+    /// 1.85:1 — US theatrical flat.
+    Academy,
+    /// 4:3 (≈1.333:1) — legacy broadcast / SD.
+    Standard,
+    /// 1:1 — square social feed.
+    Square,
+    /// 4:5 — Instagram portrait feed.
+    Social45,
+    /// 9:16 — Reels / TikTok / Shorts vertical.
+    Vertical,
+}
+
+impl AspectMaskPreset {
+    pub const ALL: [AspectMaskPreset; 8] = [
+        AspectMaskPreset::None,
+        AspectMaskPreset::Cinemascope,
+        AspectMaskPreset::Univisium,
+        AspectMaskPreset::Academy,
+        AspectMaskPreset::Standard,
+        AspectMaskPreset::Square,
+        AspectMaskPreset::Social45,
+        AspectMaskPreset::Vertical,
+    ];
+
+    /// Target width/height ratio. `None` means "no mask".
+    pub fn ratio(self) -> Option<f64> {
+        match self {
+            AspectMaskPreset::None => None,
+            AspectMaskPreset::Cinemascope => Some(2.39),
+            AspectMaskPreset::Univisium => Some(2.0),
+            AspectMaskPreset::Academy => Some(1.85),
+            AspectMaskPreset::Standard => Some(4.0 / 3.0),
+            AspectMaskPreset::Square => Some(1.0),
+            AspectMaskPreset::Social45 => Some(4.0 / 5.0),
+            AspectMaskPreset::Vertical => Some(9.0 / 16.0),
+        }
+    }
+
+    /// Human-readable label shown in the Overlays popover dropdown.
+    pub fn label(self) -> &'static str {
+        match self {
+            AspectMaskPreset::None => "None",
+            AspectMaskPreset::Cinemascope => "2.39 : 1",
+            AspectMaskPreset::Univisium => "2.00 : 1",
+            AspectMaskPreset::Academy => "1.85 : 1",
+            AspectMaskPreset::Standard => "4 : 3",
+            AspectMaskPreset::Square => "1 : 1",
+            AspectMaskPreset::Social45 => "4 : 5",
+            AspectMaskPreset::Vertical => "9 : 16",
+        }
+    }
+
+    /// Snake-case serde key, also used as the MCP `preset` argument.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AspectMaskPreset::None => "none",
+            AspectMaskPreset::Cinemascope => "cinemascope",
+            AspectMaskPreset::Univisium => "univisium",
+            AspectMaskPreset::Academy => "academy",
+            AspectMaskPreset::Standard => "standard",
+            AspectMaskPreset::Square => "square",
+            AspectMaskPreset::Social45 => "social_45",
+            AspectMaskPreset::Vertical => "vertical",
+        }
+    }
+
+    /// Parse a snake-case preset key back into the enum. Returns `None`
+    /// for unknown input, which lets callers distinguish "invalid" from
+    /// "intentionally `None`" (the latter round-trips through `"none"`).
+    pub fn from_str(s: &str) -> Option<AspectMaskPreset> {
+        Self::ALL.iter().copied().find(|p| p.as_str() == s)
+    }
 }
 
 fn default_zebra_threshold() -> f64 {
     0.90
+}
+
+fn default_ab_midline() -> f64 {
+    50.0
 }
 
 fn default_width() -> i32 {
@@ -71,6 +186,10 @@ fn default_workspace_panel_visible() -> bool {
     true
 }
 
+fn default_bottom_panel_child() -> String {
+    "keyframes".to_string()
+}
+
 pub fn workspace_split_ratio_from_pixels(position: i32, total: i32) -> Option<u16> {
     if total <= 0 {
         return None;
@@ -111,6 +230,11 @@ impl Default for ProgramMonitorState {
             show_false_color: false,
             show_zebra: false,
             zebra_threshold: default_zebra_threshold(),
+            show_hud: false,
+            aspect_mask: AspectMaskPreset::None,
+            ab_compare_enabled: false,
+            ab_midline_percent: default_ab_midline(),
+            ab_reference_still_id: None,
         }
     }
 }
@@ -208,8 +332,14 @@ pub struct WorkspaceArrangement {
     pub inspector_visible: bool,
     #[serde(default)]
     pub keyframe_editor_visible: bool,
+    /// Which child of the bottom panel stack is active ("keyframes",
+    /// "transcript", or "markers"). Defaults to "keyframes".
+    #[serde(default = "default_bottom_panel_child")]
+    pub bottom_panel_child: String,
     #[serde(default)]
     pub left_panel_tab: WorkspaceLeftPanelTab,
+    #[serde(default)]
+    pub minimap_visible: bool,
     #[serde(default)]
     pub program_monitor: ProgramMonitorWorkspaceState,
 }
@@ -232,7 +362,9 @@ impl Default for WorkspaceArrangement {
             media_browser_visible: default_workspace_panel_visible(),
             inspector_visible: default_workspace_panel_visible(),
             keyframe_editor_visible: false,
+            bottom_panel_child: default_bottom_panel_child(),
             left_panel_tab: WorkspaceLeftPanelTab::default(),
+            minimap_visible: false,
             program_monitor: ProgramMonitorWorkspaceState::default(),
         }
     }
@@ -823,6 +955,9 @@ pub struct ExportPreset {
     /// without this field continues to load unchanged.
     #[serde(default)]
     pub audio_channel_layout: ExportAudioChannelLayout,
+    /// Preserve HDR metadata and skip tone mapping on export.
+    #[serde(default)]
+    pub hdr_passthrough: bool,
 }
 
 impl ExportPreset {
@@ -840,6 +975,7 @@ impl ExportPreset {
             audio_channel_layout: ExportAudioChannelLayout::from_layout(
                 &options.audio_channel_layout,
             ),
+            hdr_passthrough: options.hdr_passthrough,
         }
     }
 
@@ -854,6 +990,7 @@ impl ExportPreset {
             audio_bitrate_kbps: self.audio_bitrate_kbps,
             gif_fps: self.gif_fps,
             audio_channel_layout: self.audio_channel_layout.to_layout(),
+            hdr_passthrough: self.hdr_passthrough,
         }
     }
 }
@@ -953,6 +1090,7 @@ fn default_export_presets() -> Vec<ExportPreset> {
             audio_bitrate_kbps: 192,
             gif_fps: None,
             audio_channel_layout: ExportAudioChannelLayout::Stereo,
+            hdr_passthrough: false,
         },
         ExportPreset {
             name: "High Quality H.264 4K".to_string(),
@@ -965,6 +1103,7 @@ fn default_export_presets() -> Vec<ExportPreset> {
             audio_bitrate_kbps: 320,
             gif_fps: None,
             audio_channel_layout: ExportAudioChannelLayout::Stereo,
+            hdr_passthrough: false,
         },
         ExportPreset {
             name: "Archive ProRes 4K".to_string(),
@@ -977,6 +1116,7 @@ fn default_export_presets() -> Vec<ExportPreset> {
             audio_bitrate_kbps: 320,
             gif_fps: None,
             audio_channel_layout: ExportAudioChannelLayout::Stereo,
+            hdr_passthrough: false,
         },
         ExportPreset {
             name: "WebM VP9 1080p".to_string(),
@@ -989,6 +1129,7 @@ fn default_export_presets() -> Vec<ExportPreset> {
             audio_bitrate_kbps: 160,
             gif_fps: None,
             audio_channel_layout: ExportAudioChannelLayout::Stereo,
+            hdr_passthrough: false,
         },
         ExportPreset {
             name: "Animated GIF".to_string(),
@@ -1001,6 +1142,7 @@ fn default_export_presets() -> Vec<ExportPreset> {
             audio_bitrate_kbps: 128,
             gif_fps: Some(15),
             audio_channel_layout: ExportAudioChannelLayout::Stereo,
+            hdr_passthrough: false,
         },
         // Cinema-style 5.1 surround at 1080p / 448 kbps AAC. Auto-routes
         // dialogue to Front Center, music to Front L/R, and effects to
@@ -1016,6 +1158,7 @@ fn default_export_presets() -> Vec<ExportPreset> {
             audio_bitrate_kbps: 448,
             gif_fps: None,
             audio_channel_layout: ExportAudioChannelLayout::Surround51,
+            hdr_passthrough: false,
         },
     ]
 }
@@ -1143,6 +1286,10 @@ pub struct PreferencesState {
     /// in the background when speech-to-text support is available.
     #[serde(default)]
     pub background_ai_indexing: bool,
+    /// Automatically derive persistent contextual Media Library tags once
+    /// visual-search embeddings are available.
+    #[serde(default)]
+    pub background_auto_tagging: bool,
     /// FFmpeg x264 preset used for background prerender video segments.
     #[serde(default)]
     pub prerender_preset: PrerenderEncodingPreset,
@@ -1202,6 +1349,16 @@ pub struct PreferencesState {
     /// type-migration churn.
     #[serde(default = "default_ai_backend")]
     pub ai_backend: String,
+    /// Show the timeline mini-map overview strip above the track canvas.
+    #[serde(default)]
+    pub show_timeline_minimap: bool,
+    /// Tracks whether the first-run onboarding tour has already been shown or dismissed.
+    #[serde(default)]
+    pub seen_onboarding_v1: bool,
+    /// When true, skip HDR→SDR tone mapping in the Program Monitor preview
+    /// so HDR sources display at native dynamic range (requires HDR display).
+    #[serde(default)]
+    pub hdr_preview_passthrough: bool,
 }
 
 fn default_ai_backend() -> String {
@@ -1230,6 +1387,7 @@ impl Default for PreferencesState {
             realtime_preview: true,
             background_prerender: false,
             background_ai_indexing: false,
+            background_auto_tagging: false,
             prerender_preset: PrerenderEncodingPreset::default(),
             prerender_crf: default_prerender_crf(),
             persist_prerenders_next_to_project_file:
@@ -1246,6 +1404,9 @@ impl Default for PreferencesState {
             loudness_target_lufs: default_loudness_target_lufs(),
             voice_enhance_cache_cap_gib: default_voice_enhance_cache_cap_gib(),
             ai_backend: default_ai_backend(),
+            show_timeline_minimap: false,
+            seen_onboarding_v1: false,
+            hdr_preview_passthrough: false,
         }
     }
 }
@@ -1369,6 +1530,8 @@ struct UiState {
     export_queue: ExportQueueState,
     #[serde(default)]
     workspace_layouts: WorkspaceLayoutsState,
+    #[serde(default)]
+    inspector_sections: HashMap<String, bool>,
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -1443,6 +1606,21 @@ pub fn save_export_queue_state(state: &ExportQueueState) {
     save_ui_state(&ui);
 }
 
+pub fn export_queue_runtime_progress(job_id: &str) -> Option<f64> {
+    EXPORT_QUEUE_RUNTIME_PROGRESS.with(|progress| progress.borrow().get(job_id).copied())
+}
+
+pub fn set_export_queue_runtime_progress(job_id: &str, progress: Option<f64>) {
+    EXPORT_QUEUE_RUNTIME_PROGRESS.with(|runtime| {
+        let mut runtime = runtime.borrow_mut();
+        if let Some(progress) = progress {
+            runtime.insert(job_id.to_string(), progress.clamp(0.0, 1.0));
+        } else {
+            runtime.remove(job_id);
+        }
+    });
+}
+
 pub fn load_workspace_layouts_state() -> WorkspaceLayoutsState {
     let ui = load_ui_state();
     let mut state = ui.workspace_layouts;
@@ -1462,6 +1640,16 @@ pub fn save_workspace_layouts_state(state: &WorkspaceLayoutsState) {
     save_ui_state(&ui);
 }
 
+pub fn load_inspector_sections_state() -> HashMap<String, bool> {
+    load_ui_state().inspector_sections
+}
+
+pub fn save_inspector_sections_state(state: &HashMap<String, bool>) {
+    let mut ui = load_ui_state();
+    ui.inspector_sections = state.clone();
+    save_ui_state(&ui);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1478,6 +1666,7 @@ mod tests {
             audio_bitrate_kbps: 256,
             gif_fps: None,
             audio_channel_layout: AudioChannelLayout::Surround51,
+            hdr_passthrough: false,
         };
         let preset = ExportPreset::from_export_options("High Quality", &options);
         assert_eq!(preset.name, "High Quality");
@@ -1525,6 +1714,7 @@ mod tests {
     fn export_preset_round_trip_preserves_surround_5_1() {
         let options = ExportOptions {
             audio_channel_layout: AudioChannelLayout::Surround51,
+            hdr_passthrough: false,
             ..ExportOptions::default()
         };
         let preset = ExportPreset::from_export_options("Cinema", &options);
@@ -1604,6 +1794,7 @@ mod tests {
         assert!(!parsed.preferences.source_monitor_auto_link_av);
         assert!(!parsed.preferences.crossfade_enabled);
         assert!(!parsed.preferences.background_ai_indexing);
+        assert!(!parsed.preferences.background_auto_tagging);
         assert_eq!(
             parsed.preferences.crossfade_curve,
             CrossfadeCurve::EqualPower
@@ -1619,6 +1810,7 @@ mod tests {
             parsed.preferences.crossfade_duration_ns,
             default_crossfade_duration_ns()
         );
+        assert!(!parsed.preferences.seen_onboarding_v1);
     }
 
     #[test]
@@ -1656,6 +1848,28 @@ mod tests {
         let json = serde_json::to_string(&prefs).unwrap();
         let decoded: PreferencesState = serde_json::from_str(&json).unwrap();
         assert!(decoded.background_ai_indexing);
+    }
+
+    #[test]
+    fn preferences_background_auto_tagging_round_trip() {
+        let prefs = PreferencesState {
+            background_auto_tagging: true,
+            ..PreferencesState::default()
+        };
+        let json = serde_json::to_string(&prefs).unwrap();
+        let decoded: PreferencesState = serde_json::from_str(&json).unwrap();
+        assert!(decoded.background_auto_tagging);
+    }
+
+    #[test]
+    fn preferences_onboarding_round_trip() {
+        let prefs = PreferencesState {
+            seen_onboarding_v1: true,
+            ..PreferencesState::default()
+        };
+        let json = serde_json::to_string(&prefs).unwrap();
+        let decoded: PreferencesState = serde_json::from_str(&json).unwrap();
+        assert!(decoded.seen_onboarding_v1);
     }
 
     #[test]
@@ -1788,6 +2002,30 @@ mod tests {
     }
 
     #[test]
+    fn program_monitor_state_loads_legacy_json_without_ab_fields() {
+        // ui-state.json written before the A/B compare feature shipped will be
+        // missing the three new fields. `#[serde(default)]` must fill them
+        // with defaults so startup does not crash.
+        let legacy = r#"{
+            "popped": false,
+            "width": 960,
+            "height": 540,
+            "docked_split_pos": 420,
+            "scopes_visible": false,
+            "show_safe_areas": false,
+            "show_false_color": false,
+            "show_zebra": false,
+            "zebra_threshold": 0.90,
+            "show_hud": false,
+            "aspect_mask": "none"
+        }"#;
+        let parsed: ProgramMonitorState = serde_json::from_str(legacy).expect("parse");
+        assert!(!parsed.ab_compare_enabled);
+        assert!((parsed.ab_midline_percent - 50.0).abs() < 1e-9);
+        assert!(parsed.ab_reference_still_id.is_none());
+    }
+
+    #[test]
     fn program_monitor_workspace_state_copies_geometry_only() {
         let monitor = ProgramMonitorState {
             popped: true,
@@ -1799,6 +2037,11 @@ mod tests {
             show_false_color: true,
             show_zebra: true,
             zebra_threshold: 0.95,
+            show_hud: true,
+            aspect_mask: AspectMaskPreset::Cinemascope,
+            ab_compare_enabled: false,
+            ab_midline_percent: 50.0,
+            ab_reference_still_id: None,
         };
         let workspace = ProgramMonitorWorkspaceState::from_program_monitor_state(&monitor);
         assert!(workspace.popped);
@@ -1806,6 +2049,71 @@ mod tests {
         assert_eq!(workspace.height, 777);
         assert_eq!(workspace.docked_split_pos, 512);
         assert!(workspace.scopes_visible);
+    }
+
+    #[test]
+    fn aspect_mask_preset_ratio_covers_all_variants() {
+        assert_eq!(AspectMaskPreset::None.ratio(), None);
+        for preset in AspectMaskPreset::ALL.iter().copied() {
+            if preset == AspectMaskPreset::None {
+                continue;
+            }
+            let r = preset
+                .ratio()
+                .unwrap_or_else(|| panic!("{:?} must have a ratio", preset));
+            assert!(r > 0.0, "{:?} ratio must be positive, got {}", preset, r);
+            assert!(r < 10.0, "{:?} ratio sanity bound, got {}", preset, r);
+        }
+        // Spot-check a few exact values.
+        assert!((AspectMaskPreset::Cinemascope.ratio().unwrap() - 2.39).abs() < 1e-9);
+        assert!((AspectMaskPreset::Square.ratio().unwrap() - 1.0).abs() < 1e-9);
+        assert!((AspectMaskPreset::Vertical.ratio().unwrap() - 9.0 / 16.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn aspect_mask_preset_str_round_trips() {
+        for preset in AspectMaskPreset::ALL.iter().copied() {
+            let s = preset.as_str();
+            assert_eq!(AspectMaskPreset::from_str(s), Some(preset));
+        }
+        assert_eq!(AspectMaskPreset::from_str("not-a-preset"), None);
+        assert_eq!(AspectMaskPreset::from_str(""), None);
+    }
+
+    #[test]
+    fn program_monitor_state_aspect_mask_round_trips() {
+        let mut monitor = ProgramMonitorState::default();
+        assert_eq!(
+            monitor.aspect_mask,
+            AspectMaskPreset::None,
+            "default aspect_mask is None"
+        );
+        monitor.aspect_mask = AspectMaskPreset::Vertical;
+        let encoded = serde_json::to_string(&monitor).expect("serialize");
+        assert!(encoded.contains(r#""aspect_mask":"vertical""#));
+        let decoded: ProgramMonitorState = serde_json::from_str(&encoded).expect("deserialize");
+        assert_eq!(decoded.aspect_mask, AspectMaskPreset::Vertical);
+        let legacy: ProgramMonitorState =
+            serde_json::from_str(r#"{"popped":false}"#).expect("legacy deserialize");
+        assert_eq!(
+            legacy.aspect_mask,
+            AspectMaskPreset::None,
+            "legacy JSON without aspect_mask defaults None"
+        );
+    }
+
+    #[test]
+    fn program_monitor_state_show_hud_round_trips() {
+        let mut monitor = ProgramMonitorState::default();
+        assert!(!monitor.show_hud, "show_hud defaults to false");
+        monitor.show_hud = true;
+        let encoded = serde_json::to_string(&monitor).expect("serialize");
+        assert!(encoded.contains(r#""show_hud":true"#));
+        let decoded: ProgramMonitorState = serde_json::from_str(&encoded).expect("deserialize");
+        assert!(decoded.show_hud);
+        let legacy: ProgramMonitorState =
+            serde_json::from_str(r#"{"popped":false}"#).expect("legacy deserialize");
+        assert!(!legacy.show_hud, "legacy JSON without show_hud defaults false");
     }
 
     #[test]

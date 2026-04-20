@@ -1,6 +1,5 @@
 use crate::media::{
-    adjustment_scope::AdjustmentScopeShape, mask_alpha::prepare_adjustment_canvas_masks,
-    program_player::ProgramPlayer,
+    adjustment_scope::AdjustmentScopeShape, color_math, mask_alpha::prepare_adjustment_canvas_masks,
 };
 use crate::model::clip::{Clip, ClipKind, MaskShape, NumericKeyframe, SlowMotionInterp};
 use crate::model::project::Project;
@@ -14,7 +13,8 @@ use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 
 /// Progress updates sent back to the UI thread
 #[derive(Debug)]
@@ -178,6 +178,10 @@ pub struct ExportOptions {
     pub gif_fps: Option<u32>,
     /// Output audio channel layout. Default = Stereo (legacy pipeline unchanged).
     pub audio_channel_layout: AudioChannelLayout,
+    /// When true, skip HDR→SDR tone mapping and preserve HDR metadata in the
+    /// output file (10-bit pixel format, PQ/HLG transfer characteristics,
+    /// MaxCLL/MaxFALL). Only effective with H.265, VP9, or AV1 codecs.
+    pub hdr_passthrough: bool,
 }
 
 impl Default for ExportOptions {
@@ -192,6 +196,7 @@ impl Default for ExportOptions {
             audio_bitrate_kbps: 192,
             gif_fps: None,
             audio_channel_layout: AudioChannelLayout::Stereo,
+            hdr_passthrough: false,
         }
     }
 }
@@ -257,11 +262,42 @@ fn split_active_video_tracks_for_export<'a>(
 pub fn export_project(
     project: &Project,
     output_path: &str,
+    options: ExportOptions,
+    estimated_size_bytes: Option<u64>,
+    bg_removal_paths: &std::collections::HashMap<String, String>,
+    frame_interp_paths: &std::collections::HashMap<String, String>,
+    render_replace_paths: &std::collections::HashMap<String, String>,
+    tx: mpsc::Sender<ExportProgress>,
+) -> Result<()> {
+    export_project_with_cancel(
+        project,
+        output_path,
+        options,
+        estimated_size_bytes,
+        bg_removal_paths,
+        frame_interp_paths,
+        render_replace_paths,
+        tx,
+        None,
+    )
+}
+
+/// Cancel-aware variant of `export_project`. When `cancel_flag` is
+/// `Some` and flips to `true`, the ffmpeg child process is killed at
+/// the next stderr line (or ~250 ms after progress pauses) and the
+/// export returns `Err("cancelled")`. Passing `None` keeps the
+/// original blocking behaviour — used by every export path except the
+/// render-replace compound bake.
+pub fn export_project_with_cancel(
+    project: &Project,
+    output_path: &str,
     mut options: ExportOptions,
     estimated_size_bytes: Option<u64>,
     bg_removal_paths: &std::collections::HashMap<String, String>,
     frame_interp_paths: &std::collections::HashMap<String, String>,
+    render_replace_paths: &std::collections::HashMap<String, String>,
     tx: mpsc::Sender<ExportProgress>,
+    cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<()> {
     // GIF outputs have no audio stream — surround layouts have nothing to do
     // there. Silently downgrade so the rest of the pipeline can ignore the
@@ -292,13 +328,33 @@ pub fn export_project(
         1.0 / 30.0
     };
 
+    // Render-and-Replace substitution: walk the project tracks and
+    // swap any clip with a ready sidecar for a synthetic file-backed
+    // clip pointing at the sidecar. Leaf clips (Video/Image/Audio)
+    // get their baked-scope fields zeroed so the filter-graph
+    // helpers return empty and the sidecar plays through untouched.
+    // Compound clips are replaced with a single file-backed video
+    // clip that will NOT recurse into their internal tracks during
+    // the flatten pass. Recursion into unbaked compounds' internal
+    // tracks still happens — nested baked compounds are substituted
+    // in place during the recursive walk. No-op when
+    // `render_replace_paths` is empty.
+    let substituted_tracks = if render_replace_paths.is_empty() {
+        project.tracks.clone()
+    } else {
+        crate::media::render_replace_cache::materialize_tracks_with_sidecars(
+            &project.tracks,
+            render_replace_paths,
+        )
+    };
+
     // Flatten compound clips before building the filter graph.
     // This produces a modified track list where every compound clip has been
     // recursively expanded into its constituent leaf clips with rebased
     // timeline positions. The rest of the export pipeline operates on this
     // flat representation unchanged.
     let mut flattened_tracks = flatten_compound_tracks_with_fps(
-        &project.tracks,
+        &substituted_tracks,
         project.frame_rate.numerator,
         project.frame_rate.denominator,
     );
@@ -532,6 +588,11 @@ pub fn export_project(
             project.frame_rate.numerator,
             project.frame_rate.denominator,
         );
+        let tonemap_prefix = if options.hdr_passthrough {
+            String::new()
+        } else {
+            build_tonemap_filter_prefix(&clip.source_path)
+        };
         let lut_prefix = build_lut_filter_prefix(clip);
         let crop_filter =
             build_crop_filter(clip, out_w, out_h, project.width, project.height, false);
@@ -603,7 +664,7 @@ pub fn export_project(
                 )
             };
             filter.push_str(&format!(
-                "[{i}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{speed_filter}\
+                "[{i}:v]{tonemap_prefix}{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{speed_filter}\
                  ,scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[pv{i}fg];\
                  color=c=black:size={out_w}x{out_h}:r={}/{}:d={clip_duration_s:.6}[pv{i}bg];\
                  [pv{i}bg][pv{i}fg]overlay=x='{overlay_x_expr}':y='{overlay_y_expr}':eval=frame\
@@ -635,14 +696,14 @@ pub fn export_project(
             let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
             let anamorphic_filter = build_anamorphic_filter(clip);
             filter.push_str(&format!(
-                "[{i}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{speed_filter}[pv{i}raw];[pv{i}raw]format=yuv420p{motion_blur_filter}{transition_stop_pad_filter}[pv{i}];",
+                "[{i}:v]{tonemap_prefix}{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{speed_filter}[pv{i}raw];[pv{i}raw]format=yuv420p{motion_blur_filter}{transition_stop_pad_filter}[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
             ));
         } else {
             let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
             let anamorphic_filter = build_anamorphic_filter(clip);
             filter.push_str(&format!(
-                "[{i}:v]{lut_prefix}{anamorphic_filter}scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{},format=yuv420p{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{title_filter}{subtitle_filter}{speed_filter}{motion_blur_filter}{transition_stop_pad_filter}[pv{i}];",
+                "[{i}:v]{tonemap_prefix}{lut_prefix}{anamorphic_filter}scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{},format=yuv420p{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{title_filter}{subtitle_filter}{speed_filter}{motion_blur_filter}{transition_stop_pad_filter}[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
             ));
         }
@@ -714,6 +775,11 @@ pub fn export_project(
             project.frame_rate.numerator,
             project.frame_rate.denominator,
         );
+        let tonemap_prefix = if options.hdr_passthrough {
+            String::new()
+        } else {
+            build_tonemap_filter_prefix(&clip.source_path)
+        };
         let lut_prefix = build_lut_filter_prefix(clip);
         let crop_filter =
             build_crop_filter(clip, out_w, out_h, project.width, project.height, true);
@@ -790,7 +856,7 @@ pub fn export_project(
                 )
             };
             filter.push_str(&format!(
-                ";[{in_idx}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{crop_filter}{rotate_filter}{speed_filter}\
+                ";[{in_idx}:v]{tonemap_prefix}{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{crop_filter}{rotate_filter}{speed_filter}\
                  ,scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[ov{k}fg];\
                  color=c=black@0:size={out_w}x{out_h}:r={}/{}:d={clip_duration_s:.6}[ov{k}bg];\
                  [ov{k}bg][ov{k}fg]overlay=x='{overlay_x_expr}':y='{overlay_y_expr}':eval=frame\
@@ -813,7 +879,7 @@ pub fn export_project(
             let opacity = clip.opacity.clamp(0.0, 1.0);
             let anamorphic_filter = build_anamorphic_filter(clip);
             filter.push_str(&format!(
-                ";[{in_idx}:v]{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{crop_filter}{scale_pos_filter}{rotate_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
+                ";[{in_idx}:v]{tonemap_prefix}{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{crop_filter}{scale_pos_filter}{rotate_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
                 , project.frame_rate.numerator, project.frame_rate.denominator
             ));
         }
@@ -933,6 +999,25 @@ pub fn export_project(
         }
     }
 
+    // === Timecode burn-in ===
+    // Project-level setting: burns a monospace timecode pill into output
+    // pixels via drawtext. Uses the sequence frame rate so the displayed
+    // tick matches the Program Monitor overlay (non-drop-frame, consistent
+    // with ui::timecode::format_ns_as_timecode).
+    if project.timecode_burnin_enabled {
+        let tc_filter = build_timecode_burnin_filter(
+            project.timecode_burnin_position,
+            &project.frame_rate,
+            out_w,
+            out_h,
+        );
+        if !tc_filter.is_empty() {
+            let next_label = "vtcburn".to_string();
+            filter.push_str(&format!(";[{prev_label}]{tc_filter}[{next_label}]"));
+            prev_label = next_label;
+        }
+    }
+
     // Final output video label — use the last composited label directly
     let vout_label = prev_label;
 
@@ -1047,6 +1132,11 @@ pub fn export_project(
                 filter.push_str(&format!(
                 ";[{i}:a]{areverse}{atempo}{enhance_part}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{match_eq_part}{eq_part},{fade_filters}anull[{pre_pan}]"
             ));
+                // Primary video clips — find owning track for role + surround position + track gain/pan.
+                let owning_track = project
+                    .tracks
+                    .iter()
+                    .find(|t| t.clips.iter().any(|c| c.id == clip.id));
                 append_pan_filter_chain(
                     &mut filter,
                     clip,
@@ -1054,13 +1144,18 @@ pub fn export_project(
                     &post_pan,
                     &label,
                     options.audio_channel_layout,
+                    owning_track.map(|t| t.pan).unwrap_or(0.0),
                 );
-                filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
-                // Primary video clips — find owning track for role + surround position.
-                let owning_track = project
-                    .tracks
-                    .iter()
-                    .find(|t| t.clips.iter().any(|c| c.id == clip.id));
+                let track_gain_linear = owning_track.map(|t| t.gain_linear()).unwrap_or(1.0);
+                if (track_gain_linear - 1.0).abs() > f64::EPSILON {
+                    let tg_label = format!("{label}_tg");
+                    filter.push_str(&format!(
+                        ";[{post_pan}]volume={track_gain_linear:.6}[{tg_label}]"
+                    ));
+                    filter.push_str(&format!(";[{tg_label}]adelay={delay_ms}:all=1[{label}]"));
+                } else {
+                    filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
+                }
                 let role = owning_track.map(|t| t.audio_role).unwrap_or_default();
                 let surround_override = owning_track
                     .map(|t| t.surround_position)
@@ -1130,6 +1225,11 @@ pub fn export_project(
                 filter.push_str(&format!(
                 ";[{in_idx}:a]{areverse}{atempo}{enhance_part}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{match_eq_part}{eq_part},{fade_filters}anull[{pre_pan}]"
             ));
+                // Find the track for this secondary clip to get its role + surround position + track gain/pan.
+                let owning_track = project
+                    .tracks
+                    .iter()
+                    .find(|t| t.clips.iter().any(|c| c.id == clip.id));
                 append_pan_filter_chain(
                     &mut filter,
                     clip,
@@ -1137,13 +1237,18 @@ pub fn export_project(
                     &post_pan,
                     &label,
                     options.audio_channel_layout,
+                    owning_track.map(|t| t.pan).unwrap_or(0.0),
                 );
-                filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
-                // Find the track for this secondary clip to get its role + surround position.
-                let owning_track = project
-                    .tracks
-                    .iter()
-                    .find(|t| t.clips.iter().any(|c| c.id == clip.id));
+                let track_gain_linear = owning_track.map(|t| t.gain_linear()).unwrap_or(1.0);
+                if (track_gain_linear - 1.0).abs() > f64::EPSILON {
+                    let tg_label = format!("{label}_tg");
+                    filter.push_str(&format!(
+                        ";[{post_pan}]volume={track_gain_linear:.6}[{tg_label}]"
+                    ));
+                    filter.push_str(&format!(";[{tg_label}]adelay={delay_ms}:all=1[{label}]"));
+                } else {
+                    filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
+                }
                 let role = owning_track.map(|t| t.audio_role).unwrap_or_default();
                 let surround_override = owning_track
                     .map(|t| t.surround_position)
@@ -1200,10 +1305,11 @@ pub fn export_project(
                 format!(",{eq_filter}")
             };
             // Ducking filter: reduce volume when non-ducked audio overlaps.
-            let duck_filter = project
+            let owning_track = project
                 .tracks
                 .iter()
-                .find(|t| t.clips.iter().any(|c| c.id == clip.id))
+                .find(|t| t.clips.iter().any(|c| c.id == clip.id));
+            let duck_filter = owning_track
                 .map(|track| build_duck_filter(clip, track, &project.tracks))
                 .unwrap_or_default();
             let duck_part = if duck_filter.is_empty() {
@@ -1226,12 +1332,19 @@ pub fn export_project(
                 &post_pan,
                 &label,
                 options.audio_channel_layout,
+                owning_track.map(|t| t.pan).unwrap_or(0.0),
             );
-            filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
-            let owning_track = project
-                .tracks
-                .iter()
-                .find(|t| t.clips.iter().any(|c| c.id == clip.id));
+            // Apply track-level gain between pan and timeline delay.
+            let track_gain_linear = owning_track.map(|t| t.gain_linear()).unwrap_or(1.0);
+            if (track_gain_linear - 1.0).abs() > f64::EPSILON {
+                let tg_label = format!("{label}_tg");
+                filter.push_str(&format!(
+                    ";[{post_pan}]volume={track_gain_linear:.6}[{tg_label}]"
+                ));
+                filter.push_str(&format!(";[{tg_label}]adelay={delay_ms}:all=1[{label}]"));
+            } else {
+                filter.push_str(&format!(";[{post_pan}]adelay={delay_ms}:all=1[{label}]"));
+            }
             let role = owning_track.map(|t| t.audio_role).unwrap_or_default();
             let surround_override = owning_track
                 .map(|t| t.surround_position)
@@ -1276,17 +1389,35 @@ pub fn export_project(
             if roles_in_use.len() <= 1 {
                 // Single role (or all None) — no submix needed, mix directly.
                 let n = audio_labels.len();
-                filter.push(';');
-                for stem in &audio_labels {
-                    filter.push_str(&format!("[{}]", stem.label));
+                let single_role = roles_in_use.first().copied().unwrap_or(AudioRole::None);
+                let bus_active = project.bus_is_active(&single_role);
+                let bus_gain = project.bus_gain_linear(&single_role);
+                if !bus_active || n == 0 {
+                    // Bus muted/solo-excluded — emit silence placeholder
+                    filter.push_str(&format!(
+                        ";anullsrc=r=48000:cl=stereo,atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
+                    ));
+                } else {
+                    filter.push(';');
+                    for stem in &audio_labels {
+                        filter.push_str(&format!("[{}]", stem.label));
+                    }
+                    let bus_vol = if (bus_gain - 1.0).abs() > 1e-6 {
+                        format!(",volume={bus_gain:.6}")
+                    } else {
+                        String::new()
+                    };
+                    filter.push_str(&format!(
+                        "amix=inputs={n}:normalize=0{bus_vol},atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
+                    ));
                 }
-                filter.push_str(&format!(
-                    "amix=inputs={n}:normalize=0,atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
-                ));
             } else {
                 // Multiple roles — create per-role submixes, then master mix.
                 let mut submix_labels: Vec<String> = Vec::new();
                 for role in &roles_in_use {
+                    if !project.bus_is_active(role) {
+                        continue; // Bus muted or solo-excluded
+                    }
                     let role_labels: Vec<&str> = audio_labels
                         .iter()
                         .filter(|s| s.role == *role)
@@ -1297,32 +1428,46 @@ pub fn export_project(
                     }
                     let submix_name = format!("submix_{}", role.as_str());
                     let n = role_labels.len();
+                    let bus_gain = project.bus_gain_linear(role);
+                    let bus_vol = if (bus_gain - 1.0).abs() > 1e-6 {
+                        format!(",volume={bus_gain:.6}")
+                    } else {
+                        String::new()
+                    };
                     filter.push(';');
                     for l in &role_labels {
                         filter.push_str(&format!("[{l}]"));
                     }
                     if n == 1 {
-                        // Single input — just rename, no amix needed.
-                        filter.push_str(&format!("anull[{submix_name}]"));
+                        filter.push_str(&format!("anull{bus_vol}[{submix_name}]"));
                     } else {
-                        filter.push_str(&format!("amix=inputs={n}:normalize=0[{submix_name}]"));
+                        filter.push_str(&format!(
+                            "amix=inputs={n}:normalize=0{bus_vol}[{submix_name}]"
+                        ));
                     }
                     submix_labels.push(submix_name);
                 }
                 // Master mix from submixes.
-                let n = submix_labels.len();
-                filter.push(';');
-                for l in &submix_labels {
-                    filter.push_str(&format!("[{l}]"));
-                }
-                if n == 1 {
+                if submix_labels.is_empty() {
+                    // All buses muted — emit silence
                     filter.push_str(&format!(
-                        "atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
+                        ";anullsrc=r=48000:cl=stereo,atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
                     ));
                 } else {
-                    filter.push_str(&format!(
-                        "amix=inputs={n}:normalize=0,atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
-                    ));
+                    let n = submix_labels.len();
+                    filter.push(';');
+                    for l in &submix_labels {
+                        filter.push_str(&format!("[{l}]"));
+                    }
+                    if n == 1 {
+                        filter.push_str(&format!(
+                            "atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
+                        ));
+                    } else {
+                        filter.push_str(&format!(
+                            "amix=inputs={n}:normalize=0,atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
+                        ));
+                    }
                 }
             }
         } else {
@@ -1390,41 +1535,54 @@ pub fn export_project(
             // 2. Per-role submix in the target layout.
             let mut submix_labels: Vec<String> = Vec::new();
             for (role, labels) in &role_inputs {
-                if labels.is_empty() {
+                if labels.is_empty() || !project.bus_is_active(role) {
                     continue;
                 }
                 let submix_name = format!("submix_{}", role.as_str());
                 let n = labels.len();
+                let bus_gain = project.bus_gain_linear(role);
+                let bus_vol = if (bus_gain - 1.0).abs() > 1e-6 {
+                    format!(",volume={bus_gain:.6}")
+                } else {
+                    String::new()
+                };
                 filter.push(';');
                 for l in labels {
                     filter.push_str(&format!("[{l}]"));
                 }
                 if n == 1 {
                     filter.push_str(&format!(
-                        "aformat=channel_layouts={layout_token}[{submix_name}]"
+                        "aformat=channel_layouts={layout_token}{bus_vol}[{submix_name}]"
                     ));
                 } else {
                     filter.push_str(&format!(
-                        "amix=inputs={n}:normalize=0,aformat=channel_layouts={layout_token}[{submix_name}]"
+                        "amix=inputs={n}:normalize=0,aformat=channel_layouts={layout_token}{bus_vol}[{submix_name}]"
                     ));
                 }
                 submix_labels.push(submix_name);
             }
 
             // 3. Master mix of submixes → final [aout] in the target layout.
-            let n = submix_labels.len();
-            filter.push(';');
-            for l in &submix_labels {
-                filter.push_str(&format!("[{l}]"));
-            }
-            if n == 1 {
+            if submix_labels.is_empty() {
+                // All buses muted — emit silence in the target layout
                 filter.push_str(&format!(
-                    "aformat=channel_layouts={layout_token},atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
+                    ";anullsrc=r=48000:cl={layout_token},atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
                 ));
             } else {
-                filter.push_str(&format!(
-                    "amix=inputs={n}:normalize=0,aformat=channel_layouts={layout_token},atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
-                ));
+                let n = submix_labels.len();
+                filter.push(';');
+                for l in &submix_labels {
+                    filter.push_str(&format!("[{l}]"));
+                }
+                if n == 1 {
+                    filter.push_str(&format!(
+                        "aformat=channel_layouts={layout_token},atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
+                    ));
+                } else {
+                    filter.push_str(&format!(
+                        "amix=inputs={n}:normalize=0,aformat=channel_layouts={layout_token},atrim=duration={project_dur_s:.6},asetpts=PTS-STARTPTS[aout]"
+                    ));
+                }
             }
         }
     }
@@ -1532,9 +1690,19 @@ pub fn export_project(
                 cmd.arg("-c:v")
                     .arg("libx265")
                     .arg("-crf")
-                    .arg(options.crf.to_string())
-                    .arg("-pix_fmt")
-                    .arg("yuv420p");
+                    .arg(options.crf.to_string());
+                if options.hdr_passthrough {
+                    cmd.arg("-pix_fmt").arg("yuv420p10le");
+                    cmd.arg("-x265-params").arg(
+                        "hdr-opt=1:repeat-headers=1:colorprim=bt2020:\
+                         transfer=smpte2084:colormatrix=bt2020nc",
+                    );
+                    cmd.arg("-color_primaries").arg("bt2020");
+                    cmd.arg("-color_trc").arg("smpte2084");
+                    cmd.arg("-colorspace").arg("bt2020nc");
+                } else {
+                    cmd.arg("-pix_fmt").arg("yuv420p");
+                }
             }
             VideoCodec::Vp9 => {
                 cmd.arg("-c:v")
@@ -1542,9 +1710,15 @@ pub fn export_project(
                     .arg("-crf")
                     .arg(options.crf.to_string())
                     .arg("-b:v")
-                    .arg("0")
-                    .arg("-pix_fmt")
-                    .arg("yuv420p");
+                    .arg("0");
+                if options.hdr_passthrough {
+                    cmd.arg("-pix_fmt").arg("yuv420p10le");
+                    cmd.arg("-color_primaries").arg("bt2020");
+                    cmd.arg("-color_trc").arg("smpte2084");
+                    cmd.arg("-colorspace").arg("bt2020nc");
+                } else {
+                    cmd.arg("-pix_fmt").arg("yuv420p");
+                }
             }
             VideoCodec::ProRes => {
                 cmd.arg("-c:v").arg("prores_ks").arg("-profile:v").arg("3");
@@ -1555,9 +1729,15 @@ pub fn export_project(
                     .arg("-crf")
                     .arg(options.crf.to_string())
                     .arg("-b:v")
-                    .arg("0")
-                    .arg("-pix_fmt")
-                    .arg("yuv420p");
+                    .arg("0");
+                if options.hdr_passthrough {
+                    cmd.arg("-pix_fmt").arg("yuv420p10le");
+                    cmd.arg("-color_primaries").arg("bt2020");
+                    cmd.arg("-color_trc").arg("smpte2084");
+                    cmd.arg("-colorspace").arg("bt2020nc");
+                } else {
+                    cmd.arg("-pix_fmt").arg("yuv420p");
+                }
             }
         }
     }
@@ -1583,7 +1763,23 @@ pub fn export_project(
     let reader = BufReader::new(stderr);
 
     let mut error_lines: Vec<String> = Vec::new();
+    let mut cancelled = false;
     for line in reader.lines().map_while(|r| r.ok()) {
+        // Cancel check — runs once per stderr line. ffmpeg emits
+        // progress frequently (≥once per second during active encode)
+        // so this is responsive in practice. When the flag flips, kill
+        // the child; the reader pipe closes and the loop exits.
+        if let Some(ref flag) = cancel_flag {
+            if flag.load(Ordering::SeqCst) {
+                log::info!(
+                    "export_project: cancel requested — killing ffmpeg pid={}",
+                    child.id()
+                );
+                let _ = child.kill();
+                cancelled = true;
+                break;
+            }
+        }
         if let Some(p) = parse_progress_line(&line, total_duration_us, estimated_size_bytes) {
             let _ = tx.send(ExportProgress::Progress(p));
         } else if !line.starts_with("frame=")
@@ -1606,6 +1802,13 @@ pub fn export_project(
     let status = child
         .wait()
         .map_err(|e| anyhow!("Failed waiting for ffmpeg: {e}"))?;
+    if cancelled {
+        // Drop the partial output so the caller doesn't mistake it for
+        // a complete export.
+        let _ = std::fs::remove_file(output_path);
+        let _ = tx.send(ExportProgress::Error("cancelled".to_string()));
+        return Err(anyhow!("cancelled"));
+    }
     if !status.success() {
         let detail = error_lines.join("; ");
         let msg = format!("ffmpeg export failed: {detail}");
@@ -1622,7 +1825,7 @@ pub fn export_project(
     Ok(())
 }
 
-fn build_color_filter(clip: &crate::model::clip::Clip) -> String {
+pub(crate) fn build_color_filter(clip: &crate::model::clip::Clip) -> String {
     let has_keyframes = !clip.brightness_keyframes.is_empty()
         || !clip.contrast_keyframes.is_empty()
         || !clip.saturation_keyframes.is_empty();
@@ -1679,7 +1882,7 @@ fn build_color_filter(clip: &crate::model::clip::Clip) -> String {
         // by reusing the calibrated videobalance mapping used in preview.
         // Temperature/tint and tonal grading are excluded here because export
         // applies them through dedicated filters later in the chain.
-        let preview_params = ProgramPlayer::compute_videobalance_params(
+        let preview_params = color_math::compute_videobalance_params(
             clip.brightness as f64,
             clip.contrast as f64,
             clip.saturation as f64,
@@ -2894,8 +3097,10 @@ fn build_volume_filter(clip: &Clip) -> String {
         let pad_ns = (clip.voice_isolation_pad_ms as f64 * 1_000_000.0) as u64;
         let merged_ns = clip.voice_isolation_speech_intervals_ns(pad_ns);
         // Duck towards floor instead of silence.
-        let duck_ratio = (1.0 - clip.voice_isolation) * (1.0 - clip.voice_isolation_floor)
-            + clip.voice_isolation_floor;
+        let duck_ratio = color_math::voice_ducking_floor(
+            clip.voice_isolation as f64,
+            clip.voice_isolation_floor as f64,
+        );
         if !merged_ns.is_empty() {
             let condition: String = merged_ns
                 .iter()
@@ -2934,7 +3139,7 @@ fn build_match_eq_filter(clip: &Clip) -> String {
         .iter()
         .filter(|band| band.gain.abs() >= 0.001)
         .map(|band| {
-            let bw = band.freq / band.q.max(0.1);
+            let bw = color_math::eq_bandwidth(band.freq, band.q);
             format!(
                 "equalizer=f={:.1}:t=h:w={:.1}:g={:.2}",
                 band.freq, bw, band.gain
@@ -2959,7 +3164,7 @@ fn build_eq_filter(clip: &Clip) -> String {
         if band.gain.abs() < 0.001 && !has_kfs {
             continue;
         }
-        let bw = band.freq / band.q.max(0.1);
+        let bw = color_math::eq_bandwidth(band.freq, band.q);
         if has_kfs {
             let gain_expr =
                 build_keyframed_property_expression(band_kfs[i], band.gain, -24.0, 24.0, "t");
@@ -2992,13 +3197,23 @@ fn append_pan_filter_chain(
     output_label: &str,
     label_prefix: &str,
     target_layout: AudioChannelLayout,
+    track_pan: f64,
 ) {
-    if clip.pan.abs() <= f32::EPSILON && clip.pan_keyframes.is_empty() {
+    if clip.pan.abs() <= f32::EPSILON
+        && clip.pan_keyframes.is_empty()
+        && track_pan.abs() <= f64::EPSILON
+    {
         filter.push_str(&format!(";[{input_label}]anull[{output_label}]"));
         return;
     }
 
-    let pan_expr = build_pan_expression(clip);
+    let clip_pan_expr = build_pan_expression(clip);
+    // Compose clip pan with track pan: clamp(clip_pan + track_pan, -1, 1)
+    let pan_expr = if track_pan.abs() > f64::EPSILON {
+        format!("clip({clip_pan_expr}+({track_pan:.10}),-1,1)")
+    } else {
+        clip_pan_expr
+    };
     let left_gain_expr = format!("if(gt({pan_expr},0),1-({pan_expr}),1)");
     let right_gain_expr = format!("if(lt({pan_expr},0),1+({pan_expr}),1)");
 
@@ -3113,7 +3328,7 @@ fn build_temperature_tint_filter_with_caps(
     f
 }
 
-fn build_denoise_filter(clip: &crate::model::clip::Clip) -> String {
+pub(crate) fn build_denoise_filter(clip: &crate::model::clip::Clip) -> String {
     if clip.denoise > 0.0 {
         let d = clip.denoise.clamp(0.0, 1.0);
         format!(
@@ -3128,7 +3343,7 @@ fn build_denoise_filter(clip: &crate::model::clip::Clip) -> String {
     }
 }
 
-fn build_sharpen_filter(clip: &crate::model::clip::Clip) -> String {
+pub(crate) fn build_sharpen_filter(clip: &crate::model::clip::Clip) -> String {
     if clip.sharpness != 0.0 {
         let la = (clip.sharpness * 3.0).clamp(-2.0, 5.0);
         format!(",unsharp=lx=5:ly=5:la={la:.4}:cx=5:cy=5:ca={la:.4}")
@@ -3137,7 +3352,7 @@ fn build_sharpen_filter(clip: &crate::model::clip::Clip) -> String {
     }
 }
 
-fn build_blur_filter(clip: &crate::model::clip::Clip) -> String {
+pub(crate) fn build_blur_filter(clip: &crate::model::clip::Clip) -> String {
     if clip.blur > 0.0 {
         let r = (clip.blur.clamp(0.0, 1.0) * 10.0).round() as i32;
         format!(",boxblur={r}:{r}")
@@ -3160,7 +3375,7 @@ fn build_blur_filter(clip: &crate::model::clip::Clip) -> String {
 ///
 /// Returns an empty string when the qualifier is neutral so primary-only
 /// clips stay byte-identical to before.
-fn build_hsl_qualifier_filter(clip: &crate::model::clip::Clip) -> String {
+pub(crate) fn build_hsl_qualifier_filter(clip: &crate::model::clip::Clip) -> String {
     let q = match &clip.hsl_qualifier {
         Some(q) if !q.is_neutral() => q,
         _ => return String::new(),
@@ -3397,7 +3612,7 @@ fn format_frei0r_native_param<P: AsRef<str>>(
 /// Build a chain of FFmpeg frei0r filters for user-applied effects on a clip.
 /// Each enabled effect becomes `,frei0r=filter_name={name}:filter_params={p1}|{p2}|...`.
 /// Effects with no FFmpeg frei0r support are silently skipped.
-fn build_frei0r_effects_filter(clip: &crate::model::clip::Clip) -> String {
+pub(crate) fn build_frei0r_effects_filter(clip: &crate::model::clip::Clip) -> String {
     use crate::media::frei0r_registry::Frei0rRegistry;
 
     if clip.frei0r_effects.is_empty() {
@@ -3504,7 +3719,42 @@ fn build_frei0r_effects_filter(clip: &crate::model::clip::Clip) -> String {
 
 /// LUT filter chain for use at the start of a filter pipeline (trailing comma, no leading).
 /// Returns `lut3d={path1},lut3d={path2},` or empty string.
-fn build_lut_filter_prefix(clip: &crate::model::clip::Clip) -> String {
+/// Build an FFmpeg tonemap filter prefix for HDR→SDR conversion.
+/// Uses ffprobe to detect HDR transfer characteristics at export time.
+/// Returns an empty string for SDR sources.
+fn build_tonemap_filter_prefix(source_path: &str) -> String {
+    if source_path.is_empty() {
+        return String::new();
+    }
+    // Quick ffprobe check for HDR transfer characteristics.
+    let output = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "quiet",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=color_transfer",
+            "-of",
+            "csv=p=0",
+            source_path,
+        ])
+        .output()
+        .ok();
+    let transfer = output
+        .as_ref()
+        .and_then(|o| String::from_utf8(o.stdout.clone()).ok())
+        .unwrap_or_default();
+    let transfer = transfer.trim().to_lowercase();
+    if transfer.contains("smpte2084") || transfer.contains("arib-std-b67") {
+        // zscale tonemap: linearize → tonemap (hable) → convert to BT.709
+        "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p,".to_string()
+    } else {
+        String::new()
+    }
+}
+
+pub(crate) fn build_lut_filter_prefix(clip: &crate::model::clip::Clip) -> String {
     let mut result = String::new();
     for path in &clip.lut_paths {
         if !path.is_empty() && std::path::Path::new(path).exists() {
@@ -3846,6 +4096,50 @@ fn ass_bool(enabled: bool) -> i32 {
     } else {
         0
     }
+}
+
+/// Build the drawtext filter that burns project-level timecode into the
+/// output. Mirrors the Program Monitor overlay: monospace, bold, translucent
+/// rounded-ish box (drawtext `box` is rectangular — visually close enough at
+/// export sizes), anchored by `TimecodeBurninPosition` with a ~2% margin.
+/// Uses the project frame rate so displayed frames match the UI timecode
+/// formatter (non-drop-frame, `rate=num/den`).
+fn build_timecode_burnin_filter(
+    position: crate::model::project::TimecodeBurninPosition,
+    frame_rate: &crate::model::project::FrameRate,
+    out_w: u32,
+    out_h: u32,
+) -> String {
+    use crate::model::project::TimecodeBurninPosition;
+    if out_w == 0 || out_h == 0 {
+        return String::new();
+    }
+    let short_edge = out_w.min(out_h) as f64;
+    let fontsize = (short_edge * 0.035).clamp(16.0, 40.0).round() as u32;
+    let margin = (short_edge * 0.02).max(6.0).round() as u32;
+    let num = frame_rate.numerator.max(1);
+    let den = frame_rate.denominator.max(1);
+    let (x_expr, y_expr): (String, String) = match position {
+        TimecodeBurninPosition::TopLeft => (format!("{margin}"), format!("{margin}")),
+        TimecodeBurninPosition::TopCenter => ("(w-text_w)/2".to_string(), format!("{margin}")),
+        TimecodeBurninPosition::TopRight => {
+            (format!("w-text_w-{margin}"), format!("{margin}"))
+        }
+        TimecodeBurninPosition::BottomLeft => {
+            (format!("{margin}"), format!("h-text_h-{margin}"))
+        }
+        TimecodeBurninPosition::BottomCenter => {
+            ("(w-text_w)/2".to_string(), format!("h-text_h-{margin}"))
+        }
+        TimecodeBurninPosition::BottomRight => {
+            (format!("w-text_w-{margin}"), format!("h-text_h-{margin}"))
+        }
+    };
+    // `timecode` option: colons in the initial value must be backslash-escaped
+    // so ffmpeg's filter parser doesn't treat them as option separators.
+    format!(
+        "drawtext=timecode='00\\:00\\:00\\:00':rate={num}/{den}:fontcolor=white@0.95:fontsize={fontsize}:x='{x_expr}':y='{y_expr}':box=1:boxcolor=black@0.72:boxborderw=8:font=Monospace"
+    )
 }
 
 fn build_subtitle_filter_composited(
@@ -4335,7 +4629,7 @@ fn build_grading_filter_with_caps(
         // (white_c, 1.0) per channel.  Using the identical quadratic in
         // `lutrgb` avoids frei0r cross-runtime parameter-passing issues
         // and cubic-spline overshoot from `curves`.
-        let p = ProgramPlayer::compute_export_3point_params(
+        let p = color_math::compute_export_3point_params(
             clip.shadows as f64,
             clip.midtones as f64,
             clip.highlights as f64,
@@ -4347,7 +4641,7 @@ fn build_grading_filter_with_caps(
             clip.shadows_warmth as f64,
             clip.shadows_tint as f64,
         );
-        let parabola = crate::media::program_player::ThreePointParabola::from_params(&p);
+        let parabola = color_math::ThreePointParabola::from_params(&p);
         parabola.to_lutrgb_filter()
     } else {
         String::new()
@@ -4357,15 +4651,15 @@ fn build_grading_filter_with_caps(
 pub(crate) fn compute_export_coloradj_params(
     temperature: f64,
     tint: f64,
-) -> crate::media::program_player::ColorAdjRGBParams {
-    let neutral = ProgramPlayer::compute_coloradj_params(6500.0, 0.0);
-    let temp_only = ProgramPlayer::compute_coloradj_params(temperature, 0.0);
-    let tint_only = ProgramPlayer::compute_coloradj_params(6500.0, tint);
+) -> color_math::ColorAdjRGBParams {
+    let neutral = color_math::compute_coloradj_params(6500.0, 0.0);
+    let temp_only = color_math::compute_coloradj_params(temperature, 0.0);
+    let tint_only = color_math::compute_coloradj_params(6500.0, tint);
 
     // FFmpeg frei0r implementations can diverge from preview at stronger
     // temperature/tint settings; apply a conservative attenuation of deltas
     // from neutral to better align cross-runtime behavior.
-    let temp_gain = ProgramPlayer::export_temperature_parity_gain(temperature);
+    let temp_gain = color_math::export_temperature_parity_gain(temperature);
     let tint_gain = if tint < 0.0 {
         0.60
     } else if tint > 0.0 {
@@ -4375,9 +4669,9 @@ pub(crate) fn compute_export_coloradj_params(
     };
 
     // Per-channel additive offsets for cross-runtime bridge compensation.
-    let (off_r, off_g, off_b) = ProgramPlayer::export_temperature_channel_offsets(temperature);
+    let (off_r, off_g, off_b) = color_math::export_temperature_channel_offsets(temperature);
 
-    crate::media::program_player::ColorAdjRGBParams {
+    color_math::ColorAdjRGBParams {
         r: (neutral.r
             + (temp_only.r - neutral.r) * temp_gain
             + (tint_only.r - neutral.r) * tint_gain
@@ -4417,7 +4711,7 @@ fn build_combined_mask_alpha(
     )
 }
 
-fn build_chroma_key_filter(clip: &crate::model::clip::Clip) -> String {
+pub(crate) fn build_chroma_key_filter(clip: &crate::model::clip::Clip) -> String {
     if clip.chroma_key_enabled {
         let color = format!("{:06x}", clip.chroma_key_color & 0xFFFFFF);
         let similarity = (clip.chroma_key_tolerance * 0.5).clamp(0.01, 0.5);
@@ -5293,7 +5587,7 @@ fn find_ladspa_so(name: &str) -> Option<String> {
     None
 }
 
-fn build_ladspa_effects_filter(clip: &crate::model::clip::Clip) -> String {
+pub(crate) fn build_ladspa_effects_filter(clip: &crate::model::clip::Clip) -> String {
     if clip.ladspa_effects.is_empty() {
         return String::new();
     }
@@ -5654,589 +5948,25 @@ fn clip_has_audio(ffmpeg: &str, clip: &Clip, cache: &mut HashMap<String, bool>) 
     if let Some(has_audio) = cache.get(&clip.source_path) {
         return *has_audio;
     }
-    let has_audio = probe_has_audio(ffmpeg, &clip.source_path);
+    let has_audio = crate::media::audio_analysis::probe_has_audio(ffmpeg, &clip.source_path);
     cache.insert(clip.source_path.clone(), has_audio);
     has_audio
 }
 
-fn probe_has_audio(ffmpeg: &str, path: &str) -> bool {
-    // Derive ffprobe path from ffmpeg path (they live side-by-side)
-    let ffprobe = ffmpeg.replace("ffmpeg", "ffprobe");
-    Command::new(&ffprobe)
-        .args([
-            "-v",
-            "error",
-            "-select_streams",
-            "a:0",
-            "-show_entries",
-            "stream=codec_type",
-            "-of",
-            "csv=p=0",
-            path,
-        ])
-        .output()
-        .map(|o| !o.stdout.is_empty())
-        .unwrap_or(false)
-}
-
-/// Detect silent intervals in a source clip's audio track using ffmpeg's `silencedetect` filter.
-///
-/// Returns `(silence_start_sec, silence_end_sec)` pairs relative to `source_in_ns`.
-/// Returns an empty vec if the source has no audio stream.
-pub(crate) fn detect_silence(
-    source_path: &str,
-    source_in_ns: u64,
-    source_out_ns: u64,
-    noise_db: f64,
-    min_duration: f64,
-) -> Result<Vec<(f64, f64)>> {
-    let ffmpeg = find_ffmpeg()?;
-    if !probe_has_audio(&ffmpeg, source_path) {
-        return Ok(Vec::new());
-    }
-    let src_in_sec = source_in_ns as f64 / 1_000_000_000.0;
-    // source_out_ns is an absolute position, not a duration — compute the duration
-    let duration_sec = source_out_ns.saturating_sub(source_in_ns) as f64 / 1_000_000_000.0;
-    if duration_sec <= 0.0 {
-        return Ok(Vec::new());
-    }
-    let af = format!("silencedetect=noise={noise_db}dB:d={min_duration}");
-    let output = Command::new(&ffmpeg)
-        .args([
-            "-ss",
-            &format!("{src_in_sec}"),
-            "-t",
-            &format!("{duration_sec}"),
-            "-i",
-            source_path,
-            "-af",
-            &af,
-            "-f",
-            "null",
-            "-",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| anyhow!("Failed to run ffmpeg silencedetect: {e}"))?;
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let mut intervals = Vec::new();
-    let mut pending_start: Option<f64> = None;
-    for line in stderr.lines() {
-        if let Some(pos) = line.find("silence_start: ") {
-            let val_str = &line[pos + "silence_start: ".len()..];
-            if let Some(val) = val_str
-                .split_whitespace()
-                .next()
-                .and_then(|s| s.parse::<f64>().ok())
-            {
-                pending_start = Some(val);
-            }
-        }
-        if let Some(pos) = line.find("silence_end: ") {
-            let val_str = &line[pos + "silence_end: ".len()..];
-            if let Some(end_val) = val_str
-                .split_whitespace()
-                .next()
-                .and_then(|s| s.parse::<f64>().ok())
-            {
-                if let Some(start_val) = pending_start.take() {
-                    intervals.push((start_val, end_val));
-                }
-            }
-        }
-    }
-    // Handle trailing silence_start with no silence_end
-    if let Some(start_val) = pending_start {
-        intervals.push((start_val, duration_sec));
-    }
-    Ok(intervals)
-}
-
-/// Convert silent intervals (returned by `detect_silence`) into the inverse:
-/// **speech intervals** in clip-local nanoseconds, suitable for storing in
-/// `Clip::voice_isolation_speech_intervals`.
-///
-/// `silences` is a sorted list of `(start_sec, end_sec)` pairs relative to
-/// `source_in`. `clip_duration_ns` is `source_out_ns - source_in_ns`. Speech
-/// regions are everything between/around the silences.
-pub(crate) fn invert_silences_to_speech(
-    silences: &[(f64, f64)],
-    clip_duration_ns: u64,
-) -> Vec<(u64, u64)> {
-    let mut speech: Vec<(u64, u64)> = Vec::new();
-    let mut cursor_ns: u64 = 0;
-    for (s, e) in silences {
-        let s_ns = (s.max(0.0) * 1_000_000_000.0) as u64;
-        let e_ns = (e.max(0.0) * 1_000_000_000.0) as u64;
-        if s_ns > cursor_ns {
-            speech.push((cursor_ns, s_ns.min(clip_duration_ns)));
-        }
-        cursor_ns = e_ns;
-    }
-    if cursor_ns < clip_duration_ns {
-        speech.push((cursor_ns, clip_duration_ns));
-    }
-    // Drop zero-length intervals that can occur at clip boundaries.
-    speech.retain(|(s, e)| e > s);
-    speech
-}
-
-/// Analyze a clip's audio and suggest a silence-detection threshold (in dB)
-/// based on the noise floor.
-///
-/// Uses FFmpeg's `astats` filter with windowed RMS measurements (0.5 s windows)
-/// and computes the **5th percentile** of the windowed RMS levels — a robust
-/// noise-floor estimate that ignores both intro/outro silences (which would
-/// pull a naive mean toward `-inf`) and loud transients during speech.
-///
-/// Returns the suggested threshold = noise_floor + 6 dB headroom, clamped to
-/// the inspector's slider range `[-60.0, -10.0]`.
-///
-/// Returns an error if ffmpeg is missing, the source has no audio, or no RMS
-/// samples were measurable.
-pub(crate) fn suggest_silence_threshold_db(
-    source_path: &str,
-    source_in_ns: u64,
-    source_out_ns: u64,
-) -> Result<f32> {
-    let ffmpeg = find_ffmpeg()?;
-    if !probe_has_audio(&ffmpeg, source_path) {
-        return Err(anyhow!("source has no audio stream"));
-    }
-    let src_in_sec = source_in_ns as f64 / 1_000_000_000.0;
-    let duration_sec = source_out_ns.saturating_sub(source_in_ns) as f64 / 1_000_000_000.0;
-    if duration_sec <= 0.0 {
-        return Err(anyhow!("clip duration is zero"));
-    }
-    // astats with reset=0.5 gives one measurement per 0.5 s window. ametadata=print
-    // emits the RMS_level metadata to stderr (alongside other lavfi.astats keys).
-    // We're only interested in lavfi.astats.Overall.RMS_level lines.
-    let af = "astats=metadata=1:reset=0.5,ametadata=print:key=lavfi.astats.Overall.RMS_level"
-        .to_string();
-    let output = Command::new(&ffmpeg)
-        .args([
-            "-nostats",
-            "-hide_banner",
-            "-ss",
-            &format!("{src_in_sec}"),
-            "-t",
-            &format!("{duration_sec}"),
-            "-i",
-            source_path,
-            "-vn",
-            "-af",
-            &af,
-            "-f",
-            "null",
-            "-",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| anyhow!("Failed to run ffmpeg astats: {e}"))?;
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let mut rms_levels: Vec<f64> = Vec::new();
-    for line in stderr.lines() {
-        // ametadata=print emits lines like:
-        //   [Parsed_ametadata_1 @ 0x...] lavfi.astats.Overall.RMS_level=-42.123456
-        if let Some(pos) = line.find("lavfi.astats.Overall.RMS_level=") {
-            let val_str = &line[pos + "lavfi.astats.Overall.RMS_level=".len()..];
-            if let Some(val) = val_str
-                .split_whitespace()
-                .next()
-                .and_then(|s| s.parse::<f64>().ok())
-            {
-                // -inf shows up as a very large negative — skip these (silent windows).
-                if val.is_finite() && val > -200.0 {
-                    rms_levels.push(val);
-                }
-            }
-        }
-    }
-
-    if rms_levels.is_empty() {
-        return Err(anyhow!("no RMS samples produced by astats"));
-    }
-
-    // 5th percentile of windowed RMS = robust noise-floor estimate.
-    rms_levels.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let idx = ((rms_levels.len() as f64) * 0.05) as usize;
-    let noise_floor = rms_levels[idx.min(rms_levels.len() - 1)];
-
-    // Suggested threshold sits 6 dB above the noise floor.
-    let suggested = (noise_floor + 6.0) as f32;
-    Ok(suggested.clamp(-60.0, -10.0))
-}
-
-/// Detect scene/shot changes in a video clip using ffmpeg's `scdet` filter.
-///
-/// Returns cut-point timestamps in seconds, relative to `source_in_ns`.
-/// Returns an empty vec if the source has no video stream or no cuts are found.
-pub(crate) fn detect_scene_cuts(
-    source_path: &str,
-    source_in_ns: u64,
-    source_out_ns: u64,
-    threshold: f64,
-) -> Result<Vec<f64>> {
-    let ffmpeg = find_ffmpeg()?;
-    let src_in_sec = source_in_ns as f64 / 1_000_000_000.0;
-    let duration_sec = source_out_ns.saturating_sub(source_in_ns) as f64 / 1_000_000_000.0;
-    if duration_sec <= 0.0 {
-        return Ok(Vec::new());
-    }
-    let vf = format!("scdet=threshold={threshold}:sc_pass=1");
-    let output = Command::new(&ffmpeg)
-        .args([
-            "-ss",
-            &format!("{src_in_sec}"),
-            "-t",
-            &format!("{duration_sec}"),
-            "-i",
-            source_path,
-            "-vf",
-            &vf,
-            "-an",
-            "-f",
-            "null",
-            "-",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| anyhow!("Failed to run ffmpeg scdet: {e}"))?;
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let mut cuts = Vec::new();
-    for line in stderr.lines() {
-        if let Some(pos) = line.find("lavfi.scd.time:") {
-            let val_str = &line[pos + "lavfi.scd.time:".len()..];
-            if let Some(t) = val_str
-                .split_whitespace()
-                .next()
-                .and_then(|s| s.parse::<f64>().ok())
-            {
-                // Skip cuts at the very start or end of the clip
-                if t > 0.01 && t < duration_sec - 0.01 {
-                    cuts.push(t);
-                }
-            }
-        }
-    }
-    cuts.dedup_by(|a, b| (*a - *b).abs() < 0.01);
-    Ok(cuts)
-}
-
-/// Measure integrated loudness (LUFS) of a clip's audio via FFmpeg `ebur128` filter.
-/// Returns the integrated loudness value in LUFS (e.g. -18.3).
-/// Full EBU R128 loudness report for a measured audio source.
-///
-/// All fields are in standard R128 units. `short_term_max_lufs` and
-/// `momentary_max_lufs` track the running max across the per-frame log;
-/// `true_peak_dbtp` is populated only when FFmpeg is invoked with
-/// `ebur128=peak=true` (otherwise defaults to 0.0 on parse).
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct LoudnessReport {
-    /// Integrated loudness over the full duration (I:). LUFS.
-    pub integrated_lufs: f64,
-    /// Loudness Range (LRA:). LU.
-    pub loudness_range_lu: f64,
-    /// Integrated threshold (I Threshold:). LUFS.
-    pub threshold_lufs: f64,
-    /// Maximum short-term (3 s window) loudness observed. LUFS.
-    pub short_term_max_lufs: f64,
-    /// Maximum momentary (400 ms window) loudness observed. LUFS.
-    pub momentary_max_lufs: f64,
-    /// True-peak (dBTP) from the Summary block's Peak: line. dBFS equivalent.
-    pub true_peak_dbtp: f64,
-}
-
-/// Parse a LoudnessReport out of an ffmpeg stderr dump that used
-/// `ebur128=peak=true:framelog=verbose`.
-///
-/// Exposed (pub(crate)) so unit tests can feed canned strings without
-/// spawning a subprocess.
-pub(crate) fn parse_loudness_report(stderr: &str) -> Result<LoudnessReport> {
-    let mut report = LoudnessReport::default();
-    let mut saw_summary_i = false;
-    let mut in_summary = false;
-
-    // First pass: scan per-frame log lines of the form
-    //   [Parsed_ebur128_0 @ 0x...] t: 0.4  M: -25.3 S:-inf     I: -25.3 LUFS  LRA:  0.0 LU
-    // and track max(M) and max(S). `-inf` / `nan` are ignored.
-    for line in stderr.lines() {
-        if !line.contains("[Parsed_ebur128") {
-            continue;
-        }
-        // `M: -25.3` and `S: -18.7` — spaces between key and value vary.
-        if let Some(m) = extract_ebur128_metric(line, " M:") {
-            if m > report.momentary_max_lufs || report.momentary_max_lufs == 0.0 {
-                report.momentary_max_lufs = m;
-            }
-        }
-        if let Some(s) = extract_ebur128_metric(line, " S:") {
-            if s > report.short_term_max_lufs || report.short_term_max_lufs == 0.0 {
-                report.short_term_max_lufs = s;
-            }
-        }
-    }
-
-    // Second pass: walk the trailing Summary block and extract
-    // I:, I Threshold:, LRA:, Peak:.
-    //
-    // The Summary block looks like:
-    //   [Parsed_ebur128_0 @ ...] Summary:
-    //
-    //     Integrated loudness:
-    //       I:         -23.0 LUFS
-    //       Threshold: -33.0 LUFS
-    //
-    //     Loudness range:
-    //       LRA:        8.4 LU
-    //       Threshold: -43.0 LUFS
-    //       LRA low:   -28.1 LUFS
-    //       LRA high:  -19.7 LUFS
-    //
-    //     True peak:
-    //       Peak:       -1.2 dBFS
-    //
-    // "Threshold:" appears twice (integrated + range); we only want the
-    // first ("I Threshold" in our struct). We disambiguate by tracking
-    // which subsection ("Integrated loudness" vs. "Loudness range") we're
-    // currently in.
-    let mut in_integrated = false;
-    let mut in_range = false;
-    let mut in_true_peak = false;
-    for line in stderr.lines() {
-        let trimmed = line.trim_start_matches(|c: char| !c.is_alphabetic()).trim();
-        if line.contains("Summary:") {
-            in_summary = true;
-            in_integrated = false;
-            in_range = false;
-            in_true_peak = false;
-            continue;
-        }
-        if !in_summary {
-            continue;
-        }
-        if trimmed.starts_with("Integrated loudness") {
-            in_integrated = true;
-            in_range = false;
-            in_true_peak = false;
-            continue;
-        }
-        if trimmed.starts_with("Loudness range") {
-            in_integrated = false;
-            in_range = true;
-            in_true_peak = false;
-            continue;
-        }
-        if trimmed.starts_with("True peak") {
-            in_integrated = false;
-            in_range = false;
-            in_true_peak = true;
-            continue;
-        }
-        if in_integrated && trimmed.starts_with("I:") {
-            if let Some(val) = parse_leading_f64(&trimmed["I:".len()..]) {
-                report.integrated_lufs = val;
-                saw_summary_i = true;
-            }
-        } else if in_integrated && trimmed.starts_with("Threshold:") {
-            if let Some(val) = parse_leading_f64(&trimmed["Threshold:".len()..]) {
-                report.threshold_lufs = val;
-            }
-        } else if in_range && trimmed.starts_with("LRA:") {
-            if let Some(val) = parse_leading_f64(&trimmed["LRA:".len()..]) {
-                report.loudness_range_lu = val;
-            }
-        } else if in_true_peak && trimmed.starts_with("Peak:") {
-            if let Some(val) = parse_leading_f64(&trimmed["Peak:".len()..]) {
-                report.true_peak_dbtp = val;
-            }
-        }
-    }
-
-    if !saw_summary_i {
-        return Err(anyhow!(
-            "Could not parse integrated loudness from ffmpeg ebur128 output"
-        ));
-    }
-    Ok(report)
-}
-
-/// Extract a numeric metric from a per-frame ebur128 log line.
-/// Handles `-inf`, `nan`, and whitespace variations between the key and value.
-fn extract_ebur128_metric(line: &str, key: &str) -> Option<f64> {
-    let idx = line.find(key)?;
-    let rest = &line[idx + key.len()..];
-    let token = rest.trim_start().split_whitespace().next().unwrap_or("");
-    if token.is_empty() || token.contains("inf") || token.contains("nan") {
-        return None;
-    }
-    token.parse::<f64>().ok().filter(|v| v.is_finite())
-}
-
-/// Parse the leading f64 from a stringified metric value, ignoring the unit.
-/// `"  -23.0 LUFS"` → `Some(-23.0)`. `"-inf LUFS"` → `None`.
-fn parse_leading_f64(s: &str) -> Option<f64> {
-    let token = s.trim().split_whitespace().next().unwrap_or("");
-    if token.is_empty() || token.contains("inf") || token.contains("nan") {
-        return None;
-    }
-    token.parse::<f64>().ok().filter(|v| v.is_finite())
-}
-
-/// Analyze a source file and return the full EBU R128 loudness report.
-/// Invokes FFmpeg with `ebur128=peak=true:framelog=verbose` so the stderr
-/// dump contains both per-frame M/S values and the Summary block with the
-/// True Peak line.
-pub(crate) fn analyze_loudness_full(
-    source_path: &str,
-    source_in_ns: u64,
-    source_out_ns: u64,
-) -> Result<LoudnessReport> {
-    analyze_loudness_full_with_prefilter(source_path, source_in_ns, source_out_ns, None)
-}
-
-pub(crate) fn analyze_loudness_full_with_prefilter(
-    source_path: &str,
-    source_in_ns: u64,
-    source_out_ns: u64,
-    prefilter: Option<String>,
-) -> Result<LoudnessReport> {
-    let ffmpeg = find_ffmpeg()?;
-    if !probe_has_audio(&ffmpeg, source_path) {
-        return Err(anyhow!("Clip has no audio stream"));
-    }
-    let src_in_sec = source_in_ns as f64 / 1_000_000_000.0;
-    let duration_sec = source_out_ns.saturating_sub(source_in_ns) as f64 / 1_000_000_000.0;
-    if duration_sec <= 0.0 {
-        return Err(anyhow!("Clip has zero duration"));
-    }
-    let ebur128_filter = "ebur128=peak=true:framelog=verbose";
-    let audio_filter = prefilter
-        .map(|filter| format!("{filter},{ebur128_filter}"))
-        .unwrap_or_else(|| ebur128_filter.to_string());
-    let output = Command::new(&ffmpeg)
-        .args([
-            "-nostats",
-            "-hide_banner",
-            "-ss",
-            &format!("{src_in_sec}"),
-            "-t",
-            &format!("{duration_sec}"),
-            "-i",
-            source_path,
-            "-vn", // skip video decode — audio-only analysis
-            "-af",
-            &audio_filter,
-            "-f",
-            "null",
-            "-",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| anyhow!("Failed to run ffmpeg ebur128: {e}"))?;
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    parse_loudness_report(&stderr)
-}
-
-/// Scalar wrapper — returns only the integrated LUFS value. Preserved for
-/// the existing per-clip Inspector **Normalize…** button, `normalize_clip_audio`
-/// MCP tool, and `match_clip_audio` paths which don't need the full report.
-pub(crate) fn analyze_loudness_lufs(
-    source_path: &str,
-    source_in_ns: u64,
-    source_out_ns: u64,
-) -> Result<f64> {
-    Ok(analyze_loudness_full(source_path, source_in_ns, source_out_ns)?.integrated_lufs)
-}
-
-pub(crate) fn analyze_loudness_lufs_with_prefilter(
-    source_path: &str,
-    source_in_ns: u64,
-    source_out_ns: u64,
-    prefilter: Option<String>,
-) -> Result<f64> {
-    Ok(
-        analyze_loudness_full_with_prefilter(source_path, source_in_ns, source_out_ns, prefilter)?
-            .integrated_lufs,
-    )
-}
-
-/// Measure peak amplitude (dB) of a clip's audio via FFmpeg `volumedetect` filter.
-/// Returns the max volume in dBFS (e.g. -3.5, where 0.0 = full scale).
-pub(crate) fn analyze_peak_db(
-    source_path: &str,
-    source_in_ns: u64,
-    source_out_ns: u64,
-) -> Result<f64> {
-    let ffmpeg = find_ffmpeg()?;
-    if !probe_has_audio(&ffmpeg, source_path) {
-        return Err(anyhow!("Clip has no audio stream"));
-    }
-    let src_in_sec = source_in_ns as f64 / 1_000_000_000.0;
-    let duration_sec = source_out_ns.saturating_sub(source_in_ns) as f64 / 1_000_000_000.0;
-    if duration_sec <= 0.0 {
-        return Err(anyhow!("Clip has zero duration"));
-    }
-    let output = Command::new(&ffmpeg)
-        .args([
-            "-ss",
-            &format!("{src_in_sec}"),
-            "-t",
-            &format!("{duration_sec}"),
-            "-i",
-            source_path,
-            "-vn", // skip video decode — audio-only analysis
-            "-af",
-            "volumedetect",
-            "-f",
-            "null",
-            "-",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| anyhow!("Failed to run ffmpeg volumedetect: {e}"))?;
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    // Parse "max_volume: -X.X dB" from volumedetect output.
-    for line in stderr.lines() {
-        if let Some(pos) = line.find("max_volume:") {
-            let rest = &line[pos + "max_volume:".len()..];
-            if let Some(val) = rest
-                .trim()
-                .split_whitespace()
-                .next()
-                .and_then(|s| s.parse::<f64>().ok())
-            {
-                return Ok(val);
-            }
-        }
-    }
-    Err(anyhow!(
-        "Could not parse max_volume from ffmpeg volumedetect output"
-    ))
-}
+// -- Audio analysis re-exports ------------------------------------------------
+//
+// Core audio analysis utilities now live in `crate::media::audio_analysis`.
+// Re-export them so existing `crate::media::export::*` import sites keep working.
+pub use crate::media::audio_analysis::LoudnessReport;
+#[allow(unused_imports)] // parse_loudness_report used by #[cfg(test)] only
+pub(crate) use crate::media::audio_analysis::{
+    analyze_loudness_full, analyze_loudness_lufs, analyze_loudness_lufs_with_prefilter,
+    analyze_peak_db, compute_lufs_gain, compute_peak_gain, detect_scene_cuts, detect_silence,
+    find_ffmpeg, invert_silences_to_speech, parse_loudness_report, suggest_silence_threshold_db,
+};
 
 /// Render the full project timeline to a temp `.mp4` via `export_project`,
 /// then run `analyze_loudness_full` on the result and return the report.
-///
-/// Used by the Loudness Radar **Analyze Project** action and the
-/// `analyze_project_loudness` MCP tool. The render uses a tiny 160×90 H.264
-/// video stream to keep encode cost minimal; we immediately discard the
-/// temp file once analysis completes.
-///
-/// **Important**: the measurement is taken with `project.master_gain_db`
-/// forced to `0.0` on a cloned project. This way the caller gets the
-/// *pre-gain* loudness and can compute `delta = target - integrated`
-/// correctly even when a master gain is already applied.
 pub fn analyze_project_loudness(project: &Project) -> Result<LoudnessReport> {
     let temp = tempfile::Builder::new()
         .prefix("us_loudness_")
@@ -6259,11 +5989,13 @@ pub fn analyze_project_loudness(project: &Project) -> Result<LoudnessReport> {
         audio_bitrate_kbps: 320,
         gif_fps: None,
         audio_channel_layout: AudioChannelLayout::Stereo,
+        hdr_passthrough: false,
     };
 
     let (tx, _rx) = mpsc::channel();
     let empty_bg: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let empty_fi: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let empty_rr: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     export_project(
         &analysis_project,
         &path,
@@ -6271,49 +6003,13 @@ pub fn analyze_project_loudness(project: &Project) -> Result<LoudnessReport> {
         None,
         &empty_bg,
         &empty_fi,
+        &empty_rr,
         tx,
     )?;
 
     let duration_ns = analysis_project.duration();
     let report = analyze_loudness_full(&path, 0, duration_ns)?;
-    // `temp` drops here — file cleaned up even on error paths above thanks
-    // to the NamedTempFile RAII guard.
     Ok(report)
-}
-
-/// Compute the linear gain multiplier needed to shift measured LUFS to a target LUFS.
-pub(crate) fn compute_lufs_gain(measured_lufs: f64, target_lufs: f64) -> f64 {
-    10.0_f64.powf((target_lufs - measured_lufs) / 20.0)
-}
-
-/// Compute the linear gain multiplier needed to shift measured peak dB to a target dB.
-pub(crate) fn compute_peak_gain(measured_peak_db: f64, target_peak_db: f64) -> f64 {
-    10.0_f64.powf((target_peak_db - measured_peak_db) / 20.0)
-}
-
-/// Find the ffmpeg binary, checking PATH and common install locations.
-pub(crate) fn find_ffmpeg() -> Result<String> {
-    // First try the name directly (respects the process PATH)
-    if Command::new("ffmpeg")
-        .arg("-version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok()
-    {
-        return Ok("ffmpeg".to_string());
-    }
-    // Fall back to common absolute paths
-    for path in &[
-        "/usr/bin/ffmpeg",
-        "/usr/local/bin/ffmpeg",
-        "/opt/homebrew/bin/ffmpeg",
-    ] {
-        if std::path::Path::new(path).exists() {
-            return Ok(path.to_string());
-        }
-    }
-    Err(anyhow!("ffmpeg not found — please install ffmpeg"))
 }
 
 /// Generate an FFMETADATA file with chapter entries from project markers.
@@ -6434,41 +6130,20 @@ fn flatten_clips(
     let mut result = Vec::new();
     for clip in clips {
         if clip.kind == ClipKind::Compound {
-            if let Some(ref internal_tracks) = clip.compound_tracks {
-                // Map internal clip positions into the parent timeline.
-                // After windowing, each clip's timeline_start >= source_in,
-                // so subtracting source_in gives the offset from the visible
-                // start. Adding the compound's parent position avoids u64
-                // underflow that saturating_sub would cause.
-                let compound_offset = timeline_offset.saturating_add(clip.timeline_start);
-                let window_start = clip.source_in;
-                let window_end = clip.source_out;
-                for inner_track in internal_tracks {
-                    for inner_clip in &inner_track.clips {
-                        // Window the clip to the compound's [source_in, source_out)
-                        // range. Skip / trim / rebase keyframes & subtitles all
-                        // happen inside the helper.
-                        let Some(mut rebased) =
-                            inner_clip.rebase_to_window(window_start, window_end)
-                        else {
-                            continue;
-                        };
-                        // Rebase: offset from window start + compound parent pos
-                        rebased.timeline_start = compound_offset
-                            .saturating_add(rebased.timeline_start.saturating_sub(window_start));
-                        if rebased.kind == ClipKind::Compound || rebased.kind == ClipKind::Multicam
-                        {
-                            result.extend(flatten_clips(
-                                &[rebased],
-                                0,
-                                depth + 1,
-                                project_fps_num,
-                                project_fps_den,
-                            ));
-                        } else {
-                            result.push(rebased);
-                        }
-                    }
+            for child in
+                crate::model::compound_flattening::flatten_compound_children(clip, timeline_offset)
+            {
+                let rebased = child.clip;
+                if rebased.kind == ClipKind::Compound || rebased.kind == ClipKind::Multicam {
+                    result.extend(flatten_clips(
+                        &[rebased],
+                        0,
+                        depth + 1,
+                        project_fps_num,
+                        project_fps_den,
+                    ));
+                } else {
+                    result.push(rebased);
                 }
             }
         } else if clip.kind == ClipKind::Multicam {
@@ -6671,7 +6346,7 @@ mod tests {
         AdjustmentMatteInput, AudioChannelLayout, AudioCodec, ClipAudioFade,
         ColorFilterCapabilities, ExportOptions, LoudnessReport, SurroundPosition, VideoCodec,
     };
-    use crate::media::program_player::ProgramPlayer;
+    use crate::media::color_math;
     use crate::model::clip::{
         Clip, ClipKind, KeyframeInterpolation, NumericKeyframe, SubtitleSegment, SubtitleWord,
     };
@@ -7182,6 +6857,7 @@ mod tests {
             "out",
             "clip1",
             AudioChannelLayout::Stereo,
+            0.0,
         );
         assert_eq!(graph, ";[in]anull[out]");
     }
@@ -7211,6 +6887,7 @@ mod tests {
             "out",
             "clip1",
             AudioChannelLayout::Stereo,
+            0.0,
         );
         assert!(graph.contains("channelsplit=channel_layout=stereo"));
         assert!(graph.contains("volume='if(gt("));
@@ -7233,6 +6910,7 @@ mod tests {
             "out",
             "clip1",
             AudioChannelLayout::Surround51,
+            0.0,
         );
         assert!(
             !graph.contains("channelsplit=channel_layout=stereo"),
@@ -7259,6 +6937,7 @@ mod tests {
             "out",
             "clip1",
             AudioChannelLayout::Surround51,
+            0.0,
         );
         assert_eq!(graph, ";[in]anull[out]");
     }
@@ -8048,10 +7727,10 @@ mod tests {
         // stronger than midtones due to shadows_endpoint_boost.
         // In 3-point space: positive warmth lowers the R control point
         // (brighter red output) and raises the B control point (darker blue).
-        let sh_p = ProgramPlayer::compute_export_3point_params(
+        let sh_p = color_math::compute_export_3point_params(
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
         );
-        let mid_p = ProgramPlayer::compute_export_3point_params(
+        let mid_p = color_math::compute_export_3point_params(
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
         );
         // Positive warmth: red control lowered (more red output)
@@ -8080,10 +7759,10 @@ mod tests {
     #[test]
     fn build_grading_filter_boosts_shadows_tint_at_slider_extremes() {
         // Validate that shadows tint is stronger than midtones tint.
-        let sh_p = ProgramPlayer::compute_export_3point_params(
+        let sh_p = color_math::compute_export_3point_params(
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         );
-        let mid_p = ProgramPlayer::compute_export_3point_params(
+        let mid_p = color_math::compute_export_3point_params(
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
         );
         // Positive tint = magenta: green channel lowered (or stays at floor)
@@ -8123,18 +7802,16 @@ mod tests {
 
     #[test]
     fn export_coloradj_compensation_preserves_neutral_and_tunes_tint_delta() {
-        let neutral = ProgramPlayer::compute_coloradj_params(6500.0, 0.0);
-        let preview_temp = ProgramPlayer::compute_coloradj_params(2000.0, 0.0);
+        let neutral = color_math::compute_coloradj_params(6500.0, 0.0);
+        let preview_temp = color_math::compute_coloradj_params(2000.0, 0.0);
         let export_temp = compute_export_coloradj_params(2000.0, 0.0);
-        let preview_tint = ProgramPlayer::compute_coloradj_params(6500.0, -1.0);
+        let preview_tint = color_math::compute_coloradj_params(6500.0, -1.0);
         let export_tint = compute_export_coloradj_params(6500.0, -1.0);
         let export_neutral = compute_export_coloradj_params(6500.0, 0.0);
 
-        let magnitude =
-            |a: &crate::media::program_player::ColorAdjRGBParams,
-             b: &crate::media::program_player::ColorAdjRGBParams| {
-                (a.r - b.r).abs() + (a.g - b.g).abs() + (a.b - b.b).abs()
-            };
+        let magnitude = |a: &color_math::ColorAdjRGBParams, b: &color_math::ColorAdjRGBParams| {
+            (a.r - b.r).abs() + (a.g - b.g).abs() + (a.b - b.b).abs()
+        };
         assert!(
             (export_neutral.r - neutral.r).abs() < 1e-9
                 && (export_neutral.g - neutral.g).abs() < 1e-9
@@ -8158,7 +7835,7 @@ mod tests {
     fn build_grading_filter_warmth_direction_is_consistent_per_tonal_region() {
         // Positive warmth = warm (lower R control point = brighter red output,
         // higher B control point = darker blue output) in ALL zones.
-        let sh = ProgramPlayer::compute_export_3point_params(
+        let sh = color_math::compute_export_3point_params(
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
         );
         assert!(
@@ -8166,7 +7843,7 @@ mod tests {
             "shadows warmth: red control < blue control at black point"
         );
 
-        let mid = ProgramPlayer::compute_export_3point_params(
+        let mid = color_math::compute_export_3point_params(
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
         );
         assert!(
@@ -8174,7 +7851,7 @@ mod tests {
             "midtones warmth: red control < blue control at gray point"
         );
 
-        let hi = ProgramPlayer::compute_export_3point_params(
+        let hi = color_math::compute_export_3point_params(
             0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         );
         assert!(
@@ -8186,7 +7863,7 @@ mod tests {
     #[test]
     fn build_grading_filter_tint_direction_is_consistent_per_tonal_region() {
         // Positive tint = magenta (higher G control = less green output) in ALL zones.
-        let sh = ProgramPlayer::compute_export_3point_params(
+        let sh = color_math::compute_export_3point_params(
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         );
         assert!(
@@ -8194,7 +7871,7 @@ mod tests {
             "shadows tint +1: green control should be higher than red (less green output)"
         );
 
-        let mid = ProgramPlayer::compute_export_3point_params(
+        let mid = color_math::compute_export_3point_params(
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
         );
         assert!(
@@ -8202,7 +7879,7 @@ mod tests {
             "midtones tint +1: green control > red at gray point"
         );
 
-        let hi = ProgramPlayer::compute_export_3point_params(
+        let hi = color_math::compute_export_3point_params(
             0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
         );
         assert!(
@@ -8235,6 +7912,55 @@ mod tests {
         assert!(f.contains("fontcolor=ff3366@0.8000"));
         assert!(f.contains("x='(0.250000)*w-text_w/2'"));
         assert!(f.contains("y='(0.750000)*h-text_h/2'"));
+    }
+
+    #[test]
+    fn build_timecode_burnin_filter_bottom_center_uses_centered_x() {
+        use crate::model::project::{FrameRate, TimecodeBurninPosition};
+        let fr = FrameRate {
+            numerator: 30000,
+            denominator: 1001,
+        };
+        let f =
+            super::build_timecode_burnin_filter(TimecodeBurninPosition::BottomCenter, &fr, 1920, 1080);
+        assert!(f.starts_with("drawtext="), "filter: {f}");
+        assert!(
+            f.contains("timecode='00\\:00\\:00\\:00'"),
+            "escaped timecode: {f}"
+        );
+        assert!(f.contains("rate=30000/1001"), "rate uses fraction: {f}");
+        assert!(f.contains("x='(w-text_w)/2'"), "x expr: {f}");
+        assert!(f.contains("y='h-text_h-"), "y expr: {f}");
+        assert!(f.contains("box=1"), "box enabled: {f}");
+    }
+
+    #[test]
+    fn build_timecode_burnin_filter_corners_have_expected_anchors() {
+        use crate::model::project::{FrameRate, TimecodeBurninPosition};
+        let fr = FrameRate {
+            numerator: 24,
+            denominator: 1,
+        };
+        let tl =
+            super::build_timecode_burnin_filter(TimecodeBurninPosition::TopLeft, &fr, 1920, 1080);
+        assert!(tl.contains("x='"), "x expr present: {tl}");
+        assert!(!tl.contains("h-text_h-"), "TopLeft has no bottom anchor: {tl}");
+        let br =
+            super::build_timecode_burnin_filter(TimecodeBurninPosition::BottomRight, &fr, 1920, 1080);
+        assert!(br.contains("w-text_w-"), "BottomRight anchors x to right: {br}");
+        assert!(br.contains("h-text_h-"), "BottomRight anchors y to bottom: {br}");
+    }
+
+    #[test]
+    fn build_timecode_burnin_filter_zero_dimensions_returns_empty() {
+        use crate::model::project::{FrameRate, TimecodeBurninPosition};
+        let fr = FrameRate {
+            numerator: 30,
+            denominator: 1,
+        };
+        let f =
+            super::build_timecode_burnin_filter(TimecodeBurninPosition::TopLeft, &fr, 0, 1080);
+        assert!(f.is_empty(), "0-width returns empty filter: {f}");
     }
 
     #[test]

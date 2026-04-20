@@ -4,6 +4,14 @@ The **Inspector** panel (right side) shows and edits the properties of the curre
 
 Select a clip in the timeline to populate the Inspector. All changes apply immediately to the program monitor preview. Clips inside compound clips are fully supported -- double-click a compound clip to enter it, then select an internal clip to inspect and edit its properties.
 
+When nothing is selected, the Inspector hides its edit controls and shows a short hint explaining how to get started again. The hint points to real timeline actions: click a clip to inspect it, or use selection commands such as **Ctrl+A** from the Timeline once that panel has focus.
+
+A **search field** at the top of the Inspector filters controls by keyword. Type "denoise", "volume", or "crop" to show only matching sliders — sections with no matches are hidden entirely. Clear the field to restore all sections.
+
+Each Inspector section (Color & Denoise, Audio, Transform, etc.) is collapsible — click the section header to expand or collapse it. The state is saved automatically and remembered across sessions.
+
+Every slider in the Inspector has a compact numeric entry (SpinButton) to its right. You can drag the slider as usual, or click the entry and type an exact value. Both inputs stay in sync — changing one immediately updates the other. A small reset button appears next to any slider whose value differs from its default — click it to restore the default (fully undoable).
+
 ---
 
 ## Clip Info
@@ -406,7 +414,9 @@ The **Motion Tracking** section is available on visual clips and covers both tra
 - If you move or resize the tracker region after analysis, UltimateSlice keeps the attachment but clears the old samples; run **Re-run Tracking** on the source clip again before expecting preview/export motion.
 - The **Follow Tracker** picker labels trackers that have no samples yet, and attached clips/masks warn when their source tracker is empty or disabled.
 - The built-in tracker currently analyzes **translation** motion, so tracked overlays and masks follow position but do not yet infer scale or rotation automatically.
-- Tracking is a **color** template matcher that samples every source frame at 320×180 analysis resolution, matches across the Y, U, and V planes (so chroma-distinctive subjects like colored stickers lock on reliably), and keeps the template from the first frame throughout the shot (so it doesn't drift onto background texture). Best results come from drawing a tight region around a subject that has a distinctive color or luminance pattern relative to its surroundings — large uniform regions are inherently ambiguous under template matching.
+- Tracking usually analyzes at **320×180**, but very small tracker boxes now auto-promote to a denser **480×270** buffer so fast-moving fine-detail subjects keep more usable template signal. The tracker still uses a small **multi-scale color NCC pyramid** (full, half, quarter resolution): it searches broadly at low resolution and refines locally back at full resolution, which helps it recover larger sudden motion without widening every fine-level candidate loop.
+- Tracking still keeps the original first-frame Y/U/V template as its recovery anchor, but the normal path now also maintains a **confidence-gated adaptive template** that blends in only strong matches. That lets the tracker follow fast subjects through moderate appearance changes without fully rewriting itself onto a bad frame. Multiscale matching also compares a lightly penalized **blur-tolerant template variant**, which helps short motion-blur bursts stay matched without replacing the normal sharp template when detail is still available. The normal search radius also widens automatically when recent motion or a short low-confidence streak suggests fast acceleration. Low-confidence results can still trigger a broader recovery search around the last known-good position, and strong pyramid recoveries keep a wider jump budget now, so large valid reacquisitions are no longer forced back into the old fixed **32 px** cap.
+- Best results still come from drawing a tight region around a subject that has a distinctive color or luminance pattern relative to its surroundings — large uniform regions are inherently ambiguous under template matching.
 - Tracker attachments are resolved in both Program Monitor preview and export, and they persist through UltimateSlice project save/load (`.uspxml` vendor-attribute workflow).
 - Title clips and other tracker-followed clips now translate directly across the canvas in preview and export, so **Follow Tracker** still moves them at `Scale = 1.0` instead of appearing to stop at the frame edge. Normal still-image clips stay on the existing still-image preview path unless they are actually following a tracker.
 - Mask attachments currently target the **first rectangle or ellipse mask** on the clip. **Path masks** still need to be animated manually with their own controls/keyframes.
@@ -595,12 +605,45 @@ You can copy all color grading values from one clip and paste them onto another.
 |---|---|
 | **Ctrl+Alt+C** | Copy color grade from the selected clip |
 | **Ctrl+Alt+V** | Paste color grade onto the selected clip |
+| **Ctrl+Alt+Shift+V** | Paste color grade onto **every selected clip** (single undo rolls them all back together) |
 
 **Copied properties:** Brightness, Contrast, Saturation, Temperature, Tint, Exposure, Black Point, Shadows, Midtones, Highlights, per-tone Warmth/Tint, Denoise, Sharpness, Blur, and LUT path. Static values only — keyframe animations are not included.
 
 > **Tip:** Use **Ctrl+Shift+V** (Paste Attributes) to copy *all* clip attributes including audio, transforms, and effects. Use **Ctrl+Alt+V** (Paste Color Grade) when you only want to match the color look between clips.
 
 > **MCP tools:** `copy_clip_color_grade` and `paste_clip_color_grade` provide the same functionality for automation.
+
+## Copy & Paste a Single Property
+
+Right-click any scalar slider in the Inspector to get a small menu with **Copy**, **Paste**, and (when more than one clip is selected) **Paste to all selected** options for that single property. This is the easy way to transfer exactly one value — for example, match the opacity of clip B to clip A without touching anything else.
+
+- **Coverage:** every numeric scalar slider across Color (brightness, contrast, saturation, temperature, tint, exposure, black point, shadows/midtones/highlights + warmth/tint variants, denoise, sharpness, blur), Transform (scale, opacity, position x/y, rotate, crop edges), Audio (volume, pan, pitch shift), Speed, Keying/BG removal (chroma tolerance/softness, BG removal threshold), and Motion Blur shutter angle.
+- **Paste** is disabled when the clipboard is empty, when the copied property doesn't apply to the selected clip kind (for example, trying to paste *Volume* onto a Title clip), or when the value would not change.
+- **Paste to all selected** silently skips any selected clips for which the property doesn't apply, and wraps the whole batch in a single undo entry.
+- Static values only. Keyframe lanes on the source clip are ignored on Copy, and pasting onto a clip with an animated lane replaces only the static baseline (keyframes are left in place).
+
+> **No keyboard shortcut** — the right-click menu is intentionally the only surface for single-property copy/paste. Use **Ctrl+Alt+Shift+V** when you want the full color-grade bundle across the selection instead.
+
+## Copy & Paste a Bundle
+
+Right-click on the following Inspector controls to copy and paste entire multi-field setups at once. Each bundle lives in its own clipboard slot, so you can, for example, hold a Frei0r chain and a chroma-key setup at the same time and paste each onto different clips.
+
+| Right-click target | Bundle |
+|---|---|
+| **Flip Horizontal** / **Flip Vertical** toggle buttons | the corresponding flip flag |
+| **Blend Mode** dropdown | blend mode enum (Normal, Multiply, Screen, Overlay, Difference, …) |
+| **LUT Stack** section header | the ordered list of `.cube` file paths assigned to the clip |
+| **Effects** section header (Frei0r chain) | the full list of Frei0r effect instances with enabled/disabled state and all parameters |
+| **Audio Effects** section header (LADSPA chain) | the full list of LADSPA plugin instances with enabled/disabled state and parameters |
+| **EQ** curve area | the 3-band parametric EQ (Low / Mid / High, each with freq/gain/Q) |
+| **Chroma Key** enable checkbox | chroma-key bundle: enabled + color + tolerance + softness |
+| **BG Removal** enable checkbox | BG-removal bundle: enabled + threshold |
+
+- Each bundle has its own **Copy**, **Paste**, and (when a multi-selection is active) **Paste to all selected** actions.
+- **Paste** silently no-ops if the clipboard holds a bundle of a different kind (e.g., trying to paste a Frei0r chain from the Chroma Key menu does nothing).
+- **Paste to all selected** skips clips for which the bundle doesn't apply — chroma key, BG removal, and Frei0r chains skip pure audio clips; LADSPA chains and EQ skip Title and Image clips; flip / blend mode / LUT stack skip pure audio clips.
+- Every bundle paste is undoable as a **single** Ctrl+Z step, even when it touches many clips across many tracks.
+- Bundles capture static values only — effect-parameter keyframe lanes and EQ-gain keyframe lanes are not part of the Copy payload (they remain untouched on Paste targets).
 
 Only `.cube` format (3D LUT) is supported. One LUT per clip; multiple-LUT stacking is a future feature.
 
@@ -746,5 +789,5 @@ All effect operations are **undoable** (add, remove, reorder, set params, toggle
 - Transform fields (scale/position/rotation), opacity, and crop are now also mapped to standard FCPXML adjustment elements (`adjust-transform`, `adjust-compositing`, `adjust-crop`/`crop-rect`) for improved interoperability.
 - Clip volume now also imports from standard FCPXML `adjust-volume@amount` (including dB values such as `-6dB` and `-96dB`) and is converted to Inspector linear volume.
 - There is no keyboard shortcut to focus the Inspector; use mouse/Tab navigation.
-- When no clip is selected, the Inspector shows an instructional message and hides edit controls.
+- When no clip is selected, the Inspector shows an instructional message and hides edit controls instead of leaving an empty edit surface.
 - To reduce first-use visual density, **Audio**, **Transform**, and **Speed** sections start collapsed by default.

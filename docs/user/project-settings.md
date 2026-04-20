@@ -113,9 +113,21 @@ For broader import compatibility, spine `ref-clip` elements are mapped through t
 For FCPXML assets that use absolute source-time domains, UltimateSlice rebases `asset-clip@start` against `asset@start` during import so layered lane clips seek/play from the intended media-relative source position.
 When imported FCPXML media references start with `/Volumes/...` and are missing locally, UltimateSlice URI-decodes the path (for example `%20` → space), retries common Linux external-drive mount locations (`/media/<user>/...`, `/run/media/<user>/...`, `/media/...`, `/run/media/...`, `/mnt/...`) plus the opened FCPXML mount-root fallback, then uses the found file for runtime playback while still saving the original imported XML source path.
 
-## Auto-Save
+## Auto-Save & Crash Recovery
 
-UltimateSlice auto-saves every 60 seconds to `/tmp/ultimateslice-autosave.fcpxml` when the project has unsaved changes. This is a safety net — use **Save…** for permanent storage.
+UltimateSlice auto-saves every 60 seconds when the project has unsaved changes. Autosave files are written per-project to:
+
+```
+~/.local/share/ultimateslice/autosave/
+```
+
+(or `$XDG_DATA_HOME/ultimateslice/autosave/` if set)
+
+Each autosave consists of a `.uspxml.autosave` project file and a `.autosave.json` metadata sidecar (project title, original file path, timestamp). The autosave is deterministic per project — each project overwrites only its own autosave.
+
+**Crash recovery**: if UltimateSlice detects recoverable autosaves on startup, the welcome screen shows a **"⚠ Recover Unsaved Work"** section with the project title, age, and source filename for each entry. Click **Recover** to load the autosaved state (the project is marked dirty so you can review and re-save), or **Discard** to delete the autosave.
+
+**Cleanup**: autosave files are automatically removed when you save the project, create a new project, or explicitly discard changes. Autosaves older than 7 days are pruned automatically.
 
 ## Named Snapshots
 

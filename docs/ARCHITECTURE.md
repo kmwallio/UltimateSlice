@@ -40,8 +40,11 @@ src/
     media_library.rs        MediaItem (library entry), MediaBin (folder), MediaLibrary (items + bins) + SourceMarks (source in/out state)
 
   media/
+    audio_analysis.rs       Audio analysis utilities: loudness (EBU R128), silence detection, scene cuts, FFmpeg binary resolution
     audio_sync.rs           FFT cross-correlation audio sync (rustfft, GStreamer raw audio extraction)
+    color_math.rs           Pure colour/audio math: videobalance calibration, coloradj, 3-point grading, export parity, EQ bandwidth, ducking floor
     player.rs               GStreamer playbin wrapper (load/play/pause/stop/seek/position/duration)
+    prerender_filters.rs    Prerender FFmpeg filter-string builders: pure functions mapping ProgramClip properties to lavfi fragments
     thumbnail.rs            Frame extraction via GStreamer AppSink pipeline (unused in UI yet)
     export.rs               MP4 export via ffmpeg subprocess: filter_complex concat (video) + adelay/amix (audio) → libx264 + aac
     proxy_cache.rs          Background proxy transcoding (half/quarter-res H.264 via ffmpeg) for preview playback
@@ -61,6 +64,7 @@ src/
 
   ui/
     window.rs               Root window builder — wires all panels together, owns shared state
+    mcp_handler.rs          MCP command dispatcher — extracted from window.rs to reduce file size
     toolbar.rs              HeaderBar — New/Open/Save/Export + Undo/Redo + Select/Razor toggles
     media_browser.rs        Media Library panel — import, list, select, Append to Timeline
     preview.rs              Source Monitor — video display, scrubber, in/out marks, transport
@@ -68,6 +72,8 @@ src/
     preferences.rs          Preferences dialog — categorized app-level settings UI
     transcript_panel.rs     Transcript-Based Editing panel — flat-word TextView, click-to-seek,
                             range-select + Delete to ripple-cut the underlying clip in one undo
+    markers_panel.rs        Marker List panel — scrollable list of project markers with inline
+                            editing (label, notes, color swatch), delete button, double-click seek
     timeline/
       mod.rs                Re-exports TimelineState and build_timeline()
       widget.rs             Full timeline: Cairo drawing + all gesture/key controllers
@@ -194,6 +200,11 @@ The same windowing logic must be applied in all three consumer paths:
 | `clip_to_program_clips()` | `src/ui/window.rs` | Preview playback |
 | `flatten_clips()` | `src/media/export.rs` | MP4/ffmpeg export |
 | `break_apart_compound()` | `src/ui/timeline/widget.rs` | Restore clips to parent |
+
+The shared trim/rebase math now lives in
+`src/model/compound_flattening.rs`. Keep these three call sites wired
+through that helper layer so compound windowing, keyframe rebasing, and
+subtitle rebasing do not drift again.
 
 ### Drill-down editing
 
@@ -405,6 +416,52 @@ prerender path uses the same FFmpeg filter chain that the export side
 uses, so once the cached file is ready, preview and export are
 byte-identical for the audio.
 
+### Colour math and preview/export parity
+
+Module: `src/media/color_math.rs`. Pure-computation functions shared by
+both the GStreamer preview path (`program_player.rs`) and the FFmpeg
+export path (`export.rs`):
+
+- **Videobalance calibration** (`compute_videobalance_params`): degree-4
+  polynomial mapping from UI sliders to GStreamer videobalance knobs.
+- **Frei0r coloradj_RGB** (`compute_coloradj_params`): temperature/tint
+  Kelvin → per-channel RGB gains for the frei0r element.
+- **3-point colour balance** (`compute_3point_params`,
+  `compute_export_3point_params`): shadows/midtones/highlights with
+  per-zone warmth/tint → parabolic transfer curve control points.
+- **Export parity helpers**: `export_temperature_parity_gain`,
+  `export_temperature_channel_offsets`, `export_tonal_parity_inputs`,
+  `apply_export_tonal_parity_gains` — env-overridable gain/offset tuning
+  for cross-runtime bridge compensation.
+- **Audio helpers**: `eq_bandwidth` (EQ band Hz width), `voice_ducking_floor`
+  (voice isolation volume floor).
+
+`ProgramPlayer` exposes thin delegator wrappers so existing `Self::` and
+`ProgramPlayer::` call sites remain valid. New code should import
+`color_math` directly.
+
+### Audio analysis utilities
+
+Module: `src/media/audio_analysis.rs`. Subprocess-based FFmpeg utilities
+shared by the export pipeline, preview engine, UI actions, and MCP server:
+
+- **FFmpeg resolution** (`find_ffmpeg`, `probe_has_audio`): locate the
+  ffmpeg/ffprobe binary and check whether a source file has an audio stream.
+- **Silence detection** (`detect_silence`, `invert_silences_to_speech`,
+  `suggest_silence_threshold_db`): FFmpeg `silencedetect` / `astats` based
+  silence analysis with automatic noise-floor threshold suggestion.
+- **Scene detection** (`detect_scene_cuts`): FFmpeg `scdet` filter for
+  shot-change timestamps.
+- **Loudness measurement** (`analyze_loudness_full`, `analyze_loudness_lufs`,
+  `analyze_peak_db`, `LoudnessReport`, `parse_loudness_report`): EBU R128
+  integrated/short-term/momentary loudness and true-peak measurement.
+- **Gain computation** (`compute_lufs_gain`, `compute_peak_gain`): linear
+  gain multipliers for loudness normalization.
+
+`export.rs` re-exports these symbols so existing import paths remain valid.
+`analyze_project_loudness` stays in `export.rs` because it depends on
+`export_project`.
+
 ### Voice enhance prerender cache
 
 Module: `src/media/voice_enhance_cache.rs`. Modeled directly after
@@ -414,9 +471,11 @@ Module: `src/media/voice_enhance_cache.rs`. Modeled directly after
   "<voice_enhance_filter>" -c:a aac out.mp4`. Video is **stream-copied**,
   so generation is dominated by audio re-encode time (typically a few
   seconds for short clips, scales linearly with duration).
-- Cache key: `ve_<source_path_hash>_<strength*100 as u32>`. Strength is
-  rounded to 1% so slider micro-wobbles don't thrash the cache, and
-  bouncing the strength back to a previous value is an instant hit.
+- Cache key: `ve_<source_fingerprint_hash>_<strength*100 as u32>`. The
+  fingerprint folds the source path plus source mtime into the hash.
+  Strength is rounded to 1% so slider micro-wobbles don't thrash the
+  cache, and bouncing the strength back to a previous value is an
+  instant hit.
 - Cache root: `$XDG_CACHE_HOME/ultimateslice/voice_enhance/<key>.mp4`.
   Files persist across sessions.
 - **Disk cost**: bounded by `MAX_CACHE_BYTES` (currently 2 GiB). Each
@@ -508,12 +567,11 @@ don't burn the same hours:
 - **Cache disk cap is hard-coded.** `MAX_CACHE_BYTES` in
   `voice_enhance_cache.rs` is 2 GiB. There's no UI to change it. Move
   it to preferences if users need to tune it for very long projects.
-- **Source-file mutation.** The cache key is
-  `hash(source_path) + strength`. If the user replaces the file at
-  `source_path` with different content, the cached enhanced version
-  becomes silently wrong (the old audio plays under the new video).
-  No mtime/content check yet — matches `bg_removal_cache`'s behavior.
-  Fix would be to fold source mtime into the cache key.
+- **Source-file mutation.** Source-derived media caches now fold source
+  mtime into their hashed keys, so ordinary in-place source replacement
+  invalidates the stale entry automatically. They still do **not**
+  content-hash files, so preserved mtimes or same-second rewrites can
+  theoretically reuse stale results.
 - **Compound clips.** The walker in the on-project-changed handler
   recurses into `clip.compound_tracks`, but the
   `resolve_source_path_for_clip` lookup is keyed on the leaf clip's
@@ -843,7 +901,7 @@ For automation-heavy loops, MCP keeps a short-lived per-session read cache for r
 1. Add a variant to `McpCommand` in `src/mcp/mod.rs`
 2. Add a matching entry to the `tools_list()` function in `src/mcp/server.rs`
 3. Add a dispatch arm in `call_tool()` in `src/mcp/server.rs`
-4. Add a handler arm in `handle_mcp_command()` in `src/ui/window.rs`
+4. Add a handler arm in `handle_mcp_command()` in `src/ui/mcp_handler.rs`
 
 Required system packages (Debian/Ubuntu):
 ```

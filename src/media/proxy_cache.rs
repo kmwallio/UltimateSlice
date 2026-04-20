@@ -111,6 +111,13 @@ pub struct ProxyCleanupSummary {
     pub removed_sidecar: usize,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProxySidecarUsage {
+    pub directories: Vec<PathBuf>,
+    pub file_count: usize,
+    pub size_bytes: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SourceSignature {
     len: u64,
@@ -389,6 +396,25 @@ impl ProxyCache {
         self.proxies.get(&proxy_key(source_path, lut_path))
     }
 
+    /// Return the set of source paths that have at least one ready
+    /// proxy entry in this cache. Recovers the source-path prefix by
+    /// splitting each composite key on the first `|` (the separator
+    /// used by `proxy_key` for LUT/vidstab variant suffixes). Useful
+    /// for UI surfaces that want to flag "has proxy" without
+    /// threading the full cache map through — e.g. the timeline
+    /// widget's Proxy badge.
+    pub fn ready_source_paths(&self) -> HashSet<String> {
+        self.proxies
+            .keys()
+            .map(|k| {
+                match k.split_once('|') {
+                    Some((src, _)) => src.to_string(),
+                    None => k.clone(),
+                }
+            })
+            .collect()
+    }
+
     /// Clear all in-memory cached and pending entries (disk files are preserved).
     /// Call this when the proxy scale changes so clips are re-requested at the new size.
     pub fn invalidate_all(&mut self) {
@@ -622,6 +648,42 @@ fn local_proxy_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/tmp/ultimateslice/proxies"))
 }
 
+pub fn local_proxy_cache_dir() -> PathBuf {
+    local_proxy_root()
+}
+
+pub fn sidecar_proxy_usage_for_sources(source_paths: &HashSet<String>) -> ProxySidecarUsage {
+    let (directories, relevant_source_hashes) =
+        collect_sidecar_proxy_dirs_and_source_hashes(source_paths);
+    let mut usage = ProxySidecarUsage {
+        directories: directories
+            .iter()
+            .filter(|dir| dir.exists())
+            .cloned()
+            .collect(),
+        ..ProxySidecarUsage::default()
+    };
+    for dir in &directories {
+        let (file_count, size_bytes) =
+            proxy_cache_artifact_usage_for_dir(dir, &relevant_source_hashes);
+        usage.file_count += file_count;
+        usage.size_bytes += size_bytes;
+    }
+    usage
+}
+
+pub fn purge_sidecar_proxy_cache_for_sources(
+    source_paths: &HashSet<String>,
+) -> Result<ProxySidecarUsage, String> {
+    let usage = sidecar_proxy_usage_for_sources(source_paths);
+    let (directories, relevant_source_hashes) =
+        collect_sidecar_proxy_dirs_and_source_hashes(source_paths);
+    for dir in &directories {
+        purge_proxy_cache_artifacts_for_dir(dir, &relevant_source_hashes)?;
+    }
+    Ok(usage)
+}
+
 fn ownership_index_path(root: &Path) -> PathBuf {
     root.join("ownership-index-v1.txt")
 }
@@ -807,12 +869,120 @@ fn prune_stale_owned_entries(root: &Path, max_age_secs: u64) -> usize {
 
 fn proxy_source_hash_from_path(path: &Path) -> Option<u64> {
     let file_name = path.file_name()?.to_str()?;
+    let file_name = file_name
+        .strip_suffix(".source-meta.partial")
+        .or_else(|| file_name.strip_suffix(".source-meta"))
+        .unwrap_or(file_name);
     let base_name = file_name.strip_suffix(".partial").unwrap_or(file_name);
     let no_ext = base_name.strip_suffix(".mp4")?;
     let (prefix, _) = no_ext.rsplit_once(".proxy_")?;
     let (stem_and_source, _) = prefix.rsplit_once("-v")?;
     let (_, source_hash_hex) = stem_and_source.rsplit_once("-s")?;
     u64::from_str_radix(source_hash_hex, 16).ok()
+}
+
+fn is_proxy_cache_artifact_name(file_name: &str) -> bool {
+    file_name.contains(".proxy_")
+        && (file_name.ends_with(".mp4")
+            || file_name.ends_with(".mp4.partial")
+            || file_name.ends_with(".mp4.source-meta")
+            || file_name.ends_with(".mp4.source-meta.partial"))
+}
+
+fn collect_sidecar_proxy_dirs_and_source_hashes(
+    source_paths: &HashSet<String>,
+) -> (Vec<PathBuf>, HashSet<u64>) {
+    let mut directories: HashSet<PathBuf> = HashSet::new();
+    let mut relevant_source_hashes: HashSet<u64> = HashSet::new();
+    for source_path in source_paths {
+        if source_path.is_empty() {
+            continue;
+        }
+        relevant_source_hashes.insert(source_path_hash(source_path));
+        if let Some(dir) = sidecar_proxy_dir_for(source_path) {
+            directories.insert(dir);
+        }
+    }
+    let mut directories: Vec<PathBuf> = directories.into_iter().collect();
+    directories.sort_unstable();
+    (directories, relevant_source_hashes)
+}
+
+fn proxy_cache_artifact_usage_for_dir(
+    dir: &Path,
+    relevant_source_hashes: &HashSet<u64>,
+) -> (usize, u64) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return (0, 0);
+    };
+    let mut file_count = 0usize;
+    let mut size_bytes = 0u64;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            continue;
+        }
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if !is_proxy_cache_artifact_name(file_name) {
+            continue;
+        }
+        let Some(source_hash) = proxy_source_hash_from_path(&path) else {
+            continue;
+        };
+        if !relevant_source_hashes.contains(&source_hash) {
+            continue;
+        }
+        let Ok(metadata) = std::fs::metadata(&path) else {
+            continue;
+        };
+        file_count += 1;
+        size_bytes = size_bytes.saturating_add(metadata.len());
+    }
+    (file_count, size_bytes)
+}
+
+fn purge_proxy_cache_artifacts_for_dir(
+    dir: &Path,
+    relevant_source_hashes: &HashSet<u64>,
+) -> Result<(), String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            continue;
+        }
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if !is_proxy_cache_artifact_name(file_name) {
+            continue;
+        }
+        let Some(source_hash) = proxy_source_hash_from_path(&path) else {
+            continue;
+        };
+        if !relevant_source_hashes.contains(&source_hash) {
+            continue;
+        }
+        if let Err(err) = std::fs::remove_file(&path) {
+            if path.exists() {
+                return Err(format!("failed to remove {}: {err}", path.display()));
+            }
+        }
+    }
+    let dir_empty = std::fs::read_dir(dir)
+        .map(|mut entries| entries.next().is_none())
+        .unwrap_or(false);
+    if dir_empty {
+        std::fs::remove_dir(dir)
+            .map_err(|err| format!("failed to remove {}: {err}", dir.display()))?;
+    }
+    Ok(())
 }
 
 fn cleanup_proxy_dir_variants(
@@ -881,8 +1051,8 @@ fn normalized_vidstab_smoothing_hundredths(vidstab_enabled: bool, vidstab_smooth
 }
 
 fn source_path_hash(source_path: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    source_path.hash(&mut hasher);
+    let mut hasher = crate::media::cache_key::CacheKeyHasher::new();
+    hasher.add_source_path(source_path);
     hasher.finish()
 }
 
@@ -899,12 +1069,16 @@ fn source_variant_hash(
     vidstab_enabled: bool,
     vidstab_smoothing: f32,
 ) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    source_path.hash(&mut hasher);
-    scale.hash(&mut hasher);
-    lut_path.unwrap_or("").hash(&mut hasher);
-    vidstab_enabled.hash(&mut hasher);
-    normalized_vidstab_smoothing_hundredths(vidstab_enabled, vidstab_smoothing).hash(&mut hasher);
+    let mut hasher = crate::media::cache_key::CacheKeyHasher::new();
+    hasher
+        .add_source_path(source_path)
+        .add(scale)
+        .add(lut_path.unwrap_or(""))
+        .add(vidstab_enabled)
+        .add(normalized_vidstab_smoothing_hundredths(
+            vidstab_enabled,
+            vidstab_smoothing,
+        ));
     hasher.finish()
 }
 
@@ -1510,6 +1684,43 @@ mod tests {
     }
 
     #[test]
+    fn ready_source_paths_recovers_source_prefix_from_composite_keys() {
+        let mut cache = ProxyCache::new();
+        // Bare source-only key (no LUT, no vidstab)
+        cache.proxies.insert(
+            "/tmp/clip-a.mp4".to_string(),
+            "/tmp/proxy-a.mp4".to_string(),
+        );
+        // Source + LUT variant
+        cache.proxies.insert(
+            "/tmp/clip-b.mp4|lut:/tmp/look.cube".to_string(),
+            "/tmp/proxy-b.mp4".to_string(),
+        );
+        // Source + LUT + vidstab variant (same source as previous, should collapse)
+        cache.proxies.insert(
+            "/tmp/clip-b.mp4|lut:/tmp/look.cube|vs:0.50".to_string(),
+            "/tmp/proxy-b-vs.mp4".to_string(),
+        );
+        // Source + vidstab only (no LUT)
+        cache.proxies.insert(
+            "/tmp/clip-c.mp4|vs:0.30".to_string(),
+            "/tmp/proxy-c.mp4".to_string(),
+        );
+
+        let ready = cache.ready_source_paths();
+        assert!(ready.contains("/tmp/clip-a.mp4"));
+        assert!(ready.contains("/tmp/clip-b.mp4"));
+        assert!(ready.contains("/tmp/clip-c.mp4"));
+        assert_eq!(ready.len(), 3);
+    }
+
+    #[test]
+    fn ready_source_paths_is_empty_when_no_proxies_ready() {
+        let cache = ProxyCache::new();
+        assert!(cache.ready_source_paths().is_empty());
+    }
+
+    #[test]
     fn sidecar_proxy_path_detection_matches_directory_name() {
         assert!(is_sidecar_proxy_path(
             "/tmp/project/UltimateSlice.cache/a.proxy_half.mp4"
@@ -1781,5 +1992,73 @@ mod tests {
             let _ = std::fs::remove_dir_all(parent);
         }
         let _ = std::fs::remove_dir_all(&local_root);
+    }
+
+    #[test]
+    fn sidecar_proxy_usage_for_sources_counts_matching_proxy_artifacts() {
+        let source_a = test_source_file("clip-a.mp4");
+        let source_b = test_source_file("clip-b.mp4");
+        let side_a =
+            alongside_proxy_path_for(&source_a, ProxyScale::Half, None, false, 0.0).unwrap();
+        let side_b =
+            alongside_proxy_path_for(&source_b, ProxyScale::Quarter, None, false, 0.0).unwrap();
+
+        for (path, source_path) in [(&side_a, &source_a), (&side_b, &source_b)] {
+            if let Some(parent) = Path::new(path).parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(path, b"proxy");
+            assert!(write_proxy_source_signature(path, source_path));
+        }
+
+        let mut sources = HashSet::new();
+        sources.insert(source_a.clone());
+        let usage = sidecar_proxy_usage_for_sources(&sources);
+
+        assert_eq!(usage.directories.len(), 1);
+        assert_eq!(usage.file_count, 2);
+        assert!(usage.size_bytes > 0);
+
+        if let Some(parent) = Path::new(&source_a).parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+        if let Some(parent) = Path::new(&source_b).parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+    }
+
+    #[test]
+    fn purge_sidecar_proxy_cache_for_sources_only_removes_matching_artifacts() {
+        let source_a = test_source_file("clip-a.mp4");
+        let source_b = test_source_file("clip-b.mp4");
+        let side_a =
+            alongside_proxy_path_for(&source_a, ProxyScale::Half, None, false, 0.0).unwrap();
+        let side_b =
+            alongside_proxy_path_for(&source_b, ProxyScale::Quarter, None, false, 0.0).unwrap();
+
+        for (path, source_path) in [(&side_a, &source_a), (&side_b, &source_b)] {
+            if let Some(parent) = Path::new(path).parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(path, b"proxy");
+            assert!(write_proxy_source_signature(path, source_path));
+        }
+
+        let mut sources = HashSet::new();
+        sources.insert(source_a.clone());
+        let removed = purge_sidecar_proxy_cache_for_sources(&sources).expect("purge succeeds");
+
+        assert_eq!(removed.file_count, 2);
+        assert!(!Path::new(&side_a).exists());
+        assert!(!Path::new(&proxy_source_signature_path(&side_a)).exists());
+        assert!(Path::new(&side_b).exists());
+        assert!(Path::new(&proxy_source_signature_path(&side_b)).exists());
+
+        if let Some(parent) = Path::new(&source_a).parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+        if let Some(parent) = Path::new(&source_b).parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
     }
 }

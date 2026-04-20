@@ -478,6 +478,16 @@ pub fn show_preferences_dialog(
     timeline_preview_hint.set_max_width_chars(60);
     timeline_box.append(&timeline_preview_check);
     timeline_box.append(&timeline_preview_hint);
+    let minimap_check = CheckButton::with_label("Show timeline mini-map");
+    minimap_check.set_active(current.show_timeline_minimap);
+    minimap_check.set_halign(gtk::Align::Start);
+    let minimap_hint = Label::new(Some("A thin overview strip above the tracks showing the entire project at a glance. Click to pan, Ctrl+Click to seek."));
+    minimap_hint.set_halign(gtk::Align::Start);
+    minimap_hint.add_css_class("dim-label");
+    minimap_hint.set_wrap(true);
+    minimap_hint.set_max_width_chars(60);
+    timeline_box.append(&minimap_check);
+    timeline_box.append(&minimap_hint);
     let autoscroll_row = GBox::new(Orientation::Horizontal, 8);
     let autoscroll_label = Label::new(Some("Follow playhead during playback:"));
     autoscroll_label.set_halign(gtk::Align::Start);
@@ -646,6 +656,9 @@ pub fn show_preferences_dialog(
     let background_ai_indexing_check = CheckButton::with_label("AI index in background");
     background_ai_indexing_check.set_active(current.background_ai_indexing);
     background_ai_indexing_check.set_halign(gtk::Align::Start);
+    let background_auto_tagging_check = CheckButton::with_label("Auto-tag visual media");
+    background_auto_tagging_check.set_active(current.background_auto_tagging);
+    background_auto_tagging_check.set_halign(gtk::Align::Start);
 
     // ── Models section (only when ai-inference feature is enabled) ─────────
     #[cfg(feature = "ai-inference")]
@@ -926,13 +939,24 @@ pub fn show_preferences_dialog(
         models_box.append(&background_ai_indexing_check);
 
         let background_ai_indexing_hint = Label::new(Some(
-            "Automatically builds transcript-search data for audio-backed library items after import/open when Whisper is available. Runs one clip at a time in the background and stays off by default.",
+            "Automatically builds Media Library AI search data after import/open. Audio-backed clips can be queued for transcript indexing when Whisper is available, and video/image clips can be queued for visual-search embeddings when the CLIP search model is installed. Runs one clip at a time in the background and stays off by default.",
         ));
         background_ai_indexing_hint.set_halign(gtk::Align::Start);
         background_ai_indexing_hint.add_css_class("dim-label");
         background_ai_indexing_hint.set_wrap(true);
         background_ai_indexing_hint.set_max_width_chars(60);
         models_box.append(&background_ai_indexing_hint);
+
+        models_box.append(&background_auto_tagging_check);
+
+        let background_auto_tagging_hint = Label::new(Some(
+            "After a clip has visual-search embeddings, derive persistent Media Library tags such as shot type, setting, time of day, and common subjects. Stored tags become searchable and survive project save/load. Disabled by default.",
+        ));
+        background_auto_tagging_hint.set_halign(gtk::Align::Start);
+        background_auto_tagging_hint.add_css_class("dim-label");
+        background_auto_tagging_hint.set_wrap(true);
+        background_auto_tagging_hint.set_max_width_chars(60);
+        models_box.append(&background_auto_tagging_hint);
 
         // ── MusicGen model status ─────────────────────────────────────
         models_box.append(&Separator::new(Orientation::Horizontal));
@@ -1344,13 +1368,24 @@ pub fn show_preferences_dialog(
         models_box.append(&background_ai_indexing_check);
 
         let background_ai_indexing_hint = Label::new(Some(
-            "Automatically builds transcript-search data for audio-backed library items after import/open when Whisper is available. Runs one clip at a time in the background and stays off by default.",
+            "Automatically builds Media Library AI search data after import/open. Audio-backed clips can be queued for transcript indexing when Whisper is available, and video/image clips can be queued for visual-search embeddings when the CLIP search model is installed. Runs one clip at a time in the background and stays off by default.",
         ));
         background_ai_indexing_hint.set_halign(gtk::Align::Start);
         background_ai_indexing_hint.add_css_class("dim-label");
         background_ai_indexing_hint.set_wrap(true);
         background_ai_indexing_hint.set_max_width_chars(60);
         models_box.append(&background_ai_indexing_hint);
+
+        models_box.append(&background_auto_tagging_check);
+
+        let background_auto_tagging_hint = Label::new(Some(
+            "After a clip has visual-search embeddings, derive persistent Media Library tags such as shot type, setting, time of day, and common subjects. Stored tags become searchable and survive project save/load. Disabled by default.",
+        ));
+        background_auto_tagging_hint.set_halign(gtk::Align::Start);
+        background_auto_tagging_hint.add_css_class("dim-label");
+        background_auto_tagging_hint.set_wrap(true);
+        background_auto_tagging_hint.set_max_width_chars(60);
+        models_box.append(&background_auto_tagging_hint);
 
         // ── MusicGen model status ─────────────────────────────────────
         models_box.append(&Separator::new(Orientation::Horizontal));
@@ -1441,6 +1476,7 @@ pub fn show_preferences_dialog(
                 ),
                 source_monitor_auto_link_av: source_monitor_auto_link_av_check.is_active(),
                 show_track_audio_levels: current.show_track_audio_levels,
+                show_timeline_minimap: minimap_check.is_active(),
                 mcp_socket_enabled: mcp_socket_check.is_active(),
                 gsk_renderer: GskRenderer::from_str(
                     gsk_renderer.active_id().as_deref().unwrap_or("auto"),
@@ -1452,6 +1488,7 @@ pub fn show_preferences_dialog(
                 realtime_preview: realtime_check.is_active(),
                 background_prerender: background_prerender_check.is_active(),
                 background_ai_indexing: background_ai_indexing_check.is_active(),
+                background_auto_tagging: background_auto_tagging_check.is_active(),
                 prerender_preset: current.prerender_preset.clone(),
                 prerender_crf: current.prerender_crf,
                 persist_prerenders_next_to_project_file: persist_prerenders_check.is_active(),
@@ -1489,6 +1526,8 @@ pub fn show_preferences_dialog(
                         None => current.ai_backend.clone(),
                     }
                 },
+                seen_onboarding_v1: current.seen_onboarding_v1,
+                hdr_preview_passthrough: current.hdr_preview_passthrough,
             };
             new_state.set_proxy_mode(ProxyMode::from_str(
                 proxy_mode.active_id().as_deref().unwrap_or("off"),

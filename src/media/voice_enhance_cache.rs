@@ -73,7 +73,7 @@ pub enum VoiceEnhanceStatus {
 
 pub struct VoiceEnhanceCache {
     /// Completed enhanced media file paths, keyed by **cache_key**
-    /// (`source_path` + `strength`). Different strengths for the same
+    /// (`source fingerprint` + `strength`). Different strengths for the same
     /// source produce different cache entries.
     pub paths: HashMap<String, String>,
     /// Currently processing keys.
@@ -362,43 +362,22 @@ impl Drop for VoiceEnhanceCache {
 /// stable key for missing files (the prerender will then fail and the
 /// key will be marked as `failed`).
 pub fn cache_key(source_path: &str, strength: f32) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    source_path.hash(&mut hasher);
-    let mtime = source_mtime_secs(source_path);
-    mtime.hash(&mut hasher);
     let s = (strength.clamp(0.0, 1.0) * 100.0).round() as u32;
-    format!("ve_{}_{:03}", hasher.finish(), s)
-}
-
-/// Read the source file's modification time as Unix seconds since the
-/// epoch. Returns 0 on any error (file missing, permission denied, OS
-/// without mtime, ...). The exact value isn't important — only that
-/// it changes when the file content changes.
-fn source_mtime_secs(source_path: &str) -> u64 {
-    std::fs::metadata(source_path)
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    let mut hasher = crate::media::cache_key::CacheKeyHasher::new();
+    hasher.add_source_fingerprint(source_path).add(s);
+    format!("ve_{:016x}_{s:03}", hasher.finish())
 }
 
 fn dirs_cache_root() -> PathBuf {
-    let base = std::env::var("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-            PathBuf::from(home).join(".cache")
-        });
-    base.join("ultimateslice").join("voice_enhance")
+    crate::media::cache_support::cache_root_dir("voice_enhance")
+}
+
+pub fn cache_root_dir() -> PathBuf {
+    dirs_cache_root()
 }
 
 fn file_is_ready(path: &str) -> bool {
-    std::fs::metadata(path)
-        .map(|m| m.len() > 0)
-        .unwrap_or(false)
+    crate::media::cache_support::file_has_content(path)
 }
 
 /// Bump a file's access + modification time to the current wall clock,

@@ -1,6 +1,6 @@
 use crate::model::clip::{AuditionTake, Clip, VoiceIsolationSource};
 use crate::model::project::Project;
-use crate::model::track::Track;
+use crate::model::track::{AudioRole, Track};
 use crate::model::transition::OutgoingTransition;
 
 /// A reversible edit operation on the project.
@@ -58,6 +58,31 @@ impl<T: Clone + 'static> EditCommand for ClipMutateCommand<T> {
     }
     fn description(&self) -> &str {
         self.label
+    }
+}
+
+/// Groups multiple `EditCommand` children into a single history entry.
+/// Used by Inspector "Paste property to all selected clips" and related
+/// bulk operations so the entire batch is undone in one Ctrl+Z press.
+/// Children are executed in order and undone in reverse order.
+pub struct CompoundEditCommand {
+    pub children: Vec<Box<dyn EditCommand>>,
+    pub description: String,
+}
+
+impl EditCommand for CompoundEditCommand {
+    fn execute(&self, project: &mut Project) {
+        for child in &self.children {
+            child.execute(project);
+        }
+    }
+    fn undo(&self, project: &mut Project) {
+        for child in self.children.iter().rev() {
+            child.undo(project);
+        }
+    }
+    fn description(&self) -> &str {
+        &self.description
     }
 }
 
@@ -1217,6 +1242,57 @@ pub fn set_track_duck_cmd(
     }
 }
 
+/// Toggle a track's muted state. Construct via `set_track_muted_cmd()`.
+pub fn set_track_muted_cmd(
+    track_id: String,
+    old_muted: bool,
+    new_muted: bool,
+) -> TrackMutateCommand<bool> {
+    TrackMutateCommand {
+        track_id,
+        old_state: old_muted,
+        new_state: new_muted,
+        apply: |track, v| {
+            track.muted = v;
+        },
+        label: "Toggle track mute",
+    }
+}
+
+/// Toggle a track's locked state. Construct via `set_track_locked_cmd()`.
+pub fn set_track_locked_cmd(
+    track_id: String,
+    old_locked: bool,
+    new_locked: bool,
+) -> TrackMutateCommand<bool> {
+    TrackMutateCommand {
+        track_id,
+        old_state: old_locked,
+        new_state: new_locked,
+        apply: |track, v| {
+            track.locked = v;
+        },
+        label: "Toggle track lock",
+    }
+}
+
+/// Change a track's color label. Construct via `set_track_color_label_cmd()`.
+pub fn set_track_color_label_cmd(
+    track_id: String,
+    old_color: crate::model::track::TrackColorLabel,
+    new_color: crate::model::track::TrackColorLabel,
+) -> TrackMutateCommand<crate::model::track::TrackColorLabel> {
+    TrackMutateCommand {
+        track_id,
+        old_state: old_color,
+        new_state: new_color,
+        apply: |track, v| {
+            track.color_label = v;
+        },
+        label: "Set track color",
+    }
+}
+
 /// Rename a track. Construct via `set_track_label_cmd()`.
 pub fn set_track_label_cmd(
     track_id: String,
@@ -1231,6 +1307,36 @@ pub fn set_track_label_cmd(
             track.label = v;
         },
         label: "Rename track",
+    }
+}
+
+/// Set a track's gain in dB. Construct via `set_track_gain_cmd()`.
+pub fn set_track_gain_cmd(
+    track_id: String,
+    old_gain_db: f64,
+    new_gain_db: f64,
+) -> TrackMutateCommand<f64> {
+    TrackMutateCommand {
+        track_id,
+        old_state: old_gain_db,
+        new_state: new_gain_db,
+        apply: |track, v| {
+            track.gain_db = v;
+        },
+        label: "Set track gain",
+    }
+}
+
+/// Set a track's stereo pan (−1.0 to +1.0). Construct via `set_track_pan_cmd()`.
+pub fn set_track_pan_cmd(track_id: String, old_pan: f64, new_pan: f64) -> TrackMutateCommand<f64> {
+    TrackMutateCommand {
+        track_id,
+        old_state: old_pan,
+        new_state: new_pan,
+        apply: |track, v| {
+            track.pan = v;
+        },
+        label: "Set track pan",
     }
 }
 
@@ -1456,24 +1562,34 @@ impl EditHistory {
         self.redo_stack.clear(); // new action clears redo stack
     }
 
+    pub fn undo_with_description(&mut self, project: &mut Project) -> Option<String> {
+        let description = self
+            .undo_stack
+            .last()
+            .map(|c| c.description().to_string())?;
+        let cmd = self.undo_stack.pop().expect("undo stack just had an item");
+        cmd.undo(project);
+        self.redo_stack.push(cmd);
+        Some(description)
+    }
+
     pub fn undo(&mut self, project: &mut Project) -> bool {
-        if let Some(cmd) = self.undo_stack.pop() {
-            cmd.undo(project);
-            self.redo_stack.push(cmd);
-            true
-        } else {
-            false
-        }
+        self.undo_with_description(project).is_some()
+    }
+
+    pub fn redo_with_description(&mut self, project: &mut Project) -> Option<String> {
+        let description = self
+            .redo_stack
+            .last()
+            .map(|c| c.description().to_string())?;
+        let cmd = self.redo_stack.pop().expect("redo stack just had an item");
+        cmd.execute(project);
+        self.undo_stack.push(cmd);
+        Some(description)
     }
 
     pub fn redo(&mut self, project: &mut Project) -> bool {
-        if let Some(cmd) = self.redo_stack.pop() {
-            cmd.execute(project);
-            self.undo_stack.push(cmd);
-            true
-        } else {
-            false
-        }
+        self.redo_with_description(project).is_some()
     }
 
     #[allow(dead_code)]
@@ -1488,6 +1604,11 @@ impl EditHistory {
     #[allow(dead_code)]
     pub fn undo_description(&self) -> Option<&str> {
         self.undo_stack.last().map(|c| c.description())
+    }
+
+    #[allow(dead_code)]
+    pub fn redo_description(&self) -> Option<&str> {
+        self.redo_stack.last().map(|c| c.description())
     }
 }
 
@@ -2004,6 +2125,110 @@ impl EditCommand for SetProjectMasterGainCommand {
     }
 }
 
+// ── Audio bus commands ────────────────────────────────────────────────────
+
+/// Set the gain (dB) of a role-based audio bus.
+pub struct SetBusGainCommand {
+    pub role: AudioRole,
+    pub old_db: f64,
+    pub new_db: f64,
+}
+
+impl EditCommand for SetBusGainCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(bus) = project.bus_for_role_mut(&self.role) {
+            bus.gain_db = self.new_db.clamp(-96.0, 24.0);
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(bus) = project.bus_for_role_mut(&self.role) {
+            bus.gain_db = self.old_db.clamp(-96.0, 24.0);
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set bus gain"
+    }
+}
+
+/// Toggle mute on a role-based audio bus.
+pub struct SetBusMuteCommand {
+    pub role: AudioRole,
+    pub old_muted: bool,
+    pub new_muted: bool,
+}
+
+impl EditCommand for SetBusMuteCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(bus) = project.bus_for_role_mut(&self.role) {
+            bus.muted = self.new_muted;
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(bus) = project.bus_for_role_mut(&self.role) {
+            bus.muted = self.old_muted;
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set bus mute"
+    }
+}
+
+/// Toggle solo on a role-based audio bus.
+pub struct SetBusSoloCommand {
+    pub role: AudioRole,
+    pub old_soloed: bool,
+    pub new_soloed: bool,
+}
+
+impl EditCommand for SetBusSoloCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(bus) = project.bus_for_role_mut(&self.role) {
+            bus.soloed = self.new_soloed;
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(bus) = project.bus_for_role_mut(&self.role) {
+            bus.soloed = self.old_soloed;
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Set bus solo"
+    }
+}
+
+/// Helper to create a `SetBusGainCommand`.
+pub fn set_bus_gain_cmd(role: AudioRole, old_db: f64, new_db: f64) -> SetBusGainCommand {
+    SetBusGainCommand {
+        role,
+        old_db,
+        new_db,
+    }
+}
+
+/// Helper to create a `SetBusMuteCommand`.
+pub fn set_bus_mute_cmd(role: AudioRole, old_muted: bool, new_muted: bool) -> SetBusMuteCommand {
+    SetBusMuteCommand {
+        role,
+        old_muted,
+        new_muted,
+    }
+}
+
+/// Helper to create a `SetBusSoloCommand`.
+pub fn set_bus_solo_cmd(role: AudioRole, old_soloed: bool, new_soloed: bool) -> SetBusSoloCommand {
+    SetBusSoloCommand {
+        role,
+        old_soloed,
+        new_soloed,
+    }
+}
+
 // ── Subtitle commands ─────────────────────────────────────────────────────
 
 /// Set (or replace) all subtitle segments on a clip (used after STT generation).
@@ -2390,12 +2615,136 @@ impl EditCommand for ScriptAssemblyCommand {
     }
 }
 
+// -----------------------------------------------------------------------
+// Marker commands
+// -----------------------------------------------------------------------
+
+pub struct AddMarkerCommand {
+    pub marker: crate::model::project::Marker,
+}
+
+impl EditCommand for AddMarkerCommand {
+    fn execute(&self, project: &mut Project) {
+        project.markers.push(self.marker.clone());
+        project.markers.sort_by_key(|m| m.position_ns);
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        project.markers.retain(|m| m.id != self.marker.id);
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Add marker"
+    }
+}
+
+pub struct RemoveMarkerCommand {
+    pub marker: crate::model::project::Marker,
+}
+
+impl EditCommand for RemoveMarkerCommand {
+    fn execute(&self, project: &mut Project) {
+        project.markers.retain(|m| m.id != self.marker.id);
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        project.markers.push(self.marker.clone());
+        project.markers.sort_by_key(|m| m.position_ns);
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Remove marker"
+    }
+}
+
+pub struct EditMarkerCommand {
+    pub marker_id: String,
+    pub old_state: crate::model::project::Marker,
+    pub new_state: crate::model::project::Marker,
+}
+
+impl EditCommand for EditMarkerCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(m) = project.markers.iter_mut().find(|m| m.id == self.marker_id) {
+            m.label = self.new_state.label.clone();
+            m.color = self.new_state.color;
+            m.notes = self.new_state.notes.clone();
+            m.position_ns = self.new_state.position_ns;
+        }
+        project.markers.sort_by_key(|m| m.position_ns);
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(m) = project.markers.iter_mut().find(|m| m.id == self.marker_id) {
+            m.label = self.old_state.label.clone();
+            m.color = self.old_state.color;
+            m.notes = self.old_state.notes.clone();
+            m.position_ns = self.old_state.position_ns;
+        }
+        project.markers.sort_by_key(|m| m.position_ns);
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Edit marker"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::clip::{Clip, ClipKind};
     use crate::model::project::Project;
     use crate::model::track::Track;
+
+    #[test]
+    fn compound_edit_command_round_trip() {
+        let mut project = Project::new("Compound test");
+        let mut track = Track::new_video("Video");
+        let mut clip = Clip::new("/tmp/a.mp4", 5_000_000_000, 0, ClipKind::Video);
+        clip.id = "clip-a".to_string();
+        clip.brightness = 0.0;
+        track.add_clip(clip);
+        let mut clip2 = Clip::new("/tmp/b.mp4", 5_000_000_000, 5_000_000_000, ClipKind::Video);
+        clip2.id = "clip-b".to_string();
+        clip2.brightness = 0.0;
+        track.add_clip(clip2);
+        project.tracks.push(track);
+
+        // Two children: set each clip's brightness to 0.4. Reversing the
+        // compound should restore both to 0.0.
+        let cmd = CompoundEditCommand {
+            description: "Paste Brightness to all selected".to_string(),
+            children: vec![
+                Box::new(ClipMutateCommand::<f32> {
+                    clip_id: "clip-a".to_string(),
+                    old_state: 0.0,
+                    new_state: 0.4,
+                    apply: |clip, v| clip.brightness = v,
+                    label: "paste brightness",
+                }),
+                Box::new(ClipMutateCommand::<f32> {
+                    clip_id: "clip-b".to_string(),
+                    old_state: 0.0,
+                    new_state: 0.4,
+                    apply: |clip, v| clip.brightness = v,
+                    label: "paste brightness",
+                }),
+            ],
+        };
+
+        cmd.execute(&mut project);
+        assert!((project.clip_mut("clip-a").unwrap().brightness - 0.4).abs() < 1e-6);
+        assert!((project.clip_mut("clip-b").unwrap().brightness - 0.4).abs() < 1e-6);
+
+        cmd.undo(&mut project);
+        assert!((project.clip_mut("clip-a").unwrap().brightness - 0.0).abs() < 1e-6);
+        assert!((project.clip_mut("clip-b").unwrap().brightness - 0.0).abs() < 1e-6);
+
+        // Re-execute after undo (redo path): values go back to 0.4.
+        cmd.execute(&mut project);
+        assert!((project.clip_mut("clip-a").unwrap().brightness - 0.4).abs() < 1e-6);
+        assert!((project.clip_mut("clip-b").unwrap().brightness - 0.4).abs() < 1e-6);
+    }
 
     #[test]
     fn auto_crop_command_round_trip() {
@@ -3141,11 +3490,39 @@ mod tests {
     }
 
     #[test]
+    fn test_edit_history_undo_redo_descriptions_follow_operations() {
+        let (mut project, track_id, clip_id) = make_project_with_clip("C", 10, 0);
+        let mut history = EditHistory::new();
+        let cmd = TrimOutCommand {
+            clip_id: clip_id.clone(),
+            track_id: track_id.clone(),
+            old_source_out: 10,
+            new_source_out: 6,
+        };
+        history.execute(Box::new(cmd), &mut project);
+
+        assert_eq!(history.undo_description(), Some("Trim clip out-point"));
+        assert!(history.redo_description().is_none());
+
+        let undo_label = history.undo_with_description(&mut project);
+        assert_eq!(undo_label.as_deref(), Some("Trim clip out-point"));
+        assert!(history.undo_description().is_none());
+        assert_eq!(history.redo_description(), Some("Trim clip out-point"));
+
+        let redo_label = history.redo_with_description(&mut project);
+        assert_eq!(redo_label.as_deref(), Some("Trim clip out-point"));
+        assert_eq!(history.undo_description(), Some("Trim clip out-point"));
+        assert!(history.redo_description().is_none());
+    }
+
+    #[test]
     fn test_edit_history_empty_undo_redo() {
         let mut project = Project::new("Test");
         let mut history = EditHistory::new();
         assert!(!history.undo(&mut project));
         assert!(!history.redo(&mut project));
+        assert!(history.undo_with_description(&mut project).is_none());
+        assert!(history.redo_with_description(&mut project).is_none());
     }
 
     // ── Compound clip undo tests ──────────────────────────────────────
@@ -3328,5 +3705,130 @@ mod tests {
         cmd.undo(&mut project);
         assert_eq!(project.track_ref(&inner_v_id).unwrap().clips.len(), 1);
         assert_eq!(project.track_ref(&inner_a_id).unwrap().clips.len(), 1);
+    }
+
+    #[test]
+    fn add_marker_command_execute_and_undo() {
+        use crate::model::project::Marker;
+        let mut project = Project::new("Marker Undo");
+        assert!(project.markers.is_empty());
+
+        let marker = Marker::new(1_000_000_000, "M1");
+        let cmd = AddMarkerCommand {
+            marker: marker.clone(),
+        };
+        cmd.execute(&mut project);
+        assert_eq!(project.markers.len(), 1);
+        assert_eq!(project.markers[0].label, "M1");
+
+        cmd.undo(&mut project);
+        assert!(project.markers.is_empty());
+    }
+
+    #[test]
+    fn remove_marker_command_execute_and_undo() {
+        use crate::model::project::Marker;
+        let mut project = Project::new("Marker Undo");
+        let m = Marker::new(2_000_000_000, "M2");
+        project.markers.push(m.clone());
+        assert_eq!(project.markers.len(), 1);
+
+        let cmd = RemoveMarkerCommand { marker: m };
+        cmd.execute(&mut project);
+        assert!(project.markers.is_empty());
+
+        cmd.undo(&mut project);
+        assert_eq!(project.markers.len(), 1);
+        assert_eq!(project.markers[0].label, "M2");
+    }
+
+    #[test]
+    fn edit_marker_command_execute_and_undo() {
+        use crate::model::project::Marker;
+        let mut project = Project::new("Marker Edit");
+        let mut m = Marker::new(0, "Before");
+        m.notes = "old notes".to_string();
+        let marker_id = m.id.clone();
+        project.markers.push(m.clone());
+
+        let mut new_marker = m.clone();
+        new_marker.label = "After".to_string();
+        new_marker.notes = "new notes".to_string();
+        let cmd = EditMarkerCommand {
+            marker_id: marker_id.clone(),
+            old_state: m,
+            new_state: new_marker,
+        };
+        cmd.execute(&mut project);
+        assert_eq!(project.markers[0].label, "After");
+        assert_eq!(project.markers[0].notes, "new notes");
+
+        cmd.undo(&mut project);
+        assert_eq!(project.markers[0].label, "Before");
+        assert_eq!(project.markers[0].notes, "old notes");
+    }
+
+    #[test]
+    fn test_set_track_gain_cmd() {
+        let mut project = Project::new("Gain Test");
+        let mut audio_track = Track::new_audio("A1");
+        let track_id = audio_track.id.clone();
+        project.tracks.push(audio_track);
+        assert_eq!(project.track_ref(&track_id).unwrap().gain_db, 0.0);
+
+        let cmd = set_track_gain_cmd(track_id.clone(), 0.0, -6.0);
+        cmd.execute(&mut project);
+        assert_eq!(project.track_ref(&track_id).unwrap().gain_db, -6.0);
+        cmd.undo(&mut project);
+        assert_eq!(project.track_ref(&track_id).unwrap().gain_db, 0.0);
+        cmd.execute(&mut project);
+        assert_eq!(project.track_ref(&track_id).unwrap().gain_db, -6.0);
+    }
+
+    #[test]
+    fn test_set_track_pan_cmd() {
+        let mut project = Project::new("Pan Test");
+        let mut audio_track = Track::new_audio("A1");
+        let track_id = audio_track.id.clone();
+        project.tracks.push(audio_track);
+        assert_eq!(project.track_ref(&track_id).unwrap().pan, 0.0);
+
+        let cmd = set_track_pan_cmd(track_id.clone(), 0.0, -0.5);
+        cmd.execute(&mut project);
+        assert_eq!(project.track_ref(&track_id).unwrap().pan, -0.5);
+        cmd.undo(&mut project);
+        assert_eq!(project.track_ref(&track_id).unwrap().pan, 0.0);
+        cmd.execute(&mut project);
+        assert_eq!(project.track_ref(&track_id).unwrap().pan, -0.5);
+    }
+
+    #[test]
+    fn test_set_bus_gain_undo() {
+        let mut project = Project::new("Test");
+        let cmd = set_bus_gain_cmd(AudioRole::Dialogue, 0.0, -6.0);
+        cmd.execute(&mut project);
+        assert!((project.dialogue_bus.gain_db - (-6.0)).abs() < f64::EPSILON);
+        cmd.undo(&mut project);
+        assert!((project.dialogue_bus.gain_db - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_set_bus_mute_undo() {
+        let mut project = Project::new("Test");
+        let cmd = set_bus_mute_cmd(AudioRole::Effects, false, true);
+        cmd.execute(&mut project);
+        assert!(project.effects_bus.muted);
+        cmd.undo(&mut project);
+        assert!(!project.effects_bus.muted);
+    }
+
+    #[test]
+    fn test_set_bus_solo_undo() {
+        let mut project = Project::new("Test");
+        let cmd = set_bus_solo_cmd(AudioRole::Music, false, true);
+        cmd.execute(&mut project);
+        assert!(project.music_bus.soloed);
+        cmd.undo(&mut project);
+        assert!(!project.music_bus.soloed);
     }
 }

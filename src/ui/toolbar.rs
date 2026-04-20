@@ -218,15 +218,23 @@ fn save_project_to_path(
         fcpxml::writer::write_fcpxml_for_path(&proj, path)
             .map_err(|e| format!("FCPXML write error: {e}"))?
     };
-    std::fs::write(path, xml).map_err(|e| format!("Save error: {e}"))?;
+    std::fs::write(path, &xml).map_err(|e| format!("Save error: {e}"))?;
     if let Some(p) = path.to_str() {
         recent::push(p);
     }
     {
         let mut proj = project.borrow_mut();
         proj.file_path = Some(path.to_string_lossy().to_string());
+        // Keep source_fcpxml in sync with what was written to disk so that
+        // subsequent clean-save passthroughs return the correct content
+        // (including up-to-date us:library-items, us:bins, etc.).
+        if !fcpxml::writer::use_strict_fcpxml_for_path(path) {
+            proj.source_fcpxml = Some(xml);
+        }
         proj.dirty = false;
     }
+    // Remove autosave now that the project is safely saved to disk.
+    crate::project_versions::delete_autosave_for_project(&project.borrow());
     Ok(())
 }
 
@@ -443,6 +451,10 @@ fn show_project_snapshots_dialog(
     let action_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     let btn_restore = gtk::Button::with_label("Restore Selected");
     let btn_delete = gtk::Button::with_label("Delete Selected");
+    btn_restore.set_tooltip_text(Some(
+        "Restore the selected snapshot into the current project",
+    ));
+    btn_delete.set_tooltip_text(Some("Delete the selected snapshot from disk"));
     action_row.append(&btn_restore);
     action_row.append(&btn_delete);
 
@@ -763,6 +775,7 @@ fn collect_export_options(
         audio_bitrate_kbps: ab_entry.text().parse::<u32>().unwrap_or(192),
         gif_fps,
         audio_channel_layout: audio_channel_layout_from_selected(cl_combo.selected()),
+        hdr_passthrough: false,
     }
 }
 
@@ -857,6 +870,8 @@ pub fn confirm_unsaved_then(
     let on_continue_c = on_continue.clone();
     dialog.connect_response(move |d, resp| match resp {
         gtk::ResponseType::Reject => {
+            // User chose to discard — remove autosave for this project.
+            crate::project_versions::delete_autosave_for_project(&project_c.borrow());
             d.close();
             on_continue_c();
         }
@@ -1006,12 +1021,15 @@ pub fn build_toolbar(
     timeline_state: Rc<RefCell<TimelineState>>,
     bg_removal_cache: Rc<RefCell<crate::media::bg_removal_cache::BgRemovalCache>>,
     frame_interp_cache: Rc<RefCell<crate::media::frame_interp_cache::FrameInterpCache>>,
+    render_replace_cache: Rc<RefCell<crate::media::render_replace_cache::RenderReplaceCache>>,
     on_project_changed: impl Fn() + 'static + Clone,
     on_project_reloaded: impl Fn() + 'static + Clone,
     on_show_editor: impl Fn() + 'static + Clone,
     on_use_collected_locations: impl Fn(fcpxml::writer::CollectFilesManifest) + 'static + Clone,
     on_export_frame: impl Fn() + 'static + Clone,
+    on_show_project_health: impl Fn(Option<gtk::Window>) + 'static + Clone,
     on_record_voiceover: impl Fn() + 'static + Clone,
+    on_replay_onboarding: impl Fn() + 'static + Clone,
 ) -> (HeaderBar, Button, Button) {
     let header = HeaderBar::new();
 
@@ -1039,6 +1057,8 @@ pub fn build_toolbar(
                 let on_project_reloaded = on_project_reloaded.clone();
                 let on_show_editor = on_show_editor.clone();
                 move || {
+                    // Clean up autosave for the project being replaced.
+                    crate::project_versions::delete_autosave_for_project(&project.borrow());
                     *project.borrow_mut() = Project::new("Untitled");
                     {
                         let mut st = timeline_state.borrow_mut();
@@ -1326,6 +1346,55 @@ pub fn build_toolbar(
         });
     }
     header.pack_start(&btn_recent);
+
+    let btn_help = gtk::MenuButton::new();
+    btn_help.set_label("Help");
+    btn_help.set_tooltip_text(Some("Keyboard shortcuts and onboarding help"));
+    {
+        let pop = gtk::Popover::new();
+        let vbox = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        vbox.set_margin_start(4);
+        vbox.set_margin_end(4);
+        vbox.set_margin_top(4);
+        vbox.set_margin_bottom(4);
+
+        let btn_shortcuts = gtk::Button::with_label("Keyboard Shortcuts");
+        btn_shortcuts.add_css_class("flat");
+        btn_shortcuts.set_halign(gtk::Align::Fill);
+        btn_shortcuts.set_hexpand(true);
+        {
+            let pop_weak = pop.downgrade();
+            btn_shortcuts.connect_clicked(move |btn| {
+                if let Some(pop) = pop_weak.upgrade() {
+                    pop.popdown();
+                }
+                if let Some(window) = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok()) {
+                    crate::ui::timeline::widget::show_shortcuts_dialog(&window);
+                }
+            });
+        }
+        vbox.append(&btn_shortcuts);
+
+        let btn_replay_tour = gtk::Button::with_label("Replay Tour");
+        btn_replay_tour.add_css_class("flat");
+        btn_replay_tour.set_halign(gtk::Align::Fill);
+        btn_replay_tour.set_hexpand(true);
+        {
+            let pop_weak = pop.downgrade();
+            let on_replay_onboarding = on_replay_onboarding.clone();
+            btn_replay_tour.connect_clicked(move |_| {
+                if let Some(pop) = pop_weak.upgrade() {
+                    pop.popdown();
+                }
+                on_replay_onboarding();
+            });
+        }
+        vbox.append(&btn_replay_tour);
+
+        pop.set_child(Some(&vbox));
+        btn_help.set_popover(Some(&pop));
+    }
+    header.pack_start(&btn_help);
     let btn_save = Button::with_label("Save…");
     btn_save.set_tooltip_text(Some("Save project XML (Ctrl+S)"));
     {
@@ -1333,6 +1402,20 @@ pub fn build_toolbar(
         let library = library.clone();
         let on_project_changed = on_project_changed.clone();
         btn_save.connect_clicked(move |btn| {
+            // If the project already has a save path, save directly without a dialog.
+            let existing_path = project.borrow().file_path.clone();
+            if let Some(ref path_str) = existing_path {
+                let path = std::path::Path::new(path_str);
+                match save_project_to_path(&project, &library, path) {
+                    Ok(()) => {
+                        println!("Saved to {}", path.display());
+                        on_project_changed();
+                    }
+                    Err(e) => log::error!("{e}"),
+                }
+                return;
+            }
+
             let dialog = gtk::FileDialog::new();
             dialog.set_title("Save Project XML");
             dialog.set_initial_name(Some("project.uspxml"));
@@ -1574,6 +1657,7 @@ pub fn build_toolbar(
         let project = project.clone();
         let bg_removal_cache = bg_removal_cache.clone();
         let frame_interp_cache = frame_interp_cache.clone();
+        let render_replace_cache = render_replace_cache.clone();
         btn_export.connect_clicked(move |btn| {
             let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
             let proj_w = project.borrow().width;
@@ -1606,6 +1690,11 @@ pub fn build_toolbar(
             let btn_save_preset = gtk::Button::with_label("Save As…");
             let btn_update_preset = gtk::Button::with_label("Update");
             let btn_delete_preset = gtk::Button::with_label("Delete");
+            btn_save_preset
+                .set_tooltip_text(Some("Save the current export settings as a named preset"));
+            btn_update_preset
+                .set_tooltip_text(Some("Update the selected preset with the current settings"));
+            btn_delete_preset.set_tooltip_text(Some("Delete the selected export preset"));
             btn_update_preset.set_sensitive(false);
             btn_delete_preset.set_sensitive(false);
             preset_box.append(&preset_dropdown);
@@ -1993,6 +2082,7 @@ pub fn build_toolbar(
             let project = project.clone();
             let bg_removal_cache = bg_removal_cache.clone();
             let frame_interp_cache = frame_interp_cache.clone();
+            let render_replace_cache = render_replace_cache.clone();
             opt_dialog.connect_response(move |d, resp| {
                 if resp != gtk::ResponseType::Accept && resp != gtk::ResponseType::Other(1) {
                     d.close();
@@ -2084,6 +2174,7 @@ pub fn build_toolbar(
                 let project = project.clone();
                 let bg_removal_cache = bg_removal_cache.clone();
                 let frame_interp_cache = frame_interp_cache.clone();
+                let render_replace_cache = render_replace_cache.clone();
                 file_dialog.save(window.as_ref(), gio::Cancellable::NONE, move |result| {
                     if let Ok(file) = result {
                         if let Some(path) = file.path() {
@@ -2094,6 +2185,13 @@ pub fn build_toolbar(
                             let bg_paths = bg_removal_cache.borrow().paths.clone();
                             let interp_paths =
                                 frame_interp_cache.borrow().snapshot_paths_by_clip_id(&proj);
+                            // Render-and-Replace sidecar snapshot. Any clip
+                            // with render_replace_enabled and a ready bake
+                            // will have its source swapped for the baked
+                            // ProRes sidecar during export, skipping the
+                            // baked-scope filter chain. Empty map → all
+                            // clips render live as before.
+                            let rr_paths = render_replace_cache.borrow().paths.clone();
                             let (tx, rx) = std::sync::mpsc::channel::<ExportProgress>();
 
                             std::thread::spawn(move || {
@@ -2104,6 +2202,7 @@ pub fn build_toolbar(
                                     None,
                                     &bg_paths,
                                     &interp_paths,
+                                    &rr_paths,
                                     tx.clone(),
                                 ) {
                                     let _ = tx.send(ExportProgress::Error(e.to_string()));
@@ -2783,6 +2882,7 @@ pub fn build_toolbar(
         let project = project.clone();
         let bg_removal_cache = bg_removal_cache.clone();
         let frame_interp_cache = frame_interp_cache.clone();
+        let render_replace_cache_queue = render_replace_cache.clone();
         btn_export_queue.connect_clicked(move |btn| {
             if let Some(pop) = export_pop_weak.upgrade() {
                 pop.popdown();
@@ -2792,12 +2892,29 @@ pub fn build_toolbar(
                 project.clone(),
                 bg_removal_cache.clone(),
                 frame_interp_cache.clone(),
+                render_replace_cache_queue.clone(),
                 window.as_ref(),
             );
             dialog.present();
         });
     }
     export_pop_box.append(&btn_export_queue);
+
+    let btn_project_health = gtk::Button::with_label("Project Health…");
+    btn_project_health.add_css_class("flat");
+    btn_project_health.set_tooltip_text(Some("Inspect offline media and managed cache usage"));
+    {
+        let export_pop_weak = export_pop.downgrade();
+        let on_show_project_health = on_show_project_health.clone();
+        btn_project_health.connect_clicked(move |btn| {
+            if let Some(pop) = export_pop_weak.upgrade() {
+                pop.popdown();
+            }
+            let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+            on_show_project_health(window);
+        });
+    }
+    export_pop_box.append(&btn_project_health);
 
     export_pop.set_child(Some(&export_pop_box));
     export_pop.set_parent(&btn_export_more);
@@ -2842,8 +2959,9 @@ pub fn build_toolbar(
         let timeline_state = timeline_state.clone();
         let on_project_changed = on_project_changed.clone();
         btn_undo.connect_clicked(move |_| {
-            timeline_state.borrow_mut().undo();
-            on_project_changed();
+            if timeline_state.borrow_mut().undo() {
+                on_project_changed();
+            }
         });
     }
     header.pack_start(&btn_undo);
@@ -2854,8 +2972,9 @@ pub fn build_toolbar(
         let timeline_state = timeline_state.clone();
         let on_project_changed = on_project_changed.clone();
         btn_redo.connect_clicked(move |_| {
-            timeline_state.borrow_mut().redo();
-            on_project_changed();
+            if timeline_state.borrow_mut().redo() {
+                on_project_changed();
+            }
         });
     }
     header.pack_start(&btn_redo);

@@ -67,6 +67,49 @@ pub enum McpCommand {
         duck: bool,
         reply: SyncSender<Value>,
     },
+    SetTrackMuted {
+        track_id: String,
+        muted: bool,
+        reply: SyncSender<Value>,
+    },
+    SetTrackGain {
+        track_id: String,
+        gain_db: f64,
+        reply: SyncSender<Value>,
+    },
+    SetTrackPan {
+        track_id: String,
+        pan: f64,
+        reply: SyncSender<Value>,
+    },
+    GetMixerState {
+        reply: SyncSender<Value>,
+    },
+    SetBusGain {
+        role: String,
+        gain_db: f64,
+        reply: SyncSender<Value>,
+    },
+    SetBusMuted {
+        role: String,
+        muted: bool,
+        reply: SyncSender<Value>,
+    },
+    SetBusSoloed {
+        role: String,
+        soloed: bool,
+        reply: SyncSender<Value>,
+    },
+    SetTrackLocked {
+        track_id: String,
+        locked: bool,
+        reply: SyncSender<Value>,
+    },
+    SetTrackColor {
+        track_id: String,
+        color: String,
+        reply: SyncSender<Value>,
+    },
     SetTrackHeightPreset {
         track_id: String,
         height_preset: String,
@@ -76,6 +119,13 @@ pub enum McpCommand {
         reply: SyncSender<Value>,
     },
     GetPreferences {
+        reply: SyncSender<Value>,
+    },
+    GetProjectHealth {
+        reply: SyncSender<Value>,
+    },
+    CleanupProjectCache {
+        cache: String,
         reply: SyncSender<Value>,
     },
     SetHardwareAcceleration {
@@ -105,6 +155,10 @@ pub enum McpCommand {
         reply: SyncSender<Value>,
     },
     SetBackgroundAiIndexing {
+        enabled: bool,
+        reply: SyncSender<Value>,
+    },
+    SetBackgroundAutoTagging {
         enabled: bool,
         reply: SyncSender<Value>,
     },
@@ -486,6 +540,11 @@ pub enum McpCommand {
         strength: Option<f64>,
         reply: SyncSender<Value>,
     },
+    SetClipRenderReplace {
+        clip_id: String,
+        enabled: bool,
+        reply: SyncSender<Value>,
+    },
     SetClipSubtitleVisible {
         clip_id: String,
         visible: bool,
@@ -632,6 +691,37 @@ pub enum McpCommand {
         enabled: bool,
         reply: SyncSender<Value>,
     },
+    SetProgramMonitorHud {
+        enabled: bool,
+        reply: SyncSender<Value>,
+    },
+    SetProgramMonitorAspectMask {
+        preset: String,
+        reply: SyncSender<Value>,
+    },
+    SetProgramMonitorTimecodeBurnin {
+        enabled: Option<bool>,
+        position: Option<String>,
+        reply: SyncSender<Value>,
+    },
+    SetProgramMonitorAbCompare {
+        enabled: Option<bool>,
+        midline_percent: Option<f64>,
+        reference_still_id: Option<String>,
+        clear_reference: bool,
+        reply: SyncSender<Value>,
+    },
+    CaptureReferenceStill {
+        label: Option<String>,
+        reply: SyncSender<Value>,
+    },
+    ListReferenceStills {
+        reply: SyncSender<Value>,
+    },
+    DeleteReferenceStill {
+        id: String,
+        reply: SyncSender<Value>,
+    },
     SetPrerenderProjectPersistence {
         enabled: bool,
         reply: SyncSender<Value>,
@@ -642,6 +732,10 @@ pub enum McpCommand {
     },
     SeekPlayhead {
         timeline_pos_ns: u64,
+        reply: SyncSender<Value>,
+    },
+    FocusClipInstance {
+        clip_id: String,
         reply: SyncSender<Value>,
     },
     ExportDisplayedFrame {
@@ -696,6 +790,10 @@ pub enum McpCommand {
         clip_id: Option<String>,
         reply: SyncSender<Value>,
     },
+    ReverseMatchFrame {
+        path: String,
+        reply: SyncSender<Value>,
+    },
     SetClipStabilization {
         clip_id: String,
         enabled: bool,
@@ -739,6 +837,15 @@ pub enum McpCommand {
     SyncClipsByAudio {
         clip_ids: Vec<String>,
         replace_audio: bool,
+        reply: SyncSender<Value>,
+    },
+    /// Align clips by their decoded source timecode (no grouping
+    /// required). Every clip_id must already have
+    /// `source_timecode_base_ns` populated — run
+    /// `convert_ltc_to_timecode` first, or re-import the file so
+    /// the BWF bext / video-tmcd probe fills it in.
+    SyncClipsByTimecode {
+        clip_ids: Vec<String>,
         reply: SyncSender<Value>,
     },
     CopyClipColorGrade {
@@ -991,6 +1098,29 @@ pub enum McpCommand {
     },
     ReorderByScript {
         track_id: String,
+        reply: SyncSender<Value>,
+    },
+    // ── Marker tools ──
+    ListMarkers {
+        reply: SyncSender<Value>,
+    },
+    AddMarker {
+        position_ns: u64,
+        label: String,
+        color: Option<u32>,
+        notes: Option<String>,
+        reply: SyncSender<Value>,
+    },
+    RemoveMarker {
+        marker_id: String,
+        reply: SyncSender<Value>,
+    },
+    EditMarker {
+        marker_id: String,
+        label: Option<String>,
+        color: Option<u32>,
+        notes: Option<String>,
+        position_ns: Option<u64>,
         reply: SyncSender<Value>,
     },
 }

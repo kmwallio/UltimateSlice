@@ -459,33 +459,75 @@ impl TransformOverlay {
                 draw_outside_vignette(cr, ww as f64, wh as f64, vx, vy, vw, vh);
                 draw_frame_border(cr, vx, vy, vw, vh);
 
-                // ── Background-encode feedback ──────────────────
-                // Visible in *any* tool while a drawing animation
-                // WebM is baking; keeps users from thinking the
-                // static PNG they see is the final render.
-                if !draw_active
-                    && crate::media::drawing_render::drawing_encode_is_pending()
-                {
-                    let note = "Baking drawing animation…";
+                // ── Drawing-animation bake feedback ─────────────
+                // Visible in *any* tool (including Draw mode) while at
+                // least one drawing-animation MOV encode is running
+                // in the background — keeps users from thinking the
+                // static PNG they see in the Program Monitor is the
+                // final render. The pill includes an animated spinner
+                // arc that rotates with wall-clock time, and — for
+                // multiple concurrent bakes — a "N jobs" counter.
+                // Anchored top-right so it doesn't collide with the
+                // Draw tool's own HUD pill (top-left).
+                let pending_count =
+                    crate::media::drawing_render::drawing_encode_pending_count();
+                if pending_count > 0 {
+                    let note = if pending_count == 1 {
+                        "Baking drawing animation…".to_string()
+                    } else {
+                        format!("Baking {} drawing animations…", pending_count)
+                    };
                     cr.select_font_face(
                         "Sans",
                         gtk4::cairo::FontSlant::Normal,
                         gtk4::cairo::FontWeight::Bold,
                     );
                     cr.set_font_size(12.0);
-                    let ext = cr.text_extents(note).unwrap_or(
-                        gtk4::cairo::TextExtents::new(0.0, 0.0, 180.0, 12.0, 0.0, 0.0),
+                    let ext = cr.text_extents(&note).unwrap_or(
+                        gtk4::cairo::TextExtents::new(0.0, 0.0, 200.0, 12.0, 0.0, 0.0),
                     );
-                    let pill_w = ext.width() + 24.0;
-                    let pill_h = ext.height() + 12.0;
-                    let px = vx + 12.0;
+                    // Layout: [spinner arc] [gap] [text] — all inside
+                    // a rounded pill. Spinner sits to the left of the
+                    // text and rotates via atan2'd sweep angle from
+                    // wall time.
+                    let spinner_r = 6.5;
+                    let spinner_gap = 8.0;
+                    let inner_pad_x = 10.0;
+                    let inner_pad_y = 6.0;
+                    let content_w = spinner_r * 2.0 + spinner_gap + ext.width();
+                    let pill_w = content_w + inner_pad_x * 2.0;
+                    let pill_h = ext.height().max(spinner_r * 2.0) + inner_pad_y * 2.0;
+                    // Anchor top-right of the video rect.
+                    let px = vx + vw - pill_w - 12.0;
                     let py = vy + 12.0;
-                    cr.set_source_rgba(0.0, 0.0, 0.0, 0.72);
+                    cr.save().ok();
+                    cr.set_source_rgba(0.0, 0.0, 0.0, 0.78);
                     cr.rectangle(px, py, pill_w, pill_h);
                     let _ = cr.fill();
+                    // Animated spinner arc — 90° sweep rotating once
+                    // per 1.2 s. Uses the system clock so the
+                    // animation stays smooth across multiple
+                    // queue_draw cycles from the periodic tick the
+                    // window.rs poll loop drives below.
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs_f64())
+                        .unwrap_or(0.0);
+                    let phase = (now % 1.2) / 1.2;
+                    let sweep_start = phase * std::f64::consts::TAU;
+                    let sweep_end = sweep_start + std::f64::consts::FRAC_PI_2 * 3.0;
+                    let cx = px + inner_pad_x + spinner_r;
+                    let cy = py + pill_h * 0.5;
                     cr.set_source_rgba(0.2, 0.8, 1.0, 0.95);
-                    cr.move_to(px + 12.0, py + 6.0 + ext.height());
-                    let _ = cr.show_text(note);
+                    cr.set_line_width(2.0);
+                    cr.arc(cx, cy, spinner_r, sweep_start, sweep_end);
+                    let _ = cr.stroke();
+                    cr.move_to(
+                        cx + spinner_r + spinner_gap,
+                        py + inner_pad_y + ext.height(),
+                    );
+                    let _ = cr.show_text(&note);
+                    cr.restore().ok();
                 }
 
                 // ── Draw-tool HUD: show current brush state ─────
@@ -503,17 +545,11 @@ impl TransformOverlay {
                         Some(_) => " +fill",
                         None => "",
                     };
-                    // Signal a background WebM bake in flight so the
-                    // user knows the static PNG they're seeing isn't
-                    // the final state.
-                    let baking_text =
-                        if crate::media::drawing_render::drawing_encode_is_pending() {
-                            "   • baking animation…"
-                        } else {
-                            ""
-                        };
+                    // The bake-in-flight indicator is rendered as the
+                    // separate top-right spinner pill above, so the
+                    // Draw HUD stays focused on brush state.
                     let label = format!(
-                        "Draw [{kind_label}]  •  #{:06X}  •  {w:.0}px{fill_text}{baking_text}   (1/2/3/4 pick shape · click to select · Del removes)",
+                        "Draw [{kind_label}]  •  #{:06X}  •  {w:.0}px{fill_text}   (1/2/3/4 pick shape · click to select · Del removes)",
                         color >> 8
                     );
                     // Dark pill in the canvas top-left.
@@ -1876,6 +1912,18 @@ impl TransformOverlay {
                         da_redraw_key.queue_draw();
                         return glib::Propagation::Stop;
                     }
+                    // Escape clears a drawing-item selection without
+                    // deleting anything — matches the conventional
+                    // "cancel current selection" affordance and keeps
+                    // the cyan highlight out of the user's way when
+                    // they want to keep drawing. Returns Stop only
+                    // when there was actually a selection to clear so
+                    // other Escape paths (SAM prompt, etc.) still run.
+                    if key == Key::Escape && selected_item_key.get().is_some() {
+                        selected_item_key.set(None);
+                        da_redraw_key.queue_draw();
+                        return glib::Propagation::Stop;
+                    }
                 }
 
                 // Escape cancels SAM prompt mode regardless of clip
@@ -2063,6 +2111,13 @@ impl TransformOverlay {
             None
         };
         self.drawing_area.set_cursor_from_name(cursor_name);
+        // A per-item drawing selection is a Draw-mode concept. Leaving
+        // the cyan highlight painted after the user leaves Draw would be
+        // visually confusing and bypass the "click to select, Delete to
+        // remove" contract. Drop it whenever we exit Draw mode.
+        if tool != crate::ui::timeline::ActiveTool::Draw {
+            self.selected_drawing_item.set(None);
+        }
         self.drawing_area.queue_draw();
     }
 
@@ -2935,4 +2990,120 @@ fn draw_mask_outline(
     }
 
     cr.restore().ok();
+}
+
+#[cfg(test)]
+mod hit_test_tests {
+    use super::{drawing_item_hit, point_to_segment_distance};
+    use crate::model::clip::{DrawingItem, DrawingKind};
+
+    // 1000×1000 canvas rect at origin so normalized points map 1:1 to pixels.
+    // vh = 1000 keeps scale_ref ≈ 0.926 inside drawing_item_hit, which means
+    // the stroke tolerance floor of `max(width*scale_ref, 4.0) * 1.8 ≈ 7.2 px`
+    // applies for tests using `width: 2.0`.
+    const VX: f64 = 0.0;
+    const VY: f64 = 0.0;
+    const VW: f64 = 1000.0;
+    const VH: f64 = 1000.0;
+
+    fn stroke_item(points: &[(f64, f64)]) -> DrawingItem {
+        DrawingItem {
+            kind: DrawingKind::Stroke,
+            points: points.to_vec(),
+            color: 0xFFFFFFFF,
+            width: 2.0,
+            fill_color: None,
+        }
+    }
+
+    #[test]
+    fn drawing_item_hit_stroke_near_midsegment_is_hit() {
+        let item = stroke_item(&[(0.10, 0.10), (0.90, 0.10)]);
+        // Click on the horizontal line at x=500, y=100 (dead center on the
+        // segment).
+        assert!(drawing_item_hit(&item, 500.0, 100.0, VX, VY, VW, VH));
+    }
+
+    #[test]
+    fn drawing_item_hit_stroke_far_from_segment_is_miss() {
+        let item = stroke_item(&[(0.10, 0.10), (0.90, 0.10)]);
+        // Same x as the stroke but 200 px below — well past any reasonable
+        // tolerance.
+        assert!(!drawing_item_hit(&item, 500.0, 300.0, VX, VY, VW, VH));
+    }
+
+    #[test]
+    fn drawing_item_hit_rectangle_filled_interior_is_hit_and_exterior_is_miss() {
+        let item = DrawingItem {
+            kind: DrawingKind::Rectangle,
+            points: vec![(0.20, 0.20), (0.80, 0.80)],
+            color: 0xFFFFFFFF,
+            width: 2.0,
+            fill_color: Some(0x80808080),
+        };
+        // Center of the rectangle → hit.
+        assert!(drawing_item_hit(&item, 500.0, 500.0, VX, VY, VW, VH));
+        // Well outside the bbox → miss.
+        assert!(!drawing_item_hit(&item, 50.0, 50.0, VX, VY, VW, VH));
+    }
+
+    #[test]
+    fn drawing_item_hit_rectangle_stroke_hollow_center_is_miss_edge_is_hit() {
+        let item = DrawingItem {
+            kind: DrawingKind::Rectangle,
+            points: vec![(0.20, 0.20), (0.80, 0.80)],
+            color: 0xFFFFFFFF,
+            width: 2.0,
+            fill_color: None,
+        };
+        // Interior (hollow rectangle) → miss.
+        assert!(!drawing_item_hit(&item, 500.0, 500.0, VX, VY, VW, VH));
+        // Right on the top edge → hit.
+        assert!(drawing_item_hit(&item, 500.0, 200.0, VX, VY, VW, VH));
+    }
+
+    #[test]
+    fn drawing_item_hit_ellipse_center_is_hit_far_outside_is_miss() {
+        let item = DrawingItem {
+            kind: DrawingKind::Ellipse,
+            points: vec![(0.30, 0.30), (0.70, 0.70)],
+            color: 0xFFFFFFFF,
+            width: 2.0,
+            fill_color: Some(0x40404040),
+        };
+        // Ellipse centered at (500, 500) with rx = ry = 200.
+        assert!(drawing_item_hit(&item, 500.0, 500.0, VX, VY, VW, VH));
+        // 800 px from center, way outside.
+        assert!(!drawing_item_hit(&item, 50.0, 50.0, VX, VY, VW, VH));
+    }
+
+    #[test]
+    fn drawing_item_hit_arrow_on_shaft_is_hit_far_off_is_miss() {
+        let item = DrawingItem {
+            kind: DrawingKind::Arrow,
+            points: vec![(0.10, 0.50), (0.90, 0.50)],
+            color: 0xFFFFFFFF,
+            width: 2.0,
+            fill_color: None,
+        };
+        // Midpoint of the shaft → hit.
+        assert!(drawing_item_hit(&item, 500.0, 500.0, VX, VY, VW, VH));
+        // Far perpendicular off the shaft → miss.
+        assert!(!drawing_item_hit(&item, 500.0, 800.0, VX, VY, VW, VH));
+    }
+
+    #[test]
+    fn point_to_segment_distance_clamps_outside_segment() {
+        // Segment along the x axis from (0, 0) to (100, 0).
+        // Query point to the left of the segment (−10, 0): distance should
+        // be 10 (endpoint distance), not 0 (unclamped perpendicular would
+        // project onto the line at x = −10 with perpendicular distance 0).
+        let d = point_to_segment_distance(-10.0, 0.0, 0.0, 0.0, 100.0, 0.0);
+        assert!((d - 10.0).abs() < 1e-6, "left-of-segment endpoint clamp: {d}");
+
+        // Query point to the right of the segment (150, 0): clamped to the
+        // (100, 0) endpoint, distance 50.
+        let d = point_to_segment_distance(150.0, 0.0, 0.0, 0.0, 100.0, 0.0);
+        assert!((d - 50.0).abs() < 1e-6, "right-of-segment endpoint clamp: {d}");
+    }
 }

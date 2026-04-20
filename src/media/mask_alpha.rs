@@ -1367,7 +1367,7 @@ fn build_ellipse_geq_expr_for_coords(
     let hh_safe = hh.max(0.1);
 
     let r_expr = format!(
-        "sqrt({ux}*{ux}/({hw_safe:.10}*{hw_safe:.10})+{uy}*{uy}/({hh_safe:.10}*{hh_safe:.10}))"
+        "sqrt(({ux})*({ux})/({hw_safe:.10}*{hw_safe:.10})+({uy})*({uy})/({hh_safe:.10}*{hh_safe:.10}))"
     );
 
     if feather < 0.5 {
@@ -1532,6 +1532,147 @@ mod tests {
             expr.contains("lte"),
             "should use lte for hard-edge ellipse: {expr}"
         );
+    }
+
+    #[test]
+    fn ffmpeg_ellipse_geq_precedence_center_inside() {
+        // Verifies that the GEQ expression correctly squares ux/uy
+        // (regression test for operator-precedence bug where ux*ux
+        // was parsed as ux + last_term_of_ux * first_term_of_next_ux).
+        let mut mask = default_ellipse_mask();
+        mask.width = 0.09;
+        mask.height = 0.22;
+        // Build for a scaled clip — exercises the full coordinate mapping.
+        let expr = build_mask_ffmpeg_geq_alpha(&mask, 1920, 1080, 2.0, 0.0, 0.0, "T");
+        // The ellipse geq must produce 1 at the center and 0 far outside.
+        // Centre pixel (960, 540):
+        let center = eval_geq_lte(&expr, 960.0, 540.0);
+        assert!(
+            center > 0.99,
+            "center should be inside the ellipse, got {center}"
+        );
+        // Far corner (0, 0):
+        let corner = eval_geq_lte(&expr, 0.0, 0.0);
+        assert!(
+            corner < 0.01,
+            "far corner should be outside the ellipse, got {corner}"
+        );
+        // A point just inside the horizontal edge:
+        let inside_h = eval_geq_lte(&expr, 960.0 + 300.0, 540.0);
+        assert!(
+            inside_h > 0.99,
+            "point inside horizontal extent should be opaque, got {inside_h}"
+        );
+        // A point well outside the horizontal edge:
+        let outside_h = eval_geq_lte(&expr, 960.0 + 400.0, 540.0);
+        assert!(
+            outside_h < 0.01,
+            "point outside horizontal extent should be transparent, got {outside_h}"
+        );
+    }
+
+    /// Minimal evaluator for `lte(sqrt((...)*(...)/(...)+(...)*(...)/(...)),1)`
+    /// style expressions produced by `build_ellipse_geq_expr_for_coords`.
+    /// Replaces X and Y literals and evaluates using basic arithmetic.
+    fn eval_geq_lte(expr: &str, x: f64, y: f64) -> f64 {
+        // The expression is `lte(<sqrt_expr>, 1)` — extract the inner sqrt arg.
+        let inner = expr
+            .strip_prefix("lte(sqrt(")
+            .and_then(|s| s.strip_suffix("),1)"))
+            .expect("expected lte(sqrt(...),1) form");
+        let val = eval_simple_expr(inner, x, y);
+        if val.sqrt() <= 1.0 {
+            1.0
+        } else {
+            0.0
+        }
+    }
+
+    /// Evaluate a simple arithmetic expression with X and Y substituted.
+    /// Supports +, -, *, / and nested parentheses.
+    fn eval_simple_expr(expr: &str, x: f64, y: f64) -> f64 {
+        let chars: Vec<char> = expr.chars().collect();
+        let mut pos = 0;
+        parse_additive(&chars, &mut pos, x, y)
+    }
+
+    fn parse_additive(chars: &[char], pos: &mut usize, x: f64, y: f64) -> f64 {
+        let mut result = parse_multiplicative(chars, pos, x, y);
+        while *pos < chars.len() {
+            if chars[*pos] == '+' {
+                *pos += 1;
+                result += parse_multiplicative(chars, pos, x, y);
+            } else if chars[*pos] == '-' && (*pos + 1 < chars.len()) && chars[*pos + 1] != '(' {
+                // Careful: '-' could be unary or subtraction
+                let saved = *pos;
+                *pos += 1;
+                let next = parse_multiplicative(chars, pos, x, y);
+                result -= next;
+                let _ = saved;
+            } else {
+                break;
+            }
+        }
+        result
+    }
+
+    fn parse_multiplicative(chars: &[char], pos: &mut usize, x: f64, y: f64) -> f64 {
+        let mut result = parse_unary(chars, pos, x, y);
+        while *pos < chars.len() {
+            if chars[*pos] == '*' {
+                *pos += 1;
+                result *= parse_unary(chars, pos, x, y);
+            } else if chars[*pos] == '/' {
+                *pos += 1;
+                result /= parse_unary(chars, pos, x, y);
+            } else {
+                break;
+            }
+        }
+        result
+    }
+
+    fn parse_unary(chars: &[char], pos: &mut usize, x: f64, y: f64) -> f64 {
+        if *pos < chars.len() && chars[*pos] == '-' {
+            *pos += 1;
+            -parse_primary(chars, pos, x, y)
+        } else {
+            parse_primary(chars, pos, x, y)
+        }
+    }
+
+    fn parse_primary(chars: &[char], pos: &mut usize, x: f64, y: f64) -> f64 {
+        if *pos < chars.len() && chars[*pos] == '(' {
+            *pos += 1; // skip '('
+            let result = parse_additive(chars, pos, x, y);
+            if *pos < chars.len() && chars[*pos] == ')' {
+                *pos += 1;
+            }
+            return result;
+        }
+        if *pos < chars.len() && chars[*pos] == 'X' {
+            *pos += 1;
+            return x;
+        }
+        if *pos < chars.len() && chars[*pos] == 'Y' {
+            *pos += 1;
+            return y;
+        }
+        // Parse a number
+        let start = *pos;
+        while *pos < chars.len()
+            && (chars[*pos].is_ascii_digit()
+                || chars[*pos] == '.'
+                || chars[*pos] == 'e'
+                || chars[*pos] == 'E'
+                || (chars[*pos] == '-'
+                    && *pos > start
+                    && (chars[*pos - 1] == 'e' || chars[*pos - 1] == 'E')))
+        {
+            *pos += 1;
+        }
+        let num_str: String = chars[start..*pos].iter().collect();
+        num_str.parse::<f64>().unwrap_or(0.0)
     }
 
     // ── Path SDF tests ──────────────────────────────────────────────

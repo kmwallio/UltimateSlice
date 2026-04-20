@@ -14,8 +14,8 @@
 | `Ctrl+,` | Open Preferences |
 | `Shift+P` | Toggle proxy playback on/off (switches the bottom status bar between `Original Media` and `Using Proxies`, and restores the last non-Off proxy size) |
 | `Ctrl+J` | Go to timecode (jump playhead) |
-| `Ctrl+Z` | Undo |
-| `Ctrl+Y` / `Ctrl+Shift+Z` | Redo |
+| `Ctrl+Z` | Undo — shows a brief `Undid: …` toast when an action is available |
+| `Ctrl+Y` / `Ctrl+Shift+Z` | Redo — shows a brief `Redid: …` toast when an action is available |
 
 ---
 
@@ -52,6 +52,9 @@ The same **I / O** Source Monitor marks are also used by the keyword-range contr
 | `Y` | Toggle Slip edit tool |
 | `U` | Toggle Slide edit tool |
 | `D` | Toggle Draw tool |
+| `S` | Toggle solo for selected track |
+| `M` | Toggle mute for selected track |
+| `Shift+L` | Toggle lock for selected track |
 | `F` | Match Frame — load selected clip's source in Source Monitor at matching timecode |
 | `Shift+F` | Create freeze-frame clip from selected video clip at playhead |
 | `Ctrl+Shift+B` | Join selected through-edit boundary into one clip |
@@ -67,6 +70,7 @@ The same **I / O** Source Monitor marks are also used by the keyword-range contr
 | `Ctrl+Shift+V` | Paste copied clip attributes onto selected clip |
 | `Ctrl+Alt+C` | Copy color grade from selected clip |
 | `Ctrl+Alt+V` | Paste color grade onto selected clip |
+| `Ctrl+Alt+Shift+V` | Paste color grade onto every selected clip (single undo) |
 | `Ctrl+Alt+M` | Match selected clip's color to a reference clip |
 | `Ctrl+G` | Group selected clips |
 | `Ctrl+Shift+G` | Ungroup selected clips |
@@ -87,6 +91,12 @@ The same **I / O** Source Monitor marks are also used by the keyword-range contr
 | `Right-click transition marker` | Remove transition at clip boundary |
 | `Scroll (vertical)` | Zoom timeline in/out |
 | `Scroll (horizontal)` | Pan timeline left/right |
+| Click (mini-map) | Centre viewport on clicked position |
+| Drag (mini-map) | Pan viewport continuously |
+| `Ctrl`/`Cmd` + Click (mini-map) | Seek playhead to clicked position |
+| Double-click (mini-map) | Zoom timeline to fit entire project |
+| `Shift+M` | Toggle timeline mini-map |
+| `Shift+H` | Toggle Program Monitor HUD overlay (timecode / frame / fps / resolution / dropped) |
 | `?` / `/` | Show keyboard shortcut reference |
 
 Right-click an audio track header and choose **Generate Music Region…** to arm the one-shot MusicGen draw gesture; `Escape` cancels it before you drag.

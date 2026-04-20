@@ -60,6 +60,7 @@ Tracking docs:
 - [x] Strict source preview behavior when proxy mode is Off (always load original media; no proxy requests)
 - [x] Adaptive VA-API source decode mode (hardware-first when available and enabled) with automatic software fallback on hardware-path errors
 - [x] Source monitor playback-priority mode (Smooth/Balanced/Accurate) with frame-boundary seek deduplication for paused scrubbing
+- [x] Compact Source Monitor footer: transport split into two rows, Source-Record routing moved into a **Routing…** popover, and keyword editing collapsed behind a **Keywords** expander for better small-display usability
 
 ### Timeline
 - [x] Cairo-rendered `DrawingArea` with ruler (adaptive multi-tier tick/label density while zooming)
@@ -82,6 +83,7 @@ Tracking docs:
 - [x] **Image clips** — still images (PNG, JPEG, etc.) placed as `ClipKind::Image` with 4 s default, unlimited trim-out, `imagefreeze` playback, and `tpad`-based export
 - [x] **Convert LTC audio to source timecode** — right-click a source-backed audio/video clip and choose **Convert LTC Audio to Timecode…** to decode Linear Timecode from the selected audio side, store it in `source_timecode_base_ns`, and reuse the existing grouped timecode alignment path
 - [x] **Automatic LTC audio cleanup** — when LTC lives on one stereo side, the opposite program-audio side is routed to both speakers via clip `AudioChannelMode`; mono LTC-only clips are muted after conversion, and new placements from the same source inherit the preferred program-audio routing in the current project
+- [x] **Fixed ruler header + clean vertical timeline scrolling** — the ruler stays visible in its own header while vertically scrolling tracks, and the track scroller no longer introduces empty black spacer bands above or below the visible track rows
 - [x] **Still-image transform overlay alignment** — Program Monitor now uses the selected still-image clip's own preview inset for transform handles, so PNG/JPEG/WebP/SVG overlays stay aligned even when the base video under them has a different aspect ratio
 - [x] **Empty-timeline Program Monitor canvas persists through Project Settings changes** — the Program Monitor now keeps a visible blank preview surface inside its AspectFrame even when the timeline is empty and the video layers are intentionally hidden to avoid stale frames, so changing project resolution/aspect on a new project still shows the canvas ratio box
 - [x] **Tracked overlay movement parity** — Program Monitor, transform-overlay sync, background prerender, and export now use direct canvas translation for titles, adjustment layers, and tracker-followed clips so `Position X/Y` keeps moving at `Scale = 1.0` and near frame edges, while normal still-image clips stay on the existing safe preview path, pin to their source-in frame during playback/transform reseeks, and refresh via a non-blocking compositor flush during transform drags (no per-decoder reseek, so the imagefreeze-parked PNG buffer stays visible while editing). Selecting a still while paused also pushes its own preview inset to the transform overlay and triggers a paused-frame refresh so the Program Monitor immediately shows the selected PNG with correctly aligned handles.
@@ -270,11 +272,11 @@ Tracking docs:
 - [x] Right-click clip context menu now shows only currently actionable clip operations (hides unavailable actions)
 - [x] Select clips forward/backward from playhead for bulk operations
 - [x] Clip display options / adjustable per-track height, clip color labels
-- [ ] Source-Record Track Patching (UI to control source channel to timeline track mapping)
+- [x] Source-Record Track Patching (compact Source Monitor **Patch V / A** selectors with Auto / Off / explicit track routing, stable track-ID targeting across reorders, explicit A/V split placement, and stale-selection fallback to Auto)
 - [ ] Dynamic Trim Mode / Precision Editor (Interface for side-by-side fine-tuning of cuts)
 
 ### Motion Tracking Improvements
-- [ ] **Multi-scale (Gaussian pyramid) search** in `src/media/tracking.rs`. Build a 2- or 3-level pyramid (full resolution + half + quarter), run the NCC matcher at the coarsest level with a generously wide search radius (catches large whip-pan motion cheaply), then refine at each finer level with a small local radius. This complements the existing motion-prediction + jump-cap path: prediction handles constant-velocity motion, the pyramid handles sudden direction changes that exceed the single-level search radius. Expected win: eliminate the "tracker falls behind during a hand whip and never recovers" failure mode that prompted the second-pass overhaul, without widening the normal search radius (which would quadruple per-frame compute). Cost: ~2× memory for the extra pyramid levels, ~1.3× compute for the cascaded refine. Touches `FrameSequence` (needs to hold multiple levels), `extract_template` (needs a template per level), and `find_best_match` (coarse-to-fine loop). Leave CACHE_VERSION bumping until this lands so we don't churn cached tracking data twice.
+- [x] **Multi-scale (Gaussian pyramid) search** in `src/media/tracking.rs`. The tracker now builds full/half/quarter-resolution levels, searches widely at the coarsest level, and refines locally at finer levels. This complements the existing motion-prediction + jump-cap path so sudden direction changes can recover without widening the normal full-resolution search radius.
 
 ### Speed Ramps (per clip)
 - [x] Constant speed change per clip (e.g. 0.5× slow-mo, 2× fast-forward) via GStreamer rate seek + ffmpeg `setpts`/`atempo` on export
@@ -465,11 +467,12 @@ Tracking docs:
   - [ ] Working colorspace preference (scene-linear, ACEScg, Rec.709 — controls internal processing space)
 - [ ] HDR workflow via libplacebo
   - [ ] libplacebo Vulkan integration for GPU-accelerated video rendering in Program Monitor
-  - [ ] HDR tone mapping (PQ/HLG → SDR) using libplacebo algorithms (hable, bt2446a, st2094-40) for accurate SDR preview of HDR sources
+  - [x] HDR source detection and timeline badge (PQ/HLG colorimetry probed on import, orange "HDR" badge on timeline clips, persisted via library metadata)
+  - [x] HDR tone mapping (PQ/HLG → SDR) — GStreamer `videoconvert` with `primaries-mode=merge-only` per-slot for preview; FFmpeg `zscale`+`tonemap=hable` for export
   - [ ] Inverse tone mapping (SDR → HDR) for HDR display output and export
   - [ ] High-quality upscaling/downscaling (libplacebo polar/orthogonal scalers as alternative to GStreamer `videoscale`)
-  - [ ] HDR export metadata (PQ/HLG transfer characteristics, mastering display color volume, MaxCLL/MaxFALL)
-  - [ ] HDR passthrough mode for native HDR display output
+  - [x] HDR export metadata — `hdr_passthrough` option in ExportOptions/ExportPreset preserves PQ/HLG transfer characteristics with 10-bit output and BT.2020 color tags (H.265 x265-params, VP9, AV1)
+  - [x] HDR passthrough mode — `hdr_preview_passthrough` preference skips tone mapping in Program Monitor for native HDR display output; GPU `glcolorconvert` tried before CPU fallback
 - [x] Frei0r video effects plugin support
   - [x] Load and enumerate installed Frei0r plugins via GStreamer `frei0r` element (auto-discover from standard paths)
   - [x] Effects browser UI listing available Frei0r filters with categories and search
@@ -560,14 +563,14 @@ Tracking docs:
 - [x] False color overlay — map luminance to color spectrum for exposure evaluation
 - [x] Zebra stripes — diagonal lines on areas exceeding configurable IRE threshold
 - [x] Focus peaking — highlight in-focus edges with colored overlay
-- [ ] Timecode Burn-In Effect (Display timeline or source timecode on screen)
+- [x] Timecode Burn-In Effect — Project-level toggle + position (6 corners) in the Program Monitor **Overlays ▾** popover; monitor draws a monospace timecode pill that ticks with the playhead; exports bake the same timecode via ffmpeg `drawtext=timecode=...:rate=<project_rate>` chained after the subtitle post-composite pass; round-trips through FCPXML as `us:timecode-burnin-enabled` / `us:timecode-burnin-position` on `<sequence>`; MCP tool `set_program_monitor_timecode_burnin`
 
 ### Project Management
 - [x] Project save / load as FCPXML (wired to New/Open/Save buttons in toolbar)
 - [x] Recent projects list
-- [x] Auto-save (60s timer, writes to /tmp/ultimateslice-autosave.fcpxml when project is dirty)
+- [x] Auto-save (60s timer, persistent per-project `.uspxml.autosave` files in XDG data dir with JSON metadata sidecars; replaces old single `/tmp/` file)
 - [x] Proxy media generation and management
-- [ ] Proxy Status Badges on timeline clips indicating Original vs. Proxy resolution
+- [x] Proxy Status Badges on timeline clips indicating Original vs. Proxy resolution — a soft-blue **PROXY** badge shows on the timeline clip body when (a) the global proxy toggle is on and (b) at least one ready proxy exists for that clip's source; sits in the same badge row as HDR / OFFLINE / LINK / CC. Drawn from a `timeline_state.proxy_ready_sources` mirror refreshed on the 500 ms poll tick. New `ProxyCache::ready_source_paths` helper recovers source paths from composite keys.
 - [ ] Proxy Watermarks (optional visual burn-in for proxy files)
 - [x] Auto-backup with versioned history (timestamped backups to `$XDG_DATA_HOME/ultimateslice/backups/`, per-project pruning, restore UI, configurable in Preferences, MCP `list_backups` tool)
 
@@ -604,13 +607,33 @@ FCPXML persistence).
   cascade + alpha expression in export
 - [x] FCPXML round-trip for `ClipKind::Drawing`; auto-migration of
   stamped `.svg` Image clips on project load
-- [ ] **Hit-test shape selection.** Click an existing stroke / shape
-  in the monitor to highlight it; per-item Delete replaces the
-  current LIFO behaviour. Data already supports it via
-  `SetDrawingItemsCommand`.
-- [ ] **Background-encode progress feedback.** Show a spinner (or
-  HUD text) while the first MOV bake is in flight so users know
-  the static PNG they see isn't the final state.
+- [x] **Hit-test shape selection.** In Draw mode the Program Monitor
+  detects press-release clicks without measurable motion and runs
+  `drawing_item_hit` (Stroke via point-to-segment distance, Rectangle
+  filled-or-stroke, Ellipse SDF, Arrow as a capped line segment) in
+  reverse iteration order so the top-most hit wins. The matched item
+  is highlighted with a cyan dashed bounding box. Pressing
+  **Delete / Backspace** in Draw mode routes `selected_drawing_item`
+  through `on_drawing_delete_at(Some(idx))`, which removes that
+  specific item via `SetDrawingItemsCommand`; with no selection the
+  existing LIFO "pop most recent" fallback still applies. **Escape**
+  clears the selection without deleting, switching away from the
+  Draw tool also clears it, and the backing list setter guards
+  against a stale out-of-range index. Unit tests cover all four
+  `DrawingKind` variants plus endpoint clamping in
+  `point_to_segment_distance`.
+- [x] **Background-encode progress feedback.** Program Monitor
+  transform overlay now renders a top-right "Baking drawing
+  animation…" pill with a rotating spinner arc while at least one
+  MOV encode is in flight, driven by a 120 ms `queue_draw` tick
+  on the overlay DrawingArea that only fires work when
+  `drawing_encode_pending_count() > 0`. Multiple concurrent
+  bakes show a "Baking N drawing animations…" counter.
+  Background Jobs tray ("Drawing animation bake — N drawing
+  animations encoding…") mirrors the state alongside the other
+  background caches. The pill stays visible in *all* tools
+  (including Draw mode) so users always see the signal that the
+  static PNG isn't the final render.
 - [x] **Cache janitor.** Age-based sweep
   (`crate::media::drawing_render::sweep_drawing_cache`) runs at
   startup and removes cached `ultimate-slice-drawing-*.{png,mov,webm}`
@@ -694,41 +717,41 @@ FCPXML persistence).
 ### UI Polish & Quality of Life
 
 **Discoverability & first-run experience**
-- [ ] Welcome screen polish — hero thumbnail strip from the most recent project, a "What's New in this version" expandable card, and a "Sample project" button that loads a bundled demo `.uspxml` so a fresh install has something to click into
-- [ ] Empty-state guidance in every panel — timeline shows a drop-zone hint when empty ("Drag media here or press ⌘O to import"); media browser surfaces the import button at center; inspector shows a keyboard hint to select a clip
-- [ ] In-app onboarding tour — first-launch coachmark sequence pointing to the five core regions (browser, source monitor, timeline, program monitor, inspector) with skip/replay from Help menu; persist `seen_onboarding_v1` in preferences
-- [ ] Tooltips audit — one-pass review using `set_tooltip_text` on every icon-only button across `inspector.rs` and `toolbar.rs`
+- [ ] Welcome screen polish — the first UI pass now highlights the most recent project and adds a collapsed "What's New in this version" card, but the bundled sample-project button is still deferred.
+- [x] Empty-state guidance in every panel — timeline now shows a clear empty-project drop target, the Media Library centers its import action when empty, and the Inspector gives a stronger no-selection hint tied to real timeline selection actions instead of leaving blank space.
+- [x] In-app onboarding tour — first launch now offers a coachmark sequence for the five core editor regions (browser, source monitor, timeline, program monitor, inspector), with **Skip** / **Finish** persistence via `seen_onboarding_v1` and a **Help → Replay Tour** entry for later replays.
+- [x] Tooltips audit — added and normalized tooltip coverage for low-context controls across `inspector.rs` and `toolbar.rs`, including glyph-style effect reorder/remove buttons, subtitle style toggles, color/swatch pickers, and secondary snapshot/export-preset actions so compact controls no longer rely on guesswork.
 
 **Notifications & feedback**
-- [ ] Toast/notification system (libadwaita-style `AdwToastOverlay` equivalent or custom GTK4) for non-modal feedback: "Project saved", "Export complete", "Proxy generation finished", "SAM mask ready"
-- [ ] Background job tray — single dropdown in the header bar showing all active background jobs (proxy transcode, thumbnail extraction, STT, SAM, MusicGen, RIFE, motion tracking, export queue) with per-job progress and cancel
-- [ ] Undo toast with action label — after Ctrl+Z show "Undid: trim clip" briefly, reusing the existing `EditCommand::description()` strings
+- [x] Toast/notification system (custom GTK4 overlay) for non-modal feedback. Transient messages now appear as in-app toasts with info/success/warning/error styling, keeping the window title focused on project name + dirty state. Proxy generation, motion tracking, subtitle generation, and MusicGen completion/failure now surface through the toast layer while the bottom status bar continues to show continuous progress.
+- [x] Background job tray — the footer now includes a **Jobs** dropdown immediately to the left of **Workspace**, surfacing active proxy generation, background prerender, AI frame interpolation (RIFE), background removal, speech-to-text, MusicGen, motion tracking, export-queue runs, and other long-running analysis tasks in one place. Rows show live progress where the backend already exposes it, and the tray enables **Cancel** only for jobs that have real cancellation support today (currently motion tracking), while the bottom status bar continues to mirror continuous progress.
+- [x] Undo toast with action label — undo and redo now show a brief in-app toast such as **"Undid: trim clip out-point"** or **"Redid: move clip"**, reusing the shared `EditCommand::description()` strings from the edit history and staying silent when history is empty.
 
 **Timeline polish**
-- [ ] Hover Scrubbing (Scrubbable Tooltips) in the Media Library and timeline
+- [x] Hover Scrubbing (Scrubbable Tooltips) in the Media Library and timeline — Media Library cards now scrub in place: moving the cursor horizontally across a thumbnail maps the x fraction to a source-time offset (quantized to ~100 ms buckets via the new `quantize_hover_scrub_time_ns` helper) and repaints the cached frame via the existing `ThumbnailCache`. Audio-only and still-image cards skip the motion controller. Timeline hover-scrub paints a 200×128 floating preview panel with the frame at the hovered timeline position and a source-timecode label — anchored near the cursor, clamped to widget bounds, reusing the same `ThumbnailCache`. Suppressed during any active drag, on mouse leave, and outside the content area (ruler / track label / empty track space). Applies to `ClipKind::Video` / `Image` / `Compound` bodies; skips Title / Adjustment / Audio / Drawing clips.
 - [ ] Two-Up / Four-Up Trim Displays in the Program Monitor for precision edits (Slip/Slide/Roll)
 - [ ] Kinetic Scrolling & Playhead Elasticity
 - [x] Snap indicator visual — when snapping to a clip edge, marker, playhead, or sequence start, draw a dashed vertical guideline + small badge ("clip start" / "clip end" / "marker" / "playhead" / "start") at the snap point; snap targets now include the playhead, timeline markers, and time 0 in addition to other clip edges
-- [ ] Drag preview ghosting — translucent ghost of the clip at the drop target with the new in/out timecode floating above it during move/trim
-- [ ] Mini-map / timeline overview strip — thin strip above the ruler showing the whole project at a glance with a viewport rectangle for the visible region
-- [ ] Track header redesign — per-track color swatch, clearer Solo/Mute/Lock button states, drag handle for reorder, double-click to rename inline
-- [ ] Marker list panel — a sortable list of timeline markers with name, time, color, and notes; double-click to seek
-- [ ] Configurable timeline row heights — preset (Compact / Normal / Tall) plus drag-to-resize per track (uses existing `height_preset` field)
+- [x] Drag preview ghosting — move/trim drags now show translucent ghost overlays at the live drop result, with a floating in/out timecode badge on the primary dragged clip
+- [x] Mini-map / timeline overview strip — thin strip above the ruler showing the whole project at a glance with a viewport rectangle for the visible region
+- [x] Track header redesign — per-track color swatch, clearer Solo/Mute/Lock button states, drag handle for reorder, double-click to rename inline
+- [x] Marker list panel — a sortable list of timeline markers with name, time, color, and notes; double-click to seek
+- [x] Configurable timeline row heights — per-track **Small / Medium / Large** presets plus direct drag-to-resize on the track-header bottom edge (uses existing `height_preset` field)
 - [ ] Color-tag legend — a small persistent legend showing what each clip color means in this project, editable
 - [x] Auto-scroll timeline to keep playhead in view during playback — when the playhead reaches the right edge of the visible region, smoothly page (or continuously scroll) the timeline so the playhead stays visible; preference toggle for Page / Smooth / Off, and suspend auto-scroll while the user is actively dragging/scrolling the timeline
 
 **Inspector polish**
-- [ ] Collapsible sections with persisted state — each section (Color, Audio, Video, Transform, Effects, Masks, Subtitles) is a collapsible expander whose open/closed state is remembered per-session
-- [ ] Search field at the top of the inspector — type "denoise" and only the relevant slider is shown
-- [ ] Reset-to-default badge on every slider — small circular reset button that appears only when a value differs from the default; click to reset that property with undo
-- [ ] Right-click → "Copy/Paste this property" on any slider/control, with a "Paste to all selected clips" variant (currently only color grading has copy/paste)
-- [ ] Numeric-entry on every slider — inline `SpinButton` or click-to-edit so users can type exact values
+- [x] Collapsible sections with persisted state — each section (Color, Audio, Video, Transform, Effects, Masks, Subtitles) is a collapsible expander whose open/closed state is remembered per-session
+- [x] Search field at the top of the inspector — type "denoise" and only the relevant slider is shown
+- [x] Reset-to-default badge on every slider — small circular reset button that appears only when a value differs from the default; click to reset that property with undo
+- [x] Right-click → "Copy/Paste this property" on any slider/control: right-click menu with **Copy**, **Paste**, and **Paste to all selected** covers every scalar slider (Color/Detail/Transform/Audio/Speed/Keying/Motion-Blur) plus non-scalar bundle controls (Flip H/V toggles, Blend Mode dropdown, LUT stack, Frei0r chain, LADSPA chain, EQ bands, Chroma Key bundle, BG Removal bundle). `Ctrl+Alt+Shift+V` pastes the existing color-grade clipboard to every selected clip. Keyframe-lane copying is still deferred (static values only).
+- [x] Numeric-entry on every slider — compact `SpinButton` sharing the slider's `Adjustment` so typed values and slider drags stay in sync
 
 **Program Monitor polish**
-- [ ] HUD overlay — togglable overlay showing timecode, frame number, fps, resolution, and dropped-frame count (reuse `src/ui/timecode.rs`)
-- [ ] A/B compare / split-view — vertical wipe between graded and ungraded versions of the current frame, draggable midline
-- [ ] Reference still pin — capture the current frame as a pinned thumbnail strip (up to 4 stills) for color-matching across scenes
-- [ ] Cinemascope / aspect-ratio mask overlay — togglable letterbox preview at 2.39:1, 2.00:1, 1.85:1, 1:1, 9:16, 4:5 etc. for delivery-format previewing
+- [x] HUD overlay — togglable overlay showing timecode, frame number, fps, resolution, and dropped-frame count (reuse `src/ui/timecode.rs`); shortcut **Shift+H**; persists via `ProgramMonitorState.show_hud`; MCP `set_program_monitor_hud`
+- [x] A/B compare / split-view — Program Monitor **Overlays ▾** now contains a **Reference stills** section with an **A/B compare** toggle that draws a vertical wipe between the live Program Monitor frame and the active pinned still, with a draggable midline (diamond handle, ±10 px drag zone). Enable state + midline position persist via `ProgramMonitorState.ab_compare_enabled` / `ab_midline_percent`. MCP `set_program_monitor_ab_compare`. Live-pipeline grading-bypass capture for explicit graded-vs-ungraded comparisons is deferred — users can reset Inspector sliders temporarily to capture an ungraded reference.
+- [x] Reference still pin — **📷 Capture current frame** button writes a PNG under `$XDG_CACHE_HOME/ultimateslice/reference_stills/<id>.png`, appends metadata to `Project.reference_stills` (cap 4), and populates the strip inline. Click a thumbnail to activate it as the A/B reference; right-click to **Rename…** or **Delete**. Round-trips through FCPXML `us:reference-stills` vendor attr and OTIO `ultimateslice.project.reference_stills`. MCP `capture_reference_still` / `list_reference_stills` / `delete_reference_still`. Preview-only (never baked into exports or prerender segments).
+- [x] Cinemascope / aspect-ratio mask overlay — dropdown in the **Overlays ▾** popover offering 2.39 : 1, 2.00 : 1, 1.85 : 1, 4 : 3, 1 : 1, 4 : 5, 9 : 16 (plus None) with translucent bars + 1 px guide line; persists via `ProgramMonitorState.aspect_mask`; MCP `set_program_monitor_aspect_mask`
 
 **Workspace & Ergonomics**
 - [ ] Detachable / Multi-Monitor Panels for Scopes, Media Library, and Inspector
@@ -755,8 +778,8 @@ FCPXML persistence).
 - [ ] "What's this?" mode — toggle via Shift+F1 that turns the cursor into a help cursor; clicking any UI element opens the relevant docs section
 
 **Project housekeeping**
-- [ ] Autosave + crash recovery with versioned `.uspxml.autosave` files and a "Recover unsaved changes" prompt on next launch
-- [ ] Project health panel — surface missing media, offline proxies, cache staleness, and disk-usage breakdown (proxy/thumbnail/STT/AI caches) with one-click cleanup
+- [x] Autosave + crash recovery: persistent per-project autosave files in `$XDG_DATA_HOME/ultimateslice/autosave/` with metadata sidecars; "Recover Unsaved Work" section on welcome screen; autosave cleaned up on save/discard/new-project
+- [x] Project health panel — **Export ▼ → Project Health…** now surfaces missing source media, managed/generated cache disk usage, and installed model directories in one place, with safe cleanup actions for generated caches plus MCP `get_project_health` / `cleanup_project_cache`. Thumbnail previews remain in-memory-only, so they are intentionally not reported as an on-disk cache here.
 - [ ] Recent projects with thumbnails in the welcome screen and a File menu submenu (currently text-only in `welcome.rs`)
 
 ### Professional Workflow (The "Pro" Edge)
@@ -773,10 +796,11 @@ FCPXML persistence).
 - [x] Nested Timelines / Compound Clips
   - [x] Phase 1: Compound clip model (`ClipKind::Compound`, `compound_tracks`), create/break-apart from selection (`Alt+G`), context menu, preview/export flattening, FCPXML round-trip, MCP tools (`create_compound_clip`, `break_apart_compound_clip`), full undo/redo
   - [x] Phase 2: Drill-down sub-timeline editing (double-click to enter compound, teal breadcrumb bar with path labels, Escape to go back, hit-test and drawing resolve to compound's internal tracks)
+  - [x] First-pass timeline thumbnail strips for compound clips (samples the top visible source-backed child clip in the compound window; full composited/effect parity and compound waveforms remain future follow-up work)
 - [x] 3-Point and 4-Point editing (Insert/Overwrite from Source)
 - [x] J/K/L scrubbing (shuttle control in program monitor; pitch-corrected audio via Rubberband is a planned enhancement)
-- [x] Match Frame (`F` shortcut to find timeline clip in media library, load in source monitor, seek to matching frame; MCP `match_frame` tool)
-- [ ] Reverse Match Frame (Find all timeline instances of a library clip)
+- [x] Match Frame (`F` shortcut to find timeline clip in media library, load in source monitor, seek to matching frame; now works for clips nested inside compounds too; MCP `match_frame` tool)
+- [x] Reverse Match Frame (Right-click a single Media Library item to find all visible timeline instances, including compound-nested uses; MCP `reverse_match_frame` tool)
 - [x] Proxy Workflow: One-click toggle between original and proxy media
 - [x] Keyword ranges + favorite/reject ratings in browser
 - [x] Auditions / clip versions — Final Cut Pro–style nondestructive alternate-take swapping. New `ClipKind::Audition` with `AuditionTake` struct stored in `audition_takes`/`audition_active_take_index`; the host clip's `source_path`/`source_in`/`source_out`/`media_duration_ns`/`source_timecode_base_ns` always mirror the active take so playback, export, transitions, color grade, transforms, keyframes, and frei0r effects all just work without knowing auditions exist. Right-click **Create Audition from Selection** groups 2+ same-track clips into one audition; Inspector shows a takes list, click a row to switch active (undoable, snapshots host-field tweaks), Add/Remove/Finalize buttons; "AUD" badge + gold fill + "n/m" indicator on the timeline; FCPXML/`.uspxml` round-trip via `us:clip-kind=audition` + `us:audition-takes` JSON vendor attrs (strict-mode FCPXML safely degrades to a plain asset-clip referencing the active take); OTIO round-trip via `metadata.ultimateslice.audition_*`; six MCP tools (`create_audition_clip`, `add_audition_take`, `remove_audition_take`, `set_active_audition_take`, `list_audition_takes`, `finalize_audition`); five undo commands; 13 new unit + round-trip tests
@@ -791,9 +815,9 @@ FCPXML persistence).
   - [x] Pitch-shift effect per clip (±12 semitones via inspector slider)
   - [x] Pitch-preserved J/K/L shuttle (scaletempo in main pipeline + rate-based decoder seeks for hot rate changes)
 - [x] Audio Roles (Dialogue, Effects, Music) with submixing — per-track `AudioRole` enum, inspector dropdown, timeline color-coded labels, MCP `set_track_role` tool, FCPXML persistence, export per-role submix routing
-- [ ] Audio Track Mixer (Panel for track-level volume, panning, effects, and bus routing)
+- [x] Audio Track Mixer (Panel for track-level volume, panning, effects, and bus routing) — Phase 1: per-track gain faders (−∞ to +12 dB), stereo pan, VU meters, mute/solo, master strip. Bottom panel alongside Keyframes/Transcript/Markers. Track gain/pan compose with per-clip volume keyframes and ducking in both GStreamer preview and FFmpeg export. FCPXML and OTIO persistence. Short docked mixer layouts now scroll vertically, and the shared bottom-panel split now clamps to the active panel's minimum height when shown/restored instead of blindly using a too-small 70/30 split. Three new MCP tools: `set_track_gain`, `set_track_pan`, `get_mixer_state`. Phase 2: role-based audio buses (Dialogue/Effects/Music) with per-bus gain, mute/solo; bus strips in mixer panel; FCPXML/OTIO persistence; three new MCP tools: `set_bus_gain`, `set_bus_muted`, `set_bus_soloed`. Phase 3 (per-track effects inserts) deferred.
 - [ ] Sub-frame Audio Editing (sample-level precision for cuts and crossfades)
-- [ ] Waveform Drawing Optimizations (LOD caching for zoomed-out performance)
+- [x] Waveform Drawing Optimizations (bounded multi-resolution peak cache now backs both audio-track waveforms and the optional video-clip waveform overlay, so zoomed-out timelines reuse coarse summaries instead of rescanning raw 10 ms peaks on every redraw)
 - [x] **Advanced Audio Mode — surround (5.1 / 7.1) export**: opt-in `Audio Channels` dropdown in the export dialog selects Stereo (default) / 5.1 / 7.1; role-based auto-routing (Dialogue → FC, Music → FL/FR, Effects → FL/FR + SL/SR with both back- and side-rears in 7.1) plus per-track inspector override (FL/FR/FC/BL/BR/SL/SR/LFE/Auto); automatic LFE bass tap from Music + Effects via cascaded 120 Hz lowpass; AAC + Opus (`-mapping_family 1`) + FLAC + PCM compatible; preset round-trip (`#[serde(default)]` keeps legacy JSON loading as Stereo); built-in `Cinema H.264 5.1 1080p` factory preset; MCP `export_mp4` / `save_export_preset` / `list_export_presets` accept the new `audio_channel_layout` argument; FCPXML strict-DTD writer can emit non-stereo `audioLayout` (7.1 falls back to 5.1); OTIO writer/parser round-trip the per-track surround override; stereo path is byte-identical to the pre-surround code so all 922 prior tests still pass plus 13 new surround unit tests
 - [ ] Dynamic per-clip surround pan keyframes (`pan=...:eval=frame`) for moving audio between channels during playback
 - [x] Loudness Radar / Normalization to Standards (Tools for broadcast-standard compliance like EBU R128)
@@ -831,10 +855,10 @@ FCPXML persistence).
 - [ ] AI Voice Enhancement (One-click studio-quality enhancement for low-quality recordings)
 - [ ] **Context-aware clip search** — a natural-language search bar at the top of the Media Library panel that filters the visible library list by **what's actually in the clip**, not just filename/metadata. It is shipping in phases so each signal can land independently while converging on one ranked result list:
   - [x] **Transcript / spoken content (phase 1)**: Media Library search now indexes library-keyed STT transcript windows produced by subtitle-generation flows, so queries like `"find the sticker"` or `"everyone's here"` resolve to clips whose dialogue contains those tokens. Results are ranked by match relevance in both the browser and MCP `list_library(search_text)`, spoken hits show an excerpt in the tooltip, smart collections persist the same transcript-aware `search_text`, and an optional disabled-by-default **AI index in background** preference can backfill eligible audio-backed library items automatically over time.
-  - **Visual content (CLIP-style embeddings)**: a new background cache (modeled on `BgRemovalCache` / `FrameInterpCache` / `MusicGenCache`) runs a CLIP-family ONNX model over a handful of keyframes per clip at import time, stores the embedding vectors under `$XDG_CACHE_HOME/ultimateslice/clip_embeddings/`, and at query time embeds the user's natural-language text via the same model's text encoder + cosine-similarity ranks candidates. Queries like `"wide shot outdoors"`, `"close-up of hands"`, `"crowd at night"` map to the closest-matching clips. Reuses the existing ONNX Runtime infrastructure (already shipped for bg removal, RIFE, MusicGen) and the user-installed models directory pattern (`~/.local/share/ultimateslice/models/clip_vit.onnx` or similar). Embedding the full library is a one-shot background pass per clip, stored next to the other caches.
-  - **Contextual auto-tagging**: at import time (behind a Preferences toggle to avoid mandatory compute), run a vision model to infer persistent tags — shot type (wide / medium / close), setting (indoor / outdoor / night / day), detected objects/people categories — and store them on the `MediaItem` so they become queryable and surfaceable in the browser without requiring a fresh embedding query. The tags also feed the existing Smart Collections feature (saved media-browser queries), giving users reusable filter chains like "all outdoor wide shots" without re-running the model.
+  - [x] **Visual content (CLIP-style embeddings)**: Media Library search now supports cached CLIP-style visual embeddings for eligible video/still-image items. A new background cache (modeled on `BgRemovalCache` / `FrameInterpCache` / `MusicGenCache`) samples representative frames, stores normalized embeddings under `$XDG_CACHE_HOME/ultimateslice/clip_embeddings/`, and reuses the paired text encoder at query time for cosine-similarity ranking. Visual hits flow through the existing browser/MCP `search_match` metadata path, show a **Visual:** card hint plus the closest matching frame time in tooltips, and share the existing **AI index in background** toggle with transcript indexing. Preferred model install directory: `~/.local/share/ultimateslice/models/clip-search/` containing `image_encoder.onnx`, `text_encoder.onnx`, and `tokenizer.json` (alternate directory names `clip_search/`, `clip-vit/`, and `clip_vit/` are also accepted).
+  - [x] **Contextual auto-tagging**: Media Library items can now derive persistent CLIP-backed tags after visual embeddings are available, behind the new disabled-by-default **Auto-tag visual media** preference. Tags are stored on `MediaItem`, surfaced on browser cards/tooltips and MCP `list_library`, participate in unified `search_text` ranking so Smart Collections can match phrases like `"outdoor wide"`, and are saved with the existing media-annotation persistence path so they survive project save/load without re-running the model.
   - **UI**: a single search field at the top of the media-browser panel returns unified results ranked across all enabled signals. Transcript hits already surface a tooltip excerpt; future visual hits should show the best-match keyframe thumbnail, and tag hits should surface the matched tag chip. Smart Collections can save any search as a persistent filter. No separate global palette for now — keep the surface area tight and lean on the existing browser filter affordances. If the query field is empty, the browser behaves exactly like today.
-  - **Scope notes**: the embedding model is the main new dependency for the remaining phases — everything else builds on existing infrastructure. Transcript search is now the shipped phase-1 foundation; visual search is the next expansion, then auto-tagging.
+  - **Scope notes**: the embedding model is now the shipped foundation for the visual phase. The next expansion is contextual auto-tagging, which can build on the same background-AI search pipeline.
 - [x] Optical Flow slow-motion (AI frame interpolation): Inspector dropdown gains an **AI Interpolation (RIFE)** mode that precomputes a 2–8× sidecar via ONNX RIFE in a background `FrameInterpCache` worker (mirrors the `BgRemovalCache` pattern); both Program Monitor preview and FFmpeg export consume the same sidecar so frames match exactly. New MCP `set_clip_speed` tool, Preferences → Models RIFE entry, FCPXML `us:slow-motion-interp="ai"` round-trip. RIFE model is user-installed at `~/.local/share/ultimateslice/models/rife.onnx`.
 - [x] AI Music Generation (MusicGen / MusicGPT)
   - [x] Phase 1 — Draw-region UX: draw a time-range box on an audio track to define a generated-audio region (reusable for silence/tone generation too)
@@ -859,6 +883,12 @@ FCPXML persistence).
 - [ ] Hardware-accelerated decoding/encoding (VA-API, NVENC)
 - [ ] Background rendering for complex effect stacks
 - [ ] Render-and-Replace (Bake complex effect stacks into temporary high-quality clips)
+  - [x] Phase 1a foundation: `Clip.render_replace_enabled` flag, `RenderReplaceCache` module (`src/media/render_replace_cache.rs`) modeled on `voice_enhance_cache` — background ffmpeg worker, LRU-evicted ProRes 422 HQ + PCM s24 MOV sidecars under `$XDG_CACHE_HOME/ultimateslice/render_replace/`, cache signature folds every baked-scope field (color grade + keyframes, LUTs, frei0r chain, blur/denoise/sharpness, exposure/shadows/highlights) so unrelated edits (transform, opacity, timeline position) never invalidate an expensive bake. Bake filter chain reuses the export helpers (`build_color_filter`, `build_lut_filter_prefix`, `build_denoise_filter`, `build_sharpen_filter`, `build_blur_filter`, `build_frei0r_effects_filter`) for preview/export parity. OTIO round-trip via `UltimateSliceClipOtioMetadata::render_replace_enabled`. MCP `set_clip_render_replace`. 8 unit tests covering signature stability, invalidation, and round-trip.
+  - [x] Phase 1b: preview swap + effect suppression. `ProgramPlayer::resolve_source_path_for_clip` now checks render-replace first and returns the sidecar when the clip's current signature is ready; a new `neutralize_baked_effects_for_sidecar_clips` pass zeros out the baked-scope fields on every sidecar-using `ProgramClip` at load/soft-reload/paths-update time, so the live GStreamer chain runs as passthrough for the baked scope (videobalance/coloradj_rgb/colorbalance_3pt/frei0r/blur/denoise/sharpness/LUTs) while the sidecar replaces the decoded source. Inspector toggle in the Effects section above the Frei0r chain. Window lifecycle: `on_project_changed` walks all clips (including inside compounds) and calls `cache.request(clip)` for any `render_replace_enabled` clip; 500 ms poll drains completions and pushes fresh path maps to the Program Monitor; Jobs tray entry "Render and Replace — N of M clips baked". Export gating is deferred to Phase 1c.
+  - [ ] Phase 1c: export pipeline gating so exports also read from the sidecar when ready (today export continues to use the live filter chain, which is correct but does not save export time on heavy clips).
+  - [x] Phase 2: compound clip Render-and-Replace. Bake a compound's entire sub-timeline (all internal clips + their effects + transitions + titles + adjustment layers + masks + audio mix) into a single ProRes sidecar by building a synthetic Project from `compound_tracks` and routing through the existing `export_project` pipeline. Preview flattening has a pre-flatten switch in `clip_to_program_clips` — when a compound has `render_replace_enabled` + a ready sidecar, a single file-backed ProgramClip is emitted pointing at the sidecar; the compound's own transform / opacity / blend / color / transitions stay live on top. Cache signature walks `compound_tracks` recursively, folding every inner clip's baked-scope + compositing state + transitions + track metadata + nested compound signatures + the outer compound window. Nested compounds bake inside-out: the request path returns early when any internal compound isn't yet Ready, and the 500 ms poll cycle re-evaluates. Bg-removal / frame-interp sidecars are plumbed into the cache so internal clips using those sidecars get them during the compound bake. Subtitles stay OUT of the baked pixels — the synthetic project flips `subtitle_visible = false` on every internal clip (recursively) so the export skips burn-in, and the Program Monitor overlay walker independently reads from the real project's `compound_tracks` so subtitles render live and stay editable without invalidating the sidecar.
+  - [x] Phase 1c: export gating. `export_project` now accepts a `render_replace_paths` map and, at the top of the export, walks the project tracks substituting any clip with `render_replace_enabled` + a ready sidecar for a flat file-backed clip pointing at the sidecar (with baked-scope fields zeroed for leaves, `compound_tracks` cleared for compounds). The filter-chain helpers then return empty for the baked scope and the sidecar plays through untouched — exports stop re-running the heavy effect chain for already-baked clips. Substitution walks recursively so nested baked compounds inside unbaked compounds still get their sidecars reused. `toolbar.rs::build_toolbar` threads the cache through so the user-initiated **Export ▶ MP4** action consults the live cache; `RenderReplaceCache`'s own compound bake carries a `nested_render_replace_paths` snapshot so inner baked compounds speed up the outer bake. Analysis-style exports (loudness, audio match, batch queue) intentionally pass empty maps so measurements run against the raw live effect chain.
+  - [ ] Phase 3: expand baked scope to chroma key, HSL qualifier, shape masks, vidstab, and audio effects on single clips; multi-clip batch action.
 - [ ] Resource Quotas & Graceful Degradation (dynamically degrading preview or pausing background tasks when RAM/VRAM is exhausted)
 - [ ] Project & Bin Locking (Collaborative project/media locking)
 - [x] OpenTimelineIO (OTIO) import/export (native Rust JSON serializer via serde_json; clips/tracks/gaps/transitions/markers/speed plus current OTIO metadata round-trip; versioned `metadata.ultimateslice` contract; title/subtitle metadata, track audio-role metadata, transform/crop/blend metadata, and core transform/opacity keyframe round-trip; absolute/relative OTIO media-reference export with base-path-aware reimport; MCP `save_otio`/`open_otio` tools; Export dropdown + File Open dialog)

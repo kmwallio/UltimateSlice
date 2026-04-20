@@ -2,15 +2,22 @@
 
 The **Timeline** panel (bottom) is where you arrange, trim, and edit clips into your final sequence.
 
+When the current timeline has no clips yet, the track canvas shows a clear in-place drop target so a new project still has an obvious next action. You can drag clips in from the **Media Library** or drop files straight from your file manager.
+
 ## Layout
 
 - **Ruler** — shows time positions with adaptive major/mid/minor tick marks; higher zoom levels add more marks and intermediate labels, while lower zoom levels reduce clutter. Click to seek the playhead.
+- **Mini-map** — a thin overview strip (hidden by default) between the ruler and the tracks that shows the entire project at a glance. Each clip is drawn as a tiny coloured rectangle matching its colour label. Faint horizontal lane separators distinguish individual tracks. A white viewport rectangle shows the currently visible portion. Toggle via `Shift+M`, the **Show Mini-Map** button on the track-management bar, or in Preferences → Timeline. Interactions:
+  - **Click** — centre the viewport on the clicked time position.
+  - **Drag** — pan the viewport continuously.
+  - **Ctrl+Click** — seek the playhead to the clicked position.
+  - **Double-click** — zoom the timeline to fit the entire project.
 - **Track rows** — each track (Video or Audio) shows clips as coloured rectangles.
 - **Playhead** — the red vertical line indicates the current playback position.
-- **Track header** — shows the track name, a per-track **S** solo badge, and a compact per-track stereo level meter (L/R) on the right.
+- **Track header** — shows a drag handle (⠿), optional per-track color swatch dot, track name, and a badge row **[D] [M] [S] [L]** (Duck, Mute, Solo, Lock). A compact per-track stereo level meter (L/R) appears on the right when enabled.
 - **Status bar** — bottom-left includes a **Track Audio Levels** eye toggle to show/hide track-header meters. Proxy queue label/progress appear only while proxies are actively generating.
 
-When the track stack is taller than the viewport, the ruler stays pinned at the visible top edge so seeking, scrubbing, and marker clicks remain available while you scroll tracks vertically.
+When the track stack is taller than the viewport, the ruler stays in a fixed header above the scrolled tracks so seeking, scrubbing, and marker clicks remain available while you scroll vertically. Only the track rows scroll: the ruler remains visible without adding empty spacer bars above or below the visible timeline content.
 
 ## Navigation
 
@@ -48,6 +55,7 @@ The default tool. Use it to:
 - **Move** a clip by dragging its body (horizontally within a track, or vertically to another track of the same kind).
 - **Trim** the In-point by dragging the left edge of a selected clip.
 - **Trim** the Out-point by dragging the right edge of a selected clip.
+- **Drag preview ghosting** — while moving or trimming, the active clip is shown as a translucent ghost at the current result, and the primary dragged clip gets a floating **In / Out** timecode badge above it.
 
 Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while moving or trimming.
 
@@ -153,7 +161,7 @@ Automatically find scene/shot boundaries in a clip using ffmpeg video analysis.
 
 1. Right-click a video or audio clip on the timeline and choose **Detect Scene Cuts…**
 2. Set the **threshold** (1–50, default 10). Lower values detect more cuts, including subtle transitions. Higher values only detect obvious hard cuts.
-3. Click **Detect** — ffmpeg analyzes the video in a background thread (title bar shows progress).
+3. Click **Detect** — ffmpeg analyzes the video in a background thread. The bottom status bar shows ongoing progress, and an in-app toast confirms the result when detection finishes.
 4. The clip is split at each detected cut point into back-to-back sub-clips, preserving the total duration.
 5. **Undo** with `Ctrl+Z` to restore the original clip.
 
@@ -251,6 +259,8 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC, SVG) can be placed on the t
 - **Break Apart Compound Clip** — right-click a compound clip → "Break Apart Compound Clip" to restore the internal clips to the timeline.
 - **Drill-down editing** — double-click a compound clip to enter its sub-timeline. A teal breadcrumb bar shows your navigation path (e.g. "Project > Compound Clip 1"). Press `Escape` to go back one level.
 - Compound clips render with a teal fill color and a stacked-layers badge.
+- Compound clips now get a **simple first-pass thumbnail strip** in the timeline by sampling the top visible source-backed child clip inside the compound window.
+- This thumbnail strip is intentionally lightweight: it does **not** yet composite titles, adjustment layers, or other overlay-only children into the thumbnail, and compound waveforms are still a separate follow-up.
 - Preview and export correctly flatten compound clips, rendering all internal clips at the right timeline positions.
 - Compound clips are saved/loaded via FCPXML (`us:clip-kind="compound"` + `us:compound-tracks` vendor attribute).
 - MCP tools: `create_compound_clip` (takes `clip_ids` array), `break_apart_compound_clip` (takes `clip_id`).
@@ -283,7 +293,7 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC, SVG) can be placed on the t
 
 - Select 2 or more clips on the timeline, then right-click → **Sync Selected Clips by Audio**.
 - The first selected clip is the **anchor** — it stays in place. All other clips are repositioned based on matching audio content using FFT cross-correlation.
-- Sync runs on a background thread; the title bar shows "Syncing audio…" while processing.
+- Sync runs on a background thread; the bottom status bar shows ongoing progress and an in-app toast confirms completion or failure.
 - If no reliable audio match is found (low confidence), a status message is shown and no changes are applied.
 - The operation is undoable (`Ctrl+Z`).
 - Clips without audio streams are not eligible for audio sync (the button is insensitive when fewer than 2 clips are selected).
@@ -301,6 +311,7 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC, SVG) can be placed on the t
 - Right-clicking a selected clip opens a context menu that only shows currently actionable clip operations (for example Link/Unlink when applicable), so link editing is available without extra disabled entries.
 - Linked clips show a **LINK** badge in the timeline so linked relationships stay visible even when nothing is selected.
 - Clips whose source files are unavailable show an **OFFLINE** badge in the timeline clip header.
+- Clips from HDR sources (PQ/HLG) show an orange **HDR** badge in the timeline clip header.
 - When a linked selection spans multiple clips, non-primary linked peers also get a cyan inset border so they stay visually distinct from the primary selected clip.
 
 ## Keyboard Shortcuts
@@ -314,6 +325,8 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC, SVG) can be placed on the t
 | `Y` | Toggle Slip edit tool |
 | `U` | Toggle Slide edit tool |
 | `S` | Toggle solo for selected track |
+| `M` | Toggle mute for selected track |
+| `Shift+L` | Toggle lock for selected track |
 | `F` | Match Frame — load selected clip's source in Source Monitor and seek to matching frame |
 | `Shift+F` | Create freeze-frame clip from selected video clip at playhead |
 | `Ctrl+Shift+B` | Join selected through-edit boundary into one clip |
@@ -357,17 +370,42 @@ Still images (PNG, JPEG, GIF, BMP, TIFF, WebP, HEIC, SVG) can be placed on the t
 - Markers are exported in the FCPXML file.
 - On FCPXML import, standard markers and chapter markers are read and placed at their correct timeline positions.
 - When exporting to MP4, MOV, or MKV, markers are embedded as **chapter metadata** in the output file (see [export.md](export.md#chapter-markers)).
+- Adding and removing markers is **undoable** (Ctrl+Z / Ctrl+Shift+Z).
+
+### Markers panel
+
+Use the **Show Markers** button on the track-management bar to open the Markers panel (shares the bottom slot with Keyframes and Transcript).
+
+The panel lists every project marker with:
+
+| Column | Description |
+|--------|-------------|
+| **Color** | Click the swatch to choose from 8 preset colours |
+| **Name** | Click to rename via inline popover |
+| **Time** | Timecode at which the marker sits |
+| **Notes** | Click to add or edit free-text notes |
+| **🗑** | Delete the marker (undoable) |
+
+- **Double-click** any row to seek the playhead to that marker's position.
+- Click **+ Add** in the panel header to add a marker at the current playhead.
+- Panel visibility is saved/restored per workspace layout.
 
 ## Tracks
 
 - **Add Track** buttons below the timeline add a new Video or Audio track.
 - **Remove Track** removes the currently active (highlighted) track, or the last track if none is selected. At least one track is always kept.
 - **Reorder tracks** by dragging a track's label vertically; a blue indicator line shows the drop target. Release to confirm.
-- **Active track** — click anywhere in a track row (including empty space) to highlight it. The active track shows a blue accent bar on its label. The active track is used as the target for the Append button and the Remove Track button.
+- **Active track** — click anywhere in a track row (including empty space) to highlight it. The active track shows a coloured accent bar on its label (uses the track colour label when set, otherwise blue). The active track is used as the target for the Append button and the Remove Track button.
 - **Track height presets** — right-click a track header and choose **Track Height: Small / Medium / Large** to resize that track row independently.
+- **Direct track resizing** — drag the bottom edge of a track header when the **row-resize** cursor appears. The row snaps between the same **Small / Medium / Large** presets used by the context menu, so you can resize quickly without opening a menu.
 - Audio tracks show a waveform visualisation (decoded in the background after import).
-- Muting an audio track excludes it from both preview and export.
+- Waveform drawing now reuses a shared multi-resolution cache after extraction, so zoomed-out timelines stay responsive even when many clips are visible at once.
+- New waveform data now repaints automatically when background extraction finishes, so you do not need to start playback just to make freshly loaded waveforms appear.
+- **Mute track** — click the **M** badge on a track header (or press **M** with that track active) to mute it. Muted tracks are silenced in playback and export; a dimming overlay appears on the track content area.
+- **Lock track** — click the **L** badge on a track header (or press **Shift+L** with that track active) to lock it. Locked tracks cannot be edited; a hatch overlay appears on the track content area.
 - **Solo track** — click the **S** badge on a track header (or press **S** with that track active) to solo it. When one or more tracks are soloed, only soloed non-muted tracks are active for Program Monitor playback and export.
+- **Duck track** — click the **D** badge on an audio track header to toggle automatic ducking.
+- **Track colour** — right-click a track header and use the **Track Color** swatch row to assign a colour label. A 10-pixel colour dot appears to the left of the track name, and the active-track accent bar adopts the colour.
 
 ## Automatic Audio Crossfades
 
@@ -417,6 +455,8 @@ All clip moves, trims, splits, deletions, track add/remove operations, transitio
 - `Ctrl+Z` — Undo
 - `Ctrl+Y` or `Ctrl+Shift+Z` — Redo
 
+When an undo or redo succeeds, UltimateSlice shows a short toast such as **"Undid: trim clip out-point"** or **"Redid: move clip"**. If the history is empty, the shortcut remains quiet.
+
 The undo history is per-session (not persisted in the FCPXML).
 
 ## Clip Appearance
@@ -425,6 +465,8 @@ The undo history is per-session (not persisted in the FCPXML).
 - Thumbnail strips now load progressively with adaptive tile density to keep timeline warm-up responsive on heavy media.
 - Preferences → Timeline → **Show timeline preview** lets you switch to start/end-only thumbnails per video clip.
 - Audio clips show a normalised waveform.
+- When **Show audio waveforms on video clips** is enabled, the video-overlay view reuses the same cached waveform path instead of a separate slower draw pass.
+- Those video-clip waveform overlays also repaint automatically as soon as waveform extraction completes.
 - A **yellow speed badge** (e.g. `2×`) appears on clips with a speed multiplier ≠ 1.0. Clips with speed keyframes (variable speed ramps) show a **⏲ Ramp** badge instead.
 - Clips with phase-1 keyframes show color-coded keyframe ticks/guides on the clip body (Scale, Opacity, Position X, Position Y, Volume, Pan, Rotate, Crop Left/Right/Top/Bottom), a `KF <count>` badge, and a `◆` prefix in the clip label when keyframes are present. **Click a keyframe tick** to select the clip and jump the playhead to that keyframe time.
 - Hovering a keyframe marker shows a tooltip with the clip name, keyframe time, and which properties are modified at that keyframe moment.

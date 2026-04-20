@@ -182,6 +182,14 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                                 project.parsed_transcript_cache_json =
                                     Some(transcript_cache.clone());
                             }
+                            if let Some(stills_json) = attrs.get("us:reference-stills") {
+                                if let Ok(stills) = serde_json::from_str::<
+                                    Vec<crate::model::project::ReferenceStill>,
+                                >(stills_json)
+                                {
+                                    project.reference_stills = stills;
+                                }
+                            }
                             project.fcpxml_unknown_event.attrs =
                                 collect_unknown_attrs(&attrs, is_known_event_attr);
                         } else {
@@ -229,6 +237,35 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                             // Project master audio gain from the Loudness Radar.
                             if let Some(v) = attrs.get("us:master-gain-db") {
                                 project.master_gain_db = v.parse().unwrap_or(0.0);
+                            }
+                            if let Some(v) = attrs.get("us:timecode-burnin-enabled") {
+                                project.timecode_burnin_enabled = v == "1" || v == "true";
+                            }
+                            if let Some(v) = attrs.get("us:timecode-burnin-position") {
+                                if let Some(pos) =
+                                    crate::model::project::TimecodeBurninPosition::from_str(v)
+                                {
+                                    project.timecode_burnin_position = pos;
+                                }
+                            }
+                            // Bus gain/mute/solo.
+                            for (role_key, bus) in [
+                                ("dialogue", &mut project.dialogue_bus),
+                                ("effects", &mut project.effects_bus),
+                                ("music", &mut project.music_bus),
+                            ] {
+                                let gain_key = format!("us:bus-{role_key}-gain-db");
+                                if let Some(v) = attrs.get(&gain_key) {
+                                    bus.gain_db = v.parse().unwrap_or(0.0);
+                                }
+                                let muted_key = format!("us:bus-{role_key}-muted");
+                                if let Some(v) = attrs.get(&muted_key) {
+                                    bus.muted = v == "1";
+                                }
+                                let soloed_key = format!("us:bus-{role_key}-soloed");
+                                if let Some(v) = attrs.get(&soloed_key) {
+                                    bus.soloed = v == "1";
+                                }
                             }
                             project.fcpxml_unknown_sequence.attrs =
                                 collect_unknown_attrs(&attrs, is_known_sequence_attr);
@@ -1016,6 +1053,15 @@ fn parse_asset_clip(
         }
         if attrs.contains_key("us:track-height") {
             track.height_preset = track_height_preset;
+        }
+        if let Some(v) = attrs.get("us:track-color") {
+            track.color_label = crate::model::track::TrackColorLabel::from_str(v);
+        }
+        if let Some(v) = attrs.get("us:track-gain-db") {
+            track.gain_db = v.parse().unwrap_or(0.0);
+        }
+        if let Some(v) = attrs.get("us:track-pan") {
+            track.pan = v.parse().unwrap_or(0.0);
         }
 
         let mut clip = Clip::new(
@@ -2809,6 +2855,9 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:track-duck"
             | "us:track-duck-amount-db"
             | "us:track-height"
+            | "us:track-color"
+            | "us:track-gain-db"
+            | "us:track-pan"
             | "us:clip-id"
             | "us:color-label"
             | "us:brightness"
@@ -2990,6 +3039,7 @@ fn is_known_event_attr(_key: &str) -> bool {
             | "us:media-annotations"
             | "us:script-path"
             | "us:transcript-cache"
+            | "us:reference-stills"
     )
 }
 
@@ -2998,7 +3048,20 @@ fn is_known_project_attr(key: &str) -> bool {
 }
 
 fn is_known_sequence_attr(key: &str) -> bool {
-    matches!(key, "duration" | "format" | "us:master-gain-db")
+    if matches!(
+        key,
+        "duration"
+            | "format"
+            | "us:master-gain-db"
+            | "us:timecode-burnin-enabled"
+            | "us:timecode-burnin-position"
+    ) {
+        return true;
+    }
+    if key.starts_with("us:bus-") {
+        return true;
+    }
+    false
 }
 
 fn is_known_spine_attr(_key: &str) -> bool {
@@ -3331,6 +3394,9 @@ fn parse_sequence_marker(
             use crate::model::project::Marker;
             let mut m = Marker::new(pos_ns, label);
             m.color = color;
+            if let Some(notes) = attrs.get("us:marker-notes") {
+                m.notes = notes.clone();
+            }
             project.markers.push(m);
         }
     }

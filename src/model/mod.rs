@@ -1,4 +1,5 @@
 pub mod clip;
+pub mod compound_flattening;
 pub mod media_library;
 pub mod project;
 pub mod through_edit;

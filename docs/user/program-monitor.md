@@ -30,6 +30,8 @@ or outside the export frame.
 | Play / Pause button | Toggle playback |
 | Stop button | Stop and return to position 0 |
 | Safe Areas toggle | Shows/hides action-safe (90%) and title-safe (80%) guides |
+| Overlays → HUD | Shows a top-left info panel with timecode, frame number, fps, canvas resolution, and dropped-frame count (shortcut: **Shift+H**) |
+| Overlays → Aspect mask | Dropdown that letterboxes/pillarboxes the monitor to a delivery aspect ratio (2.39 : 1, 2.00 : 1, 1.85 : 1, 4 : 3, 1 : 1, 4 : 5, 9 : 16) |
 | Master VU meter | Stereo (L/R) output level meter in dBFS |
 | ▾ Scopes toggle | Show/hide the docked color scopes panel (waveform, histogram, vectorscope, RGB parade) |
 | Loudness button | Next to the Scopes toggle — opens the Loudness Radar popover for broadcast-standard EBU R128 analysis + normalize-to-target |
@@ -165,6 +167,59 @@ When **Motion Tracking → Edit Region in Monitor** is enabled for the selected 
   - **Action-safe** at **90%** of the canvas.
   - **Title-safe** at **80%** of the canvas.
 - The toggle state is persisted across launches.
+
+## HUD Overlay
+
+- Open the **Overlays ▾** popover in the Program Monitor header and enable
+  **HUD**, or press **Shift+H**, to show a compact info panel in the
+  top-left corner of the monitor.
+- The panel displays, in a monospace font:
+  - **TC** — current timeline playhead as `HH:MM:SS:FF` (project-frame-rate aware).
+  - **FRM** — current frame number since the start of the timeline.
+  - **FPS** — project frame rate (e.g. `24`, `29.97`, `59.94`).
+  - **RES** — project canvas resolution (width × height).
+  - **DROP** — cumulative video frames the preview pipeline has dropped
+    under QoS pressure since the project was loaded. Reset on project
+    open/new; a steadily climbing counter is a hint to drop preview
+    quality, enable proxies, or enable background prerender.
+- The HUD does not appear in export output — it is a monitoring overlay only.
+- Toggle state persists across launches (stored with the other Program Monitor
+  overlay toggles in `ui-state.json`). The MCP tool `set_program_monitor_hud`
+  controls the same setting from automation.
+
+## Aspect-Ratio Mask
+
+- Open the **Overlays ▾** popover and pick a preset from the **Aspect mask**
+  dropdown to preview the monitor inside a different delivery aspect ratio.
+  Selecting **None** disables the overlay.
+- Presets:
+
+  | Label | Ratio | Typical use |
+  |---|---|---|
+  | None | — | Disabled |
+  | 2.39 : 1 | Cinemascope | Modern anamorphic cinema masters |
+  | 2.00 : 1 | Univisium | Modern streaming features (many Netflix titles) |
+  | 1.85 : 1 | Academy | US theatrical flat |
+  | 4 : 3 | Standard | Legacy broadcast / SD |
+  | 1 : 1 | Square | Square social feed |
+  | 4 : 5 | Social 4:5 | Instagram portrait feed |
+  | 9 : 16 | Vertical | Reels / TikTok / Shorts |
+
+- The mask centers a target-ratio rectangle inside the Program Monitor canvas
+  and darkens the regions outside it with a translucent black fill. A 1 px
+  white guide line marks the target rectangle, matching the Safe Areas
+  treatment so the two overlays read as a family.
+- The overlay is a monitoring aid only — it never appears in export or
+  prerender output, and it does not alter the project canvas size. If you
+  actually want the delivered file in that aspect ratio, change the project
+  resolution in **Project Settings** or crop individual clips in the
+  Inspector.
+- The selected preset persists across launches (stored in `ui-state.json`
+  alongside the other Program Monitor overlay toggles). The MCP tool
+  `set_program_monitor_aspect_mask` with a `preset` argument
+  (`none` / `cinemascope` / `univisium` / `academy` / `standard` /
+  `square` / `social_45` / `vertical`) flips the same setting from
+  automation.
 
 ## Playback Behaviour
 

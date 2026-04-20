@@ -243,6 +243,13 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                 event.push_attribute(("us:transcript-cache", transcript_cache.as_str()));
             }
         }
+        // Reference stills for Program Monitor A/B compare (vendor-only —
+        // strict writer drops them because there's no DTD equivalent).
+        if !project.reference_stills.is_empty() {
+            if let Ok(json) = serde_json::to_string(&project.reference_stills) {
+                event.push_attribute(("us:reference-stills", json.as_str()));
+            }
+        }
     }
     writer.write_event(Event::Start(event))?;
 
@@ -276,6 +283,37 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
     if !options.strict_dtd && project.master_gain_db.abs() > 1e-9 {
         let gain_str = format!("{:.6}", project.master_gain_db);
         seq.push_attribute(("us:master-gain-db", gain_str.as_str()));
+    }
+    // Project-level timecode burn-in (Monitoring / delivery feature).
+    // Only emitted when enabled and only in non-strict mode.
+    if !options.strict_dtd && project.timecode_burnin_enabled {
+        seq.push_attribute(("us:timecode-burnin-enabled", "1"));
+        seq.push_attribute((
+            "us:timecode-burnin-position",
+            project.timecode_burnin_position.as_str(),
+        ));
+    }
+    // Bus gain/mute/solo — only emit non-default values.
+    if !options.strict_dtd {
+        for (role, bus) in [
+            ("dialogue", &project.dialogue_bus),
+            ("effects", &project.effects_bus),
+            ("music", &project.music_bus),
+        ] {
+            if bus.gain_db.abs() > 1e-9 {
+                let key = format!("us:bus-{role}-gain-db");
+                let val = format!("{:.6}", bus.gain_db);
+                seq.push_attribute((key.as_str(), val.as_str()));
+            }
+            if bus.muted {
+                let key = format!("us:bus-{role}-muted");
+                seq.push_attribute((key.as_str(), "1"));
+            }
+            if bus.soloed {
+                let key = format!("us:bus-{role}-soloed");
+                seq.push_attribute((key.as_str(), "1"));
+            }
+        }
     }
     if options.strict_dtd {
         // Resolve the FCPXML audioLayout token. Default behavior (no opt-in)
@@ -693,6 +731,22 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                             crate::model::track::TrackHeightPreset::Large => "large",
                         },
                     ));
+                    if track.color_label != crate::model::track::TrackColorLabel::None {
+                        asset_clip.push_attribute((
+                            "us:track-color",
+                            track.color_label.label().to_lowercase().as_str(),
+                        ));
+                    }
+                    if track.gain_db != 0.0 {
+                        asset_clip.push_attribute((
+                            "us:track-gain-db",
+                            format!("{:.2}", track.gain_db).as_str(),
+                        ));
+                    }
+                    if track.pan != 0.0 {
+                        asset_clip
+                            .push_attribute(("us:track-pan", format!("{:.2}", track.pan).as_str()));
+                    }
                     asset_clip.push_attribute((
                         "us:color-label",
                         match clip.color_label {
@@ -1584,6 +1638,9 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
             m.push_attribute(("value", marker.label.as_str()));
             if emit_vendor_extensions {
                 m.push_attribute(("us:color", format!("{:08X}", marker.color).as_str()));
+                if !marker.notes.is_empty() {
+                    m.push_attribute(("us:marker-notes", marker.notes.as_str()));
+                }
             }
             writer.write_event(Event::Empty(m))?;
         }
@@ -4360,6 +4417,7 @@ fn is_writer_managed_event_attr(_key: &str) -> bool {
             | "us:media-annotations"
             | "us:script-path"
             | "us:transcript-cache"
+            | "us:reference-stills"
     )
 }
 
@@ -4368,10 +4426,24 @@ fn is_writer_managed_project_attr(key: &str) -> bool {
 }
 
 fn is_writer_managed_sequence_attr(key: &str) -> bool {
-    matches!(
+    if matches!(
         key,
-        "duration" | "format" | "tcFormat" | "audioLayout" | "audioRate" | "us:master-gain-db"
-    )
+        "duration"
+            | "format"
+            | "tcFormat"
+            | "audioLayout"
+            | "audioRate"
+            | "us:master-gain-db"
+            | "us:timecode-burnin-enabled"
+            | "us:timecode-burnin-position"
+    ) {
+        return true;
+    }
+    // Bus vendor attrs: us:bus-{role}-{field}
+    if key.starts_with("us:bus-") {
+        return true;
+    }
+    false
 }
 
 fn is_writer_managed_spine_attr(_key: &str) -> bool {
@@ -5108,6 +5180,36 @@ mod tests {
     }
 
     #[test]
+    fn test_reference_stills_round_trip_through_fcpxml() {
+        use crate::fcpxml::parser::parse_fcpxml;
+        let mut project = Project::new("ReferenceStillsRT");
+        let mut still = crate::model::project::ReferenceStill::new("Take 1");
+        still.width = 1920;
+        still.height = 1080;
+        still.captured_at_ns = 42_000_000_000;
+        still.timeline_pos_ns = 5_000_000_000;
+        still.filename = format!("{}.png", still.id);
+        project.reference_stills.push(still.clone());
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(
+            xml.contains("us:reference-stills="),
+            "reference stills vendor attr missing"
+        );
+
+        let roundtripped = parse_fcpxml(&xml).expect("parse");
+        assert_eq!(roundtripped.reference_stills.len(), 1);
+        let got = &roundtripped.reference_stills[0];
+        assert_eq!(got.id, still.id);
+        assert_eq!(got.label, "Take 1");
+        assert_eq!(got.width, 1920);
+        assert_eq!(got.height, 1080);
+        assert_eq!(got.filename, still.filename);
+        assert_eq!(got.captured_at_ns, 42_000_000_000);
+        assert_eq!(got.timeline_pos_ns, 5_000_000_000);
+    }
+
+    #[test]
     fn test_write_fcpxml_emits_library_annotation_vendor_attrs() {
         let mut project = Project::new("Annotations");
         project.parsed_collections_json = Some(
@@ -5257,6 +5359,7 @@ mod tests {
             position_ns: 0,
             label: "Marker".to_string(),
             color: 0xFF00FF00,
+            notes: String::new(),
         });
 
         let xml = write_fcpxml_strict(&project).expect("strict write should succeed");
@@ -5884,6 +5987,41 @@ mod tests {
             ),
             "expected known format name for standard 1080p24 export:\n{xml}"
         );
+    }
+
+    #[test]
+    fn test_write_fcpxml_roundtrip_timecode_burnin() {
+        use crate::fcpxml::parser::parse_fcpxml;
+        use crate::model::project::TimecodeBurninPosition;
+
+        let mut project = Project::new("BurninRoundtrip");
+        project.timecode_burnin_enabled = true;
+        project.timecode_burnin_position = TimecodeBurninPosition::TopRight;
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(
+            xml.contains("us:timecode-burnin-enabled=\"1\""),
+            "expected enabled attr in output:\n{xml}"
+        );
+        assert!(
+            xml.contains("us:timecode-burnin-position=\"top_right\""),
+            "expected position attr in output:\n{xml}"
+        );
+
+        let parsed = parse_fcpxml(&xml).expect("parse should succeed");
+        assert!(parsed.timecode_burnin_enabled);
+        assert_eq!(
+            parsed.timecode_burnin_position,
+            TimecodeBurninPosition::TopRight
+        );
+    }
+
+    #[test]
+    fn test_write_fcpxml_omits_timecode_burnin_when_disabled() {
+        let project = Project::new("BurninOff");
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(!xml.contains("us:timecode-burnin-enabled"));
+        assert!(!xml.contains("us:timecode-burnin-position"));
     }
 
     #[test]

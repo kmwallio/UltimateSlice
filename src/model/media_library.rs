@@ -234,6 +234,80 @@ impl MediaTranscriptWindow {
     }
 }
 
+/// CLIP-style visual-search embedding captured for a representative frame.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MediaVisualEmbeddingFrame {
+    #[serde(default)]
+    pub time_ns: u64,
+    #[serde(default)]
+    pub embedding: Vec<f32>,
+}
+
+/// Runtime visual-search embedding state for a media item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MediaVisualEmbedding {
+    #[serde(default)]
+    pub model_id: String,
+    #[serde(default)]
+    pub frames: Vec<MediaVisualEmbeddingFrame>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaAutoTagCategory {
+    ShotType,
+    Setting,
+    TimeOfDay,
+    Subject,
+}
+
+impl MediaAutoTagCategory {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ShotType => "Shot type",
+            Self::Setting => "Setting",
+            Self::TimeOfDay => "Time of day",
+            Self::Subject => "Subject",
+        }
+    }
+
+    pub fn search_text(self) -> &'static str {
+        match self {
+            Self::ShotType => "shot type shot framing",
+            Self::Setting => "setting location scene",
+            Self::TimeOfDay => "time of day daytime nighttime",
+            Self::Subject => "subject object people",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MediaAutoTag {
+    pub category: MediaAutoTagCategory,
+    pub label: String,
+    #[serde(default)]
+    pub confidence: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub best_frame_time_ns: Option<u64>,
+}
+
+impl MediaAutoTag {
+    pub fn new(
+        category: MediaAutoTagCategory,
+        label: impl Into<String>,
+        confidence: f32,
+        best_frame_time_ns: Option<u64>,
+    ) -> Option<Self> {
+        let label = label.into().trim().to_string();
+        (!label.is_empty()).then_some(Self {
+            category,
+            label,
+            confidence: confidence.clamp(0.0, 1.0),
+            best_frame_time_ns,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MediaSearchField {
@@ -243,7 +317,9 @@ pub enum MediaSearchField {
     SourcePath,
     Codec,
     Keyword,
+    AutoTag,
     Transcript,
+    Visual,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -290,6 +366,9 @@ pub struct MediaItem {
     pub frame_rate_den: Option<u32>,
     /// Human-friendly codec summary derived from probe metadata.
     pub codec_summary: Option<String>,
+    /// Detected HDR colorimetry label (e.g. "bt2100-pq", "bt2100-hlg") when
+    /// the source video uses a high dynamic range transfer function.
+    pub hdr_colorimetry: Option<String>,
     /// File size resolved from filesystem metadata.
     pub file_size_bytes: Option<u64>,
     /// Timeline-native clip kind when this item has no backing source file.
@@ -304,8 +383,28 @@ pub struct MediaItem {
     pub rating: MediaRating,
     /// Named sub-ranges within the source media for browser triage.
     pub keyword_ranges: Vec<MediaKeywordRange>,
+    /// Persistent semantic tags inferred from the visual search embedding.
+    pub auto_tags: Vec<MediaAutoTag>,
+    /// True once contextual auto-tagging has run for this item, even if no
+    /// tags cleared the confidence threshold.
+    pub auto_tags_indexed: bool,
     /// Library-keyed transcript windows generated from speech-to-text runs.
     pub transcript_windows: Vec<MediaTranscriptWindow>,
+    /// Runtime-only CLIP-style frame embeddings for semantic visual search.
+    pub visual_embedding: Option<MediaVisualEmbedding>,
+    /// When set, this item is a **subclip** cut from another library
+    /// item's source range. The value is the parent item's `id`.
+    /// Subclips share the parent's `source_path` + codec metadata
+    /// but carry their own In/Out window (via
+    /// `subclip_source_in_ns` / `subclip_source_out_ns`) and their
+    /// own label. Top-level items leave this `None`.
+    pub parent_id: Option<String>,
+    /// In-point within the source (ns) for a subclip. Ignored when
+    /// `parent_id` is `None` — top-level items represent the full
+    /// source, so their effective range is `0..duration_ns`.
+    pub subclip_source_in_ns: u64,
+    /// Out-point within the source (ns) for a subclip.
+    pub subclip_source_out_ns: u64,
 }
 
 impl MediaItem {
@@ -332,6 +431,7 @@ impl MediaItem {
             frame_rate_num: None,
             frame_rate_den: None,
             codec_summary: None,
+            hdr_colorimetry: None,
             file_size_bytes: None,
             clip_kind: None,
             title_text: None,
@@ -339,8 +439,87 @@ impl MediaItem {
             bin_id: None,
             rating: MediaRating::None,
             keyword_ranges: Vec::new(),
+            auto_tags: Vec::new(),
+            auto_tags_indexed: false,
             transcript_windows: Vec::new(),
+            visual_embedding: None,
+            parent_id: None,
+            subclip_source_in_ns: 0,
+            subclip_source_out_ns: 0,
         }
+    }
+
+    /// Construct a subclip MediaItem that shares its parent's
+    /// `source_path` + codec metadata but carries its own In/Out
+    /// window, label, and fresh id. Media-library code that branches
+    /// on `is_subclip()` (drag payload, card badge, FCPXML save,
+    /// restore match-by-id) relies on `parent_id` being `Some` to
+    /// route correctly, so always go through this constructor when
+    /// creating subclips.
+    pub fn new_subclip(parent: &MediaItem, in_ns: u64, out_ns: u64, label: String) -> Self {
+        let (clamped_in, clamped_out) = clamp_subclip_range(parent.duration_ns, in_ns, out_ns);
+        let mut item = Self::new(parent.source_path.clone(), parent.duration_ns);
+        item.label = label;
+        item.is_audio_only = parent.is_audio_only;
+        item.has_audio = parent.has_audio;
+        item.is_image = parent.is_image;
+        item.is_animated_svg = parent.is_animated_svg;
+        item.video_width = parent.video_width;
+        item.video_height = parent.video_height;
+        item.frame_rate_num = parent.frame_rate_num;
+        item.frame_rate_den = parent.frame_rate_den;
+        item.codec_summary = parent.codec_summary.clone();
+        item.hdr_colorimetry = parent.hdr_colorimetry.clone();
+        item.file_size_bytes = parent.file_size_bytes;
+        item.clip_kind = parent.clip_kind.clone();
+        // Subclip timecode = parent TC base shifted by the subclip's
+        // in-point, so "go to start of subclip" shows the correct
+        // TC on the HUD / in the Inspector's Source TC row.
+        item.source_timecode_base_ns = parent.source_timecode_base_ns.map(|b| b + clamped_in);
+        item.bin_id = parent.bin_id.clone();
+        item.parent_id = Some(parent.id.clone());
+        item.subclip_source_in_ns = clamped_in;
+        item.subclip_source_out_ns = clamped_out;
+        item
+    }
+
+    /// True when this item is a subclip (has a parent_id).
+    pub fn is_subclip(&self) -> bool {
+        self.parent_id.is_some()
+    }
+
+    /// Effective in-point within the source media. Top-level items
+    /// always return 0; subclips return their stored
+    /// `subclip_source_in_ns`. Drag-to-timeline + UI consumers
+    /// should use this instead of reading `subclip_source_in_ns`
+    /// directly so they don't need to branch on `is_subclip()`.
+    pub fn effective_source_in_ns(&self) -> u64 {
+        if self.is_subclip() {
+            self.subclip_source_in_ns
+        } else {
+            0
+        }
+    }
+
+    /// Effective out-point within the source media. Top-level items
+    /// return `duration_ns`; subclips return `subclip_source_out_ns`.
+    pub fn effective_source_out_ns(&self) -> u64 {
+        if self.is_subclip() {
+            self.subclip_source_out_ns
+        } else {
+            self.duration_ns
+        }
+    }
+
+    /// Effective playable duration. `duration_ns` on the struct is
+    /// always the *full* source duration even for subclips (that's
+    /// what the codec-layer probe returns, and we don't want to
+    /// re-probe just because the user cut a subclip), so use this
+    /// accessor wherever UI needs to show "how long will this play
+    /// for" — library cards, drop-to-timeline, etc.
+    pub fn effective_duration_ns(&self) -> u64 {
+        self.effective_source_out_ns()
+            .saturating_sub(self.effective_source_in_ns())
     }
 
     pub fn has_backing_file(&self) -> bool {
@@ -389,6 +568,53 @@ impl MediaItem {
         ));
         self.transcript_windows
             .sort_by_key(|window| (window.source_in_ns, window.source_out_ns));
+        true
+    }
+
+    pub fn upsert_visual_embedding(&mut self, embedding: MediaVisualEmbedding) -> bool {
+        if embedding.frames.is_empty() {
+            return false;
+        }
+        if self.visual_embedding.as_ref() == Some(&embedding) {
+            return false;
+        }
+        self.visual_embedding = Some(embedding);
+        true
+    }
+
+    pub fn upsert_auto_tags(&mut self, auto_tags: Vec<MediaAutoTag>) -> bool {
+        let mut normalized = auto_tags
+            .into_iter()
+            .filter_map(|tag| {
+                MediaAutoTag::new(
+                    tag.category,
+                    tag.label,
+                    tag.confidence,
+                    tag.best_frame_time_ns,
+                )
+            })
+            .collect::<Vec<_>>();
+        normalized.sort_by(|a, b| {
+            (a.category as u8)
+                .cmp(&(b.category as u8))
+                .then_with(|| {
+                    b.confidence
+                        .partial_cmp(&a.confidence)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| {
+                    a.label
+                        .to_ascii_lowercase()
+                        .cmp(&b.label.to_ascii_lowercase())
+                })
+        });
+        normalized
+            .dedup_by(|a, b| a.category == b.category && a.label.eq_ignore_ascii_case(&b.label));
+        if self.auto_tags == normalized && self.auto_tags_indexed {
+            return false;
+        }
+        self.auto_tags = normalized;
+        self.auto_tags_indexed = true;
         true
     }
 }
@@ -482,6 +708,70 @@ pub fn media_keyword_summary(item: &MediaItem, max_labels: usize) -> Option<Stri
     Some(labels.join(" • "))
 }
 
+pub fn media_auto_tag_summary(item: &MediaItem, max_tags: usize) -> Option<String> {
+    if item.auto_tags.is_empty() || max_tags == 0 {
+        return None;
+    }
+    let mut labels: Vec<String> = item
+        .auto_tags
+        .iter()
+        .map(|tag| tag.label.trim())
+        .filter(|label| !label.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    labels.sort();
+    labels.dedup();
+    if labels.is_empty() {
+        return None;
+    }
+    let extra = labels.len().saturating_sub(max_tags);
+    labels.truncate(max_tags);
+    if extra > 0 {
+        labels.push(format!("+{extra}"));
+    }
+    Some(labels.join(" • "))
+}
+
+pub fn media_auto_tag_state_key(item: &MediaItem) -> String {
+    std::iter::once(format!("indexed:{}", item.auto_tags_indexed))
+        .chain(item.auto_tags.iter().map(|tag| {
+            format!(
+                "{:?}:{}:{:.3}:{}",
+                tag.category,
+                tag.label,
+                tag.confidence,
+                tag.best_frame_time_ns.unwrap_or_default()
+            )
+        }))
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+fn media_auto_tag_search_excerpt(item: &MediaItem, query: &SearchQuery) -> Option<String> {
+    let mut best: Option<(i32, &MediaAutoTag)> = None;
+    for tag in &item.auto_tags {
+        let tag_text = format!("{} {}", tag.category.search_text(), tag.label);
+        let Some(score) = score_search_text(tag_text.as_str(), query, 860, 720) else {
+            continue;
+        };
+        let replace = best
+            .as_ref()
+            .map(|(current, _)| score > *current)
+            .unwrap_or(true);
+        if replace {
+            best = Some((score, tag));
+        }
+    }
+    best.map(|(_, tag)| {
+        format!(
+            "{}: {} ({:.0}%)",
+            tag.category.label(),
+            highlight_search_excerpt(tag.label.as_str(), query),
+            tag.confidence * 100.0
+        )
+    })
+}
+
 pub fn media_transcript_state_key(item: &MediaItem) -> String {
     item.transcript_windows
         .iter()
@@ -521,8 +811,37 @@ pub fn media_background_ai_index_request(item: &MediaItem) -> Option<(u64, u64)>
     Some((0, item.duration_ns))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MediaVisualIndexRequest {
+    pub duration_ns: u64,
+    pub is_image: bool,
+}
+
+pub fn media_background_visual_index_request(item: &MediaItem) -> Option<MediaVisualIndexRequest> {
+    if !item.has_backing_file()
+        || item.is_missing
+        || item.is_audio_only
+        || item.is_animated_svg
+        || item.visual_embedding.is_some()
+    {
+        return None;
+    }
+    Some(MediaVisualIndexRequest {
+        duration_ns: item.duration_ns,
+        is_image: item.is_image,
+    })
+}
+
+pub fn media_background_auto_tag_request(item: &MediaItem) -> Option<MediaVisualEmbedding> {
+    if !item.has_backing_file() || item.is_missing || item.auto_tags_indexed {
+        return None;
+    }
+    item.visual_embedding.clone()
+}
+
 pub fn media_search_match(item: &MediaItem, query: &str) -> Option<MediaSearchMatch> {
-    let query = SearchQuery::new(query)?;
+    let raw_query = query.trim();
+    let query = SearchQuery::new(raw_query)?;
     let mut best = None;
 
     consider_text_search(
@@ -603,6 +922,25 @@ pub fn media_search_match(item: &MediaItem, query: &str) -> Option<MediaSearchMa
             None,
         );
     }
+    if !item.auto_tags.is_empty() {
+        let auto_tag_text = item
+            .auto_tags
+            .iter()
+            .map(|tag| format!("{} {}", tag.category.search_text(), tag.label))
+            .collect::<Vec<_>>()
+            .join(" ");
+        consider_text_search(
+            &mut best,
+            MediaSearchField::AutoTag,
+            auto_tag_text.as_str(),
+            &query,
+            850,
+            720,
+            media_auto_tag_search_excerpt(item, &query),
+            item.auto_tags.iter().find_map(|tag| tag.best_frame_time_ns),
+            item.auto_tags.iter().find_map(|tag| tag.best_frame_time_ns),
+        );
+    }
     for window in &item.transcript_windows {
         let joined_text = window
             .segments
@@ -640,6 +978,29 @@ pub fn media_search_match(item: &MediaItem, query: &str) -> Option<MediaSearchMa
                 Some(window.source_in_ns.saturating_add(segment.start_ns)),
                 Some(window.source_in_ns.saturating_add(segment.end_ns)),
             );
+        }
+    }
+    if let Some(embedding) = item.visual_embedding.as_ref() {
+        if let Some(visual_match) =
+            crate::media::clip_embedding_cache::visual_search_match(raw_query, embedding)
+        {
+            let candidate = MediaSearchMatch {
+                field: MediaSearchField::Visual,
+                score: visual_match.score,
+                excerpt: visual_match
+                    .best_frame_time_ns
+                    .map(format_visual_search_excerpt)
+                    .or_else(|| Some("Semantic visual match".to_string())),
+                source_in_ns: visual_match.best_frame_time_ns,
+                source_out_ns: visual_match.best_frame_time_ns,
+            };
+            let replace = best
+                .as_ref()
+                .map(|current| candidate.score > current.score)
+                .unwrap_or(true);
+            if replace {
+                best = Some(candidate);
+            }
         }
     }
 
@@ -686,6 +1047,42 @@ pub fn upsert_media_transcript(
     let changed = item.upsert_transcript_window(source_in_ns, source_out_ns, segments);
     lib.items.push(item);
     changed
+}
+
+pub fn upsert_media_visual_embedding(
+    lib: &mut MediaLibrary,
+    source_path: &str,
+    embedding: MediaVisualEmbedding,
+) -> bool {
+    if source_path.trim().is_empty() || embedding.frames.is_empty() {
+        return false;
+    }
+    if let Some(item) = lib
+        .items
+        .iter_mut()
+        .find(|item| item.source_path == source_path)
+    {
+        return item.upsert_visual_embedding(embedding);
+    }
+    false
+}
+
+pub fn upsert_media_auto_tags(
+    lib: &mut MediaLibrary,
+    source_path: &str,
+    auto_tags: Vec<MediaAutoTag>,
+) -> bool {
+    if source_path.trim().is_empty() {
+        return false;
+    }
+    if let Some(item) = lib
+        .items
+        .iter_mut()
+        .find(|item| item.source_path == source_path)
+    {
+        return item.upsert_auto_tags(auto_tags);
+    }
+    false
 }
 
 #[derive(Debug, Clone)]
@@ -801,6 +1198,19 @@ fn highlight_search_excerpt(text: &str, query: &SearchQuery) -> String {
     text.to_string()
 }
 
+fn format_visual_search_excerpt(time_ns: u64) -> String {
+    let total_millis = time_ns / 1_000_000;
+    let hours = total_millis / 3_600_000;
+    let minutes = (total_millis / 60_000) % 60;
+    let seconds = (total_millis / 1_000) % 60;
+    let tenths = (total_millis % 1_000) / 100;
+    if hours > 0 {
+        format!("Closest visual frame around {hours:02}:{minutes:02}:{seconds:02}.{tenths}")
+    } else {
+        format!("Closest visual frame around {minutes:02}:{seconds:02}.{tenths}")
+    }
+}
+
 fn consider_text_search(
     best: &mut Option<MediaSearchMatch>,
     field: MediaSearchField,
@@ -876,16 +1286,43 @@ pub fn matches_media_rating_filter(item: &MediaItem, filter: MediaRatingFilter) 
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 struct SavedMediaAnnotations {
     #[serde(default)]
     rating: MediaRating,
     #[serde(default)]
     keyword_ranges: Vec<MediaKeywordRange>,
+    #[serde(default)]
+    auto_tags: Vec<MediaAutoTag>,
+    #[serde(default)]
+    auto_tags_indexed: bool,
+}
+
+/// Clamp a requested subclip range against the parent's duration.
+/// Also enforces `in < out` with a 1-frame minimum (at 24 fps) so
+/// a miskeyed Mark O onto the same frame as Mark I produces a
+/// valid (if tiny) subclip rather than a zero-length one.
+pub fn clamp_subclip_range(parent_duration_ns: u64, in_ns: u64, out_ns: u64) -> (u64, u64) {
+    const MIN_WINDOW_NS: u64 = 1_000_000_000 / 24;
+    let max = parent_duration_ns.max(MIN_WINDOW_NS);
+    // Reserve at least one 24-fps frame between in and max so the
+    // clamp below is always valid. If the requested in-point is
+    // closer to the end than one frame, pull it back.
+    let in_clamped = in_ns.min(max.saturating_sub(MIN_WINDOW_NS));
+    let min_out = in_clamped.saturating_add(MIN_WINDOW_NS);
+    let out_clamped = out_ns.clamp(min_out, max);
+    (in_clamped, out_clamped)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct SavedLibraryItem {
+    // Stable library-item id. Persisted so subclips can store
+    // `parent_id` references across save/reload cycles. Older
+    // projects that predate this field deserialize with an empty
+    // string, in which case we fall back to the existing
+    // path-based match-or-insert logic.
+    #[serde(default)]
+    pub id: String,
     pub source_path: String,
     #[serde(default)]
     pub duration_ns: u64,
@@ -912,12 +1349,26 @@ struct SavedLibraryItem {
     #[serde(default)]
     pub codec_summary: Option<String>,
     #[serde(default)]
+    pub hdr_colorimetry: Option<String>,
+    #[serde(default)]
     pub file_size_bytes: Option<u64>,
+    /// Subclip parent reference. `None` (or absent on older saves)
+    /// means this is a top-level library item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    /// Subclip in-point within the source. Ignored when `parent_id`
+    /// is absent — top-level items cover `0..duration_ns`.
+    #[serde(default)]
+    pub subclip_source_in_ns: u64,
+    /// Subclip out-point within the source.
+    #[serde(default)]
+    pub subclip_source_out_ns: u64,
 }
 
 impl SavedLibraryItem {
     fn from_media_item(item: &MediaItem) -> Option<Self> {
         item.has_backing_file().then(|| Self {
+            id: item.id.clone(),
             source_path: item.source_path.clone(),
             duration_ns: item.duration_ns,
             label: item.label.clone(),
@@ -931,7 +1382,11 @@ impl SavedLibraryItem {
             frame_rate_num: item.frame_rate_num,
             frame_rate_den: item.frame_rate_den,
             codec_summary: item.codec_summary.clone(),
+            hdr_colorimetry: item.hdr_colorimetry.clone(),
             file_size_bytes: item.file_size_bytes,
+            parent_id: item.parent_id.clone(),
+            subclip_source_in_ns: item.subclip_source_in_ns,
+            subclip_source_out_ns: item.subclip_source_out_ns,
         })
     }
 
@@ -952,13 +1407,24 @@ impl SavedLibraryItem {
         item.frame_rate_num = self.frame_rate_num;
         item.frame_rate_den = self.frame_rate_den;
         item.codec_summary = self.codec_summary.clone();
+        item.hdr_colorimetry = self.hdr_colorimetry.clone();
         item.file_size_bytes = self.file_size_bytes;
         item.is_missing = source_path_exists(&item.source_path);
         item.is_missing = !item.is_missing;
+        item.parent_id = self.parent_id.clone();
+        item.subclip_source_in_ns = self.subclip_source_in_ns;
+        item.subclip_source_out_ns = self.subclip_source_out_ns;
     }
 
     fn into_media_item(self) -> MediaItem {
         let mut item = MediaItem::new(self.source_path, self.duration_ns);
+        // Preserve the saved id when present so subclip parent_id
+        // references across save/reload remain valid. Empty id from
+        // pre-subclips saves falls through to the fresh Uuid from
+        // MediaItem::new (existing behaviour).
+        if !self.id.trim().is_empty() {
+            item.id = self.id;
+        }
         if !self.label.trim().is_empty() {
             item.label = self.label;
         }
@@ -972,7 +1438,11 @@ impl SavedLibraryItem {
         item.frame_rate_num = self.frame_rate_num;
         item.frame_rate_den = self.frame_rate_den;
         item.codec_summary = self.codec_summary;
+        item.hdr_colorimetry = self.hdr_colorimetry;
         item.file_size_bytes = self.file_size_bytes;
+        item.parent_id = self.parent_id;
+        item.subclip_source_in_ns = self.subclip_source_in_ns;
+        item.subclip_source_out_ns = self.subclip_source_out_ns;
         item
     }
 }
@@ -1014,15 +1484,21 @@ pub fn sync_bins_to_project(lib: &MediaLibrary, project: &mut crate::model::proj
         .items
         .iter()
         .filter_map(|item| {
-            ((item.rating != MediaRating::None) || !item.keyword_ranges.is_empty()).then(|| {
-                (
-                    item.library_key(),
-                    SavedMediaAnnotations {
-                        rating: item.rating,
-                        keyword_ranges: item.keyword_ranges.clone(),
-                    },
-                )
-            })
+            ((item.rating != MediaRating::None)
+                || !item.keyword_ranges.is_empty()
+                || !item.auto_tags.is_empty()
+                || item.auto_tags_indexed)
+                .then(|| {
+                    (
+                        item.library_key(),
+                        SavedMediaAnnotations {
+                            rating: item.rating,
+                            keyword_ranges: item.keyword_ranges.clone(),
+                            auto_tags: item.auto_tags.clone(),
+                            auto_tags_indexed: item.auto_tags_indexed,
+                        },
+                    )
+                })
         })
         .collect();
     if annotations.is_empty() {
@@ -1054,12 +1530,37 @@ pub fn apply_bins_from_project(
     if let Some(ref library_items_json) = project.parsed_library_items_json {
         if let Ok(saved_items) = serde_json::from_str::<Vec<SavedLibraryItem>>(library_items_json) {
             for saved in saved_items {
-                if let Some(item) = lib
-                    .items
-                    .iter_mut()
-                    .find(|item| item.matches_library_key(&saved.source_path))
-                {
-                    saved.apply_to_item(item);
+                // ID-first match so saved subclips deterministically
+                // re-bind to the correct in-memory item (multiple
+                // items can share a source_path once subclips exist,
+                // and path-only matching would clobber the wrong
+                // one). Fall back to path-based match when the save
+                // predates the `id` field (empty string) or when no
+                // id match is found — this keeps restore working
+                // for legacy projects and for the common case where
+                // the media-probe path has already populated a
+                // top-level item from an auto-import.
+                // Resolve an existing item to update in two stages so
+                // the borrow checker can reason about each
+                // independently: first look for an id match (when
+                // saved has an id), then fall back to a
+                // source-path match restricted to top-level items
+                // on both sides — subclips share a source_path with
+                // their parent and must not collide.
+                let saved_has_id = !saved.id.trim().is_empty();
+                let mut existing_idx: Option<usize> = None;
+                if saved_has_id {
+                    existing_idx = lib.items.iter().position(|item| item.id == saved.id);
+                }
+                if existing_idx.is_none() {
+                    existing_idx = lib.items.iter().position(|item| {
+                        item.parent_id.is_none()
+                            && saved.parent_id.is_none()
+                            && item.matches_library_key(&saved.source_path)
+                    });
+                }
+                if let Some(idx) = existing_idx {
+                    saved.apply_to_item(&mut lib.items[idx]);
                 } else {
                     lib.items.push(saved.into_media_item());
                 }
@@ -1107,6 +1608,8 @@ pub fn apply_bins_from_project(
                 if let Some(annotations) = annotations {
                     item.rating = annotations.rating;
                     item.keyword_ranges = annotations.keyword_ranges.clone();
+                    item.auto_tags = annotations.auto_tags.clone();
+                    item.auto_tags_indexed = annotations.auto_tags_indexed;
                 }
             }
         }
@@ -1210,6 +1713,7 @@ mod tests {
             frame_rate_num: None,
             frame_rate_den: None,
             codec_summary: None,
+            hdr_colorimetry: None,
             file_size_bytes: None,
             clip_kind: None,
             title_text: None,
@@ -1217,7 +1721,13 @@ mod tests {
             bin_id,
             rating: MediaRating::None,
             keyword_ranges: Vec::new(),
+            auto_tags: Vec::new(),
+            auto_tags_indexed: false,
             transcript_windows: Vec::new(),
+            visual_embedding: None,
+            parent_id: None,
+            subclip_source_in_ns: 0,
+            subclip_source_out_ns: 0,
         }
     }
 
@@ -1301,6 +1811,104 @@ mod tests {
 
         assert!(lib.find_bin(&bin.id).is_some());
         assert!(lib.find_bin("nonexistent").is_none());
+    }
+
+    #[test]
+    fn clamp_subclip_range_enforces_minimum_and_bounds() {
+        // Out beyond parent duration clamps to duration.
+        let (in_ns, out_ns) = clamp_subclip_range(10_000_000_000, 1_000_000_000, 20_000_000_000);
+        assert_eq!(in_ns, 1_000_000_000);
+        assert_eq!(out_ns, 10_000_000_000);
+        // Out == in bumps out to in + 1 frame (at 24 fps = ~41.67ms).
+        let (in_ns, out_ns) = clamp_subclip_range(10_000_000_000, 5_000_000_000, 5_000_000_000);
+        assert_eq!(in_ns, 5_000_000_000);
+        assert!(out_ns > 5_000_000_000);
+        // In beyond duration pulls back so there's room for at
+        // least a 1-frame (24 fps) window.
+        let (in_ns, out_ns) = clamp_subclip_range(10_000_000_000, 99_000_000_000, 99_000_000_000);
+        assert!(in_ns <= 10_000_000_000 - (1_000_000_000 / 24));
+        assert!(out_ns > in_ns);
+        assert!(out_ns <= 10_000_000_000);
+    }
+
+    #[test]
+    fn new_subclip_inherits_metadata_and_offsets_timecode() {
+        let mut parent = MediaItem::new("/tmp/parent.mp4", 60_000_000_000);
+        parent.source_timecode_base_ns = Some(50_000_000_000);
+        parent.has_audio = true;
+        parent.video_width = Some(1920);
+        parent.video_height = Some(1080);
+        parent.codec_summary = Some("H.264".into());
+
+        let sub = MediaItem::new_subclip(
+            &parent,
+            10_000_000_000,
+            20_000_000_000,
+            "Highlight".into(),
+        );
+
+        assert!(sub.is_subclip());
+        assert_eq!(sub.parent_id.as_deref(), Some(parent.id.as_str()));
+        assert_eq!(sub.source_path, parent.source_path);
+        assert_eq!(sub.subclip_source_in_ns, 10_000_000_000);
+        assert_eq!(sub.subclip_source_out_ns, 20_000_000_000);
+        assert_eq!(sub.effective_source_in_ns(), 10_000_000_000);
+        assert_eq!(sub.effective_source_out_ns(), 20_000_000_000);
+        assert_eq!(sub.effective_duration_ns(), 10_000_000_000);
+        // TC base offset by in-point so "start of subclip" shows correct TC.
+        assert_eq!(sub.source_timecode_base_ns, Some(60_000_000_000));
+        // Codec metadata inherits.
+        assert_eq!(sub.has_audio, true);
+        assert_eq!(sub.video_width, Some(1920));
+        assert_eq!(sub.codec_summary.as_deref(), Some("H.264"));
+        // Subclip gets its own id.
+        assert_ne!(sub.id, parent.id);
+    }
+
+    #[test]
+    fn top_level_item_is_not_subclip_and_returns_full_range() {
+        let item = MediaItem::new("/tmp/foo.mp4", 30_000_000_000);
+        assert!(!item.is_subclip());
+        assert_eq!(item.effective_source_in_ns(), 0);
+        assert_eq!(item.effective_source_out_ns(), 30_000_000_000);
+        assert_eq!(item.effective_duration_ns(), 30_000_000_000);
+    }
+
+    #[test]
+    fn saved_library_item_round_trip_preserves_subclip_fields() {
+        let mut parent = MediaItem::new("/tmp/parent.mp4", 60_000_000_000);
+        parent.has_audio = true;
+        let sub = MediaItem::new_subclip(&parent, 5_000_000_000, 25_000_000_000, "Take".into());
+        let saved = SavedLibraryItem::from_media_item(&sub).expect("backing-file subclip");
+        let json = serde_json::to_string(&saved).expect("serialize");
+        let restored: SavedLibraryItem =
+            serde_json::from_str(&json).expect("deserialize");
+        let restored_item = restored.into_media_item();
+        assert!(restored_item.is_subclip());
+        assert_eq!(restored_item.parent_id, Some(parent.id.clone()));
+        assert_eq!(restored_item.subclip_source_in_ns, 5_000_000_000);
+        assert_eq!(restored_item.subclip_source_out_ns, 25_000_000_000);
+        assert_eq!(restored_item.id, sub.id, "stable id preserved");
+        assert_eq!(restored_item.label, "Take");
+    }
+
+    #[test]
+    fn legacy_saved_item_without_id_field_deserializes_with_fresh_id() {
+        // Pre-subclip saves didn't persist `id`. Deserialization
+        // must default to empty, and into_media_item must assign a
+        // fresh Uuid rather than keeping the empty string. This is
+        // the path that keeps old .uspxml files loading.
+        let legacy_json = r#"{
+            "source_path": "/tmp/legacy.mp4",
+            "duration_ns": 1000000000,
+            "label": "Old"
+        }"#;
+        let saved: SavedLibraryItem = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(saved.id, "");
+        let item = saved.into_media_item();
+        assert!(!item.id.is_empty(), "fresh Uuid when saved id was absent");
+        assert_eq!(item.label, "Old");
+        assert!(!item.is_subclip());
     }
 
     #[test]
@@ -1423,6 +2031,43 @@ mod tests {
     }
 
     #[test]
+    fn test_media_search_match_finds_auto_tags() {
+        let mut item = MediaItem::new("/tmp/clip.mov", 3_000_000_000);
+        item.is_missing = false;
+        assert!(item.upsert_auto_tags(vec![
+            MediaAutoTag::new(
+                MediaAutoTagCategory::ShotType,
+                "wide",
+                0.82,
+                Some(1_000_000_000),
+            )
+            .expect("wide tag"),
+            MediaAutoTag::new(
+                MediaAutoTagCategory::Setting,
+                "outdoor",
+                0.76,
+                Some(2_000_000_000),
+            )
+            .expect("outdoor tag"),
+        ]));
+
+        let search_match =
+            media_search_match(&item, "outdoor wide").expect("expected auto-tag match");
+        assert_eq!(search_match.field, MediaSearchField::AutoTag);
+        assert!(search_match
+            .excerpt
+            .as_deref()
+            .is_some_and(|excerpt| excerpt.contains("wide") || excerpt.contains("outdoor")));
+        assert!(media_matches_filters(
+            &item,
+            &MediaFilterCriteria {
+                search_text: "outdoor wide".to_string(),
+                ..Default::default()
+            }
+        ));
+    }
+
+    #[test]
     fn test_upsert_media_transcript_creates_library_item() {
         let mut lib = MediaLibrary::new();
         let segments = vec![SubtitleSegment {
@@ -1513,6 +2158,118 @@ mod tests {
     }
 
     #[test]
+    fn test_media_background_visual_index_request_requires_visual_gap() {
+        let mut item = MediaItem::new("/tmp/visual.mov", 12_000_000_000);
+        item.is_missing = false;
+        assert_eq!(
+            media_background_visual_index_request(&item),
+            Some(MediaVisualIndexRequest {
+                duration_ns: 12_000_000_000,
+                is_image: false,
+            })
+        );
+
+        item.is_audio_only = true;
+        assert_eq!(media_background_visual_index_request(&item), None);
+
+        item.is_audio_only = false;
+        item.is_animated_svg = true;
+        assert_eq!(media_background_visual_index_request(&item), None);
+
+        item.is_animated_svg = false;
+        item.visual_embedding = Some(MediaVisualEmbedding {
+            model_id: "test".to_string(),
+            frames: vec![MediaVisualEmbeddingFrame {
+                time_ns: 0,
+                embedding: vec![1.0, 0.0],
+            }],
+        });
+        assert_eq!(media_background_visual_index_request(&item), None);
+    }
+
+    #[test]
+    fn test_media_background_auto_tag_request_requires_visual_gap() {
+        let mut item = MediaItem::new("/tmp/visual.mov", 12_000_000_000);
+        item.is_missing = false;
+        assert_eq!(media_background_auto_tag_request(&item), None);
+
+        let embedding = MediaVisualEmbedding {
+            model_id: "test".to_string(),
+            frames: vec![MediaVisualEmbeddingFrame {
+                time_ns: 0,
+                embedding: vec![1.0, 0.0],
+            }],
+        };
+        item.visual_embedding = Some(embedding.clone());
+        assert_eq!(
+            media_background_auto_tag_request(&item),
+            Some(embedding.clone())
+        );
+
+        item.upsert_auto_tags(vec![MediaAutoTag::new(
+            MediaAutoTagCategory::Subject,
+            "person",
+            0.8,
+            Some(0),
+        )
+        .expect("person tag")]);
+        assert_eq!(media_background_auto_tag_request(&item), None);
+    }
+
+    #[test]
+    fn test_upsert_media_visual_embedding_updates_existing_item() {
+        let mut lib = MediaLibrary::new();
+        let mut item = MediaItem::new("/tmp/visual.mov", 5_000_000_000);
+        item.is_missing = false;
+        lib.items.push(item);
+
+        let embedding = MediaVisualEmbedding {
+            model_id: "test-model".to_string(),
+            frames: vec![MediaVisualEmbeddingFrame {
+                time_ns: 2_000_000_000,
+                embedding: vec![0.5, 0.5],
+            }],
+        };
+        assert!(upsert_media_visual_embedding(
+            &mut lib,
+            "/tmp/visual.mov",
+            embedding.clone()
+        ));
+        assert_eq!(lib.items[0].visual_embedding.as_ref(), Some(&embedding));
+        assert!(!upsert_media_visual_embedding(
+            &mut lib,
+            "/tmp/visual.mov",
+            embedding
+        ));
+    }
+
+    #[test]
+    fn test_upsert_media_auto_tags_updates_existing_item() {
+        let mut lib = MediaLibrary::new();
+        let mut item = MediaItem::new("/tmp/visual.mov", 5_000_000_000);
+        item.is_missing = false;
+        lib.items.push(item);
+
+        let auto_tags = vec![
+            MediaAutoTag::new(MediaAutoTagCategory::Setting, "indoor", 0.65, Some(0))
+                .expect("indoor tag"),
+            MediaAutoTag::new(MediaAutoTagCategory::Subject, "person", 0.71, Some(0))
+                .expect("person tag"),
+        ];
+        assert!(upsert_media_auto_tags(
+            &mut lib,
+            "/tmp/visual.mov",
+            auto_tags.clone()
+        ));
+        assert_eq!(lib.items[0].auto_tags, auto_tags);
+        assert!(!upsert_media_auto_tags(
+            &mut lib,
+            "/tmp/visual.mov",
+            auto_tags
+        ));
+    }
+
+    #[test]
     fn test_sync_bins_round_trips_collections() {
         let mut lib = MediaLibrary::new();
         lib.collections.push(MediaCollection::new(
@@ -1549,6 +2306,15 @@ mod tests {
         item.rating = MediaRating::Favorite;
         item.keyword_ranges
             .push(MediaKeywordRange::new("B-roll", 250_000_000, 900_000_000));
+        item.auto_tags.push(
+            MediaAutoTag::new(
+                MediaAutoTagCategory::Setting,
+                "outdoor",
+                0.77,
+                Some(500_000_000),
+            )
+            .expect("outdoor tag"),
+        );
         item.upsert_transcript_window(
             0,
             2_000_000_000,
@@ -1572,7 +2338,7 @@ mod tests {
         assert!(project
             .parsed_media_annotations_json
             .as_ref()
-            .is_some_and(|json| json.contains("B-roll")));
+            .is_some_and(|json| json.contains("B-roll") && json.contains("outdoor")));
         assert!(project
             .parsed_transcript_cache_json
             .as_ref()
@@ -1586,11 +2352,55 @@ mod tests {
         assert_eq!(restored.items[0].rating, MediaRating::Favorite);
         assert_eq!(restored.items[0].keyword_ranges.len(), 1);
         assert_eq!(restored.items[0].keyword_ranges[0].label, "B-roll");
+        assert_eq!(restored.items[0].auto_tags.len(), 1);
+        assert_eq!(restored.items[0].auto_tags[0].label, "outdoor");
         assert_eq!(restored.items[0].transcript_windows.len(), 1);
         assert_eq!(
             restored.items[0].transcript_windows[0].segments[0].text,
             "Interview opening line"
         );
         assert!(project.parsed_transcript_cache_json.is_none());
+    }
+
+    #[test]
+    fn library_item_roundtrip_through_fcpxml() {
+        let mut project = crate::model::project::Project::new("Test");
+        let mut lib = MediaLibrary::new();
+
+        // Add an off-timeline item to the library.
+        let mut item = MediaItem::new("/tmp/video.mp4", 5_000_000_000);
+        item.label = "My Clip".to_string();
+        item.has_audio = true;
+        lib.items.push(item);
+
+        // Sync library → project transient fields.
+        sync_bins_to_project(&lib, &mut project);
+        assert!(
+            project.parsed_library_items_json.is_some(),
+            "parsed_library_items_json should be populated"
+        );
+
+        // Write FCPXML.
+        let xml = crate::fcpxml::writer::write_fcpxml(&project).expect("write_fcpxml");
+        assert!(
+            xml.contains("us:library-items"),
+            "FCPXML should contain us:library-items vendor attr"
+        );
+
+        // Parse FCPXML back.
+        let mut loaded = crate::fcpxml::parser::parse_fcpxml(&xml).expect("parse_fcpxml");
+        assert!(
+            loaded.parsed_library_items_json.is_some(),
+            "loaded project should carry parsed_library_items_json"
+        );
+
+        // Apply to a fresh library (simulates clear-on-reload).
+        let mut new_lib = MediaLibrary::new();
+        apply_bins_from_project(&mut new_lib, &mut loaded);
+        assert_eq!(new_lib.items.len(), 1);
+        assert_eq!(new_lib.items[0].source_path, "/tmp/video.mp4");
+        assert_eq!(new_lib.items[0].duration_ns, 5_000_000_000);
+        assert_eq!(new_lib.items[0].label, "My Clip");
+        assert!(new_lib.items[0].has_audio);
     }
 }

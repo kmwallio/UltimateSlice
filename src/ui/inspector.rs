@@ -298,6 +298,13 @@ pub struct InspectorView {
     pub out_value: Label,
     pub dur_value: Label,
     pub pos_value: Label,
+    /// Displays the clip's decoded source timecode base (from
+    /// Convert LTC Audio to Timecode, BWF bext time_reference, or
+    /// an FCPXML `start` attr). Reads "—" when no timecode has been
+    /// decoded yet, with a tooltip suggesting Convert LTC so the
+    /// user can tell at a glance whether "Sync Selected Clips by
+    /// Timecode" will be enabled.
+    pub source_tc_value: Label,
     /// Which clip is currently shown (kept in sync by update())
     pub selected_clip_id: Rc<RefCell<Option<String>>>,
     pub clip_color_label_combo: gtk4::DropDown,
@@ -575,6 +582,13 @@ pub struct InspectorView {
     pub selected_motion_tracker_id: Rc<RefCell<Option<String>>>,
     pub tracking_tracker_ids: Rc<RefCell<Vec<Option<String>>>>,
     pub tracking_reference_choices: Rc<RefCell<Vec<Option<MotionTrackerReference>>>>,
+    // Render-and-Replace toggle (Phase 1b). Lives above the Frei0r
+    // effects section since the bake covers color grade + frei0r +
+    // LUTs + blur/denoise/sharpness.
+    pub render_replace_check: CheckButton,
+    pub render_replace_status_label: Label,
+    pub render_replace_cancel_btn: Button,
+    pub render_replace_apply_to_selected_btn: Button,
     // Applied frei0r effects
     pub frei0r_effects_section: GBox,
     pub frei0r_effects_list: GBox,
@@ -1274,15 +1288,15 @@ impl InspectorView {
                         }
                         _ => {
                             // Double — use a slider.
-                            let (mut min, mut max) = plugin_info
+                            let (mut min, mut max, param_default) = plugin_info
                                 .as_ref()
                                 .and_then(|info| {
                                     info.params
                                         .iter()
                                         .find(|p| p.name == *param_name)
-                                        .map(|p| (p.min, p.max))
+                                        .map(|p| (p.min, p.max, p.default_value))
                                 })
-                                .unwrap_or((0.0, 1.0));
+                                .unwrap_or((0.0, 1.0, 0.0));
                             // Safety: ensure finite, sane bounds for GTK Scale.
                             if !min.is_finite() || min < -1e6 {
                                 min = 0.0;
@@ -1297,10 +1311,7 @@ impl InspectorView {
                             let step = ((max - min) / 100.0).max(f64::MIN_POSITIVE);
                             let slider = Scale::with_range(Orientation::Horizontal, min, max, step);
                             slider.set_value(param_val);
-                            slider.set_draw_value(true);
-                            slider.set_digits(2);
-                            slider.set_hexpand(true);
-                            param_row.append(&slider);
+                            append_slider_with_spin(&param_row, &slider, 2, param_default);
 
                             let project = self.project.clone();
                             let selected_clip_id = self.selected_clip_id.clone();
@@ -2394,6 +2405,20 @@ impl InspectorView {
                 self.out_value.set_text(&ns_to_timecode(c.source_out));
                 self.dur_value.set_text(&ns_to_timecode(c.duration()));
                 self.pos_value.set_text(&ns_to_timecode(c.timeline_start));
+                // Source TC: show decoded base at source_in offset when
+                // present, else flag the absence so the user knows to
+                // run Convert LTC.
+                match c.source_timecode_start_ns() {
+                    Some(tc_ns) => {
+                        self.source_tc_value.set_text(&ns_to_timecode(tc_ns));
+                        self.source_tc_value.add_css_class("dim-label");
+                    }
+                    None => {
+                        self.source_tc_value
+                            .set_text("— (none; run Convert LTC)");
+                        self.source_tc_value.add_css_class("dim-label");
+                    }
+                }
                 let current_transition = &c.outgoing_transition;
                 let current_kind_id =
                     if is_supported_transition_kind(current_transition.kind_trimmed()) {
@@ -2540,13 +2565,33 @@ impl InspectorView {
                 );
                 self.volume_slider.set_value(linear_to_db_volume(vol_val));
                 self.voice_enhance_check.set_active(c.voice_enhance);
+                // Render-and-Replace only applies to file-backed clip
+                // kinds. Hide the toggle for Compound / Multicam /
+                // Title / Adjustment / Drawing where ffmpeg has no
+                // source file to read. Clearing the flag on unsupported
+                // kinds also protects against stale OTIO imports.
+                let bakeable = crate::media::render_replace_cache::is_bakeable_kind(&c.kind);
+                self.render_replace_check.set_visible(bakeable);
+                // The status label is driven by the 500 ms poll loop
+                // in window.rs (reads render_replace_cache.status). We
+                // only force it hidden when the toggle itself isn't
+                // applicable to this clip kind; otherwise the poll
+                // loop handles visibility based on the cache state.
+                if !bakeable {
+                    self.render_replace_status_label.set_visible(false);
+                }
+                if bakeable {
+                    self.render_replace_check.set_active(c.render_replace_enabled);
+                } else {
+                    self.render_replace_check.set_active(false);
+                }
                 self.voice_enhance_strength_slider
                     .set_value((c.voice_enhance_strength * 100.0) as f64);
                 self.voice_enhance_strength_slider
                     .set_sensitive(c.voice_enhance);
                 self.voice_isolation_slider
                     .set_value((c.voice_isolation * 100.0) as f64);
-                self.voice_isolation_slider.set_sensitive(true);
+                set_slider_row_sensitive(&self.voice_isolation_slider, true);
                 self.vi_pad_slider
                     .set_value(c.voice_isolation_pad_ms as f64);
                 self.vi_fade_slider
@@ -2630,23 +2675,25 @@ impl InspectorView {
                             let header_row = GBox::new(Orientation::Horizontal, 4);
                             let enable_check = gtk4::CheckButton::new();
                             enable_check.set_active(effect.enabled);
+                            enable_check
+                                .set_tooltip_text(Some("Enable or disable this audio effect"));
                             header_row.append(&enable_check);
                             let name_label = Label::new(Some(&display_name));
                             name_label.set_hexpand(true);
                             name_label.set_halign(gtk4::Align::Start);
                             header_row.append(&name_label);
                             let btn_up = Button::with_label("\u{25b2}");
-                            btn_up.set_tooltip_text(Some("Move up"));
+                            btn_up.set_tooltip_text(Some("Move this audio effect up"));
                             btn_up.add_css_class("flat");
                             btn_up.set_sensitive(effect_idx > 0);
                             header_row.append(&btn_up);
                             let btn_down = Button::with_label("\u{25bc}");
-                            btn_down.set_tooltip_text(Some("Move down"));
+                            btn_down.set_tooltip_text(Some("Move this audio effect down"));
                             btn_down.add_css_class("flat");
                             btn_down.set_sensitive(effect_idx < c.ladspa_effects.len() - 1);
                             header_row.append(&btn_down);
                             let btn_remove = Button::with_label("\u{00d7}");
-                            btn_remove.set_tooltip_text(Some("Remove"));
+                            btn_remove.set_tooltip_text(Some("Remove this audio effect"));
                             btn_remove.add_css_class("flat");
                             header_row.append(&btn_remove);
                             effect_box.append(&header_row);
@@ -2763,14 +2810,17 @@ impl InspectorView {
                                         if step > 0.0 { step } else { 0.01 },
                                     );
                                     slider.set_value(val);
-                                    slider.set_draw_value(true);
-                                    slider.set_digits(2);
                                     slider.add_mark(
                                         param_info.default_value,
                                         gtk4::PositionType::Bottom,
                                         None,
                                     );
-                                    param_row.append(&slider);
+                                    append_slider_with_spin(
+                                        &param_row,
+                                        &slider,
+                                        2,
+                                        param_info.default_value,
+                                    );
 
                                     // Wire slider
                                     let project = self.project.clone();
@@ -3029,6 +3079,7 @@ impl InspectorView {
                     &self.out_value,
                     &self.dur_value,
                     &self.pos_value,
+                    &self.source_tc_value,
                 ] {
                     l.set_text("—");
                 }
@@ -3064,14 +3115,17 @@ impl InspectorView {
                 self.vidstab_slider.set_value(0.5);
                 self.motion_blur_check.set_active(false);
                 self.motion_blur_shutter_slider.set_value(180.0);
-                self.motion_blur_shutter_slider.set_sensitive(false);
+                set_slider_row_sensitive(&self.motion_blur_shutter_slider, false);
                 self.shadows_slider.set_value(0.0);
                 self.midtones_slider.set_value(0.0);
                 self.highlights_slider.set_value(0.0);
                 self.volume_slider.set_value(0.0);
                 self.voice_enhance_check.set_active(false);
+                self.render_replace_check.set_active(false);
+                self.render_replace_check.set_visible(true);
+                self.render_replace_status_label.set_visible(false);
                 self.voice_enhance_strength_slider.set_value(50.0);
-                self.voice_enhance_strength_slider.set_sensitive(false);
+                set_slider_row_sensitive(&self.voice_enhance_strength_slider, false);
                 self.voice_isolation_slider.set_value(0.0);
                 self.vi_source_dropdown.set_visible(false);
                 self.vi_silence_threshold_slider.set_visible(false);
@@ -3164,10 +3218,10 @@ impl InspectorView {
                 self.tracking_width_slider.set_value(0.25);
                 self.tracking_height_slider.set_value(0.25);
                 self.tracking_rotation_spin.set_value(0.0);
-                self.tracking_center_x_slider.set_sensitive(false);
-                self.tracking_center_y_slider.set_sensitive(false);
-                self.tracking_width_slider.set_sensitive(false);
-                self.tracking_height_slider.set_sensitive(false);
+                set_slider_row_sensitive(&self.tracking_center_x_slider, false);
+                set_slider_row_sensitive(&self.tracking_center_y_slider, false);
+                set_slider_row_sensitive(&self.tracking_width_slider, false);
+                set_slider_row_sensitive(&self.tracking_height_slider, false);
                 self.tracking_rotation_spin.set_sensitive(false);
                 self.tracking_run_btn.set_label("Track Region");
                 self.tracking_run_btn.set_sensitive(false);
@@ -3401,6 +3455,9 @@ pub fn build_inspector(
     on_clear_match_eq: impl Fn(&str) + 'static,
     on_request_sam_prompt: impl Fn(Box<dyn Fn(f64, f64, f64, f64) + 'static>) + 'static,
 ) -> (GBox, Rc<InspectorView>) {
+    // Load persisted inspector section expanded/collapsed state.
+    let saved_sections = crate::ui_state::load_inspector_sections_state();
+
     // Bring transform-bound constants into scope so the slider/range/clamp
     // sites below can use them by short name instead of literal magic
     // numbers.  See `src/model/transform_bounds.rs` for the canonical
@@ -3444,16 +3501,45 @@ pub fn build_inspector(
     vbox.set_margin_end(8);
     vbox.set_margin_top(8);
 
+    let header_row = GBox::new(Orientation::Horizontal, 4);
     let title = Label::new(Some("Inspector"));
     title.add_css_class("browser-header");
-    vbox.append(&title);
+    title.set_hexpand(true);
+    header_row.append(&title);
+    let search_toggle = gtk4::ToggleButton::new();
+    search_toggle.set_icon_name("edit-find-symbolic");
+    search_toggle.add_css_class("flat");
+    search_toggle.set_tooltip_text(Some("Filter controls"));
+    header_row.append(&search_toggle);
+    vbox.append(&header_row);
+
+    let search_entry = gtk4::SearchEntry::new();
+    search_entry.set_placeholder_text(Some("Filter controls\u{2026}"));
+    search_entry.set_visible(false);
+    search_entry.set_halign(gtk4::Align::Fill);
+    search_entry.set_max_width_chars(20);
+    vbox.append(&search_entry);
+
+    {
+        let entry = search_entry.clone();
+        search_toggle.connect_toggled(move |btn| {
+            let active = btn.is_active();
+            entry.set_visible(active);
+            if active {
+                entry.grab_focus();
+            } else {
+                entry.set_text("");
+            }
+        });
+    }
 
     let empty_state_label = Label::new(Some(
-        "Select a clip in the timeline to edit its properties.",
+        "Select a clip in the Timeline to edit its properties here.\nTip: click a clip once, or press Ctrl+A in the Timeline to inspect the current selection.",
     ));
     empty_state_label.set_halign(gtk::Align::Start);
     empty_state_label.set_xalign(0.0);
     empty_state_label.set_wrap(true);
+    empty_state_label.set_margin_bottom(8);
     empty_state_label.add_css_class("panel-empty-state");
     vbox.append(&empty_state_label);
 
@@ -3518,6 +3604,19 @@ pub fn build_inspector(
     row_label(&content_box, "Timeline Start");
     let pos_value = value_label("—");
     content_box.append(&pos_value);
+
+    // Source TC base — verifies Convert LTC / BWF bext / FCPXML
+    // `start` actually populated decoded timecode metadata on the
+    // clip. Gates "Sync Selected Clips by Timecode" in the timeline
+    // clip-context menu.
+    row_label(&content_box, "Source TC");
+    let source_tc_value = value_label("—");
+    source_tc_value.set_tooltip_text(Some(
+        "Decoded source timecode (from Convert LTC Audio to Timecode, \
+         BWF bext time_reference on WAV imports, or an FCPXML start attr). \
+         Required for Sync Selected Clips by Timecode to enable.",
+    ));
+    content_box.append(&source_tc_value);
 
     // ── Transition section ───────────────────────────────────────────────────
     let transition_section = GBox::new(Orientation::Vertical, 8);
@@ -3597,10 +3696,8 @@ pub fn build_inspector(
         COLOR_SLIDER_STEP,
     );
     exposure_slider.set_value(0.0);
-    exposure_slider.set_draw_value(true);
-    exposure_slider.set_digits(2);
     exposure_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&exposure_slider);
+    append_slider_with_spin(&color_inner, &exposure_slider, 2, 0.0);
 
     row_label(&color_inner, "Brightness");
     let brightness_slider = Scale::with_range(
@@ -3610,10 +3707,8 @@ pub fn build_inspector(
         COLOR_SLIDER_STEP,
     );
     brightness_slider.set_value(0.0);
-    brightness_slider.set_draw_value(true);
-    brightness_slider.set_digits(2);
     brightness_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&brightness_slider);
+    append_slider_with_spin(&color_inner, &brightness_slider, 2, 0.0);
 
     row_label(&color_inner, "Contrast");
     let contrast_slider = Scale::with_range(
@@ -3623,10 +3718,8 @@ pub fn build_inspector(
         DOUBLE_SLIDER_STEP,
     );
     contrast_slider.set_value(1.0);
-    contrast_slider.set_draw_value(true);
-    contrast_slider.set_digits(2);
     contrast_slider.add_mark(1.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&contrast_slider);
+    append_slider_with_spin(&color_inner, &contrast_slider, 2, 1.0);
 
     row_label(&color_inner, "Saturation");
     let saturation_slider = Scale::with_range(
@@ -3636,10 +3729,8 @@ pub fn build_inspector(
         DOUBLE_SLIDER_STEP,
     );
     saturation_slider.set_value(1.0);
-    saturation_slider.set_draw_value(true);
-    saturation_slider.set_digits(2);
     saturation_slider.add_mark(1.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&saturation_slider);
+    append_slider_with_spin(&color_inner, &saturation_slider, 2, 1.0);
 
     row_label(&color_inner, "Temperature (K)");
     let temperature_slider = Scale::with_range(
@@ -3649,10 +3740,8 @@ pub fn build_inspector(
         COLOR_TEMPERATURE_STEP_K,
     );
     temperature_slider.set_value(6500.0);
-    temperature_slider.set_draw_value(true);
-    temperature_slider.set_digits(0);
     temperature_slider.add_mark(6500.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&temperature_slider);
+    append_slider_with_spin(&color_inner, &temperature_slider, 0, 6500.0);
 
     row_label(&color_inner, "Tint");
     let tint_slider = Scale::with_range(
@@ -3662,10 +3751,8 @@ pub fn build_inspector(
         COLOR_SLIDER_STEP,
     );
     tint_slider.set_value(0.0);
-    tint_slider.set_draw_value(true);
-    tint_slider.set_digits(2);
     tint_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&tint_slider);
+    append_slider_with_spin(&color_inner, &tint_slider, 2, 0.0);
 
     row_label(&color_inner, "Black Point");
     let black_point_slider = Scale::with_range(
@@ -3675,10 +3762,8 @@ pub fn build_inspector(
         COLOR_SLIDER_STEP,
     );
     black_point_slider.set_value(0.0);
-    black_point_slider.set_draw_value(true);
-    black_point_slider.set_digits(2);
     black_point_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&black_point_slider);
+    append_slider_with_spin(&color_inner, &black_point_slider, 2, 0.0);
 
     let ds_title = Label::new(Some("Denoise / Sharpness / Blur"));
     ds_title.set_halign(gtk::Align::Start);
@@ -3693,10 +3778,8 @@ pub fn build_inspector(
         UNIT_SLIDER_STEP,
     );
     denoise_slider.set_value(0.0);
-    denoise_slider.set_draw_value(true);
-    denoise_slider.set_digits(2);
     denoise_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&denoise_slider);
+    append_slider_with_spin(&color_inner, &denoise_slider, 2, 0.0);
 
     row_label(&color_inner, "Sharpness");
     let sharpness_slider = Scale::with_range(
@@ -3706,10 +3789,8 @@ pub fn build_inspector(
         COLOR_SLIDER_STEP,
     );
     sharpness_slider.set_value(0.0);
-    sharpness_slider.set_draw_value(true);
-    sharpness_slider.set_digits(2);
     sharpness_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&sharpness_slider);
+    append_slider_with_spin(&color_inner, &sharpness_slider, 2, 0.0);
 
     row_label(&color_inner, "Blur");
     let blur_slider = Scale::with_range(
@@ -3719,10 +3800,8 @@ pub fn build_inspector(
         UNIT_SLIDER_STEP,
     );
     blur_slider.set_value(0.0);
-    blur_slider.set_draw_value(true);
-    blur_slider.set_digits(2);
     blur_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&blur_slider);
+    append_slider_with_spin(&color_inner, &blur_slider, 2, 0.0);
 
     let stab_title = Label::new(Some("Stabilization"));
     stab_title.set_halign(gtk::Align::Start);
@@ -3746,10 +3825,8 @@ pub fn build_inspector(
         UNIT_SLIDER_STEP,
     );
     vidstab_slider.set_value(0.5);
-    vidstab_slider.set_draw_value(true);
-    vidstab_slider.set_digits(2);
     vidstab_slider.add_mark(0.5, gtk4::PositionType::Bottom, None);
-    color_inner.append(&vidstab_slider);
+    append_slider_with_spin(&color_inner, &vidstab_slider, 2, 0.5);
 
     let grading_title = Label::new(Some("Grading"));
     grading_title.set_halign(gtk::Align::Start);
@@ -3764,10 +3841,8 @@ pub fn build_inspector(
         COLOR_SLIDER_STEP,
     );
     shadows_slider.set_value(0.0);
-    shadows_slider.set_draw_value(true);
-    shadows_slider.set_digits(2);
     shadows_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&shadows_slider);
+    append_slider_with_spin(&color_inner, &shadows_slider, 2, 0.0);
 
     row_label(&color_inner, "Midtones");
     let midtones_slider = Scale::with_range(
@@ -3777,10 +3852,8 @@ pub fn build_inspector(
         COLOR_SLIDER_STEP,
     );
     midtones_slider.set_value(0.0);
-    midtones_slider.set_draw_value(true);
-    midtones_slider.set_digits(2);
     midtones_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&midtones_slider);
+    append_slider_with_spin(&color_inner, &midtones_slider, 2, 0.0);
 
     row_label(&color_inner, "Highlights");
     let highlights_slider = Scale::with_range(
@@ -3790,10 +3863,8 @@ pub fn build_inspector(
         COLOR_SLIDER_STEP,
     );
     highlights_slider.set_value(0.0);
-    highlights_slider.set_draw_value(true);
-    highlights_slider.set_digits(2);
     highlights_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&highlights_slider);
+    append_slider_with_spin(&color_inner, &highlights_slider, 2, 0.0);
 
     row_label(&color_inner, "Highlights Warmth");
     let highlights_warmth_slider = Scale::with_range(
@@ -3803,10 +3874,8 @@ pub fn build_inspector(
         COLOR_SLIDER_STEP,
     );
     highlights_warmth_slider.set_value(0.0);
-    highlights_warmth_slider.set_draw_value(true);
-    highlights_warmth_slider.set_digits(2);
     highlights_warmth_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&highlights_warmth_slider);
+    append_slider_with_spin(&color_inner, &highlights_warmth_slider, 2, 0.0);
 
     row_label(&color_inner, "Highlights Tint");
     let highlights_tint_slider = Scale::with_range(
@@ -3816,10 +3885,8 @@ pub fn build_inspector(
         COLOR_SLIDER_STEP,
     );
     highlights_tint_slider.set_value(0.0);
-    highlights_tint_slider.set_draw_value(true);
-    highlights_tint_slider.set_digits(2);
     highlights_tint_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&highlights_tint_slider);
+    append_slider_with_spin(&color_inner, &highlights_tint_slider, 2, 0.0);
 
     row_label(&color_inner, "Midtones Warmth");
     let midtones_warmth_slider = Scale::with_range(
@@ -3829,10 +3896,8 @@ pub fn build_inspector(
         COLOR_SLIDER_STEP,
     );
     midtones_warmth_slider.set_value(0.0);
-    midtones_warmth_slider.set_draw_value(true);
-    midtones_warmth_slider.set_digits(2);
     midtones_warmth_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&midtones_warmth_slider);
+    append_slider_with_spin(&color_inner, &midtones_warmth_slider, 2, 0.0);
 
     row_label(&color_inner, "Midtones Tint");
     let midtones_tint_slider = Scale::with_range(
@@ -3842,10 +3907,8 @@ pub fn build_inspector(
         COLOR_SLIDER_STEP,
     );
     midtones_tint_slider.set_value(0.0);
-    midtones_tint_slider.set_draw_value(true);
-    midtones_tint_slider.set_digits(2);
     midtones_tint_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&midtones_tint_slider);
+    append_slider_with_spin(&color_inner, &midtones_tint_slider, 2, 0.0);
 
     row_label(&color_inner, "Shadows Warmth");
     let shadows_warmth_slider = Scale::with_range(
@@ -3855,10 +3918,8 @@ pub fn build_inspector(
         COLOR_SLIDER_STEP,
     );
     shadows_warmth_slider.set_value(0.0);
-    shadows_warmth_slider.set_draw_value(true);
-    shadows_warmth_slider.set_digits(2);
     shadows_warmth_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&shadows_warmth_slider);
+    append_slider_with_spin(&color_inner, &shadows_warmth_slider, 2, 0.0);
 
     row_label(&color_inner, "Shadows Tint");
     let shadows_tint_slider = Scale::with_range(
@@ -3868,10 +3929,8 @@ pub fn build_inspector(
         COLOR_SLIDER_STEP,
     );
     shadows_tint_slider.set_value(0.0);
-    shadows_tint_slider.set_draw_value(true);
-    shadows_tint_slider.set_digits(2);
     shadows_tint_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    color_inner.append(&shadows_tint_slider);
+    append_slider_with_spin(&color_inner, &shadows_tint_slider, 2, 0.0);
 
     // ── Match Color button ───────────────────────────────────────────────────
     let match_color_sep = Separator::new(Orientation::Horizontal);
@@ -3914,6 +3973,7 @@ pub fn build_inspector(
     chroma_color_dialog.set_with_alpha(false);
     let chroma_color_btn = gtk4::ColorDialogButton::new(Some(chroma_color_dialog));
     chroma_color_btn.set_rgba(&gdk4::RGBA::new(0.0, 1.0, 0.0, 1.0));
+    chroma_color_btn.set_tooltip_text(Some("Choose a custom chroma key color"));
     chroma_custom_color_row.append(&chroma_color_btn);
     chroma_key_inner.append(&chroma_custom_color_row);
     chroma_custom_color_row.set_visible(false);
@@ -3926,10 +3986,8 @@ pub fn build_inspector(
         UNIT_SLIDER_STEP,
     );
     chroma_tolerance_slider.set_value(0.3);
-    chroma_tolerance_slider.set_draw_value(true);
-    chroma_tolerance_slider.set_digits(2);
     chroma_tolerance_slider.add_mark(0.3, gtk4::PositionType::Bottom, None);
-    chroma_key_inner.append(&chroma_tolerance_slider);
+    append_slider_with_spin(&chroma_key_inner, &chroma_tolerance_slider, 2, 0.3);
 
     row_label(&chroma_key_inner, "Edge Softness");
     let chroma_softness_slider = Scale::with_range(
@@ -3939,10 +3997,8 @@ pub fn build_inspector(
         UNIT_SLIDER_STEP,
     );
     chroma_softness_slider.set_value(0.1);
-    chroma_softness_slider.set_draw_value(true);
-    chroma_softness_slider.set_digits(2);
     chroma_softness_slider.add_mark(0.1, gtk4::PositionType::Bottom, None);
-    chroma_key_inner.append(&chroma_softness_slider);
+    append_slider_with_spin(&chroma_key_inner, &chroma_softness_slider, 2, 0.1);
 
     // ── Background Removal section (Video + Image only) ──────────────────────
     let bg_removal_section = GBox::new(Orientation::Vertical, 8);
@@ -3966,10 +4022,8 @@ pub fn build_inspector(
         UNIT_SLIDER_STEP,
     );
     bg_removal_threshold_slider.set_value(0.5);
-    bg_removal_threshold_slider.set_draw_value(true);
-    bg_removal_threshold_slider.set_digits(2);
     bg_removal_threshold_slider.add_mark(0.5, gtk4::PositionType::Bottom, None);
-    bg_removal_inner.append(&bg_removal_threshold_slider);
+    append_slider_with_spin(&bg_removal_inner, &bg_removal_threshold_slider, 2, 0.5);
 
     // ── Subtitles section (Video + Audio clips) ────────────────────────
     let subtitle_section = GBox::new(Orientation::Vertical, 8);
@@ -4079,13 +4133,13 @@ pub fn build_inspector(
     // Base style toggle buttons
     let subtitle_style_row = GBox::new(Orientation::Horizontal, 4);
     let sub_bold_btn = gtk4::ToggleButton::with_label("B");
-    sub_bold_btn.set_tooltip_text(Some("Bold"));
+    sub_bold_btn.set_tooltip_text(Some("Toggle subtitle bold"));
     let sub_italic_btn = gtk4::ToggleButton::with_label("I");
-    sub_italic_btn.set_tooltip_text(Some("Italic"));
+    sub_italic_btn.set_tooltip_text(Some("Toggle subtitle italic"));
     let sub_underline_btn = gtk4::ToggleButton::with_label("U");
-    sub_underline_btn.set_tooltip_text(Some("Underline"));
+    sub_underline_btn.set_tooltip_text(Some("Toggle subtitle underline"));
     let sub_shadow_btn = gtk4::ToggleButton::with_label("S");
-    sub_shadow_btn.set_tooltip_text(Some("Shadow"));
+    sub_shadow_btn.set_tooltip_text(Some("Toggle subtitle shadow"));
     subtitle_style_row.append(&sub_bold_btn);
     subtitle_style_row.append(&sub_italic_btn);
     subtitle_style_row.append(&sub_underline_btn);
@@ -4097,6 +4151,7 @@ pub fn build_inspector(
     sub_color_dialog.set_with_alpha(true);
     let subtitle_color_btn = gtk4::ColorDialogButton::new(Some(sub_color_dialog));
     subtitle_color_btn.set_rgba(&gdk4::RGBA::new(1.0, 1.0, 1.0, 1.0));
+    subtitle_color_btn.set_tooltip_text(Some("Choose the subtitle text color"));
     subtitle_style_box.append(&subtitle_color_btn);
 
     row_label(&subtitle_style_box, "Word Highlight");
@@ -4134,6 +4189,7 @@ pub fn build_inspector(
     sub_hl_color_dialog.set_with_alpha(true);
     let subtitle_highlight_color_btn = gtk4::ColorDialogButton::new(Some(sub_hl_color_dialog));
     subtitle_highlight_color_btn.set_rgba(&gdk4::RGBA::new(1.0, 1.0, 0.0, 1.0));
+    subtitle_highlight_color_btn.set_tooltip_text(Some("Choose the subtitle highlight color"));
     subtitle_highlight_color_row.append(&subtitle_highlight_color_btn);
     subtitle_style_box.append(&subtitle_highlight_color_row);
 
@@ -4150,6 +4206,8 @@ pub fn build_inspector(
     let subtitle_highlight_stroke_color_btn =
         gtk4::ColorDialogButton::new(Some(sub_hl_stroke_color_dialog));
     subtitle_highlight_stroke_color_btn.set_rgba(&gdk4::RGBA::new(0.0, 0.0, 0.0, 1.0));
+    subtitle_highlight_stroke_color_btn
+        .set_tooltip_text(Some("Choose the subtitle highlight stroke color"));
     subtitle_highlight_stroke_color_row.append(&subtitle_highlight_stroke_color_btn);
     subtitle_highlight_stroke_color_row.set_visible(false);
     subtitle_style_box.append(&subtitle_highlight_stroke_color_row);
@@ -4161,35 +4219,34 @@ pub fn build_inspector(
     let subtitle_bg_highlight_color_btn =
         gtk4::ColorDialogButton::new(Some(sub_bg_hl_color_dialog));
     subtitle_bg_highlight_color_btn.set_rgba(&gdk4::RGBA::new(1.0, 1.0, 0.0, 0.5));
+    subtitle_bg_highlight_color_btn
+        .set_tooltip_text(Some("Choose the subtitle background highlight color"));
     subtitle_bg_highlight_color_row.append(&subtitle_bg_highlight_color_btn);
     subtitle_bg_highlight_color_row.set_visible(false);
     subtitle_style_box.append(&subtitle_bg_highlight_color_row);
 
     let subtitle_word_window_slider = Scale::with_range(Orientation::Horizontal, 2.0, 10.0, 1.0);
     subtitle_word_window_slider.set_value(4.0);
-    subtitle_word_window_slider.set_draw_value(true);
-    subtitle_word_window_slider.set_digits(0);
     subtitle_word_window_slider.add_mark(4.0, gtk4::PositionType::Bottom, None);
     subtitle_word_window_slider
         .set_tooltip_text(Some("Number of words shown per group in highlight mode"));
-    subtitle_style_box.append(&subtitle_word_window_slider);
+    append_slider_with_spin(&subtitle_style_box, &subtitle_word_window_slider, 0, 3.0);
 
     row_label(&subtitle_style_box, "Vertical Position");
     let subtitle_position_slider = Scale::with_range(Orientation::Horizontal, 0.05, 0.95, 0.05);
     subtitle_position_slider.set_value(0.85);
-    subtitle_position_slider.set_draw_value(true);
-    subtitle_position_slider.set_digits(2);
     subtitle_position_slider.add_mark(0.85, gtk4::PositionType::Bottom, None);
     subtitle_position_slider.add_mark(0.10, gtk4::PositionType::Bottom, Some("Top"));
     subtitle_position_slider.add_mark(0.50, gtk4::PositionType::Bottom, Some("Mid"));
     subtitle_position_slider.set_tooltip_text(Some("Vertical position: 0 = top, 1 = bottom"));
-    subtitle_style_box.append(&subtitle_position_slider);
+    append_slider_with_spin(&subtitle_style_box, &subtitle_position_slider, 2, 0.9);
 
     row_label(&subtitle_style_box, "Outline Color");
     let sub_outline_color_dialog = gtk4::ColorDialog::new();
     sub_outline_color_dialog.set_with_alpha(true);
     let subtitle_outline_color_btn = gtk4::ColorDialogButton::new(Some(sub_outline_color_dialog));
     subtitle_outline_color_btn.set_rgba(&gdk4::RGBA::new(0.0, 0.0, 0.0, 1.0));
+    subtitle_outline_color_btn.set_tooltip_text(Some("Choose the subtitle outline color"));
     subtitle_style_box.append(&subtitle_outline_color_btn);
 
     let subtitle_bg_box_check = CheckButton::with_label("Background Box");
@@ -4201,6 +4258,7 @@ pub fn build_inspector(
     sub_bg_color_dialog.set_with_alpha(true);
     let subtitle_bg_color_btn = gtk4::ColorDialogButton::new(Some(sub_bg_color_dialog));
     subtitle_bg_color_btn.set_rgba(&gdk4::RGBA::new(0.0, 0.0, 0.0, 0.6));
+    subtitle_bg_color_btn.set_tooltip_text(Some("Choose the subtitle background box color"));
     subtitle_style_box.append(&subtitle_bg_color_btn);
 
     // Copy/Paste Style buttons
@@ -4285,10 +4343,8 @@ pub fn build_inspector(
         UNIT_SLIDER_STEP,
     );
     mask_center_x_slider.set_value(0.5);
-    mask_center_x_slider.set_draw_value(true);
-    mask_center_x_slider.set_digits(2);
     mask_center_x_slider.add_mark(0.5, gtk4::PositionType::Bottom, None);
-    mask_rect_ellipse_controls.append(&mask_center_x_slider);
+    append_slider_with_spin(&mask_rect_ellipse_controls, &mask_center_x_slider, 2, 0.5);
 
     row_label(&mask_rect_ellipse_controls, "Center Y");
     let mask_center_y_slider = Scale::with_range(
@@ -4298,24 +4354,18 @@ pub fn build_inspector(
         UNIT_SLIDER_STEP,
     );
     mask_center_y_slider.set_value(0.5);
-    mask_center_y_slider.set_draw_value(true);
-    mask_center_y_slider.set_digits(2);
     mask_center_y_slider.add_mark(0.5, gtk4::PositionType::Bottom, None);
-    mask_rect_ellipse_controls.append(&mask_center_y_slider);
+    append_slider_with_spin(&mask_rect_ellipse_controls, &mask_center_y_slider, 2, 0.5);
 
     row_label(&mask_rect_ellipse_controls, "Width");
     let mask_width_slider = Scale::with_range(Orientation::Horizontal, 0.01, 0.5, 0.01);
     mask_width_slider.set_value(0.25);
-    mask_width_slider.set_draw_value(true);
-    mask_width_slider.set_digits(2);
-    mask_rect_ellipse_controls.append(&mask_width_slider);
+    append_slider_with_spin(&mask_rect_ellipse_controls, &mask_width_slider, 2, 0.25);
 
     row_label(&mask_rect_ellipse_controls, "Height");
     let mask_height_slider = Scale::with_range(Orientation::Horizontal, 0.01, 0.5, 0.01);
     mask_height_slider.set_value(0.25);
-    mask_height_slider.set_draw_value(true);
-    mask_height_slider.set_digits(2);
-    mask_rect_ellipse_controls.append(&mask_height_slider);
+    append_slider_with_spin(&mask_rect_ellipse_controls, &mask_height_slider, 2, 0.25);
 
     row_label(&mask_rect_ellipse_controls, "Rotation");
     let mask_rotation_spin = gtk4::SpinButton::with_range(-180.0, 180.0, 1.0);
@@ -4326,17 +4376,13 @@ pub fn build_inspector(
     row_label(&mask_rect_ellipse_controls, "Feather");
     let mask_feather_slider = Scale::with_range(Orientation::Horizontal, 0.0, 0.5, 0.01);
     mask_feather_slider.set_value(0.0);
-    mask_feather_slider.set_draw_value(true);
-    mask_feather_slider.set_digits(2);
-    mask_rect_ellipse_controls.append(&mask_feather_slider);
+    append_slider_with_spin(&mask_rect_ellipse_controls, &mask_feather_slider, 2, 0.0);
 
     row_label(&mask_rect_ellipse_controls, "Expansion");
     let mask_expansion_slider = Scale::with_range(Orientation::Horizontal, -0.5, 0.5, 0.01);
     mask_expansion_slider.set_value(0.0);
-    mask_expansion_slider.set_draw_value(true);
-    mask_expansion_slider.set_digits(2);
     mask_expansion_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    mask_rect_ellipse_controls.append(&mask_expansion_slider);
+    append_slider_with_spin(&mask_rect_ellipse_controls, &mask_expansion_slider, 2, 0.0);
 
     let mask_invert_check = CheckButton::with_label("Invert Mask");
     mask_rect_ellipse_controls.append(&mask_invert_check);
@@ -4552,10 +4598,8 @@ pub fn build_inspector(
         UNIT_SLIDER_STEP,
     );
     tracking_center_x_slider.set_value(0.5);
-    tracking_center_x_slider.set_draw_value(true);
-    tracking_center_x_slider.set_digits(2);
     tracking_center_x_slider.add_mark(0.5, gtk4::PositionType::Bottom, None);
-    tracking_inner.append(&tracking_center_x_slider);
+    append_slider_with_spin(&tracking_inner, &tracking_center_x_slider, 2, 0.5);
 
     row_label(&tracking_inner, "Region Center Y");
     let tracking_center_y_slider = Scale::with_range(
@@ -4565,24 +4609,18 @@ pub fn build_inspector(
         UNIT_SLIDER_STEP,
     );
     tracking_center_y_slider.set_value(0.5);
-    tracking_center_y_slider.set_draw_value(true);
-    tracking_center_y_slider.set_digits(2);
     tracking_center_y_slider.add_mark(0.5, gtk4::PositionType::Bottom, None);
-    tracking_inner.append(&tracking_center_y_slider);
+    append_slider_with_spin(&tracking_inner, &tracking_center_y_slider, 2, 0.5);
 
     row_label(&tracking_inner, "Region Width");
     let tracking_width_slider = Scale::with_range(Orientation::Horizontal, 0.05, 1.0, 0.01);
     tracking_width_slider.set_value(0.25);
-    tracking_width_slider.set_draw_value(true);
-    tracking_width_slider.set_digits(2);
-    tracking_inner.append(&tracking_width_slider);
+    append_slider_with_spin(&tracking_inner, &tracking_width_slider, 2, 0.2);
 
     row_label(&tracking_inner, "Region Height");
     let tracking_height_slider = Scale::with_range(Orientation::Horizontal, 0.05, 1.0, 0.01);
     tracking_height_slider.set_value(0.25);
-    tracking_height_slider.set_draw_value(true);
-    tracking_height_slider.set_digits(2);
-    tracking_inner.append(&tracking_height_slider);
+    append_slider_with_spin(&tracking_inner, &tracking_height_slider, 2, 0.2);
 
     row_label(&tracking_inner, "Region Rotation");
     let tracking_rotation_spin = gtk4::SpinButton::with_range(-180.0, 180.0, 1.0);
@@ -4612,13 +4650,11 @@ pub fn build_inspector(
     let tracking_auto_crop_padding_slider =
         Scale::with_range(Orientation::Horizontal, 0.0, 0.5, 0.05);
     tracking_auto_crop_padding_slider.set_value(0.1);
-    tracking_auto_crop_padding_slider.set_draw_value(true);
-    tracking_auto_crop_padding_slider.set_digits(2);
     tracking_auto_crop_padding_slider.set_tooltip_text(Some(
         "Extra headroom around the tracked region (0 = tight crop, 0.5 = generous margin). Takes effect the next time you click Auto-Crop, or immediately if an auto-crop is already active",
     ));
-    tracking_auto_crop_padding_slider.set_sensitive(false);
-    tracking_inner.append(&tracking_auto_crop_padding_slider);
+    set_slider_row_sensitive(&tracking_auto_crop_padding_slider, false);
+    append_slider_with_spin(&tracking_inner, &tracking_auto_crop_padding_slider, 2, 0.05);
 
     let tracking_status_label = Label::new(Some(
         "Select a visual clip to create or attach motion tracking.",
@@ -4657,6 +4693,56 @@ pub fn build_inspector(
     tracking_binding_status_label.set_halign(gtk4::Align::Start);
     tracking_binding_status_label.add_css_class("dim-label");
     tracking_inner.append(&tracking_binding_status_label);
+
+    // ── Render-and-Replace (Phase 1b) ─────────────────────────────────────
+    // Bakes the clip's baked-scope effect stack (color grade, LUTs,
+    // frei0r, blur/denoise/sharpness) into a ProRes sidecar so heavy
+    // effect chains stop re-computing per frame. Sits above the Frei0r
+    // chain since those effects are part of the baked scope.
+    let render_replace_section = GBox::new(Orientation::Vertical, 4);
+    render_replace_section.append(&Separator::new(Orientation::Horizontal));
+    let render_replace_check = CheckButton::with_label("Render and Replace");
+    render_replace_check.set_tooltip_text(Some(
+        "Bake this clip's color grade, LUT stack, frei0r effects, and \
+         blur / denoise / sharpness into a high-quality ProRes sidecar \
+         so playback stops re-computing them every frame. Transforms, \
+         opacity, transitions, and speed ramps stay editable. Changing \
+         any baked effect invalidates the sidecar and a fresh bake is \
+         queued in the background.",
+    ));
+    render_replace_section.append(&render_replace_check);
+    // Batch toggle — visible only while the multi-selection holds
+    // more than one bakeable clip. Clicking flips every selected
+    // clip's `render_replace_enabled` to the primary clip's current
+    // checkbox state as one undoable batch, so the user doesn't have
+    // to click into each clip and toggle individually. Wiring + show/
+    // hide logic live in window.rs (it needs the timeline widget).
+    let render_replace_apply_to_selected_btn = Button::with_label("Apply to selected");
+    render_replace_apply_to_selected_btn.set_tooltip_text(Some(
+        "Apply the current Render-and-Replace state to every selected clip as one undoable batch.",
+    ));
+    render_replace_apply_to_selected_btn.set_visible(false);
+    render_replace_apply_to_selected_btn.set_halign(gtk::Align::Start);
+    render_replace_section.append(&render_replace_apply_to_selected_btn);
+    let render_replace_status_row = GBox::new(Orientation::Horizontal, 6);
+    let render_replace_status_label = Label::new(None);
+    render_replace_status_label.set_halign(gtk::Align::Start);
+    render_replace_status_label.set_hexpand(true);
+    render_replace_status_label.add_css_class("dim-label");
+    render_replace_status_label.set_visible(false);
+    render_replace_status_row.append(&render_replace_status_label);
+    // Cancel button — visible only while a bake is in flight. Wired up
+    // in window.rs to call `render_replace_cache.cancel(clip)` on the
+    // currently-selected clip so the worker kills ffmpeg at its next
+    // poll tick.
+    let render_replace_cancel_btn = Button::with_label("Cancel");
+    render_replace_cancel_btn.set_tooltip_text(Some(
+        "Stop the in-flight render-replace bake for this clip",
+    ));
+    render_replace_cancel_btn.set_visible(false);
+    render_replace_status_row.append(&render_replace_cancel_btn);
+    render_replace_section.append(&render_replace_status_row);
+    content_box.append(&render_replace_section);
 
     // ── Applied Frei0r Effects section (Video + Image only) ──────────────
     let frei0r_effects_section = GBox::new(Orientation::Vertical, 8);
@@ -4786,12 +4872,10 @@ pub fn build_inspector(
     let volume_slider =
         Scale::with_range(Orientation::Horizontal, VOLUME_DB_MIN, VOLUME_DB_MAX, 0.1);
     volume_slider.set_value(0.0);
-    volume_slider.set_draw_value(true);
-    volume_slider.set_digits(1);
     volume_slider.add_mark(VOLUME_DB_MIN, gtk4::PositionType::Bottom, Some("-100 dB"));
     volume_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("0 dB"));
     volume_slider.add_mark(VOLUME_DB_MAX, gtk4::PositionType::Bottom, Some("+12 dB"));
-    audio_inner.append(&volume_slider);
+    append_slider_with_spin(&audio_inner, &volume_slider, 1, 0.0);
     let volume_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let volume_set_keyframe_btn = Button::with_label("Set Volume Keyframe");
     let volume_remove_keyframe_btn = Button::with_label("Remove Volume Keyframe");
@@ -4814,16 +4898,14 @@ pub fn build_inspector(
     row_label(&audio_inner, "  Strength");
     let voice_enhance_strength_slider = Scale::with_range(Orientation::Horizontal, 0.0, 100.0, 1.0);
     voice_enhance_strength_slider.set_value(50.0);
-    voice_enhance_strength_slider.set_draw_value(true);
-    voice_enhance_strength_slider.set_digits(0);
     voice_enhance_strength_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("Subtle"));
     voice_enhance_strength_slider.add_mark(100.0, gtk4::PositionType::Bottom, Some("Strong"));
-    voice_enhance_strength_slider.set_sensitive(false);
+    set_slider_row_sensitive(&voice_enhance_strength_slider, false);
     voice_enhance_strength_slider.set_tooltip_text(Some(
         "Scales noise-reduction depth, presence boost, and compression. \
          0 = subtle clean-up, 100 = broadcast voice.",
     ));
-    audio_inner.append(&voice_enhance_strength_slider);
+    append_slider_with_spin(&audio_inner, &voice_enhance_strength_slider, 0, 50.0);
 
     // Per-clip cache status row: shows whether the prerender is ready,
     // running, or failed for the current strength. Updated by the
@@ -4846,46 +4928,38 @@ pub fn build_inspector(
     row_label(&audio_inner, "Voice Isolation");
     let voice_isolation_slider = Scale::with_range(Orientation::Horizontal, 0.0, 100.0, 1.0);
     voice_isolation_slider.set_value(0.0);
-    voice_isolation_slider.set_draw_value(true);
-    voice_isolation_slider.set_digits(0);
     voice_isolation_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("Off"));
     voice_isolation_slider.add_mark(100.0, gtk4::PositionType::Bottom, Some("Max"));
     voice_isolation_slider.set_tooltip_text(Some(
         "Duck volume between spoken words (requires generated subtitles)",
     ));
-    audio_inner.append(&voice_isolation_slider);
+    append_slider_with_spin(&audio_inner, &voice_isolation_slider, 0, 0.0);
 
     row_label(&audio_inner, "  Padding (ms)");
     let vi_pad_slider = Scale::with_range(Orientation::Horizontal, 0.0, 500.0, 5.0);
     vi_pad_slider.set_value(80.0);
-    vi_pad_slider.set_draw_value(true);
-    vi_pad_slider.set_digits(0);
     vi_pad_slider.set_tooltip_text(Some(
         "Extend word boundaries to merge close words into continuous speech",
     ));
-    audio_inner.append(&vi_pad_slider);
+    append_slider_with_spin(&audio_inner, &vi_pad_slider, 0, 80.0);
 
     row_label(&audio_inner, "  Fade (ms)");
     let vi_fade_slider = Scale::with_range(Orientation::Horizontal, 0.0, 200.0, 1.0);
     vi_fade_slider.set_value(25.0);
-    vi_fade_slider.set_draw_value(true);
-    vi_fade_slider.set_digits(0);
     vi_fade_slider.set_tooltip_text(Some(
         "Smooth transition time between speech and ducked regions",
     ));
-    audio_inner.append(&vi_fade_slider);
+    append_slider_with_spin(&audio_inner, &vi_fade_slider, 0, 30.0);
 
     row_label(&audio_inner, "  Floor");
     let vi_floor_slider = Scale::with_range(Orientation::Horizontal, 0.0, 100.0, 1.0);
     vi_floor_slider.set_value(0.0);
-    vi_floor_slider.set_draw_value(true);
-    vi_floor_slider.set_digits(0);
     vi_floor_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("Silent"));
     vi_floor_slider.add_mark(100.0, gtk4::PositionType::Bottom, Some("Full"));
     vi_floor_slider.set_tooltip_text(Some(
         "Minimum volume during ducked regions (preserves room tone)",
     ));
-    audio_inner.append(&vi_floor_slider);
+    append_slider_with_spin(&audio_inner, &vi_floor_slider, 0, 0.05);
 
     // ── Voice isolation source: Subtitles (default) or Silence-detect ──
     row_label(&audio_inner, "  Source");
@@ -4900,8 +4974,6 @@ pub fn build_inspector(
     row_label(&audio_inner, "  Silence threshold");
     let vi_silence_threshold_slider = Scale::with_range(Orientation::Horizontal, -60.0, -10.0, 1.0);
     vi_silence_threshold_slider.set_value(-30.0);
-    vi_silence_threshold_slider.set_draw_value(true);
-    vi_silence_threshold_slider.set_digits(0);
     vi_silence_threshold_slider.add_mark(-60.0, gtk4::PositionType::Bottom, Some("-60 dB"));
     vi_silence_threshold_slider.add_mark(-30.0, gtk4::PositionType::Bottom, Some("-30 dB"));
     vi_silence_threshold_slider.add_mark(-10.0, gtk4::PositionType::Bottom, Some("-10 dB"));
@@ -4909,18 +4981,16 @@ pub fn build_inspector(
         "Audio below this dB level is treated as silence. Lower = stricter \
          (only treat near-silence as gaps). Click Suggest to auto-pick.",
     ));
-    audio_inner.append(&vi_silence_threshold_slider);
+    append_slider_with_spin(&audio_inner, &vi_silence_threshold_slider, 0, -30.0);
 
     row_label(&audio_inner, "  Min gap (ms)");
     let vi_silence_min_ms_slider = Scale::with_range(Orientation::Horizontal, 50.0, 2000.0, 10.0);
     vi_silence_min_ms_slider.set_value(200.0);
-    vi_silence_min_ms_slider.set_draw_value(true);
-    vi_silence_min_ms_slider.set_digits(0);
     vi_silence_min_ms_slider.set_tooltip_text(Some(
         "Minimum silence duration to count as a gap. Higher = ignore \
          brief pauses between words.",
     ));
-    audio_inner.append(&vi_silence_min_ms_slider);
+    append_slider_with_spin(&audio_inner, &vi_silence_min_ms_slider, 0, 200.0);
 
     let vi_silence_actions_row = GBox::new(Orientation::Horizontal, 6);
     let vi_suggest_btn = Button::with_label("Suggest");
@@ -5088,10 +5158,8 @@ pub fn build_inspector(
         COLOR_SLIDER_STEP,
     );
     pan_slider.set_value(0.0);
-    pan_slider.set_draw_value(true);
-    pan_slider.set_digits(2);
     pan_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-    audio_inner.append(&pan_slider);
+    append_slider_with_spin(&audio_inner, &pan_slider, 2, 0.0);
     let pan_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let pan_set_keyframe_btn = Button::with_label("Set Pan Keyframe");
     let pan_remove_keyframe_btn = Button::with_label("Remove Pan Keyframe");
@@ -5129,28 +5197,22 @@ pub fn build_inspector(
             1.0,
         );
         freq_slider.set_value(eq_freq_ranges[i].2);
-        freq_slider.set_draw_value(true);
-        freq_slider.set_digits(0);
         freq_slider.add_mark(eq_freq_ranges[i].2, gtk4::PositionType::Bottom, None);
-        eq_inner.append(&freq_slider);
+        append_slider_with_spin(&eq_inner, &freq_slider, 0, eq_freq_ranges[i].2);
         eq_freq_sliders.push(freq_slider);
 
         row_label(&eq_inner, "Gain (dB)");
         let gain_slider = Scale::with_range(Orientation::Horizontal, -24.0, 12.0, 0.1);
         gain_slider.set_value(0.0);
-        gain_slider.set_draw_value(true);
-        gain_slider.set_digits(1);
         gain_slider.add_mark(0.0, gtk4::PositionType::Bottom, None);
-        eq_inner.append(&gain_slider);
+        append_slider_with_spin(&eq_inner, &gain_slider, 1, 0.0);
         eq_gain_sliders.push(gain_slider);
 
         row_label(&eq_inner, "Q");
         let q_slider = Scale::with_range(Orientation::Horizontal, 0.1, 10.0, 0.1);
         q_slider.set_value(1.0);
-        q_slider.set_draw_value(true);
-        q_slider.set_digits(1);
         q_slider.add_mark(1.0, gtk4::PositionType::Bottom, None);
-        eq_inner.append(&q_slider);
+        append_slider_with_spin(&eq_inner, &q_slider, 1, 1.0);
         eq_q_sliders.push(q_slider);
     }
 
@@ -5176,12 +5238,10 @@ pub fn build_inspector(
     row_label(&pitch_inner, "Pitch Shift (semitones)");
     let pitch_shift_slider = Scale::with_range(Orientation::Horizontal, -12.0, 12.0, 0.5);
     pitch_shift_slider.set_value(0.0);
-    pitch_shift_slider.set_draw_value(true);
-    pitch_shift_slider.set_digits(1);
     pitch_shift_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("0"));
     pitch_shift_slider.add_mark(-12.0, gtk4::PositionType::Bottom, Some("-12"));
     pitch_shift_slider.add_mark(12.0, gtk4::PositionType::Bottom, Some("+12"));
-    pitch_inner.append(&pitch_shift_slider);
+    append_slider_with_spin(&pitch_inner, &pitch_shift_slider, 1, 0.0);
 
     let pitch_preserve_check = gtk4::CheckButton::with_label("Preserve pitch during speed changes");
     pitch_preserve_check.set_tooltip_text(Some(
@@ -5248,11 +5308,9 @@ pub fn build_inspector(
     row_label(&duck_inner, "Duck Amount (dB)");
     let duck_amount_slider = Scale::with_range(Orientation::Horizontal, -24.0, 0.0, 0.5);
     duck_amount_slider.set_value(-6.0);
-    duck_amount_slider.set_draw_value(true);
-    duck_amount_slider.set_digits(1);
     duck_amount_slider.add_mark(-6.0, gtk4::PositionType::Bottom, Some("-6 dB"));
     duck_amount_slider.add_mark(-12.0, gtk4::PositionType::Bottom, Some("-12 dB"));
-    duck_inner.append(&duck_amount_slider);
+    append_slider_with_spin(&duck_inner, &duck_amount_slider, 1, 0.5);
 
     let duck_hint = Label::new(Some("Lowers this track\u{2019}s volume when audio from\nnon-ducked tracks (e.g. dialogue) is playing"));
     duck_hint.set_halign(gtk4::Align::Start);
@@ -5348,27 +5406,21 @@ pub fn build_inspector(
     row_label(&transform_inner, "Shutter Angle");
     let motion_blur_shutter_slider = Scale::with_range(Orientation::Horizontal, 0.0, 720.0, 1.0);
     motion_blur_shutter_slider.set_value(180.0);
-    motion_blur_shutter_slider.set_draw_value(true);
-    motion_blur_shutter_slider.set_digits(0);
     motion_blur_shutter_slider.add_mark(180.0, gtk4::PositionType::Bottom, Some("180°"));
     motion_blur_shutter_slider.add_mark(360.0, gtk4::PositionType::Bottom, Some("360°"));
-    motion_blur_shutter_slider.set_hexpand(true);
     motion_blur_shutter_slider.set_tooltip_text(Some(
         "Shutter angle in degrees: 180° = cinematic, 360° = full natural blur",
     ));
-    transform_inner.append(&motion_blur_shutter_slider);
+    append_slider_with_spin(&transform_inner, &motion_blur_shutter_slider, 0, 180.0);
 
     row_label(&transform_inner, "Scale");
     let scale_slider = Scale::with_range(Orientation::Horizontal, SCALE_MIN, SCALE_MAX, 0.05);
     scale_slider.set_value(1.0);
-    scale_slider.set_draw_value(true);
-    scale_slider.set_digits(2);
     scale_slider.add_mark(0.5, gtk4::PositionType::Bottom, Some("½×"));
     scale_slider.add_mark(1.0, gtk4::PositionType::Bottom, Some("1×"));
     scale_slider.add_mark(2.0, gtk4::PositionType::Bottom, Some("2×"));
-    scale_slider.set_hexpand(true);
     scale_slider.set_tooltip_text(Some("Scale: <1 = shrink with black borders, >1 = zoom in"));
-    transform_inner.append(&scale_slider);
+    append_slider_with_spin(&transform_inner, &scale_slider, 2, 1.0);
     let scale_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let scale_set_keyframe_btn = Button::with_label("Set Scale Keyframe");
     let scale_remove_keyframe_btn = Button::with_label("Remove Scale Keyframe");
@@ -5384,13 +5436,10 @@ pub fn build_inspector(
         UNIT_SLIDER_STEP,
     );
     opacity_slider.set_value(1.0);
-    opacity_slider.set_draw_value(true);
-    opacity_slider.set_digits(2);
     opacity_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("0%"));
     opacity_slider.add_mark(1.0, gtk4::PositionType::Bottom, Some("100%"));
-    opacity_slider.set_hexpand(true);
     opacity_slider.set_tooltip_text(Some("Clip opacity for compositing"));
-    transform_inner.append(&opacity_slider);
+    append_slider_with_spin(&transform_inner, &opacity_slider, 2, 1.0);
     let opacity_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let opacity_set_keyframe_btn = Button::with_label("Set Opacity Keyframe");
     let opacity_remove_keyframe_btn = Button::with_label("Remove Opacity Keyframe");
@@ -5402,18 +5451,15 @@ pub fn build_inspector(
     let position_x_slider =
         Scale::with_range(Orientation::Horizontal, POSITION_MIN, POSITION_MAX, 0.01);
     position_x_slider.set_value(0.0);
-    position_x_slider.set_draw_value(true);
-    position_x_slider.set_digits(2);
     position_x_slider.add_mark(POSITION_MIN, gtk4::PositionType::Bottom, Some("⇤"));
     position_x_slider.add_mark(-1.0, gtk4::PositionType::Bottom, Some("←"));
     position_x_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("·"));
     position_x_slider.add_mark(1.0, gtk4::PositionType::Bottom, Some("→"));
     position_x_slider.add_mark(POSITION_MAX, gtk4::PositionType::Bottom, Some("⇥"));
-    position_x_slider.set_hexpand(true);
     position_x_slider.set_tooltip_text(Some(
         "Horizontal position: −1 = canvas left edge, 0 = center, +1 = canvas right edge. Values past ±1 push the clip off-canvas.",
     ));
-    transform_inner.append(&position_x_slider);
+    append_slider_with_spin(&transform_inner, &position_x_slider, 2, 0.0);
     let position_x_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let position_x_set_keyframe_btn = Button::with_label("Set Position X Keyframe");
     let position_x_remove_keyframe_btn = Button::with_label("Remove Position X Keyframe");
@@ -5425,18 +5471,15 @@ pub fn build_inspector(
     let position_y_slider =
         Scale::with_range(Orientation::Horizontal, POSITION_MIN, POSITION_MAX, 0.01);
     position_y_slider.set_value(0.0);
-    position_y_slider.set_draw_value(true);
-    position_y_slider.set_digits(2);
     position_y_slider.add_mark(POSITION_MIN, gtk4::PositionType::Bottom, Some("⤒"));
     position_y_slider.add_mark(-1.0, gtk4::PositionType::Bottom, Some("↑"));
     position_y_slider.add_mark(0.0, gtk4::PositionType::Bottom, Some("·"));
     position_y_slider.add_mark(1.0, gtk4::PositionType::Bottom, Some("↓"));
     position_y_slider.add_mark(POSITION_MAX, gtk4::PositionType::Bottom, Some("⤓"));
-    position_y_slider.set_hexpand(true);
     position_y_slider.set_tooltip_text(Some(
         "Vertical position: −1 = canvas top edge, 0 = center, +1 = canvas bottom edge. Values past ±1 push the clip off-canvas.",
     ));
-    transform_inner.append(&position_y_slider);
+    append_slider_with_spin(&transform_inner, &position_y_slider, 2, 0.0);
     let position_y_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let position_y_set_keyframe_btn = Button::with_label("Set Position Y Keyframe");
     let position_y_remove_keyframe_btn = Button::with_label("Remove Position Y Keyframe");
@@ -5448,10 +5491,8 @@ pub fn build_inspector(
     let crop_left_slider =
         Scale::with_range(Orientation::Horizontal, CROP_MIN_PX, CROP_MAX_PX, 2.0);
     crop_left_slider.set_value(0.0);
-    crop_left_slider.set_draw_value(true);
-    crop_left_slider.set_digits(0);
     crop_left_slider.set_tooltip_text(Some("Crop from the left edge, in project pixels (0–4000)."));
-    transform_inner.append(&crop_left_slider);
+    append_slider_with_spin(&transform_inner, &crop_left_slider, 0, 0.0);
     let crop_left_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let crop_left_set_keyframe_btn = Button::with_label("Set Crop Left Keyframe");
     let crop_left_remove_keyframe_btn = Button::with_label("Remove Crop Left Keyframe");
@@ -5463,12 +5504,10 @@ pub fn build_inspector(
     let crop_right_slider =
         Scale::with_range(Orientation::Horizontal, CROP_MIN_PX, CROP_MAX_PX, 2.0);
     crop_right_slider.set_value(0.0);
-    crop_right_slider.set_draw_value(true);
-    crop_right_slider.set_digits(0);
     crop_right_slider.set_tooltip_text(Some(
         "Crop from the right edge, in project pixels (0–4000).",
     ));
-    transform_inner.append(&crop_right_slider);
+    append_slider_with_spin(&transform_inner, &crop_right_slider, 0, 0.0);
     let crop_right_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let crop_right_set_keyframe_btn = Button::with_label("Set Crop Right Keyframe");
     let crop_right_remove_keyframe_btn = Button::with_label("Remove Crop Right Keyframe");
@@ -5479,10 +5518,8 @@ pub fn build_inspector(
     row_label(&transform_inner, "Crop Top");
     let crop_top_slider = Scale::with_range(Orientation::Horizontal, CROP_MIN_PX, CROP_MAX_PX, 2.0);
     crop_top_slider.set_value(0.0);
-    crop_top_slider.set_draw_value(true);
-    crop_top_slider.set_digits(0);
     crop_top_slider.set_tooltip_text(Some("Crop from the top edge, in project pixels (0–4000)."));
-    transform_inner.append(&crop_top_slider);
+    append_slider_with_spin(&transform_inner, &crop_top_slider, 0, 0.0);
     let crop_top_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let crop_top_set_keyframe_btn = Button::with_label("Set Crop Top Keyframe");
     let crop_top_remove_keyframe_btn = Button::with_label("Remove Crop Top Keyframe");
@@ -5494,12 +5531,10 @@ pub fn build_inspector(
     let crop_bottom_slider =
         Scale::with_range(Orientation::Horizontal, CROP_MIN_PX, CROP_MAX_PX, 2.0);
     crop_bottom_slider.set_value(0.0);
-    crop_bottom_slider.set_draw_value(true);
-    crop_bottom_slider.set_digits(0);
     crop_bottom_slider.set_tooltip_text(Some(
         "Crop from the bottom edge, in project pixels (0–4000).",
     ));
-    transform_inner.append(&crop_bottom_slider);
+    append_slider_with_spin(&transform_inner, &crop_bottom_slider, 0, 0.0);
     let crop_bottom_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let crop_bottom_set_keyframe_btn = Button::with_label("Set Crop Bottom Keyframe");
     let crop_bottom_remove_keyframe_btn = Button::with_label("Remove Crop Bottom Keyframe");
@@ -5644,6 +5679,7 @@ pub fn build_inspector(
     title_color_dialog.set_with_alpha(true);
     let title_color_btn = gtk4::ColorDialogButton::new(Some(title_color_dialog));
     title_color_btn.set_rgba(&gdk4::RGBA::new(1.0, 1.0, 1.0, 1.0));
+    title_color_btn.set_tooltip_text(Some("Choose the title text color"));
     title_inner.append(&title_color_btn);
 
     row_label(&title_inner, "Position X");
@@ -5654,8 +5690,7 @@ pub fn build_inspector(
         UNIT_SLIDER_STEP,
     );
     title_x_slider.set_value(0.5);
-    title_x_slider.set_hexpand(true);
-    title_inner.append(&title_x_slider);
+    append_slider_with_spin(&title_inner, &title_x_slider, 2, 0.5);
 
     row_label(&title_inner, "Position Y");
     let title_y_slider = Scale::with_range(
@@ -5665,22 +5700,19 @@ pub fn build_inspector(
         UNIT_SLIDER_STEP,
     );
     title_y_slider.set_value(0.9);
-    title_y_slider.set_hexpand(true);
-    title_inner.append(&title_y_slider);
+    append_slider_with_spin(&title_inner, &title_y_slider, 2, 0.9);
 
     row_label(&title_inner, "Outline Width");
     let title_outline_width_slider = Scale::with_range(Orientation::Horizontal, 0.0, 10.0, 0.5);
     title_outline_width_slider.set_value(0.0);
-    title_outline_width_slider.set_draw_value(true);
-    title_outline_width_slider.set_digits(1);
-    title_outline_width_slider.set_hexpand(true);
-    title_inner.append(&title_outline_width_slider);
+    append_slider_with_spin(&title_inner, &title_outline_width_slider, 1, 0.0);
 
     row_label(&title_inner, "Outline Color");
     let title_outline_color_dialog = gtk4::ColorDialog::new();
     title_outline_color_dialog.set_with_alpha(true);
     let title_outline_color_btn = gtk4::ColorDialogButton::new(Some(title_outline_color_dialog));
     title_outline_color_btn.set_rgba(&gdk4::RGBA::new(0.0, 0.0, 0.0, 1.0));
+    title_outline_color_btn.set_tooltip_text(Some("Choose the title outline color"));
     title_inner.append(&title_outline_color_btn);
 
     let title_shadow_check = CheckButton::with_label("Drop Shadow");
@@ -5691,23 +5723,18 @@ pub fn build_inspector(
     title_shadow_color_dialog.set_with_alpha(true);
     let title_shadow_color_btn = gtk4::ColorDialogButton::new(Some(title_shadow_color_dialog));
     title_shadow_color_btn.set_rgba(&gdk4::RGBA::new(0.0, 0.0, 0.0, 0.67));
+    title_shadow_color_btn.set_tooltip_text(Some("Choose the title shadow color"));
     title_inner.append(&title_shadow_color_btn);
 
     row_label(&title_inner, "Shadow Offset X");
     let title_shadow_x_slider = Scale::with_range(Orientation::Horizontal, -10.0, 10.0, 0.5);
     title_shadow_x_slider.set_value(2.0);
-    title_shadow_x_slider.set_draw_value(true);
-    title_shadow_x_slider.set_digits(1);
-    title_shadow_x_slider.set_hexpand(true);
-    title_inner.append(&title_shadow_x_slider);
+    append_slider_with_spin(&title_inner, &title_shadow_x_slider, 1, 2.0);
 
     row_label(&title_inner, "Shadow Offset Y");
     let title_shadow_y_slider = Scale::with_range(Orientation::Horizontal, -10.0, 10.0, 0.5);
     title_shadow_y_slider.set_value(2.0);
-    title_shadow_y_slider.set_draw_value(true);
-    title_shadow_y_slider.set_digits(1);
-    title_shadow_y_slider.set_hexpand(true);
-    title_inner.append(&title_shadow_y_slider);
+    append_slider_with_spin(&title_inner, &title_shadow_y_slider, 1, 2.0);
 
     let title_bg_box_check = CheckButton::with_label("Background Box");
     title_inner.append(&title_bg_box_check);
@@ -5717,15 +5744,13 @@ pub fn build_inspector(
     title_bg_box_color_dialog.set_with_alpha(true);
     let title_bg_box_color_btn = gtk4::ColorDialogButton::new(Some(title_bg_box_color_dialog));
     title_bg_box_color_btn.set_rgba(&gdk4::RGBA::new(0.0, 0.0, 0.0, 0.53));
+    title_bg_box_color_btn.set_tooltip_text(Some("Choose the title background box color"));
     title_inner.append(&title_bg_box_color_btn);
 
     row_label(&title_inner, "Box Padding");
     let title_bg_box_padding_slider = Scale::with_range(Orientation::Horizontal, 0.0, 30.0, 1.0);
     title_bg_box_padding_slider.set_value(8.0);
-    title_bg_box_padding_slider.set_draw_value(true);
-    title_bg_box_padding_slider.set_digits(0);
-    title_bg_box_padding_slider.set_hexpand(true);
-    title_inner.append(&title_bg_box_padding_slider);
+    append_slider_with_spin(&title_inner, &title_bg_box_padding_slider, 0, 8.0);
 
     title_inner.append(&Separator::new(Orientation::Horizontal));
     row_label(&title_inner, "Animation");
@@ -5736,9 +5761,7 @@ pub fn build_inspector(
     row_label(&title_inner, "  Duration (s)");
     let title_animation_duration_slider = Scale::with_range(Orientation::Horizontal, 0.1, 5.0, 0.1);
     title_animation_duration_slider.set_value(1.0);
-    title_animation_duration_slider.set_draw_value(true);
-    title_animation_duration_slider.set_hexpand(true);
-    title_inner.append(&title_animation_duration_slider);
+    append_slider_with_spin(&title_inner, &title_animation_duration_slider, 2, 1.0);
 
     // ── Speed section (all clip types) ───────────────────────────────────────
     let speed_section_box = GBox::new(Orientation::Vertical, 8);
@@ -5754,14 +5777,11 @@ pub fn build_inspector(
     row_label(&speed_inner, "Speed Multiplier");
     let speed_slider = Scale::with_range(Orientation::Horizontal, 0.25, 4.0, 0.05);
     speed_slider.set_value(1.0);
-    speed_slider.set_draw_value(true);
-    speed_slider.set_digits(2);
     speed_slider.add_mark(0.5, gtk4::PositionType::Bottom, Some("½×"));
     speed_slider.add_mark(1.0, gtk4::PositionType::Bottom, Some("1×"));
     speed_slider.add_mark(2.0, gtk4::PositionType::Bottom, Some("2×"));
-    speed_slider.set_hexpand(true);
     speed_slider.set_tooltip_text(Some("Playback speed: <1 = slow motion, >1 = fast forward"));
-    speed_inner.append(&speed_slider);
+    append_slider_with_spin(&speed_inner, &speed_slider, 2, 1.0);
 
     let speed_keyframe_row = GBox::new(Orientation::Horizontal, 6);
     let speed_set_keyframe_btn = Button::with_label("Set Speed Keyframe");
@@ -6145,7 +6165,7 @@ pub fn build_inspector(
                 return;
             }
             let enabled = btn.is_active();
-            shutter_slider.set_sensitive(enabled);
+            set_slider_row_sensitive(&shutter_slider, enabled);
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
                 let mut proj = project.borrow_mut();
@@ -6178,6 +6198,35 @@ pub fn build_inspector(
         });
     }
 
+    // Wire Render-and-Replace toggle. Flipping it marks the clip for
+    // baking; the cache request kicks via `on_clip_changed` → the
+    // window-side project walk. Preview swap + effect suppression
+    // happens automatically once the bake completes (Program Monitor
+    // neutralizes baked-scope fields on sidecar-ready clips).
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_clip_changed = on_clip_changed.clone();
+        render_replace_check.connect_toggled(move |btn| {
+            if *updating.borrow() {
+                return;
+            }
+            let enabled = btn.is_active();
+            let id = selected_clip_id.borrow().clone();
+            if let Some(ref clip_id) = id {
+                {
+                    let mut proj = project.borrow_mut();
+                    if let Some(clip) = proj.clip_mut(clip_id) {
+                        clip.render_replace_enabled = enabled;
+                    }
+                    proj.dirty = true;
+                }
+                on_clip_changed();
+            }
+        });
+    }
+
     // Wire "Enhance Voice" toggle. The toggle changes the SHAPE of the
     // GStreamer chain (elements added/removed), so it triggers a slot
     // rebuild via `on_clip_changed`. The strength slider below stays
@@ -6194,7 +6243,7 @@ pub fn build_inspector(
                 return;
             }
             let enabled = btn.is_active();
-            strength_slider.set_sensitive(enabled);
+            set_slider_row_sensitive(&strength_slider, enabled);
             let id = selected_clip_id.borrow().clone();
             if let Some(ref clip_id) = id {
                 {
@@ -10929,6 +10978,82 @@ pub fn build_inspector(
     wire_hsl_slider!(hsl_contrast, contrast);
     wire_hsl_slider!(hsl_saturation, saturation);
 
+    // Restore persisted expander states and wire save-on-toggle.
+    for exp in &[
+        &transition_expander,
+        &color_expander,
+        &chroma_key_expander,
+        &bg_removal_expander,
+        &subtitle_expander,
+        &segments_expander,
+        &mask_expander,
+        &hsl_expander,
+        &tracking_expander,
+        &frei0r_effects_expander,
+        &audio_expander,
+        &eq_expander,
+        &pitch_expander,
+        &ladspa_effects_expander,
+        &duck_expander,
+        &transform_expander,
+        &audition_expander,
+        &title_expander,
+        &speed_expander,
+        &lut_expander,
+    ] {
+        restore_expander_state(exp, &saved_sections);
+        connect_expander_persist(exp);
+    }
+
+    // Wire search/filter field.
+    {
+        let saved_sections = saved_sections.clone();
+        let filter_sections: Vec<(GBox, Expander)> = vec![
+            (color_section.clone(), color_expander.clone()),
+            (chroma_key_section.clone(), chroma_key_expander.clone()),
+            (bg_removal_section.clone(), bg_removal_expander.clone()),
+            (subtitle_section.clone(), subtitle_expander.clone()),
+            (subtitle_segments_section.clone(), segments_expander.clone()),
+            (mask_section.clone(), mask_expander.clone()),
+            (hsl_section.clone(), hsl_expander.clone()),
+            (tracking_section.clone(), tracking_expander.clone()),
+            (
+                frei0r_effects_section.clone(),
+                frei0r_effects_expander.clone(),
+            ),
+            (audio_section.clone(), audio_expander.clone()),
+            (transform_section.clone(), transform_expander.clone()),
+            (transition_section.clone(), transition_expander.clone()),
+            (audition_section_box.clone(), audition_expander.clone()),
+            (title_section_box.clone(), title_expander.clone()),
+            (speed_section_box.clone(), speed_expander.clone()),
+            (lut_section_box.clone(), lut_expander.clone()),
+        ];
+        search_entry.connect_search_changed(move |entry| {
+            let query = entry.text().to_string().to_lowercase();
+            if query.is_empty() {
+                for (section, expander) in &filter_sections {
+                    section.set_visible(true);
+                    show_all_inner_controls(expander);
+                    restore_expander_state(expander, &saved_sections);
+                }
+                return;
+            }
+            for (section, expander) in &filter_sections {
+                let section_name_matches = expander
+                    .label()
+                    .map(|l| l.to_lowercase().contains(&query))
+                    .unwrap_or(false);
+                let inner_has_match = filter_inner_controls(expander, &query, section_name_matches);
+                let visible = section_name_matches || inner_has_match;
+                section.set_visible(visible);
+                if visible {
+                    expander.set_expanded(true);
+                }
+            }
+        });
+    }
+
     let view = Rc::new(InspectorView {
         name_entry,
         path_value,
@@ -10938,6 +11063,7 @@ pub fn build_inspector(
         out_value,
         dur_value,
         pos_value,
+        source_tc_value,
         selected_clip_id,
         clip_color_label_combo,
         brightness_slider,
@@ -10966,6 +11092,10 @@ pub fn build_inspector(
         voice_enhance_strength_slider,
         voice_enhance_status_label,
         voice_enhance_retry_btn,
+        render_replace_check,
+        render_replace_status_label,
+        render_replace_cancel_btn,
+        render_replace_apply_to_selected_btn,
         voice_isolation_slider,
         vi_pad_slider,
         vi_fade_slider,
@@ -11388,6 +11518,124 @@ fn row_label(parent: &GBox, text: &str) {
     parent.append(&l);
 }
 
+/// Restore an expander's expanded state from the persisted section map.
+fn restore_expander_state(expander: &Expander, sections: &std::collections::HashMap<String, bool>) {
+    if let Some(label) = expander.label() {
+        if let Some(&expanded) = sections.get(label.as_str()) {
+            expander.set_expanded(expanded);
+        }
+    }
+}
+
+/// Connect an expander to persist its expanded/collapsed state on toggle.
+fn connect_expander_persist(expander: &Expander) {
+    expander.connect_notify(Some("expanded"), |exp, _| {
+        if let Some(label) = exp.label() {
+            let mut sections = crate::ui_state::load_inspector_sections_state();
+            sections.insert(label.to_string(), exp.is_expanded());
+            crate::ui_state::save_inspector_sections_state(&sections);
+        }
+    });
+}
+
+/// Filter an expander's inner controls by query. Returns true if any control matched.
+/// Labels with the `clip-path` CSS class are row labels; each label and its next
+/// sibling (the control row) are shown/hidden together.
+fn filter_inner_controls(expander: &Expander, query: &str, show_all: bool) -> bool {
+    let inner = match expander.child().and_then(|c| c.downcast::<GBox>().ok()) {
+        Some(b) => b,
+        None => return false,
+    };
+    let mut any_match = false;
+    let mut child = inner.first_child();
+    while let Some(widget) = child {
+        let next = widget.next_sibling();
+        if widget.has_css_class("clip-path") {
+            let label_text = widget
+                .downcast_ref::<Label>()
+                .map(|l| l.text().to_string().to_lowercase())
+                .unwrap_or_default();
+            let matches = show_all || label_text.contains(query);
+            widget.set_visible(matches);
+            if let Some(ref ctrl) = next {
+                if !ctrl.has_css_class("clip-path") {
+                    ctrl.set_visible(matches);
+                }
+            }
+            if matches {
+                any_match = true;
+            }
+        }
+        child = next;
+    }
+    any_match
+}
+
+/// Show all children of an expander's inner container.
+fn show_all_inner_controls(expander: &Expander) {
+    let inner = match expander.child().and_then(|c| c.downcast::<GBox>().ok()) {
+        Some(b) => b,
+        None => return,
+    };
+    let mut child = inner.first_child();
+    while let Some(widget) = child {
+        widget.set_visible(true);
+        child = widget.next_sibling();
+    }
+}
+
+/// Append a Scale inside an HBox with a compact SpinButton sharing the same
+/// Adjustment, plus a reset-to-default button that appears only when the
+/// value differs from `default_value`.
+fn append_slider_with_spin(parent: &GBox, slider: &Scale, digits: u32, default_value: f64) {
+    let adj = slider.adjustment();
+    let spin = gtk4::SpinButton::new(Some(&adj), 0.0, digits);
+    spin.set_width_chars(4);
+    spin.set_max_width_chars(6);
+    spin.add_css_class("inspector-spin");
+    slider.set_draw_value(false);
+    slider.set_hexpand(true);
+
+    // Reset-to-default button — always occupies space in the row so the
+    // slider width stays stable; faded out when the value matches the default.
+    let reset_btn = Button::new();
+    reset_btn.set_icon_name("edit-undo-symbolic");
+    reset_btn.add_css_class("inspector-reset");
+    reset_btn.add_css_class("flat");
+    reset_btn.set_tooltip_text(Some("Reset to default"));
+    reset_btn.set_opacity(0.0);
+    reset_btn.set_sensitive(false);
+
+    let reset_ref = reset_btn.clone();
+    let eps = 10f64.powi(-(digits as i32)) * 0.5;
+    adj.connect_value_changed(move |a| {
+        let differs = (a.value() - default_value).abs() > eps;
+        reset_ref.set_opacity(if differs { 1.0 } else { 0.0 });
+        reset_ref.set_sensitive(differs);
+    });
+
+    let slider_for_reset = slider.clone();
+    reset_btn.connect_clicked(move |_| {
+        slider_for_reset.set_value(default_value);
+    });
+
+    let row = GBox::new(gtk4::Orientation::Horizontal, 4);
+    row.append(slider);
+    row.append(&spin);
+    row.append(&reset_btn);
+    parent.append(&row);
+}
+
+/// Set sensitivity on the slider's wrapper row (so the sibling SpinButton is
+/// also affected), falling back to the slider itself if it has no parent yet.
+fn set_slider_row_sensitive(slider: &Scale, sensitive: bool) {
+    if let Some(parent) = slider.parent() {
+        parent.set_sensitive(sensitive);
+    } else {
+        slider.set_sensitive(sensitive);
+    }
+}
+
 fn value_label(text: &str) -> Label {
     let l = Label::new(Some(text));
     l.set_halign(gtk4::Align::Start);
@@ -11451,4 +11699,1052 @@ fn humanize_frei0r_name(name: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+// ---------------------------------------------------------------------------
+// Right-click Copy / Paste property helper
+// ---------------------------------------------------------------------------
+
+/// Attach a right-click context menu to every Phase-1 scalar slider on the
+/// Inspector. The menu offers **Copy <property>**, **Paste <property>**,
+/// and **Paste <property> to all selected clips** (visible only when more
+/// than one clip is selected).
+///
+/// Called once by `window.rs` after `build_inspector` returns. The
+/// wiring is table-driven so future properties can be added in one place
+/// without touching each slider's construction site.
+pub fn attach_property_context_menus(
+    view: &InspectorView,
+    project: Rc<RefCell<Project>>,
+    timeline_state: Rc<RefCell<crate::ui::timeline::widget::TimelineState>>,
+    on_project_changed: Rc<dyn Fn()>,
+) {
+    use crate::ui::clip_property::ClipProperty;
+
+    let bindings: Vec<(Scale, ClipProperty)> = vec![
+        // Color grade
+        (view.brightness_slider.clone(), ClipProperty::Brightness),
+        (view.contrast_slider.clone(), ClipProperty::Contrast),
+        (view.saturation_slider.clone(), ClipProperty::Saturation),
+        (view.temperature_slider.clone(), ClipProperty::Temperature),
+        (view.tint_slider.clone(), ClipProperty::Tint),
+        (view.exposure_slider.clone(), ClipProperty::Exposure),
+        (view.black_point_slider.clone(), ClipProperty::BlackPoint),
+        (view.shadows_slider.clone(), ClipProperty::Shadows),
+        (view.midtones_slider.clone(), ClipProperty::Midtones),
+        (view.highlights_slider.clone(), ClipProperty::Highlights),
+        (
+            view.highlights_warmth_slider.clone(),
+            ClipProperty::HighlightsWarmth,
+        ),
+        (
+            view.highlights_tint_slider.clone(),
+            ClipProperty::HighlightsTint,
+        ),
+        (
+            view.midtones_warmth_slider.clone(),
+            ClipProperty::MidtonesWarmth,
+        ),
+        (
+            view.midtones_tint_slider.clone(),
+            ClipProperty::MidtonesTint,
+        ),
+        (
+            view.shadows_warmth_slider.clone(),
+            ClipProperty::ShadowsWarmth,
+        ),
+        (view.shadows_tint_slider.clone(), ClipProperty::ShadowsTint),
+        // Detail
+        (view.denoise_slider.clone(), ClipProperty::Denoise),
+        (view.sharpness_slider.clone(), ClipProperty::Sharpness),
+        (view.blur_slider.clone(), ClipProperty::Blur),
+        // Transform
+        (view.scale_slider.clone(), ClipProperty::Scale),
+        (view.opacity_slider.clone(), ClipProperty::Opacity),
+        (view.position_x_slider.clone(), ClipProperty::PositionX),
+        (view.position_y_slider.clone(), ClipProperty::PositionY),
+        (view.crop_left_slider.clone(), ClipProperty::CropLeft),
+        (view.crop_right_slider.clone(), ClipProperty::CropRight),
+        (view.crop_top_slider.clone(), ClipProperty::CropTop),
+        (view.crop_bottom_slider.clone(), ClipProperty::CropBottom),
+        // Audio
+        (view.volume_slider.clone(), ClipProperty::Volume),
+        (view.pan_slider.clone(), ClipProperty::Pan),
+        (
+            view.pitch_shift_slider.clone(),
+            ClipProperty::PitchShiftSemitones,
+        ),
+        // Speed
+        (view.speed_slider.clone(), ClipProperty::Speed),
+        // Chroma key / BG removal
+        (
+            view.chroma_tolerance_slider.clone(),
+            ClipProperty::ChromaKeyTolerance,
+        ),
+        (
+            view.chroma_softness_slider.clone(),
+            ClipProperty::ChromaKeySoftness,
+        ),
+        (
+            view.bg_removal_threshold_slider.clone(),
+            ClipProperty::BgRemovalThreshold,
+        ),
+        // Motion blur
+        (
+            view.motion_blur_shutter_slider.clone(),
+            ClipProperty::MotionBlurShutterAngle,
+        ),
+    ];
+
+    for (slider, property) in bindings {
+        attach_one_property_context_menu(
+            slider,
+            property,
+            project.clone(),
+            timeline_state.clone(),
+            on_project_changed.clone(),
+        );
+    }
+
+    // Phase 2: bundle Copy / Paste on the non-scalar controls
+    // (Flip H/V, Blend Mode, LUT Stack, Frei0r Effect Chain,
+    // LADSPA Audio Effect Chain, EQ Bands, Chroma Key, BG Removal).
+    attach_all_bundle_context_menus(
+        view,
+        project,
+        timeline_state,
+        on_project_changed,
+    );
+}
+
+fn attach_one_property_context_menu(
+    slider: Scale,
+    property: crate::ui::clip_property::ClipProperty,
+    project: Rc<RefCell<Project>>,
+    timeline_state: Rc<RefCell<crate::ui::timeline::widget::TimelineState>>,
+    on_project_changed: Rc<dyn Fn()>,
+) {
+    use crate::ui::timeline::widget::PropertyClipboard;
+
+    let gesture = gtk4::GestureClick::new();
+    gesture.set_button(3); // right-click
+    let slider_for_popup = slider.clone();
+    gesture.connect_released(move |_gesture, _n_press, x, y| {
+        // Build a small popover anchored at the click point with Copy /
+        // Paste / Paste-to-all buttons.
+        let popover = gtk::Popover::new();
+        popover.set_autohide(true);
+        popover.set_has_arrow(true);
+        popover.set_parent(&slider_for_popup);
+        popover.set_pointing_to(Some(&gdk4::Rectangle::new(
+            x.round() as i32,
+            y.round() as i32,
+            1,
+            1,
+        )));
+
+        let content = GBox::new(Orientation::Vertical, 2);
+        content.set_margin_top(6);
+        content.set_margin_bottom(6);
+        content.set_margin_start(8);
+        content.set_margin_end(8);
+
+        let copy_btn = Button::with_label(&format!("Copy {}", property.label()));
+        copy_btn.add_css_class("flat");
+        let paste_btn = Button::with_label(&format!("Paste {}", property.label()));
+        paste_btn.add_css_class("flat");
+        let paste_all_btn =
+            Button::with_label(&format!("Paste {} to all selected", property.label()));
+        paste_all_btn.add_css_class("flat");
+
+        // Primary selected clip id (drives Copy source and Paste target).
+        let primary_id: Option<String> = timeline_state.borrow().selected_clip_id.clone();
+        let selected_ids = timeline_state.borrow().selected_clip_ids().clone();
+
+        // Enable/disable items based on current state.
+        let primary_clip_compatible = primary_id
+            .as_ref()
+            .and_then(|id| {
+                let proj = project.borrow();
+                for track in proj.tracks.iter() {
+                    if let Some(c) = track.clips.iter().find(|c| &c.id == id) {
+                        return Some(property.applies_to(c));
+                    }
+                }
+                None
+            })
+            .unwrap_or(false);
+        copy_btn.set_sensitive(primary_clip_compatible);
+
+        let clipboard_matches = matches!(
+            timeline_state.borrow().property_clipboard,
+            Some(PropertyClipboard::Scalar { property: p, .. }) if p == property
+        );
+        paste_btn.set_sensitive(clipboard_matches && primary_clip_compatible);
+
+        let multi_select = selected_ids.len() > 1
+            || (selected_ids.len() == 1 && primary_id.is_some()
+                && !selected_ids.contains(primary_id.as_deref().unwrap_or("")));
+        paste_all_btn.set_visible(multi_select);
+        paste_all_btn.set_sensitive(clipboard_matches);
+
+        // --- Copy ---
+        {
+            let project = project.clone();
+            let timeline_state = timeline_state.clone();
+            let popover_close = popover.clone();
+            copy_btn.connect_clicked(move |_| {
+                let Some(clip_id) = timeline_state.borrow().selected_clip_id.clone() else {
+                    popover_close.popdown();
+                    return;
+                };
+                let value = {
+                    let proj = project.borrow();
+                    let mut found = None;
+                    for track in proj.tracks.iter() {
+                        if let Some(c) = track.clips.iter().find(|c| c.id == clip_id) {
+                            found = Some(property.read(c));
+                            break;
+                        }
+                    }
+                    found
+                };
+                if let Some(value) = value {
+                    timeline_state.borrow_mut().property_clipboard =
+                        Some(PropertyClipboard::Scalar { property, value });
+                }
+                popover_close.popdown();
+            });
+        }
+
+        // --- Paste (primary clip) ---
+        {
+            let project = project.clone();
+            let timeline_state = timeline_state.clone();
+            let on_project_changed = on_project_changed.clone();
+            let popover_close = popover.clone();
+            paste_btn.connect_clicked(move |_| {
+                let Some(primary_id) = timeline_state.borrow().selected_clip_id.clone() else {
+                    popover_close.popdown();
+                    return;
+                };
+                let clipboard_value: Option<f64> = match timeline_state.borrow().property_clipboard {
+                    Some(PropertyClipboard::Scalar {
+                        property: p,
+                        value: v,
+                    }) if p == property => Some(v),
+                    _ => None,
+                };
+                let Some(clipboard_value) = clipboard_value else {
+                    popover_close.popdown();
+                    return;
+                };
+                // Build a ClipMutateCommand<f64> that snapshots the old
+                // value and writes the new one via ClipProperty::write.
+                let old_value: Option<f64> = {
+                    let proj = project.borrow();
+                    proj.tracks.iter().find_map(|t| {
+                        t.clips
+                            .iter()
+                            .find(|c| c.id == primary_id)
+                            .map(|c| property.read(c))
+                    })
+                };
+                let Some(old_value) = old_value else {
+                    popover_close.popdown();
+                    return;
+                };
+                if (old_value - clipboard_value).abs() < 1e-9 {
+                    popover_close.popdown();
+                    return;
+                }
+                let cmd = clip_property_mutate_command(
+                    primary_id.clone(),
+                    property,
+                    old_value,
+                    clipboard_value,
+                );
+                {
+                    let mut ts = timeline_state.borrow_mut();
+                    let mut proj = project.borrow_mut();
+                    ts.history.execute(cmd, &mut proj);
+                }
+                on_project_changed();
+                popover_close.popdown();
+            });
+        }
+
+        // --- Paste to all selected ---
+        {
+            let project = project.clone();
+            let timeline_state = timeline_state.clone();
+            let on_project_changed = on_project_changed.clone();
+            let popover_close = popover.clone();
+            paste_all_btn.connect_clicked(move |_| {
+                let clipboard_value: f64 = match timeline_state.borrow().property_clipboard {
+                    Some(PropertyClipboard::Scalar {
+                        property: p,
+                        value: v,
+                    }) if p == property => v,
+                    _ => {
+                        popover_close.popdown();
+                        return;
+                    }
+                };
+                // Union of multi-select + primary. We never want to skip
+                // the primary clip just because selected_clip_ids happened
+                // not to include it.
+                let mut target_ids: HashSet<String> =
+                    timeline_state.borrow().selected_clip_ids().clone();
+                if let Some(ref id) = timeline_state.borrow().selected_clip_id {
+                    target_ids.insert(id.clone());
+                }
+                if target_ids.is_empty() {
+                    popover_close.popdown();
+                    return;
+                }
+
+                let mut children: Vec<Box<dyn crate::undo::EditCommand>> = Vec::new();
+                {
+                    let proj = project.borrow();
+                    for track in proj.tracks.iter() {
+                        for c in track.clips.iter() {
+                            if !target_ids.contains(&c.id) {
+                                continue;
+                            }
+                            if !property.applies_to(c) {
+                                continue;
+                            }
+                            let old_v = property.read(c);
+                            if (old_v - clipboard_value).abs() < 1e-9 {
+                                continue;
+                            }
+                            children.push(clip_property_mutate_command(
+                                c.id.clone(),
+                                property,
+                                old_v,
+                                clipboard_value,
+                            ));
+                        }
+                    }
+                }
+
+                if children.is_empty() {
+                    popover_close.popdown();
+                    return;
+                }
+
+                let cmd = Box::new(crate::undo::CompoundEditCommand {
+                    description: format!("Paste {} to selected", property.label()),
+                    children,
+                });
+                {
+                    let mut ts = timeline_state.borrow_mut();
+                    let mut proj = project.borrow_mut();
+                    ts.history.execute(cmd, &mut proj);
+                }
+                on_project_changed();
+                popover_close.popdown();
+            });
+        }
+
+        content.append(&copy_btn);
+        content.append(&paste_btn);
+        content.append(&paste_all_btn);
+        popover.set_child(Some(&content));
+        popover.popup();
+    });
+    slider.add_controller(gesture);
+}
+
+/// Build a `ClipMutateCommand<f64>` that writes a single
+/// [`ClipProperty`](crate::ui::clip_property::ClipProperty) value via the
+/// generic property-write path.
+fn clip_property_mutate_command(
+    clip_id: String,
+    property: crate::ui::clip_property::ClipProperty,
+    old_value: f64,
+    new_value: f64,
+) -> Box<dyn crate::undo::EditCommand> {
+    Box::new(PastePropertyCommand {
+        clip_id,
+        property,
+        old_value,
+        new_value,
+    })
+}
+
+struct PastePropertyCommand {
+    clip_id: String,
+    property: crate::ui::clip_property::ClipProperty,
+    old_value: f64,
+    new_value: f64,
+}
+
+impl crate::undo::EditCommand for PastePropertyCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            self.property.write(clip, self.new_value);
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            self.property.write(clip, self.old_value);
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Paste property"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 bundle Copy / Paste
+// ---------------------------------------------------------------------------
+//
+// The Phase 1 helper above handles one scalar slider at a time. Phase 2
+// layers on "bundle" variants of the clipboard — a whole frei0r/ladspa/
+// LUT stack, the EQ bands, chroma-key settings, BG-removal settings,
+// blend mode, and the flip toggles. Each bundle is attached to a
+// sensible widget target (section container, enable checkbox,
+// dropdown, toggle button) and reuses `ClipMutateCommand<T>` for undo
+// so paste-to-all still collapses into a single Ctrl+Z step.
+
+/// Shared popover builder used by every bundle's right-click menu. All
+/// action labels and enabled-state flags are supplied by the caller.
+/// The popover dismisses itself after any button click.
+#[allow(clippy::too_many_arguments)]
+fn show_property_popover(
+    anchor: &impl IsA<gtk::Widget>,
+    x: f64,
+    y: f64,
+    copy_label: &str,
+    paste_label: &str,
+    paste_all_label: &str,
+    copy_enabled: bool,
+    paste_enabled: bool,
+    paste_all_visible: bool,
+    paste_all_enabled: bool,
+    on_copy: impl Fn() + 'static,
+    on_paste: impl Fn() + 'static,
+    on_paste_all: impl Fn() + 'static,
+) {
+    let popover = gtk::Popover::new();
+    popover.set_autohide(true);
+    popover.set_has_arrow(true);
+    popover.set_parent(anchor);
+    popover.set_pointing_to(Some(&gdk4::Rectangle::new(
+        x.round() as i32,
+        y.round() as i32,
+        1,
+        1,
+    )));
+
+    let content = GBox::new(Orientation::Vertical, 2);
+    content.set_margin_top(6);
+    content.set_margin_bottom(6);
+    content.set_margin_start(8);
+    content.set_margin_end(8);
+
+    let copy_btn = Button::with_label(copy_label);
+    copy_btn.add_css_class("flat");
+    copy_btn.set_sensitive(copy_enabled);
+    let popover_close = popover.clone();
+    copy_btn.connect_clicked(move |_| {
+        on_copy();
+        popover_close.popdown();
+    });
+
+    let paste_btn = Button::with_label(paste_label);
+    paste_btn.add_css_class("flat");
+    paste_btn.set_sensitive(paste_enabled);
+    let popover_close = popover.clone();
+    paste_btn.connect_clicked(move |_| {
+        on_paste();
+        popover_close.popdown();
+    });
+
+    let paste_all_btn = Button::with_label(paste_all_label);
+    paste_all_btn.add_css_class("flat");
+    paste_all_btn.set_visible(paste_all_visible);
+    paste_all_btn.set_sensitive(paste_all_enabled);
+    let popover_close = popover.clone();
+    paste_all_btn.connect_clicked(move |_| {
+        on_paste_all();
+        popover_close.popdown();
+    });
+
+    content.append(&copy_btn);
+    content.append(&paste_btn);
+    content.append(&paste_all_btn);
+    popover.set_child(Some(&content));
+    popover.popup();
+}
+
+/// Returns `(primary_id, selected_ids)` for the current timeline selection,
+/// where `selected_ids` always includes the primary even when the
+/// selection set does not.
+fn current_selection(
+    timeline_state: &std::rc::Rc<
+        std::cell::RefCell<crate::ui::timeline::widget::TimelineState>,
+    >,
+) -> (Option<String>, HashSet<String>) {
+    let ts = timeline_state.borrow();
+    let primary = ts.selected_clip_id.clone();
+    let mut ids: HashSet<String> = ts.selected_clip_ids().clone();
+    if let Some(ref id) = primary {
+        ids.insert(id.clone());
+    }
+    (primary, ids)
+}
+
+/// Read the first clip with id `clip_id` from the project. Multicam,
+/// compound, and deep-tracks are not traversed — bundles always live on
+/// top-level clips.
+fn find_clip_cloned(project: &Project, clip_id: &str) -> Option<crate::model::clip::Clip> {
+    project
+        .tracks
+        .iter()
+        .find_map(|t| t.clips.iter().find(|c| c.id == clip_id).cloned())
+}
+
+/// ---- apply functions for ClipMutateCommand<T> ----
+
+fn apply_blend_mode(clip: &mut crate::model::clip::Clip, value: crate::model::clip::BlendMode) {
+    clip.blend_mode = value;
+}
+
+fn apply_flip_h(clip: &mut crate::model::clip::Clip, value: bool) {
+    clip.flip_h = value;
+}
+
+fn apply_flip_v(clip: &mut crate::model::clip::Clip, value: bool) {
+    clip.flip_v = value;
+}
+
+fn apply_lut_paths(clip: &mut crate::model::clip::Clip, value: Vec<String>) {
+    clip.lut_paths = value;
+}
+
+fn apply_frei0r_chain(
+    clip: &mut crate::model::clip::Clip,
+    value: Vec<crate::model::clip::Frei0rEffect>,
+) {
+    clip.frei0r_effects = value;
+}
+
+fn apply_ladspa_chain(
+    clip: &mut crate::model::clip::Clip,
+    value: Vec<crate::model::clip::LadspaEffect>,
+) {
+    clip.ladspa_effects = value;
+}
+
+fn apply_eq_bands(
+    clip: &mut crate::model::clip::Clip,
+    value: [crate::model::clip::EqBand; 3],
+) {
+    clip.eq_bands = value;
+}
+
+#[derive(Clone, Debug)]
+struct ChromaKeyBundle {
+    enabled: bool,
+    color: u32,
+    tolerance: f32,
+    softness: f32,
+}
+
+fn apply_chroma_key(clip: &mut crate::model::clip::Clip, value: ChromaKeyBundle) {
+    clip.chroma_key_enabled = value.enabled;
+    clip.chroma_key_color = value.color;
+    clip.chroma_key_tolerance = value.tolerance;
+    clip.chroma_key_softness = value.softness;
+}
+
+#[derive(Clone, Debug)]
+struct BgRemovalBundle {
+    enabled: bool,
+    threshold: f64,
+}
+
+fn apply_bg_removal(clip: &mut crate::model::clip::Clip, value: BgRemovalBundle) {
+    clip.bg_removal_enabled = value.enabled;
+    clip.bg_removal_threshold = value.threshold;
+}
+
+// ---- A single generic helper that handles the whole Copy/Paste/Paste-to-all
+//      orchestration for any ClipMutateCommand<T>. ----
+
+#[allow(clippy::too_many_arguments)]
+fn attach_bundle_context_menu<T>(
+    widget: gtk::Widget,
+    project: Rc<RefCell<Project>>,
+    timeline_state: Rc<RefCell<crate::ui::timeline::widget::TimelineState>>,
+    on_project_changed: Rc<dyn Fn()>,
+    label: &'static str,
+    applies_to: fn(&crate::model::clip::Clip) -> bool,
+    read: fn(&crate::model::clip::Clip) -> T,
+    apply: fn(&mut crate::model::clip::Clip, T),
+    wrap: fn(T) -> crate::ui::timeline::widget::PropertyClipboard,
+    unwrap: fn(&crate::ui::timeline::widget::PropertyClipboard) -> Option<T>,
+    eq: fn(&T, &T) -> bool,
+    undo_label: &'static str,
+) where
+    T: Clone + 'static,
+{
+    let gesture = gtk4::GestureClick::new();
+    gesture.set_button(3);
+    let widget_for_popup = widget.clone();
+    gesture.connect_released(move |_g, _n, x, y| {
+        let (primary_id, selected_ids) = current_selection(&timeline_state);
+        let primary_clip = primary_id
+            .as_ref()
+            .and_then(|id| find_clip_cloned(&project.borrow(), id));
+        let primary_compatible = primary_clip
+            .as_ref()
+            .map(|c| applies_to(c))
+            .unwrap_or(false);
+        let clipboard_has_match = timeline_state
+            .borrow()
+            .property_clipboard
+            .as_ref()
+            .and_then(|pc| unwrap(pc))
+            .is_some();
+        let multi_selected = selected_ids.len() > 1;
+
+        let copy_label_full = format!("Copy {}", label);
+        let paste_label_full = format!("Paste {}", label);
+        let paste_all_label_full = format!("Paste {} to all selected", label);
+
+        // Build Copy / Paste / Paste-all closures. Each borrows the
+        // project + timeline_state + on_project_changed.
+        let on_copy = {
+            let project = project.clone();
+            let timeline_state = timeline_state.clone();
+            let primary_id = primary_id.clone();
+            move || {
+                let Some(id) = primary_id.clone() else { return };
+                let Some(value) = find_clip_cloned(&project.borrow(), &id)
+                    .as_ref()
+                    .map(|c| read(c))
+                else {
+                    return;
+                };
+                timeline_state.borrow_mut().property_clipboard = Some(wrap(value));
+            }
+        };
+
+        let on_paste = {
+            let project = project.clone();
+            let timeline_state = timeline_state.clone();
+            let on_project_changed = on_project_changed.clone();
+            let primary_id = primary_id.clone();
+            move || {
+                let Some(id) = primary_id.clone() else { return };
+                let value = match timeline_state
+                    .borrow()
+                    .property_clipboard
+                    .as_ref()
+                    .and_then(|pc| unwrap(pc))
+                {
+                    Some(v) => v,
+                    None => return,
+                };
+                let old_value = match find_clip_cloned(&project.borrow(), &id)
+                    .as_ref()
+                    .map(|c| read(c))
+                {
+                    Some(v) => v,
+                    None => return,
+                };
+                if eq(&old_value, &value) {
+                    return;
+                }
+                let cmd = Box::new(crate::undo::ClipMutateCommand::<T> {
+                    clip_id: id,
+                    old_state: old_value,
+                    new_state: value,
+                    apply,
+                    label: undo_label,
+                });
+                {
+                    let mut ts = timeline_state.borrow_mut();
+                    let mut proj = project.borrow_mut();
+                    ts.history.execute(cmd, &mut proj);
+                }
+                on_project_changed();
+            }
+        };
+
+        let on_paste_all = {
+            let project = project.clone();
+            let timeline_state = timeline_state.clone();
+            let on_project_changed = on_project_changed.clone();
+            let selected_ids = selected_ids.clone();
+            move || {
+                let value = match timeline_state
+                    .borrow()
+                    .property_clipboard
+                    .as_ref()
+                    .and_then(|pc| unwrap(pc))
+                {
+                    Some(v) => v,
+                    None => return,
+                };
+                if selected_ids.is_empty() {
+                    return;
+                }
+
+                let mut children: Vec<Box<dyn crate::undo::EditCommand>> = Vec::new();
+                {
+                    let proj = project.borrow();
+                    for track in proj.tracks.iter() {
+                        for c in track.clips.iter() {
+                            if !selected_ids.contains(&c.id) {
+                                continue;
+                            }
+                            if !applies_to(c) {
+                                continue;
+                            }
+                            let old_v = read(c);
+                            if eq(&old_v, &value) {
+                                continue;
+                            }
+                            children.push(Box::new(crate::undo::ClipMutateCommand::<T> {
+                                clip_id: c.id.clone(),
+                                old_state: old_v,
+                                new_state: value.clone(),
+                                apply,
+                                label: undo_label,
+                            }));
+                        }
+                    }
+                }
+                if children.is_empty() {
+                    return;
+                }
+                let cmd = Box::new(crate::undo::CompoundEditCommand {
+                    description: format!("Paste {} to selected", label),
+                    children,
+                });
+                {
+                    let mut ts = timeline_state.borrow_mut();
+                    let mut proj = project.borrow_mut();
+                    ts.history.execute(cmd, &mut proj);
+                }
+                on_project_changed();
+            }
+        };
+
+        show_property_popover(
+            &widget_for_popup,
+            x,
+            y,
+            &copy_label_full,
+            &paste_label_full,
+            &paste_all_label_full,
+            primary_compatible,
+            clipboard_has_match && primary_compatible,
+            multi_selected,
+            clipboard_has_match,
+            on_copy,
+            on_paste,
+            on_paste_all,
+        );
+    });
+    widget.add_controller(gesture);
+}
+
+/// True for clips that can hold visual (video-path) bundles — every
+/// clip kind except pure audio.
+fn is_visual_clip(clip: &crate::model::clip::Clip) -> bool {
+    !matches!(clip.kind, crate::model::clip::ClipKind::Audio)
+}
+
+/// True for clips that can carry audio — video, audio, compound, multicam.
+fn is_audio_capable_clip(clip: &crate::model::clip::Clip) -> bool {
+    matches!(
+        clip.kind,
+        crate::model::clip::ClipKind::Video
+            | crate::model::clip::ClipKind::Audio
+            | crate::model::clip::ClipKind::Compound
+            | crate::model::clip::ClipKind::Multicam
+    )
+}
+
+/// True for video-only features like chroma key, BG removal, and
+/// frei0r effects.
+fn is_video_path_clip(clip: &crate::model::clip::Clip) -> bool {
+    matches!(
+        clip.kind,
+        crate::model::clip::ClipKind::Video
+            | crate::model::clip::ClipKind::Compound
+            | crate::model::clip::ClipKind::Multicam
+            | crate::model::clip::ClipKind::Audition
+    )
+}
+
+fn vec_paths_eq(a: &Vec<String>, b: &Vec<String>) -> bool {
+    a == b
+}
+fn vec_frei0r_eq(
+    a: &Vec<crate::model::clip::Frei0rEffect>,
+    b: &Vec<crate::model::clip::Frei0rEffect>,
+) -> bool {
+    a == b
+}
+fn vec_ladspa_eq(
+    a: &Vec<crate::model::clip::LadspaEffect>,
+    b: &Vec<crate::model::clip::LadspaEffect>,
+) -> bool {
+    a == b
+}
+fn eq_bands_eq(
+    a: &[crate::model::clip::EqBand; 3],
+    b: &[crate::model::clip::EqBand; 3],
+) -> bool {
+    a == b
+}
+fn chroma_eq(a: &ChromaKeyBundle, b: &ChromaKeyBundle) -> bool {
+    a.enabled == b.enabled
+        && a.color == b.color
+        && (a.tolerance - b.tolerance).abs() < 1e-6
+        && (a.softness - b.softness).abs() < 1e-6
+}
+fn bg_removal_eq(a: &BgRemovalBundle, b: &BgRemovalBundle) -> bool {
+    a.enabled == b.enabled && (a.threshold - b.threshold).abs() < 1e-9
+}
+fn blend_eq(
+    a: &crate::model::clip::BlendMode,
+    b: &crate::model::clip::BlendMode,
+) -> bool {
+    a == b
+}
+fn bool_eq(a: &bool, b: &bool) -> bool {
+    a == b
+}
+
+fn attach_all_bundle_context_menus(
+    view: &InspectorView,
+    project: Rc<RefCell<Project>>,
+    timeline_state: Rc<RefCell<crate::ui::timeline::widget::TimelineState>>,
+    on_project_changed: Rc<dyn Fn()>,
+) {
+    use crate::ui::timeline::widget::{FlipAxis, PropertyClipboard};
+
+    // Flip H toggle — single bool, visual-only.
+    attach_bundle_context_menu::<bool>(
+        view.flip_h_btn.clone().upcast::<gtk::Widget>(),
+        project.clone(),
+        timeline_state.clone(),
+        on_project_changed.clone(),
+        "Flip Horizontal",
+        is_visual_clip,
+        |c| c.flip_h,
+        apply_flip_h,
+        |v| PropertyClipboard::Flip {
+            axis: FlipAxis::Horizontal,
+            value: v,
+        },
+        |pc| match pc {
+            PropertyClipboard::Flip {
+                axis: FlipAxis::Horizontal,
+                value,
+            } => Some(*value),
+            _ => None,
+        },
+        bool_eq,
+        "Paste flip horizontal",
+    );
+
+    attach_bundle_context_menu::<bool>(
+        view.flip_v_btn.clone().upcast::<gtk::Widget>(),
+        project.clone(),
+        timeline_state.clone(),
+        on_project_changed.clone(),
+        "Flip Vertical",
+        is_visual_clip,
+        |c| c.flip_v,
+        apply_flip_v,
+        |v| PropertyClipboard::Flip {
+            axis: FlipAxis::Vertical,
+            value: v,
+        },
+        |pc| match pc {
+            PropertyClipboard::Flip {
+                axis: FlipAxis::Vertical,
+                value,
+            } => Some(*value),
+            _ => None,
+        },
+        bool_eq,
+        "Paste flip vertical",
+    );
+
+    // Blend mode — enum on a DropDown.
+    attach_bundle_context_menu::<crate::model::clip::BlendMode>(
+        view.blend_mode_dropdown.clone().upcast::<gtk::Widget>(),
+        project.clone(),
+        timeline_state.clone(),
+        on_project_changed.clone(),
+        "Blend Mode",
+        is_visual_clip,
+        |c| c.blend_mode.clone(),
+        apply_blend_mode,
+        PropertyClipboard::BlendMode,
+        |pc| match pc {
+            PropertyClipboard::BlendMode(v) => Some(v.clone()),
+            _ => None,
+        },
+        blend_eq,
+        "Paste blend mode",
+    );
+
+    // LUT paths — Vec<String>, visual-only.
+    attach_bundle_context_menu::<Vec<String>>(
+        view.lut_section_box.clone().upcast::<gtk::Widget>(),
+        project.clone(),
+        timeline_state.clone(),
+        on_project_changed.clone(),
+        "LUT Stack",
+        is_visual_clip,
+        |c| c.lut_paths.clone(),
+        apply_lut_paths,
+        PropertyClipboard::LutPaths,
+        |pc| match pc {
+            PropertyClipboard::LutPaths(v) => Some(v.clone()),
+            _ => None,
+        },
+        vec_paths_eq,
+        "Paste LUT stack",
+    );
+
+    // Frei0r chain — Vec<Frei0rEffect>, video-path only.
+    attach_bundle_context_menu::<Vec<crate::model::clip::Frei0rEffect>>(
+        view.frei0r_effects_list.clone().upcast::<gtk::Widget>(),
+        project.clone(),
+        timeline_state.clone(),
+        on_project_changed.clone(),
+        "Effect Chain",
+        is_video_path_clip,
+        |c| c.frei0r_effects.clone(),
+        apply_frei0r_chain,
+        PropertyClipboard::Frei0rChain,
+        |pc| match pc {
+            PropertyClipboard::Frei0rChain(v) => Some(v.clone()),
+            _ => None,
+        },
+        vec_frei0r_eq,
+        "Paste effect chain",
+    );
+
+    // LADSPA chain — Vec<LadspaEffect>, audio-capable clips.
+    attach_bundle_context_menu::<Vec<crate::model::clip::LadspaEffect>>(
+        view.ladspa_effects_list.clone().upcast::<gtk::Widget>(),
+        project.clone(),
+        timeline_state.clone(),
+        on_project_changed.clone(),
+        "Audio Effect Chain",
+        is_audio_capable_clip,
+        |c| c.ladspa_effects.clone(),
+        apply_ladspa_chain,
+        PropertyClipboard::LadspaChain,
+        |pc| match pc {
+            PropertyClipboard::LadspaChain(v) => Some(v.clone()),
+            _ => None,
+        },
+        vec_ladspa_eq,
+        "Paste audio effect chain",
+    );
+
+    // EQ bands — [EqBand; 3], audio-capable clips.
+    attach_bundle_context_menu::<[crate::model::clip::EqBand; 3]>(
+        view.match_eq_curve.clone().upcast::<gtk::Widget>(),
+        project.clone(),
+        timeline_state.clone(),
+        on_project_changed.clone(),
+        "EQ Bands",
+        is_audio_capable_clip,
+        |c| c.eq_bands,
+        apply_eq_bands,
+        PropertyClipboard::EqBands,
+        |pc| match pc {
+            PropertyClipboard::EqBands(v) => Some(*v),
+            _ => None,
+        },
+        eq_bands_eq,
+        "Paste EQ bands",
+    );
+
+    // Chroma key bundle — video-path only.
+    attach_bundle_context_menu::<ChromaKeyBundle>(
+        view.chroma_key_enable.clone().upcast::<gtk::Widget>(),
+        project.clone(),
+        timeline_state.clone(),
+        on_project_changed.clone(),
+        "Chroma Key",
+        is_video_path_clip,
+        |c| ChromaKeyBundle {
+            enabled: c.chroma_key_enabled,
+            color: c.chroma_key_color,
+            tolerance: c.chroma_key_tolerance,
+            softness: c.chroma_key_softness,
+        },
+        apply_chroma_key,
+        |b| PropertyClipboard::ChromaKey {
+            enabled: b.enabled,
+            color: b.color,
+            tolerance: b.tolerance,
+            softness: b.softness,
+        },
+        |pc| match pc {
+            PropertyClipboard::ChromaKey {
+                enabled,
+                color,
+                tolerance,
+                softness,
+            } => Some(ChromaKeyBundle {
+                enabled: *enabled,
+                color: *color,
+                tolerance: *tolerance,
+                softness: *softness,
+            }),
+            _ => None,
+        },
+        chroma_eq,
+        "Paste chroma key",
+    );
+
+    // BG removal bundle — video-path only.
+    attach_bundle_context_menu::<BgRemovalBundle>(
+        view.bg_removal_enable.clone().upcast::<gtk::Widget>(),
+        project.clone(),
+        timeline_state.clone(),
+        on_project_changed.clone(),
+        "BG Removal",
+        is_video_path_clip,
+        |c| BgRemovalBundle {
+            enabled: c.bg_removal_enabled,
+            threshold: c.bg_removal_threshold,
+        },
+        apply_bg_removal,
+        |b| PropertyClipboard::BgRemoval {
+            enabled: b.enabled,
+            threshold: b.threshold,
+        },
+        |pc| match pc {
+            PropertyClipboard::BgRemoval {
+                enabled,
+                threshold,
+            } => Some(BgRemovalBundle {
+                enabled: *enabled,
+                threshold: *threshold,
+            }),
+            _ => None,
+        },
+        bg_removal_eq,
+        "Paste BG removal",
+    );
 }

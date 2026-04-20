@@ -1,4 +1,5 @@
 use crate::media::adjustment_scope::AdjustmentScopeShape;
+use crate::media::color_math;
 use crate::media::cube_lut::CubeLut;
 use crate::media::player::PlayerState;
 use crate::model::clip::{Clip as ModelClip, ClipMask, MaskShape, NumericKeyframe};
@@ -46,15 +47,16 @@ fn child_proxy_get_child(element: &gst::Element, index: u32) -> Option<glib::Obj
 fn eq_set_band(element: &gst::Element, band_idx: u32, freq: f64, gain: f64, q: f64) {
     if let Some(band) = child_proxy_get_child(element, band_idx) {
         let gain_clamped = gain.clamp(-24.0, 12.0);
+        let bw = color_math::eq_bandwidth(freq, q);
         band.set_property("freq", freq);
         band.set_property("gain", gain_clamped);
-        band.set_property("bandwidth", freq / q.max(0.1));
+        band.set_property("bandwidth", bw);
         log::debug!(
             "eq_set_band: band={} freq={:.0} gain={:.1} bw={:.0}",
             band_idx,
             freq,
             gain_clamped,
-            freq / q.max(0.1)
+            bw
         );
     } else {
         log::warn!(
@@ -472,114 +474,11 @@ impl ShortFrameCache {
     }
 }
 
-/// Calibrated videobalance output parameters (brightness, contrast,
-/// saturation, hue) computed from clip colour settings by
-/// `ProgramPlayer::compute_videobalance_params`.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct VBParams {
-    pub(crate) brightness: f64,
-    pub(crate) contrast: f64,
-    pub(crate) saturation: f64,
-    pub(crate) hue: f64,
-}
-
-/// Per-channel RGB gains for frei0r `coloradj_RGB` element.
-/// Values are in frei0r's [0,1] range where 0.5 = neutral (gain 1.0).
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ColorAdjRGBParams {
-    pub(crate) r: f64,
-    pub(crate) g: f64,
-    pub(crate) b: f64,
-}
-
-/// Parameters for frei0r `3-point-color-balance` element.
-/// Maps shadows/midtones/highlights to the black/gray/white reference
-/// points of a piecewise-linear transfer curve.
-#[derive(Clone)]
-pub(crate) struct ThreePointParams {
-    pub(crate) black_r: f64,
-    pub(crate) black_g: f64,
-    pub(crate) black_b: f64,
-    pub(crate) gray_r: f64,
-    pub(crate) gray_g: f64,
-    pub(crate) gray_b: f64,
-    pub(crate) white_r: f64,
-    pub(crate) white_g: f64,
-    pub(crate) white_b: f64,
-}
-
-/// Quadratic (parabola) coefficients for one channel of the frei0r
-/// 3-point-color-balance transfer curve.  The plugin fits y = a·x² + b·x + c
-/// through (black_c, 0), (gray_c, 0.5), (white_c, 1.0) where x is the
-/// normalised input pixel value and y is the output (both 0–1).
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ThreePointParabolaCoeffs {
-    pub(crate) a: f64,
-    pub(crate) b: f64,
-    pub(crate) c: f64,
-}
-
-impl ThreePointParabolaCoeffs {
-    /// Solve the quadratic passing through (x1, 0), (x2, 0.5), (x3, 1.0).
-    pub(crate) fn from_control_points(x1: f64, x2: f64, x3: f64) -> Self {
-        // System: a·x1² + b·x1 + c = 0
-        //         a·x2² + b·x2 + c = 0.5
-        //         a·x3² + b·x3 + c = 1.0
-        let d1 = x2 - x1;
-        let d2 = x3 - x1;
-        let d3 = x3 - x2;
-        // Guard against degenerate/nearly-coincident control points.
-        if d1.abs() < 1e-9 || d2.abs() < 1e-9 || d3.abs() < 1e-9 {
-            // Fall back to identity.
-            return Self {
-                a: 0.0,
-                b: 1.0,
-                c: 0.0,
-            };
-        }
-        let a = (1.0 / d2 - 0.5 / d1) / d3;
-        let b = 0.5 / d1 - a * (x2 + x1);
-        let c = -(a * x1 * x1 + b * x1);
-        Self { a, b, c }
-    }
-}
-
-/// Per-channel parabola coefficients matching the frei0r 3-point plugin.
-#[derive(Debug, Clone)]
-pub(crate) struct ThreePointParabola {
-    pub(crate) r: ThreePointParabolaCoeffs,
-    pub(crate) g: ThreePointParabolaCoeffs,
-    pub(crate) b: ThreePointParabolaCoeffs,
-}
-
-impl ThreePointParabola {
-    pub(crate) fn from_params(p: &ThreePointParams) -> Self {
-        Self {
-            r: ThreePointParabolaCoeffs::from_control_points(p.black_r, p.gray_r, p.white_r),
-            g: ThreePointParabolaCoeffs::from_control_points(p.black_g, p.gray_g, p.white_g),
-            b: ThreePointParabolaCoeffs::from_control_points(p.black_b, p.gray_b, p.white_b),
-        }
-    }
-
-    /// Format as an FFmpeg `lutrgb` filter expression.  `val` is 0–255 integer.
-    /// output = clamp(a·(val/255)² + b·(val/255) + c, 0, 1) · 255
-    ///        = clamp(A·val² + B·val + C, 0, 255)
-    /// where A = a/255, B = b, C = c·255.
-    pub(crate) fn to_lutrgb_filter(&self) -> String {
-        fn chan_expr(tag: &str, c: &ThreePointParabolaCoeffs) -> String {
-            let a = c.a / 255.0;
-            let b = c.b;
-            let cv = c.c * 255.0;
-            format!("{tag}='clip({a:.6}*val*val+{b:.6}*val+{cv:.4},0,255)'")
-        }
-        format!(
-            ",lutrgb={}:{}:{}",
-            chan_expr("r", &self.r),
-            chan_expr("g", &self.g),
-            chan_expr("b", &self.b),
-        )
-    }
-}
+// Re-export colour math types from the shared module so existing
+// `use crate::media::program_player::{VBParams, ...}` paths still work.
+pub(crate) use crate::media::color_math::{
+    ColorAdjRGBParams, ThreePointParabola, ThreePointParabolaCoeffs, ThreePointParams, VBParams,
+};
 
 /// Role of a clip within a transition overlap region.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -793,6 +692,13 @@ pub struct ProgramClip {
     /// Strength of the realtime enhance chain, 0.0..=1.0. Mirrors the
     /// export-side scaling so the slider feels consistent across both.
     pub voice_enhance_strength: f32,
+    /// Render-and-Replace enabled flag. When true AND the cache has a
+    /// sidecar ready for this clip's signature,
+    /// [`ProgramPlayer::resolve_source_path_for_clip`] returns the
+    /// sidecar path and the slot builder neutralizes the baked-scope
+    /// effect fields so they do not double-apply on top of the
+    /// already-baked frames.
+    pub render_replace_enabled: bool,
     pub volume_keyframes: Vec<NumericKeyframe>,
     /// Pre-merged speech intervals (clip-local source-time ns), padded by
     /// `voice_isolation_pad_ns`. Computed from either subtitle word timings
@@ -961,6 +867,18 @@ pub struct ProgramClip {
     pub masks: Vec<crate::model::clip::ClipMask>,
     /// Optional HSL Qualifier (secondary color correction).
     pub hsl_qualifier: Option<crate::model::clip::HslQualifier>,
+    /// True when this clip's track is muted or excluded by solo.
+    /// The clip stays in the pipeline to preserve topology, but
+    /// volume and opacity are forced to zero during preview.
+    pub track_muted: bool,
+    /// Track-level gain as a linear multiplier (from `Track::gain_linear()`).
+    /// Composed with per-clip volume in `volume_at_timeline_ns`.
+    pub track_gain_linear: f64,
+    /// Track-level stereo pan offset (−1.0 to +1.0).
+    /// Added to per-clip pan in `pan_at_timeline_ns`.
+    pub track_pan: f64,
+    /// True when the source media uses an HDR transfer function (PQ/HLG).
+    pub is_hdr: bool,
 }
 
 impl ProgramClip {
@@ -983,6 +901,9 @@ impl ProgramClip {
     }
 
     pub fn opacity_at_timeline_ns(&self, timeline_pos_ns: u64) -> f64 {
+        if self.track_muted {
+            return 0.0;
+        }
         ModelClip::evaluate_keyframed_value(
             &self.opacity_keyframes,
             self.local_timeline_position_ns(timeline_pos_ns),
@@ -1061,49 +982,58 @@ impl ProgramClip {
     }
 
     pub fn volume_at_timeline_ns(&self, timeline_pos_ns: u64) -> f64 {
+        if self.track_muted {
+            return 0.0;
+        }
         let local_ns = self.local_timeline_position_ns(timeline_pos_ns);
         let base_vol =
             ModelClip::evaluate_keyframed_value(&self.volume_keyframes, local_ns, self.volume);
-        if self.voice_isolation > 0.0 && !self.voice_isolation_merged_intervals_ns.is_empty() {
-            let rel_ns = timeline_pos_ns.saturating_sub(self.timeline_start_ns);
-            let clip_local_ns = (rel_ns as f64 * self.speed) as u64;
-            let fade_ns = self.voice_isolation_fade_ns;
-            // Merged intervals are already padded — find the nearest boundary
-            // for cosine fade. Distance 0 means we're inside a speech region.
-            let mut min_dist: u64 = u64::MAX;
-            for &(start, end) in &self.voice_isolation_merged_intervals_ns {
-                if clip_local_ns >= start && clip_local_ns <= end {
-                    min_dist = 0;
-                    break;
+        let clip_vol =
+            if self.voice_isolation > 0.0 && !self.voice_isolation_merged_intervals_ns.is_empty() {
+                let rel_ns = timeline_pos_ns.saturating_sub(self.timeline_start_ns);
+                let clip_local_ns = (rel_ns as f64 * self.speed) as u64;
+                let fade_ns = self.voice_isolation_fade_ns;
+                // Merged intervals are already padded — find the nearest boundary
+                // for cosine fade. Distance 0 means we're inside a speech region.
+                let mut min_dist: u64 = u64::MAX;
+                for &(start, end) in &self.voice_isolation_merged_intervals_ns {
+                    if clip_local_ns >= start && clip_local_ns <= end {
+                        min_dist = 0;
+                        break;
+                    }
+                    let d = if clip_local_ns < start {
+                        start - clip_local_ns
+                    } else {
+                        clip_local_ns - end
+                    };
+                    min_dist = min_dist.min(d);
                 }
-                let d = if clip_local_ns < start {
-                    start - clip_local_ns
+                if min_dist > 0 {
+                    // Duck towards floor instead of silence.
+                    let duck_range = self.voice_isolation * (1.0 - self.voice_isolation_floor);
+                    if fade_ns > 0 && min_dist <= fade_ns {
+                        let t = min_dist as f64 / fade_ns as f64;
+                        let smooth = 0.5 * (1.0 - (t * std::f64::consts::PI).cos());
+                        base_vol * (1.0 - duck_range * smooth)
+                    } else {
+                        base_vol * (1.0 - duck_range)
+                    }
                 } else {
-                    clip_local_ns - end
-                };
-                min_dist = min_dist.min(d);
-            }
-            if min_dist > 0 {
-                // Duck towards floor instead of silence.
-                let duck_range = self.voice_isolation * (1.0 - self.voice_isolation_floor);
-                if fade_ns > 0 && min_dist <= fade_ns {
-                    let t = min_dist as f64 / fade_ns as f64;
-                    let smooth = 0.5 * (1.0 - (t * std::f64::consts::PI).cos());
-                    return base_vol * (1.0 - duck_range * smooth);
+                    base_vol
                 }
-                return base_vol * (1.0 - duck_range);
-            }
-        }
-        base_vol
+            } else {
+                base_vol
+            };
+        clip_vol * self.track_gain_linear
     }
 
     pub fn pan_at_timeline_ns(&self, timeline_pos_ns: u64) -> f64 {
-        ModelClip::evaluate_keyframed_value(
+        let clip_pan = ModelClip::evaluate_keyframed_value(
             &self.pan_keyframes,
             self.local_timeline_position_ns(timeline_pos_ns),
             self.pan,
-        )
-        .clamp(-1.0, 1.0)
+        );
+        (clip_pan + self.track_pan).clamp(-1.0, 1.0)
     }
 
     /// Evaluate keyframed EQ gain (dB) for band `idx` at a given timeline position.
@@ -1507,15 +1437,7 @@ struct PrerenderSegment {
     signature: u64,
 }
 
-#[derive(Clone)]
-struct TransitionPrerenderSpec {
-    outgoing_input: usize,
-    incoming_input: usize,
-    xfade_transition: String,
-    duration_ns: u64,
-    before_cut_ns: u64,
-    after_cut_ns: u64,
-}
+use crate::media::prerender_filters::TransitionPrerenderSpec;
 
 struct PrerenderJobResult {
     key: String,
@@ -1627,28 +1549,7 @@ fn blend_pixel(
     }
 }
 
-#[inline]
-fn coloradj_param_to_gain(param: f64) -> f64 {
-    (param.clamp(0.0, 1.0) * 2.0).clamp(0.0, 2.0)
-}
-
-#[inline]
-fn apply_videobalance_rgb(r: f64, g: f64, b: f64, params: VBParams) -> (f64, f64, f64) {
-    let y = 0.299 * r + 0.587 * g + 0.114 * b;
-    let mut u = 0.492 * (b - y);
-    let mut v = 0.877 * (r - y);
-    let y = ((y - 0.5) * params.contrast + 0.5 + params.brightness).clamp(0.0, 1.0);
-    let hue_rad = params.hue * std::f64::consts::PI;
-    let (sin_h, cos_h) = hue_rad.sin_cos();
-    let rot_u = u * cos_h - v * sin_h;
-    let rot_v = u * sin_h + v * cos_h;
-    u = rot_u * params.saturation;
-    v = rot_v * params.saturation;
-    let r = (y + v / 0.877).clamp(0.0, 1.0);
-    let b = (y + u / 0.492).clamp(0.0, 1.0);
-    let g = ((y - 0.299 * r - 0.114 * b) / 0.587).clamp(0.0, 1.0);
-    (r, g, b)
-}
+use color_math::{apply_videobalance_rgb, coloradj_param_to_gain};
 
 #[inline]
 fn apply_three_point_channel(v: f64, coeffs: &ThreePointParabolaCoeffs) -> f64 {
@@ -1835,6 +1736,17 @@ pub struct ProgramPlayer {
     /// Populated by [`Self::update_frame_interp_paths`] from
     /// `FrameInterpCache::snapshot_paths_by_clip_id`.
     frame_interp_paths: HashMap<String, String>,
+    /// Render-and-Replace sidecar paths, keyed by
+    /// `render_replace_cache::cache_key_for_clip(clip)`. Populated by
+    /// [`Self::update_render_replace_paths`] from
+    /// `RenderReplaceCache::paths`. When a clip's signature is a hit
+    /// here AND `clip.render_replace_enabled` is true,
+    /// `resolve_source_path_for_clip` returns the sidecar file path so
+    /// preview reads the pre-baked frames instead of the live effect
+    /// chain. Slot-building code paths simultaneously neutralize the
+    /// baked-scope effect fields so the same effects are not applied
+    /// twice.
+    render_replace_paths: HashMap<String, String>,
     /// Cache for per-path audio-stream probe results.
     audio_stream_probe_cache: HashMap<String, bool>,
     /// GStreamer `level` element on audiomixer output for metering.
@@ -2011,6 +1923,13 @@ pub struct ProgramPlayer {
     /// Cache of parsed 3D LUT files keyed by file path.
     /// Avoids re-parsing the same `.cube` file on every slot rebuild.
     lut_cache: HashMap<String, Arc<CubeLut>>,
+    /// Cumulative video frames dropped by QoS-reporting elements in the
+    /// preview pipeline, surfaced on the Program Monitor HUD. Reset when
+    /// clips reload (project replacement). QoS stats messages carry
+    /// cumulative counts per element since the last reset, so we keep
+    /// per-source last-seen values and accumulate only the delta.
+    dropped_frames_total: Arc<AtomicU64>,
+    dropped_frames_last_seen: HashMap<String, u64>,
 }
 
 impl ProgramPlayer {
@@ -2653,6 +2572,7 @@ impl ProgramPlayer {
                 bg_removal_paths: HashMap::new(),
                 voice_enhance_paths: HashMap::new(),
                 frame_interp_paths: HashMap::new(),
+                render_replace_paths: HashMap::new(),
                 audio_stream_probe_cache: HashMap::new(),
                 level_element,
                 master_volume_element,
@@ -2727,6 +2647,8 @@ impl ProgramPlayer {
                 last_boundary_rebuild_at: None,
                 last_not_negotiated_recover_at: None,
                 lut_cache: HashMap::new(),
+                dropped_frames_total: Arc::new(AtomicU64::new(0)),
+                dropped_frames_last_seen: HashMap::new(),
             },
             paintable,
             paintable2,
@@ -2737,6 +2659,13 @@ impl ProgramPlayer {
 
     pub fn set_playback_priority(&mut self, playback_priority: PlaybackPriority) {
         self.playback_priority = playback_priority;
+    }
+
+    /// Shared handle to the cumulative dropped-frame counter, suitable for
+    /// polling from UI overlays (e.g. the Program Monitor HUD) without
+    /// borrowing the player itself.
+    pub fn dropped_frames_handle(&self) -> Arc<AtomicU64> {
+        self.dropped_frames_total.clone()
     }
 
     pub fn set_proxy_enabled(&mut self, enabled: bool) {
@@ -3026,6 +2955,190 @@ impl ProgramPlayer {
         }
     }
 
+    /// Hand off a freshly snapshotted render-replace cache key → sidecar
+    /// path map from `RenderReplaceCache::paths`. Triggers the same
+    /// pipeline invalidation the other sidecar caches do so
+    /// newly-baked clips start using the sidecar on the next rebuild.
+    pub fn update_render_replace_paths(&mut self, paths: HashMap<String, String>) {
+        if self.render_replace_paths != paths {
+            self.render_replace_paths = paths;
+            self.prewarmed_boundary_ns = None;
+            self.invalidate_short_frame_cache("render-replace-paths-updated");
+            // Newly-arrived sidecars may now apply to clips already
+            // loaded — re-neutralize so the next pipeline activity
+            // sees zeroed baked-scope fields on those clips.
+            self.neutralize_baked_effects_for_sidecar_clips();
+        }
+    }
+
+    /// Walk `self.clips` + `self.audio_clips` and zero out the baked-scope
+    /// effect fields on any clip whose render-replace sidecar is ready
+    /// for its current signature. The sidecar already contains those
+    /// effects baked in, so re-applying them in the live GStreamer
+    /// chain would double-apply. Called after every clip-set load and
+    /// after `update_render_replace_paths` so incoming sidecars take
+    /// effect without a full pipeline rebuild.
+    fn neutralize_baked_effects_for_sidecar_clips(&mut self) {
+        let paths = self.render_replace_paths.clone();
+        if paths.is_empty() {
+            return;
+        }
+        let neutralize = |c: &mut ProgramClip, paths: &HashMap<String, String>| {
+            if !c.render_replace_enabled {
+                return;
+            }
+            let key = crate::media::render_replace_cache::cache_key_for_program_clip_fields(
+                &c.source_path,
+                c.source_in_ns,
+                c.source_out_ns,
+                c.brightness,
+                c.contrast,
+                c.saturation,
+                c.temperature,
+                c.tint,
+                c.exposure,
+                c.black_point,
+                c.shadows,
+                c.highlights,
+                c.denoise,
+                c.sharpness,
+                c.blur,
+                &c.lut_paths,
+                &c.frei0r_effects,
+                c.vidstab_enabled,
+                c.vidstab_smoothing as f64,
+                &c.ladspa_effects,
+                c.hsl_qualifier.as_ref(),
+                c.chroma_key_enabled,
+                c.chroma_key_color,
+                c.chroma_key_tolerance as f64,
+                c.chroma_key_softness as f64,
+                &c.brightness_keyframes,
+                &c.contrast_keyframes,
+                &c.saturation_keyframes,
+                &c.temperature_keyframes,
+                &c.tint_keyframes,
+            );
+            let sidecar_ready = paths
+                .get(&key)
+                .map(|p| {
+                    std::fs::metadata(p)
+                        .ok()
+                        .filter(|m| m.len() > 0)
+                        .is_some()
+                })
+                .unwrap_or(false);
+            if !sidecar_ready {
+                return;
+            }
+            // Zero all Phase 1b baked-scope fields so the live GStreamer
+            // chain runs as passthrough for them. The sidecar replaces
+            // `source_path` upstream via resolve_source_path_for_clip.
+            c.brightness = 0.0;
+            c.contrast = 1.0;
+            c.saturation = 1.0;
+            c.temperature = 6500.0;
+            c.tint = 0.0;
+            c.exposure = 0.0;
+            c.black_point = 0.0;
+            c.shadows = 0.0;
+            c.highlights = 0.0;
+            c.denoise = 0.0;
+            c.sharpness = 0.0;
+            c.blur = 0.0;
+            c.brightness_keyframes.clear();
+            c.contrast_keyframes.clear();
+            c.saturation_keyframes.clear();
+            c.temperature_keyframes.clear();
+            c.tint_keyframes.clear();
+            c.lut_paths.clear();
+            c.frei0r_effects.clear();
+        };
+        for c in self.clips.iter_mut() {
+            neutralize(c, &paths);
+        }
+        for c in self.audio_clips.iter_mut() {
+            neutralize(c, &paths);
+        }
+    }
+
+    /// Look up the render-replace sidecar path for a compound `Clip`.
+    /// Mirrors [`Self::render_replace_sidecar_path`] but operates on a
+    /// model `Clip` (specifically a compound) because the preview
+    /// flattening walker in `window.rs::clip_to_program_clips` sees
+    /// compound clips as `Clip` — compounds never exist as a single
+    /// `ProgramClip` (they're flattened into their internals). Returns
+    /// `Some(sidecar_path)` only when `render_replace_enabled` is true
+    /// AND the cache has a matching signature AND the file is on disk
+    /// and non-empty.
+    pub fn render_replace_compound_sidecar_path(
+        &self,
+        compound: &crate::model::clip::Clip,
+    ) -> Option<String> {
+        if !compound.render_replace_enabled
+            || compound.kind != crate::model::clip::ClipKind::Compound
+            || self.render_replace_paths.is_empty()
+        {
+            return None;
+        }
+        let key = crate::media::render_replace_cache::cache_key_for_compound(compound);
+        self.render_replace_paths.get(&key).and_then(|p| {
+            std::fs::metadata(p)
+                .ok()
+                .filter(|m| m.len() > 0)
+                .map(|_| p.clone())
+        })
+    }
+
+    /// Look up the render-replace sidecar path for `clip` using the
+    /// live ProgramClip field view. Returns `None` when the cache
+    /// does not have an entry for this clip's current signature, when
+    /// the entry's file has been evicted from disk, or when
+    /// `render_replace_enabled` is false on the clip itself.
+    fn render_replace_sidecar_path(&self, clip: &ProgramClip) -> Option<String> {
+        if !clip.render_replace_enabled || self.render_replace_paths.is_empty() {
+            return None;
+        }
+        let key = crate::media::render_replace_cache::cache_key_for_program_clip_fields(
+            &clip.source_path,
+            clip.source_in_ns,
+            clip.source_out_ns,
+            clip.brightness,
+            clip.contrast,
+            clip.saturation,
+            clip.temperature,
+            clip.tint,
+            clip.exposure,
+            clip.black_point,
+            clip.shadows,
+            clip.highlights,
+            clip.denoise,
+            clip.sharpness,
+            clip.blur,
+            &clip.lut_paths,
+            &clip.frei0r_effects,
+            clip.vidstab_enabled,
+            clip.vidstab_smoothing as f64,
+            &clip.ladspa_effects,
+            clip.hsl_qualifier.as_ref(),
+            clip.chroma_key_enabled,
+            clip.chroma_key_color,
+            clip.chroma_key_tolerance as f64,
+            clip.chroma_key_softness as f64,
+            &clip.brightness_keyframes,
+            &clip.contrast_keyframes,
+            &clip.saturation_keyframes,
+            &clip.temperature_keyframes,
+            &clip.tint_keyframes,
+        );
+        self.render_replace_paths.get(&key).and_then(|p| {
+            std::fs::metadata(p)
+                .ok()
+                .filter(|m| m.len() > 0)
+                .map(|_| p.clone())
+        })
+    }
+
     /// Hand off a freshly snapshotted clip-id → AI frame-interpolation
     /// sidecar map. The Program Monitor will swap in the sidecar at decoder
     /// build time for any clip in the map whose source path actually exists.
@@ -3035,6 +3148,16 @@ impl ProgramPlayer {
             self.prewarmed_boundary_ns = None;
             self.invalidate_short_frame_cache("frame-interp-paths-updated");
         }
+    }
+
+    pub fn project_health_prerender_cache_root(&self) -> &Path {
+        &self.prerender_cache_root
+    }
+
+    pub fn purge_project_health_prerender_cache(&mut self) {
+        self.cleanup_background_prerender_cache(true);
+        self.prewarmed_boundary_ns = None;
+        self.invalidate_short_frame_cache("project-health-prerender-cache-cleared");
     }
 
     pub fn set_project_dimensions(&mut self, width: u32, height: u32) {
@@ -3373,6 +3496,49 @@ impl ProgramPlayer {
         result
     }
 
+    /// Capture the current Program Monitor composited frame as an RGBA
+    /// `ScopeFrame` at project resolution. Used by the A/B compare reference-
+    /// still workflow. Mirrors the pause/reseek/wait/restore flow of
+    /// `export_displayed_frame_ppm`, but returns the frame in memory rather
+    /// than writing to disk.
+    pub fn capture_current_frame_rgba(&mut self) -> Result<ScopeFrame> {
+        let was_playing = self.state == PlayerState::Playing;
+        if was_playing {
+            self.pause();
+        }
+        let start_comp_seq = self.compositor_frame_seq.load(Ordering::Relaxed);
+        let was_scope_enabled = self.scope_enabled.swap(true, Ordering::Relaxed);
+        let was_comp_capture = self
+            .compositor_capture_enabled
+            .swap(true, Ordering::Relaxed);
+        let result = (|| -> Result<ScopeFrame> {
+            self.reseek_all_slots_for_export();
+            let deadline = Instant::now() + Duration::from_millis(1200);
+            while self.compositor_frame_seq.load(Ordering::Relaxed) <= start_comp_seq
+                && Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let comp_now = self.compositor_frame_seq.load(Ordering::Relaxed);
+            if comp_now <= start_comp_seq {
+                return Err(anyhow!("no fresh project-resolution frame available yet"));
+            }
+            self.latest_compositor_frame
+                .lock()
+                .ok()
+                .and_then(|f| f.clone())
+                .ok_or_else(|| anyhow!("no compositor frame available yet"))
+        })();
+        self.scope_enabled
+            .store(was_scope_enabled, Ordering::Relaxed);
+        self.compositor_capture_enabled
+            .store(was_comp_capture, Ordering::Relaxed);
+        if was_playing {
+            self.play();
+        }
+        result
+    }
+
     /// Phase 1 of async export: enable scope capture, trigger re-seek on all
     /// decoder slots + background, and return (start_seq, was_scope_enabled, left_playing).
     /// The caller should release the borrow on ProgramPlayer after this call,
@@ -3625,12 +3791,93 @@ impl ProgramPlayer {
 
     // ── Clip loading ───────────────────────────────────────────────────────
 
+    /// Check whether the new clip set has the same pipeline topology as the
+    /// currently loaded clips.  "Topology" means same clip IDs in the same
+    /// order with the same source paths and timing — i.e. the GStreamer
+    /// pipeline wouldn't need to be rebuilt.
+    pub fn clips_topology_matches(&self, new_clips: &[ProgramClip]) -> bool {
+        // Quick reject: if slots are empty we need a full load to build them.
+        if self.slots.is_empty() && !self.clips.is_empty() {
+            return false;
+        }
+        let mut sorted: Vec<&ProgramClip> = new_clips.iter().collect();
+        sorted.sort_by_key(|c| c.timeline_start_ns);
+        let (new_audio, new_video): (Vec<_>, Vec<_>) =
+            sorted.into_iter().partition(|c| c.is_audio_only);
+
+        if new_video.len() != self.clips.len() || new_audio.len() != self.audio_clips.len() {
+            return false;
+        }
+        let video_ok = new_video.iter().zip(self.clips.iter()).all(|(a, b)| {
+            a.id == b.id
+                && a.source_path == b.source_path
+                && a.source_in_ns == b.source_in_ns
+                && a.source_out_ns == b.source_out_ns
+                && a.timeline_start_ns == b.timeline_start_ns
+                && a.track_index == b.track_index
+        });
+        let audio_ok = new_audio.iter().zip(self.audio_clips.iter()).all(|(a, b)| {
+            a.id == b.id
+                && a.source_path == b.source_path
+                && a.source_in_ns == b.source_in_ns
+                && a.source_out_ns == b.source_out_ns
+                && a.timeline_start_ns == b.timeline_start_ns
+                && a.track_index == b.track_index
+        });
+        video_ok && audio_ok
+    }
+
+    /// Update clip data in-place without tearing down the GStreamer pipeline.
+    /// Use this when `clips_topology_matches` returned true — the pipeline
+    /// topology is unchanged and only "soft" properties (volume, color
+    /// correction, keyframes, etc.) may have been modified.
+    pub fn soft_reload_clips(&mut self, mut clips: Vec<ProgramClip>) {
+        self.invalidate_short_frame_cache("soft-reload-clips");
+        clips.sort_by_key(|c| c.timeline_start_ns);
+        let (audio, video): (Vec<_>, Vec<_>) = clips.into_iter().partition(|c| c.is_audio_only);
+        self.audio_clips = audio;
+        self.clips = video;
+        self.neutralize_baked_effects_for_sidecar_clips();
+        let max_track_index = self
+            .clips
+            .iter()
+            .chain(self.audio_clips.iter())
+            .map(|c| c.track_index)
+            .max();
+        self.audio_track_peak_db = max_track_index
+            .map(|idx| vec![[-60.0, -60.0]; idx + 1])
+            .unwrap_or_default();
+        let vdur = self
+            .clips
+            .iter()
+            .map(|c| c.timeline_end_ns())
+            .max()
+            .unwrap_or(0);
+        let adur = self
+            .audio_clips
+            .iter()
+            .map(|c| c.timeline_end_ns())
+            .max()
+            .unwrap_or(0);
+        self.timeline_dur_ns = vdur.max(adur);
+        // Clear cached frame position so the next seek re-renders with
+        // updated property values (color correction, volume, etc.).
+        self.last_seeked_frame_pos = None;
+        self.rebuild_adjustment_overlays();
+        log::info!(
+            "soft_reload_clips: updated {} video + {} audio clips in-place (pipeline intact)",
+            self.clips.len(),
+            self.audio_clips.len()
+        );
+    }
+
     pub fn load_clips(&mut self, mut clips: Vec<ProgramClip>) {
         self.invalidate_short_frame_cache("project-clips-reloaded");
         clips.sort_by_key(|c| c.timeline_start_ns);
         let (audio, video): (Vec<_>, Vec<_>) = clips.into_iter().partition(|c| c.is_audio_only);
         self.audio_clips = audio;
         self.clips = video;
+        self.neutralize_baked_effects_for_sidecar_clips();
         let max_track_index = self
             .clips
             .iter()
@@ -3681,6 +3928,8 @@ impl ProgramPlayer {
         self.current_prerender_segment_key = None;
         self.teardown_prepreroll_sidecars();
         self.cleanup_background_prerender_cache(!self.should_preserve_prerender_cache_files());
+        self.dropped_frames_total.store(0, Ordering::Relaxed);
+        self.dropped_frames_last_seen.clear();
 
         // Populate adjustment overlays from the loaded clips.
         self.rebuild_adjustment_overlays();
@@ -3981,17 +4230,12 @@ impl ProgramPlayer {
             self.state = PlayerState::Paused;
             false
         } else if self.current_idx.is_some() {
-            if self.slots.len() >= 3 {
-                // For 3+ tracks, start a non-blocking Playing pulse so the GTK
-                // main loop can service gtk4paintablesink's preroll.  The caller
-                // must schedule complete_playing_pulse() via idle/timeout.
-                self.start_playing_pulse();
-                true
-            } else {
-                // ≤2 tracks: synchronous pulse works fine.
-                self.playing_pulse();
-                false
-            }
+            // Always use the non-blocking Playing pulse after a full rebuild.
+            // pipeline.state(timeout) in the synchronous playing_pulse() can
+            // deadlock with gtk4paintablesink even with ≤2 tracks when the
+            // sink hasn't finished its GL preroll on the main thread.
+            self.start_playing_pulse();
+            true
         } else {
             false
         };
@@ -4162,7 +4406,18 @@ impl ProgramPlayer {
         }
         // Seek to 0 while keeping slots alive, then pause.
         self.state = PlayerState::Paused;
-        let _ = self.seek(0);
+        let needs_async = self.seek(0);
+        // seek() may have started a playing pulse (start_playing_pulse) that
+        // left the video pipeline in Playing state.  Force it back to Paused
+        // so video doesn't keep rendering after stop.  Unlock the audio sink
+        // in case start_playing_pulse locked it.
+        if needs_async {
+            let _ = self.pipeline.set_state(gst::State::Paused);
+            if self.audio_sink.is_locked_state() {
+                self.audio_sink.set_locked_state(false);
+                let _ = self.audio_sink.sync_state_with_parent();
+            }
+        }
         self.state = PlayerState::Stopped;
         self.timeline_pos_ns = 0;
         self.base_timeline_ns = 0;
@@ -4260,9 +4515,15 @@ impl ProgramPlayer {
             let _ = self.audio_pipeline.set_state(gst::State::Playing);
         }
         if let Some(ref mp) = self.audio_multi_pipeline {
-            if let Some(base) = self.pipeline.base_time() {
-                mp.set_base_time(base);
-            }
+            // Don't copy the main pipeline's base_time here.  The audio multi
+            // pipeline gets a fresh base_time from GStreamer whenever it
+            // transitions to Playing (base_time = clock_time - start_time).
+            // Overriding with the main pipeline's (potentially stale) base_time
+            // causes a running-time mismatch: FLUSH-seeked audio decoders
+            // produce buffers from running_time 0, but a stale base_time makes
+            // the audio sink compute a running_time that is minutes ahead,
+            // causing it to drop all "late" buffers.  Clock sharing (set in
+            // rebuild_audio_multi_pipeline) is sufficient for long-term sync.
             let _ = mp.set_state(gst::State::Playing);
         }
     }
@@ -6817,6 +7078,23 @@ impl ProgramPlayer {
             return (clip.source_path.clone(), false, key, false);
         }
 
+        // Render-and-Replace sidecar: highest precedence over all other
+        // sidecars because the baked frames already include whatever the
+        // other sidecars would have applied (for Phase 1b's baked scope).
+        // When the bake is ready for this clip's current signature, play
+        // it directly; the slot builder neutralizes the baked-scope
+        // effect fields so they do not double-apply.
+        if clip.render_replace_enabled && !self.render_replace_paths.is_empty() {
+            // Rebuild the signature from the live ProgramClip fields so
+            // the key exactly matches what the cache layer produced. The
+            // ProgramClip view holds the subset of Clip fields the Phase
+            // 1b baked-scope uses; unknown fields (HSL qualifier, masks,
+            // etc. — not yet in baked scope) are excluded on both sides.
+            if let Some(rr_path) = self.render_replace_sidecar_path(clip) {
+                return (rr_path, false, String::new(), false);
+            }
+        }
+
         // AI frame-interpolation sidecar takes priority over the original
         // source so playback shows the same interpolated frames as export.
         // The sidecar has the same wall-clock duration as the source so
@@ -8751,8 +9029,10 @@ impl ProgramPlayer {
     /// pipeline to reach Playing (the GTK main loop has been running since
     /// `start_playing_pulse` returned), then restore Paused and unlock audio.
     pub fn complete_playing_pulse(&self) {
-        // Check if the pipeline reached Playing.
-        let (res, cur, pend) = self.pipeline.state(gst::ClockTime::from_mseconds(10));
+        // Non-blocking check — never call pipeline.state(timeout) from the
+        // main thread because gtk4paintablesink needs the main loop for GL
+        // preroll; any positive timeout can deadlock.
+        let (res, cur, pend) = self.pipeline.state(gst::ClockTime::ZERO);
         log::info!(
             "complete_playing_pulse: state_result={:?} cur={:?} pend={:?} seq={}",
             res,
@@ -9127,16 +9407,10 @@ impl ProgramPlayer {
         // Reset the pipeline's start_time so running_time begins at 0 in the
         // next Playing transition.
         self.pipeline.set_start_time(gst::ClockTime::ZERO);
-        if self.slots.len() >= 3 {
-            // For 3+ tracks, start a non-blocking Playing pulse so the GTK
-            // main loop can service gtk4paintablesink's preroll.
-            self.start_playing_pulse();
-            true
-        } else {
-            // ≤2 tracks: synchronous pulse works fine.
-            self.playing_pulse();
-            false
-        }
+        // Always use the non-blocking Playing pulse to avoid deadlocking
+        // with gtk4paintablesink on the GTK main thread.
+        self.start_playing_pulse();
+        true
     }
 
     fn apply_transform_to_slot(
@@ -9444,7 +9718,11 @@ impl ProgramPlayer {
         let _ = pad;
     }
 
-    fn direct_canvas_origin(axis_size: f64, scaled_axis_size: f64, position: f64) -> i32 {
+    pub(crate) fn direct_canvas_origin(
+        axis_size: f64,
+        scaled_axis_size: f64,
+        position: f64,
+    ) -> i32 {
         // Allow positions past ±1.0 so titles, adjustment scopes, and
         // tracker-followed clips can be moved fully off-canvas; the
         // downstream `videobox` element handles negative offsets by
@@ -9464,7 +9742,7 @@ impl ProgramPlayer {
         (crop_start - pad_start, crop_end - pad_end)
     }
 
-    fn clip_uses_direct_canvas_translation(clip: &ProgramClip) -> bool {
+    pub(crate) fn clip_uses_direct_canvas_translation(clip: &ProgramClip) -> bool {
         clip.is_adjustment || clip.is_title || clip.tracking_binding.is_some()
     }
 
@@ -9599,14 +9877,22 @@ impl ProgramPlayer {
         }
 
         // 3. Wait for NEW decoders to link (discover streams + pad-added).
+        // Use per-decoder waits to avoid blocking on gtk4paintablesink.
         let link_wait_ms = if was_playing {
             self.adaptive_arrival_wait_ms(400)
         } else {
             self.effective_wait_timeout_ms(400)
         };
-        let _ = self
-            .pipeline
-            .state(gst::ClockTime::from_mseconds(link_wait_ms));
+        {
+            let per_slot_ms = (link_wait_ms / self.slots.len().max(1) as u64).max(80);
+            for slot in &self.slots {
+                if added_clip_idxs.contains(&slot.clip_idx) {
+                    let _ = slot
+                        .decoder
+                        .state(gst::ClockTime::from_mseconds(per_slot_ms));
+                }
+            }
+        }
         for slot in &self.slots {
             if !slot.video_linked.load(Ordering::Relaxed) {
                 if added_clip_idxs.contains(&slot.clip_idx) {
@@ -9907,13 +10193,22 @@ impl ProgramPlayer {
             }
 
             // Wait for new decoders to link (stream discovery + pad-added).
+            // Use per-decoder waits to avoid blocking on gtk4paintablesink.
             let link_wait_ms = self.adaptive_arrival_wait_ms(400);
-            let _ = self
-                .pipeline
-                .state(gst::ClockTime::from_mseconds(link_wait_ms));
+            {
+                let per_slot_ms = (link_wait_ms / self.slots.len().max(1) as u64).max(80);
+                for slot in &self.slots {
+                    if added_clip_idxs.contains(&slot.clip_idx) {
+                        let _ = slot
+                            .decoder
+                            .state(gst::ClockTime::from_mseconds(per_slot_ms));
+                    }
+                }
+            }
 
             // Seek new decoders to their source positions.
             let seek_flags = gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE;
+            let mut seek_ok = true;
             for slot in &self.slots {
                 if !added_clip_idxs.contains(&slot.clip_idx) {
                     continue;
@@ -9933,7 +10228,29 @@ impl ProgramPlayer {
                     if let Some(ref pad) = slot.audio_mixer_pad {
                         let _ = pad.send_event(gst::event::Eos::new());
                     }
+                    seek_ok = false;
+                    break;
                 }
+            }
+
+            if !seek_ok {
+                // Don't keep a boundary update that never produced valid decoder
+                // output; fall back to the full rebuild path instead.
+                let mut j = 0usize;
+                while j < self.slots.len() {
+                    if added_clip_idxs.contains(&self.slots[j].clip_idx) {
+                        let slot = self.slots.remove(j);
+                        self.teardown_single_slot(slot);
+                    } else {
+                        j += 1;
+                    }
+                }
+                for slot in self.slots.iter_mut() {
+                    if removed.contains(&slot.clip_idx) {
+                        slot.hidden = false;
+                    }
+                }
+                return false;
             }
 
             // Brief preroll wait for new decoders only.
@@ -9982,12 +10299,41 @@ impl ProgramPlayer {
                 overlays.remove(&slot.clip_idx);
             }
         }
+        // 0. Comprehensive FlushStart: flush every stage in the processing
+        // chain, not just the aggregator pads.  Streaming threads can block
+        // pushing into a full queue or inside effects_bin — a FlushStart
+        // only on the compositor/audiomixer pad doesn't propagate back
+        // upstream, leaving those threads stuck and causing set_state(Null)
+        // to deadlock later.
+        //
+        // Video chain: decoder → effects_bin → slot_queue → compositor_pad
+        // Audio chain: decoder → audio_conv → ... → audio_level → mixer_pad
+        //
+        // Flush effects_bin sink (propagates through effects_bin → queue).
+        if let Some(sink_pad) = slot.effects_bin.static_pad("sink") {
+            let _ = sink_pad.send_event(gst::event::FlushStart::new());
+        }
+        // Flush queue sink directly as belt-and-suspenders.
+        if let Some(ref q) = slot.slot_queue {
+            if let Some(sink_pad) = q.static_pad("sink") {
+                let _ = sink_pad.send_event(gst::event::FlushStart::new());
+            }
+        }
         if let Some(ref pad) = slot.compositor_pad {
             let _ = pad.send_event(gst::event::FlushStart::new());
+        }
+        // Audio chain: flush from the entry point (audioconvert sink).
+        if let Some(ref ac) = slot.audio_conv {
+            if let Some(sink_pad) = ac.static_pad("sink") {
+                let _ = sink_pad.send_event(gst::event::FlushStart::new());
+            }
         }
         if let Some(ref pad) = slot.audio_mixer_pad {
             let _ = pad.send_event(gst::event::FlushStart::new());
         }
+        // Flush the decoder itself so its internal streaming threads stop.
+        let _ = slot.decoder.send_event(gst::event::FlushStart::new());
+
         // 1. Detach branch elements from the pipeline.
         self.pipeline.remove(&slot.decoder).ok();
         self.pipeline
@@ -10018,44 +10364,35 @@ impl ProgramPlayer {
             self.pipeline.remove(lv).ok();
         }
         // 2. Stop any residual streaming work on removed elements.
-        // Use short timeouts (10ms) — after FlushStart, Null transitions are
-        // near-instant.  The previous 100ms timeout per element caused up to
-        // 700ms blocking on the main thread during boundary crossings.
+        // After comprehensive FlushStart, Null transitions should be
+        // near-instant.  Skip blocking state() confirmation waits —
+        // they added up to ~110ms per slot and can deadlock if an
+        // internal streaming thread is still shutting down.
         let _ = slot.decoder.set_state(gst::State::Null);
-        let _ = slot.decoder.state(gst::ClockTime::from_mseconds(10));
         let _ = slot.effects_bin.set_state(gst::State::Null);
-        let _ = slot.effects_bin.state(gst::ClockTime::from_mseconds(10));
         if let Some(ref q) = slot.slot_queue {
             let _ = q.set_state(gst::State::Null);
-            let _ = q.state(gst::ClockTime::from_mseconds(10));
         }
         if let Some(ref ac) = slot.audio_conv {
             let _ = ac.set_state(gst::State::Null);
-            let _ = ac.state(gst::ClockTime::from_mseconds(10));
         }
         if let Some(ref ar) = slot.audio_resample {
             let _ = ar.set_state(gst::State::Null);
-            let _ = ar.state(gst::ClockTime::from_mseconds(10));
         }
         if let Some(ref cf) = slot.audio_capsfilter {
             let _ = cf.set_state(gst::State::Null);
-            let _ = cf.state(gst::ClockTime::from_mseconds(10));
         }
         if let Some(ref eq_elem) = slot.audio_equalizer {
             let _ = eq_elem.set_state(gst::State::Null);
-            let _ = eq_elem.state(gst::ClockTime::from_mseconds(10));
         }
         if let Some(ref meq_elem) = slot.audio_match_equalizer {
             let _ = meq_elem.set_state(gst::State::Null);
-            let _ = meq_elem.state(gst::ClockTime::from_mseconds(10));
         }
         if let Some(ref ap) = slot.audio_panorama {
             let _ = ap.set_state(gst::State::Null);
-            let _ = ap.state(gst::ClockTime::from_mseconds(10));
         }
         if let Some(ref lv) = slot.audio_level {
             let _ = lv.set_state(gst::State::Null);
-            let _ = lv.state(gst::ClockTime::from_mseconds(10));
         }
         // 3. Release aggregator request pads after branch shutdown.
         if let Some(ref pad) = slot.compositor_pad {
@@ -10074,19 +10411,36 @@ impl ProgramPlayer {
     /// 2. Transition removed elements to Null to stop residual streaming work.
     /// 3. Release compositor/audiomixer request pads after branch shutdown.
     fn teardown_slots(&mut self) {
-        // Pre-flush: send FlushStart to all compositor/audiomixer sink pads
-        // to unblock aggregation.  Streaming threads may be blocked in
-        // downstream pushes, holding STREAM_LOCKs that set_state(Null) needs
-        // for pad deactivation.  Flushing releases those locks first.
-        // (We cannot simply reverse the remove/Null order — setting Null while
-        // branches are still attached caused a different hang; see CHANGELOG.)
+        // Pre-flush: send FlushStart to the ENTIRE processing chain of each
+        // slot, not just the aggregator pads.  Streaming threads can block
+        // pushing into a full queue between effects_bin and compositor, or
+        // inside the audio processing chain.  A FlushStart on the compositor
+        // pad alone doesn't propagate back upstream, so those threads stay
+        // stuck — and the later set_state(Null) deadlocks on STREAM_LOCK.
         for slot in &self.slots {
+            // Video chain: effects_bin sink → queue → compositor pad
+            if let Some(sink_pad) = slot.effects_bin.static_pad("sink") {
+                let _ = sink_pad.send_event(gst::event::FlushStart::new());
+            }
+            if let Some(ref q) = slot.slot_queue {
+                if let Some(sink_pad) = q.static_pad("sink") {
+                    let _ = sink_pad.send_event(gst::event::FlushStart::new());
+                }
+            }
             if let Some(ref pad) = slot.compositor_pad {
                 let _ = pad.send_event(gst::event::FlushStart::new());
+            }
+            // Audio chain: audio_conv sink → ... → audiomixer pad
+            if let Some(ref ac) = slot.audio_conv {
+                if let Some(sink_pad) = ac.static_pad("sink") {
+                    let _ = sink_pad.send_event(gst::event::FlushStart::new());
+                }
             }
             if let Some(ref pad) = slot.audio_mixer_pad {
                 let _ = pad.send_event(gst::event::FlushStart::new());
             }
+            // Flush the decoder itself so its internal streaming threads stop.
+            let _ = slot.decoder.send_event(gst::event::FlushStart::new());
         }
 
         let drained: Vec<VideoSlot> = self.slots.drain(..).collect();
@@ -10634,6 +10988,30 @@ impl ProgramPlayer {
                 chain.push(cs);
             }
         }
+        // 0. HDR tone mapping — insert a tone-mapping element before the RGBA
+        //    capsfilter clamps to SDR.  Try GPU-accelerated paths first:
+        //      1. glcolorconvert (GL-based, widely available with GL plugins)
+        //      2. videoconvert with primaries-mode (GStreamer 1.24+ CPU path)
+        //      3. plain videoconvert (best-effort matrix conversion)
+        //    Only added when the source is flagged HDR; otherwise a no-op.
+        if clip.is_hdr {
+            let tm_name = format!("hdr_tonemap_{}", clip.id);
+            let tm = gst::ElementFactory::make("glcolorconvert")
+                .name(&tm_name)
+                .build()
+                .or_else(|_| {
+                    gst::ElementFactory::make("videoconvert")
+                        .name(&tm_name)
+                        .build()
+                });
+            if let Ok(tm) = tm {
+                if tm.has_property("primaries-mode") {
+                    tm.set_property_from_str("primaries-mode", "merge-only");
+                }
+                chain.push(tm);
+            }
+        }
+
         // 1. Convert + downscale to project resolution in a single pass.
         if let Some(ref e) = convertscale {
             chain.push(e.clone());
@@ -11521,7 +11899,17 @@ impl ProgramPlayer {
         if self.pipeline.add(&decoder).is_err() {
             return None;
         }
-        let comp_pad = self.compositor.request_pad_simple("sink_%u")?;
+        let comp_pad = match self.compositor.request_pad_simple("sink_%u") {
+            Some(p) => p,
+            None => {
+                log::warn!(
+                    "build_prerender_video_slot: compositor pad request failed for source={}",
+                    source_path
+                );
+                self.pipeline.remove(&decoder).ok();
+                return None;
+            }
+        };
         comp_pad.set_property("zorder", (zorder_offset + 1) as u32);
         comp_pad.set_property("alpha", 1.0_f64);
 
@@ -11690,6 +12078,7 @@ impl ProgramPlayer {
         let prerender_path_for_cb = source_path.to_string();
         let effects_sink_for_cb = effects_bin.static_pad("sink")?;
         let audio_sink_for_cb = audio_sink.clone();
+        let pipeline_for_prerender_cb: gst::Bin = self.pipeline.clone().upcast();
         decoder.connect_pad_added(move |_dec, pad| {
             let caps = pad.current_caps().or_else(|| Some(pad.query_caps(None)));
             if let Some(caps) = caps {
@@ -11718,6 +12107,7 @@ impl ProgramPlayer {
                             }
                         }
                     } else if name.starts_with("audio/") {
+                        let mut linked = false;
                         if let Some(ref sink) = audio_sink_for_cb {
                             if !sink.is_linked() && pad.link(sink).is_ok() {
                                 log::info!(
@@ -11725,6 +12115,24 @@ impl ProgramPlayer {
                                     prerender_path_for_cb
                                 );
                                 audio_linked_for_cb.store(true, Ordering::Relaxed);
+                                linked = true;
+                            }
+                        }
+                        // Drain unwanted audio to a fakesink so qtdemux's
+                        // streaming loop doesn't get NOT_LINKED and stall
+                        // the video track.
+                        if !linked {
+                            if let Ok(fs) = gst::ElementFactory::make("fakesink")
+                                .property("sync", false)
+                                .property("async", false)
+                                .build()
+                            {
+                                if pipeline_for_prerender_cb.add(&fs).is_ok() {
+                                    let _ = fs.sync_state_with_parent();
+                                    if let Some(fs_sink) = fs.static_pad("sink") {
+                                        let _ = pad.link(&fs_sink);
+                                    }
+                                }
                             }
                         }
                     } else {
@@ -11873,50 +12281,72 @@ impl ProgramPlayer {
         let mut _mask_temp_files: Vec<tempfile::NamedTempFile> = Vec::new();
         for (i, (clip, _, _, _, source_is_proxy)) in inputs.iter().enumerate() {
             let clip_has_mask = clip.masks.iter().any(|mask| mask.enabled);
-            let lut_filter = Self::prerender_build_lut_filter(clip, *source_is_proxy);
-            let anamorphic_filter = Self::prerender_build_anamorphic_filter(clip);
-            let color_filter = Self::prerender_build_color_filter(clip);
-            let temp_tint_filter = Self::prerender_build_temperature_tint_filter(clip, &color_caps);
-            let grading_filter = Self::prerender_build_grading_filter(clip);
-            let denoise_filter = Self::prerender_build_denoise_filter(clip);
-            let sharpen_filter = Self::prerender_build_sharpen_filter(clip);
-            let blur_filter = Self::prerender_build_blur_filter(clip);
-            let frei0r_filter = Self::prerender_build_frei0r_effects_filter(clip);
-            let chroma_key_filter = Self::prerender_build_chroma_key_filter(clip);
-            let title_filter = Self::prerender_build_title_filter(clip, out_h);
-            let minterpolate_filter = Self::prerender_build_minterpolate_filter(clip, fps);
-            let motion_blur_filter = Self::prerender_build_motion_blur_filter(clip, fps);
-            let flip_filter = Self::prerender_build_flip_filter(clip);
-            if use_transition_xfade {
-                let crop_filter = Self::prerender_build_crop_filter(clip, out_w, out_h, false);
-                let scale_position_filter =
-                    Self::prerender_build_scale_position_filter(clip, out_w, out_h, false);
-                let rotation_filter = Self::prerender_build_rotation_filter(clip, false);
-                let transition_tpad_filter = Self::prerender_build_transition_tpad_filter(
-                    transition_spec,
-                    transition_offset_ns,
-                    i,
+            let lut_filter =
+                crate::media::prerender_filters::prerender_build_lut_filter(clip, *source_is_proxy);
+            let anamorphic_filter =
+                crate::media::prerender_filters::prerender_build_anamorphic_filter(clip);
+            let color_filter = crate::media::prerender_filters::prerender_build_color_filter(clip);
+            let temp_tint_filter =
+                crate::media::prerender_filters::prerender_build_temperature_tint_filter(
+                    clip,
+                    &color_caps,
                 );
-                let use_keyframed_overlay =
-                    !clip_has_mask && Self::prerender_clip_has_keyframed_overlay(clip);
+            let grading_filter =
+                crate::media::prerender_filters::prerender_build_grading_filter(clip);
+            let denoise_filter =
+                crate::media::prerender_filters::prerender_build_denoise_filter(clip);
+            let sharpen_filter =
+                crate::media::prerender_filters::prerender_build_sharpen_filter(clip);
+            let blur_filter = crate::media::prerender_filters::prerender_build_blur_filter(clip);
+            let frei0r_filter =
+                crate::media::prerender_filters::prerender_build_frei0r_effects_filter(clip);
+            let chroma_key_filter =
+                crate::media::prerender_filters::prerender_build_chroma_key_filter(clip);
+            let title_filter =
+                crate::media::prerender_filters::prerender_build_title_filter(clip, out_h);
+            let minterpolate_filter =
+                crate::media::prerender_filters::prerender_build_minterpolate_filter(clip, fps);
+            let motion_blur_filter =
+                crate::media::prerender_filters::prerender_build_motion_blur_filter(clip, fps);
+            let flip_filter = crate::media::prerender_filters::prerender_build_flip_filter(clip);
+            if use_transition_xfade {
+                let crop_filter = crate::media::prerender_filters::prerender_build_crop_filter(
+                    clip, out_w, out_h, false,
+                );
+                let scale_position_filter =
+                    crate::media::prerender_filters::prerender_build_scale_position_filter(
+                        clip, out_w, out_h, false,
+                    );
+                let rotation_filter =
+                    crate::media::prerender_filters::prerender_build_rotation_filter(clip, false);
+                let transition_tpad_filter =
+                    crate::media::prerender_filters::prerender_build_transition_tpad_filter(
+                        transition_spec,
+                        transition_offset_ns,
+                        i,
+                    );
+                let use_keyframed_overlay = !clip_has_mask
+                    && crate::media::prerender_filters::prerender_clip_has_keyframed_overlay(clip);
                 if use_keyframed_overlay {
                     let pre_label = format!("pv{i}kf");
                     nodes.push(format!(
                         "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{rotation_filter}{flip_filter}{transition_tpad_filter},fps={}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}[{pre_label}]",
                         fps.max(1),
                     ));
-                    nodes.push(Self::prerender_build_keyframed_overlay_tail(
-                        clip,
-                        &pre_label,
-                        &format!("pv{i}"),
-                        out_w,
-                        out_h,
-                        fps.max(1),
-                        1,
-                        false,
-                        true,
-                        &format!("{minterpolate_filter}{motion_blur_filter}"),
-                    ));
+                    nodes.push(
+                        crate::media::prerender_filters::prerender_build_keyframed_overlay_tail(
+                            clip,
+                            &pre_label,
+                            &format!("pv{i}"),
+                            out_w,
+                            out_h,
+                            fps.max(1),
+                            1,
+                            false,
+                            true,
+                            &format!("{minterpolate_filter}{motion_blur_filter}"),
+                        ),
+                    );
                 } else if clip_has_mask {
                     let pre_label = format!("pv{i}pre");
                     let masked_label = format!("pv{i}masked");
@@ -11924,7 +12354,7 @@ impl ProgramPlayer {
                         "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter}{transition_tpad_filter},fps={}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}{minterpolate_filter}{motion_blur_filter}[{pre_label}]",
                         fps.max(1),
                     ));
-                    let _ = Self::prerender_append_mask_filter(
+                    let _ = crate::media::prerender_filters::prerender_append_mask_filter(
                         &mut nodes,
                         &pre_label,
                         &masked_label,
@@ -11948,37 +12378,44 @@ impl ProgramPlayer {
                     ));
                 }
             } else if i == 0 {
-                let crop_filter = Self::prerender_build_crop_filter(clip, out_w, out_h, false);
+                let crop_filter = crate::media::prerender_filters::prerender_build_crop_filter(
+                    clip, out_w, out_h, false,
+                );
                 let scale_position_filter =
-                    Self::prerender_build_scale_position_filter(clip, out_w, out_h, false);
-                let rotation_filter = Self::prerender_build_rotation_filter(clip, false);
-                let use_keyframed_overlay =
-                    !clip_has_mask && Self::prerender_clip_has_keyframed_overlay(clip);
+                    crate::media::prerender_filters::prerender_build_scale_position_filter(
+                        clip, out_w, out_h, false,
+                    );
+                let rotation_filter =
+                    crate::media::prerender_filters::prerender_build_rotation_filter(clip, false);
+                let use_keyframed_overlay = !clip_has_mask
+                    && crate::media::prerender_filters::prerender_clip_has_keyframed_overlay(clip);
                 if use_keyframed_overlay {
                     let pre_label = format!("pv{i}kf");
                     nodes.push(format!(
                         "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{rotation_filter}{flip_filter},fps={}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}[{pre_label}]",
                         fps.max(1),
                     ));
-                    nodes.push(Self::prerender_build_keyframed_overlay_tail(
-                        clip,
-                        &pre_label,
-                        &format!("pv{i}"),
-                        out_w,
-                        out_h,
-                        fps.max(1),
-                        1,
-                        false,
-                        true,
-                        &format!("{minterpolate_filter}{motion_blur_filter}"),
-                    ));
+                    nodes.push(
+                        crate::media::prerender_filters::prerender_build_keyframed_overlay_tail(
+                            clip,
+                            &pre_label,
+                            &format!("pv{i}"),
+                            out_w,
+                            out_h,
+                            fps.max(1),
+                            1,
+                            false,
+                            true,
+                            &format!("{minterpolate_filter}{motion_blur_filter}"),
+                        ),
+                    );
                 } else if clip_has_mask {
                     let pre_label = format!("pv{i}pre");
                     nodes.push(format!(
                         "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter},fps={}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}{minterpolate_filter}{motion_blur_filter}[{pre_label}]",
                         fps.max(1),
                     ));
-                    let _ = Self::prerender_append_mask_filter(
+                    let _ = crate::media::prerender_filters::prerender_append_mask_filter(
                         &mut nodes,
                         &pre_label,
                         &format!("pv{i}"),
@@ -12002,48 +12439,56 @@ impl ProgramPlayer {
                     ));
                 }
             } else {
-                let crop_filter = Self::prerender_build_crop_filter(clip, out_w, out_h, true);
+                let crop_filter = crate::media::prerender_filters::prerender_build_crop_filter(
+                    clip, out_w, out_h, true,
+                );
                 let scale_position_filter =
-                    Self::prerender_build_scale_position_filter(clip, out_w, out_h, true);
-                let rotation_filter = Self::prerender_build_rotation_filter(clip, true);
-                let use_keyframed_overlay =
-                    !clip_has_mask && Self::prerender_clip_has_keyframed_overlay(clip);
+                    crate::media::prerender_filters::prerender_build_scale_position_filter(
+                        clip, out_w, out_h, true,
+                    );
+                let rotation_filter =
+                    crate::media::prerender_filters::prerender_build_rotation_filter(clip, true);
+                let use_keyframed_overlay = !clip_has_mask
+                    && crate::media::prerender_filters::prerender_clip_has_keyframed_overlay(clip);
                 if use_keyframed_overlay {
                     let pre_label = format!("pv{i}kf");
                     nodes.push(format!(
                         "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{rotation_filter}{flip_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}[{pre_label}]",
                     ));
-                    nodes.push(Self::prerender_build_keyframed_overlay_tail(
-                        clip,
-                        &pre_label,
-                        &format!("pv{i}"),
-                        out_w,
-                        out_h,
-                        fps.max(1),
-                        1,
-                        true,  // overlay tracks: transparent bg
-                        false, // overlay tracks: keep alpha (no format=yuv420p)
-                        &format!("{minterpolate_filter}{motion_blur_filter}"),
-                    ));
+                    nodes.push(
+                        crate::media::prerender_filters::prerender_build_keyframed_overlay_tail(
+                            clip,
+                            &pre_label,
+                            &format!("pv{i}"),
+                            out_w,
+                            out_h,
+                            fps.max(1),
+                            1,
+                            true,  // overlay tracks: transparent bg
+                            false, // overlay tracks: keep alpha (no format=yuv420p)
+                            &format!("{minterpolate_filter}{motion_blur_filter}"),
+                        ),
+                    );
                 } else if clip_has_mask {
                     let pre_label = format!("pv{i}pre");
                     let masked_label = format!("pv{i}masked");
                     nodes.push(format!(
                         "[{i}:v]setpts=PTS-STARTPTS{lut_filter}{anamorphic_filter},format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_position_filter}{rotation_filter}{flip_filter}{color_filter}{temp_tint_filter}{grading_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_filter}{chroma_key_filter}{title_filter}{minterpolate_filter}{motion_blur_filter}[{pre_label}]",
                     ));
-                    let masked_input = if Self::prerender_append_mask_filter(
-                        &mut nodes,
-                        &pre_label,
-                        &masked_label,
-                        clip,
-                        out_w,
-                        out_h,
-                        &mut _mask_temp_files,
-                    ) {
-                        masked_label
-                    } else {
-                        pre_label
-                    };
+                    let masked_input =
+                        if crate::media::prerender_filters::prerender_append_mask_filter(
+                            &mut nodes,
+                            &pre_label,
+                            &masked_label,
+                            clip,
+                            out_w,
+                            out_h,
+                            &mut _mask_temp_files,
+                        ) {
+                            masked_label
+                        } else {
+                            pre_label
+                        };
                     nodes.push(format!(
                         "[{masked_input}]colorchannelmixer=aa={:.4}[pv{i}]",
                         clip.opacity.clamp(0.0, 1.0),
@@ -12088,19 +12533,26 @@ impl ProgramPlayer {
         }
         // Apply adjustment layer effects to the composited output.
         for (adj_idx, adj_clip) in adjustment_clips.iter().enumerate() {
-            let adj_color = Self::prerender_build_color_filter(adj_clip);
+            let adj_color = crate::media::prerender_filters::prerender_build_color_filter(adj_clip);
             let adj_temp_tint =
-                Self::prerender_build_temperature_tint_filter(adj_clip, &color_caps);
-            let adj_grading = Self::prerender_build_grading_filter(adj_clip);
-            let adj_denoise = Self::prerender_build_denoise_filter(adj_clip);
-            let adj_sharpen = Self::prerender_build_sharpen_filter(adj_clip);
+                crate::media::prerender_filters::prerender_build_temperature_tint_filter(
+                    adj_clip,
+                    &color_caps,
+                );
+            let adj_grading =
+                crate::media::prerender_filters::prerender_build_grading_filter(adj_clip);
+            let adj_denoise =
+                crate::media::prerender_filters::prerender_build_denoise_filter(adj_clip);
+            let adj_sharpen =
+                crate::media::prerender_filters::prerender_build_sharpen_filter(adj_clip);
             let adj_blur = if adj_clip.blur > f64::EPSILON {
                 let radius = (adj_clip.blur * 10.0).clamp(0.0, 10.0);
                 format!(",boxblur={radius:.0}:{radius:.0}")
             } else {
                 String::new()
             };
-            let adj_frei0r = Self::prerender_build_frei0r_effects_filter(adj_clip);
+            let adj_frei0r =
+                crate::media::prerender_filters::prerender_build_frei0r_effects_filter(adj_clip);
 
             let mut effects = String::new();
             effects.push_str(&adj_color);
@@ -12125,11 +12577,13 @@ impl ProgramPlayer {
                 continue;
             }
             let mut chain = format!("[{i}:a]asetpts=PTS-STARTPTS,aresample=async=1:first_pts=0");
-            chain.push_str(&Self::prerender_build_transition_adelay_filter(
-                transition_spec,
-                transition_offset_ns,
-                i,
-            ));
+            chain.push_str(
+                &crate::media::prerender_filters::prerender_build_transition_adelay_filter(
+                    transition_spec,
+                    transition_offset_ns,
+                    i,
+                ),
+            );
             let vol = clip.volume.clamp(0.0, MAX_PREVIEW_AUDIO_GAIN);
             if (vol - 1.0).abs() > 0.001 {
                 chain.push_str(&format!(",volume={vol:.4}"));
@@ -12246,855 +12700,6 @@ impl ProgramPlayer {
                 "color=c=black@0.0:size={out_w}x{out_h}:r={fps}:d={duration_s:.6},format=yuva420p,trim=duration={duration_s:.6},setpts=PTS-STARTPTS"
             )
         }
-    }
-
-    fn prerender_build_transition_tpad_filter(
-        transition_spec: Option<&TransitionPrerenderSpec>,
-        transition_offset_ns: u64,
-        input_index: usize,
-    ) -> String {
-        let Some(spec) = transition_spec else {
-            return String::new();
-        };
-        let mut filter = String::new();
-        let offset_s = transition_offset_ns as f64 / 1_000_000_000.0;
-        if input_index == spec.incoming_input && offset_s > 0.0 {
-            // Keep incoming transition source parked on its first frame until the
-            // overlap boundary, so pre-padding does not advance incoming content.
-            filter.push_str(&format!(
-                ",tpad=start_duration={offset_s:.6}:start_mode=clone"
-            ));
-        }
-        if input_index == spec.outgoing_input && spec.after_cut_ns > 0 {
-            // For after-cut overlap, hold the outgoing clip's final frame long
-            // enough for xfade to cover the tail that extends past the cut.
-            filter.push_str(&format!(
-                ",tpad=stop_mode=clone:stop_duration={:.6}",
-                spec.after_cut_ns as f64 / 1_000_000_000.0
-            ));
-        }
-        filter
-    }
-
-    fn prerender_build_transition_adelay_filter(
-        transition_spec: Option<&TransitionPrerenderSpec>,
-        transition_offset_ns: u64,
-        input_index: usize,
-    ) -> String {
-        let Some(spec) = transition_spec else {
-            return String::new();
-        };
-        if input_index != spec.incoming_input {
-            return String::new();
-        }
-        if transition_offset_ns == 0 {
-            return String::new();
-        }
-        // Keep incoming transition audio silent until overlap boundary so
-        // prerender pre-padding does not introduce early incoming-audio bleed.
-        let delay_ms = ((transition_offset_ns + 999_999) / 1_000_000).max(1);
-        format!(",adelay={delay_ms}:all=1")
-    }
-
-    fn prerender_build_color_filter(clip: &ProgramClip) -> String {
-        let has_color_keyframes = !clip.brightness_keyframes.is_empty()
-            || !clip.contrast_keyframes.is_empty()
-            || !clip.saturation_keyframes.is_empty();
-        let has_color = clip.brightness != 0.0 || clip.contrast != 1.0 || clip.saturation != 1.0;
-        let has_exposure = clip.exposure.abs() > f64::EPSILON;
-        if has_color_keyframes {
-            // Brightness is bounded ±1.0 (a normalized value range, not a
-            // transform property — kept as a literal here because it's not
-            // shared with anything else).
-            let brightness_expr = crate::media::export::build_keyframed_property_expression(
-                &clip.brightness_keyframes,
-                clip.brightness,
-                -1.0,
-                1.0,
-                "t",
-            );
-            let contrast_expr = crate::media::export::build_keyframed_property_expression(
-                &clip.contrast_keyframes,
-                clip.contrast,
-                0.0,
-                2.0,
-                "t",
-            );
-            let saturation_expr = crate::media::export::build_keyframed_property_expression(
-                &clip.saturation_keyframes,
-                clip.saturation,
-                0.0,
-                2.0,
-                "t",
-            );
-            let brightness_expr = if has_exposure {
-                let exposure_brightness_delta = clip.exposure.clamp(-1.0, 1.0) * 0.55;
-                format!("({brightness_expr})+{exposure_brightness_delta:.6}")
-            } else {
-                brightness_expr
-            };
-            let contrast_expr = if has_exposure {
-                let exposure_contrast_delta = clip.exposure.clamp(-1.0, 1.0) * 0.12;
-                format!("({contrast_expr})+{exposure_contrast_delta:.6}")
-            } else {
-                contrast_expr
-            };
-            format!(
-                ",eq=brightness='{brightness_expr}':contrast='{contrast_expr}':saturation='{saturation_expr}':eval=frame"
-            )
-        } else if has_color || has_exposure {
-            // Use the same calibrated videobalance mapping as export so that
-            // proxy-mode preview matches the final render.
-            let preview_params = Self::compute_videobalance_params(
-                clip.brightness,
-                clip.contrast,
-                clip.saturation,
-                6500.0, // temperature handled by separate filter
-                0.0,    // tint handled by separate filter
-                0.0,    // shadows handled by grading filter
-                0.0,    // midtones handled by grading filter
-                0.0,    // highlights handled by grading filter
-                clip.exposure,
-                0.0, // black_point handled by grading filter
-                0.0, // warmth/tint handled by grading filter
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                true,
-                true,
-            );
-            let contrast_t = clip.contrast.clamp(0.0, 2.0);
-            let contrast_delta = contrast_t - 1.0;
-            let contrast_brightness_bias =
-                0.26 * contrast_delta - 0.08 * contrast_delta * contrast_delta;
-            format!(
-                ",eq=brightness={:.4}:contrast={:.4}:saturation={:.4}",
-                (preview_params.brightness + contrast_brightness_bias).clamp(-1.0, 1.0),
-                preview_params.contrast,
-                preview_params.saturation
-            )
-        } else {
-            String::new()
-        }
-    }
-
-    fn prerender_build_temperature_tint_filter(
-        clip: &ProgramClip,
-        caps: &crate::media::export::ColorFilterCapabilities,
-    ) -> String {
-        let has_temp = (clip.temperature - 6500.0).abs() > 1.0;
-        let has_tint = clip.tint.abs() > 0.001;
-        let has_temp_keyframes = !clip.temperature_keyframes.is_empty();
-        let has_tint_keyframes = !clip.tint_keyframes.is_empty();
-        // Use frei0r coloradj_RGB when available — same calibrated path as export.
-        if caps.use_coloradj_frei0r
-            && (has_temp || has_tint)
-            && !has_temp_keyframes
-            && !has_tint_keyframes
-        {
-            let cp =
-                crate::media::export::compute_export_coloradj_params(clip.temperature, clip.tint);
-            return format!(
-                ",frei0r=filter_name=coloradj_RGB:filter_params={:.6}|{:.6}|{:.6}|0.333",
-                cp.r, cp.g, cp.b
-            );
-        }
-        // Fallback when frei0r is unavailable.
-        let mut f = String::new();
-        if has_temp_keyframes {
-            let temp_expr = crate::media::export::build_keyframed_property_expression(
-                &clip.temperature_keyframes,
-                clip.temperature,
-                2000.0,
-                10000.0,
-                "t",
-            );
-            f.push_str(&format!(
-                ",colortemperature=temperature='{temp_expr}':eval=frame"
-            ));
-        } else if has_temp {
-            f.push_str(&format!(
-                ",colortemperature=temperature={:.0}",
-                clip.temperature.clamp(2000.0, 10000.0)
-            ));
-        }
-        if has_tint_keyframes {
-            let tint_expr = crate::media::export::build_keyframed_property_expression(
-                &clip.tint_keyframes,
-                clip.tint,
-                -1.0,
-                1.0,
-                "t",
-            );
-            let gm_expr = format!("(-({tint_expr}))*0.5");
-            let rm_expr = format!("({tint_expr})*0.25");
-            let bm_expr = format!("({tint_expr})*0.25");
-            f.push_str(&format!(
-                ",colorbalance=rm='{rm_expr}':gm='{gm_expr}':bm='{bm_expr}':eval=frame"
-            ));
-        } else if has_tint {
-            let t = clip.tint.clamp(-1.0, 1.0);
-            let gm = -t * 0.5;
-            let rm = t * 0.25;
-            let bm = t * 0.25;
-            f.push_str(&format!(",colorbalance=rm={rm:.4}:gm={gm:.4}:bm={bm:.4}"));
-        }
-        f
-    }
-
-    fn prerender_build_denoise_filter(clip: &ProgramClip) -> String {
-        if clip.denoise > 0.0 {
-            let d = clip.denoise.clamp(0.0, 1.0);
-            format!(
-                ",hqdn3d={:.4}:{:.4}:{:.4}:{:.4}",
-                d * 4.0,
-                d * 3.0,
-                d * 6.0,
-                d * 4.5
-            )
-        } else {
-            String::new()
-        }
-    }
-
-    fn prerender_build_sharpen_filter(clip: &ProgramClip) -> String {
-        if clip.sharpness != 0.0 {
-            let la = (clip.sharpness * 3.0).clamp(-2.0, 5.0);
-            format!(",unsharp=lx=5:ly=5:la={la:.4}:cx=5:cy=5:ca={la:.4}")
-        } else {
-            String::new()
-        }
-    }
-
-    fn prerender_build_blur_filter(clip: &ProgramClip) -> String {
-        if clip.blur > f64::EPSILON {
-            let radius = (clip.blur * 10.0).clamp(0.0, 10.0);
-            format!(",boxblur={radius:.0}:{radius:.0}")
-        } else {
-            String::new()
-        }
-    }
-
-    fn prerender_build_anamorphic_filter(clip: &ProgramClip) -> String {
-        if (clip.anamorphic_desqueeze - 1.0).abs() > 0.001 {
-            // Physically desqueeze the source pixels horizontally and reset SAR to 1.
-            format!(",scale=iw*{}:ih,setsar=1", clip.anamorphic_desqueeze)
-        } else {
-            String::new()
-        }
-    }
-
-    fn prerender_build_lut_filter(clip: &ProgramClip, source_is_proxy: bool) -> String {
-        if source_is_proxy {
-            return String::new();
-        }
-        let mut result = String::new();
-        for path in &clip.lut_paths {
-            if !path.is_empty() && Path::new(path).exists() {
-                let escaped = path.replace('\\', "\\\\").replace(':', "\\:");
-                result.push_str(&format!(",lut3d={escaped}"));
-            }
-        }
-        result
-    }
-
-    fn prerender_build_chroma_key_filter(clip: &ProgramClip) -> String {
-        if clip.chroma_key_enabled {
-            let color = format!(
-                "0x{:02X}{:02X}{:02X}",
-                (clip.chroma_key_color >> 16) & 0xFF,
-                (clip.chroma_key_color >> 8) & 0xFF,
-                clip.chroma_key_color & 0xFF
-            );
-            let similarity = (clip.chroma_key_tolerance * 0.5).clamp(0.01, 0.5);
-            let blend = (clip.chroma_key_softness * 0.5).clamp(0.0, 0.5);
-            format!(",colorkey={color}:{similarity:.4}:{blend:.4}")
-        } else {
-            String::new()
-        }
-    }
-
-    fn prerender_build_grading_filter(clip: &ProgramClip) -> String {
-        let has_grading = clip.shadows != 0.0
-            || clip.midtones != 0.0
-            || clip.highlights != 0.0
-            || clip.black_point != 0.0
-            || clip.highlights_warmth != 0.0
-            || clip.highlights_tint != 0.0
-            || clip.midtones_warmth != 0.0
-            || clip.midtones_tint != 0.0
-            || clip.shadows_warmth != 0.0
-            || clip.shadows_tint != 0.0;
-        if has_grading {
-            // Use the same parabola-matched lutrgb as export for proxy parity.
-            let p = Self::compute_export_3point_params(
-                clip.shadows,
-                clip.midtones,
-                clip.highlights,
-                clip.black_point,
-                clip.highlights_warmth,
-                clip.highlights_tint,
-                clip.midtones_warmth,
-                clip.midtones_tint,
-                clip.shadows_warmth,
-                clip.shadows_tint,
-            );
-            let parabola = ThreePointParabola::from_params(&p);
-            parabola.to_lutrgb_filter()
-        } else {
-            String::new()
-        }
-    }
-
-    fn prerender_build_crop_filter(
-        clip: &ProgramClip,
-        out_w: u32,
-        out_h: u32,
-        transparent_pad: bool,
-    ) -> String {
-        let cl = clip.crop_left.max(0) as u32;
-        let cr = clip.crop_right.max(0) as u32;
-        let ct = clip.crop_top.max(0) as u32;
-        let cb = clip.crop_bottom.max(0) as u32;
-        if cl == 0 && cr == 0 && ct == 0 && cb == 0 {
-            return String::new();
-        }
-        let cw = out_w.saturating_sub(cl + cr).max(1);
-        let ch = out_h.saturating_sub(ct + cb).max(1);
-        let pad_color = if transparent_pad {
-            "black@0.0"
-        } else {
-            "black"
-        };
-        format!(",crop={cw}:{ch}:{cl}:{ct},pad={out_w}:{out_h}:{cl}:{ct}:{pad_color}")
-    }
-
-    fn prerender_build_rotation_filter(clip: &ProgramClip, transparent_pad: bool) -> String {
-        // Keyframed rotation: emit per-frame ffmpeg expression mirroring
-        // export's `build_rotation_filter` keyframed branch.
-        if !clip.rotate_keyframes.is_empty() {
-            let fill = if transparent_pad { "black@0" } else { "black" };
-            let angle_expr = crate::media::export::build_keyframed_property_expression(
-                &clip.rotate_keyframes,
-                clip.rotate as f64,
-                -180.0,
-                180.0,
-                "t",
-            );
-            return format!(",rotate='-({angle_expr})*PI/180':fillcolor={fill}");
-        }
-        if clip.rotate == 0 {
-            return String::new();
-        }
-        let fill = if transparent_pad { "black@0" } else { "black" };
-        format!(
-            ",rotate={:.10}:fillcolor={fill}",
-            -(clip.rotate as f64).to_radians()
-        )
-    }
-
-    /// Returns `true` when this prerender clip has any keyframe lane that
-    /// affects per-frame geometry (scale, position, or crop). Rotation is
-    /// handled inline by `prerender_build_rotation_filter`, so it's NOT in
-    /// this gate — it doesn't need the multi-stream overlay path.
-    ///
-    /// When this returns `true`, the prerender format string for this clip
-    /// uses the keyframed multi-stream overlay chain instead of the existing
-    /// static `prerender_build_scale_position_filter`.
-    fn prerender_clip_has_keyframed_overlay(clip: &ProgramClip) -> bool {
-        !clip.scale_keyframes.is_empty()
-            || !clip.position_x_keyframes.is_empty()
-            || !clip.position_y_keyframes.is_empty()
-            || !clip.crop_left_keyframes.is_empty()
-            || !clip.crop_right_keyframes.is_empty()
-            || !clip.crop_top_keyframes.is_empty()
-            || !clip.crop_bottom_keyframes.is_empty()
-            || !clip.opacity_keyframes.is_empty()
-    }
-
-    /// Build the multi-step keyframed transform tail for a prerender clip
-    /// chain. Mirrors the keyframed branch in `src/media/export.rs:543-605`:
-    ///
-    /// 1. `,scale=w='max(1,{out_w}*({scale_expr}))':h=...:eval=frame[fg]`
-    /// 2. `color=c={bg}:size={out_w}x{out_h}:r={fps}:d={dur}[bg]`
-    /// 3. `[bg][fg]overlay=x='...':y='...':eval=frame,geq=...alpha*({opacity_expr})[raw]`
-    /// 4. `[raw]format=yuv420p[output_label]` (or yuva420p for transparent)
-    ///
-    /// Returns a multi-step filter graph fragment with internal chains
-    /// separated by `;`, ending in `[{output_label}]`. The caller pushes
-    /// this as one entry into `nodes` (which is later joined by `;`),
-    /// AFTER pushing a separate node that produces the `[{pre_chain_label}]`
-    /// label containing all the static effects.
-    fn prerender_build_keyframed_overlay_tail(
-        clip: &ProgramClip,
-        pre_chain_label: &str,
-        output_label: &str,
-        out_w: u32,
-        out_h: u32,
-        fps_n: u32,
-        fps_d: u32,
-        transparent_bg: bool,
-        final_format_yuv420p: bool,
-        post_tail: &str,
-    ) -> String {
-        use crate::media::export::build_keyframed_property_expression;
-        use crate::model::transform_bounds::{POSITION_MAX, POSITION_MIN, SCALE_MAX, SCALE_MIN};
-        let scale_expr = build_keyframed_property_expression(
-            &clip.scale_keyframes,
-            clip.scale,
-            SCALE_MIN,
-            SCALE_MAX,
-            "t",
-        );
-        let pos_x_expr = build_keyframed_property_expression(
-            &clip.position_x_keyframes,
-            clip.position_x,
-            POSITION_MIN,
-            POSITION_MAX,
-            "t",
-        );
-        let pos_y_expr = build_keyframed_property_expression(
-            &clip.position_y_keyframes,
-            clip.position_y,
-            POSITION_MIN,
-            POSITION_MAX,
-            "t",
-        );
-        let opacity_expr = build_keyframed_property_expression(
-            &clip.opacity_keyframes,
-            clip.opacity,
-            0.0,
-            1.0,
-            "T",
-        );
-        let clip_duration_s = clip.duration_ns() as f64 / 1_000_000_000.0;
-        let bg_color = if transparent_bg { "black@0" } else { "black" };
-        let (overlay_x_expr, overlay_y_expr) = if Self::clip_uses_direct_canvas_translation(clip) {
-            (
-                format!("(W*(1+({pos_x_expr}))-w)/2"),
-                format!("(H*(1+({pos_y_expr}))-h)/2"),
-            )
-        } else {
-            (
-                format!("(W-w)*(1+({pos_x_expr}))/2"),
-                format!("(H-h)*(1+({pos_y_expr}))/2"),
-            )
-        };
-        // Build the tail filter chain that consumes [raw] and produces
-        // [output_label]. ffmpeg syntax requires at least one filter
-        // between labels, and a leading comma after a `]` is invalid, so
-        // strip any leading comma from `post_tail` and fall back to a
-        // no-op `null` filter when nothing else is being applied.
-        let post_tail_clean = post_tail.strip_prefix(',').unwrap_or(post_tail);
-        let raw_to_output_chain = if final_format_yuv420p {
-            if post_tail_clean.is_empty() {
-                "format=yuv420p".to_string()
-            } else {
-                format!("format=yuv420p,{post_tail_clean}")
-            }
-        } else if post_tail_clean.is_empty() {
-            "null".to_string()
-        } else {
-            post_tail_clean.to_string()
-        };
-        let fg_label = format!("{output_label}fg");
-        let bg_label = format!("{output_label}bg");
-        let raw_label = format!("{output_label}raw");
-        format!(
-            "[{pre_chain_label}]scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[{fg_label}];color=c={bg_color}:size={out_w}x{out_h}:r={fps_n}/{fps_d}:d={clip_duration_s:.6}[{bg_label}];[{bg_label}][{fg_label}]overlay=x='{overlay_x_expr}':y='{overlay_y_expr}':eval=frame,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({opacity_expr})'[{raw_label}];[{raw_label}]{raw_to_output_chain}[{output_label}]"
-        )
-    }
-
-    fn prerender_build_flip_filter(clip: &ProgramClip) -> String {
-        match (clip.flip_h, clip.flip_v) {
-            (false, false) => String::new(),
-            (true, false) => ",hflip".to_string(),
-            (false, true) => ",vflip".to_string(),
-            (true, true) => ",hflip,vflip".to_string(),
-        }
-    }
-
-    fn prerender_build_scale_position_filter(
-        clip: &ProgramClip,
-        out_w: u32,
-        out_h: u32,
-        transparent_pad: bool,
-    ) -> String {
-        let scale = clip.scale.clamp(
-            crate::model::transform_bounds::SCALE_MIN,
-            crate::model::transform_bounds::SCALE_MAX,
-        );
-        if (scale - 1.0).abs() < 0.001
-            && clip.position_x.abs() < 0.001
-            && clip.position_y.abs() < 0.001
-        {
-            return String::new();
-        }
-        let pw = out_w as f64;
-        let ph = out_h as f64;
-        let pos_x = clip.position_x;
-        let pos_y = clip.position_y;
-        let sw = (pw * scale).round() as u32;
-        let sh = (ph * scale).round() as u32;
-
-        if Self::clip_uses_direct_canvas_translation(clip) {
-            let raw_x = Self::direct_canvas_origin(pw, sw as f64, pos_x) as i64;
-            let raw_y = Self::direct_canvas_origin(ph, sh as f64, pos_y) as i64;
-            return Self::prerender_build_scale_translate_filter(
-                sw,
-                sh,
-                raw_x,
-                raw_y,
-                out_w,
-                out_h,
-                transparent_pad,
-            );
-        }
-
-        if scale >= 1.0 {
-            let total_x = pw * (scale - 1.0);
-            let total_y = ph * (scale - 1.0);
-            let cx = (total_x * (1.0 + pos_x) / 2.0).round() as i64;
-            let cy = (total_y * (1.0 + pos_y) / 2.0).round() as i64;
-            format!(",scale={sw}:{sh},crop={out_w}:{out_h}:{cx}:{cy}")
-        } else {
-            let total_x = pw * (1.0 - scale);
-            let total_y = ph * (1.0 - scale);
-            let raw_pad_x = (total_x * (1.0 + pos_x) / 2.0).round() as i64;
-            let raw_pad_y = (total_y * (1.0 + pos_y) / 2.0).round() as i64;
-            Self::prerender_build_scale_translate_filter(
-                sw,
-                sh,
-                raw_pad_x,
-                raw_pad_y,
-                out_w,
-                out_h,
-                transparent_pad,
-            )
-        }
-    }
-
-    fn prerender_build_scale_translate_filter(
-        sw: u32,
-        sh: u32,
-        raw_x: i64,
-        raw_y: i64,
-        out_w: u32,
-        out_h: u32,
-        transparent_pad: bool,
-    ) -> String {
-        let crop_left = if raw_x < 0 { (-raw_x) as u32 } else { 0 };
-        let crop_top = if raw_y < 0 { (-raw_y) as u32 } else { 0 };
-        let crop_right = if raw_x + sw as i64 > out_w as i64 {
-            (raw_x + sw as i64 - out_w as i64) as u32
-        } else {
-            0
-        };
-        let crop_bottom = if raw_y + sh as i64 > out_h as i64 {
-            (raw_y + sh as i64 - out_h as i64) as u32
-        } else {
-            0
-        };
-        let pad_x = raw_x.max(0) as u32;
-        let pad_y = raw_y.max(0) as u32;
-        let pad_color = if transparent_pad { "black@0" } else { "black" };
-        let needs_crop = crop_left > 0 || crop_top > 0 || crop_right > 0 || crop_bottom > 0;
-        if needs_crop {
-            let vis_w = sw.saturating_sub(crop_left + crop_right).max(1);
-            let vis_h = sh.saturating_sub(crop_top + crop_bottom).max(1);
-            format!(
-                ",scale={sw}:{sh},crop={vis_w}:{vis_h}:{crop_left}:{crop_top},pad={out_w}:{out_h}:{pad_x}:{pad_y}:{pad_color}"
-            )
-        } else {
-            format!(",scale={sw}:{sh},pad={out_w}:{out_h}:{pad_x}:{pad_y}:{pad_color}")
-        }
-    }
-
-    /// Build a chain of ffmpeg frei0r filters for user-applied effects.
-    /// Mirrors the export-pipeline `build_frei0r_effects_filter()` logic
-    /// but operates on `ProgramClip` instead of `Clip`.
-    fn prerender_build_frei0r_effects_filter(clip: &ProgramClip) -> String {
-        use crate::media::frei0r_registry::{Frei0rNativeType, Frei0rRegistry};
-
-        if clip.frei0r_effects.is_empty() {
-            return String::new();
-        }
-        let mut result = String::new();
-        let registry = Frei0rRegistry::get_or_discover();
-        for effect in &clip.frei0r_effects {
-            if !effect.enabled {
-                continue;
-            }
-            let plugin = registry.find_by_name(&effect.plugin_name);
-            let params_str = if let Some(info) = plugin {
-                if !info.native_params.is_empty() {
-                    info.native_params
-                        .iter()
-                        .map(|np| match np.native_type {
-                            Frei0rNativeType::Color => {
-                                let r = np
-                                    .gst_properties
-                                    .first()
-                                    .and_then(|k| effect.params.get(k))
-                                    .copied()
-                                    .unwrap_or(0.0);
-                                let g = np
-                                    .gst_properties
-                                    .get(1)
-                                    .and_then(|k| effect.params.get(k))
-                                    .copied()
-                                    .unwrap_or(0.0);
-                                let b = np
-                                    .gst_properties
-                                    .get(2)
-                                    .and_then(|k| effect.params.get(k))
-                                    .copied()
-                                    .unwrap_or(0.0);
-                                format!("{r:.6}/{g:.6}/{b:.6}")
-                            }
-                            Frei0rNativeType::Position => {
-                                let x = np
-                                    .gst_properties
-                                    .first()
-                                    .and_then(|k| effect.params.get(k))
-                                    .copied()
-                                    .unwrap_or(0.0);
-                                let y = np
-                                    .gst_properties
-                                    .get(1)
-                                    .and_then(|k| effect.params.get(k))
-                                    .copied()
-                                    .unwrap_or(0.0);
-                                format!("{x:.6}/{y:.6}")
-                            }
-                            Frei0rNativeType::NativeString => {
-                                let prop =
-                                    np.gst_properties.first().map(|s| s.as_str()).unwrap_or("");
-                                effect.string_params.get(prop).cloned().unwrap_or_default()
-                            }
-                            _ => {
-                                let prop =
-                                    np.gst_properties.first().map(|s| s.as_str()).unwrap_or("");
-                                if np.native_type == Frei0rNativeType::Bool {
-                                    let val = effect.params.get(prop).copied().unwrap_or(0.0);
-                                    if val > 0.5 {
-                                        "y".to_string()
-                                    } else {
-                                        "n".to_string()
-                                    }
-                                } else {
-                                    let val = effect.params.get(prop).copied().unwrap_or(0.0);
-                                    format!("{val:.6}")
-                                }
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join("|")
-                } else {
-                    info.params
-                        .iter()
-                        .map(|p| {
-                            if p.param_type
-                                == crate::media::frei0r_registry::Frei0rParamType::String
-                            {
-                                effect
-                                    .string_params
-                                    .get(&p.name)
-                                    .cloned()
-                                    .or_else(|| p.default_string.clone())
-                                    .unwrap_or_default()
-                            } else {
-                                let val = effect
-                                    .params
-                                    .get(&p.name)
-                                    .copied()
-                                    .unwrap_or(p.default_value);
-                                format!("{val:.6}")
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join("|")
-                }
-            } else {
-                effect
-                    .params
-                    .values()
-                    .map(|v| format!("{v:.6}"))
-                    .collect::<Vec<_>>()
-                    .join("|")
-            };
-            let ffmpeg_name = plugin
-                .map(|p| p.ffmpeg_name.as_str())
-                .unwrap_or(&effect.plugin_name);
-            if params_str.is_empty() {
-                result.push_str(&format!(",frei0r=filter_name={ffmpeg_name}"));
-            } else {
-                result.push_str(&format!(
-                    ",frei0r=filter_name={ffmpeg_name}:filter_params={params_str}"
-                ));
-            }
-        }
-        result
-    }
-
-    /// Build an ffmpeg `drawtext` filter for a title clip's text overlay.
-    /// Mirrors the export-pipeline `build_title_filter()` logic but operates
-    /// on `ProgramClip` instead of `Clip`.
-    fn prerender_build_title_filter(clip: &ProgramClip, out_h: u32) -> String {
-        if clip.title_text.trim().is_empty() {
-            return String::new();
-        }
-        use crate::model::clip::TitleAnimation;
-        const REF_H: f64 = 1080.0;
-        let text =
-            crate::media::title_font::escape_drawtext_value(&clip.title_text).replace('\n', "\\n");
-        let font_size = crate::media::title_font::parse_title_font(&clip.title_font).size_points();
-        let font_option = crate::media::title_font::build_drawtext_font_option(&clip.title_font);
-        let rel_x = clip.title_x.clamp(0.0, 1.0);
-        let rel_y = clip.title_y.clamp(0.0, 1.0);
-        let scale_factor = out_h as f64 / REF_H;
-        let scaled_size = font_size * (4.0 / 3.0) * scale_factor;
-        let (r, g, b, a) = crate::ui::colors::rgba_u32_to_u8(clip.title_color);
-        let alpha = (a as f64 / 255.0).clamp(0.0, 1.0);
-
-        let mut style = String::new();
-        if clip.title_outline_width > 0.0 {
-            let bw = (clip.title_outline_width * scale_factor).max(0.5);
-            let (or_, og, ob, oa) = crate::ui::colors::rgba_u32_to_u8(clip.title_outline_color);
-            let o_alpha = (oa as f64 / 255.0).clamp(0.0, 1.0);
-            style.push_str(&format!(
-                ":borderw={bw:.1}:bordercolor={or_:02x}{og:02x}{ob:02x}@{o_alpha:.4}"
-            ));
-        }
-        if clip.title_shadow {
-            let sx = (clip.title_shadow_offset_x * scale_factor).round() as i32;
-            let sy = (clip.title_shadow_offset_y * scale_factor).round() as i32;
-            let (sr, sg, sb, sa) = crate::ui::colors::rgba_u32_to_u8(clip.title_shadow_color);
-            let s_alpha = (sa as f64 / 255.0).clamp(0.0, 1.0);
-            style.push_str(&format!(
-                ":shadowx={sx}:shadowy={sy}:shadowcolor={sr:02x}{sg:02x}{sb:02x}@{s_alpha:.4}"
-            ));
-        }
-        if clip.title_bg_box {
-            let pad = (clip.title_bg_box_padding * scale_factor).round() as i32;
-            let (br, bgg, bb, ba) = crate::ui::colors::rgba_u32_to_u8(clip.title_bg_box_color);
-            let b_alpha = (ba as f64 / 255.0).clamp(0.0, 1.0);
-            style.push_str(&format!(
-                ":box=1:boxcolor={br:02x}{bgg:02x}{bb:02x}@{b_alpha:.4}:boxborderw={pad}"
-            ));
-        }
-
-        let dur_s = (clip.title_animation_duration_ns as f64 / 1_000_000_000.0).max(1e-6);
-        let pos_x = format!("({rel_x:.6})*w-text_w/2");
-        let pos_y = format!("({rel_y:.6})*h-text_h/2");
-        let base_color = format!("{r:02x}{g:02x}{b:02x}@{alpha:.4}");
-
-        let mut filter = String::new();
-        match clip.title_animation {
-            TitleAnimation::None | TitleAnimation::Pop => {
-                filter.push_str(&format!(
-                    ",drawtext={font_option}:text='{text}':fontsize={scaled_size:.2}:fontcolor={base_color}:x='{pos_x}':y='{pos_y}'{style}"
-                ));
-            }
-            TitleAnimation::Fade => {
-                let alpha_expr = format!("min(1,max(0,t/{dur_s:.4}))*{alpha:.4}");
-                filter.push_str(&format!(
-                    ",drawtext={font_option}:text='{text}':fontsize={scaled_size:.2}:fontcolor={r:02x}{g:02x}{b:02x}:x='{pos_x}':y='{pos_y}':alpha='{alpha_expr}'{style}"
-                ));
-            }
-            TitleAnimation::Typewriter => {
-                let char_count = clip.title_text.chars().count();
-                if char_count == 0 {
-                    filter.push_str(&format!(
-                        ",drawtext={font_option}:text='{text}':fontsize={scaled_size:.2}:fontcolor={base_color}:x='{pos_x}':y='{pos_y}'{style}"
-                    ));
-                } else {
-                    let step = dur_s / char_count as f64;
-                    for i in 0..char_count {
-                        let prefix: String = clip.title_text.chars().take(i + 1).collect();
-                        let prefix_esc = crate::media::title_font::escape_drawtext_value(&prefix)
-                            .replace('\n', "\\n");
-                        let t0 = i as f64 * step;
-                        let enable = if i + 1 == char_count {
-                            format!("gte(t\\,{t0:.4})")
-                        } else {
-                            let t1 = (i + 1) as f64 * step;
-                            format!("between(t\\,{t0:.4}\\,{t1:.4})")
-                        };
-                        filter.push_str(&format!(
-                            ",drawtext={font_option}:text='{prefix_esc}':fontsize={scaled_size:.2}:fontcolor={base_color}:x='{pos_x}':y='{pos_y}':enable='{enable}'{style}"
-                        ));
-                    }
-                }
-            }
-        }
-        filter
-    }
-
-    /// Background-prerender variant of `build_motion_blur_filter` (export.rs).
-    /// Uses the same math: `tmix=frames=2` at 360°, otherwise oversample by
-    /// 4× via `minterpolate`, average the appropriate sub-frame count, and
-    /// decimate back to project rate. Returns empty when motion blur is
-    /// disabled or the clip has no per-frame motion (animated transform or
-    /// speed > 1).
-    fn prerender_build_motion_blur_filter(clip: &ProgramClip, fps: u32) -> String {
-        if !clip.motion_blur_enabled || clip.motion_blur_shutter_angle <= 0.5 {
-            return String::new();
-        }
-        let has_animated_transform = !clip.scale_keyframes.is_empty()
-            || !clip.position_x_keyframes.is_empty()
-            || !clip.position_y_keyframes.is_empty()
-            || !clip.rotate_keyframes.is_empty()
-            || !clip.crop_left_keyframes.is_empty()
-            || !clip.crop_right_keyframes.is_empty()
-            || !clip.crop_top_keyframes.is_empty()
-            || !clip.crop_bottom_keyframes.is_empty();
-        let has_fast_speed = clip.speed > 1.001;
-        if !has_animated_transform && !has_fast_speed {
-            return String::new();
-        }
-        let shutter = clip.motion_blur_shutter_angle.clamp(0.0, 720.0);
-        if (shutter - 360.0).abs() < 0.5 {
-            return ",tmix=frames=2:weights='1 1'".to_string();
-        }
-        const K: u32 = 4;
-        let raw_frames = (K as f64 * shutter / 360.0).round() as i32;
-        let frames = raw_frames.max(1).min((K * 2) as i32) as u32;
-        let weights = std::iter::repeat("1")
-            .take(frames as usize)
-            .collect::<Vec<_>>()
-            .join(" ");
-        let over_fps = fps.saturating_mul(K).max(1);
-        format!(
-            ",minterpolate=fps={over_fps}:mi_mode=blend,tmix=frames={frames}:weights='{weights}',fps={fps}"
-        )
-    }
-
-    fn prerender_build_minterpolate_filter(clip: &ProgramClip, fps: u32) -> String {
-        use crate::model::clip::SlowMotionInterp;
-        if clip.slow_motion_interp == SlowMotionInterp::Off {
-            return String::new();
-        }
-        // Only apply for slow-motion clips
-        let is_slow = if !clip.speed_keyframes.is_empty() {
-            clip.speed_keyframes.iter().any(|kf| kf.value < 1.0)
-        } else {
-            clip.speed < 1.0 - 0.001
-        };
-        if !is_slow {
-            return String::new();
-        }
-        let mi_mode = match clip.slow_motion_interp {
-            SlowMotionInterp::Blend => "blend",
-            SlowMotionInterp::OpticalFlow => "mci",
-            // AI mode is realized via a precomputed sidecar consumed at the
-            // input level — do not also apply ffmpeg minterpolate here.
-            SlowMotionInterp::Ai => return String::new(),
-            SlowMotionInterp::Off => unreachable!(),
-        };
-        format!(",minterpolate=fps={fps}:mi_mode={mi_mode}")
     }
 
     fn build_slot_for_clip(
@@ -13275,6 +12880,11 @@ impl ProgramPlayer {
             let comp_pad = match self.compositor.request_pad_simple("sink_%u") {
                 Some(p) => p,
                 None => {
+                    log::warn!(
+                        "build_slot_for_clip: compositor pad request failed for title clip {} (idx={})",
+                        clip.id,
+                        clip_idx
+                    );
                     self.pipeline.remove(&src).ok();
                     self.pipeline.remove(&capsfilter).ok();
                     self.pipeline
@@ -13491,6 +13101,11 @@ impl ProgramPlayer {
         let comp_pad = match self.compositor.request_pad_simple("sink_%u") {
             Some(p) => p,
             None => {
+                log::warn!(
+                    "build_slot_for_clip: compositor pad request failed for clip {} (idx={})",
+                    clip.id,
+                    clip_idx
+                );
                 self.pipeline.remove(&decoder).ok();
                 self.pipeline
                     .remove(effects_bin.upcast_ref::<gst::Element>())
@@ -13802,6 +13417,7 @@ impl ProgramPlayer {
         let video_linked_for_cb = video_linked.clone();
         let audio_linked_for_cb = audio_linked.clone();
         let clip_id_for_cb = clip.id.clone();
+        let pipeline_for_cb: gst::Bin = self.pipeline.clone().upcast();
         decoder.connect_pad_added(move |_dec, pad| {
             let caps = pad.current_caps().or_else(|| Some(pad.query_caps(None)));
             if let Some(caps) = caps {
@@ -13832,9 +13448,28 @@ impl ProgramPlayer {
                             }
                         }
                     } else if name.starts_with("audio/") {
+                        let mut linked = false;
                         if let Some(ref sink) = audio_sink {
                             if pad.link(sink).is_ok() {
                                 audio_linked_for_cb.store(true, Ordering::Relaxed);
+                                linked = true;
+                            }
+                        }
+                        // Drain unwanted audio to a fakesink so qtdemux's
+                        // streaming loop doesn't get NOT_LINKED and stall the
+                        // video track.
+                        if !linked {
+                            if let Ok(fs) = gst::ElementFactory::make("fakesink")
+                                .property("sync", false)
+                                .property("async", false)
+                                .build()
+                            {
+                                if pipeline_for_cb.add(&fs).is_ok() {
+                                    let _ = fs.sync_state_with_parent();
+                                    if let Some(fs_sink) = fs.static_pad("sink") {
+                                        let _ = pad.link(&fs_sink);
+                                    }
+                                }
                             }
                         }
                     }
@@ -14022,33 +13657,13 @@ impl ProgramPlayer {
 
     // ── Continuing decoders (fast-path boundary crossing) ────────────────
 
-    // ── Calibrated videobalance mapping ──────────────────────────────────
+    // ── Colour math delegators ──────────────────────────────────────────
     //
-    // GStreamer `videobalance` operates in RGB/HSV with 4 knobs (brightness,
-    // contrast, saturation, hue) while the FFmpeg export pipeline uses
-    // dedicated per-domain filters (eq, colortemperature, colorbalance,
-    // hqdn3d, unsharp).  These polynomial coefficients were derived from
-    // empirical calibration (tools/calibrate_color.py) by sweeping each
-    // slider across its range, generating FFmpeg reference frames, and using
-    // L-BFGS-B optimisation to find the videobalance params that minimise
-    // per-pixel RMSE against the FFmpeg output.
+    // Pure colour computation now lives in `crate::media::color_math`.
+    // These thin wrappers keep `Self::compute_*` / `ProgramPlayer::compute_*`
+    // call sites working without touching every caller.
 
-    /// Evaluate degree-4 polynomial: c₀ + c₁t + c₂t² + c₃t³ + c₄t⁴
-    #[inline]
-    fn poly4(t: f64, c: &[f64; 5]) -> f64 {
-        c[0] + t * (c[1] + t * (c[2] + t * (c[3] + t * c[4])))
-    }
-
-    /// Compute calibrated videobalance parameters that best approximate the
-    /// FFmpeg export filter chain.  Each slider contributes a *delta* from
-    /// neutral (0, 1, 1, 0) based on fitted polynomials.  When multiple
-    /// sliders are active, deltas are summed (linear superposition — an
-    /// approximation that works well for moderate adjustments).
-    ///
-    /// When `has_coloradj` is true, temperature/tint are handled by the
-    /// frei0r `coloradj_RGB` element and excluded from videobalance.
-    /// When `has_3point` is true, shadows/midtones/highlights are handled
-    /// by the frei0r `3-point-color-balance` element.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn compute_videobalance_params(
         brightness: f64,
         contrast: f64,
@@ -14069,206 +13684,37 @@ impl ProgramPlayer {
         has_coloradj: bool,
         has_3point: bool,
     ) -> VBParams {
-        let mut b = 0.0_f64;
-        let mut c = 1.0_f64;
-        let mut s = 1.0_f64;
-        let mut h = 0.0_f64;
-
-        // ── Brightness (default 0.0) ────────────────────────────────────
-        // Calibration: FFmpeg eq brightness (YUV additive) maps to ~1.15×
-        // GStreamer videobalance brightness (RGB additive) with a slight
-        // contrast compensation.
-        {
-            const B_B: [f64; 5] = [0.005156, 1.260891, 0.002010, -0.217226, -0.009772];
-            const B_C: [f64; 5] = [1.025037, 0.023633, -0.205914, -0.132415, 0.120400];
-            // B_S omitted: high residual (0.48), noisy at extremes
-            let t = brightness;
-            b += Self::poly4(t, &B_B) - B_B[0]; // delta from neutral (poly(0) = c[0])
-            c += Self::poly4(t, &B_C) - B_C[0];
-        }
-
-        // ── Exposure (default 0.0, range −1..1) ─────────────────────────
-        // Approximated as a brightness lift with contrast compensation.
-        // Exposure is fundamentally multiplicative (gamma-like) but
-        // videobalance only has additive brightness; this linear
-        // approximation matches well for |exposure| ≤ 0.5 and degrades
-        // gracefully at extremes.  FFmpeg export uses `eq=gamma=` for
-        // a more accurate curve.
-        {
-            let e = exposure.clamp(-1.0, 1.0);
-            b += e * 0.55;
-            c += e * 0.12;
-        }
-
-        // ── Contrast (default 1.0) ──────────────────────────────────────
-        // Calibrated contrast + saturation compensation (YUV↔RGB).
-        // Brightness cross-effect removed: RMSE-optimal but perceptually
-        // jarring (Δb ≈ +0.5 at contrast=0).
-        {
-            const C_C: [f64; 5] = [0.294574, 0.666291, 0.242201, -0.290659, 0.071964];
-            const C_S: [f64; 5] = [2.423564, -3.689165, 3.643393, -1.624246, 0.272677];
-            let t = contrast;
-            let t0 = 1.0;
-            c += Self::poly4(t, &C_C) - Self::poly4(t0, &C_C);
-            s += Self::poly4(t, &C_S) - Self::poly4(t0, &C_S);
-        }
-
-        // ── Saturation (default 1.0) ────────────────────────────────────
-        // Primary saturation polynomial only.  Brightness and contrast
-        // cross-effects removed: optimizer found them RMSE-helpful but
-        // users expect the saturation slider to change color, not luminance.
-        {
-            const S_S: [f64; 5] = [0.364002, 1.024258, -0.843067, 0.625649, -0.135496];
-            let t = saturation;
-            let t0 = 1.0;
-            s += Self::poly4(t, &S_S) - Self::poly4(t0, &S_S);
-        }
-
-        // ── Temperature (default 6500K, normalised to [-1, 0.78]) ───────
-        // When frei0r coloradj_RGB is available, temperature is handled
-        // there via per-channel RGB gains.  Otherwise, fall back to a
-        // hue-rotation approximation.
-        if !has_coloradj {
-            let t_norm = (temperature - 6500.0) / 6500.0;
-            h += (t_norm * -0.15).clamp(-0.25, 0.25);
-        }
-
-        // ── Tint (default 0.0) ──────────────────────────────────────────
-        // When frei0r coloradj_RGB is available, tint is handled there.
-        // Otherwise, keep the perceptual hue shift.
-        if !has_coloradj {
-            h += (tint * 0.08).clamp(-0.15, 0.15);
-        }
-
-        // ── Shadows (default 0.0) ───────────────────────────────────────
-        // When frei0r 3-point-color-balance is available, shadows/midtones/
-        // highlights are handled there with proper per-luminance-range control.
-        // Otherwise, fall back to polynomial approximation via videobalance.
-        if !has_3point {
-            // Calibration: 74-94% RMSE improvement over current coefficients.
-            // FFmpeg colorbalance shadows apply per-luminance-range shifts that
-            // are poorly approximated by global brightness alone; adding
-            // contrast and saturation compensation dramatically improves match.
-            const SH_B: [f64; 5] = [-0.004654, 0.217915, 0.503318, 0.095557, -0.208157];
-            const SH_C: [f64; 5] = [0.967806, -0.569223, -0.773125, 0.208067, 0.503863];
-            let t = shadows;
-            b += Self::poly4(t, &SH_B) - SH_B[0];
-            c += Self::poly4(t, &SH_C) - SH_C[0];
-        }
-
-        // ── Midtones (default 0.0) ──────────────────────────────────────
-        if !has_3point {
-            // Calibration: moderate improvement; brightness weight close to
-            // original (0.13 vs 0.20) but contrast compensation is significant.
-            const M_B: [f64; 5] = [-0.009292, 0.130927, -0.050035, -0.039406, 0.044492];
-            const M_C: [f64; 5] = [1.049000, -0.302024, 0.407251, 0.214717, -0.319686];
-            let t = midtones;
-            b += Self::poly4(t, &M_B) - M_B[0];
-            c += Self::poly4(t, &M_C) - M_C[0];
-        }
-
-        // ── Highlights (default 0.0) ────────────────────────────────────
-        if !has_3point {
-            // Calibration: 78-88% RMSE improvement.  Current coefficients
-            // (b×0.15, c×0.15) dramatically undershoot; optimal mapping uses
-            // ~3× stronger brightness and aggressive contrast boost.
-            const H_B: [f64; 5] = [-0.002545, 0.500927, -0.437295, -0.060255, 0.152945];
-            const H_C: [f64; 5] = [0.918940, 1.420073, 1.848961, -0.254895, -0.846390];
-            const H_S: [f64; 5] = [1.031708, -1.145010, 0.783173, 0.699344, -0.956279];
-            let t = highlights;
-            b += Self::poly4(t, &H_B) - H_B[0];
-            c += Self::poly4(t, &H_C) - H_C[0];
-            s += Self::poly4(t, &H_S) - H_S[0];
-        }
-
-        if !has_3point {
-            // Fallback approximation when frei0r 3-point-color-balance is
-            // unavailable.  videobalance cannot target luminance zones, so we
-            // map these controls to a small global lift/hue response.
-            let bp = black_point.clamp(-1.0, 1.0);
-            b += bp * 0.18;
-            c += bp * 0.10;
-
-            let warmth_avg =
-                (highlights_warmth + midtones_warmth + shadows_warmth).clamp(-3.0, 3.0) / 3.0;
-            let tint_avg = (highlights_tint + midtones_tint + shadows_tint).clamp(-3.0, 3.0) / 3.0;
-            h += (tint_avg * 0.08 - warmth_avg * 0.06).clamp(-0.20, 0.20);
-        }
-
-        VBParams {
-            brightness: b.clamp(-1.0, 1.0),
-            contrast: c.clamp(0.0, 2.0),
-            saturation: s.clamp(0.0, 2.0),
-            hue: h.clamp(-1.0, 1.0),
-        }
+        color_math::compute_videobalance_params(
+            brightness,
+            contrast,
+            saturation,
+            temperature,
+            tint,
+            shadows,
+            midtones,
+            highlights,
+            exposure,
+            black_point,
+            highlights_warmth,
+            highlights_tint,
+            midtones_warmth,
+            midtones_tint,
+            shadows_warmth,
+            shadows_tint,
+            has_coloradj,
+            has_3point,
+        )
     }
 
-    /// Compute frei0r `coloradj_RGB` parameters for temperature and tint.
-    ///
-    /// Uses the Tanner Helland algorithm (same as FFmpeg's `colortemperature`
-    /// filter) to convert a Kelvin value into per-channel RGB gains, then
-    /// maps those gains into frei0r's [0,1] parameter space where 0.5 is
-    /// neutral (gain 1.0).
-    ///
-    /// Tint is applied as a green-channel shift with complementary R/B
-    /// boost, matching FFmpeg's `colorbalance` midtones approach.
     pub(crate) fn compute_coloradj_params(temperature: f64, tint: f64) -> ColorAdjRGBParams {
-        // Calibrated polynomial mapping: frei0r coloradj_RGB params that best
-        // approximate the FFmpeg colortemperature + colorbalance tint export.
-        // Coefficients derived from empirical calibration (tools/calibrate_frei0r.py).
-        //
-        // Temperature is normalised: t = (K − 6500) / 4500.
-        // Tint is passed directly (range −1..1).
-        // Each polynomial gives the absolute param value; tint contributes a
-        // delta from its neutral (poly(0) = coeffs[0]).
-
-        // ── Temperature (normalised Kelvin) ─────────────────────────────
-        const TEMP_R: [f64; 5] = [0.484425, -0.096376, -0.113860, 0.040888, 0.074672];
-        const TEMP_G: [f64; 5] = [0.477346, 0.003212, -0.205499, 0.074971, 0.075272];
-        const TEMP_B: [f64; 5] = [0.481896, 0.123688, -0.212512, 0.107891, -0.001538];
-
-        // ── Tint ────────────────────────────────────────────────────────
-        const TINT_R: [f64; 5] = [0.501907, 0.059414, 0.031477, 0.020843, -0.014643];
-        const TINT_G: [f64; 5] = [0.493519, -0.073231, 0.227645, -0.178444, -0.126107];
-        const TINT_B: [f64; 5] = [0.505304, 0.055597, -0.003110, 0.025954, -0.016120];
-
-        let t_temp = ((temperature.clamp(1000.0, 15000.0) - 6500.0) / 4500.0).clamp(-1.0, 1.0);
-        let t_tint = tint.clamp(-1.0, 1.0);
-
-        let mut r = Self::poly4(t_temp, &TEMP_R);
-        let mut g = Self::poly4(t_temp, &TEMP_G);
-        let mut b = Self::poly4(t_temp, &TEMP_B);
-
-        // Tint: add delta from neutral.
-        r += Self::poly4(t_tint, &TINT_R) - TINT_R[0];
-        g += Self::poly4(t_tint, &TINT_G) - TINT_G[0];
-        b += Self::poly4(t_tint, &TINT_B) - TINT_B[0];
-
-        ColorAdjRGBParams {
-            r: r.clamp(0.0, 1.0),
-            g: g.clamp(0.0, 1.0),
-            b: b.clamp(0.0, 1.0),
-        }
+        color_math::compute_coloradj_params(temperature, tint)
     }
 
-    /// Non-linear response used by tonal warmth/tint controls.
-    ///
-    /// Keeps precision near 0.0 while boosting creative range near slider ends.
     pub(crate) fn compute_tonal_axis_response(value: f64) -> f64 {
-        let v = value.clamp(-1.0, 1.0);
-        v * (1.0 + 0.35 * v * v)
+        color_math::compute_tonal_axis_response(value)
     }
 
-    /// Compute frei0r `3-point-color-balance` parameters from
-    /// shadows/midtones/highlights sliders.
-    ///
-    /// The 3-point element fits a parabola through three control points
-    /// (black, 0), (gray, 0.5), (white, 1.0) per channel and applies it
-    /// as the transfer curve.  Coefficients derived from empirical
-    /// calibration against FFmpeg's `colorbalance` export filter
-    /// (tools/calibrate_frei0r.py).
-    ///
-    /// Each slider contributes a delta from neutral via fitted polynomials.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn compute_3point_params(
         shadows: f64,
         midtones: f64,
@@ -14281,106 +13727,21 @@ impl ProgramPlayer {
         shadows_warmth: f64,
         shadows_tint: f64,
     ) -> ThreePointParams {
-        // ── Shadows ─────────────────────────────────────────────────────
-        const SH_BLACK: [f64; 5] = [0.065817, 0.157626, 0.002710, -0.194674, -0.055835];
-        const SH_GRAY: [f64; 5] = [0.513596, 0.081446, -0.041960, 0.017848, 0.117598];
-        const SH_WHITE: [f64; 5] = [0.999118, -0.037826, -0.087347, -0.046390, -0.004455];
-
-        // ── Midtones ────────────────────────────────────────────────────
-        const M_BLACK: [f64; 5] = [0.006185, -0.024554, -0.070816, 0.093034, 0.159694];
-        const M_GRAY: [f64; 5] = [0.499145, -0.111600, -0.219452, 0.010107, 0.285960];
-        const M_WHITE: [f64; 5] = [0.988180, -0.000025, 0.125044, 0.017842, -0.230026];
-
-        // ── Highlights ──────────────────────────────────────────────────
-        const H_BLACK: [f64; 5] = [0.039231, 0.056431, -0.027366, 0.018788, 0.094133];
-        const H_GRAY: [f64; 5] = [0.519445, -0.494215, 0.275317, 0.483889, -0.277072];
-        const H_WHITE: [f64; 5] = [0.957496, -0.356602, -0.543984, 0.462982, 0.266763];
-
-        let sh = shadows.clamp(-1.0, 1.0);
-        let mid = midtones.clamp(-1.0, 1.0);
-        let hi = highlights.clamp(-1.0, 1.0);
-
-        // Start from neutral, accumulate deltas from each slider.
-        let mut black = 0.0_f64;
-        let mut gray = 0.5_f64;
-        let mut white = 1.0_f64;
-
-        black += Self::poly4(sh, &SH_BLACK) - SH_BLACK[0];
-        gray += Self::poly4(sh, &SH_GRAY) - SH_GRAY[0];
-        white += Self::poly4(sh, &SH_WHITE) - SH_WHITE[0];
-
-        black += Self::poly4(mid, &M_BLACK) - M_BLACK[0];
-        gray += Self::poly4(mid, &M_GRAY) - M_GRAY[0];
-        white += Self::poly4(mid, &M_WHITE) - M_WHITE[0];
-
-        black += Self::poly4(hi, &H_BLACK) - H_BLACK[0];
-        gray += Self::poly4(hi, &H_GRAY) - H_GRAY[0];
-        white += Self::poly4(hi, &H_WHITE) - H_WHITE[0];
-
-        // Clamp to valid frei0r ranges and ensure ordering.
-        let black = black.clamp(0.0, 0.95);
-        let white = white.clamp(0.05, 1.0);
-        let gray = gray.clamp(black + 0.01, white - 0.01);
-
-        // ── Black point (default 0.0, range −1..1) ─────────────────────
-        // Positive lifts blacks (raises floor), negative crushes them.
-        // Applied as uniform shift to the black reference point.
-        let bp = black_point.clamp(-1.0, 1.0) * 0.15;
-
-        // ── Per-tone warmth/tint → per-channel RGB offsets ──────────────
-        // Warmth: positive = warm (red boost, blue cut), negative = cool.
-        // Tint: positive = magenta (green cut, R+B boost), negative = green.
-        // Scale factor chosen for visible creative shifts at slider extremes
-        // while keeping the 3-point curve within usable bounds.
-        // At ±1.0 slider: response=1.35, shift=±0.47 warmth / ±0.38 tint.
-        let warmth_scale = 0.35;
-        let tint_scale = 0.28;
-        let shadows_endpoint_boost = 1.30;
-
-        // Warmth positive = warm (red boost, blue cut in 3-point curve space).
-        // Tint positive = magenta (green cut); negated because 3-point
-        // adds tint directly to green channel.
-        let sw = Self::compute_tonal_axis_response(shadows_warmth)
-            * warmth_scale
-            * shadows_endpoint_boost;
-        let st =
-            -Self::compute_tonal_axis_response(shadows_tint) * tint_scale * shadows_endpoint_boost;
-        let mw = Self::compute_tonal_axis_response(midtones_warmth) * warmth_scale;
-        let mt = -Self::compute_tonal_axis_response(midtones_tint) * tint_scale;
-        let hw = Self::compute_tonal_axis_response(highlights_warmth) * warmth_scale;
-        let ht = -Self::compute_tonal_axis_response(highlights_tint) * tint_scale;
-
-        // Per-channel: warmth shifts R↔B, tint shifts G↔(R+B).
-        // In frei0r 3-point space a LOWER control point value means
-        // BRIGHTER channel output (the curve shifts left), so we
-        // subtract warmth from red and add it to blue for a warm look.
-        let black_r = (black + bp - sw + st * 0.5).clamp(0.0, 0.95);
-        let black_g = (black + bp - st).clamp(0.0, 0.95);
-        let black_b = (black + bp + sw + st * 0.5).clamp(0.0, 0.95);
-
-        let gray_r = (gray - mw + mt * 0.5).clamp(0.01, 0.99);
-        let gray_g = (gray - mt).clamp(0.01, 0.99);
-        let gray_b = (gray + mw + mt * 0.5).clamp(0.01, 0.99);
-
-        let white_r = (white - hw + ht * 0.5).clamp(0.05, 1.0);
-        let white_g = (white - ht).clamp(0.05, 1.0);
-        let white_b = (white + hw + ht * 0.5).clamp(0.05, 1.0);
-
-        ThreePointParams {
-            black_r,
-            black_g,
-            black_b,
-            gray_r,
-            gray_g,
-            gray_b,
-            white_r,
-            white_g,
-            white_b,
-        }
+        color_math::compute_3point_params(
+            shadows,
+            midtones,
+            highlights,
+            black_point,
+            highlights_warmth,
+            highlights_tint,
+            midtones_warmth,
+            midtones_tint,
+            shadows_warmth,
+            shadows_tint,
+        )
     }
 
-    /// Compute export-focused 3-point parameters with small luma harmonization
-    /// terms tuned to reduce known preview/export endpoint drift.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn compute_export_3point_params(
         shadows: f64,
         midtones: f64,
@@ -14393,9 +13754,7 @@ impl ProgramPlayer {
         shadows_warmth: f64,
         shadows_tint: f64,
     ) -> ThreePointParams {
-        let (shadows, midtones, highlights) =
-            Self::export_tonal_parity_inputs(shadows, midtones, highlights);
-        let mut p = Self::compute_3point_params(
+        color_math::compute_export_3point_params(
             shadows,
             midtones,
             highlights,
@@ -14406,32 +13765,20 @@ impl ProgramPlayer {
             midtones_tint,
             shadows_warmth,
             shadows_tint,
-        );
-        p
+        )
     }
 
-    /// Per-zone additive corrections for the export frei0r 3-point-color-balance
-    /// path.  Reserved for future per-zone compensation once a reliable model
-    /// is found.  Previous polynomial offsets regressed midtones parity
-    /// (3-point curve reshaping has undesirable cross-zone side effects),
-    /// so the body is intentionally empty.
     pub(crate) fn apply_export_3point_parity_offsets(
-        _p: &mut ThreePointParams,
-        _shadows: f64,
-        _midtones: f64,
-        _highlights: f64,
+        p: &mut ThreePointParams,
+        shadows: f64,
+        midtones: f64,
+        highlights: f64,
     ) {
-        // Intentionally empty — tonal 3-point offsets reverted after
-        // MCP cross-runtime validation showed midtones regression.
+        color_math::apply_export_3point_parity_offsets(p, shadows, midtones, highlights);
     }
 
-    /// Cool-side export temperature gain (env-overridable for parity fitting).
-    /// Uses a piecewise curve in cool range with unity at/above 6500K.
     pub(crate) fn export_temperature_parity_gain(temperature: f64) -> f64 {
-        let legacy_gain = Self::export_gain_env("US_EXPORT_COOL_TEMP_GAIN", 1.0);
-        let far_gain = Self::export_gain_env("US_EXPORT_COOL_TEMP_GAIN_FAR", legacy_gain);
-        let near_gain = Self::export_gain_env("US_EXPORT_COOL_TEMP_GAIN_NEAR", legacy_gain);
-        Self::piecewise_cool_temperature_gain(temperature, far_gain, near_gain)
+        color_math::export_temperature_parity_gain(temperature)
     }
 
     pub(crate) fn piecewise_cool_temperature_gain(
@@ -14439,53 +13786,11 @@ impl ProgramPlayer {
         far_gain: f64,
         near_gain: f64,
     ) -> f64 {
-        const FAR_K: f64 = 2000.0;
-        const NEAR_K: f64 = 5000.0;
-        const NEUTRAL_K: f64 = 6500.0;
-
-        if temperature >= NEUTRAL_K {
-            return 1.0;
-        }
-        if temperature <= FAR_K {
-            return far_gain;
-        }
-        if temperature <= NEAR_K {
-            let t = (temperature - FAR_K) / (NEAR_K - FAR_K);
-            return far_gain + (near_gain - far_gain) * t;
-        }
-        let t = (temperature - NEAR_K) / (NEUTRAL_K - NEAR_K);
-        near_gain + (1.0 - near_gain) * t
+        color_math::piecewise_cool_temperature_gain(temperature, far_gain, near_gain)
     }
 
-    fn export_gain_env(key: &str, default: f64) -> f64 {
-        std::env::var(key)
-            .ok()
-            .and_then(|raw| raw.trim().parse::<f64>().ok())
-            .filter(|v| *v >= 0.80 && *v <= 1.20)
-            .unwrap_or(default)
-    }
-
-    /// Per-channel additive offsets for the export coloradj temperature path.
-    /// Compensates for FFmpeg/GStreamer frei0r bridge differences in color
-    /// temperature rendering.  All offsets taper to zero at neutral (6500K).
     pub(crate) fn export_temperature_channel_offsets(temperature: f64) -> (f64, f64, f64) {
-        let deviation = (temperature - 6500.0) / 4500.0;
-        if deviation.abs() < 0.01 {
-            return (0.0, 0.0, 0.0);
-        }
-        let abs_dev = deviation.abs().min(1.0);
-
-        if deviation < 0.0 {
-            // Below neutral (warm effect: low Kelvin = orange).
-            // Warm-side offsets intentionally zeroed — chart showed small
-            // improvement but natural footage showed small regression,
-            // indicating content-dependent behaviour.
-            (0.0, 0.0, 0.0)
-        } else {
-            // Above neutral (cool effect: high Kelvin = blue).
-            // FFmpeg bridge doesn't cool enough → excess B and moderate R.
-            (-abs_dev * 0.012, -abs_dev * 0.008, -abs_dev * 0.022)
-        }
+        color_math::export_temperature_channel_offsets(temperature)
     }
 
     pub(crate) fn export_tonal_parity_inputs(
@@ -14493,106 +13798,9 @@ impl ProgramPlayer {
         midtones: f64,
         highlights: f64,
     ) -> (f64, f64, f64) {
-        let shadows_pos_gain = Self::export_gain_env("US_EXPORT_SHADOWS_POS_GAIN", 1.0);
-        let midtones_neg_gain = Self::export_gain_env("US_EXPORT_MIDTONES_NEG_GAIN", 1.0);
-        let highlights_neg_gain = Self::export_gain_env("US_EXPORT_HIGHLIGHTS_NEG_GAIN", 1.0);
-        Self::apply_export_tonal_parity_gains(
-            shadows,
-            midtones,
-            highlights,
-            shadows_pos_gain,
-            midtones_neg_gain,
-            highlights_neg_gain,
-        )
+        color_math::export_tonal_parity_inputs(shadows, midtones, highlights)
     }
 
-    fn prerender_build_mask_alpha(
-        clip: &ProgramClip,
-        out_w: u32,
-        out_h: u32,
-    ) -> Option<crate::media::mask_alpha::FfmpegMaskAlphaResult> {
-        crate::media::mask_alpha::build_combined_mask_ffmpeg_alpha(
-            &clip.masks,
-            out_w,
-            out_h,
-            0,
-            clip.scale,
-            clip.position_x,
-            clip.position_y,
-        )
-    }
-
-    fn prerender_append_mask_filter(
-        nodes: &mut Vec<String>,
-        input_label: &str,
-        output_label: &str,
-        clip: &ProgramClip,
-        out_w: u32,
-        out_h: u32,
-        mask_temp_files: &mut Vec<tempfile::NamedTempFile>,
-    ) -> bool {
-        match Self::prerender_build_mask_alpha(clip, out_w, out_h) {
-            Some(crate::media::mask_alpha::FfmpegMaskAlphaResult::GeqExpression(expr)) => {
-                nodes.push(format!(
-                    "[{input_label}]geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({expr})'[{output_label}]"
-                ));
-                true
-            }
-            Some(crate::media::mask_alpha::FfmpegMaskAlphaResult::RasterFile(mask_file)) => {
-                let mask_path = mask_file
-                    .path()
-                    .display()
-                    .to_string()
-                    .replace('\\', "\\\\")
-                    .replace(':', "\\:");
-                let mask_label = format!("{output_label}_mask");
-                nodes.push(format!(
-                    "movie='{mask_path}',format=gray,scale={out_w}:{out_h}[{mask_label}]"
-                ));
-                nodes.push(format!(
-                    "[{input_label}][{mask_label}]alphamerge[{output_label}]"
-                ));
-                mask_temp_files.push(mask_file);
-                true
-            }
-            None => false,
-        }
-    }
-
-    pub(crate) fn apply_export_tonal_parity_gains(
-        shadows: f64,
-        midtones: f64,
-        highlights: f64,
-        shadows_pos_gain: f64,
-        midtones_neg_gain: f64,
-        highlights_neg_gain: f64,
-    ) -> (f64, f64, f64) {
-        let sh = shadows.clamp(-1.0, 1.0);
-        let mid = midtones.clamp(-1.0, 1.0);
-        let hi = highlights.clamp(-1.0, 1.0);
-
-        let sh = if sh > 0.0 {
-            (sh * shadows_pos_gain).clamp(-1.0, 1.0)
-        } else {
-            sh
-        };
-        let mid = if mid < 0.0 {
-            (mid * midtones_neg_gain).clamp(-1.0, 1.0)
-        } else {
-            mid
-        };
-        let hi = if hi < 0.0 {
-            (hi * highlights_neg_gain).clamp(-1.0, 1.0)
-        } else {
-            hi
-        };
-        (sh, mid, hi)
-    }
-
-    /// Returns true if two clips would produce effects bins with the same
-    /// element topology (same set of active effect elements).  When true,
-    /// a reused slot's effects bin can be updated via property sets alone,
-    /// without adding/removing GStreamer elements.
     fn effects_topology_matches(a: &ProgramClip, b: &ProgramClip) -> bool {
         let need_balance = |c: &ProgramClip| {
             c.brightness != 0.0
@@ -15308,6 +14516,13 @@ impl ProgramPlayer {
             {
                 slot.transition_enter_offset_ns = trans_offset;
                 self.slots.push(slot);
+            } else {
+                log::warn!(
+                    "build_live_video_slots_for_active: failed to build slot for clip {} (idx={} zorder={})",
+                    self.clips[clip_idx].id,
+                    clip_idx,
+                    zorder_offset
+                );
             }
         }
     }
@@ -15474,10 +14689,11 @@ impl ProgramPlayer {
         );
         let _ = self.pipeline.set_state(gst::State::Paused);
         log::debug!("rebuild_pipeline_at: waiting for paused preroll...");
-        // Give decoders time to discover streams and link pads (up to 5s).
-        // We cannot do a full wait_for_paused_preroll here because the
-        // compositor might be waiting on an unlinked pad.  Use a short
-        // timeout to let decoders link, then EOS any that didn't.
+        // Give decoders time to discover streams and link pads.
+        // Wait on individual decoders instead of the whole pipeline to
+        // avoid blocking on gtk4paintablesink, which needs the GTK main
+        // loop for GL preroll — calling pipeline.state(timeout) from the
+        // main thread would deadlock.
         let mut link_wait_ms = if was_playing {
             self.adaptive_arrival_wait_ms(400)
         } else {
@@ -15486,9 +14702,14 @@ impl ProgramPlayer {
         if used_prerender {
             link_wait_ms = link_wait_ms.max(3000);
         }
-        let _ = self
-            .pipeline
-            .state(gst::ClockTime::from_mseconds(link_wait_ms));
+        {
+            let per_slot_ms = (link_wait_ms / self.slots.len().max(1) as u64).max(80);
+            for slot in &self.slots {
+                let _ = slot
+                    .decoder
+                    .state(gst::ClockTime::from_mseconds(per_slot_ms));
+            }
+        }
 
         if used_prerender {
             let deadline = Instant::now() + Duration::from_millis(250);
@@ -15737,6 +14958,20 @@ impl ProgramPlayer {
             .unwrap_or(false)
     }
 
+    /// Detect GStreamer NOT_LINKED errors (qtdemux streaming loop stall).
+    /// These occur when a demuxer pad (typically audio) has no downstream
+    /// consumer inside the decode bin, causing the pull-mode loop to abort.
+    fn should_recover_not_linked(error: &str, debug: Option<&str>) -> bool {
+        if let Some(d) = debug {
+            let d_lower = d.to_ascii_lowercase();
+            if d_lower.contains("not-linked") || d_lower.contains("reason not-linked") {
+                return true;
+            }
+        }
+        let err_lower = error.to_ascii_lowercase();
+        err_lower.contains("not-linked")
+    }
+
     fn recover_main_pipeline_not_negotiated(&mut self) {
         const RECOVERY_DEBOUNCE_MS: u64 = 250;
         let now = Instant::now();
@@ -15776,6 +15011,7 @@ impl ProgramPlayer {
     fn poll_bus(&mut self) -> bool {
         let mut eos = false;
         let mut main_not_negotiated = false;
+        let mut main_not_linked = false;
         if let Some(bus) = self.pipeline.bus() {
             while let Some(msg) = bus.pop() {
                 match msg.view() {
@@ -15859,6 +15095,32 @@ impl ProgramPlayer {
                         log::error!("poll_bus: main pipeline error: {} ({:?})", err, debug);
                         if Self::should_recover_not_negotiated(&err, debug.as_deref()) {
                             main_not_negotiated = true;
+                        } else if Self::should_recover_not_linked(&err, debug.as_deref()) {
+                            main_not_linked = true;
+                        }
+                    }
+                    gstreamer::MessageView::Qos(_) => {
+                        // QoS stats messages carry the element's cumulative
+                        // dropped-buffer count in their structure. We read
+                        // `dropped` directly from the structure because the
+                        // `Qos::stats()` wrapper wraps the count in a
+                        // `GenericFormattedValue` that is version-sensitive.
+                        let dropped = msg
+                            .structure()
+                            .and_then(|s| s.get::<u64>("dropped").ok());
+                        let src_name = msg
+                            .src()
+                            .and_then(|src| src.clone().downcast::<gst::Element>().ok())
+                            .map(|elem| elem.name().to_string());
+                        if let (Some(dropped), Some(src_name)) = (dropped, src_name) {
+                            let previous = self
+                                .dropped_frames_last_seen
+                                .insert(src_name, dropped)
+                                .unwrap_or(0);
+                            if dropped > previous {
+                                self.dropped_frames_total
+                                    .fetch_add(dropped - previous, Ordering::Relaxed);
+                            }
                         }
                     }
                     _ => {}
@@ -15866,6 +15128,12 @@ impl ProgramPlayer {
             }
         }
         if main_not_negotiated {
+            self.recover_main_pipeline_not_negotiated();
+        } else if main_not_linked {
+            // NOT_LINKED errors (qtdemux streaming stall) are recovered the
+            // same way as not-negotiated: full teardown + rebuild.  The
+            // debounce logic prevents rapid-fire rebuilds when the bus has
+            // queued multiple error messages from the same incident.
             self.recover_main_pipeline_not_negotiated();
         }
         if let Some(abus) = self.audio_pipeline.bus() {
@@ -15955,6 +15223,23 @@ impl ProgramPlayer {
         }
     }
 
+    fn bounded_audio_multi_wait_timeout_ms(
+        base_ms: u64,
+        playing: bool,
+        prioritize_ui: bool,
+    ) -> u64 {
+        if playing {
+            // Compound entry commonly switches from clip-embedded audio to the
+            // separate audio-track mixer. Keep that handoff short enough that
+            // the GTK main thread doesn't feel frozen.
+            base_ms.min(180)
+        } else if prioritize_ui {
+            base_ms.min(120)
+        } else {
+            base_ms
+        }
+    }
+
     fn audio_level_element_name(audio_clip_idx: usize, track_index: usize) -> String {
         format!("audiolevel_clip{audio_clip_idx}_track{track_index}")
     }
@@ -15986,7 +15271,12 @@ impl ProgramPlayer {
         };
         let was_playing = self.state == PlayerState::Playing;
         let _ = pipeline.set_state(gst::State::Paused);
-        let _ = pipeline.state(Some(gst::ClockTime::from_seconds(1)));
+        let audio_reseek_ms = Self::bounded_audio_multi_wait_timeout_ms(
+            self.effective_wait_timeout_ms(180),
+            was_playing,
+            self.should_prioritize_ui_responsiveness(),
+        );
+        let _ = pipeline.state(Some(gst::ClockTime::from_mseconds(audio_reseek_ms)));
         // Reset the separate audio pipeline's segment/running-time before the
         // per-decoder reseeks. Without this flush, the audiomixer can keep the
         // old running-time and drop freshly reseeked external-audio buffers as
@@ -16010,9 +15300,11 @@ impl ProgramPlayer {
             );
         }
         if was_playing {
-            if let Some(base) = self.pipeline.base_time() {
-                pipeline.set_base_time(base);
-            }
+            // Reset start_time so the Paused→Playing transition computes a
+            // fresh base_time = clock_time, giving running_time = 0.  This
+            // keeps the audiomixer aligned with FLUSH-seeked decoder buffers
+            // that also start from running_time 0.
+            pipeline.set_start_time(gst::ClockTime::ZERO);
             let _ = pipeline.set_state(gst::State::Playing);
         }
         true
@@ -16375,15 +15667,25 @@ impl ProgramPlayer {
         // Preroll the pipeline, then seek each decoder to its correct source position.
         // Slave the multi-audio pipeline to the main pipeline's clock so
         // audio and video stay in sync over long playback sessions.
+        // Don't copy base_time — the Playing transition below (or a later
+        // resume_synced_audio_playback call) auto-computes a fresh
+        // base_time = clock_time, keeping running_time aligned with the
+        // FLUSH-seeked decoders' buffer timestamps.
         if let Some(clock) = self.pipeline.clock() {
             pipeline.use_clock(Some(&clock));
         }
-        if let Some(base) = self.pipeline.base_time() {
-            pipeline.set_base_time(base);
-        }
 
         let _ = pipeline.set_state(gst::State::Paused);
-        let _ = pipeline.state(Some(gst::ClockTime::from_seconds(2)));
+        // Cap the blocking wait to avoid freezing the GTK main thread.
+        // Audio decoders don't need GL context and preroll quickly; the
+        // old long timeout caused compound-entry handoffs to visibly stall
+        // when the audio-track mixer rebuilt alongside the video boundary.
+        let audio_preroll_ms = Self::bounded_audio_multi_wait_timeout_ms(
+            self.effective_wait_timeout_ms(220),
+            self.state == PlayerState::Playing,
+            self.should_prioritize_ui_responsiveness(),
+        );
+        let _ = pipeline.state(Some(gst::ClockTime::from_mseconds(audio_preroll_ms)));
 
         for (decoder, branch) in &decoders {
             // Compute the source position this clip should play from.
@@ -16420,7 +15722,10 @@ impl ProgramPlayer {
     fn teardown_audio_multi_pipeline(&mut self) {
         if let Some(ref pipeline) = self.audio_multi_pipeline {
             let _ = pipeline.set_state(gst::State::Null);
-            let _ = pipeline.state(Some(gst::ClockTime::from_seconds(1)));
+            // Audio-only pipeline has no gtk4paintablesink so this won't
+            // deadlock, but keep the timeout short to avoid blocking the
+            // GTK main thread.
+            let _ = pipeline.state(Some(gst::ClockTime::from_mseconds(100)));
         }
         self.audio_multi_pipeline = None;
         self.audio_multi_active.clear();
@@ -16758,6 +16063,7 @@ mod tests {
         ThreePointParabola, TransitionPrerenderSpec, TransitionRole, VBParams, VideoSlot,
     };
     use crate::media::adjustment_scope::AdjustmentScopeShape;
+    use crate::media::color_math;
     use crate::model::clip::{KeyframeInterpolation, MaskShape, NumericKeyframe};
     use crate::model::transition::TransitionAlignment;
     use crate::ui_state::{PrerenderEncodingPreset, DEFAULT_PRERENDER_CRF};
@@ -16919,6 +16225,30 @@ mod tests {
     }
 
     #[test]
+    fn audio_multi_wait_timeout_stays_tight_during_playback() {
+        assert_eq!(
+            ProgramPlayer::bounded_audio_multi_wait_timeout_ms(220, true, false),
+            180
+        );
+    }
+
+    #[test]
+    fn audio_multi_wait_timeout_stays_tight_for_responsive_paused_seeks() {
+        assert_eq!(
+            ProgramPlayer::bounded_audio_multi_wait_timeout_ms(220, false, true),
+            120
+        );
+    }
+
+    #[test]
+    fn audio_multi_wait_timeout_preserves_noninteractive_budget() {
+        assert_eq!(
+            ProgramPlayer::bounded_audio_multi_wait_timeout_ms(220, false, false),
+            220
+        );
+    }
+
+    #[test]
     fn audio_level_element_names_are_unique_per_clip_and_parse_track_index() {
         let first = ProgramPlayer::audio_level_element_name(0, 1);
         let second = ProgramPlayer::audio_level_element_name(1, 1);
@@ -16964,6 +16294,7 @@ mod tests {
             volume: 1.0,
             voice_isolation: 0.0,
             voice_enhance: false,
+            render_replace_enabled: false,
             voice_enhance_strength: 0.5,
             voice_isolation_pad_ns: 80_000_000,
             voice_isolation_fade_ns: 25_000_000,
@@ -17066,6 +16397,10 @@ mod tests {
             title_animation: crate::model::clip::TitleAnimation::None,
             title_animation_duration_ns: 1_000_000_000,
             drawing_items: Vec::new(),
+            track_muted: false,
+            track_gain_linear: 1.0,
+            track_pan: 0.0,
+            is_hdr: false,
         }
     }
 
@@ -17180,11 +16515,19 @@ mod tests {
             after_cut_ns: 500_000_000,
         };
         assert_eq!(
-            ProgramPlayer::prerender_build_transition_tpad_filter(Some(&spec), 83_333_333, 0),
+            crate::media::prerender_filters::prerender_build_transition_tpad_filter(
+                Some(&spec),
+                83_333_333,
+                0
+            ),
             ",tpad=stop_mode=clone:stop_duration=0.500000"
         );
         assert_eq!(
-            ProgramPlayer::prerender_build_transition_tpad_filter(Some(&spec), 83_333_333, 1),
+            crate::media::prerender_filters::prerender_build_transition_tpad_filter(
+                Some(&spec),
+                83_333_333,
+                1
+            ),
             ",tpad=start_duration=0.083333:start_mode=clone"
         );
     }
@@ -17215,7 +16558,11 @@ mod tests {
             before_cut_ns: 500_000_000,
             after_cut_ns: 0,
         };
-        let f = ProgramPlayer::prerender_build_transition_adelay_filter(Some(&spec), 83_333_333, 1);
+        let f = crate::media::prerender_filters::prerender_build_transition_adelay_filter(
+            Some(&spec),
+            83_333_333,
+            1,
+        );
         assert_eq!(f, ",adelay=84:all=1");
     }
 
@@ -17230,11 +16577,19 @@ mod tests {
             after_cut_ns: 0,
         };
         assert_eq!(
-            ProgramPlayer::prerender_build_transition_adelay_filter(Some(&spec), 0, 1),
+            crate::media::prerender_filters::prerender_build_transition_adelay_filter(
+                Some(&spec),
+                0,
+                1
+            ),
             ""
         );
         assert_eq!(
-            ProgramPlayer::prerender_build_transition_adelay_filter(Some(&spec), 83_333_333, 0),
+            crate::media::prerender_filters::prerender_build_transition_adelay_filter(
+                Some(&spec),
+                83_333_333,
+                0
+            ),
             ""
         );
     }
@@ -17270,7 +16625,9 @@ mod tests {
         clip.is_title = true;
         clip.position_x = 0.5;
 
-        let filter = ProgramPlayer::prerender_build_scale_position_filter(&clip, 1920, 1080, true);
+        let filter = crate::media::prerender_filters::prerender_build_scale_position_filter(
+            &clip, 1920, 1080, true,
+        );
 
         assert!(filter.contains("scale=1920:1080"));
         assert!(filter.contains("crop=1440:1080:0:0"));
@@ -17314,7 +16671,9 @@ mod tests {
             "tracker-1",
         ));
 
-        let filter = ProgramPlayer::prerender_build_scale_position_filter(&clip, 1920, 1080, false);
+        let filter = crate::media::prerender_filters::prerender_build_scale_position_filter(
+            &clip, 1920, 1080, false,
+        );
 
         assert!(filter.contains("scale=1920:1080"));
         assert!(filter.contains("crop=1440:1080:0:0"));
@@ -17327,7 +16686,7 @@ mod tests {
         clip.title_text = "Preview".to_string();
         clip.title_font = "Sans Bold Italic 36".to_string();
 
-        let filter = ProgramPlayer::prerender_build_title_filter(&clip, 1080);
+        let filter = crate::media::prerender_filters::prerender_build_title_filter(&clip, 1080);
 
         assert!(
             filter.contains("drawtext=fontfile='")
@@ -17342,7 +16701,7 @@ mod tests {
         clip.blur = 0.35;
 
         assert_eq!(
-            ProgramPlayer::prerender_build_blur_filter(&clip),
+            crate::media::prerender_filters::prerender_build_blur_filter(&clip),
             ",boxblur=4:4"
         );
     }
@@ -17366,7 +16725,7 @@ mod tests {
             },
         ];
 
-        let filter = ProgramPlayer::prerender_build_color_filter(&clip);
+        let filter = crate::media::prerender_filters::prerender_build_color_filter(&clip);
 
         assert!(filter.contains("eq=brightness='if(lt(t,0.000000000),"));
         assert!(filter.contains("lt(t,1.000000000)"));
@@ -17410,7 +16769,8 @@ mod tests {
             use_coloradj_frei0r: true,
             ..Default::default()
         };
-        let filter = ProgramPlayer::prerender_build_temperature_tint_filter(&clip, &caps);
+        let filter =
+            crate::media::prerender_filters::prerender_build_temperature_tint_filter(&clip, &caps);
 
         assert!(filter.contains("colortemperature=temperature='if(lt(t,0.000000000),"));
         assert!(filter.contains("lt(t,1.000000000)"));
@@ -17422,18 +16782,27 @@ mod tests {
     #[test]
     fn prerender_build_flip_filter_handles_all_flip_modes() {
         let mut clip = make_clip();
-        assert_eq!(ProgramPlayer::prerender_build_flip_filter(&clip), "");
-
-        clip.flip_h = true;
-        assert_eq!(ProgramPlayer::prerender_build_flip_filter(&clip), ",hflip");
-
-        clip.flip_h = false;
-        clip.flip_v = true;
-        assert_eq!(ProgramPlayer::prerender_build_flip_filter(&clip), ",vflip");
+        assert_eq!(
+            crate::media::prerender_filters::prerender_build_flip_filter(&clip),
+            ""
+        );
 
         clip.flip_h = true;
         assert_eq!(
-            ProgramPlayer::prerender_build_flip_filter(&clip),
+            crate::media::prerender_filters::prerender_build_flip_filter(&clip),
+            ",hflip"
+        );
+
+        clip.flip_h = false;
+        clip.flip_v = true;
+        assert_eq!(
+            crate::media::prerender_filters::prerender_build_flip_filter(&clip),
+            ",vflip"
+        );
+
+        clip.flip_h = true;
+        assert_eq!(
+            crate::media::prerender_filters::prerender_build_flip_filter(&clip),
             ",hflip,vflip"
         );
     }
@@ -17446,7 +16815,8 @@ mod tests {
         mask.height = 0.15;
         clip.masks.push(mask);
 
-        let mask_alpha = ProgramPlayer::prerender_build_mask_alpha(&clip, 1920, 1080);
+        let mask_alpha =
+            crate::media::prerender_filters::prerender_build_mask_alpha(&clip, 1920, 1080);
 
         match mask_alpha {
             Some(crate::media::mask_alpha::FfmpegMaskAlphaResult::GeqExpression(expr)) => {
@@ -17494,7 +16864,8 @@ mod tests {
             },
         ]));
 
-        let mask_alpha = ProgramPlayer::prerender_build_mask_alpha(&clip, 640, 360);
+        let mask_alpha =
+            crate::media::prerender_filters::prerender_build_mask_alpha(&clip, 640, 360);
 
         match mask_alpha {
             Some(crate::media::mask_alpha::FfmpegMaskAlphaResult::RasterFile(file)) => {
@@ -17635,7 +17006,7 @@ mod tests {
     #[test]
     fn prerender_clip_has_keyframed_overlay_detects_transform_lanes() {
         let mut clip = make_clip();
-        assert!(!ProgramPlayer::prerender_clip_has_keyframed_overlay(&clip));
+        assert!(!crate::media::prerender_filters::prerender_clip_has_keyframed_overlay(&clip));
 
         clip.scale_keyframes.push(NumericKeyframe {
             time_ns: 0,
@@ -17643,7 +17014,7 @@ mod tests {
             interpolation: KeyframeInterpolation::Linear,
             bezier_controls: None,
         });
-        assert!(ProgramPlayer::prerender_clip_has_keyframed_overlay(&clip));
+        assert!(crate::media::prerender_filters::prerender_clip_has_keyframed_overlay(&clip));
 
         clip.scale_keyframes.clear();
         clip.position_x_keyframes.push(NumericKeyframe {
@@ -17652,7 +17023,7 @@ mod tests {
             interpolation: KeyframeInterpolation::Linear,
             bezier_controls: None,
         });
-        assert!(ProgramPlayer::prerender_clip_has_keyframed_overlay(&clip));
+        assert!(crate::media::prerender_filters::prerender_clip_has_keyframed_overlay(&clip));
 
         clip.position_x_keyframes.clear();
         clip.opacity_keyframes.push(NumericKeyframe {
@@ -17661,7 +17032,7 @@ mod tests {
             interpolation: KeyframeInterpolation::Linear,
             bezier_controls: None,
         });
-        assert!(ProgramPlayer::prerender_clip_has_keyframed_overlay(&clip));
+        assert!(crate::media::prerender_filters::prerender_clip_has_keyframed_overlay(&clip));
 
         clip.opacity_keyframes.clear();
         // Rotate keyframes are handled by `prerender_build_rotation_filter`
@@ -17673,7 +17044,7 @@ mod tests {
             interpolation: KeyframeInterpolation::Linear,
             bezier_controls: None,
         });
-        assert!(!ProgramPlayer::prerender_clip_has_keyframed_overlay(&clip));
+        assert!(!crate::media::prerender_filters::prerender_clip_has_keyframed_overlay(&clip));
     }
 
     #[test]
@@ -17704,7 +17075,7 @@ mod tests {
             bezier_controls: None,
         });
 
-        let tail = ProgramPlayer::prerender_build_keyframed_overlay_tail(
+        let tail = crate::media::prerender_filters::prerender_build_keyframed_overlay_tail(
             &clip, "pv0kf", "pv0", 1920, 1080, 30, 1, false, true, "",
         );
         assert!(tail.contains("[pv0kf]scale=w='max(1,1920*("), "got: {tail}");
@@ -17738,7 +17109,7 @@ mod tests {
             interpolation: KeyframeInterpolation::Linear,
             bezier_controls: None,
         });
-        let tail = ProgramPlayer::prerender_build_keyframed_overlay_tail(
+        let tail = crate::media::prerender_filters::prerender_build_keyframed_overlay_tail(
             &clip,
             "pv0kf",
             "pv0",
@@ -17769,7 +17140,7 @@ mod tests {
             interpolation: KeyframeInterpolation::Linear,
             bezier_controls: None,
         });
-        let tail = ProgramPlayer::prerender_build_keyframed_overlay_tail(
+        let tail = crate::media::prerender_filters::prerender_build_keyframed_overlay_tail(
             &clip, "pv1kf", "pv1", 1920, 1080, 30, 1, true, false, "",
         );
         assert!(
@@ -18034,8 +17405,9 @@ mod tests {
         );
         std::fs::write(&lut_path, "LUT_3D_SIZE 2\n0 0 0\n1 1 1\n").expect("write LUT test file");
         clip.lut_paths = vec![lut_path.clone()];
-        let with_original = ProgramPlayer::prerender_build_lut_filter(&clip, false);
-        let with_proxy = ProgramPlayer::prerender_build_lut_filter(&clip, true);
+        let with_original =
+            crate::media::prerender_filters::prerender_build_lut_filter(&clip, false);
+        let with_proxy = crate::media::prerender_filters::prerender_build_lut_filter(&clip, true);
         assert!(with_original.contains("lut3d="));
         assert_eq!(with_proxy, "");
         let _ = std::fs::remove_file(lut_path);
@@ -19441,10 +18813,10 @@ mod tests {
     fn vb_poly4_evaluates_correctly() {
         let c = [1.0, 2.0, 3.0, 4.0, 5.0];
         // poly4(2.0) = 1 + 2*2 + 3*4 + 4*8 + 5*16 = 1 + 4 + 12 + 32 + 80 = 129
-        let v = ProgramPlayer::poly4(2.0, &c);
+        let v = color_math::poly4(2.0, &c);
         assert!((v - 129.0).abs() < 1e-9, "poly4(2.0) = {}", v);
         // poly4(0.0) = 1.0
-        let v0 = ProgramPlayer::poly4(0.0, &c);
+        let v0 = color_math::poly4(0.0, &c);
         assert!((v0 - 1.0).abs() < 1e-9, "poly4(0.0) = {}", v0);
     }
 
@@ -19707,8 +19079,9 @@ mod tests {
 
     #[test]
     fn apply_export_tonal_parity_gains_with_unity_preserves_inputs() {
-        let (sh, mid, hi) =
-            ProgramPlayer::apply_export_tonal_parity_gains(0.7, -0.4, -0.6, 1.0, 1.0, 1.0);
+        let (sh, mid, hi) = crate::media::prerender_filters::apply_export_tonal_parity_gains(
+            0.7, -0.4, -0.6, 1.0, 1.0, 1.0,
+        );
         assert!((sh - 0.7).abs() < 1e-9);
         assert!((mid + 0.4).abs() < 1e-9);
         assert!((hi + 0.6).abs() < 1e-9);
@@ -19716,14 +19089,17 @@ mod tests {
 
     #[test]
     fn apply_export_tonal_parity_gains_is_side_selective() {
-        let (sh, mid, hi) =
-            ProgramPlayer::apply_export_tonal_parity_gains(0.8, -0.5, -0.4, 0.9, 0.92, 0.95);
+        let (sh, mid, hi) = crate::media::prerender_filters::apply_export_tonal_parity_gains(
+            0.8, -0.5, -0.4, 0.9, 0.92, 0.95,
+        );
         assert!((sh - 0.72).abs() < 1e-9);
         assert!((mid + 0.46).abs() < 1e-9);
         assert!((hi + 0.38).abs() < 1e-9);
 
         let (sh_pos, mid_pos, hi_pos) =
-            ProgramPlayer::apply_export_tonal_parity_gains(-0.8, 0.5, 0.4, 0.9, 0.92, 0.95);
+            crate::media::prerender_filters::apply_export_tonal_parity_gains(
+                -0.8, 0.5, 0.4, 0.9, 0.92, 0.95,
+            );
         assert!(
             (sh_pos + 0.8).abs() < 1e-9,
             "negative shadows must be unchanged"

@@ -1,19 +1,33 @@
 use crate::media::program_player::{ProgramPlayer, ScopeFrame};
-use crate::model::project::FrameRate;
+use crate::media::reference_still::DecodedStill;
+use crate::model::project::{FrameRate, TimecodeBurninPosition};
 use crate::ui::colors::{LUMA_B, LUMA_G, LUMA_R};
 use crate::ui::timecode;
+use crate::ui_state::AspectMaskPreset;
 
 /// Discrete zoom levels for the program monitor zoom in/out buttons.
 const PROGRAM_MONITOR_ZOOM_LEVELS: &[f64] = &[0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
 const PROGRAM_MONITOR_CANVAS_BASE_CSS_CLASSES: &[&str] = &["preview-video"];
 use gtk4::prelude::*;
 use gtk4::{
-    self as gtk, AspectFrame, Box as GBox, Button, CheckButton, DrawingArea, EventControllerScroll,
-    EventControllerScrollFlags, Label, MenuButton, Orientation, Overlay, Picture, Popover,
-    ScrolledWindow,
+    self as gtk, AspectFrame, Box as GBox, Button, CheckButton, DrawingArea, DropDown,
+    EventControllerScroll, EventControllerScrollFlags, FlowBox, FlowBoxChild, GestureClick,
+    GestureDrag, Label, MenuButton, Orientation, Overlay, Picture, Popover, ScrolledWindow,
+    StringList,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+
+/// Flat summary of a reference still shown in the Program Monitor popover
+/// strip. UI-only; the canonical data lives in `Project::reference_stills`.
+#[derive(Clone, Default)]
+pub struct ReferenceStillSummary {
+    pub id: String,
+    pub label: String,
+    /// Decoded thumbnail pixel data. `None` when the still is missing on disk
+    /// (placeholder slot rendered instead).
+    pub thumbnail: Option<Rc<DecodedStill>>,
+}
 
 /// Style info for a subtitle line in the program monitor overlay.
 #[derive(Clone)]
@@ -164,6 +178,35 @@ fn subtitle_preview_baseline_y(
     }
 }
 
+/// Snapshot of the values shown in the Program Monitor HUD overlay
+/// (timecode, frame #, fps, canvas resolution, and cumulative dropped
+/// frames). The caller supplies a getter closure so the HUD can reflect
+/// whatever the current project / player state is without holding a
+/// borrow on the heavier state objects.
+#[derive(Clone)]
+pub struct HudStats {
+    pub playhead_ns: u64,
+    pub frame_rate: FrameRate,
+    pub width: u32,
+    pub height: u32,
+    pub dropped_frames: u64,
+}
+
+impl Default for HudStats {
+    fn default() -> Self {
+        Self {
+            playhead_ns: 0,
+            frame_rate: FrameRate {
+                numerator: 24,
+                denominator: 1,
+            },
+            width: 1920,
+            height: 1080,
+            dropped_frames: 0,
+        }
+    }
+}
+
 /// Transform parameters for a clip (crop, rotation, flip).
 /// Kept here so other modules can reference it without a separate file.
 #[derive(Clone, Copy, Default)]
@@ -184,10 +227,13 @@ fn style_program_monitor_canvas_base(widget: &impl IsA<gtk::Widget>) {
 }
 
 /// Build the program monitor widget.
-/// Returns `(widget, pos_label, speed_label, picture_a, picture_b, vu_meter, peak_cell, canvas_frame, safe_area_setter, false_color_setter, zebra_setter, frame_updater, subtitle_text_setter)`.
+/// Returns `(widget, pos_label, speed_label, picture_a, picture_b, vu_meter, peak_cell, canvas_frame, safe_area_setter, false_color_setter, zebra_setter, hud_setter, hud_redraw, aspect_mask_setter, frame_updater, subtitle_text_setter)`.
 /// - `safe_area_setter(enabled)` — toggle safe-area guide overlay.
 /// - `false_color_setter(enabled)` — toggle false-color luminance overlay.
 /// - `zebra_setter(enabled, threshold)` — toggle zebra overexposure overlay; threshold is 0.0–1.0.
+/// - `hud_setter(enabled)` — toggle HUD overlay (timecode/frame/fps/resolution/dropped).
+/// - `hud_redraw()` — request a HUD redraw; call from the position poll so the HUD ticks.
+/// - `aspect_mask_setter(preset)` — select a delivery-format letterbox/pillarbox preset on the Program Monitor.
 /// - `frame_updater(frame)` — push a new 320×180 RGBA scope frame; triggers overlay redraw.
 /// - `subtitle_text_setter(lines)` — set current subtitle lines for overlay display with per-clip styling.
 pub fn build_program_monitor(
@@ -208,10 +254,33 @@ pub fn build_program_monitor(
     initial_show_zebra: bool,
     initial_zebra_threshold: f64,
     on_zebra_changed: impl Fn(bool, f64) + 'static,
+    initial_show_hud: bool,
+    on_hud_changed: impl Fn(bool) + 'static,
+    hud_stats_getter: impl Fn() -> HudStats + 'static,
+    initial_aspect_mask: AspectMaskPreset,
+    on_aspect_mask_changed: impl Fn(AspectMaskPreset) + 'static,
+    initial_timecode_burnin_enabled: bool,
+    initial_timecode_burnin_position: TimecodeBurninPosition,
+    on_timecode_burnin_changed: impl Fn(bool, TimecodeBurninPosition) + 'static,
     // Optional extra button to append to the Program Monitor header
     // controls row (e.g. the Loudness Radar popover toggle). When `None`
     // the header looks exactly as before.
     extra_header_button: Option<gtk::Widget>,
+    // A/B compare wipe parameters (Program Monitor polish: reference-still
+    // pin + split-view). The wipe is off by default; when enabled, the
+    // active reference still is painted on the right side of the vertical
+    // midline over the live preview. Midline position is a percent (0..100)
+    // of the canvas width. See docs/ROADMAP.md → "Program Monitor polish".
+    initial_ab_enabled: bool,
+    initial_ab_midline: f64,
+    initial_stills_summary: Vec<ReferenceStillSummary>,
+    initial_active_still_id: Option<String>,
+    on_ab_enabled_changed: impl Fn(bool) + 'static,
+    on_ab_midline_changed: impl Fn(f64) + 'static,
+    on_capture_still: impl Fn() + 'static,
+    on_select_still: impl Fn(Option<String>) + 'static,
+    on_delete_still: impl Fn(String) + 'static,
+    on_rename_still: impl Fn(String, String) + 'static,
 ) -> (
     GBox,
     Label,
@@ -224,8 +293,21 @@ pub fn build_program_monitor(
     Rc<dyn Fn(bool)>,
     Rc<dyn Fn(bool)>,
     Rc<dyn Fn(bool, f64)>,
+    Rc<dyn Fn(bool)>,
+    Rc<dyn Fn()>,
+    Rc<dyn Fn(AspectMaskPreset)>,
     Rc<dyn Fn(ScopeFrame)>,
     Rc<dyn Fn(Vec<SubtitleLine>)>,
+    // A/B setters — see Program Monitor polish section in ROADMAP.
+    Rc<dyn Fn(bool)>,                                        // ab_enabled_setter
+    Rc<dyn Fn(f64)>,                                         // ab_midline_setter
+    Rc<dyn Fn(Option<Rc<DecodedStill>>)>,                    // ab_reference_setter
+    Rc<dyn Fn(Vec<ReferenceStillSummary>, Option<String>)>, // stills_strip_setter
+    // Timecode burn-in setter. Called on project load + after the
+    // Project Settings dialog writes new values so the overlay
+    // reflects the stored state. Monitor keeps its own shared cell
+    // for the draw_func; window.rs owns persistence (FCPXML + model).
+    Rc<dyn Fn(bool, TimecodeBurninPosition)>,
 ) {
     let root = GBox::new(Orientation::Vertical, 0);
     root.set_hexpand(true);
@@ -294,6 +376,74 @@ pub fn build_program_monitor(
         "Zebra stripes: diagonal lines on regions exceeding the exposure threshold (default 90%)",
     ));
 
+    let on_hud_changed = Rc::new(on_hud_changed);
+    let hud_btn = CheckButton::with_label("HUD");
+    hud_btn.set_active(initial_show_hud);
+    hud_btn.set_tooltip_text(Some(
+        "HUD overlay: timecode, frame number, fps, resolution, and dropped-frame count (Shift+H)",
+    ));
+
+    // Aspect-ratio mask preset dropdown — letterboxes/pillarboxes the
+    // canvas to a delivery-format target. `None` disables the overlay.
+    let on_aspect_mask_changed = Rc::new(on_aspect_mask_changed);
+    let aspect_mask_label_row = GBox::new(Orientation::Horizontal, 6);
+    let aspect_mask_label = Label::new(Some("Aspect mask"));
+    aspect_mask_label.set_xalign(0.0);
+    aspect_mask_label.set_hexpand(true);
+    let aspect_mask_strings: Vec<&'static str> = AspectMaskPreset::ALL
+        .iter()
+        .map(|p| p.label())
+        .collect();
+    let aspect_mask_model = StringList::new(&aspect_mask_strings);
+    let aspect_mask_dropdown = DropDown::new(Some(aspect_mask_model), None::<gtk::Expression>);
+    aspect_mask_dropdown.set_tooltip_text(Some(
+        "Preview a delivery-format aspect ratio by letterboxing the Program Monitor canvas",
+    ));
+    let initial_mask_index = AspectMaskPreset::ALL
+        .iter()
+        .position(|p| *p == initial_aspect_mask)
+        .unwrap_or(0) as u32;
+    aspect_mask_dropdown.set_selected(initial_mask_index);
+    aspect_mask_label_row.append(&aspect_mask_label);
+    aspect_mask_label_row.append(&aspect_mask_dropdown);
+
+    // Timecode burn-in — draws a timecode pill over the program monitor
+    // at the configured position. Persisted on the project so export
+    // bakes it into output pixels via drawtext. Delivery specs frequently
+    // require burned timecode for review masters.
+    let on_timecode_burnin_changed = Rc::new(on_timecode_burnin_changed);
+    let tc_burnin_header_row = GBox::new(Orientation::Horizontal, 6);
+    let tc_burnin_label = Label::new(Some("Timecode burn-in"));
+    tc_burnin_label.set_xalign(0.0);
+    tc_burnin_label.set_hexpand(true);
+    tc_burnin_label.add_css_class("dim-label");
+    let tc_burnin_check = CheckButton::new();
+    tc_burnin_check.set_active(initial_timecode_burnin_enabled);
+    tc_burnin_check.set_tooltip_text(Some(
+        "Render a timecode pill on the Program Monitor and burn it into exports",
+    ));
+    tc_burnin_header_row.append(&tc_burnin_label);
+    tc_burnin_header_row.append(&tc_burnin_check);
+
+    let tc_burnin_position_row = GBox::new(Orientation::Horizontal, 6);
+    let tc_burnin_position_label = Label::new(Some("Position"));
+    tc_burnin_position_label.set_xalign(0.0);
+    tc_burnin_position_label.set_hexpand(true);
+    let tc_burnin_pos_strings: Vec<&'static str> = TimecodeBurninPosition::ALL
+        .iter()
+        .map(|p| p.label())
+        .collect();
+    let tc_burnin_pos_model = StringList::new(&tc_burnin_pos_strings);
+    let tc_burnin_dropdown = DropDown::new(Some(tc_burnin_pos_model), None::<gtk::Expression>);
+    tc_burnin_dropdown.set_tooltip_text(Some("Where the timecode pill is drawn on the canvas"));
+    let initial_tc_burnin_idx = TimecodeBurninPosition::ALL
+        .iter()
+        .position(|p| *p == initial_timecode_burnin_position)
+        .unwrap_or(4) as u32;
+    tc_burnin_dropdown.set_selected(initial_tc_burnin_idx);
+    tc_burnin_position_row.append(&tc_burnin_position_label);
+    tc_burnin_position_row.append(&tc_burnin_dropdown);
+
     // "Overlays" dropdown — pops up a small panel with the three check items.
     let overlays_popover_box = GBox::new(Orientation::Vertical, 4);
     overlays_popover_box.set_margin_top(8);
@@ -308,7 +458,62 @@ pub fn build_program_monitor(
     overlays_popover_box.append(&safe_area_btn);
     overlays_popover_box.append(&false_color_btn);
     overlays_popover_box.append(&zebra_btn);
+    overlays_popover_box.append(&hud_btn);
     overlays_popover_box.append(&subtitle_overlay_btn);
+    overlays_popover_box.append(&aspect_mask_label_row);
+    overlays_popover_box.append(&tc_burnin_header_row);
+    overlays_popover_box.append(&tc_burnin_position_row);
+
+    // ── Reference stills section (A/B compare wipe) ──
+    let ref_stills_separator = gtk::Separator::new(Orientation::Horizontal);
+    ref_stills_separator.set_margin_top(6);
+    ref_stills_separator.set_margin_bottom(2);
+    overlays_popover_box.append(&ref_stills_separator);
+
+    let ref_stills_header_row = GBox::new(Orientation::Horizontal, 6);
+    let ref_stills_header_label = Label::new(Some("Reference stills"));
+    ref_stills_header_label.set_xalign(0.0);
+    ref_stills_header_label.set_hexpand(true);
+    ref_stills_header_label.add_css_class("dim-label");
+    let ab_compare_btn = CheckButton::with_label("A/B compare");
+    ab_compare_btn.set_active(initial_ab_enabled);
+    ab_compare_btn.set_tooltip_text(Some(
+        "Toggle the vertical A/B wipe overlay between the live Program Monitor frame and the active reference still. Drag the midline to slide the wipe.",
+    ));
+    ref_stills_header_row.append(&ref_stills_header_label);
+    ref_stills_header_row.append(&ab_compare_btn);
+    overlays_popover_box.append(&ref_stills_header_row);
+
+    let ref_stills_capture_row = GBox::new(Orientation::Horizontal, 6);
+    let ref_stills_capture_btn = Button::with_label("📷 Capture current frame");
+    ref_stills_capture_btn.set_tooltip_text(Some(
+        "Capture the current Program Monitor frame as a reference still (up to 4 per project)",
+    ));
+    ref_stills_capture_btn.set_hexpand(true);
+    ref_stills_capture_row.append(&ref_stills_capture_btn);
+    overlays_popover_box.append(&ref_stills_capture_row);
+
+    let ref_stills_empty_hint = Label::new(Some(
+        "No reference stills yet — capture one to enable A/B compare.",
+    ));
+    ref_stills_empty_hint.set_xalign(0.0);
+    ref_stills_empty_hint.add_css_class("dim-label");
+    ref_stills_empty_hint.set_wrap(true);
+    ref_stills_empty_hint.set_max_width_chars(30);
+    ref_stills_empty_hint.set_margin_top(4);
+    overlays_popover_box.append(&ref_stills_empty_hint);
+
+    let ref_stills_strip = FlowBox::new();
+    ref_stills_strip.set_selection_mode(gtk::SelectionMode::None);
+    ref_stills_strip.set_homogeneous(false);
+    ref_stills_strip.set_min_children_per_line(1);
+    ref_stills_strip.set_max_children_per_line(4);
+    ref_stills_strip.set_column_spacing(4);
+    ref_stills_strip.set_row_spacing(4);
+    ref_stills_strip.set_margin_top(4);
+    ref_stills_strip.set_visible(!initial_stills_summary.is_empty());
+    ref_stills_empty_hint.set_visible(initial_stills_summary.is_empty());
+    overlays_popover_box.append(&ref_stills_strip);
 
     let overlays_popover = Popover::new();
     overlays_popover.set_child(Some(&overlays_popover_box));
@@ -517,6 +722,439 @@ pub fn build_program_monitor(
     }
     overlay.add_overlay(&zebra_da);
     overlay.set_measure_overlay(&zebra_da, false);
+
+    // HUD overlay: top-left info panel with timecode, frame #, fps, resolution,
+    // and cumulative dropped-frame count. State lives in `hud_visible`, and the
+    // `hud_stats_getter` closure is called each draw to pull fresh values.
+    let hud_visible = Rc::new(Cell::new(initial_show_hud));
+    let hud_stats_getter: Rc<dyn Fn() -> HudStats> = Rc::new(hud_stats_getter);
+    let hud_da = DrawingArea::new();
+    hud_da.set_hexpand(true);
+    hud_da.set_vexpand(true);
+    hud_da.set_halign(gtk::Align::Fill);
+    hud_da.set_valign(gtk::Align::Fill);
+    hud_da.set_can_target(false);
+    {
+        let hud_visible = hud_visible.clone();
+        let hud_stats_getter = hud_stats_getter.clone();
+        hud_da.set_draw_func(move |_da, cr, width, height| {
+            if !hud_visible.get() || width <= 0 || height <= 0 {
+                return;
+            }
+            let stats = hud_stats_getter();
+            let nominal = timecode::nominal_fps(&stats.frame_rate).max(1);
+            let fps_num = u128::from(stats.frame_rate.numerator.max(1));
+            let fps_den = u128::from(stats.frame_rate.denominator.max(1));
+            let total_frames =
+                (u128::from(stats.playhead_ns) * fps_num) / (1_000_000_000u128 * fps_den);
+            let fps_label = if stats.frame_rate.denominator <= 1 {
+                format!("{}", nominal)
+            } else {
+                format!("{:.2}", stats.frame_rate.as_f64())
+            };
+            let lines = [
+                format!(
+                    "TC   {}",
+                    timecode::format_ns_as_timecode(stats.playhead_ns, &stats.frame_rate)
+                ),
+                format!("FRM  {}", total_frames),
+                format!("FPS  {}", fps_label),
+                format!("RES  {}×{}", stats.width, stats.height),
+                format!("DROP {}", stats.dropped_frames),
+            ];
+
+            let pad = 10.0;
+            let line_h = 15.0;
+            let font_size = 12.0;
+            cr.select_font_face(
+                "monospace",
+                gtk::cairo::FontSlant::Normal,
+                gtk::cairo::FontWeight::Normal,
+            );
+            cr.set_font_size(font_size);
+
+            let mut text_w: f64 = 0.0;
+            for line in &lines {
+                if let Ok(ext) = cr.text_extents(line) {
+                    if ext.width() > text_w {
+                        text_w = ext.width();
+                    }
+                }
+            }
+            let box_w = text_w + pad * 2.0;
+            let box_h = line_h * lines.len() as f64 + pad * 2.0;
+            let x = 12.0;
+            let y = 12.0;
+
+            // Dark translucent rounded background.
+            let radius = 6.0;
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.62);
+            cr.new_sub_path();
+            cr.arc(
+                x + box_w - radius,
+                y + radius,
+                radius,
+                -std::f64::consts::FRAC_PI_2,
+                0.0,
+            );
+            cr.arc(
+                x + box_w - radius,
+                y + box_h - radius,
+                radius,
+                0.0,
+                std::f64::consts::FRAC_PI_2,
+            );
+            cr.arc(
+                x + radius,
+                y + box_h - radius,
+                radius,
+                std::f64::consts::FRAC_PI_2,
+                std::f64::consts::PI,
+            );
+            cr.arc(
+                x + radius,
+                y + radius,
+                radius,
+                std::f64::consts::PI,
+                3.0 * std::f64::consts::FRAC_PI_2,
+            );
+            cr.close_path();
+            let _ = cr.fill();
+
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.92);
+            for (i, line) in lines.iter().enumerate() {
+                let ty = y + pad + line_h * (i as f64 + 1.0) - 3.0;
+                cr.move_to(x + pad, ty);
+                let _ = cr.show_text(line);
+            }
+        });
+    }
+    overlay.add_overlay(&hud_da);
+    overlay.set_measure_overlay(&hud_da, false);
+
+    // Aspect-ratio mask overlay: darkens the canvas regions outside the
+    // selected delivery-format target rectangle. When the active preset
+    // is `None` (the default) the draw func early-outs so the overlay is
+    // effectively free.
+    let aspect_mask_preset: Rc<Cell<AspectMaskPreset>> = Rc::new(Cell::new(initial_aspect_mask));
+    let aspect_mask_da = DrawingArea::new();
+    aspect_mask_da.set_hexpand(true);
+    aspect_mask_da.set_vexpand(true);
+    aspect_mask_da.set_halign(gtk::Align::Fill);
+    aspect_mask_da.set_valign(gtk::Align::Fill);
+    aspect_mask_da.set_can_target(false);
+    {
+        let aspect_mask_preset = aspect_mask_preset.clone();
+        aspect_mask_da.set_draw_func(move |_da, cr, width, height| {
+            if width <= 0 || height <= 0 {
+                return;
+            }
+            let Some(target_ratio) = aspect_mask_preset.get().ratio() else {
+                return;
+            };
+            let w = width as f64;
+            let h = height as f64;
+            let canvas_ratio = w / h;
+
+            // Compute the inner target-ratio rectangle centered in the canvas.
+            // target_ratio > canvas_ratio → target is wider than canvas, so the
+            //   inner rect fills the canvas width and is shorter → letterbox
+            //   bars on top/bottom.
+            // target_ratio < canvas_ratio → target is narrower than canvas, so
+            //   the inner rect fills the canvas height and is narrower →
+            //   pillarbox bars on left/right.
+            let (inner_w, inner_h) = if target_ratio > canvas_ratio {
+                (w, w / target_ratio)
+            } else {
+                (h * target_ratio, h)
+            };
+            let inner_x = (w - inner_w) * 0.5;
+            let inner_y = (h - inner_h) * 0.5;
+
+            // Skip drawing when the target effectively matches the canvas
+            // (sub-pixel difference). Avoids a faint 1px guide line on the
+            // same-ratio preset.
+            if (inner_w - w).abs() < 1.0 && (inner_h - h).abs() < 1.0 {
+                return;
+            }
+
+            // Fill the four letterbox/pillarbox bands with translucent black.
+            // Using individual rectangles (not a cut-out path) keeps the draw
+            // simple and avoids fill-rule gotchas across Cairo versions.
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.75);
+            if inner_y > 0.5 {
+                cr.rectangle(0.0, 0.0, w, inner_y);
+                let _ = cr.fill();
+                cr.rectangle(0.0, inner_y + inner_h, w, h - (inner_y + inner_h));
+                let _ = cr.fill();
+            }
+            if inner_x > 0.5 {
+                cr.rectangle(0.0, inner_y, inner_x, inner_h);
+                let _ = cr.fill();
+                cr.rectangle(inner_x + inner_w, inner_y, w - (inner_x + inner_w), inner_h);
+                let _ = cr.fill();
+            }
+
+            // 1px guide line around the target rect, matching the Safe Areas
+            // overlay treatment so the two overlays read as a family.
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.32);
+            cr.set_line_width(1.0);
+            cr.rectangle(inner_x, inner_y, inner_w, inner_h);
+            let _ = cr.stroke();
+        });
+    }
+    overlay.add_overlay(&aspect_mask_da);
+    overlay.set_measure_overlay(&aspect_mask_da, false);
+
+    // Timecode burn-in overlay — draws a rounded monospace pill at the
+    // configured corner. The HUD getter already provides playhead ns +
+    // frame rate which we reuse so the overlay stays in sync with the
+    // HUD and exported burn-in (drawtext).
+    let tc_burnin_enabled_state = Rc::new(Cell::new(initial_timecode_burnin_enabled));
+    let tc_burnin_position_state: Rc<Cell<TimecodeBurninPosition>> =
+        Rc::new(Cell::new(initial_timecode_burnin_position));
+    let tc_burnin_da = DrawingArea::new();
+    tc_burnin_da.set_hexpand(true);
+    tc_burnin_da.set_vexpand(true);
+    tc_burnin_da.set_halign(gtk::Align::Fill);
+    tc_burnin_da.set_valign(gtk::Align::Fill);
+    tc_burnin_da.set_can_target(false);
+    {
+        let enabled = tc_burnin_enabled_state.clone();
+        let position = tc_burnin_position_state.clone();
+        let stats_getter = hud_stats_getter.clone();
+        tc_burnin_da.set_draw_func(move |_da, cr, width, height| {
+            if !enabled.get() || width <= 0 || height <= 0 {
+                return;
+            }
+            let stats = stats_getter();
+            let text = timecode::format_ns_as_timecode(stats.playhead_ns, &stats.frame_rate);
+
+            let w = width as f64;
+            let h = height as f64;
+            let short_edge = w.min(h);
+            let font_size = (short_edge * 0.035).clamp(12.0, 28.0);
+            let pad_x = font_size * 0.7;
+            let pad_y = font_size * 0.35;
+            let margin = (short_edge * 0.02).max(6.0);
+
+            cr.select_font_face(
+                "monospace",
+                gtk::cairo::FontSlant::Normal,
+                gtk::cairo::FontWeight::Bold,
+            );
+            cr.set_font_size(font_size);
+            let ext = match cr.text_extents(&text) {
+                Ok(e) => e,
+                Err(_) => return,
+            };
+            let pill_w = ext.width() + pad_x * 2.0;
+            let pill_h = font_size + pad_y * 2.0;
+            let (x, y) = position.get().anchor(w, h, pill_w, pill_h, margin);
+
+            let radius = (pill_h * 0.35).min(10.0);
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.72);
+            cr.new_sub_path();
+            cr.arc(
+                x + pill_w - radius,
+                y + radius,
+                radius,
+                -std::f64::consts::FRAC_PI_2,
+                0.0,
+            );
+            cr.arc(
+                x + pill_w - radius,
+                y + pill_h - radius,
+                radius,
+                0.0,
+                std::f64::consts::FRAC_PI_2,
+            );
+            cr.arc(
+                x + radius,
+                y + pill_h - radius,
+                radius,
+                std::f64::consts::FRAC_PI_2,
+                std::f64::consts::PI,
+            );
+            cr.arc(
+                x + radius,
+                y + radius,
+                radius,
+                std::f64::consts::PI,
+                3.0 * std::f64::consts::FRAC_PI_2,
+            );
+            cr.close_path();
+            let _ = cr.fill();
+
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.95);
+            let text_x = x + pad_x - ext.x_bearing();
+            let text_y = y + pad_y - ext.y_bearing();
+            cr.move_to(text_x, text_y);
+            let _ = cr.show_text(&text);
+        });
+    }
+    overlay.add_overlay(&tc_burnin_da);
+    overlay.set_measure_overlay(&tc_burnin_da, false);
+
+    // A/B compare overlay — vertical wipe painting the selected reference
+    // still over the right-hand side of the canvas, with a draggable midline.
+    // Shared state the draw_func + drag gesture both read:
+    let ab_enabled: Rc<Cell<bool>> = Rc::new(Cell::new(initial_ab_enabled));
+    let ab_midline: Rc<Cell<f64>> = Rc::new(Cell::new(initial_ab_midline.clamp(0.0, 100.0)));
+    let ab_surface: Rc<RefCell<Option<gtk::cairo::ImageSurface>>> = Rc::new(RefCell::new(None));
+    let ab_surface_dims: Rc<Cell<(i32, i32)>> = Rc::new(Cell::new((0, 0)));
+
+    let ab_da = DrawingArea::new();
+    ab_da.set_hexpand(true);
+    ab_da.set_vexpand(true);
+    ab_da.set_halign(gtk::Align::Fill);
+    ab_da.set_valign(gtk::Align::Fill);
+    // Accept input so the midline drag gesture receives events.
+    ab_da.set_can_target(true);
+    {
+        let ab_enabled_draw = ab_enabled.clone();
+        let ab_midline_draw = ab_midline.clone();
+        let ab_surface_draw = ab_surface.clone();
+        let ab_dims_draw = ab_surface_dims.clone();
+        ab_da.set_draw_func(move |_da, cr, width, height| {
+            if !ab_enabled_draw.get() || width <= 0 || height <= 0 {
+                return;
+            }
+            let w = width as f64;
+            let h = height as f64;
+            let mid_frac = (ab_midline_draw.get() * 0.01).clamp(0.0, 1.0);
+            let mid_x = (w * mid_frac).round();
+
+            // Paint the reference still on the right half only, letterboxed into
+            // the canvas so the aspect ratio is preserved even if the reference
+            // was captured at a different resolution.
+            if let Some(ref surface) = *ab_surface_draw.borrow() {
+                let (sw, sh) = ab_dims_draw.get();
+                if sw > 0 && sh > 0 {
+                    cr.save().ok();
+                    // Clip to the right strip.
+                    cr.rectangle(mid_x, 0.0, w - mid_x, h);
+                    let _ = cr.clip();
+                    // Letterbox-fit the reference into the canvas.
+                    let src_ratio = sw as f64 / sh as f64;
+                    let dst_ratio = w / h;
+                    let (draw_w, draw_h) = if src_ratio > dst_ratio {
+                        (w, w / src_ratio)
+                    } else {
+                        (h * src_ratio, h)
+                    };
+                    let draw_x = (w - draw_w) * 0.5;
+                    let draw_y = (h - draw_h) * 0.5;
+                    cr.translate(draw_x, draw_y);
+                    cr.scale(draw_w / sw as f64, draw_h / sh as f64);
+                    let _ = cr.set_source_surface(surface, 0.0, 0.0);
+                    cr.paint().ok();
+                    cr.restore().ok();
+                } else {
+                    // Dimensions not yet recorded — draw a dim placeholder.
+                    cr.set_source_rgba(0.05, 0.05, 0.05, 0.6);
+                    cr.rectangle(mid_x, 0.0, w - mid_x, h);
+                    let _ = cr.fill();
+                }
+            } else {
+                // Compare is enabled but no reference is loaded. Dim the right
+                // side so the user sees the feature is "armed" but empty.
+                cr.set_source_rgba(0.05, 0.05, 0.05, 0.4);
+                cr.rectangle(mid_x, 0.0, w - mid_x, h);
+                let _ = cr.fill();
+            }
+
+            // Midline: thin black under, 1-px white on top, plus triangular
+            // pointer tabs at the vertical centre for drag affordance.
+            cr.set_line_width(3.0);
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.85);
+            cr.move_to(mid_x + 0.5, 0.0);
+            cr.line_to(mid_x + 0.5, h);
+            let _ = cr.stroke();
+            cr.set_line_width(1.0);
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.95);
+            cr.move_to(mid_x + 0.5, 0.0);
+            cr.line_to(mid_x + 0.5, h);
+            let _ = cr.stroke();
+
+            // Drag handle diamond at vertical center.
+            let cy = h * 0.5;
+            let r = 8.0_f64;
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.85);
+            cr.move_to(mid_x, cy - r);
+            cr.line_to(mid_x + r, cy);
+            cr.line_to(mid_x, cy + r);
+            cr.line_to(mid_x - r, cy);
+            cr.close_path();
+            let _ = cr.fill_preserve();
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.95);
+            cr.set_line_width(1.0);
+            let _ = cr.stroke();
+        });
+    }
+
+    // Midline drag gesture — hit within ±8 px of the current midline grabs it.
+    {
+        let drag = GestureDrag::new();
+        drag.set_button(1);
+        let ab_enabled_drag = ab_enabled.clone();
+        let ab_midline_drag = ab_midline.clone();
+        let ab_da_inner = ab_da.clone();
+        let on_ab_midline_changed = Rc::new(on_ab_midline_changed);
+
+        // Per-drag state: (start_percent, total_width_px, active)
+        let drag_state: Rc<Cell<(f64, f64, bool)>> = Rc::new(Cell::new((50.0, 1.0, false)));
+        {
+            let drag_state = drag_state.clone();
+            let ab_enabled_drag = ab_enabled_drag.clone();
+            let ab_midline_drag = ab_midline_drag.clone();
+            let ab_da_inner = ab_da_inner.clone();
+            drag.connect_drag_begin(move |gesture, sx, _sy| {
+                if !ab_enabled_drag.get() {
+                    drag_state.set((0.0, 1.0, false));
+                    gesture.set_state(gtk::EventSequenceState::Denied);
+                    return;
+                }
+                let w = ab_da_inner.width().max(1) as f64;
+                let mid_x = w * (ab_midline_drag.get() * 0.01).clamp(0.0, 1.0);
+                if (sx - mid_x).abs() > 10.0 {
+                    drag_state.set((0.0, w, false));
+                    gesture.set_state(gtk::EventSequenceState::Denied);
+                    return;
+                }
+                drag_state.set((ab_midline_drag.get(), w, true));
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+            });
+        }
+        {
+            let drag_state = drag_state.clone();
+            let ab_midline_drag = ab_midline_drag.clone();
+            let ab_da_inner = ab_da_inner.clone();
+            let on_ab_midline_changed = on_ab_midline_changed.clone();
+            drag.connect_drag_update(move |_gesture, off_x, _off_y| {
+                let (start, total_w, active) = drag_state.get();
+                if !active || total_w <= 0.0 {
+                    return;
+                }
+                let delta_pct = (off_x / total_w) * 100.0;
+                let new_pct = (start + delta_pct).clamp(0.0, 100.0);
+                ab_midline_drag.set(new_pct);
+                ab_da_inner.queue_draw();
+                on_ab_midline_changed(new_pct);
+            });
+        }
+        {
+            let drag_state = drag_state.clone();
+            drag.connect_drag_end(move |_gesture, _off_x, _off_y| {
+                let (_, w, _) = drag_state.get();
+                drag_state.set((0.0, w, false));
+            });
+        }
+        ab_da.add_controller(drag);
+    }
+
+    overlay.add_overlay(&ab_da);
+    overlay.set_measure_overlay(&ab_da, false);
 
     // Subtitle overlay: displays current subtitle lines with per-clip styling.
     let subtitle_lines: Rc<RefCell<Vec<SubtitleLine>>> = Rc::new(RefCell::new(Vec::new()));
@@ -1106,6 +1744,85 @@ pub fn build_program_monitor(
         });
     }
 
+    let hud_setter: Rc<dyn Fn(bool)> = {
+        let hud_visible = hud_visible.clone();
+        let hud_da = hud_da.clone();
+        let hud_btn = hud_btn.clone();
+        Rc::new(move |enabled: bool| {
+            hud_visible.set(enabled);
+            if hud_btn.is_active() != enabled {
+                hud_btn.set_active(enabled);
+            }
+            hud_da.queue_draw();
+        })
+    };
+    {
+        let hud_setter = hud_setter.clone();
+        let on_hud_changed = on_hud_changed.clone();
+        hud_btn.connect_toggled(move |btn| {
+            let enabled = btn.is_active();
+            hud_setter(enabled);
+            on_hud_changed(enabled);
+        });
+    }
+    let hud_redraw: Rc<dyn Fn()> = {
+        let hud_visible = hud_visible.clone();
+        let hud_da = hud_da.clone();
+        Rc::new(move || {
+            if hud_visible.get() {
+                hud_da.queue_draw();
+            }
+        })
+    };
+
+    // Aspect-mask dropdown → setter round-trip. `updating` guards against
+    // the selection-notify callback feeding back into itself when the
+    // setter programmatically updates the dropdown index.
+    let aspect_mask_updating: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    let aspect_mask_setter: Rc<dyn Fn(AspectMaskPreset)> = {
+        let aspect_mask_preset = aspect_mask_preset.clone();
+        let aspect_mask_da = aspect_mask_da.clone();
+        let aspect_mask_dropdown = aspect_mask_dropdown.clone();
+        let aspect_mask_updating = aspect_mask_updating.clone();
+        Rc::new(move |preset: AspectMaskPreset| {
+            aspect_mask_preset.set(preset);
+            let idx = AspectMaskPreset::ALL
+                .iter()
+                .position(|p| *p == preset)
+                .unwrap_or(0) as u32;
+            if aspect_mask_dropdown.selected() != idx {
+                aspect_mask_updating.set(true);
+                aspect_mask_dropdown.set_selected(idx);
+                aspect_mask_updating.set(false);
+            }
+            aspect_mask_da.queue_draw();
+        })
+    };
+    {
+        let aspect_mask_setter = aspect_mask_setter.clone();
+        let on_aspect_mask_changed = on_aspect_mask_changed.clone();
+        let aspect_mask_updating = aspect_mask_updating.clone();
+        // Dismiss the Overlays popover after a pick. Nested GTK4 popovers
+        // (the DropDown opens its own popover inside this one) can leave the
+        // outer popover's autohide stuck after the child popover closes, so
+        // we popdown explicitly — which is also the right UX since the user
+        // has made their selection.
+        let overlays_popover_close = overlays_popover.clone();
+        aspect_mask_dropdown.connect_selected_notify(move |dd| {
+            if aspect_mask_updating.get() {
+                return;
+            }
+            let idx = dd.selected() as usize;
+            let preset = AspectMaskPreset::ALL
+                .get(idx)
+                .copied()
+                .unwrap_or(AspectMaskPreset::None);
+            aspect_mask_setter(preset);
+            on_aspect_mask_changed(preset);
+            overlays_popover_close.popdown();
+        });
+    }
+
     // Wire subtitle overlay checkbox toggle.
     {
         let sv = subtitle_visible.clone();
@@ -1144,6 +1861,217 @@ pub fn build_program_monitor(
         })
     };
 
+    // ── A/B compare setters + capture button wiring ──
+    let on_ab_enabled_changed = Rc::new(on_ab_enabled_changed);
+    let ab_enabled_setter: Rc<dyn Fn(bool)> = {
+        let ab_enabled = ab_enabled.clone();
+        let ab_da = ab_da.clone();
+        let ab_compare_btn = ab_compare_btn.clone();
+        Rc::new(move |enabled: bool| {
+            ab_enabled.set(enabled);
+            if ab_compare_btn.is_active() != enabled {
+                ab_compare_btn.set_active(enabled);
+            }
+            ab_da.queue_draw();
+        })
+    };
+    {
+        let ab_enabled_setter = ab_enabled_setter.clone();
+        let on_ab_enabled_changed = on_ab_enabled_changed.clone();
+        ab_compare_btn.connect_toggled(move |btn| {
+            let enabled = btn.is_active();
+            ab_enabled_setter(enabled);
+            on_ab_enabled_changed(enabled);
+        });
+    }
+
+    let ab_midline_setter: Rc<dyn Fn(f64)> = {
+        let ab_midline = ab_midline.clone();
+        let ab_da = ab_da.clone();
+        Rc::new(move |pct: f64| {
+            let clamped = pct.clamp(0.0, 100.0);
+            if (ab_midline.get() - clamped).abs() > f64::EPSILON {
+                ab_midline.set(clamped);
+                ab_da.queue_draw();
+            }
+        })
+    };
+
+    let ab_reference_setter: Rc<dyn Fn(Option<Rc<DecodedStill>>)> = {
+        let ab_surface = ab_surface.clone();
+        let ab_surface_dims = ab_surface_dims.clone();
+        let ab_da = ab_da.clone();
+        Rc::new(move |decoded: Option<Rc<DecodedStill>>| {
+            let new_surface = match decoded {
+                None => None,
+                Some(dec) => {
+                    if dec.width == 0 || dec.height == 0 {
+                        None
+                    } else {
+                        ab_surface_dims.set((dec.width as i32, dec.height as i32));
+                        decoded_to_surface(&dec).ok()
+                    }
+                }
+            };
+            if new_surface.is_none() {
+                ab_surface_dims.set((0, 0));
+            }
+            *ab_surface.borrow_mut() = new_surface;
+            ab_da.queue_draw();
+        })
+    };
+
+    // Capture button wiring — the caller handles ScopeFrame grabbing, disk
+    // write, and project mutation. The UI layer just forwards the click.
+    let on_capture_still = Rc::new(on_capture_still);
+    {
+        let on_capture_still = on_capture_still.clone();
+        ref_stills_capture_btn.connect_clicked(move |_| {
+            on_capture_still();
+        });
+    }
+
+    // ── Stills strip: rebuild on every list change ──
+    let on_select_still = Rc::new(on_select_still);
+    let on_delete_still = Rc::new(on_delete_still);
+    let on_rename_still = Rc::new(on_rename_still);
+    // Nested GTK4 popovers (context menu inside Overlays popover inside the
+    // MenuButton popover) can leave the outer Overlays popover's autohide
+    // stuck after the inner menu closes. Same issue as the aspect-mask
+    // dropdown earlier in this file — explicitly popdown the Overlays
+    // popover after any destructive still action so the user gets clear
+    // feedback that their action took effect.
+    let close_overlays_popover: Rc<dyn Fn()> = {
+        let overlays_popover = overlays_popover.clone();
+        Rc::new(move || {
+            overlays_popover.popdown();
+        })
+    };
+
+    let stills_strip_setter: Rc<dyn Fn(Vec<ReferenceStillSummary>, Option<String>)> = {
+        let ref_stills_strip = ref_stills_strip.clone();
+        let ref_stills_empty_hint = ref_stills_empty_hint.clone();
+        let ref_stills_capture_btn = ref_stills_capture_btn.clone();
+        let on_select_still = on_select_still.clone();
+        let on_delete_still = on_delete_still.clone();
+        let on_rename_still = on_rename_still.clone();
+        let close_overlays_popover = close_overlays_popover.clone();
+        Rc::new(move |stills: Vec<ReferenceStillSummary>, active_id: Option<String>| {
+            // Clear existing children.
+            while let Some(child) = ref_stills_strip.first_child() {
+                ref_stills_strip.remove(&child);
+            }
+            if stills.is_empty() {
+                ref_stills_strip.set_visible(false);
+                ref_stills_empty_hint.set_visible(true);
+            } else {
+                ref_stills_strip.set_visible(true);
+                ref_stills_empty_hint.set_visible(false);
+            }
+            // Cap the capture button when at max.
+            ref_stills_capture_btn.set_sensitive(stills.len() < 4);
+
+            for still in stills.iter() {
+                let cell = build_reference_still_cell(
+                    still,
+                    active_id.as_deref() == Some(still.id.as_str()),
+                    on_select_still.clone(),
+                    on_delete_still.clone(),
+                    on_rename_still.clone(),
+                    close_overlays_popover.clone(),
+                );
+                ref_stills_strip.insert(&cell, -1);
+            }
+        })
+    };
+
+    // Apply the initial stills list so the strip reflects the loaded project.
+    stills_strip_setter(initial_stills_summary, initial_active_still_id);
+
+    // ── Timecode burn-in setter + control wiring ──
+    let tc_burnin_updating: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    let timecode_burnin_setter: Rc<dyn Fn(bool, TimecodeBurninPosition)> = {
+        let enabled_state = tc_burnin_enabled_state.clone();
+        let position_state = tc_burnin_position_state.clone();
+        let tc_burnin_da = tc_burnin_da.clone();
+        let tc_burnin_check = tc_burnin_check.clone();
+        let tc_burnin_dropdown = tc_burnin_dropdown.clone();
+        let updating = tc_burnin_updating.clone();
+        Rc::new(move |enabled: bool, pos: TimecodeBurninPosition| {
+            enabled_state.set(enabled);
+            position_state.set(pos);
+            updating.set(true);
+            if tc_burnin_check.is_active() != enabled {
+                tc_burnin_check.set_active(enabled);
+            }
+            let idx = TimecodeBurninPosition::ALL
+                .iter()
+                .position(|p| *p == pos)
+                .unwrap_or(4) as u32;
+            if tc_burnin_dropdown.selected() != idx {
+                tc_burnin_dropdown.set_selected(idx);
+            }
+            updating.set(false);
+            tc_burnin_da.queue_draw();
+        })
+    };
+    {
+        let enabled_state = tc_burnin_enabled_state.clone();
+        let position_state = tc_burnin_position_state.clone();
+        let tc_burnin_da = tc_burnin_da.clone();
+        let on_changed = on_timecode_burnin_changed.clone();
+        let updating = tc_burnin_updating.clone();
+        tc_burnin_check.connect_toggled(move |btn| {
+            if updating.get() {
+                return;
+            }
+            let enabled = btn.is_active();
+            enabled_state.set(enabled);
+            tc_burnin_da.queue_draw();
+            on_changed(enabled, position_state.get());
+        });
+    }
+    {
+        let enabled_state = tc_burnin_enabled_state.clone();
+        let position_state = tc_burnin_position_state.clone();
+        let tc_burnin_da = tc_burnin_da.clone();
+        let on_changed = on_timecode_burnin_changed.clone();
+        let updating = tc_burnin_updating.clone();
+        let overlays_popover_close = overlays_popover.clone();
+        tc_burnin_dropdown.connect_selected_notify(move |dd| {
+            if updating.get() {
+                return;
+            }
+            let idx = dd.selected() as usize;
+            let pos = TimecodeBurninPosition::ALL
+                .get(idx)
+                .copied()
+                .unwrap_or_default();
+            position_state.set(pos);
+            tc_burnin_da.queue_draw();
+            on_changed(enabled_state.get(), pos);
+            // Dismiss the Overlays popover after a pick (same nested-popover
+            // autohide workaround used for the aspect-mask dropdown).
+            overlays_popover_close.popdown();
+        });
+    }
+
+    // Drive a steady redraw of the burn-in overlay by piggybacking on the HUD
+    // redraw timer the caller already ticks. `hud_redraw` below already drives
+    // `hud_da.queue_draw()`; we want the burn-in timecode to advance at the
+    // same cadence whenever the overlay is visible, so extend that closure.
+    let hud_redraw: Rc<dyn Fn()> = {
+        let inner = hud_redraw.clone();
+        let tc_da = tc_burnin_da.clone();
+        let tc_enabled = tc_burnin_enabled_state.clone();
+        Rc::new(move || {
+            inner();
+            if tc_enabled.get() {
+                tc_da.queue_draw();
+            }
+        })
+    };
+
     (
         root,
         pos_label,
@@ -1156,9 +2084,307 @@ pub fn build_program_monitor(
         safe_area_setter,
         false_color_setter,
         zebra_setter,
+        hud_setter,
+        hud_redraw,
+        aspect_mask_setter,
         frame_updater,
         subtitle_text_setter,
+        ab_enabled_setter,
+        ab_midline_setter,
+        ab_reference_setter,
+        stills_strip_setter,
+        timecode_burnin_setter,
     )
+}
+
+/// Convert a decoded RGBA reference still into a Cairo ARGB32 ImageSurface
+/// suitable for `cr.set_source_surface()`. On little-endian hosts Cairo
+/// stores ARgb32 as [B, G, R, A] in memory, so we byte-swap on load.
+fn decoded_to_surface(dec: &DecodedStill) -> anyhow::Result<gtk::cairo::ImageSurface> {
+    let w = dec.width as i32;
+    let h = dec.height as i32;
+    let stride = gtk::cairo::Format::ARgb32
+        .stride_for_width(dec.width)
+        .map_err(|_| anyhow::anyhow!("stride error"))? as usize;
+    let mut surface = gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, w, h)
+        .map_err(|_| anyhow::anyhow!("surface create failed"))?;
+    {
+        let mut buf = surface
+            .data()
+            .map_err(|_| anyhow::anyhow!("surface data error"))?;
+        let width = dec.width as usize;
+        let height = dec.height as usize;
+        for row in 0..height {
+            let src_row = row * width * 4;
+            let dst_row = row * stride;
+            for col in 0..width {
+                let s = src_row + col * 4;
+                let d = dst_row + col * 4;
+                if s + 3 < dec.rgba.len() && d + 3 < buf.len() {
+                    buf[d] = dec.rgba[s + 2]; // B
+                    buf[d + 1] = dec.rgba[s + 1]; // G
+                    buf[d + 2] = dec.rgba[s]; // R
+                    buf[d + 3] = dec.rgba[s + 3]; // A
+                }
+            }
+        }
+    }
+    Ok(surface)
+}
+
+/// Build a single strip cell for a reference still (thumbnail + label + right-
+/// click context menu). Clicking the cell asks the caller to activate this
+/// still as the A/B reference.
+fn build_reference_still_cell(
+    still: &ReferenceStillSummary,
+    is_active: bool,
+    on_select: Rc<dyn Fn(Option<String>)>,
+    on_delete: Rc<dyn Fn(String)>,
+    on_rename: Rc<dyn Fn(String, String)>,
+    close_overlays_popover: Rc<dyn Fn()>,
+) -> FlowBoxChild {
+    const CELL_W: i32 = 120;
+    const CELL_H: i32 = 68;
+
+    let container = GBox::new(Orientation::Vertical, 2);
+    container.set_size_request(CELL_W, CELL_H + 18);
+
+    // Thumbnail paint area.
+    let thumb_da = DrawingArea::new();
+    thumb_da.set_content_width(CELL_W);
+    thumb_da.set_content_height(CELL_H);
+    let thumb_surface = still
+        .thumbnail
+        .as_ref()
+        .and_then(|dec| decoded_to_surface(dec).ok());
+    let is_missing = still.thumbnail.is_none();
+    let highlight_active = is_active;
+    thumb_da.set_draw_func(move |_da, cr, width, height| {
+        let w = width as f64;
+        let h = height as f64;
+        cr.set_source_rgb(0.08, 0.08, 0.08);
+        cr.rectangle(0.0, 0.0, w, h);
+        let _ = cr.fill();
+        if let Some(ref surface) = thumb_surface {
+            let sw = surface.width() as f64;
+            let sh = surface.height() as f64;
+            if sw > 0.0 && sh > 0.0 {
+                let src_ratio = sw / sh;
+                let dst_ratio = w / h;
+                let (draw_w, draw_h) = if src_ratio > dst_ratio {
+                    (w, w / src_ratio)
+                } else {
+                    (h * src_ratio, h)
+                };
+                let draw_x = (w - draw_w) * 0.5;
+                let draw_y = (h - draw_h) * 0.5;
+                cr.save().ok();
+                cr.translate(draw_x, draw_y);
+                cr.scale(draw_w / sw, draw_h / sh);
+                let _ = cr.set_source_surface(surface, 0.0, 0.0);
+                cr.paint().ok();
+                cr.restore().ok();
+            }
+        } else if is_missing {
+            cr.set_source_rgb(0.6, 0.25, 0.25);
+            cr.set_line_width(1.0);
+            let pad = 6.0;
+            cr.rectangle(pad, pad, w - pad * 2.0, h - pad * 2.0);
+            let _ = cr.stroke();
+            cr.move_to(pad, pad);
+            cr.line_to(w - pad, h - pad);
+            let _ = cr.stroke();
+            cr.move_to(w - pad, pad);
+            cr.line_to(pad, h - pad);
+            let _ = cr.stroke();
+        }
+        // Active highlight border.
+        if highlight_active {
+            cr.set_source_rgb(0.95, 0.75, 0.15);
+            cr.set_line_width(3.0);
+            cr.rectangle(1.5, 1.5, w - 3.0, h - 3.0);
+            let _ = cr.stroke();
+        }
+    });
+    container.append(&thumb_da);
+
+    // Label row.
+    let label_text = if still.label.trim().is_empty() {
+        "(untitled)".to_string()
+    } else {
+        still.label.clone()
+    };
+    let label = Label::new(Some(&label_text));
+    label.set_xalign(0.5);
+    label.set_max_width_chars(14);
+    label.set_ellipsize(pango::EllipsizeMode::End);
+    label.add_css_class("dim-label");
+    container.append(&label);
+
+    // Left-click selects this still as the A/B reference.
+    {
+        let id = still.id.clone();
+        let on_select = on_select.clone();
+        let click = GestureClick::new();
+        click.set_button(1);
+        click.connect_pressed(move |_gesture, _n, _x, _y| {
+            on_select(Some(id.clone()));
+        });
+        container.add_controller(click);
+    }
+
+    // Right-click → context menu (Rename / Delete).
+    {
+        let id = still.id.clone();
+        let label_text = still.label.clone();
+        let on_delete = on_delete.clone();
+        let on_rename = on_rename.clone();
+        let close_overlays_popover = close_overlays_popover.clone();
+        let click = GestureClick::new();
+        click.set_button(3);
+        let container_weak = container.downgrade();
+        click.connect_pressed(move |_gesture, _n, x, y| {
+            let close_overlays_for_menu = close_overlays_popover.clone();
+            let Some(container) = container_weak.upgrade() else {
+                return;
+            };
+            let popover = Popover::new();
+            popover.set_parent(&container);
+            popover.set_has_arrow(false);
+            popover.set_autohide(true);
+            popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
+                x as i32, y as i32, 1, 1,
+            )));
+            // Popovers created via `set_parent` must be explicitly unparented
+            // when they close, otherwise they linger in the widget tree and
+            // subsequent clicks can fall through without dismissing the menu.
+            popover.connect_closed(|pop| {
+                pop.unparent();
+            });
+            let menu_box = GBox::new(Orientation::Vertical, 2);
+            menu_box.set_margin_start(4);
+            menu_box.set_margin_end(4);
+            menu_box.set_margin_top(4);
+            menu_box.set_margin_bottom(4);
+
+            let rename_btn = Button::with_label("Rename…");
+            rename_btn.add_css_class("flat");
+            let delete_btn = Button::with_label("Delete");
+            delete_btn.add_css_class("flat");
+
+            {
+                let id = id.clone();
+                let label_text = label_text.clone();
+                let on_rename = on_rename.clone();
+                let container = container.clone();
+                let popover_weak = popover.downgrade();
+                let close_overlays = close_overlays_for_menu.clone();
+                rename_btn.connect_clicked(move |_| {
+                    if let Some(p) = popover_weak.upgrade() {
+                        p.popdown();
+                    }
+                    // Close the parent Overlays popover too — the rename
+                    // prompt opens a popover anchored to the cell, and a
+                    // third-level popover inside the stuck-autohide Overlays
+                    // menu is visually confusing. The user can reopen
+                    // Overlays after rename if they need more tweaks.
+                    close_overlays();
+                    prompt_rename_reference_still(
+                        &container,
+                        id.clone(),
+                        label_text.clone(),
+                        on_rename.clone(),
+                    );
+                });
+            }
+            {
+                // The delete handler triggers a strip rebuild, which destroys
+                // the widget tree this popover is parented to. Defer the
+                // actual delete to the next idle tick so the popover's
+                // popdown animation + `connect_closed` unparent land before
+                // the parent cell goes away. Also close the outer Overlays
+                // popover so the user gets clear feedback and GTK doesn't
+                // leave the nested-autohide state stuck.
+                let id = id.clone();
+                let on_delete = on_delete.clone();
+                let popover_weak = popover.downgrade();
+                let close_overlays = close_overlays_for_menu.clone();
+                delete_btn.connect_clicked(move |_| {
+                    if let Some(p) = popover_weak.upgrade() {
+                        p.popdown();
+                    }
+                    close_overlays();
+                    let id = id.clone();
+                    let on_delete = on_delete.clone();
+                    gtk::glib::idle_add_local_once(move || {
+                        on_delete(id);
+                    });
+                });
+            }
+            menu_box.append(&rename_btn);
+            menu_box.append(&delete_btn);
+            popover.set_child(Some(&menu_box));
+            popover.popup();
+        });
+        container.add_controller(click);
+    }
+
+    let child = FlowBoxChild::new();
+    child.set_child(Some(&container));
+    child.set_focusable(false);
+    child
+}
+
+/// Minimal rename prompt using a transient Popover with an Entry. Avoids the
+/// deprecated gtk::Dialog path.
+fn prompt_rename_reference_still(
+    anchor: &impl IsA<gtk::Widget>,
+    id: String,
+    current: String,
+    on_rename: Rc<dyn Fn(String, String)>,
+) {
+    let popover = Popover::new();
+    popover.set_parent(anchor);
+    popover.set_has_arrow(true);
+    popover.set_autohide(true);
+    popover.connect_closed(|pop| {
+        pop.unparent();
+    });
+    let vbox = GBox::new(Orientation::Vertical, 4);
+    vbox.set_margin_start(6);
+    vbox.set_margin_end(6);
+    vbox.set_margin_top(6);
+    vbox.set_margin_bottom(6);
+    let entry = gtk::Entry::new();
+    entry.set_text(&current);
+    entry.set_placeholder_text(Some("Reference still name"));
+    entry.set_width_chars(20);
+    let apply_btn = Button::with_label("Rename");
+    apply_btn.add_css_class("suggested-action");
+    vbox.append(&entry);
+    vbox.append(&apply_btn);
+    popover.set_child(Some(&vbox));
+    {
+        let entry = entry.clone();
+        let id = id.clone();
+        let on_rename = on_rename.clone();
+        let popover_weak = popover.downgrade();
+        apply_btn.connect_clicked(move |_| {
+            let new_label = entry.text().to_string();
+            on_rename(id.clone(), new_label);
+            if let Some(p) = popover_weak.upgrade() {
+                p.popdown();
+            }
+        });
+    }
+    {
+        let entry_apply = apply_btn.clone();
+        entry.connect_activate(move |_| {
+            entry_apply.emit_clicked();
+        });
+    }
+    popover.popup();
+    entry.grab_focus();
 }
 
 #[cfg(test)]

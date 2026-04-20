@@ -43,6 +43,37 @@ pub fn parse_otio_with_path(json: &str, otio_path: Option<&Path>) -> Result<Proj
     if let Some(gain) = us_project.master_gain_db {
         project.master_gain_db = gain;
     }
+    // Restore bus state.
+    if let Some(db) = us_project.dialogue_bus_gain_db {
+        project.dialogue_bus.gain_db = db;
+    }
+    if let Some(v) = us_project.dialogue_bus_muted {
+        project.dialogue_bus.muted = v;
+    }
+    if let Some(v) = us_project.dialogue_bus_soloed {
+        project.dialogue_bus.soloed = v;
+    }
+    if let Some(db) = us_project.effects_bus_gain_db {
+        project.effects_bus.gain_db = db;
+    }
+    if let Some(v) = us_project.effects_bus_muted {
+        project.effects_bus.muted = v;
+    }
+    if let Some(v) = us_project.effects_bus_soloed {
+        project.effects_bus.soloed = v;
+    }
+    if let Some(db) = us_project.music_bus_gain_db {
+        project.music_bus.gain_db = db;
+    }
+    if let Some(v) = us_project.music_bus_muted {
+        project.music_bus.muted = v;
+    }
+    if let Some(v) = us_project.music_bus_soloed {
+        project.music_bus.soloed = v;
+    }
+    if !us_project.reference_stills.is_empty() {
+        project.reference_stills = us_project.reference_stills.clone();
+    }
     // Clear default tracks that Project::new creates.
     project.tracks.clear();
 
@@ -91,6 +122,12 @@ pub fn parse_otio_with_path(json: &str, otio_path: Option<&Path>) -> Result<Proj
                     "large" => crate::model::track::TrackHeightPreset::Large,
                     _ => crate::model::track::TrackHeightPreset::Medium,
                 };
+            }
+            if let Some(db) = us.gain_db {
+                track.gain_db = db;
+            }
+            if let Some(p) = us.pan {
+                track.pan = p;
             }
         }
 
@@ -149,6 +186,9 @@ pub fn parse_otio_with_path(json: &str, otio_path: Option<&Path>) -> Result<Proj
                 position_ns: pos_ns,
                 label: m.name.clone(),
                 color,
+                notes: marker_metadata_from_root(&m.metadata)
+                    .and_then(|us| us.notes)
+                    .unwrap_or_default(),
             });
         }
 
@@ -231,6 +271,9 @@ fn otio_clip_to_clip(
         }
         if let Some(v) = us.match_eq_bands.clone() {
             clip.match_eq_bands = v;
+        }
+        if let Some(v) = us.render_replace_enabled {
+            clip.render_replace_enabled = v;
         }
         if let Some(v) = us.voice_enhance {
             clip.voice_enhance = v;

@@ -15,6 +15,8 @@ Animated SVG clips are rendered to cached silent video during export. Static ima
 
 Tracked clip transforms and first-mask attachments use the same motion data during export as they do in Program Monitor preview, including trackers with dense sample counts.
 
+When an export queue job is actively running, the footer **Jobs** dropdown next to **Workspace** shows the current export with live progress, and the bottom status bar mirrors that continuous activity. Pending queue entries that have not started yet stay in the queue dialog rather than appearing as active jobs.
+
 ## Export Dialog Options
 
 ### Video Codec

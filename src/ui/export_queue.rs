@@ -15,6 +15,7 @@ pub fn build_export_queue_dialog(
     project: Rc<RefCell<Project>>,
     bg_removal_cache: Rc<RefCell<BgRemovalCache>>,
     frame_interp_cache: Rc<RefCell<FrameInterpCache>>,
+    render_replace_cache: Rc<RefCell<crate::media::render_replace_cache::RenderReplaceCache>>,
     transient_for: Option<&gtk::Window>,
 ) -> gtk::Window {
     let win = gtk::Window::builder()
@@ -360,6 +361,13 @@ pub fn build_export_queue_dialog(
             let interp_paths = frame_interp_cache
                 .borrow()
                 .snapshot_paths_by_clip_id(&proj_snapshot);
+            // Snapshot the render-replace sidecar map once for the
+            // whole queue. Each job runs on a fresh thread from this
+            // snapshot, so queued jobs consume whatever bakes are
+            // ready at queue-start time (mid-queue bake completions
+            // aren't picked up — but the queue is already running
+            // non-interactively). Empty when the cache has no bakes.
+            let rr_paths = render_replace_cache.borrow().paths.clone();
 
             std::thread::spawn(move || {
                 for job in &jobs_snapshot {
@@ -371,6 +379,7 @@ pub fn build_export_queue_dialog(
                     let proj2 = proj_snapshot.clone();
                     let bg_paths2 = bg_paths.clone();
                     let interp_paths2 = interp_paths.clone();
+                    let rr_paths2 = rr_paths.clone();
                     let job_id = job.id.clone();
                     let tx2 = tx.clone();
                     let handle = std::thread::spawn(move || {
@@ -381,6 +390,7 @@ pub fn build_export_queue_dialog(
                             None,
                             &bg_paths2,
                             &interp_paths2,
+                            &rr_paths2,
                             ptx.clone(),
                         ) {
                             let _ = ptx.send(ExportProgress::Error(e.to_string()));
@@ -428,12 +438,15 @@ pub fn build_export_queue_dialog(
                             let mut q = queue_state.borrow_mut();
                             if let Some(job) = q.jobs.iter_mut().find(|j| j.id == id) {
                                 job.status = ExportQueueJobStatus::Running;
+                                job.error = None;
                             }
+                            ui_state::set_export_queue_runtime_progress(&id, None);
                             ui_state::save_export_queue_state(&q);
                             drop(q);
                             rebuild_list_fn(&list_box, &queue_state, &status_label, &btn_run_poll);
                         }
                         QueueMsg::Progress(id, p) => {
+                            ui_state::set_export_queue_runtime_progress(&id, Some(p));
                             status_label.set_text(&format!("Exporting… {:.0}%", p * 100.0));
                         }
                         QueueMsg::JobDone(id) => {
@@ -441,6 +454,7 @@ pub fn build_export_queue_dialog(
                             if let Some(job) = q.jobs.iter_mut().find(|j| j.id == id) {
                                 job.status = ExportQueueJobStatus::Done;
                             }
+                            ui_state::set_export_queue_runtime_progress(&id, None);
                             ui_state::save_export_queue_state(&q);
                             drop(q);
                             rebuild_list_fn(&list_box, &queue_state, &status_label, &btn_run_poll);
@@ -451,6 +465,7 @@ pub fn build_export_queue_dialog(
                                 job.status = ExportQueueJobStatus::Error;
                                 job.error = Some(err);
                             }
+                            ui_state::set_export_queue_runtime_progress(&id, None);
                             ui_state::save_export_queue_state(&q);
                             drop(q);
                             rebuild_list_fn(&list_box, &queue_state, &status_label, &btn_run_poll);
