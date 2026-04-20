@@ -1768,7 +1768,12 @@ pub fn build_media_browser(
                                 child_widget = w.next_sibling();
                                 continue;
                             }
-                            let payload = format!("{}|{}", item.source_path, item.duration_ns);
+                            let payload = format!(
+                                "{}|{}|{}",
+                                item.source_path,
+                                item.effective_duration_ns(),
+                                item.id
+                            );
                             let val = glib::Value::from(&payload);
                             for ctrl in w.observe_controllers().into_iter().flatten() {
                                 if let Ok(ds) = ctrl.downcast::<gtk::DragSource>() {
@@ -2088,7 +2093,13 @@ fn make_grid_item(
     search_text: &str,
 ) -> FlowBoxChild {
     let path = item.source_path.clone();
-    let duration_ns = item.duration_ns;
+    // Subclips carry the parent's total duration in `duration_ns` but only
+    // play their window; use effective_duration_ns so the drag payload
+    // matches the time the dropped clip will actually occupy, and offset
+    // hover-scrub math by the subclip's in-point so scrubbing the card
+    // traverses the subclip window instead of the parent file.
+    let duration_ns = item.effective_duration_ns();
+    let source_in_offset_ns = item.effective_source_in_ns();
     let is_missing = item.is_missing;
     let is_audio_only = item.is_audio_only;
     let has_backing_file = item.has_backing_file();
@@ -2100,7 +2111,7 @@ fn make_grid_item(
     // to extract; trying causes noisy ffmpeg "Output file does not contain any
     // stream" errors.
     if has_backing_file && duration_ns > 0 && !is_audio_only {
-        thumb_cache.borrow_mut().request(&path, 0);
+        thumb_cache.borrow_mut().request(&path, source_in_offset_ns);
     }
 
     let cell = GBox::new(Orientation::Vertical, 2);
@@ -2191,7 +2202,7 @@ fn make_grid_item(
                     return;
                 }
             }
-            if let Some(surf) = cache.get(&path_owned, 0) {
+            if let Some(surf) = cache.get(&path_owned, source_in_offset_ns) {
                 let sx = w as f64 / THUMB_W as f64;
                 let sy = h as f64 / THUMB_H as f64;
                 cr.scale(sx, sy);
@@ -2221,7 +2232,8 @@ fn make_grid_item(
             motion.connect_motion(move |_ctrl, x, _y| {
                 let width = thumb_area_inner.width().max(1) as f64;
                 let frac = (x / width).clamp(0.0, 1.0);
-                let raw_t = (frac * duration_ns as f64).round() as u64;
+                let raw_t = source_in_offset_ns
+                    + (frac * duration_ns as f64).round() as u64;
                 let bucket =
                     crate::media::thumb_cache::quantize_hover_scrub_time_ns(raw_t);
                 if scrub_time_ns.get() != Some(bucket) {
@@ -2558,11 +2570,17 @@ fn media_secondary_text(item: &MediaItem) -> Option<String> {
     if let Some(codec) = item.codec_summary.as_ref() {
         parts.push(codec.clone());
     }
-    if item.duration_ns > 0 {
-        parts.push(format_duration_short(item.duration_ns));
+    let display_duration_ns = item.effective_duration_ns();
+    if display_duration_ns > 0 {
+        parts.push(format_duration_short(display_duration_ns));
     }
-    if let Some(file_size_bytes) = item.file_size_bytes {
-        parts.push(format_file_size(file_size_bytes));
+    // Subclips reference the parent file so the on-disk size is the
+    // parent's — showing it on the subclip card is misleading ("0:02 • 576 MB"
+    // suggests a fat subclip). Only include file_size for top-level items.
+    if !item.is_subclip() {
+        if let Some(file_size_bytes) = item.file_size_bytes {
+            parts.push(format_file_size(file_size_bytes));
+        }
     }
     if parts.is_empty() {
         None
@@ -2723,14 +2741,24 @@ fn media_tooltip_text(item: &MediaItem, search_text: Option<&str>) -> String {
     if let Some(frame_rate) = media_frame_rate_text(item) {
         lines.push(format!("Frame rate: {frame_rate}"));
     }
-    if item.duration_ns > 0 {
+    let tooltip_duration_ns = item.effective_duration_ns();
+    if tooltip_duration_ns > 0 {
         lines.push(format!(
             "Duration: {}",
-            format_duration_short(item.duration_ns)
+            format_duration_short(tooltip_duration_ns)
         ));
     }
-    if let Some(file_size_bytes) = item.file_size_bytes {
-        lines.push(format!("Size: {}", format_file_size(file_size_bytes)));
+    if item.is_subclip() {
+        lines.push(format!(
+            "Subclip range: {} – {}",
+            format_duration_short(item.effective_source_in_ns()),
+            format_duration_short(item.effective_source_out_ns())
+        ));
+    }
+    if !item.is_subclip() {
+        if let Some(file_size_bytes) = item.file_size_bytes {
+            lines.push(format!("Size: {}", format_file_size(file_size_bytes)));
+        }
     }
     if let Some(rating_text) = media_rating_text(item.rating) {
         lines.push(format!("Rating: {rating_text}"));
