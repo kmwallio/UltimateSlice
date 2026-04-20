@@ -15377,12 +15377,23 @@ pub fn build_window(
             } else {
                 set_audio_only(source_info.is_audio_only);
             }
+            // Preserve Mark In / Mark Out when the selected path
+            // hasn't changed. This runs on every emission of the
+            // flow-box selection-change signal — including redundant
+            // re-selections from the library right-click auto-
+            // select fix, which would otherwise wipe marks that the
+            // user just set with I / O and was about to use for
+            // Create Subclip / Sync / etc. Reset only when the
+            // source actually changed (same guard as the playbin
+            // reload above).
             let mut m = source_marks.borrow_mut();
             m.path = path;
             m.duration_ns = duration_ns;
-            m.in_ns = 0;
-            m.out_ns = duration_ns;
-            m.display_pos_ns = 0;
+            if should_reload {
+                m.in_ns = 0;
+                m.out_ns = duration_ns;
+                m.display_pos_ns = 0;
+            }
             m.is_audio_only = source_info.is_audio_only;
             m.has_audio = source_info.has_audio;
             m.is_image = source_info.is_image;
