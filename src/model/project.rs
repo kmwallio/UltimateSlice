@@ -577,6 +577,32 @@ impl Project {
         Self::find_clip_ref_recursive(&self.tracks, clip_id)
     }
 
+    /// Count every timeline clip (recursively including those inside
+    /// compound clips) whose `source_path` matches any entry in
+    /// `source_paths`. Used by the Media Library "Remove from
+    /// Library" confirmation dialog to tell the user how many
+    /// timeline clips will go offline if they proceed. Scans all
+    /// tracks; a single source may be referenced by multiple clips.
+    pub fn count_clips_using_source_paths(&self, source_paths: &[String]) -> usize {
+        fn walk(tracks: &[super::track::Track], paths: &[String], acc: &mut usize) {
+            for track in tracks {
+                for clip in &track.clips {
+                    if !clip.source_path.is_empty()
+                        && paths.iter().any(|p| p == &clip.source_path)
+                    {
+                        *acc += 1;
+                    }
+                    if let Some(ref inner) = clip.compound_tracks {
+                        walk(inner, paths, acc);
+                    }
+                }
+            }
+        }
+        let mut count = 0usize;
+        walk(&self.tracks, source_paths, &mut count);
+        count
+    }
+
     fn find_clip_ref_recursive<'a>(
         tracks: &'a [Track],
         clip_id: &str,
@@ -937,6 +963,74 @@ impl Project {
 mod tests {
     use super::*;
     use crate::model::clip::{Clip, ClipKind, ClipMask, MotionTracker, TrackingBinding};
+
+    #[test]
+    fn count_clips_using_source_paths_counts_direct_and_nested_uses() {
+        // Build: one video track with two clips that share the target
+        // source, one compound clip whose internal track holds a
+        // third clip using the same source, plus an unrelated clip.
+        let mut project = Project::new("usage-count");
+        project.tracks.clear();
+        let mut video_track = crate::model::track::Track::new_video("V1");
+        let target_src = "/tmp/target.mp4".to_string();
+        video_track
+            .clips
+            .push(Clip::new(target_src.clone(), 1_000_000_000, 0, ClipKind::Video));
+        video_track.clips.push(Clip::new(
+            target_src.clone(),
+            1_000_000_000,
+            2_000_000_000,
+            ClipKind::Video,
+        ));
+        video_track.clips.push(Clip::new(
+            "/tmp/other.mp4",
+            1_000_000_000,
+            4_000_000_000,
+            ClipKind::Video,
+        ));
+        // Compound containing a clip that uses the target source.
+        let mut inner_track = crate::model::track::Track::new_video("Compound V1");
+        inner_track.clips.push(Clip::new(
+            target_src.clone(),
+            1_000_000_000,
+            0,
+            ClipKind::Video,
+        ));
+        let mut compound = Clip::new("", 5_000_000_000, 5_000_000_000, ClipKind::Compound);
+        compound.compound_tracks = Some(vec![inner_track]);
+        video_track.clips.push(compound);
+        project.tracks.push(video_track);
+
+        // 2 direct uses on video_track + 1 inside the compound = 3
+        let count = project.count_clips_using_source_paths(&[target_src.clone()]);
+        assert_eq!(count, 3);
+        // Unrelated source → 0
+        let count = project.count_clips_using_source_paths(&["/tmp/nope.mp4".to_string()]);
+        assert_eq!(count, 0);
+        // Two paths at once → 3 target + 1 other = 4
+        let count = project.count_clips_using_source_paths(&[
+            target_src,
+            "/tmp/other.mp4".to_string(),
+        ]);
+        assert_eq!(count, 4);
+    }
+
+    #[test]
+    fn count_clips_using_source_paths_ignores_empty_paths() {
+        // A compound clip has source_path="" by convention — it must
+        // not match the empty-path entry, otherwise every compound
+        // would look like a "use" of every item missing a source.
+        let mut project = Project::new("empty-path");
+        project.tracks.clear();
+        let mut t = crate::model::track::Track::new_video("V1");
+        t.clips.push(Clip::new("", 5_000_000_000, 0, ClipKind::Compound));
+        project.tracks.push(t);
+        assert_eq!(
+            project.count_clips_using_source_paths(&["".to_string()]),
+            0,
+            "empty source path in the query list must count zero, not every clip with source_path=\"\""
+        );
+    }
 
     #[test]
     fn test_project_new_defaults() {

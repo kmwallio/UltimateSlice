@@ -168,6 +168,13 @@ pub fn build_media_browser(
     on_relink_media: Rc<dyn Fn()>,
     on_create_multicam_from_browser: Rc<dyn Fn(Vec<String>)>,
     on_library_changed: Rc<dyn Fn()>,
+    // Given a set of source paths about to be removed from the
+    // library, return how many timeline clips reference them. Used
+    // to surface a "N timeline clips will go offline" warning in
+    // the Remove-from-Library confirmation dialog. Implemented in
+    // window.rs by walking Project::tracks recursively (including
+    // compound_tracks).
+    on_check_library_usage: Rc<dyn Fn(&[String]) -> usize>,
     proxy_cache: Rc<RefCell<ProxyCache>>,
     preferences_state: Rc<RefCell<PreferencesState>>,
 ) -> (GBox, Rc<dyn Fn()>, Rc<dyn Fn()>) {
@@ -785,6 +792,7 @@ pub fn build_media_browser(
         let filters_ctx = filters.clone();
         let on_library_changed_ctx = on_library_changed.clone();
         let on_reverse_match_frame_ctx = on_reverse_match_frame.clone();
+        let on_check_library_usage_ctx = on_check_library_usage.clone();
         let rclick = gtk::GestureClick::new();
         rclick.set_button(3); // right button
         rclick.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -1123,6 +1131,49 @@ pub fn build_media_browser(
                                     &all_media_btn,
                                     &filters,
                                     &on_library_changed,
+                                );
+                            });
+                        }
+
+                        // Remove from Library — also surfaces a
+                        // confirmation dialog when timeline clips
+                        // reference the item(s), so users don't
+                        // accidentally orphan clips on the timeline.
+                        let remove_btn = add_menu_item(&menu_box, "Remove from Library");
+                        {
+                            let item_ids = selected_ids.clone();
+                            let library = library_ctx.clone();
+                            let flow_box = flow_box_ctx.clone();
+                            let thumb_cache = thumb_cache_ctx.clone();
+                            let flow_box_paths = flow_box_paths_ctx.clone();
+                            let current_bin_id = current_bin_id_ctx.clone();
+                            let show_all_media = show_all_media_ctx.clone();
+                            let breadcrumb_bar = breadcrumb_bar_ctx.clone();
+                            let all_media_btn = all_media_btn_ctx.clone();
+                            let filters = filters_ctx.clone();
+                            let popover = popover.clone();
+                            let on_library_changed = on_library_changed_ctx.clone();
+                            let on_check_library_usage =
+                                on_check_library_usage_ctx.clone();
+                            remove_btn.connect_clicked(move |btn| {
+                                popover.popdown();
+                                let parent_window = btn
+                                    .root()
+                                    .and_then(|r| r.downcast::<gtk::Window>().ok());
+                                remove_items_from_library_with_confirm(
+                                    &item_ids,
+                                    &library,
+                                    &flow_box,
+                                    &thumb_cache,
+                                    &flow_box_paths,
+                                    &current_bin_id,
+                                    &show_all_media,
+                                    &breadcrumb_bar,
+                                    &all_media_btn,
+                                    &filters,
+                                    &on_library_changed,
+                                    &on_check_library_usage,
+                                    parent_window.as_ref(),
                                 );
                             });
                         }
@@ -3224,6 +3275,164 @@ fn delete_bin(
 }
 
 /// Move media items to a bin (or root if bin_id is None).
+/// Core removal: delete the given library items, purge any smart-
+/// collection pins that referenced them, and refresh the browser.
+/// Does NOT touch the timeline — any clips whose `source_path`
+/// matched one of the removed items will surface as OFFLINE (via
+/// the existing `is_missing` detection pass that runs on project
+/// reload). Cache entries (proxy / thumbnail / waveform / etc.)
+/// stay on disk and get cleaned up by the existing eviction /
+/// project-close paths.
+fn remove_items_from_library(
+    item_ids: &[String],
+    library: &Rc<RefCell<MediaLibrary>>,
+    flow_box: &FlowBox,
+    thumb_cache: &Rc<RefCell<ThumbnailCache>>,
+    flow_box_paths: &Rc<RefCell<Vec<FlowBoxEntry>>>,
+    current_bin_id: &Rc<RefCell<Option<String>>>,
+    show_all_media: &Rc<RefCell<bool>>,
+    breadcrumb_bar: &GBox,
+    all_media_btn: &Button,
+    filters: &Rc<RefCell<MediaFilterCriteria>>,
+    on_library_changed: &Rc<dyn Fn()>,
+) {
+    {
+        let mut lib = library.borrow_mut();
+        // Drop matching items from the master list.
+        lib.items.retain(|item| !item_ids.contains(&item.id));
+    }
+    refresh_bin_view(
+        library,
+        flow_box,
+        thumb_cache,
+        flow_box_paths,
+        current_bin_id,
+        show_all_media,
+        breadcrumb_bar,
+        all_media_btn,
+        filters,
+        on_library_changed,
+    );
+    on_library_changed();
+}
+
+/// User-facing entry point: check whether any selected item is used
+/// on the timeline; if so, ask for confirmation with the usage count
+/// before proceeding. If no timeline use, remove immediately.
+#[allow(clippy::too_many_arguments)]
+fn remove_items_from_library_with_confirm(
+    item_ids: &[String],
+    library: &Rc<RefCell<MediaLibrary>>,
+    flow_box: &FlowBox,
+    thumb_cache: &Rc<RefCell<ThumbnailCache>>,
+    flow_box_paths: &Rc<RefCell<Vec<FlowBoxEntry>>>,
+    current_bin_id: &Rc<RefCell<Option<String>>>,
+    show_all_media: &Rc<RefCell<bool>>,
+    breadcrumb_bar: &GBox,
+    all_media_btn: &Button,
+    filters: &Rc<RefCell<MediaFilterCriteria>>,
+    on_library_changed: &Rc<dyn Fn()>,
+    on_check_library_usage: &Rc<dyn Fn(&[String]) -> usize>,
+    parent: Option<&gtk::Window>,
+) {
+    if item_ids.is_empty() {
+        return;
+    }
+
+    // Collect the source paths for timeline-usage checking. Items
+    // without a backing file (e.g. generated media) can't be
+    // referenced by timeline clips' source_path, so they get
+    // skipped in the count.
+    let source_paths: Vec<String> = {
+        let lib = library.borrow();
+        lib.items
+            .iter()
+            .filter(|i| item_ids.contains(&i.id))
+            .map(|i| i.source_path.clone())
+            .filter(|p| !p.is_empty())
+            .collect()
+    };
+    let usage_count = if source_paths.is_empty() {
+        0
+    } else {
+        on_check_library_usage(&source_paths)
+    };
+
+    if usage_count == 0 {
+        // No timeline clips reference these items — straight removal.
+        remove_items_from_library(
+            item_ids,
+            library,
+            flow_box,
+            thumb_cache,
+            flow_box_paths,
+            current_bin_id,
+            show_all_media,
+            breadcrumb_bar,
+            all_media_btn,
+            filters,
+            on_library_changed,
+        );
+        return;
+    }
+
+    // Used on the timeline — surface a confirmation dialog.
+    let item_label = if item_ids.len() == 1 {
+        "1 item".to_string()
+    } else {
+        format!("{} items", item_ids.len())
+    };
+    let clip_label = if usage_count == 1 {
+        "1 timeline clip".to_string()
+    } else {
+        format!("{usage_count} timeline clips")
+    };
+    let message = format!(
+        "Remove {item_label} from the Media Library?\n\n\
+         {clip_label} on the timeline will be marked OFFLINE \
+         but will not be deleted. You can relink them later if you \
+         re-import the source file."
+    );
+
+    let dialog = gtk::AlertDialog::builder()
+        .message("Remove from Library")
+        .detail(&message)
+        .buttons(["Cancel", "Remove"])
+        .cancel_button(0)
+        .default_button(0)
+        .modal(true)
+        .build();
+
+    let item_ids = item_ids.to_vec();
+    let library = library.clone();
+    let flow_box = flow_box.clone();
+    let thumb_cache = thumb_cache.clone();
+    let flow_box_paths = flow_box_paths.clone();
+    let current_bin_id = current_bin_id.clone();
+    let show_all_media = show_all_media.clone();
+    let breadcrumb_bar = breadcrumb_bar.clone();
+    let all_media_btn = all_media_btn.clone();
+    let filters = filters.clone();
+    let on_library_changed = on_library_changed.clone();
+    dialog.choose(parent, gio::Cancellable::NONE, move |result| {
+        if let Ok(1) = result {
+            remove_items_from_library(
+                &item_ids,
+                &library,
+                &flow_box,
+                &thumb_cache,
+                &flow_box_paths,
+                &current_bin_id,
+                &show_all_media,
+                &breadcrumb_bar,
+                &all_media_btn,
+                &filters,
+                &on_library_changed,
+            );
+        }
+    });
+}
+
 fn move_items_to_bin(
     item_ids: &[String],
     bin_id: Option<String>,

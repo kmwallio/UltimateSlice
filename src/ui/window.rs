@@ -15529,6 +15529,12 @@ pub fn build_window(
         });
     }
 
+    let on_check_library_usage: Rc<dyn Fn(&[String]) -> usize> = {
+        let project = project.clone();
+        Rc::new(move |paths: &[String]| -> usize {
+            project.borrow().count_clips_using_source_paths(paths)
+        })
+    };
     let (browser, clear_media_selection, force_rebuild_media_browser) =
         media_browser::build_media_browser(
             library.clone(),
@@ -15537,6 +15543,7 @@ pub fn build_window(
             on_relink_media_gui.clone(),
             on_create_multicam_from_browser,
             on_library_changed.clone(),
+            on_check_library_usage,
             proxy_cache.clone(),
             preferences_state.clone(),
         );
