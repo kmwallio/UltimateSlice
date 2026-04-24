@@ -1,9 +1,11 @@
 use crate::media::program_player::{ProgramPlayer, ScopeFrame};
 use crate::media::reference_still::DecodedStill;
+use crate::media::thumb_cache::ThumbnailCache;
 use crate::model::project::{FrameRate, TimecodeBurninPosition};
 use crate::ui::colors::{LUMA_B, LUMA_G, LUMA_R};
 use crate::ui::timecode;
-use crate::ui_state::AspectMaskPreset;
+use crate::ui::timeline::widget::{TrimPreview, TrimPreviewKind};
+use crate::ui_state::{AspectMaskPreset, TrimDisplayMode};
 
 /// Discrete zoom levels for the program monitor zoom in/out buttons.
 const PROGRAM_MONITOR_ZOOM_LEVELS: &[f64] = &[0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0];
@@ -281,6 +283,11 @@ pub fn build_program_monitor(
     on_select_still: impl Fn(Option<String>) + 'static,
     on_delete_still: impl Fn(String) + 'static,
     on_rename_still: impl Fn(String, String) + 'static,
+    // Precision Trim Display parameters — overlay that draws 2-up (Trim/Roll)
+    // or 4-up (Slip/Slide) source frames over the Program Monitor during an
+    // active timeline trim drag. Off by default after first-run.
+    initial_trim_display_mode: TrimDisplayMode,
+    on_trim_display_mode_changed: impl Fn(TrimDisplayMode) + 'static,
 ) -> (
     GBox,
     Label,
@@ -308,6 +315,10 @@ pub fn build_program_monitor(
     // reflects the stored state. Monitor keeps its own shared cell
     // for the draw_func; window.rs owns persistence (FCPXML + model).
     Rc<dyn Fn(bool, TimecodeBurninPosition)>,
+    // Precision trim display setter. Fired from the timeline on trim/roll/
+    // slip/slide drag-update (with `Some(preview)`) and on drag-end (with
+    // `None` to clear).
+    Rc<dyn Fn(Option<TrimPreview>)>,
 ) {
     let root = GBox::new(Orientation::Vertical, 0);
     root.set_hexpand(true);
@@ -463,6 +474,34 @@ pub fn build_program_monitor(
     overlays_popover_box.append(&aspect_mask_label_row);
     overlays_popover_box.append(&tc_burnin_header_row);
     overlays_popover_box.append(&tc_burnin_position_row);
+
+    // Precision trim display — draws outgoing/incoming source frames over
+    // the Program Monitor during an active timeline trim/roll/slip/slide
+    // drag. Off or Auto; Auto picks 2-up for Trim/Roll and 4-up for
+    // Slip/Slide based on the drag op.
+    let on_trim_display_mode_changed = Rc::new(on_trim_display_mode_changed);
+    let trim_display_row = GBox::new(Orientation::Horizontal, 6);
+    let trim_display_label = Label::new(Some("Precision trim"));
+    trim_display_label.set_xalign(0.0);
+    trim_display_label.set_hexpand(true);
+    let trim_display_strings: Vec<&'static str> = TrimDisplayMode::ALL
+        .iter()
+        .map(|m| m.label())
+        .collect();
+    let trim_display_model = StringList::new(&trim_display_strings);
+    let trim_display_dropdown =
+        DropDown::new(Some(trim_display_model), None::<gtk::Expression>);
+    trim_display_dropdown.set_tooltip_text(Some(
+        "Show outgoing/incoming source frames over the Program Monitor during slip/slide/roll/trim drags. Auto picks 2-up or 4-up based on the active tool.",
+    ));
+    let initial_trim_idx = TrimDisplayMode::ALL
+        .iter()
+        .position(|m| *m == initial_trim_display_mode)
+        .unwrap_or(0) as u32;
+    trim_display_dropdown.set_selected(initial_trim_idx);
+    trim_display_row.append(&trim_display_label);
+    trim_display_row.append(&trim_display_dropdown);
+    overlays_popover_box.append(&trim_display_row);
 
     // ── Reference stills section (A/B compare wipe) ──
     let ref_stills_separator = gtk::Separator::new(Orientation::Horizontal);
@@ -2072,6 +2111,117 @@ pub fn build_program_monitor(
         })
     };
 
+    // ── Precision Trim Display overlay ─────────────────────────────────
+    //
+    // Drawn over the video paintable during active timeline trim drags.
+    // State lives in this build scope so both the DropDown handler and
+    // the DrawingArea draw_func can see it without cross-component
+    // plumbing. ThumbnailCache is private to the monitor (bounded by
+    // unique source-time pairs produced during drags).
+    let trim_preview_state: Rc<RefCell<Option<TrimPreview>>> = Rc::new(RefCell::new(None));
+    let trim_display_mode_cell: Rc<Cell<TrimDisplayMode>> =
+        Rc::new(Cell::new(initial_trim_display_mode));
+    let trim_thumb_cache: Rc<RefCell<ThumbnailCache>> =
+        Rc::new(RefCell::new(ThumbnailCache::new()));
+
+    let trim_display_da = DrawingArea::new();
+    trim_display_da.set_hexpand(true);
+    trim_display_da.set_vexpand(true);
+    trim_display_da.set_halign(gtk::Align::Fill);
+    trim_display_da.set_valign(gtk::Align::Fill);
+    trim_display_da.set_can_target(false);
+    {
+        let preview_state = trim_preview_state.clone();
+        let mode_cell = trim_display_mode_cell.clone();
+        let thumb_cache = trim_thumb_cache.clone();
+        trim_display_da.set_draw_func(move |_da, cr, width, height| {
+            if width <= 0 || height <= 0 {
+                return;
+            }
+            if mode_cell.get() == TrimDisplayMode::Off {
+                return;
+            }
+            let preview_ref = preview_state.borrow();
+            let Some(preview) = preview_ref.as_ref() else {
+                return;
+            };
+            draw_trim_preview_overlay(cr, width as f64, height as f64, preview, &thumb_cache);
+        });
+    }
+    overlay.add_overlay(&trim_display_da);
+    overlay.set_measure_overlay(&trim_display_da, false);
+
+    // Dropdown: Precision trim mode (Off / Auto).
+    {
+        let on_changed = on_trim_display_mode_changed.clone();
+        let mode_cell = trim_display_mode_cell.clone();
+        let da = trim_display_da.clone();
+        // Same nested-popover autohide workaround as aspect_mask / tc_burnin:
+        // the DropDown opens its own popover inside this one and can leave
+        // the outer popover's autohide stuck, so popdown explicitly after a
+        // pick (also the right UX — user has made their selection).
+        let overlays_popover_close = overlays_popover.clone();
+        trim_display_dropdown.connect_selected_notify(move |dd| {
+            let idx = dd.selected() as usize;
+            let mode = TrimDisplayMode::ALL
+                .get(idx)
+                .copied()
+                .unwrap_or(TrimDisplayMode::Auto);
+            mode_cell.set(mode);
+            da.queue_draw();
+            on_changed(mode);
+            overlays_popover_close.popdown();
+        });
+    }
+
+    // Setter pushed from the timeline on trim drag update / drag end.
+    let trim_preview_setter: Rc<dyn Fn(Option<TrimPreview>)> = {
+        let preview_state = trim_preview_state.clone();
+        let mode_cell = trim_display_mode_cell.clone();
+        let thumb_cache = trim_thumb_cache.clone();
+        let da = trim_display_da.clone();
+        Rc::new(move |preview: Option<TrimPreview>| {
+            if mode_cell.get() == TrimDisplayMode::Off {
+                // Still store None so we don't paint a stale overlay if the
+                // user re-enables mid-session.
+                *preview_state.borrow_mut() = None;
+                da.queue_draw();
+                return;
+            }
+            if let Some(ref p) = preview {
+                let mut cache = thumb_cache.borrow_mut();
+                for slot in &p.slots {
+                    if let Some(frame) = slot {
+                        cache.request(&frame.source_path, frame.source_time_ns);
+                    }
+                }
+            }
+            *preview_state.borrow_mut() = preview;
+            da.queue_draw();
+        })
+    };
+
+    // Poll the Program Monitor's private ThumbnailCache at ~120ms so newly
+    // ready frames repaint the overlay without stalling the main loop.
+    {
+        let thumb_cache = trim_thumb_cache.clone();
+        let preview_state = trim_preview_state.clone();
+        let mode_cell = trim_display_mode_cell.clone();
+        let da = trim_display_da.downgrade();
+        glib::timeout_add_local(std::time::Duration::from_millis(120), move || {
+            if preview_state.borrow().is_none() || mode_cell.get() == TrimDisplayMode::Off {
+                return glib::ControlFlow::Continue;
+            }
+            let ready = thumb_cache.borrow_mut().poll_ready_keys();
+            if !ready.is_empty() {
+                if let Some(d) = da.upgrade() {
+                    d.queue_draw();
+                }
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+
     (
         root,
         pos_label,
@@ -2094,7 +2244,118 @@ pub fn build_program_monitor(
         ab_reference_setter,
         stills_strip_setter,
         timecode_burnin_setter,
+        trim_preview_setter,
     )
+}
+
+/// Render the Precision Trim Display overlay. Divides the canvas into
+/// `kind`-many quadrants, dims the rest of the monitor, and draws each
+/// slot's cached source frame with a short label under it. Blank slots
+/// render a placeholder strip so the layout stays stable.
+fn draw_trim_preview_overlay(
+    cr: &gtk::cairo::Context,
+    width: f64,
+    height: f64,
+    preview: &TrimPreview,
+    thumb_cache: &Rc<RefCell<ThumbnailCache>>,
+) {
+    // 55% dim the underlying video so the inset frames pop.
+    cr.set_source_rgba(0.0, 0.0, 0.0, 0.55);
+    cr.rectangle(0.0, 0.0, width, height);
+    let _ = cr.fill();
+
+    let rects = match preview.kind {
+        TrimPreviewKind::TwoUp => {
+            let margin = (width * 0.04).min(height * 0.08);
+            let gap = margin * 0.6;
+            let cell_w = (width - 2.0 * margin - gap) * 0.5;
+            let cell_h = height - 2.0 * margin;
+            vec![
+                (margin, margin, cell_w, cell_h),
+                (margin + cell_w + gap, margin, cell_w, cell_h),
+            ]
+        }
+        TrimPreviewKind::FourUp => {
+            let margin = (width * 0.04).min(height * 0.08);
+            let gap = margin * 0.6;
+            let cell_w = (width - 2.0 * margin - gap) * 0.5;
+            let cell_h = (height - 2.0 * margin - gap) * 0.5;
+            vec![
+                (margin, margin, cell_w, cell_h),
+                (margin + cell_w + gap, margin, cell_w, cell_h),
+                (margin, margin + cell_h + gap, cell_w, cell_h),
+                (margin + cell_w + gap, margin + cell_h + gap, cell_w, cell_h),
+            ]
+        }
+    };
+
+    let cache = thumb_cache.borrow();
+    for (idx, rect) in rects.iter().enumerate() {
+        let (x, y, w, h) = *rect;
+        let slot = preview.slots.get(idx).and_then(|s| s.as_ref());
+
+        // Cell background.
+        cr.set_source_rgba(0.10, 0.10, 0.12, 1.0);
+        cr.rectangle(x, y, w, h);
+        let _ = cr.fill();
+
+        if let Some(frame) = slot {
+            if let Some(surface) = cache.get(&frame.source_path, frame.source_time_ns) {
+                let sw = surface.width() as f64;
+                let sh = surface.height() as f64;
+                if sw > 0.0 && sh > 0.0 {
+                    let scale = (w / sw).min(h / sh);
+                    let draw_w = sw * scale;
+                    let draw_h = sh * scale;
+                    let dx = x + (w - draw_w) * 0.5;
+                    let dy = y + (h - draw_h) * 0.5;
+                    let _ = cr.save();
+                    cr.translate(dx, dy);
+                    cr.scale(scale, scale);
+                    let _ = cr.set_source_surface(surface, 0.0, 0.0);
+                    cr.rectangle(0.0, 0.0, sw, sh);
+                    let _ = cr.fill();
+                    let _ = cr.restore();
+                }
+            } else {
+                // Loading placeholder.
+                cr.set_source_rgba(0.25, 0.25, 0.28, 1.0);
+                cr.rectangle(x, y, w, h);
+                let _ = cr.fill();
+                cr.set_source_rgba(0.55, 0.55, 0.60, 1.0);
+                cr.set_font_size((h * 0.08).clamp(10.0, 16.0));
+                let ext = cr.text_extents("Loading…").ok();
+                if let Some(ext) = ext {
+                    cr.move_to(x + (w - ext.width()) * 0.5, y + h * 0.5);
+                    let _ = cr.show_text("Loading…");
+                }
+            }
+            // Label under the cell.
+            cr.set_source_rgba(0.95, 0.95, 0.95, 0.92);
+            cr.set_font_size((h * 0.07).clamp(10.0, 14.0));
+            let label_y = y + h - 6.0;
+            cr.move_to(x + 6.0, label_y);
+            let _ = cr.show_text(&frame.label);
+        } else {
+            // Empty slot (e.g., no neighbor).
+            cr.set_source_rgba(0.18, 0.18, 0.20, 1.0);
+            cr.rectangle(x, y, w, h);
+            let _ = cr.fill();
+            cr.set_source_rgba(0.50, 0.50, 0.52, 0.9);
+            cr.set_font_size((h * 0.08).clamp(10.0, 14.0));
+            let ext = cr.text_extents("—").ok();
+            if let Some(ext) = ext {
+                cr.move_to(x + (w - ext.width()) * 0.5, y + h * 0.5);
+                let _ = cr.show_text("—");
+            }
+        }
+
+        // Cell border.
+        cr.set_source_rgba(0.85, 0.85, 0.88, 0.45);
+        cr.set_line_width(1.0);
+        cr.rectangle(x + 0.5, y + 0.5, w - 1.0, h - 1.0);
+        let _ = cr.stroke();
+    }
 }
 
 /// Convert a decoded RGBA reference still into a Cairo ARGB32 ImageSurface

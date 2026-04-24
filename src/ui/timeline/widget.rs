@@ -712,6 +712,11 @@ pub struct TimelineState {
     /// scroll, or playhead seek so a stale preview never lingers. Purely
     /// ephemeral view state — not persisted.
     pub hover_scrub: Option<HoverScrubPreview>,
+    /// Callback fired from mid-trim drags with a `TrimPreview` payload,
+    /// and once at drag-end with `None` to clear the Program Monitor
+    /// precision overlay. Borrow-safety: clone out of the `TimelineState`
+    /// and drop the `RefMut` before invoking.
+    pub on_trim_preview: Option<Rc<dyn Fn(Option<TrimPreview>)>>,
 }
 
 /// Per-frame payload for the timeline hover-scrub floating preview. The
@@ -726,6 +731,168 @@ pub struct HoverScrubPreview {
     pub cursor_x: f64,
     pub cursor_y: f64,
     pub display_timecode: String,
+}
+
+/// Precision trim display payload fired from the timeline into the Program
+/// Monitor while the user is mid-drag on a trim/roll/slip/slide. The
+/// monitor draws one quadrant per entry in `slots`. `slots.len()` matches
+/// `kind` (2 for TwoUp, 4 for FourUp). A `None` slot means "no content
+/// for this quadrant" (e.g., clip at track edge with no neighbor) — the
+/// overlay renders a blank placeholder in that case.
+#[derive(Clone, Debug)]
+pub struct TrimPreview {
+    pub kind: TrimPreviewKind,
+    pub slots: Vec<Option<TrimPreviewFrame>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrimPreviewKind {
+    TwoUp,
+    FourUp,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrimPreviewFrame {
+    /// Path used to request the frame from `ThumbnailCache`.
+    pub source_path: String,
+    /// Source-file time in nanoseconds.
+    pub source_time_ns: u64,
+    /// Short caption drawn under the quadrant (e.g. `"Out"`, `"In 00:00:01:07"`).
+    pub label: String,
+}
+
+impl TrimPreview {
+    pub fn two_up(
+        left: Option<TrimPreviewFrame>,
+        right: Option<TrimPreviewFrame>,
+    ) -> Self {
+        Self {
+            kind: TrimPreviewKind::TwoUp,
+            slots: vec![left, right],
+        }
+    }
+
+    pub fn four_up(
+        ll: Option<TrimPreviewFrame>,
+        l: Option<TrimPreviewFrame>,
+        r: Option<TrimPreviewFrame>,
+        rr: Option<TrimPreviewFrame>,
+    ) -> Self {
+        Self {
+            kind: TrimPreviewKind::FourUp,
+            slots: vec![ll, l, r, rr],
+        }
+    }
+}
+
+fn source_backed_clip_frame(clip: &Clip, source_time_ns: u64, label: String) -> Option<TrimPreviewFrame> {
+    // Compound / title / adjustment clips have no extractable source path.
+    if clip.source_path.is_empty() {
+        return None;
+    }
+    Some(TrimPreviewFrame {
+        source_path: clip.source_path.clone(),
+        source_time_ns,
+        label,
+    })
+}
+
+/// Frame representing the **last visible** source frame of `clip`
+/// (one frame before `source_out`, clamped to `source_in`). Captioned as
+/// "Out" plus the timecode.
+fn out_frame_for_clip(clip: &Clip, fr: &FrameRate, caption: &str) -> Option<TrimPreviewFrame> {
+    let frame_ns = frame_duration_ns(fr);
+    let t = clip.source_out.saturating_sub(frame_ns).max(clip.source_in);
+    source_backed_clip_frame(
+        clip,
+        t,
+        format!("{caption} {}", crate::ui::timecode::format_ns_as_timecode(t, fr)),
+    )
+}
+
+/// Frame representing the **first visible** source frame of `clip`
+/// (at `source_in`). Captioned as "In" plus the timecode.
+fn in_frame_for_clip(clip: &Clip, fr: &FrameRate, caption: &str) -> Option<TrimPreviewFrame> {
+    let t = clip.source_in;
+    source_backed_clip_frame(
+        clip,
+        t,
+        format!("{caption} {}", crate::ui::timecode::format_ns_as_timecode(t, fr)),
+    )
+}
+
+fn frame_duration_ns(fr: &FrameRate) -> u64 {
+    let num = fr.numerator.max(1) as f64;
+    let den = fr.denominator.max(1) as f64;
+    // frame dur seconds = den / num (e.g. 1001/30000 for 29.97)
+    let secs = den / num;
+    (secs * 1_000_000_000.0) as u64
+}
+
+/// Build a TwoUp preview for a Trim-In drag on `clip`.
+/// Left slot = left neighbor's out-frame (if any), right slot = new in-frame.
+pub fn build_trim_preview_for_trim_in(
+    clip: &Clip,
+    left_neighbor: Option<&Clip>,
+    fr: &FrameRate,
+) -> TrimPreview {
+    TrimPreview::two_up(
+        left_neighbor.and_then(|c| out_frame_for_clip(c, fr, "Prev out")),
+        in_frame_for_clip(clip, fr, "New in"),
+    )
+}
+
+/// Build a TwoUp preview for a Trim-Out drag on `clip`.
+/// Left slot = new out-frame, right slot = right neighbor's in-frame (if any).
+pub fn build_trim_preview_for_trim_out(
+    clip: &Clip,
+    right_neighbor: Option<&Clip>,
+    fr: &FrameRate,
+) -> TrimPreview {
+    TrimPreview::two_up(
+        out_frame_for_clip(clip, fr, "New out"),
+        right_neighbor.and_then(|c| in_frame_for_clip(c, fr, "Next in")),
+    )
+}
+
+/// Build a TwoUp preview for a Roll edit between `left_clip` and `right_clip`.
+pub fn build_trim_preview_for_roll(
+    left_clip: &Clip,
+    right_clip: &Clip,
+    fr: &FrameRate,
+) -> TrimPreview {
+    TrimPreview::two_up(
+        out_frame_for_clip(left_clip, fr, "New out"),
+        in_frame_for_clip(right_clip, fr, "New in"),
+    )
+}
+
+/// Build a FourUp preview for a Slip drag on `clip`. Slots:
+/// \[left_neighbor_out, clip_in, clip_out, right_neighbor_in\].
+pub fn build_trim_preview_for_slip(
+    clip: &Clip,
+    left_neighbor: Option<&Clip>,
+    right_neighbor: Option<&Clip>,
+    fr: &FrameRate,
+) -> TrimPreview {
+    TrimPreview::four_up(
+        left_neighbor.and_then(|c| out_frame_for_clip(c, fr, "Prev out")),
+        in_frame_for_clip(clip, fr, "In"),
+        out_frame_for_clip(clip, fr, "Out"),
+        right_neighbor.and_then(|c| in_frame_for_clip(c, fr, "Next in")),
+    )
+}
+
+/// Build a FourUp preview for a Slide drag on `clip`. Slots:
+/// \[left_neighbor_out, clip_in, clip_out, right_neighbor_in\]. Same layout
+/// as Slip — what's changing differs but the inspection frames are the same.
+pub fn build_trim_preview_for_slide(
+    clip: &Clip,
+    left_neighbor: Option<&Clip>,
+    right_neighbor: Option<&Clip>,
+    fr: &FrameRate,
+) -> TrimPreview {
+    build_trim_preview_for_slip(clip, left_neighbor, right_neighbor, fr)
 }
 
 impl TimelineState {
@@ -790,6 +957,7 @@ impl TimelineState {
             active_snap_hit: None,
             minimap_widget: None,
             hover_scrub: None,
+            on_trim_preview: None,
         }
     }
 
@@ -1017,6 +1185,81 @@ impl TimelineState {
         let cb = state.borrow().on_project_changed.clone();
         if let Some(cb) = cb {
             cb();
+        }
+    }
+
+    /// Fire `on_trim_preview` with no `TimelineState` borrow held.
+    ///
+    /// Same borrow-safety motivation as `notify_project_changed`: the
+    /// Program Monitor callback re-borrows shared state to queue_draw, so
+    /// invoking it while a `borrow_mut()` is live is a GTK4 hard abort.
+    /// Caller must release any outstanding `borrow_mut()` before calling.
+    pub fn notify_trim_preview(state: &Rc<RefCell<Self>>, preview: Option<TrimPreview>) {
+        let cb = state.borrow().on_trim_preview.clone();
+        if let Some(cb) = cb {
+            cb(preview);
+        }
+    }
+
+    /// Build a [`TrimPreview`] from the current project state for the given
+    /// `drag_op`. Returns `None` for drag ops that don't warrant a trim
+    /// display (move, reorder, marquee, etc.). Caller must hold only a
+    /// shared borrow on `TimelineState`.
+    fn build_trim_preview_from_drag_op(&self, drag_op: &DragOp) -> Option<TrimPreview> {
+        let proj = self.project.borrow();
+        let editing_tracks = self.resolve_editing_tracks(&proj);
+        let fr = proj.frame_rate.clone();
+        match drag_op {
+            DragOp::TrimIn {
+                clip_id, track_id, ..
+            } => {
+                let track = editing_tracks.iter().find(|t| &t.id == track_id)?;
+                let idx = track.clips.iter().position(|c| &c.id == clip_id)?;
+                let me = &track.clips[idx];
+                let left = (idx > 0).then(|| &track.clips[idx - 1]);
+                Some(build_trim_preview_for_trim_in(me, left, &fr))
+            }
+            DragOp::TrimOut {
+                clip_id, track_id, ..
+            } => {
+                let track = editing_tracks.iter().find(|t| &t.id == track_id)?;
+                let idx = track.clips.iter().position(|c| &c.id == clip_id)?;
+                let me = &track.clips[idx];
+                let right = track.clips.get(idx + 1);
+                Some(build_trim_preview_for_trim_out(me, right, &fr))
+            }
+            DragOp::Roll {
+                left_clip_id,
+                right_clip_id,
+                track_id,
+                ..
+            } => {
+                let track = editing_tracks.iter().find(|t| &t.id == track_id)?;
+                let left = track.clips.iter().find(|c| &c.id == left_clip_id)?;
+                let right = track.clips.iter().find(|c| &c.id == right_clip_id)?;
+                Some(build_trim_preview_for_roll(left, right, &fr))
+            }
+            DragOp::Slip {
+                clip_id, track_id, ..
+            } => {
+                let track = editing_tracks.iter().find(|t| &t.id == track_id)?;
+                let idx = track.clips.iter().position(|c| &c.id == clip_id)?;
+                let me = &track.clips[idx];
+                let left = (idx > 0).then(|| &track.clips[idx - 1]);
+                let right = track.clips.get(idx + 1);
+                Some(build_trim_preview_for_slip(me, left, right, &fr))
+            }
+            DragOp::Slide {
+                clip_id, track_id, ..
+            } => {
+                let track = editing_tracks.iter().find(|t| &t.id == track_id)?;
+                let idx = track.clips.iter().position(|c| &c.id == clip_id)?;
+                let me = &track.clips[idx];
+                let left = (idx > 0).then(|| &track.clips[idx - 1]);
+                let right = track.clips.get(idx + 1);
+                Some(build_trim_preview_for_slide(me, left, right, &fr))
+            }
+            _ => None,
         }
     }
 
@@ -7568,9 +7811,9 @@ pub fn build_timeline(
                         }
                     }
                     DragOp::Roll {
-                        left_clip_id,
-                        right_clip_id,
-                        track_id,
+                        ref left_clip_id,
+                        ref right_clip_id,
+                        ref track_id,
                         original_left_out: _,
                         original_right_in,
                         original_right_start,
@@ -7580,12 +7823,12 @@ pub fn build_timeline(
                         let new_cut_pos = (original_right_start as i64 + drag_ns).max(0) as u64;
 
                         let mut proj = st.project.borrow_mut();
-                        if let Some(track) = proj.track_mut(&track_id) {
+                        if let Some(track) = proj.track_mut(track_id) {
                             // Find left start to ensure we don't go past it
                             let left_start = track
                                 .clips
                                 .iter()
-                                .find(|c| &c.id == &left_clip_id)
+                                .find(|c| &c.id == left_clip_id)
                                 .map(|c| c.timeline_start)
                                 .unwrap_or(0);
 
@@ -7593,7 +7836,7 @@ pub fn build_timeline(
                             if new_cut_pos > left_start + 1_000_000 {
                                 // Update Left
                                 if let Some(left) =
-                                    track.clips.iter_mut().find(|c| &c.id == &left_clip_id)
+                                    track.clips.iter_mut().find(|c| &c.id == left_clip_id)
                                 {
                                     let new_tl_dur = new_cut_pos - left.timeline_start;
                                     let new_source_dur = left.timeline_to_source_dur(new_tl_dur);
@@ -7602,7 +7845,7 @@ pub fn build_timeline(
                                 }
                                 // Update Right
                                 if let Some(right) =
-                                    track.clips.iter_mut().find(|c| &c.id == &right_clip_id)
+                                    track.clips.iter_mut().find(|c| &c.id == right_clip_id)
                                 {
                                     let source_drag = right.timeline_to_source_delta(drag_ns);
                                     let new_right_in =
@@ -7808,8 +8051,18 @@ pub fn build_timeline(
                     }
                 }
 
+                // Build a Precision Trim Display preview from the just-updated
+                // clip state and push it into the Program Monitor. `None` for
+                // non-trim drag ops — the Program Monitor treats that as an
+                // explicit "no overlay for this drag" signal and keeps any
+                // previously-cleared state.
+                let trim_preview = st.build_trim_preview_from_drag_op(&drag_op);
+                drop(st);
                 if let Some(a) = area_weak.upgrade() {
                     a.queue_draw();
+                }
+                if trim_preview.is_some() {
+                    TimelineState::notify_trim_preview(&state, trim_preview);
                 }
             }
         });
@@ -7821,6 +8074,16 @@ pub fn build_timeline(
                 let mut st = state.borrow_mut();
                 let music_generation_outcome = st.finish_music_generation_region_drag();
                 let drag_op = std::mem::replace(&mut st.drag_op, DragOp::None);
+                // Capture whether this drag was trim-related *before* the match
+                // arms below move non-Copy fields out of `drag_op`.
+                let trim_was_active = matches!(
+                    drag_op,
+                    DragOp::TrimIn { .. }
+                        | DragOp::TrimOut { .. }
+                        | DragOp::Roll { .. }
+                        | DragOp::Slip { .. }
+                        | DragOp::Slide { .. }
+                );
                 st.active_snap_hit = None;
                 let should_notify_project = match &drag_op {
                     DragOp::None => false,
@@ -8311,6 +8574,11 @@ pub fn build_timeline(
                 }
                 if should_notify_project {
                     TimelineState::notify_project_changed(&state);
+                }
+                if trim_was_active {
+                    // Clear the Program Monitor precision-trim overlay now
+                    // that the drag has committed.
+                    TimelineState::notify_trim_preview(&state, None);
                 }
                 if let Some(cb) = sel_cb {
                     cb(new_sel);
@@ -14730,5 +14998,115 @@ mod tests {
             2,
             "inner clip should have been split"
         );
+    }
+
+    fn sample_clip(id: &str, source_in: u64, source_out: u64, timeline_start: u64) -> Clip {
+        let mut clip = Clip::new(format!("{id}.mp4"), source_out - source_in, timeline_start, ClipKind::Video);
+        clip.id = id.to_string();
+        clip.source_in = source_in;
+        clip.source_out = source_out;
+        clip
+    }
+
+    fn sample_fr() -> FrameRate {
+        FrameRate { numerator: 30, denominator: 1 }
+    }
+
+    #[test]
+    fn build_trim_preview_for_trim_in_populates_both_slots_with_neighbor() {
+        let fr = sample_fr();
+        let prev = sample_clip("A", 0, 3_000_000_000, 0);
+        let me = sample_clip("B", 1_000_000_000, 5_000_000_000, 3_000_000_000);
+        let preview = build_trim_preview_for_trim_in(&me, Some(&prev), &fr);
+        assert_eq!(preview.kind, TrimPreviewKind::TwoUp);
+        assert_eq!(preview.slots.len(), 2);
+        let left = preview.slots[0].as_ref().expect("prev out frame present");
+        assert_eq!(left.source_path, "A.mp4");
+        // Prev's out-frame is source_out - 1 frame (~33.3ms), clamped to source_in.
+        assert!(left.source_time_ns < 3_000_000_000);
+        let right = preview.slots[1].as_ref().expect("in frame present");
+        assert_eq!(right.source_path, "B.mp4");
+        assert_eq!(right.source_time_ns, 1_000_000_000);
+    }
+
+    #[test]
+    fn build_trim_preview_for_trim_in_without_neighbor_leaves_left_slot_empty() {
+        let fr = sample_fr();
+        let me = sample_clip("B", 0, 5_000_000_000, 0);
+        let preview = build_trim_preview_for_trim_in(&me, None, &fr);
+        assert!(preview.slots[0].is_none());
+        assert!(preview.slots[1].is_some());
+    }
+
+    #[test]
+    fn build_trim_preview_for_trim_out_without_right_neighbor_leaves_right_slot_empty() {
+        let fr = sample_fr();
+        let me = sample_clip("B", 0, 5_000_000_000, 0);
+        let preview = build_trim_preview_for_trim_out(&me, None, &fr);
+        assert_eq!(preview.kind, TrimPreviewKind::TwoUp);
+        assert!(preview.slots[0].is_some());
+        assert!(preview.slots[1].is_none());
+    }
+
+    #[test]
+    fn build_trim_preview_for_roll_shows_both_new_edit_points() {
+        let fr = sample_fr();
+        let left = sample_clip("L", 0, 3_000_000_000, 0);
+        let right = sample_clip("R", 2_000_000_000, 6_000_000_000, 3_000_000_000);
+        let preview = build_trim_preview_for_roll(&left, &right, &fr);
+        assert_eq!(preview.kind, TrimPreviewKind::TwoUp);
+        let left_f = preview.slots[0].as_ref().unwrap();
+        assert_eq!(left_f.source_path, "L.mp4");
+        assert!(left_f.label.contains("New out"));
+        let right_f = preview.slots[1].as_ref().unwrap();
+        assert_eq!(right_f.source_path, "R.mp4");
+        assert!(right_f.label.contains("New in"));
+    }
+
+    #[test]
+    fn build_trim_preview_for_slip_yields_four_slots() {
+        let fr = sample_fr();
+        let prev = sample_clip("A", 0, 3_000_000_000, 0);
+        let me = sample_clip("B", 1_000_000_000, 5_000_000_000, 3_000_000_000);
+        let next = sample_clip("C", 500_000_000, 8_000_000_000, 7_000_000_000);
+        let preview = build_trim_preview_for_slip(&me, Some(&prev), Some(&next), &fr);
+        assert_eq!(preview.kind, TrimPreviewKind::FourUp);
+        assert_eq!(preview.slots.len(), 4);
+        for slot in &preview.slots {
+            assert!(slot.is_some(), "all four slots should be populated");
+        }
+        assert_eq!(preview.slots[1].as_ref().unwrap().source_path, "B.mp4");
+        assert_eq!(preview.slots[2].as_ref().unwrap().source_path, "B.mp4");
+        // Middle two slots must read from the clip's current source_in/source_out,
+        // which is the whole point of the slip display.
+        assert_eq!(preview.slots[1].as_ref().unwrap().source_time_ns, 1_000_000_000);
+        let frame_ns = frame_duration_ns(&fr);
+        assert_eq!(
+            preview.slots[2].as_ref().unwrap().source_time_ns,
+            5_000_000_000 - frame_ns
+        );
+    }
+
+    #[test]
+    fn build_trim_preview_for_slide_mirrors_slip_layout() {
+        let fr = sample_fr();
+        let prev = sample_clip("A", 0, 3_000_000_000, 0);
+        let me = sample_clip("B", 1_000_000_000, 5_000_000_000, 3_000_000_000);
+        let next = sample_clip("C", 500_000_000, 8_000_000_000, 7_000_000_000);
+        let slip = build_trim_preview_for_slip(&me, Some(&prev), Some(&next), &fr);
+        let slide = build_trim_preview_for_slide(&me, Some(&prev), Some(&next), &fr);
+        assert_eq!(slide.kind, slip.kind);
+        assert_eq!(slide.slots, slip.slots);
+    }
+
+    #[test]
+    fn source_backed_clip_frame_skips_sourceless_clips() {
+        let fr = sample_fr();
+        let mut compound = Clip::new(String::new(), 5_000_000_000, 0, ClipKind::Compound);
+        compound.id = "CMP".to_string();
+        compound.source_in = 0;
+        compound.source_out = 5_000_000_000;
+        assert!(in_frame_for_clip(&compound, &fr, "In").is_none());
+        assert!(out_frame_for_clip(&compound, &fr, "Out").is_none());
     }
 }

@@ -48,9 +48,9 @@ The same **I / O** Source Monitor marks are also used by the keyword-range contr
 | `L` | Shuttle forward in program monitor (1× → 2× → 4× → 8×) |
 | `B` | Toggle Razor (Blade) tool |
 | `R` | Toggle Ripple edit tool |
-| `E` | Toggle Roll edit tool |
-| `Y` | Toggle Slip edit tool |
-| `U` | Toggle Slide edit tool |
+| `E` | Toggle Roll edit tool (2-up precision trim display shown in Program Monitor while dragging) |
+| `Y` | Toggle Slip edit tool (4-up precision trim display shown in Program Monitor while dragging) |
+| `U` | Toggle Slide edit tool (4-up precision trim display shown in Program Monitor while dragging) |
 | `D` | Toggle Draw tool |
 | `S` | Toggle solo for selected track |
 | `M` | Toggle mute for selected track |

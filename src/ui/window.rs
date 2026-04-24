@@ -12391,6 +12391,7 @@ pub fn build_window(
         prog_ab_reference_setter,
         prog_stills_strip_setter,
         prog_timecode_burnin_setter,
+        prog_trim_preview_setter,
     ) = {
         // Drawing edits (shape commits, per-item deletes) each fire
         // `on_project_changed`, which runs a two-phase program-player
@@ -13772,8 +13773,27 @@ pub fn build_window(
                     }
                 }
             },
+            monitor_state.borrow().trim_display_mode,
+            {
+                let monitor_state = monitor_state.clone();
+                move |mode: crate::ui_state::TrimDisplayMode| {
+                    let mut state = monitor_state.borrow_mut();
+                    if state.trim_display_mode != mode {
+                        state.trim_display_mode = mode;
+                        crate::ui_state::save_program_monitor_state(&state);
+                    }
+                }
+            },
         )
     };
+
+    // Wire the Program Monitor's precision-trim-display setter to the
+    // timeline's on_trim_preview callback. Fires once per drag update and
+    // once with `None` on drag end.
+    {
+        let setter = prog_trim_preview_setter.clone();
+        timeline_state.borrow_mut().on_trim_preview = Some(Rc::new(move |preview| setter(preview)));
+    }
 
     // ── Voiceover countdown overlay on the program monitor ────────────────
     let countdown_overlay_da = gtk4::DrawingArea::new();

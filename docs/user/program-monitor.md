@@ -221,6 +221,47 @@ When **Motion Tracking → Edit Region in Monitor** is enabled for the selected 
   `square` / `social_45` / `vertical`) flips the same setting from
   automation.
 
+## Precision Trim Display
+
+Shows source frames at the edit points during an active timeline trim drag,
+so you can see exactly what's on either side of the cut while dragging.
+
+- **2-up** (side-by-side) appears during **Trim In**, **Trim Out**, and **Roll**
+  drags. Left pane is the outgoing frame (`New out` for the clip being
+  trimmed, or `Prev out` for the previous clip's last frame); right pane is
+  the incoming frame (`New in` or `Next in`).
+- **4-up** (2×2 grid) appears during **Slip** and **Slide** drags. Slots are
+  `Prev out · Clip in · Clip out · Next in`. The middle two update in real
+  time as you slip (source window shifts) or slide (position + neighbor
+  edit points shift).
+- Frame captions include the source timecode at that edit point, updated
+  live as you drag.
+- If the clip is at the edge of a track with no neighbor on one side, that
+  slot shows a `—` placeholder so the layout stays stable.
+- The overlay auto-clears when you release the mouse; no separate toggle
+  action is needed per drag.
+- Sourceless clip kinds (compounds, titles, adjustment layers) skip the
+  overlay because they have no extractable source frame.
+- Follows into the pop-out Program Monitor window automatically.
+
+### Enabling / Disabling
+
+- Open **Overlays ▾** in the Program Monitor header and pick from the
+  **Precision trim** dropdown:
+  - **Auto** (default) — 2-up for Trim/Roll, 4-up for Slip/Slide.
+  - **Off** — no overlay; drags show only the timeline ghost clip and
+    in/out badge.
+- The selected mode persists across launches in `ui-state.json` next to the
+  other Program Monitor overlay toggles.
+
+### Performance Notes
+
+- Frames are extracted in the background via a dedicated async ThumbnailCache.
+  A brief `Loading…` placeholder appears on first hover of a new frame
+  position; subsequent hits use the cached image.
+- The overlay is preview-only — it never appears in export, prerender, or
+  still-frame capture output, and it never triggers pipeline rebuilds.
+
 ## Playback Behaviour
 
 - The program monitor uses a GStreamer **compositor** pipeline that layers all active video tracks simultaneously at the playhead position.

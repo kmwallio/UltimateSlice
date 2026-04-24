@@ -51,6 +51,9 @@ pub struct ProgramMonitorState {
     /// no-op even if `ab_compare_enabled` is true.
     #[serde(default)]
     pub ab_reference_still_id: Option<String>,
+    /// Precision trim display mode shown during slip/slide/roll/trim drags.
+    #[serde(default)]
+    pub trim_display_mode: TrimDisplayMode,
 }
 
 /// Delivery-format letterbox/pillarbox preview selected from the Program
@@ -135,6 +138,40 @@ impl AspectMaskPreset {
     /// "intentionally `None`" (the latter round-trips through `"none"`).
     pub fn from_str(s: &str) -> Option<AspectMaskPreset> {
         Self::ALL.iter().copied().find(|p| p.as_str() == s)
+    }
+}
+
+/// Precision trim display mode shown over the Program Monitor during an
+/// active timeline slip/slide/roll/trim drag.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrimDisplayMode {
+    /// No precision overlay — drags show only the timeline ghost + badge.
+    Off,
+    /// Two-up (Trim In/Out/Roll) or four-up (Slip/Slide), chosen by active tool.
+    #[default]
+    Auto,
+}
+
+impl TrimDisplayMode {
+    pub const ALL: [TrimDisplayMode; 2] = [TrimDisplayMode::Off, TrimDisplayMode::Auto];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TrimDisplayMode::Off => "Off",
+            TrimDisplayMode::Auto => "Auto",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TrimDisplayMode::Off => "off",
+            TrimDisplayMode::Auto => "auto",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<TrimDisplayMode> {
+        Self::ALL.iter().copied().find(|m| m.as_str() == s)
     }
 }
 
@@ -235,6 +272,7 @@ impl Default for ProgramMonitorState {
             ab_compare_enabled: false,
             ab_midline_percent: default_ab_midline(),
             ab_reference_still_id: None,
+            trim_display_mode: TrimDisplayMode::default(),
         }
     }
 }
@@ -2042,6 +2080,7 @@ mod tests {
             ab_compare_enabled: false,
             ab_midline_percent: 50.0,
             ab_reference_still_id: None,
+            trim_display_mode: TrimDisplayMode::Auto,
         };
         let workspace = ProgramMonitorWorkspaceState::from_program_monitor_state(&monitor);
         assert!(workspace.popped);
@@ -2169,5 +2208,23 @@ mod tests {
         );
         assert!(parsed.program_monitor.popped);
         assert!(parsed.program_monitor.scopes_visible);
+    }
+
+    #[test]
+    fn program_monitor_state_defaults_trim_display_mode_to_auto() {
+        // Legacy JSON predates trim_display_mode; must default to Auto.
+        let legacy = r#"{"popped":false,"width":960,"height":540,"docked_split_pos":420,"scopes_visible":false,"show_safe_areas":false,"show_false_color":false,"show_zebra":false,"zebra_threshold":0.9,"show_hud":false,"aspect_mask":"none","ab_compare_enabled":false,"ab_midline_percent":50.0,"ab_reference_still_id":null}"#;
+        let parsed: ProgramMonitorState = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.trim_display_mode, TrimDisplayMode::Auto);
+    }
+
+    #[test]
+    fn trim_display_mode_round_trips() {
+        for mode in TrimDisplayMode::ALL {
+            let json = serde_json::to_string(&mode).unwrap();
+            let back: TrimDisplayMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(mode, back);
+            assert_eq!(TrimDisplayMode::from_str(mode.as_str()), Some(mode));
+        }
     }
 }

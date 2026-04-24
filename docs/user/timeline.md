@@ -81,12 +81,14 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 - Click near an edit point (boundary between two adjacent clips) to adjust the cut point.
 - The left clip's out-point and the right clip's in-point move together — the overall timeline duration stays the same.
 - Press **E** to toggle Roll mode on/off.
+- While dragging, the Program Monitor shows a **2-up precision trim display** with the new out-frame on the left and new in-frame on the right. See [`program-monitor.md#precision-trim-display`](program-monitor.md) for details; disable via **Overlays ▾ → Precision trim → Off**.
 
 ### Slip Edit Tool (`Y`)
 
 - Drag a clip body to shift its **source window** (source in/out) without moving the clip on the timeline or changing its duration.
 - Useful for adjusting which portion of the source footage appears in a fixed-length clip.
 - Press **Y** to toggle Slip mode on/off.
+- While dragging, the Program Monitor shows a **4-up precision trim display** (`Prev out · Clip in · Clip out · Next in`). See [`program-monitor.md#precision-trim-display`](program-monitor.md).
 
 ### Slide Edit Tool (`U`)
 
@@ -94,6 +96,7 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 - The left neighbor's out-point extends/shrinks and the right neighbor's in-point shrinks/extends — overall timeline duration stays the same.
 - On edge clips (only one neighbor), slide remains available but movement is clamped and only the available-side neighbor is adjusted.
 - Press **U** to toggle Slide mode on/off.
+- While dragging, the Program Monitor shows a **4-up precision trim display** (`Prev out · Clip in · Clip out · Next in`). See [`program-monitor.md#precision-trim-display`](program-monitor.md).
 
 ### Draw Tool (`D`)
 
