@@ -646,6 +646,15 @@ fn write_otio_with_mode(
                 None
             },
             reference_stills: project.reference_stills.clone(),
+            color_label_names: {
+                // Convert HashMap<ClipColorLabel, String> → BTreeMap<String,
+                // String> with snake_case keys for stable serialization.
+                let mut out = std::collections::BTreeMap::new();
+                for (label, name) in project.color_label_names.iter() {
+                    out.insert(label.as_str().to_string(), name.clone());
+                }
+                out
+            },
         }),
     };
 
@@ -1026,5 +1035,46 @@ mod tests {
         assert_eq!(parsed.reference_stills[0].width, 1280);
         assert_eq!(parsed.reference_stills[0].height, 720);
         assert_eq!(parsed.reference_stills[0].filename, still.filename);
+    }
+
+    #[test]
+    fn test_color_label_names_round_trip_through_otio() {
+        use crate::model::clip::ClipColorLabel;
+        let mut p = make_project();
+        p.set_color_label_name(ClipColorLabel::Red, "B-roll");
+        p.set_color_label_name(ClipColorLabel::Green, "Interview");
+
+        let json = write_otio(&p).unwrap();
+        // OTIO writes the legend under ultimateslice.project.color_label_names.
+        assert!(
+            json.contains("\"color_label_names\""),
+            "OTIO must emit color_label_names section"
+        );
+
+        let parsed = crate::otio::parser::parse_otio(&json).expect("parse");
+        assert_eq!(parsed.color_label_names.len(), 2);
+        assert_eq!(
+            parsed.display_name_for_color_label(ClipColorLabel::Red),
+            "B-roll"
+        );
+        assert_eq!(
+            parsed.display_name_for_color_label(ClipColorLabel::Green),
+            "Interview"
+        );
+        // Unset colors fall back to defaults.
+        assert_eq!(
+            parsed.display_name_for_color_label(ClipColorLabel::Blue),
+            "Blue"
+        );
+    }
+
+    #[test]
+    fn test_color_label_names_empty_omitted_from_otio_json() {
+        let p = make_project();
+        let json = write_otio(&p).unwrap();
+        assert!(
+            !json.contains("\"color_label_names\""),
+            "empty legend must be omitted to keep OTIO JSON small"
+        );
     }
 }

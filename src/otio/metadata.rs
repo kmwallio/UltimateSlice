@@ -437,6 +437,15 @@ pub(crate) struct UltimateSliceProjectOtioMetadata {
     /// don't grow on round-trip.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub(crate) reference_stills: Vec<crate::model::project::ReferenceStill>,
+    /// Project-scoped color-tag legend mapping each `ClipColorLabel` to a
+    /// custom display name. JSON keys are the label's snake_case
+    /// serialization. Empty means "not authored" and is skipped so legacy
+    /// projects don't grow on round-trip.
+    #[serde(
+        skip_serializing_if = "std::collections::BTreeMap::is_empty",
+        default
+    )]
+    pub(crate) color_label_names: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

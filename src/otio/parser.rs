@@ -74,6 +74,17 @@ pub fn parse_otio_with_path(json: &str, otio_path: Option<&Path>) -> Result<Proj
     if !us_project.reference_stills.is_empty() {
         project.reference_stills = us_project.reference_stills.clone();
     }
+    if !us_project.color_label_names.is_empty() {
+        for (k, v) in us_project.color_label_names.iter() {
+            if let Some(label) = crate::model::clip::ClipColorLabel::from_str(k) {
+                if label != crate::model::clip::ClipColorLabel::None && !v.trim().is_empty() {
+                    project
+                        .color_label_names
+                        .insert(label, v.trim().to_string());
+                }
+            }
+        }
+    }
     // Clear default tracks that Project::new creates.
     project.tracks.clear();
 

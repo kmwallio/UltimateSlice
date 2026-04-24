@@ -4960,6 +4960,24 @@ impl TimelineState {
         None
     }
 
+    /// Tooltip text for the clip body at `(x, y)`. Includes the clip label
+    /// and, if the clip has a non-`None` color label, the legend's display
+    /// name for that color (custom override or default English name). Used
+    /// only when no badge / keyframe-marker tooltip applies.
+    fn clip_body_tooltip_text(&self, x: f64, y: f64) -> Option<String> {
+        let hit = self.hit_test(x, y)?;
+        if !matches!(hit.zone, HitZone::Body) {
+            return None;
+        }
+        let proj = self.project.borrow();
+        let clip = proj.clip_ref(&hit.clip_id)?;
+        if clip.color_label == crate::model::clip::ClipColorLabel::None {
+            return None;
+        }
+        let legend_name = proj.display_name_for_color_label(clip.color_label);
+        Some(format!("{}\nColor: {}", clip.label, legend_name))
+    }
+
     /// Find which clip and track are at a given (x, y) coordinate.
     /// Also returns whether x is near the in-edge or out-edge (for trimming).
     fn hit_test(&self, x: f64, y: f64) -> Option<HitResult> {
@@ -5726,6 +5744,10 @@ pub fn build_timeline(
                 return true;
             }
             if let Some(text) = st.keyframe_marker_tooltip_text(x as f64, y as f64) {
+                tooltip.set_text(Some(&text));
+                return true;
+            }
+            if let Some(text) = st.clip_body_tooltip_text(x as f64, y as f64) {
                 tooltip.set_text(Some(&text));
                 return true;
             }
@@ -11904,14 +11926,11 @@ fn clip_fill_color(clip: &Clip, track_kind: TrackKind) -> (f64, f64, f64) {
                 TrackKind::Audio => (0.18, 0.65, 0.45),
             }
         }
-        crate::model::clip::ClipColorLabel::Red => (0.78, 0.27, 0.27),
-        crate::model::clip::ClipColorLabel::Orange => (0.83, 0.49, 0.20),
-        crate::model::clip::ClipColorLabel::Yellow => (0.78, 0.68, 0.20),
-        crate::model::clip::ClipColorLabel::Green => (0.28, 0.66, 0.33),
-        crate::model::clip::ClipColorLabel::Teal => (0.20, 0.63, 0.60),
-        crate::model::clip::ClipColorLabel::Blue => (0.22, 0.48, 0.85),
-        crate::model::clip::ClipColorLabel::Purple => (0.53, 0.38, 0.80),
-        crate::model::clip::ClipColorLabel::Magenta => (0.78, 0.35, 0.68),
+        // All other ClipColorLabel variants share their RGB with the
+        // status-bar Color Legend popover via `swatch_rgb`. Keeping a
+        // single source of truth means the timeline body and the legend
+        // swatch can never drift.
+        other => other.swatch_rgb(),
     }
 }
 
@@ -12539,7 +12558,7 @@ fn reorder_track_by_script(state: &std::rc::Rc<std::cell::RefCell<TimelineState>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::clip::{Clip, ClipKind, KeyframeInterpolation, NumericKeyframe};
+    use crate::model::clip::{Clip, ClipColorLabel, ClipKind, KeyframeInterpolation, NumericKeyframe};
     use crate::model::project::Project;
     use crate::model::track::Track;
     use std::cell::RefCell;
@@ -12751,6 +12770,77 @@ mod tests {
                 "hit_test should resolve to clip A"
             );
         }
+    }
+
+    #[test]
+    fn clip_body_tooltip_text_includes_color_legend_name() {
+        let (st, _track_id, _ids) = timeline_state_with_video_clips(&[("A", 0)]);
+        {
+            let mut proj = st.project.borrow_mut();
+            // Make clip A wide enough for hit_test to land on its body, set
+            // a color label, and register a custom legend name.
+            for t in &mut proj.tracks {
+                for c in &mut t.clips {
+                    if c.id == "A" {
+                        c.source_out = c.source_in + 10_000_000_000;
+                        c.color_label = ClipColorLabel::Red;
+                        c.label = "Cool Cut".to_string();
+                    }
+                }
+            }
+            proj.set_color_label_name(ClipColorLabel::Red, "B-roll");
+        }
+        // Sample a y inside track 0's band and an x well inside clip A.
+        let probe_x = st.ns_to_x(2_000_000_000) + 4.0;
+        let probe_y = RULER_HEIGHT + 20.0;
+        let tip = st.clip_body_tooltip_text(probe_x, probe_y);
+        assert_eq!(
+            tip.as_deref(),
+            Some("Cool Cut\nColor: B-roll"),
+            "tooltip should surface custom legend name"
+        );
+    }
+
+    #[test]
+    fn clip_body_tooltip_text_falls_back_to_default_color_name() {
+        let (st, _track_id, _ids) = timeline_state_with_video_clips(&[("B", 0)]);
+        {
+            let mut proj = st.project.borrow_mut();
+            for t in &mut proj.tracks {
+                for c in &mut t.clips {
+                    if c.id == "B" {
+                        c.source_out = c.source_in + 10_000_000_000;
+                        c.color_label = ClipColorLabel::Green;
+                    }
+                }
+            }
+        }
+        let probe_x = st.ns_to_x(2_000_000_000) + 4.0;
+        let probe_y = RULER_HEIGHT + 20.0;
+        let tip = st.clip_body_tooltip_text(probe_x, probe_y).unwrap();
+        assert!(tip.contains("Color: Green"), "got tooltip: {tip}");
+    }
+
+    #[test]
+    fn clip_body_tooltip_text_returns_none_for_unlabeled_clip() {
+        let (st, _track_id, _ids) = timeline_state_with_video_clips(&[("C", 0)]);
+        {
+            let mut proj = st.project.borrow_mut();
+            for t in &mut proj.tracks {
+                for c in &mut t.clips {
+                    if c.id == "C" {
+                        c.source_out = c.source_in + 10_000_000_000;
+                        // color_label stays ClipColorLabel::None.
+                    }
+                }
+            }
+        }
+        let probe_x = st.ns_to_x(2_000_000_000) + 4.0;
+        let probe_y = RULER_HEIGHT + 20.0;
+        assert!(
+            st.clip_body_tooltip_text(probe_x, probe_y).is_none(),
+            "unlabeled clip should not surface a color tooltip"
+        );
     }
 
     #[test]
