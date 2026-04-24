@@ -54,6 +54,12 @@ pub struct ProgramMonitorState {
     /// Precision trim display mode shown during slip/slide/roll/trim drags.
     #[serde(default)]
     pub trim_display_mode: TrimDisplayMode,
+    /// Show a small "PROXY" pill in the Program Monitor when the currently
+    /// active playback clip is being served from a proxy file rather than
+    /// the original media. Defaults to on — informational, never appears in
+    /// export output.
+    #[serde(default = "default_show_proxy_watermark")]
+    pub show_proxy_watermark: bool,
 }
 
 /// Delivery-format letterbox/pillarbox preview selected from the Program
@@ -179,6 +185,10 @@ fn default_zebra_threshold() -> f64 {
     0.90
 }
 
+fn default_show_proxy_watermark() -> bool {
+    true
+}
+
 fn default_ab_midline() -> f64 {
     50.0
 }
@@ -273,6 +283,7 @@ impl Default for ProgramMonitorState {
             ab_midline_percent: default_ab_midline(),
             ab_reference_still_id: None,
             trim_display_mode: TrimDisplayMode::default(),
+            show_proxy_watermark: default_show_proxy_watermark(),
         }
     }
 }
@@ -2081,6 +2092,7 @@ mod tests {
             ab_midline_percent: 50.0,
             ab_reference_still_id: None,
             trim_display_mode: TrimDisplayMode::Auto,
+            show_proxy_watermark: true,
         };
         let workspace = ProgramMonitorWorkspaceState::from_program_monitor_state(&monitor);
         assert!(workspace.popped);
@@ -2216,6 +2228,14 @@ mod tests {
         let legacy = r#"{"popped":false,"width":960,"height":540,"docked_split_pos":420,"scopes_visible":false,"show_safe_areas":false,"show_false_color":false,"show_zebra":false,"zebra_threshold":0.9,"show_hud":false,"aspect_mask":"none","ab_compare_enabled":false,"ab_midline_percent":50.0,"ab_reference_still_id":null}"#;
         let parsed: ProgramMonitorState = serde_json::from_str(legacy).unwrap();
         assert_eq!(parsed.trim_display_mode, TrimDisplayMode::Auto);
+    }
+
+    #[test]
+    fn program_monitor_state_defaults_show_proxy_watermark_to_true() {
+        // Legacy JSON predates show_proxy_watermark; must default to true.
+        let legacy = r#"{"popped":false,"width":960,"height":540,"docked_split_pos":420,"scopes_visible":false,"show_safe_areas":false,"show_false_color":false,"show_zebra":false,"zebra_threshold":0.9,"show_hud":false,"aspect_mask":"none","ab_compare_enabled":false,"ab_midline_percent":50.0,"ab_reference_still_id":null}"#;
+        let parsed: ProgramMonitorState = serde_json::from_str(legacy).unwrap();
+        assert!(parsed.show_proxy_watermark);
     }
 
     #[test]

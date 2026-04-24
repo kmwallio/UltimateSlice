@@ -12392,6 +12392,7 @@ pub fn build_window(
         prog_stills_strip_setter,
         prog_timecode_burnin_setter,
         prog_trim_preview_setter,
+        prog_proxy_watermark_setter,
     ) = {
         // Drawing edits (shape commits, per-item deletes) each fire
         // `on_project_changed`, which runs a two-phase program-player
@@ -13784,6 +13785,17 @@ pub fn build_window(
                     }
                 }
             },
+            monitor_state.borrow().show_proxy_watermark,
+            {
+                let monitor_state = monitor_state.clone();
+                move |show: bool| {
+                    let mut state = monitor_state.borrow_mut();
+                    if state.show_proxy_watermark != show {
+                        state.show_proxy_watermark = show;
+                        crate::ui_state::save_program_monitor_state(&state);
+                    }
+                }
+            },
         )
     };
 
@@ -14462,6 +14474,7 @@ pub fn build_window(
         let prog_frame_updater_poll = prog_frame_updater.clone();
         let prog_subtitle_setter_poll = prog_subtitle_text_setter.clone();
         let prog_hud_redraw_poll = prog_hud_redraw.clone();
+        let prog_proxy_watermark_setter_poll = prog_proxy_watermark_setter.clone();
         let monitor_state_poll = monitor_state.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(33), move || {
             let (pos_ns, playing, opacity_a, opacity_b, peaks, track_peaks, scope_frame, jkl_rate) = {
@@ -14642,6 +14655,33 @@ pub fn build_window(
                 };
                 pos_label.set_text(&program_monitor::format_timecode(pos_ns, &frame_rate));
                 ts.borrow_mut().playhead_ns = root_pos;
+
+                // Proxy watermark: flag as active if any video clip at the
+                // current playhead resolves to a ready proxy file. Matches
+                // the timeline PROXY badge semantics (proxy_preview_enabled
+                // + source_path in proxy_ready_sources).
+                {
+                    let ts_ref = ts.borrow();
+                    let any_using_proxy = if ts_ref.proxy_preview_enabled
+                        && !ts_ref.proxy_ready_sources.is_empty()
+                    {
+                        let proj = project.borrow();
+                        proj.tracks.iter().any(|track| {
+                            matches!(track.kind, crate::model::track::TrackKind::Video)
+                                && track.clips.iter().any(|clip| {
+                                    root_pos >= clip.timeline_start
+                                        && root_pos < clip.timeline_end()
+                                        && !clip.source_path.is_empty()
+                                        && ts_ref
+                                            .proxy_ready_sources
+                                            .contains(&clip.source_path)
+                                })
+                        })
+                    } else {
+                        false
+                    };
+                    prog_proxy_watermark_setter_poll(any_using_proxy);
+                }
                 let should_draw = if !playing {
                     true
                 } else {

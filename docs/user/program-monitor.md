@@ -221,6 +221,22 @@ When **Motion Tracking → Edit Region in Monitor** is enabled for the selected 
   `square` / `social_45` / `vertical`) flips the same setting from
   automation.
 
+## Proxy Watermark
+
+- Toggle **Overlays ▾ → Proxy watermark** to show a small soft-blue **PROXY**
+  pill in the top-right corner of the Program Monitor whenever the currently
+  active playback clip is being served from a proxy file rather than the
+  original media. Default on.
+- Mirrors the timeline PROXY badge but lives in the preview pane, so you
+  can tell at a glance that the frames you're seeing aren't full resolution.
+- The pill is preview-only — it never appears in export, prerender, or
+  still-frame capture output.
+- Appearance is AND-gated with the per-clip proxy-resolution check: even
+  with the toggle on, the pill stays hidden when the current playhead
+  plays an original (non-proxied) clip.
+- State persists across launches (`ProgramMonitorState.show_proxy_watermark`
+  in `ui-state.json`).
+
 ## Precision Trim Display
 
 Shows source frames at the edit points during an active timeline trim drag,

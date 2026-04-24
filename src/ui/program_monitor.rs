@@ -288,6 +288,11 @@ pub fn build_program_monitor(
     // active timeline trim drag. Off by default after first-run.
     initial_trim_display_mode: TrimDisplayMode,
     on_trim_display_mode_changed: impl Fn(TrimDisplayMode) + 'static,
+    // Proxy watermark — small "PROXY" pill drawn when the currently active
+    // playback clip is being served from a proxy file rather than the
+    // original media. Informational only, never baked into export output.
+    initial_show_proxy_watermark: bool,
+    on_proxy_watermark_changed: impl Fn(bool) + 'static,
 ) -> (
     GBox,
     Label,
@@ -319,6 +324,11 @@ pub fn build_program_monitor(
     // slip/slide drag-update (with `Some(preview)`) and on drag-end (with
     // `None` to clear).
     Rc<dyn Fn(Option<TrimPreview>)>,
+    // Proxy watermark active-state setter. Called from the window's poll
+    // tick with `true` when the current playhead has any active video clip
+    // whose preview resolves to a proxy file, `false` otherwise. The
+    // overlay AND-gates this with the user toggle before drawing.
+    Rc<dyn Fn(bool)>,
 ) {
     let root = GBox::new(Orientation::Vertical, 0);
     root.set_hexpand(true);
@@ -474,6 +484,16 @@ pub fn build_program_monitor(
     overlays_popover_box.append(&aspect_mask_label_row);
     overlays_popover_box.append(&tc_burnin_header_row);
     overlays_popover_box.append(&tc_burnin_position_row);
+
+    // Proxy watermark toggle — informational pill shown when the current
+    // playhead plays back from a proxy file. Default on.
+    let on_proxy_watermark_changed = Rc::new(on_proxy_watermark_changed);
+    let proxy_watermark_btn = CheckButton::with_label("Proxy watermark");
+    proxy_watermark_btn.set_active(initial_show_proxy_watermark);
+    proxy_watermark_btn.set_tooltip_text(Some(
+        "Show a small PROXY pill in the Program Monitor when the current playback clip is being served from a proxy rather than the original media. Never appears in export output.",
+    ));
+    overlays_popover_box.append(&proxy_watermark_btn);
 
     // Precision trim display — draws outgoing/incoming source frames over
     // the Program Monitor during an active timeline trim/roll/slip/slide
@@ -2201,6 +2221,62 @@ pub fn build_program_monitor(
         })
     };
 
+    // ── Proxy watermark overlay ─────────────────────────────────────
+    //
+    // Drawn as a small "PROXY" pill in the top-right corner of the Program
+    // Monitor when the current playhead is actively displaying a clip
+    // whose preview has been swapped for a proxy file. Two AND-gated state
+    // cells: `proxy_watermark_user_enabled` (the user toggle) and
+    // `proxy_watermark_active` (pushed from window.rs poll tick with the
+    // current clip's proxy resolution). Never baked into export.
+    let proxy_watermark_user_enabled: Rc<Cell<bool>> =
+        Rc::new(Cell::new(initial_show_proxy_watermark));
+    let proxy_watermark_active: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+
+    let proxy_watermark_da = DrawingArea::new();
+    proxy_watermark_da.set_hexpand(true);
+    proxy_watermark_da.set_vexpand(true);
+    proxy_watermark_da.set_halign(gtk::Align::Fill);
+    proxy_watermark_da.set_valign(gtk::Align::Fill);
+    proxy_watermark_da.set_can_target(false);
+    {
+        let user_enabled = proxy_watermark_user_enabled.clone();
+        let active = proxy_watermark_active.clone();
+        proxy_watermark_da.set_draw_func(move |_da, cr, width, height| {
+            if !user_enabled.get() || !active.get() || width <= 0 || height <= 0 {
+                return;
+            }
+            draw_proxy_watermark_pill(cr, width as f64, height as f64);
+        });
+    }
+    overlay.add_overlay(&proxy_watermark_da);
+    overlay.set_measure_overlay(&proxy_watermark_da, false);
+
+    // Wire the CheckButton.
+    {
+        let user_enabled = proxy_watermark_user_enabled.clone();
+        let da = proxy_watermark_da.clone();
+        let on_changed = on_proxy_watermark_changed.clone();
+        proxy_watermark_btn.connect_toggled(move |btn| {
+            let v = btn.is_active();
+            user_enabled.set(v);
+            da.queue_draw();
+            on_changed(v);
+        });
+    }
+
+    let proxy_watermark_setter: Rc<dyn Fn(bool)> = {
+        let active = proxy_watermark_active.clone();
+        let da = proxy_watermark_da.clone();
+        Rc::new(move |is_active: bool| {
+            if active.get() == is_active {
+                return;
+            }
+            active.set(is_active);
+            da.queue_draw();
+        })
+    };
+
     // Poll the Program Monitor's private ThumbnailCache at ~120ms so newly
     // ready frames repaint the overlay without stalling the main loop.
     {
@@ -2245,7 +2321,80 @@ pub fn build_program_monitor(
         stills_strip_setter,
         timecode_burnin_setter,
         trim_preview_setter,
+        proxy_watermark_setter,
     )
+}
+
+/// Draw a small "PROXY" pill in the top-right corner of the Program
+/// Monitor. Scales with monitor height so the pill stays readable whether
+/// docked small or popped out full-screen. Soft-blue fill with white bold
+/// text, matches the timeline PROXY badge palette so the two overlays
+/// read as a family.
+fn draw_proxy_watermark_pill(cr: &gtk::cairo::Context, width: f64, height: f64) {
+    let text = "PROXY";
+    // Font size scales with monitor height; clamp to reasonable bounds.
+    let font_size = (height * 0.028).clamp(11.0, 18.0);
+    cr.select_font_face(
+        "sans",
+        gtk::cairo::FontSlant::Normal,
+        gtk::cairo::FontWeight::Bold,
+    );
+    cr.set_font_size(font_size);
+    let Ok(extents) = cr.text_extents(text) else {
+        return;
+    };
+    let pad_x = font_size * 0.55;
+    let pad_y = font_size * 0.30;
+    let pill_w = extents.width() + pad_x * 2.0;
+    let pill_h = font_size + pad_y * 2.0;
+    let margin = (height * 0.02).clamp(6.0, 14.0);
+    let x = (width - pill_w - margin).max(0.0);
+    let y = margin;
+    let radius = pill_h * 0.5;
+
+    // Rounded-rectangle pill fill (soft blue, matches timeline PROXY badge).
+    cr.new_sub_path();
+    cr.arc(
+        x + pill_w - radius,
+        y + radius,
+        radius,
+        -std::f64::consts::FRAC_PI_2,
+        0.0,
+    );
+    cr.arc(
+        x + pill_w - radius,
+        y + pill_h - radius,
+        radius,
+        0.0,
+        std::f64::consts::FRAC_PI_2,
+    );
+    cr.arc(
+        x + radius,
+        y + pill_h - radius,
+        radius,
+        std::f64::consts::FRAC_PI_2,
+        std::f64::consts::PI,
+    );
+    cr.arc(
+        x + radius,
+        y + radius,
+        radius,
+        std::f64::consts::PI,
+        3.0 * std::f64::consts::FRAC_PI_2,
+    );
+    cr.close_path();
+    cr.set_source_rgba(0.20, 0.45, 0.75, 0.85);
+    let _ = cr.fill_preserve();
+    cr.set_source_rgba(0.95, 0.95, 0.98, 0.65);
+    cr.set_line_width(1.0);
+    let _ = cr.stroke();
+
+    // Text (white, bold).
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.98);
+    let text_x = x + pad_x - extents.x_bearing();
+    let text_y = y + pad_y + font_size * 0.85;
+    cr.move_to(text_x, text_y);
+    let _ = cr.show_text(text);
 }
 
 /// Render the Precision Trim Display overlay. Divides the canvas into

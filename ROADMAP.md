@@ -571,7 +571,7 @@ Tracking docs:
 - [x] Auto-save (60s timer, persistent per-project `.uspxml.autosave` files in XDG data dir with JSON metadata sidecars; replaces old single `/tmp/` file)
 - [x] Proxy media generation and management
 - [x] Proxy Status Badges on timeline clips indicating Original vs. Proxy resolution — a soft-blue **PROXY** badge shows on the timeline clip body when (a) the global proxy toggle is on and (b) at least one ready proxy exists for that clip's source; sits in the same badge row as HDR / OFFLINE / LINK / CC. Drawn from a `timeline_state.proxy_ready_sources` mirror refreshed on the 500 ms poll tick. New `ProxyCache::ready_source_paths` helper recovers source paths from composite keys.
-- [ ] Proxy Watermarks (optional visual burn-in for proxy files)
+- [x] Proxy Watermarks — soft-blue **PROXY** pill in the Program Monitor when the current playback clip resolves to a proxy file; toggleable via **Overlays ▾ → Proxy watermark** (default on); persisted in `ProgramMonitorState.show_proxy_watermark`; never baked into export
 - [x] Auto-backup with versioned history (timestamped backups to `$XDG_DATA_HOME/ultimateslice/backups/`, per-project pruning, restore UI, configurable in Preferences, MCP `list_backups` tool)
 
 ### Media Management
