@@ -474,6 +474,7 @@ The undo history is per-session (not persisted in the FCPXML).
 - Clips with phase-1 keyframes show color-coded keyframe ticks/guides on the clip body (Scale, Opacity, Position X, Position Y, Volume, Pan, Rotate, Crop Left/Right/Top/Bottom), a `KF <count>` badge, and a `◆` prefix in the clip label when keyframes are present. **Click a keyframe tick** to select the clip and jump the playhead to that keyframe time.
 - Hovering a keyframe marker shows a tooltip with the clip name, keyframe time, and which properties are modified at that keyframe moment.
 - Clips can use semantic color labels (set in the Inspector) for quick visual categorization.
+- **Color Legend** in the status bar assigns a per-project meaning to each color (e.g. Red = "B-roll", Green = "Interview"). Click the **Color Legend** button, type a name next to each color swatch, press Enter or click away to commit. Empty names fall back to the default color name. The legend is saved with the project (FCPXML `us:color-label-names` vendor attr) and can be automated via the `set_color_label_name` / `get_color_label_names` MCP tools.
 - Selected clips have a yellow highlight border.
 - Adjacent join-safe through-edits (same source with contiguous source/timeline ranges, no boundary transition, and compatible clip metadata/effects) are marked with a subtle dotted line at the cut on the track row.
 - Group peers (same `Ctrl+G` group) show a lighter secondary border when a group member is selected.

@@ -4087,6 +4087,66 @@ pub(crate) fn handle_mcp_command(
             on_project_changed();
         }
 
+        McpCommand::SetColorLabelName {
+            label,
+            name,
+            reply,
+        } => {
+            use crate::model::clip::ClipColorLabel;
+            let label_enum = ClipColorLabel::from_str(&label);
+            if label_enum.is_none() || label_enum == Some(ClipColorLabel::None) {
+                let msg = if label_enum == Some(ClipColorLabel::None) {
+                    "'none' is not a color-taggable label".to_string()
+                } else {
+                    format!("unknown color label '{label}'; expected one of: red, orange, yellow, green, teal, blue, purple, magenta")
+                };
+                reply.send(json!({"success": false, "error": msg})).ok();
+            } else {
+                let label_enum = label_enum.unwrap();
+                let mut proj = project.borrow_mut();
+                let changed = proj.set_color_label_name(label_enum, &name);
+                if changed {
+                    proj.dirty = true;
+                }
+                let display = proj.display_name_for_color_label(label_enum);
+                drop(proj);
+                reply
+                    .send(json!({
+                        "success": true,
+                        "label": label,
+                        "display_name": display,
+                        "changed": changed,
+                    }))
+                    .ok();
+                if changed {
+                    on_project_changed();
+                }
+            }
+        }
+
+        McpCommand::GetColorLabelNames { reply } => {
+            use crate::model::clip::ClipColorLabel;
+            let proj = project.borrow();
+            let mut custom = serde_json::Map::new();
+            let mut defaults = serde_json::Map::new();
+            for label in ClipColorLabel::PALETTE {
+                defaults.insert(
+                    label.as_str().to_string(),
+                    json!(label.default_display_name()),
+                );
+                if let Some(name) = proj.color_label_names.get(&label) {
+                    custom.insert(label.as_str().to_string(), json!(name));
+                }
+            }
+            reply
+                .send(json!({
+                    "success": true,
+                    "custom": custom,
+                    "defaults": defaults,
+                }))
+                .ok();
+        }
+
         McpCommand::SaveFcpxml { path, reply } => {
             // Sync bin data before save.
             crate::model::media_library::sync_bins_to_project(

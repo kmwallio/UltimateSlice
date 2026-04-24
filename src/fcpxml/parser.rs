@@ -190,6 +190,28 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                                     project.reference_stills = stills;
                                 }
                             }
+                            if let Some(legend_json) = attrs.get("us:color-label-names") {
+                                if let Ok(map) =
+                                    serde_json::from_str::<std::collections::HashMap<String, String>>(
+                                        legend_json,
+                                    )
+                                {
+                                    for (k, v) in map {
+                                        if let Some(label) =
+                                            crate::model::clip::ClipColorLabel::from_str(&k)
+                                        {
+                                            if label
+                                                != crate::model::clip::ClipColorLabel::None
+                                                && !v.trim().is_empty()
+                                            {
+                                                project
+                                                    .color_label_names
+                                                    .insert(label, v.trim().to_string());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             project.fcpxml_unknown_event.attrs =
                                 collect_unknown_attrs(&attrs, is_known_event_attr);
                         } else {
@@ -3040,6 +3062,7 @@ fn is_known_event_attr(_key: &str) -> bool {
             | "us:script-path"
             | "us:transcript-cache"
             | "us:reference-stills"
+            | "us:color-label-names"
     )
 }
 

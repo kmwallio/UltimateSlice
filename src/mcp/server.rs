@@ -820,6 +820,27 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_color_label_name",
+            "description": "Set the project-scoped display name for a clip color label (color-tag legend). Pass an empty or whitespace-only name to remove the override so the legend falls back to the default English name.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "label": {
+                        "type": "string",
+                        "description": "Color label key (snake_case). One of: red, orange, yellow, green, teal, blue, purple, magenta.",
+                        "enum": ["red", "orange", "yellow", "green", "teal", "blue", "purple", "magenta"]
+                    },
+                    "name": { "type": "string", "description": "New custom display name for that color (empty removes the override)." }
+                },
+                "required": ["label", "name"]
+            }
+        },
+        {
+            "name": "get_color_label_names",
+            "description": "Return the project-scoped color-tag legend (custom names per color) and the default fallbacks.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
             "name": "save_fcpxml",
             "description": "Export the current project to a Final Cut Pro XML (.fcpxml) file using FCPXML 1.14.",
             "inputSchema": {
@@ -3173,6 +3194,14 @@ fn dispatch_tool_payload(
             title: arg_str!(args, "title"),
             reply: tx,
         },
+
+        "set_color_label_name" => McpCommand::SetColorLabelName {
+            label: arg_str!(args, "label"),
+            name: arg_str!(args, "name"),
+            reply: tx,
+        },
+
+        "get_color_label_names" => McpCommand::GetColorLabelNames { reply: tx },
 
         "save_fcpxml" => McpCommand::SaveFcpxml {
             path: arg_str!(args, "path"),

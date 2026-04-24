@@ -18095,6 +18095,15 @@ pub fn build_window(
     status_bar.append(&track_levels_toggle);
     status_bar.append(&background_render_toggle);
     status_bar.append(&proxy_quick_toggle);
+    {
+        // Color-tag legend popover — per-project meaning per clip color.
+        let cb = on_project_changed.clone();
+        let color_legend_btn = crate::ui::color_legend::build_color_legend_button(
+            project.clone(),
+            Rc::new(move || cb()),
+        );
+        status_bar.append(&color_legend_btn);
+    }
     status_bar.append(&status_label);
     status_bar.append(&status_progress);
     let status_spacer = gtk::Box::new(Orientation::Horizontal, 0);

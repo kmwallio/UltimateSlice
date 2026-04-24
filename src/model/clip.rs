@@ -394,7 +394,7 @@ pub struct AngleSwitch {
     pub angle_index: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClipColorLabel {
     None,
@@ -406,6 +406,90 @@ pub enum ClipColorLabel {
     Blue,
     Purple,
     Magenta,
+}
+
+impl ClipColorLabel {
+    /// All labels except `None`, in display order (for the legend UI and for
+    /// iterating the palette in tests).
+    pub const PALETTE: [ClipColorLabel; 8] = [
+        ClipColorLabel::Red,
+        ClipColorLabel::Orange,
+        ClipColorLabel::Yellow,
+        ClipColorLabel::Green,
+        ClipColorLabel::Teal,
+        ClipColorLabel::Blue,
+        ClipColorLabel::Purple,
+        ClipColorLabel::Magenta,
+    ];
+
+    /// Snake-case string used by MCP + FCPXML serialization.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ClipColorLabel::None => "none",
+            ClipColorLabel::Red => "red",
+            ClipColorLabel::Orange => "orange",
+            ClipColorLabel::Yellow => "yellow",
+            ClipColorLabel::Green => "green",
+            ClipColorLabel::Teal => "teal",
+            ClipColorLabel::Blue => "blue",
+            ClipColorLabel::Purple => "purple",
+            ClipColorLabel::Magenta => "magenta",
+        }
+    }
+
+    /// Parse a snake-case label string. Returns `None` for unknown input
+    /// (callers distinguish this from the `ClipColorLabel::None` variant,
+    /// which round-trips through `"none"`).
+    pub fn from_str(s: &str) -> Option<ClipColorLabel> {
+        match s {
+            "none" => Some(ClipColorLabel::None),
+            "red" => Some(ClipColorLabel::Red),
+            "orange" => Some(ClipColorLabel::Orange),
+            "yellow" => Some(ClipColorLabel::Yellow),
+            "green" => Some(ClipColorLabel::Green),
+            "teal" => Some(ClipColorLabel::Teal),
+            "blue" => Some(ClipColorLabel::Blue),
+            "purple" => Some(ClipColorLabel::Purple),
+            "magenta" => Some(ClipColorLabel::Magenta),
+            _ => None,
+        }
+    }
+
+    /// Default English-language display name shown in the legend when the
+    /// user has not provided a project-specific override.
+    pub fn default_display_name(self) -> &'static str {
+        match self {
+            ClipColorLabel::None => "None",
+            ClipColorLabel::Red => "Red",
+            ClipColorLabel::Orange => "Orange",
+            ClipColorLabel::Yellow => "Yellow",
+            ClipColorLabel::Green => "Green",
+            ClipColorLabel::Teal => "Teal",
+            ClipColorLabel::Blue => "Blue",
+            ClipColorLabel::Purple => "Purple",
+            ClipColorLabel::Magenta => "Magenta",
+        }
+    }
+
+    /// Canonical `(r, g, b)` triple (each 0.0–1.0) for this label. Used by
+    /// the timeline clip renderer and the color-tag legend popover so the
+    /// two swatches stay aligned.
+    pub fn swatch_rgb(self) -> (f64, f64, f64) {
+        match self {
+            // `None` is rendered as mid-gray when a caller asks for a
+            // swatch (the legend never shows it, but callers that want to
+            // use this helper uniformly won't crash).
+            ClipColorLabel::None => (0.45, 0.45, 0.47),
+            ClipColorLabel::Red => (0.78, 0.27, 0.27),
+            ClipColorLabel::Orange => (0.83, 0.49, 0.20),
+            ClipColorLabel::Yellow => (0.78, 0.68, 0.20),
+            ClipColorLabel::Green => (0.28, 0.66, 0.33),
+            ClipColorLabel::Teal => (0.20, 0.63, 0.60),
+            ClipColorLabel::Blue => (0.22, 0.48, 0.85),
+            ClipColorLabel::Purple => (0.53, 0.38, 0.80),
+            ClipColorLabel::Magenta => (0.78, 0.35, 0.68),
+        }
+    }
 }
 
 impl Default for ClipColorLabel {

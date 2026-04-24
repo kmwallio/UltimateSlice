@@ -320,6 +320,21 @@ pub enum McpCommand {
         title: String,
         reply: SyncSender<Value>,
     },
+    /// Set the project-scoped display name for a clip color label (e.g.
+    /// Red → "B-roll"). An empty / whitespace-only `name` removes the
+    /// override so the legend falls back to the default English name.
+    /// `label` is the snake-case variant string
+    /// (`red`/`orange`/`yellow`/`green`/`teal`/`blue`/`purple`/`magenta`).
+    SetColorLabelName {
+        label: String,
+        name: String,
+        reply: SyncSender<Value>,
+    },
+    /// Return the project's color-tag legend as a JSON map of
+    /// `{ "label": "custom name" }` plus a `defaults` map for every color.
+    GetColorLabelNames {
+        reply: SyncSender<Value>,
+    },
     OpenFcpxml {
         path: String,
         reply: SyncSender<Value>,

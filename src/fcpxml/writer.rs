@@ -250,6 +250,19 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                 event.push_attribute(("us:reference-stills", json.as_str()));
             }
         }
+        // Color-tag legend: per-project display names for each ClipColorLabel
+        // (e.g. Red = "B-roll"). Keys are the enum's snake_case serialization
+        // so the JSON is portable between projects + future tooling.
+        if !project.color_label_names.is_empty() {
+            let mut keyed: std::collections::BTreeMap<&str, &str> =
+                std::collections::BTreeMap::new();
+            for (label, name) in project.color_label_names.iter() {
+                keyed.insert(label.as_str(), name.as_str());
+            }
+            if let Ok(json) = serde_json::to_string(&keyed) {
+                event.push_attribute(("us:color-label-names", json.as_str()));
+            }
+        }
     }
     writer.write_event(Event::Start(event))?;
 
@@ -4418,6 +4431,7 @@ fn is_writer_managed_event_attr(_key: &str) -> bool {
             | "us:script-path"
             | "us:transcript-cache"
             | "us:reference-stills"
+            | "us:color-label-names"
     )
 }
 
@@ -5207,6 +5221,49 @@ mod tests {
         assert_eq!(got.filename, still.filename);
         assert_eq!(got.captured_at_ns, 42_000_000_000);
         assert_eq!(got.timeline_pos_ns, 5_000_000_000);
+    }
+
+    #[test]
+    fn test_color_label_names_round_trip_through_fcpxml() {
+        use crate::fcpxml::parser::parse_fcpxml;
+        use crate::model::clip::ClipColorLabel;
+        let mut project = Project::new("ColorLegendRT");
+        project.set_color_label_name(ClipColorLabel::Red, "B-roll");
+        project.set_color_label_name(ClipColorLabel::Green, "Interview");
+        project.set_color_label_name(ClipColorLabel::Blue, "VFX");
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(
+            xml.contains("us:color-label-names="),
+            "color-label-names vendor attr missing"
+        );
+
+        let rt = parse_fcpxml(&xml).expect("parse");
+        assert_eq!(rt.color_label_names.len(), 3);
+        assert_eq!(
+            rt.display_name_for_color_label(ClipColorLabel::Red),
+            "B-roll"
+        );
+        assert_eq!(
+            rt.display_name_for_color_label(ClipColorLabel::Green),
+            "Interview"
+        );
+        assert_eq!(rt.display_name_for_color_label(ClipColorLabel::Blue), "VFX");
+        // Unset colors fall back to defaults.
+        assert_eq!(
+            rt.display_name_for_color_label(ClipColorLabel::Yellow),
+            "Yellow"
+        );
+    }
+
+    #[test]
+    fn test_color_label_names_empty_is_omitted_from_xml() {
+        let project = Project::new("NoLegend");
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(
+            !xml.contains("us:color-label-names"),
+            "empty legend must not emit vendor attr"
+        );
     }
 
     #[test]
