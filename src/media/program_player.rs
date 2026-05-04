@@ -2,7 +2,9 @@ use crate::media::adjustment_scope::AdjustmentScopeShape;
 use crate::media::color_math;
 use crate::media::cube_lut::CubeLut;
 use crate::media::player::PlayerState;
-use crate::model::clip::{Clip as ModelClip, ClipMask, MaskShape, NumericKeyframe};
+use crate::model::clip::{
+    AudioSourceStreamInfo, Clip as ModelClip, ClipMask, MaskShape, NumericKeyframe,
+};
 use crate::model::transition::{
     canonicalize_transition_kind, transition_kind_from_xfade_name, transition_xfade_name_for_kind,
     TransitionAlignment, TransitionOverlapWindow,
@@ -80,7 +82,7 @@ use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -255,22 +257,61 @@ fn remove_prerender_segment_files(output_path: &Path) {
 /// Normalize mixer-bound clip audio so camera AAC (e.g. 16 kHz mono Ring MP4s)
 /// negotiates cleanly with the fixed preview mix format.
 /// Insert a mono capsfilter between `audioconvert` and the rest of the audio
-/// chain to extract a single channel (Left/Right) or downmix (MonoMix).
-/// The downstream stereo capsfilter then upmixes mono to both speakers.
-/// Returns the element on success (caller must sync state), or None for Stereo.
+fn build_preview_audio_mix_matrix(
+    mode: crate::model::clip::AudioChannelMode,
+    input_channels: u32,
+    channel_offset: u32,
+) -> Option<Vec<Vec<f32>>> {
+    use crate::model::clip::AudioChannelMode;
+
+    let input_channels = input_channels.max(1) as usize;
+    let left_idx = channel_offset.min((input_channels - 1) as u32) as usize;
+    let right_idx = ((left_idx + 1) < input_channels).then_some(left_idx + 1);
+
+    if matches!(mode, AudioChannelMode::Stereo) && input_channels <= 2 && left_idx == 0 {
+        return None;
+    }
+
+    let mut left_row = vec![0.0f32; input_channels];
+    let mut right_row = vec![0.0f32; input_channels];
+    match mode {
+        AudioChannelMode::Stereo => {
+            left_row[left_idx] = 1.0;
+            right_row[right_idx.unwrap_or(left_idx)] = 1.0;
+        }
+        AudioChannelMode::Left => {
+            left_row[left_idx] = 1.0;
+            right_row[left_idx] = 1.0;
+        }
+        AudioChannelMode::Right => {
+            let right_idx = right_idx.unwrap_or(left_idx);
+            left_row[right_idx] = 1.0;
+            right_row[right_idx] = 1.0;
+        }
+        AudioChannelMode::MonoMix => {
+            if let Some(right_idx) = right_idx {
+                left_row[left_idx] = 0.5;
+                left_row[right_idx] = 0.5;
+                right_row[left_idx] = 0.5;
+                right_row[right_idx] = 0.5;
+            } else {
+                left_row[left_idx] = 1.0;
+                right_row[left_idx] = 1.0;
+            }
+        }
+    }
+    Some(vec![left_row, right_row])
+}
+
 /// Set `mix-matrix` on an `audioconvert` element for channel extraction.
-/// Left: both outputs get input left. Right: both get input right.
-/// MonoMix: both get 0.5*L + 0.5*R.  Stereo: no-op.
 fn apply_channel_mode_to_audioconvert(
     audio_conv: &gst::Element,
     mode: crate::model::clip::AudioChannelMode,
+    input_channels: u32,
+    channel_offset: u32,
 ) {
-    use crate::model::clip::AudioChannelMode;
-    let matrix: Vec<Vec<f32>> = match mode {
-        AudioChannelMode::Stereo => return,
-        AudioChannelMode::Left => vec![vec![1.0, 0.0], vec![1.0, 0.0]],
-        AudioChannelMode::Right => vec![vec![0.0, 1.0], vec![0.0, 1.0]],
-        AudioChannelMode::MonoMix => vec![vec![0.5, 0.5], vec![0.5, 0.5]],
+    let Some(matrix) = build_preview_audio_mix_matrix(mode, input_channels, channel_offset) else {
+        return;
     };
     if audio_conv.find_property("mix-matrix").is_some() {
         let gst_matrix: Vec<glib::SendValue> = matrix
@@ -299,6 +340,8 @@ fn attach_preview_audio_normalizer(
         pipeline,
         audio_conv,
         crate::model::clip::AudioChannelMode::Stereo,
+        2,
+        0,
         log_context,
     )
 }
@@ -307,6 +350,8 @@ fn attach_preview_audio_normalizer_with_channel_mode(
     pipeline: &gst::Pipeline,
     audio_conv: &gst::Element,
     channel_mode: crate::model::clip::AudioChannelMode,
+    input_channels: u32,
+    channel_offset: u32,
     log_context: &str,
 ) -> Option<(gst::Element, gst::Element, gst::Pad)> {
     let resample = match gst::ElementFactory::make("audioresample").build() {
@@ -341,7 +386,7 @@ fn attach_preview_audio_normalizer_with_channel_mode(
     // Apply channel extraction (Left/Right/MonoMix) via the audioconvert
     // mix-matrix.  The matrix maps input channels to output stereo so that
     // both speakers carry the selected channel(s).
-    apply_channel_mode_to_audioconvert(audio_conv, channel_mode);
+    apply_channel_mode_to_audioconvert(audio_conv, channel_mode, input_channels, channel_offset);
 
     let Some(conv_src) = audio_conv.static_pad("src") else {
         log::warn!("{log_context}: audioconvert src pad missing");
@@ -711,6 +756,12 @@ pub struct ProgramClip {
     pub pan_keyframes: Vec<NumericKeyframe>,
     /// Audio channel extraction/downmix mode.
     pub audio_channel_mode: crate::model::clip::AudioChannelMode,
+    /// Probe-time source audio streams for the source media.
+    pub audio_source_streams: Vec<AudioSourceStreamInfo>,
+    /// Selected source audio stream (zero-based ordinal among audio streams).
+    pub audio_source_stream_index: u32,
+    /// Selected channel offset within the chosen source stream.
+    pub audio_source_channel_offset: u32,
     /// 3-band parametric EQ settings.
     pub eq_bands: [crate::model::clip::EqBand; 3],
     pub eq_low_gain_keyframes: Vec<NumericKeyframe>,
@@ -884,6 +935,35 @@ pub struct ProgramClip {
 impl ProgramClip {
     pub fn source_duration_ns(&self) -> u64 {
         self.source_out_ns.saturating_sub(self.source_in_ns)
+    }
+
+    pub fn selected_audio_source_stream(&self) -> Option<&AudioSourceStreamInfo> {
+        self.audio_source_streams
+            .iter()
+            .find(|stream| stream.stream_index == self.audio_source_stream_index)
+            .or_else(|| self.audio_source_streams.first())
+    }
+
+    pub fn selected_audio_stream_channel_count(&self) -> u32 {
+        self.selected_audio_source_stream()
+            .map(|stream| stream.channels.max(1))
+            .unwrap_or(2)
+    }
+
+    pub fn clamped_audio_source_stream_index(&self) -> u32 {
+        self.selected_audio_source_stream()
+            .map(|stream| stream.stream_index)
+            .unwrap_or(0)
+    }
+
+    pub fn clamped_audio_source_channel_offset(&self) -> u32 {
+        let channels = self.selected_audio_stream_channel_count();
+        if channels <= 1 {
+            0
+        } else {
+            self.audio_source_channel_offset
+                .min(channels.saturating_sub(1))
+        }
     }
 
     pub fn local_timeline_position_ns(&self, timeline_pos_ns: u64) -> u64 {
@@ -2943,6 +3023,10 @@ impl ProgramPlayer {
         }
     }
 
+    pub fn snapshot_bg_removal_paths(&self) -> HashMap<String, String> {
+        self.bg_removal_paths.clone()
+    }
+
     /// Hand off a freshly snapshotted voice-enhance cache key → output
     /// path map. The Program Monitor swaps in the prerendered file at
     /// `resolve_source_path_for_clip` time for any clip whose
@@ -2969,6 +3053,10 @@ impl ProgramPlayer {
             // sees zeroed baked-scope fields on those clips.
             self.neutralize_baked_effects_for_sidecar_clips();
         }
+    }
+
+    pub fn snapshot_render_replace_paths(&self) -> HashMap<String, String> {
+        self.render_replace_paths.clone()
     }
 
     /// Walk `self.clips` + `self.audio_clips` and zero out the baked-scope
@@ -3021,12 +3109,7 @@ impl ProgramPlayer {
             );
             let sidecar_ready = paths
                 .get(&key)
-                .map(|p| {
-                    std::fs::metadata(p)
-                        .ok()
-                        .filter(|m| m.len() > 0)
-                        .is_some()
-                })
+                .map(|p| std::fs::metadata(p).ok().filter(|m| m.len() > 0).is_some())
                 .unwrap_or(false);
             if !sidecar_ready {
                 return;
@@ -3148,6 +3231,10 @@ impl ProgramPlayer {
             self.prewarmed_boundary_ns = None;
             self.invalidate_short_frame_cache("frame-interp-paths-updated");
         }
+    }
+
+    pub fn snapshot_frame_interp_paths(&self) -> HashMap<String, String> {
+        self.frame_interp_paths.clone()
     }
 
     pub fn project_health_prerender_cache_root(&self) -> &Path {
@@ -11635,6 +11722,8 @@ impl ProgramPlayer {
                             &self.pipeline,
                             &ac_elem,
                             clip.audio_channel_mode,
+                            clip.selected_audio_stream_channel_count(),
+                            clip.clamped_audio_source_channel_offset(),
                             "build_audio_only_slot",
                         ) {
                         ar = Some(resample);
@@ -13237,6 +13326,8 @@ impl ProgramPlayer {
                             &self.pipeline,
                             &ac_elem,
                             clip.audio_channel_mode,
+                            clip.selected_audio_stream_channel_count(),
+                            clip.clamped_audio_source_channel_offset(),
                             "build_slot_for_clip",
                         ) {
                         ar = Some(resample);
@@ -15105,9 +15196,7 @@ impl ProgramPlayer {
                         // `dropped` directly from the structure because the
                         // `Qos::stats()` wrapper wraps the count in a
                         // `GenericFormattedValue` that is version-sensitive.
-                        let dropped = msg
-                            .structure()
-                            .and_then(|s| s.get::<u64>("dropped").ok());
+                        let dropped = msg.structure().and_then(|s| s.get::<u64>("dropped").ok());
                         let src_name = msg
                             .src()
                             .and_then(|src| src.clone().downcast::<gst::Element>().ok())
@@ -15503,11 +15592,19 @@ impl ProgramPlayer {
                 continue;
             }
             let ch_mode = clip_ref.map(|c| c.audio_channel_mode).unwrap_or_default();
+            let input_channels = clip_ref
+                .map(|c| c.selected_audio_stream_channel_count())
+                .unwrap_or(2);
+            let channel_offset = clip_ref
+                .map(|c| c.clamped_audio_source_channel_offset())
+                .unwrap_or(0);
             let mut link_src_pad = if let Some((resample, capsfilter, normalized_src)) =
                 attach_preview_audio_normalizer_with_channel_mode(
                     &pipeline,
                     &ac,
                     ch_mode,
+                    input_channels,
+                    channel_offset,
                     "audio_multi_pipeline",
                 ) {
                 audio_resample = Some(resample);
@@ -15621,11 +15718,20 @@ impl ProgramPlayer {
             }
 
             let ac_for_cb = ac.clone();
+            let selected_stream_index = clip_ref
+                .map(|clip| clip.clamped_audio_source_stream_index())
+                .unwrap_or(0);
+            let audio_pad_ordinal = Arc::new(AtomicU32::new(0));
+            let audio_pad_ordinal_for_cb = audio_pad_ordinal.clone();
             decoder.connect_pad_added(move |_, pad| {
                 let caps = pad.current_caps().or_else(|| Some(pad.query_caps(None)));
                 if let Some(caps) = caps {
                     if let Some(s) = caps.structure(0) {
                         if s.name().starts_with("audio/") {
+                            let ordinal = audio_pad_ordinal_for_cb.fetch_add(1, Ordering::Relaxed);
+                            if ordinal != selected_stream_index {
+                                return;
+                            }
                             if let Some(sink) = ac_for_cb.static_pad("sink") {
                                 if !sink.is_linked() {
                                     let _ = pad.link(&sink);
@@ -16304,6 +16410,9 @@ mod tests {
             pan: 0.0,
             pan_keyframes: Vec::new(),
             audio_channel_mode: crate::model::clip::AudioChannelMode::default(),
+            audio_source_streams: Vec::new(),
+            audio_source_stream_index: 0,
+            audio_source_channel_offset: 0,
             eq_bands: crate::model::clip::default_eq_bands(),
             eq_low_gain_keyframes: Vec::new(),
             eq_mid_gain_keyframes: Vec::new(),

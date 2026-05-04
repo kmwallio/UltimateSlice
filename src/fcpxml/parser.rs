@@ -191,17 +191,15 @@ pub fn parse_fcpxml_with_path(xml: &str, fcpxml_path: Option<&Path>) -> Result<P
                                 }
                             }
                             if let Some(legend_json) = attrs.get("us:color-label-names") {
-                                if let Ok(map) =
-                                    serde_json::from_str::<std::collections::HashMap<String, String>>(
-                                        legend_json,
-                                    )
+                                if let Ok(map) = serde_json::from_str::<
+                                    std::collections::HashMap<String, String>,
+                                >(legend_json)
                                 {
                                     for (k, v) in map {
                                         if let Some(label) =
                                             crate::model::clip::ClipColorLabel::from_str(&k)
                                         {
-                                            if label
-                                                != crate::model::clip::ClipColorLabel::None
+                                            if label != crate::model::clip::ClipColorLabel::None
                                                 && !v.trim().is_empty()
                                             {
                                                 project
@@ -1342,6 +1340,12 @@ fn parse_asset_clip(
         }
         if let Some(v) = attrs.get("us:audio-channel-mode") {
             clip.audio_channel_mode = crate::model::clip::AudioChannelMode::from_str(v);
+        }
+        if let Some(v) = attrs.get("us:audio-source-stream-index") {
+            clip.audio_source_stream_index = v.parse().unwrap_or(0);
+        }
+        if let Some(v) = attrs.get("us:audio-source-channel-offset") {
+            clip.audio_source_channel_offset = v.parse().unwrap_or(0);
         }
         if let Some(v) = attrs.get("us:measured-loudness-lufs") {
             clip.measured_loudness_lufs = v.parse().ok();
@@ -3002,6 +3006,8 @@ fn is_known_asset_clip_attr(key: &str) -> bool {
             | "us:pitch-shift-semitones"
             | "us:pitch-preserve"
             | "us:audio-channel-mode"
+            | "us:audio-source-stream-index"
+            | "us:audio-source-channel-offset"
             | "us:ladspa-effects"
             | "us:masks"
             | "us:measured-loudness-lufs"

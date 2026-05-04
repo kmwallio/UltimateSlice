@@ -317,6 +317,8 @@ fn write_otio_with_mode(
                 pitch_shift_semitones: Some(clip.pitch_shift_semitones),
                 pitch_preserve: Some(clip.pitch_preserve),
                 audio_channel_mode: Some(clip.audio_channel_mode),
+                audio_source_stream_index: Some(clip.audio_source_stream_index),
+                audio_source_channel_offset: Some(clip.audio_source_channel_offset),
                 speed_keyframes: if clip.speed_keyframes.is_empty() {
                     None
                 } else {
@@ -1021,6 +1023,7 @@ mod tests {
     fn test_reference_stills_round_trip_through_otio() {
         let mut p = make_project();
         let mut still = crate::model::project::ReferenceStill::new("Ref A");
+        still.origin = crate::model::project::ReferenceStillOrigin::ExportRender;
         still.width = 1280;
         still.height = 720;
         still.captured_at_ns = 10_000_000_000;
@@ -1035,6 +1038,10 @@ mod tests {
         assert_eq!(parsed.reference_stills[0].width, 1280);
         assert_eq!(parsed.reference_stills[0].height, 720);
         assert_eq!(parsed.reference_stills[0].filename, still.filename);
+        assert_eq!(
+            parsed.reference_stills[0].origin,
+            crate::model::project::ReferenceStillOrigin::ExportRender
+        );
     }
 
     #[test]

@@ -472,6 +472,12 @@ fn otio_clip_to_clip(
         if let Some(v) = us.audio_channel_mode {
             clip.audio_channel_mode = v;
         }
+        if let Some(v) = us.audio_source_stream_index {
+            clip.audio_source_stream_index = v;
+        }
+        if let Some(v) = us.audio_source_channel_offset {
+            clip.audio_source_channel_offset = v;
+        }
         if let Some(v) = us.speed_keyframes.as_ref() {
             clip.speed_keyframes = v.clone();
         }
@@ -1364,6 +1370,8 @@ mod tests {
         clip.pitch_preserve = true;
         // Audio routing
         clip.audio_channel_mode = AudioChannelMode::Left;
+        clip.audio_source_stream_index = 1;
+        clip.audio_source_channel_offset = 2;
         // Slow-motion interp
         clip.slow_motion_interp = SlowMotionInterp::OpticalFlow;
         // LUTs
@@ -1425,6 +1433,14 @@ mod tests {
         assert_eq!(clip2.pitch_shift_semitones, clip.pitch_shift_semitones);
         assert_eq!(clip2.pitch_preserve, clip.pitch_preserve);
         assert_eq!(clip2.audio_channel_mode, clip.audio_channel_mode);
+        assert_eq!(
+            clip2.audio_source_stream_index,
+            clip.audio_source_stream_index
+        );
+        assert_eq!(
+            clip2.audio_source_channel_offset,
+            clip.audio_source_channel_offset
+        );
         // Slow-motion interp
         assert_eq!(clip2.slow_motion_interp, clip.slow_motion_interp);
         // LUTs

@@ -338,12 +338,12 @@ pub fn show_preferences_dialog(
     proxy_label.set_halign(gtk::Align::Start);
     let proxy_mode = gtk4::ComboBoxText::new();
     proxy_mode.append(Some("off"), "Off (use original media)");
-    proxy_mode.append(Some("half_res"), "Half resolution");
-    proxy_mode.append(Some("quarter_res"), "Quarter resolution");
+    proxy_mode.append(Some("p1080"), "1080p (HD-tall preview)");
+    proxy_mode.append(Some("p640"), "640p (very small, fastest scrubbing)");
     proxy_mode.set_active_id(Some(current.proxy_mode.as_str()));
     proxy_mode.set_halign(gtk::Align::Start);
     let proxy_hint = Label::new(Some(
-        "Generate lightweight proxy files for smoother preview playback. Export always uses original media.",
+        "Generate lightweight proxy files for smoother preview playback. Proxies preserve source aspect ratio and never upscale. Export always uses original media.",
     ));
     proxy_hint.set_halign(gtk::Align::Start);
     proxy_hint.add_css_class("dim-label");

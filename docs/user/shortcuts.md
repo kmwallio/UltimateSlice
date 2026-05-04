@@ -51,6 +51,9 @@ The same **I / O** Source Monitor marks are also used by the keyword-range contr
 | `E` | Toggle Roll edit tool (2-up precision trim display shown in Program Monitor while dragging) |
 | `Y` | Toggle Slip edit tool (4-up precision trim display shown in Program Monitor while dragging) |
 | `U` | Toggle Slide edit tool (4-up precision trim display shown in Program Monitor while dragging) |
+| `Enter` | Open Precision Trim for the active Ripple/Roll/Slip/Slide tool, or commit the current Precision Trim session |
+| `←` / `→` *(Precision Trim active)* | Nudge the active Precision Trim session by 1 frame |
+| `Shift+←` / `Shift+→` *(Precision Trim active)* | Nudge the active Precision Trim session by 5 frames |
 | `D` | Toggle Draw tool |
 | `S` | Toggle solo for selected track |
 | `M` | Toggle mute for selected track |
@@ -60,7 +63,7 @@ The same **I / O** Source Monitor marks are also used by the keyword-range contr
 | `Ctrl+Shift+B` | Join selected through-edit boundary into one clip |
 | `,` | Insert at playhead (shift subsequent clips) |
 | `.` | Overwrite at playhead (replace existing material) |
-| `Escape` | Switch to Select tool, or cancel an armed **Generate Music Region** draw |
+| `Escape` | Cancel Precision Trim, switch to Select tool, or cancel an armed **Generate Music Region** draw |
 | `Delete` / `Backspace` | Delete selected clip(s) |
 | `Shift+Delete` / `Shift+Backspace` | Ripple delete selected clip(s) (track-local gap close) |
 | `Ctrl+Shift+→` | Select clips forward from playhead |
@@ -86,7 +89,7 @@ The same **I / O** Source Monitor marks are also used by the keyword-range contr
 | `Ctrl+A` | Select all timeline clips |
 | Drag in empty timeline body | Marquee-select clips intersecting the rectangle |
 | `M` | Add chapter marker at playhead |
-| `Right-click clip` | Open clip context menu with only currently actionable clip actions (join-through-edit, freeze-frame, link/unlink, grouped timecode-align, audio sync when applicable) |
+| `Right-click clip` | Open clip context menu with only currently actionable clip actions (including **Precision Trim…** when Ripple/Roll/Slip/Slide can start from the current selection) |
 | `Right-click ruler` | Remove nearest marker |
 | `Right-click transition marker` | Remove transition at clip boundary |
 | `Scroll (vertical)` | Zoom timeline in/out |

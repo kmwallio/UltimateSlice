@@ -1,6 +1,8 @@
 use crate::media::player::Player;
 use crate::media::program_player::{ProgramClip, ProgramPlayer};
-use crate::model::clip::{AudioChannelMode, Clip, ClipKind, Phase1KeyframeProperty};
+use crate::model::clip::{
+    AudioChannelMode, AudioSourceStreamInfo, Clip, ClipKind, Phase1KeyframeProperty,
+};
 use crate::model::media_library::{
     media_background_ai_index_request, media_background_auto_tag_request,
     media_background_visual_index_request, media_keyword_summary, upsert_media_auto_tags,
@@ -1974,11 +1976,106 @@ fn lookup_source_audio_channel_mode_in_tracks(
     None
 }
 
-fn lookup_source_audio_channel_mode(project: &Project, source_path: &str) -> AudioChannelMode {
-    let mut fallback = None;
+fn lookup_source_audio_stream_index_in_tracks(
+    tracks: &[crate::model::track::Track],
+    source_path: &str,
+    fallback: &mut Option<u32>,
+) -> Option<u32> {
+    for track in tracks {
+        for clip in &track.clips {
+            if clip.source_path == source_path {
+                let stream_index = clip.clamped_audio_source_stream_index();
+                if fallback.is_none() {
+                    *fallback = Some(stream_index);
+                }
+                if stream_index != 0 {
+                    return Some(stream_index);
+                }
+            }
+            if let Some(ref compound_tracks) = clip.compound_tracks {
+                if let Some(stream_index) = lookup_source_audio_stream_index_in_tracks(
+                    compound_tracks,
+                    source_path,
+                    fallback,
+                ) {
+                    return Some(stream_index);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn lookup_source_audio_channel_offset_in_tracks(
+    tracks: &[crate::model::track::Track],
+    source_path: &str,
+    fallback: &mut Option<u32>,
+) -> Option<u32> {
+    for track in tracks {
+        for clip in &track.clips {
+            if clip.source_path == source_path {
+                let channel_offset = clip.clamped_audio_source_channel_offset();
+                if fallback.is_none() {
+                    *fallback = Some(channel_offset);
+                }
+                if channel_offset != 0 {
+                    return Some(channel_offset);
+                }
+            }
+            if let Some(ref compound_tracks) = clip.compound_tracks {
+                if let Some(channel_offset) = lookup_source_audio_channel_offset_in_tracks(
+                    compound_tracks,
+                    source_path,
+                    fallback,
+                ) {
+                    return Some(channel_offset);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn lookup_source_audio_channel_mode(
+    library: &[MediaItem],
+    project: &Project,
+    source_path: &str,
+) -> AudioChannelMode {
+    let mut fallback = library
+        .iter()
+        .find(|item| item.source_path == source_path)
+        .map(|item| item.audio_channel_mode);
     lookup_source_audio_channel_mode_in_tracks(&project.tracks, source_path, &mut fallback)
         .or(fallback)
         .unwrap_or_default()
+}
+
+fn lookup_source_audio_stream_index(
+    library: &[MediaItem],
+    project: &Project,
+    source_path: &str,
+) -> u32 {
+    let mut fallback = library
+        .iter()
+        .find(|item| item.source_path == source_path)
+        .map(|item| item.audio_source_stream_index);
+    lookup_source_audio_stream_index_in_tracks(&project.tracks, source_path, &mut fallback)
+        .or(fallback)
+        .unwrap_or(0)
+}
+
+fn lookup_source_audio_channel_offset(
+    library: &[MediaItem],
+    project: &Project,
+    source_path: &str,
+) -> u32 {
+    let mut fallback = library
+        .iter()
+        .find(|item| item.source_path == source_path)
+        .map(|item| item.audio_source_channel_offset);
+    lookup_source_audio_channel_offset_in_tracks(&project.tracks, source_path, &mut fallback)
+        .or(fallback)
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1989,6 +2086,10 @@ struct ProjectLibraryEntry {
     duration_ns: u64,
     source_timecode_base_ns: Option<u64>,
     is_animated_svg: bool,
+    audio_source_streams: Vec<AudioSourceStreamInfo>,
+    audio_source_stream_index: u32,
+    audio_source_channel_offset: u32,
+    audio_channel_mode: AudioChannelMode,
     clip_kind: Option<ClipKind>,
     label: String,
     title_text: Option<String>,
@@ -2017,6 +2118,10 @@ impl ProjectLibraryEntry {
             },
             source_timecode_base_ns: clip.source_timecode_base_ns,
             is_animated_svg: clip.animated_svg,
+            audio_source_streams: clip.audio_source_streams.clone(),
+            audio_source_stream_index: clip.audio_source_stream_index,
+            audio_source_channel_offset: clip.audio_source_channel_offset,
+            audio_channel_mode: clip.audio_channel_mode,
             clip_kind,
             label: clip.label.clone(),
             title_text,
@@ -2046,6 +2151,10 @@ impl ProjectLibraryEntry {
             item.source_timecode_base_ns = self.source_timecode_base_ns;
         }
         item.is_animated_svg = self.is_animated_svg;
+        item.audio_source_streams = self.audio_source_streams.clone();
+        item.audio_source_stream_index = self.audio_source_stream_index;
+        item.audio_source_channel_offset = self.audio_source_channel_offset;
+        item.audio_channel_mode = self.audio_channel_mode;
     }
 
     fn into_media_item(self) -> MediaItem {
@@ -2053,6 +2162,10 @@ impl ProjectLibraryEntry {
         item.id = self.item_id;
         item.source_timecode_base_ns = self.source_timecode_base_ns;
         item.is_animated_svg = self.is_animated_svg;
+        item.audio_source_streams = self.audio_source_streams;
+        item.audio_source_stream_index = self.audio_source_stream_index;
+        item.audio_source_channel_offset = self.audio_source_channel_offset;
+        item.audio_channel_mode = self.audio_channel_mode;
         item.clip_kind = self.clip_kind;
         item.title_text = self.title_text;
         if !item.has_backing_file() {
@@ -2439,13 +2552,16 @@ pub(crate) fn apply_collected_files_manifest_to_project_state(
     summary
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct SourcePlacementInfo {
     pub(crate) is_audio_only: bool,
     pub(crate) has_audio: bool,
     pub(crate) is_image: bool,
     pub(crate) is_animated_svg: bool,
     pub(crate) source_timecode_base_ns: Option<u64>,
+    pub(crate) audio_source_streams: Vec<AudioSourceStreamInfo>,
+    pub(crate) audio_source_stream_index: u32,
+    pub(crate) audio_source_channel_offset: u32,
     pub(crate) audio_channel_mode: AudioChannelMode,
 }
 
@@ -2459,6 +2575,9 @@ pub(crate) fn lookup_source_placement_info(
     let item = library.iter().find(|item| item.source_path == source_path);
     let mut is_audio_only = item.map(|item| item.is_audio_only).unwrap_or(false);
     let mut has_audio = item.map(|item| item.has_audio).unwrap_or(false);
+    let mut audio_source_streams = item
+        .map(|item| item.audio_source_streams.clone())
+        .unwrap_or_default();
     let is_animated_svg = item.map(|item| item.is_animated_svg).unwrap_or_else(|| {
         crate::model::clip::is_svg_file(source_path)
             && crate::media::animated_svg::analyze_svg_path(source_path)
@@ -2473,6 +2592,7 @@ pub(crate) fn lookup_source_placement_info(
         let metadata = crate::media::probe_cache::probe_media_metadata(source_path);
         is_audio_only = metadata.is_audio_only;
         has_audio = metadata.has_audio;
+        audio_source_streams = metadata.audio_source_streams;
     }
 
     // Images are never audio-only; override Discoverer misclassification.
@@ -2486,8 +2606,15 @@ pub(crate) fn lookup_source_placement_info(
         has_audio,
         is_image,
         is_animated_svg,
+        audio_source_streams,
+        audio_source_stream_index: lookup_source_audio_stream_index(library, project, source_path),
+        audio_source_channel_offset: lookup_source_audio_channel_offset(
+            library,
+            project,
+            source_path,
+        ),
         source_timecode_base_ns: lookup_source_timecode_base_ns(library, project, source_path),
-        audio_channel_mode: lookup_source_audio_channel_mode(project, source_path),
+        audio_channel_mode: lookup_source_audio_channel_mode(library, project, source_path),
     }
 }
 
@@ -2529,7 +2656,7 @@ fn find_track_index_by_id_and_kind(
 }
 
 fn default_source_patch_audio_enabled(
-    source_info: SourcePlacementInfo,
+    source_info: &SourcePlacementInfo,
     source_monitor_auto_link_av: bool,
 ) -> bool {
     source_info.is_audio_only
@@ -2579,7 +2706,7 @@ impl SourcePlacementPlan {
 fn build_source_placement_plan_by_track_id_with_patch(
     project: &Project,
     preferred_track_id: Option<&str>,
-    source_info: SourcePlacementInfo,
+    source_info: &SourcePlacementInfo,
     source_monitor_auto_link_av: bool,
     patch_routing: Option<&preview::SourcePatchRouting>,
 ) -> SourcePlacementPlan {
@@ -2659,7 +2786,7 @@ fn build_source_placement_plan_by_track_id_with_patch(
 fn build_source_placement_plan_by_track_id(
     project: &Project,
     preferred_track_id: Option<&str>,
-    source_info: SourcePlacementInfo,
+    source_info: &SourcePlacementInfo,
     source_monitor_auto_link_av: bool,
 ) -> SourcePlacementPlan {
     build_source_placement_plan_by_track_id_with_patch(
@@ -2674,7 +2801,7 @@ fn build_source_placement_plan_by_track_id(
 fn build_source_placement_plan_by_track_index_with_patch(
     project: &Project,
     preferred_track_index: Option<usize>,
-    source_info: SourcePlacementInfo,
+    source_info: &SourcePlacementInfo,
     source_monitor_auto_link_av: bool,
     patch_routing: Option<&preview::SourcePatchRouting>,
 ) -> SourcePlacementPlan {
@@ -2693,7 +2820,7 @@ fn build_source_placement_plan_by_track_index_with_patch(
 pub(crate) fn build_source_placement_plan_by_track_index(
     project: &Project,
     preferred_track_index: Option<usize>,
-    source_info: SourcePlacementInfo,
+    source_info: &SourcePlacementInfo,
     source_monitor_auto_link_av: bool,
 ) -> SourcePlacementPlan {
     build_source_placement_plan_by_track_index_with_patch(
@@ -2707,7 +2834,7 @@ pub(crate) fn build_source_placement_plan_by_track_index(
 
 fn ensure_matching_source_track_exists(
     project: &mut Project,
-    source_info: SourcePlacementInfo,
+    source_info: &SourcePlacementInfo,
 ) -> bool {
     let target_kind = if source_info.is_audio_only {
         TrackKind::Audio
@@ -2726,7 +2853,7 @@ fn ensure_matching_source_track_exists(
 
 fn ensure_source_patch_tracks_exist(
     project: &mut Project,
-    source_info: SourcePlacementInfo,
+    source_info: &SourcePlacementInfo,
     source_monitor_auto_link_av: bool,
     patch_routing: Option<&preview::SourcePatchRouting>,
 ) -> bool {
@@ -2772,6 +2899,9 @@ pub(crate) fn build_source_clips_for_plan(
     source_out_ns: u64,
     timeline_start_ns: u64,
     source_timecode_base_ns: Option<u64>,
+    audio_source_streams: &[AudioSourceStreamInfo],
+    audio_source_stream_index: u32,
+    audio_source_channel_offset: u32,
     audio_channel_mode: AudioChannelMode,
     media_duration_ns: Option<u64>,
     animated_svg: bool,
@@ -2786,6 +2916,9 @@ pub(crate) fn build_source_clips_for_plan(
                 timeline_start_ns,
                 target.clip_kind.clone(),
                 source_timecode_base_ns,
+                audio_source_streams,
+                audio_source_stream_index,
+                audio_source_channel_offset,
                 audio_channel_mode,
                 plan.link_group_id.as_deref(),
                 media_duration_ns,
@@ -2806,6 +2939,9 @@ fn build_source_clip(
     timeline_start_ns: u64,
     kind: ClipKind,
     source_timecode_base_ns: Option<u64>,
+    audio_source_streams: &[AudioSourceStreamInfo],
+    audio_source_stream_index: u32,
+    audio_source_channel_offset: u32,
     audio_channel_mode: AudioChannelMode,
     link_group_id: Option<&str>,
     media_duration_ns: Option<u64>,
@@ -2832,6 +2968,9 @@ fn build_source_clip(
     clip.source_in = source_in_ns;
     clip.source_out = source_out_ns;
     clip.source_timecode_base_ns = source_timecode_base_ns;
+    clip.audio_source_streams = audio_source_streams.to_vec();
+    clip.audio_source_stream_index = audio_source_stream_index;
+    clip.audio_source_channel_offset = audio_source_channel_offset;
     clip.audio_channel_mode = audio_channel_mode;
     clip.link_group_id = link_group_id.map(str::to_string);
     clip.media_duration_ns = media_duration_ns;
@@ -3188,6 +3327,53 @@ pub(crate) fn overwrite_clip_range_on_track(
 mod tests {
     use super::*;
 
+    fn test_source_info(
+        is_audio_only: bool,
+        has_audio: bool,
+        is_image: bool,
+        source_timecode_base_ns: Option<u64>,
+        audio_channel_mode: AudioChannelMode,
+    ) -> SourcePlacementInfo {
+        SourcePlacementInfo {
+            is_audio_only,
+            has_audio,
+            is_image,
+            is_animated_svg: false,
+            source_timecode_base_ns,
+            audio_source_streams: Vec::new(),
+            audio_source_stream_index: 0,
+            audio_source_channel_offset: 0,
+            audio_channel_mode,
+        }
+    }
+
+    fn test_build_source_clip(
+        source_path: &str,
+        source_in_ns: u64,
+        source_out_ns: u64,
+        timeline_start_ns: u64,
+        kind: ClipKind,
+        source_timecode_base_ns: Option<u64>,
+        audio_channel_mode: AudioChannelMode,
+        link_group_id: Option<&str>,
+        media_duration_ns: Option<u64>,
+    ) -> Clip {
+        build_source_clip(
+            source_path,
+            source_in_ns,
+            source_out_ns,
+            timeline_start_ns,
+            kind,
+            source_timecode_base_ns,
+            &[],
+            0,
+            0,
+            audio_channel_mode,
+            link_group_id,
+            media_duration_ns,
+        )
+    }
+
     #[test]
     fn auto_preview_keeps_full_when_canvas_matches_project() {
         // 1080p project in a 1080p widget → no reason to downscale.
@@ -3421,19 +3607,12 @@ mod tests {
             .find(|track| track.is_audio())
             .map(|track| track.id.clone())
             .expect("audio track should exist");
-        let source_info = SourcePlacementInfo {
-            is_audio_only: false,
-            has_audio: true,
-            is_image: false,
-            is_animated_svg: false,
-            source_timecode_base_ns: Some(42),
-            audio_channel_mode: AudioChannelMode::Stereo,
-        };
+        let source_info = test_source_info(false, true, false, Some(42), AudioChannelMode::Stereo);
 
         let plan = build_source_placement_plan_by_track_id(
             &project,
             Some(preferred_audio_track_id.as_str()),
-            source_info,
+            &source_info,
             true,
         );
 
@@ -3455,6 +3634,9 @@ mod tests {
             300,
             1_000,
             source_info.source_timecode_base_ns,
+            &source_info.audio_source_streams,
+            source_info.audio_source_stream_index,
+            source_info.audio_source_channel_offset,
             source_info.audio_channel_mode,
             None,
             false,
@@ -3488,10 +3670,13 @@ mod tests {
             is_image: false,
             is_animated_svg: false,
             source_timecode_base_ns: None,
+            audio_source_streams: Vec::new(),
+            audio_source_stream_index: 0,
+            audio_source_channel_offset: 0,
             audio_channel_mode: AudioChannelMode::Right,
         };
 
-        let plan = build_source_placement_plan_by_track_id(&project, None, source_info, false);
+        let plan = build_source_placement_plan_by_track_id(&project, None, &source_info, false);
         let created = build_source_clips_for_plan(
             &plan,
             "/tmp/program-with-ltc.wav",
@@ -3499,6 +3684,9 @@ mod tests {
             500_000_000,
             0,
             None,
+            &source_info.audio_source_streams,
+            source_info.audio_source_stream_index,
+            source_info.audio_source_channel_offset,
             source_info.audio_channel_mode,
             None,
             false,
@@ -3519,7 +3707,7 @@ mod tests {
             .position(|track| track.is_audio())
             .expect("audio track should exist");
 
-        let mut root_clip = build_source_clip(
+        let mut root_clip = test_build_source_clip(
             "/tmp/program-with-ltc.wav",
             0,
             1_000_000_000,
@@ -3533,7 +3721,7 @@ mod tests {
         root_clip.id = "root-clip".to_string();
         project.tracks[audio_track_idx].add_clip(root_clip);
 
-        let mut nested_clip = build_source_clip(
+        let mut nested_clip = test_build_source_clip(
             "/tmp/program-with-ltc.wav",
             0,
             1_000_000_000,
@@ -3638,10 +3826,13 @@ mod tests {
             is_image: false,
             is_animated_svg: false,
             source_timecode_base_ns: None,
+            audio_source_streams: Vec::new(),
+            audio_source_stream_index: 0,
+            audio_source_channel_offset: 0,
             audio_channel_mode: AudioChannelMode::Stereo,
         };
 
-        let plan = build_source_placement_plan_by_track_id(&project, None, source_info, false);
+        let plan = build_source_placement_plan_by_track_id(&project, None, &source_info, false);
 
         assert_eq!(plan.targets.len(), 1);
         assert_eq!(plan.targets[0].clip_kind, ClipKind::Video);
@@ -3654,23 +3845,16 @@ mod tests {
         project_video_only.tracks.retain(|track| track.is_video());
         let mut project_audio_only = Project::new("Test");
         project_audio_only.tracks.retain(|track| track.is_audio());
-        let source_info = SourcePlacementInfo {
-            is_audio_only: false,
-            has_audio: true,
-            is_image: false,
-            is_animated_svg: false,
-            source_timecode_base_ns: None,
-            audio_channel_mode: AudioChannelMode::Stereo,
-        };
+        let source_info = test_source_info(false, true, false, None, AudioChannelMode::Stereo);
 
         let video_only_plan =
-            build_source_placement_plan_by_track_id(&project_video_only, None, source_info, true);
+            build_source_placement_plan_by_track_id(&project_video_only, None, &source_info, true);
         assert_eq!(video_only_plan.targets.len(), 1);
         assert_eq!(video_only_plan.targets[0].clip_kind, ClipKind::Video);
         assert!(video_only_plan.link_group_id.is_none());
 
         let audio_only_plan =
-            build_source_placement_plan_by_track_id(&project_audio_only, None, source_info, true);
+            build_source_placement_plan_by_track_id(&project_audio_only, None, &source_info, true);
         assert_eq!(audio_only_plan.targets.len(), 1);
         assert_eq!(audio_only_plan.targets[0].clip_kind, ClipKind::Audio);
         assert!(audio_only_plan.link_group_id.is_none());
@@ -3679,30 +3863,16 @@ mod tests {
     #[test]
     fn source_monitor_plan_handles_audio_only_and_silent_video_sources() {
         let project = Project::new("Test");
-        let audio_only = SourcePlacementInfo {
-            is_audio_only: true,
-            has_audio: true,
-            is_image: false,
-            is_animated_svg: false,
-            source_timecode_base_ns: None,
-            audio_channel_mode: AudioChannelMode::Stereo,
-        };
-        let silent_video = SourcePlacementInfo {
-            is_audio_only: false,
-            has_audio: false,
-            is_image: false,
-            is_animated_svg: false,
-            source_timecode_base_ns: None,
-            audio_channel_mode: AudioChannelMode::Stereo,
-        };
+        let audio_only = test_source_info(true, true, false, None, AudioChannelMode::Stereo);
+        let silent_video = test_source_info(false, false, false, None, AudioChannelMode::Stereo);
 
-        let audio_plan = build_source_placement_plan_by_track_id(&project, None, audio_only, true);
+        let audio_plan = build_source_placement_plan_by_track_id(&project, None, &audio_only, true);
         assert_eq!(audio_plan.targets.len(), 1);
         assert_eq!(audio_plan.targets[0].clip_kind, ClipKind::Audio);
         assert!(audio_plan.link_group_id.is_none());
 
         let silent_video_plan =
-            build_source_placement_plan_by_track_id(&project, None, silent_video, true);
+            build_source_placement_plan_by_track_id(&project, None, &silent_video, true);
         assert_eq!(silent_video_plan.targets.len(), 1);
         assert_eq!(silent_video_plan.targets[0].clip_kind, ClipKind::Video);
         assert!(silent_video_plan.link_group_id.is_none());
@@ -3712,16 +3882,9 @@ mod tests {
     fn source_monitor_plan_returns_empty_when_no_matching_track_exists() {
         let mut project = Project::new("Test");
         project.tracks.clear();
-        let source_info = SourcePlacementInfo {
-            is_audio_only: false,
-            has_audio: true,
-            is_image: false,
-            is_animated_svg: false,
-            source_timecode_base_ns: None,
-            audio_channel_mode: AudioChannelMode::Stereo,
-        };
+        let source_info = test_source_info(false, true, false, None, AudioChannelMode::Stereo);
 
-        let plan = build_source_placement_plan_by_track_id(&project, None, source_info, true);
+        let plan = build_source_placement_plan_by_track_id(&project, None, &source_info, true);
         assert!(plan.targets.is_empty());
         assert!(plan.link_group_id.is_none());
     }
@@ -3730,22 +3893,15 @@ mod tests {
     fn ensure_matching_source_track_exists_adds_video_track_for_image_sources() {
         let mut project = Project::new("Test");
         project.tracks.retain(|track| track.is_audio());
-        let source_info = SourcePlacementInfo {
-            is_audio_only: false,
-            has_audio: false,
-            is_image: true,
-            is_animated_svg: false,
-            source_timecode_base_ns: None,
-            audio_channel_mode: AudioChannelMode::Stereo,
-        };
+        let source_info = test_source_info(false, false, true, None, AudioChannelMode::Stereo);
 
         assert!(ensure_matching_source_track_exists(
             &mut project,
-            source_info
+            &source_info
         ));
         assert!(project.tracks.iter().any(|track| track.is_video()));
 
-        let plan = build_source_placement_plan_by_track_id(&project, None, source_info, true);
+        let plan = build_source_placement_plan_by_track_id(&project, None, &source_info, true);
         assert_eq!(plan.targets.len(), 1);
         assert_eq!(plan.targets[0].clip_kind, ClipKind::Image);
     }
@@ -3754,22 +3910,15 @@ mod tests {
     fn ensure_matching_source_track_exists_adds_audio_track_for_audio_only_sources() {
         let mut project = Project::new("Test");
         project.tracks.retain(|track| track.is_video());
-        let source_info = SourcePlacementInfo {
-            is_audio_only: true,
-            has_audio: true,
-            is_image: false,
-            is_animated_svg: false,
-            source_timecode_base_ns: None,
-            audio_channel_mode: AudioChannelMode::Stereo,
-        };
+        let source_info = test_source_info(true, true, false, None, AudioChannelMode::Stereo);
 
         assert!(ensure_matching_source_track_exists(
             &mut project,
-            source_info
+            &source_info
         ));
         assert!(project.tracks.iter().any(|track| track.is_audio()));
 
-        let plan = build_source_placement_plan_by_track_id(&project, None, source_info, true);
+        let plan = build_source_placement_plan_by_track_id(&project, None, &source_info, true);
         assert_eq!(plan.targets.len(), 1);
         assert_eq!(plan.targets[0].clip_kind, ClipKind::Audio);
     }
@@ -3783,25 +3932,18 @@ mod tests {
             .enumerate()
             .find(|(_, track)| track.is_audio())
             .expect("audio track should exist");
-        let source_info = SourcePlacementInfo {
-            is_audio_only: false,
-            has_audio: false,
-            is_image: false,
-            is_animated_svg: false,
-            source_timecode_base_ns: None,
-            audio_channel_mode: AudioChannelMode::Stereo,
-        };
+        let source_info = test_source_info(false, false, false, None, AudioChannelMode::Stereo);
 
         let by_track_id = build_source_placement_plan_by_track_id(
             &project,
             Some(preferred_audio_track.1.id.as_str()),
-            source_info,
+            &source_info,
             true,
         );
         let by_track_index = build_source_placement_plan_by_track_index(
             &project,
             Some(preferred_audio_track.0),
-            source_info,
+            &source_info,
             true,
         );
 
@@ -3831,19 +3973,12 @@ mod tests {
             .find(|(_, track)| track.is_audio())
             .map(|(idx, _)| idx)
             .expect("audio track should exist");
-        let source_info = SourcePlacementInfo {
-            is_audio_only: true,
-            has_audio: true,
-            is_image: false,
-            is_animated_svg: false,
-            source_timecode_base_ns: None,
-            audio_channel_mode: AudioChannelMode::Stereo,
-        };
+        let source_info = test_source_info(true, true, false, None, AudioChannelMode::Stereo);
 
         let plan = build_source_placement_plan_by_track_index(
             &project,
             Some(preferred_video_track_idx),
-            source_info,
+            &source_info,
             true,
         );
         assert_eq!(plan.targets.len(), 1);
@@ -3862,19 +3997,12 @@ mod tests {
             .find(|(_, track)| track.is_video())
             .map(|(idx, _)| idx)
             .expect("video track should exist");
-        let source_info = SourcePlacementInfo {
-            is_audio_only: false,
-            has_audio: true,
-            is_image: false,
-            is_animated_svg: false,
-            source_timecode_base_ns: None,
-            audio_channel_mode: AudioChannelMode::Stereo,
-        };
+        let source_info = test_source_info(false, true, false, None, AudioChannelMode::Stereo);
 
         let plan = build_source_placement_plan_by_track_index(
             &project,
             Some(preferred_video_track_idx),
-            source_info,
+            &source_info,
             false,
         );
         let created = build_source_clips_for_plan(
@@ -3884,6 +4012,9 @@ mod tests {
             1_000,
             2_000,
             source_info.source_timecode_base_ns,
+            &source_info.audio_source_streams,
+            source_info.audio_source_stream_index,
+            source_info.audio_source_channel_offset,
             source_info.audio_channel_mode,
             Some(10_000),
             false,
@@ -3903,16 +4034,10 @@ mod tests {
     fn mcp_track_index_plan_returns_empty_without_matching_tracks() {
         let mut project = Project::new("Test");
         project.tracks.retain(|track| track.is_video());
-        let source_info = SourcePlacementInfo {
-            is_audio_only: true,
-            has_audio: true,
-            is_image: false,
-            is_animated_svg: false,
-            source_timecode_base_ns: None,
-            audio_channel_mode: AudioChannelMode::Stereo,
-        };
+        let source_info = test_source_info(true, true, false, None, AudioChannelMode::Stereo);
 
-        let plan = build_source_placement_plan_by_track_index(&project, Some(0), source_info, true);
+        let plan =
+            build_source_placement_plan_by_track_index(&project, Some(0), &source_info, true);
         assert!(plan.targets.is_empty());
         assert!(plan.link_group_id.is_none());
     }
@@ -3928,14 +4053,7 @@ mod tests {
             .map(|(idx, _)| idx)
             .expect("audio track should exist");
         let audio_track_id = project.tracks[audio_track_idx].id.clone();
-        let source_info = SourcePlacementInfo {
-            is_audio_only: false,
-            has_audio: true,
-            is_image: false,
-            is_animated_svg: false,
-            source_timecode_base_ns: None,
-            audio_channel_mode: AudioChannelMode::Stereo,
-        };
+        let source_info = test_source_info(false, true, false, None, AudioChannelMode::Stereo);
         let patch_routing = preview::SourcePatchRouting {
             video: preview::SourcePatchTarget::Auto,
             audio: preview::SourcePatchTarget::TrackId(audio_track_id),
@@ -3944,7 +4062,7 @@ mod tests {
         let plan = build_source_placement_plan_by_track_id_with_patch(
             &project,
             None,
-            source_info,
+            &source_info,
             false,
             Some(&patch_routing),
         );
@@ -3960,14 +4078,7 @@ mod tests {
     #[test]
     fn source_patch_audio_off_disables_linked_pair_audio_lane() {
         let project = Project::new("Test");
-        let source_info = SourcePlacementInfo {
-            is_audio_only: false,
-            has_audio: true,
-            is_image: false,
-            is_animated_svg: false,
-            source_timecode_base_ns: None,
-            audio_channel_mode: AudioChannelMode::Stereo,
-        };
+        let source_info = test_source_info(false, true, false, None, AudioChannelMode::Stereo);
         let patch_routing = preview::SourcePatchRouting {
             video: preview::SourcePatchTarget::Auto,
             audio: preview::SourcePatchTarget::Off,
@@ -3976,7 +4087,7 @@ mod tests {
         let plan = build_source_placement_plan_by_track_id_with_patch(
             &project,
             None,
-            source_info,
+            &source_info,
             true,
             Some(&patch_routing),
         );
@@ -3998,14 +4109,7 @@ mod tests {
             .map(|(idx, _)| idx)
             .expect("audio track should exist");
         let audio_track_id = project.tracks[audio_track_idx].id.clone();
-        let source_info = SourcePlacementInfo {
-            is_audio_only: false,
-            has_audio: true,
-            is_image: false,
-            is_animated_svg: false,
-            source_timecode_base_ns: None,
-            audio_channel_mode: AudioChannelMode::Stereo,
-        };
+        let source_info = test_source_info(false, true, false, None, AudioChannelMode::Stereo);
         let patch_routing = preview::SourcePatchRouting {
             video: preview::SourcePatchTarget::Off,
             audio: preview::SourcePatchTarget::TrackId(audio_track_id),
@@ -4014,7 +4118,7 @@ mod tests {
         let plan = build_source_placement_plan_by_track_id_with_patch(
             &project,
             None,
-            source_info,
+            &source_info,
             false,
             Some(&patch_routing),
         );
@@ -4029,14 +4133,7 @@ mod tests {
     fn ensure_source_patch_tracks_exist_adds_audio_track_for_explicit_audio_patch() {
         let mut project = Project::new("Test");
         project.tracks.retain(|track| track.is_video());
-        let source_info = SourcePlacementInfo {
-            is_audio_only: false,
-            has_audio: true,
-            is_image: false,
-            is_animated_svg: false,
-            source_timecode_base_ns: None,
-            audio_channel_mode: AudioChannelMode::Stereo,
-        };
+        let source_info = test_source_info(false, true, false, None, AudioChannelMode::Stereo);
         let patch_routing = preview::SourcePatchRouting {
             video: preview::SourcePatchTarget::Auto,
             audio: preview::SourcePatchTarget::TrackId("missing-audio-track".to_string()),
@@ -4044,7 +4141,7 @@ mod tests {
 
         assert!(ensure_source_patch_tracks_exist(
             &mut project,
-            source_info,
+            &source_info,
             false,
             Some(&patch_routing),
         ));
@@ -4052,7 +4149,7 @@ mod tests {
         let plan = build_source_placement_plan_by_track_id_with_patch(
             &project,
             None,
-            source_info,
+            &source_info,
             false,
             Some(&patch_routing),
         );
@@ -4069,16 +4166,9 @@ mod tests {
         let playhead = 1_000_000_000;
         let source_in = 0;
         let source_out = 500_000_000;
-        let source_info = SourcePlacementInfo {
-            is_audio_only: false,
-            has_audio: true,
-            is_image: false,
-            is_animated_svg: false,
-            source_timecode_base_ns: None,
-            audio_channel_mode: AudioChannelMode::Stereo,
-        };
+        let source_info = test_source_info(false, true, false, None, AudioChannelMode::Stereo);
 
-        project.tracks[0].add_clip(build_source_clip(
+        project.tracks[0].add_clip(test_build_source_clip(
             "/tmp/existing-video.mp4",
             0,
             1_000_000_000,
@@ -4089,7 +4179,7 @@ mod tests {
             None,
             None,
         ));
-        project.tracks[1].add_clip(build_source_clip(
+        project.tracks[1].add_clip(test_build_source_clip(
             "/tmp/existing-audio.wav",
             0,
             1_000_000_000,
@@ -4102,7 +4192,7 @@ mod tests {
         ));
 
         let insert_plan =
-            build_source_placement_plan_by_track_id(&project, None, source_info, true);
+            build_source_placement_plan_by_track_id(&project, None, &source_info, true);
         let insert_link_group_id = insert_plan
             .link_group_id
             .clone()
@@ -4114,6 +4204,9 @@ mod tests {
             source_out,
             playhead,
             None,
+            &source_info.audio_source_streams,
+            source_info.audio_source_stream_index,
+            source_info.audio_source_channel_offset,
             source_info.audio_channel_mode,
             None,
             false,
@@ -4155,7 +4248,7 @@ mod tests {
         let range_end = 750_000_000;
         project.tracks[0].clips.clear();
         project.tracks[1].clips.clear();
-        project.tracks[0].add_clip(build_source_clip(
+        project.tracks[0].add_clip(test_build_source_clip(
             "/tmp/existing-video-overwrite.mp4",
             0,
             2_000_000_000,
@@ -4166,7 +4259,7 @@ mod tests {
             None,
             None,
         ));
-        project.tracks[1].add_clip(build_source_clip(
+        project.tracks[1].add_clip(test_build_source_clip(
             "/tmp/existing-audio-overwrite.wav",
             0,
             2_000_000_000,
@@ -4179,7 +4272,7 @@ mod tests {
         ));
 
         let overwrite_plan =
-            build_source_placement_plan_by_track_id(&project, None, source_info, true);
+            build_source_placement_plan_by_track_id(&project, None, &source_info, true);
         let overwrite_link_group_id = overwrite_plan
             .link_group_id
             .clone()
@@ -4191,6 +4284,9 @@ mod tests {
             source_out,
             range_start,
             None,
+            &source_info.audio_source_streams,
+            source_info.audio_source_stream_index,
+            source_info.audio_source_channel_offset,
             source_info.audio_channel_mode,
             None,
             false,
@@ -4264,7 +4360,7 @@ mod tests {
         project.tracks[0].clips.clear();
         project.tracks[1].clips.clear();
         let missing_path = "/missing/media/show/day1/camA/clip.mp4";
-        project.tracks[0].add_clip(build_source_clip(
+        project.tracks[0].add_clip(test_build_source_clip(
             missing_path,
             0,
             1_000_000_000,
@@ -4334,7 +4430,7 @@ mod tests {
         let mut project = Project::new("RelinkChain");
         project.tracks[0].clips.clear();
         project.tracks[1].clips.clear();
-        project.tracks[0].add_clip(build_source_clip(
+        project.tracks[0].add_clip(test_build_source_clip(
             missing_path,
             0,
             1_000_000_000,
@@ -5290,15 +5386,30 @@ pub(crate) fn proxy_scale_for_mode(
     mode: &crate::ui_state::ProxyMode,
 ) -> crate::media::proxy_cache::ProxyScale {
     match mode {
-        crate::ui_state::ProxyMode::QuarterRes => crate::media::proxy_cache::ProxyScale::Quarter,
-        _ => crate::media::proxy_cache::ProxyScale::Half,
+        crate::ui_state::ProxyMode::P640 => crate::media::proxy_cache::ProxyScale::MaxHeight(640),
+        _ => crate::media::proxy_cache::ProxyScale::MaxHeight(1080),
     }
+}
+
+/// Effective preview-divisor floor for the current proxy mode. Fixed-height
+/// proxies don't have a fixed source-relative divisor — the floor depends on
+/// how much smaller the proxy is than the project canvas. Returns 1 for Off.
+pub(crate) fn proxy_scale_divisor_for_mode(
+    mode: &crate::ui_state::ProxyMode,
+    project_height: u32,
+) -> u32 {
+    let target = match mode {
+        crate::ui_state::ProxyMode::P640 => 640,
+        crate::ui_state::ProxyMode::P1080 => 1080,
+        crate::ui_state::ProxyMode::Off => return 1,
+    };
+    (project_height / target).max(1)
 }
 
 fn proxy_mode_label(mode: &crate::ui_state::ProxyMode) -> &'static str {
     match mode {
-        crate::ui_state::ProxyMode::QuarterRes => "Quarter Resolution",
-        _ => "Half Resolution",
+        crate::ui_state::ProxyMode::P640 => "640p",
+        _ => "1080p",
     }
 }
 
@@ -5308,12 +5419,12 @@ fn proxy_toggle_tooltip(
 ) -> String {
     if current_proxy_mode.is_enabled() {
         format!(
-            "Proxy playback on ({}). Click to switch back to original media (Shift+P). Change Half/Quarter in Preferences.",
+            "Proxy playback on ({}). Click to switch back to original media (Shift+P). Change 1080p/640p in Preferences.",
             proxy_mode_label(current_proxy_mode)
         )
     } else {
         format!(
-            "Proxy playback off. Click to restore {} proxies (Shift+P). Change Half/Quarter in Preferences.",
+            "Proxy playback off. Click to restore {} proxies (Shift+P). Change 1080p/640p in Preferences.",
             proxy_mode_label(remembered_proxy_mode)
         )
     }
@@ -5351,7 +5462,7 @@ fn ready_proxy_path_for_source(
 fn reload_source_preview_selection(
     path: &str,
     duration_ns: u64,
-    source_info: SourcePlacementInfo,
+    source_info: &SourcePlacementInfo,
     player: &Rc<RefCell<Player>>,
     project: &Rc<RefCell<Project>>,
     proxy_cache: &Rc<RefCell<crate::media::proxy_cache::ProxyCache>>,
@@ -5464,10 +5575,10 @@ fn collect_unique_preview_lut_proxy_variants(
     project: &Project,
 ) -> Vec<crate::media::proxy_cache::ProxyVariantSpec> {
     let mut seen: HashSet<crate::media::proxy_cache::ProxyVariantSpec> = HashSet::new();
-    let scale = crate::media::proxy_cache::ProxyScale::Project {
-        width: project.width,
-        height: project.height,
-    };
+    // Preview-LUT proxies bake the LUT at the project's height so the player
+    // can composite without realtime LUT processing. MaxHeight preserves the
+    // source aspect ratio (the player handles canvas-aspect mismatch).
+    let scale = crate::media::proxy_cache::ProxyScale::MaxHeight(project.height);
     let mut out = Vec::new();
     for track in project.tracks.iter().filter(|t| t.is_video()) {
         for c in &track.clips {
@@ -5774,7 +5885,10 @@ fn clip_to_program_clips(
     if c.kind == ClipKind::Multicam && c.render_replace_enabled {
         let sig = crate::media::render_replace_cache::cache_key_for_multicam(c);
         if let Some(sidecar_path) = render_replace_paths.get(&sig).and_then(|p| {
-            std::fs::metadata(p).ok().filter(|m| m.len() > 0).map(|_| p.clone())
+            std::fs::metadata(p)
+                .ok()
+                .filter(|m| m.len() > 0)
+                .map(|_| p.clone())
         }) {
             let internal_dur = c.source_out.saturating_sub(c.source_in);
             let mut file_backed = c.clone();
@@ -5827,7 +5941,10 @@ fn clip_to_program_clips(
     if c.kind == ClipKind::Compound && c.render_replace_enabled {
         let sig = crate::media::render_replace_cache::cache_key_for_compound(c);
         if let Some(sidecar_path) = render_replace_paths.get(&sig).and_then(|p| {
-            std::fs::metadata(p).ok().filter(|m| m.len() > 0).map(|_| p.clone())
+            std::fs::metadata(p)
+                .ok()
+                .filter(|m| m.len() > 0)
+                .map(|_| p.clone())
         }) {
             // Build a synthetic Clip that LOOKS like a file-backed
             // video clip at the compound's timeline position, but
@@ -6091,6 +6208,9 @@ fn clip_to_program_clips(
         pan: c.pan as f64,
         pan_keyframes: c.pan_keyframes.clone(),
         audio_channel_mode: c.audio_channel_mode,
+        audio_source_streams: c.audio_source_streams.clone(),
+        audio_source_stream_index: c.audio_source_stream_index,
+        audio_source_channel_offset: c.audio_source_channel_offset,
         eq_bands: c.eq_bands,
         eq_low_gain_keyframes: c.eq_low_gain_keyframes.clone(),
         eq_mid_gain_keyframes: c.eq_mid_gain_keyframes.clone(),
@@ -6415,10 +6535,11 @@ pub fn build_window(
     }
     prog_player_raw.set_playback_priority(initial_playback_priority);
     prog_player_raw.set_proxy_enabled(initial_proxy_mode.is_enabled());
-    prog_player_raw.set_proxy_scale_divisor(match initial_proxy_mode {
-        crate::ui_state::ProxyMode::QuarterRes => 4,
-        _ => 2,
-    });
+    {
+        let p = project.borrow();
+        prog_player_raw
+            .set_proxy_scale_divisor(proxy_scale_divisor_for_mode(&initial_proxy_mode, p.height));
+    }
     prog_player_raw.set_preview_luts(initial_preview_luts);
     prog_player_raw.set_preview_quality(initial_preview_quality.divisor());
     prog_player_raw.set_experimental_preview_optimizations(
@@ -6482,9 +6603,9 @@ pub fn build_window(
     let tracking_cache = Rc::new(RefCell::new(crate::media::tracking::TrackingCache::new()));
     let music_gen_cache = Rc::new(RefCell::new(crate::media::music_gen::MusicGenCache::new()));
     let effective_proxy_enabled = Rc::new(Cell::new(initial_proxy_mode.is_enabled()));
-    let effective_proxy_scale_divisor = Rc::new(Cell::new(match initial_proxy_mode {
-        crate::ui_state::ProxyMode::QuarterRes => 4,
-        _ => 2,
+    let effective_proxy_scale_divisor = Rc::new(Cell::new({
+        let p = project.borrow();
+        proxy_scale_divisor_for_mode(&initial_proxy_mode, p.height)
     }));
 
     let timeline_state = Rc::new(RefCell::new(TimelineState::new(project.clone())));
@@ -6576,10 +6697,10 @@ pub fn build_window(
             );
             prog_player
                 .borrow_mut()
-                .set_proxy_scale_divisor(match new_state.proxy_mode {
-                    crate::ui_state::ProxyMode::QuarterRes => 4,
-                    _ => 2,
-                });
+                .set_proxy_scale_divisor(proxy_scale_divisor_for_mode(
+                    &new_state.proxy_mode,
+                    project.borrow().height,
+                ));
             prog_player
                 .borrow_mut()
                 .set_preview_quality(new_state.preview_quality.divisor());
@@ -6631,12 +6752,7 @@ pub fn build_window(
                 {
                     proxy_cache.borrow_mut().invalidate_all();
                 }
-                let scale = match new_state.proxy_mode {
-                    crate::ui_state::ProxyMode::QuarterRes => {
-                        crate::media::proxy_cache::ProxyScale::Quarter
-                    }
-                    _ => crate::media::proxy_cache::ProxyScale::Half,
-                };
+                let scale = proxy_scale_for_mode(&new_state.proxy_mode);
                 let variants = {
                     let proj = project.borrow();
                     collect_unique_proxy_variants(&proj, scale)
@@ -7104,12 +7220,7 @@ pub fn build_window(
                         if prefs.proxy_mode.is_enabled() {
                             collect_unique_proxy_variants(
                                 &proj,
-                                match prefs.proxy_mode {
-                                    crate::ui_state::ProxyMode::QuarterRes => {
-                                        crate::media::proxy_cache::ProxyScale::Quarter
-                                    }
-                                    _ => crate::media::proxy_cache::ProxyScale::Half,
-                                },
+                                proxy_scale_for_mode(&prefs.proxy_mode),
                             )
                         } else {
                             collect_unique_preview_lut_proxy_variants(&proj)
@@ -7210,12 +7321,7 @@ pub fn build_window(
                 on_project_changed();
                 let prefs = preferences_state.borrow();
                 if prefs.proxy_mode.is_enabled() {
-                    let scale = match prefs.proxy_mode {
-                        crate::ui_state::ProxyMode::QuarterRes => {
-                            crate::media::proxy_cache::ProxyScale::Quarter
-                        }
-                        _ => crate::media::proxy_cache::ProxyScale::Half,
-                    };
+                    let scale = proxy_scale_for_mode(&prefs.proxy_mode);
                     let variants = {
                         let proj = project.borrow();
                         collect_unique_proxy_variants(&proj, scale)
@@ -10988,7 +11094,7 @@ pub fn build_window(
             reload_source_preview_selection(
                 &path,
                 duration_ns,
-                source_info,
+                &source_info,
                 &player,
                 &project,
                 &proxy_cache,
@@ -11019,9 +11125,8 @@ pub fn build_window(
                 // subclip lands with its subclip window pre-applied
                 // regardless of whether the source monitor still
                 // shows marks for a different clip.
-                let library_subclip_range: Option<(u64, u64, Option<u64>)> = item_id
-                    .as_ref()
-                    .and_then(|id| {
+                let library_subclip_range: Option<(u64, u64, Option<u64>)> =
+                    item_id.as_ref().and_then(|id| {
                         let lib = library.borrow();
                         lib.items.iter().find(|i| &i.id == id).and_then(|i| {
                             if i.is_subclip() {
@@ -11043,6 +11148,9 @@ pub fn build_window(
                             has_audio: marks.has_audio,
                             is_image: marks.is_image,
                             is_animated_svg: marks.is_animated_svg,
+                            audio_source_streams: marks.audio_source_streams.clone(),
+                            audio_source_stream_index: marks.audio_source_stream_index,
+                            audio_source_channel_offset: marks.audio_source_channel_offset,
                             // For subclip drops use the subclip's
                             // TC base (already offset by its in
                             // point during subclip creation); the
@@ -11056,7 +11164,8 @@ pub fn build_window(
                     } else {
                         let lib = library.borrow();
                         let proj = project.borrow();
-                        let mut info = lookup_source_placement_info(&lib.items, &proj, &source_path);
+                        let mut info =
+                            lookup_source_placement_info(&lib.items, &proj, &source_path);
                         if let Some((_, _, tc)) = library_subclip_range {
                             if let Some(tc) = tc {
                                 info.source_timecode_base_ns = Some(tc);
@@ -11084,7 +11193,7 @@ pub fn build_window(
                 let placement_plan = build_source_placement_plan_by_track_index(
                     &proj,
                     Some(track_idx),
-                    source_info,
+                    &source_info,
                     source_monitor_auto_link_av,
                 );
                 let magnetic_mode_for_placement =
@@ -11106,6 +11215,9 @@ pub fn build_window(
                     src_out,
                     timeline_start_ns,
                     source_info.source_timecode_base_ns,
+                    &source_info.audio_source_streams,
+                    source_info.audio_source_stream_index,
+                    source_info.audio_source_channel_offset,
                     source_info.audio_channel_mode,
                     media_dur_opt,
                     source_info.is_animated_svg,
@@ -11200,6 +11312,9 @@ pub fn build_window(
                         item.has_audio = metadata.has_audio;
                         item.is_image = is_image;
                         item.is_animated_svg = is_animated_svg;
+                        item.audio_source_streams = metadata.audio_source_streams.clone();
+                        item.audio_source_stream_index = 0;
+                        item.audio_source_channel_offset = 0;
                         item.source_timecode_base_ns =
                             metadata.source_timecode_base_ns.or_else(|| {
                                 lookup_source_timecode_base_ns(
@@ -11245,7 +11360,7 @@ pub fn build_window(
                     let placement_plan = build_source_placement_plan_by_track_index(
                         &proj,
                         Some(track_idx),
-                        source_info,
+                        &source_info,
                         source_monitor_auto_link_av,
                     );
                     let magnetic_mode_for_placement =
@@ -11266,6 +11381,9 @@ pub fn build_window(
                         src_out,
                         cursor_ns,
                         source_info.source_timecode_base_ns,
+                        &source_info.audio_source_streams,
+                        source_info.audio_source_stream_index,
+                        source_info.audio_source_channel_offset,
                         source_info.audio_channel_mode,
                         media_dur_opt,
                         source_info.is_animated_svg,
@@ -11903,12 +12021,7 @@ pub fn build_window(
                 let context = {
                     let proj = project.borrow();
                     let lib = library.borrow();
-                    resolve_ltc_conversion_context_from_library(
-                        &lib,
-                        &proj,
-                        &source_path,
-                        None,
-                    )
+                    resolve_ltc_conversion_context_from_library(&lib, &proj, &source_path, None)
                 };
                 let context = match context {
                     Ok(context) => context,
@@ -12362,10 +12475,11 @@ pub fn build_window(
     // because they need access to the returned setters. The call below uses
     // thin dispatchers that read from these cells.
     let on_capture_still_impl: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    let on_capture_export_still_impl: Rc<RefCell<Option<Rc<dyn Fn()>>>> =
+        Rc::new(RefCell::new(None));
     let on_select_still_impl: Rc<RefCell<Option<Rc<dyn Fn(Option<String>)>>>> =
         Rc::new(RefCell::new(None));
-    let on_delete_still_impl: Rc<RefCell<Option<Rc<dyn Fn(String)>>>> =
-        Rc::new(RefCell::new(None));
+    let on_delete_still_impl: Rc<RefCell<Option<Rc<dyn Fn(String)>>>> = Rc::new(RefCell::new(None));
     let on_rename_still_impl: Rc<RefCell<Option<Rc<dyn Fn(String, String)>>>> =
         Rc::new(RefCell::new(None));
 
@@ -13667,8 +13781,7 @@ pub fn build_window(
                         frame_rate,
                         width,
                         height,
-                        dropped_frames: dropped_handle
-                            .load(std::sync::atomic::Ordering::Relaxed),
+                        dropped_frames: dropped_handle.load(std::sync::atomic::Ordering::Relaxed),
                     }
                 }
             },
@@ -13695,8 +13808,8 @@ pub fn build_window(
                 move |enabled: bool, pos: crate::model::project::TimecodeBurninPosition| {
                     let changed = {
                         let mut p = project.borrow_mut();
-                        let was =
-                            p.timecode_burnin_enabled != enabled || p.timecode_burnin_position != pos;
+                        let was = p.timecode_burnin_enabled != enabled
+                            || p.timecode_burnin_position != pos;
                         if was {
                             p.timecode_burnin_enabled = enabled;
                             p.timecode_burnin_position = pos;
@@ -13744,6 +13857,14 @@ pub fn build_window(
             },
             {
                 let slot = on_capture_still_impl.clone();
+                move || {
+                    if let Some(f) = slot.borrow().as_ref() {
+                        f();
+                    }
+                }
+            },
+            {
+                let slot = on_capture_export_still_impl.clone();
                 move || {
                     if let Some(f) = slot.borrow().as_ref() {
                         f();
@@ -13903,8 +14024,8 @@ pub fn build_window(
                 setter(enabled, pos);
                 let changed = {
                     let mut p = project.borrow_mut();
-                    let was = p.timecode_burnin_enabled != enabled
-                        || p.timecode_burnin_position != pos;
+                    let was =
+                        p.timecode_burnin_enabled != enabled || p.timecode_burnin_position != pos;
                     if was {
                         p.timecode_burnin_enabled = enabled;
                         p.timecode_burnin_position = pos;
@@ -13991,8 +14112,7 @@ pub fn build_window(
                 let mut summaries: Vec<crate::ui::program_monitor::ReferenceStillSummary> =
                     Vec::with_capacity(proj.reference_stills.len());
                 for still in &proj.reference_stills {
-                    let path =
-                        crate::media::reference_still::still_path(&still.filename);
+                    let path = crate::media::reference_still::still_path(&still.filename);
                     let decoded = crate::media::reference_still::load_decoded(&path)
                         .ok()
                         .map(Rc::new);
@@ -14002,6 +14122,7 @@ pub fn build_window(
                     summaries.push(crate::ui::program_monitor::ReferenceStillSummary {
                         id: still.id.clone(),
                         label: still.label.clone(),
+                        origin: still.origin,
                         thumbnail: decoded,
                     });
                 }
@@ -14045,6 +14166,7 @@ pub fn build_window(
     {
         let project = project.clone();
         let prog_player = prog_player.clone();
+        let timeline_state = timeline_state.clone();
         let apply_ab_reference = apply_program_monitor_ab_reference.clone();
         let refresh = refresh_reference_stills.clone();
         let on_project_changed = on_project_changed.clone();
@@ -14058,7 +14180,8 @@ pub fn build_window(
             })
         };
         let handler: Rc<dyn Fn()> = Rc::new(move || {
-            let at_cap = project.borrow().reference_stills.len() >= 4;
+            let at_cap = project.borrow().reference_stills.len()
+                >= crate::model::project::MAX_REFERENCE_STILLS;
             if at_cap {
                 toast(
                     "Reference still limit reached — delete one before capturing another.",
@@ -14066,6 +14189,7 @@ pub fn build_window(
                 );
                 return;
             }
+            let timeline_pos_ns = timeline_state.borrow().editing_playhead_ns();
             let frame = match prog_player.borrow_mut().capture_current_frame_rgba() {
                 Ok(f) => f,
                 Err(e) => {
@@ -14090,13 +14214,12 @@ pub fn build_window(
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(0);
+            still.timeline_pos_ns = timeline_pos_ns;
             still.width = frame.width as u32;
             still.height = frame.height as u32;
             still.filename = crate::media::reference_still::filename_for_id(&still.id);
-            still.label = format!(
-                "Still {}",
-                project.borrow().reference_stills.len() + 1
-            );
+            still.origin = crate::model::project::ReferenceStillOrigin::LivePreview;
+            still.label = format!("Still {}", project.borrow().reference_stills.len() + 1);
             let path = crate::media::reference_still::still_path(&still.filename);
             if let Err(e) = crate::media::reference_still::write_png(&path, &frame) {
                 log::warn!("reference still write failed: {e}");
@@ -14117,6 +14240,192 @@ pub fn build_window(
             apply_ab_reference(Some(new_id));
         });
         *on_capture_still_impl.borrow_mut() = Some(handler);
+    }
+
+    // Export-compare capture handler: render the current playhead frame
+    // through the export pipeline on a worker thread, then store/refresh an
+    // export-origin reference still when the render completes.
+    {
+        let project = project.clone();
+        let prog_player = prog_player.clone();
+        let timeline_state = timeline_state.clone();
+        let monitor_state = monitor_state.clone();
+        let apply_ab_reference = apply_program_monitor_ab_reference.clone();
+        let refresh = refresh_reference_stills.clone();
+        let on_project_changed = on_project_changed.clone();
+        let window_weak = window.downgrade();
+        let toast: Rc<dyn Fn(&str, ToastSeverity)> = {
+            let window_weak = window_weak.clone();
+            Rc::new(move |msg: &str, sev: ToastSeverity| {
+                if let Some(w) = window_weak.upgrade() {
+                    show_window_status_toast(&w, msg, sev);
+                }
+            })
+        };
+        let handler: Rc<dyn Fn()> = Rc::new(move || {
+            let timeline_pos_ns = timeline_state.borrow().editing_playhead_ns();
+            let (refresh_existing_id, pending_still) = {
+                let proj = project.borrow();
+                let active_export_id = monitor_state
+                    .borrow()
+                    .ab_reference_still_id
+                    .clone()
+                    .and_then(|active_id| {
+                        proj.reference_stills
+                            .iter()
+                            .find(|still| {
+                                still.id == active_id
+                                    && still.origin
+                                        == crate::model::project::ReferenceStillOrigin::ExportRender
+                            })
+                            .map(|still| still.id.clone())
+                    });
+                let mut still = active_export_id
+                    .as_ref()
+                    .and_then(|active_id| {
+                        proj.reference_stills
+                            .iter()
+                            .find(|still| &still.id == active_id)
+                            .cloned()
+                    })
+                    .unwrap_or_else(|| {
+                        let mut still = crate::model::project::ReferenceStill::new("Export");
+                        let export_count = proj
+                            .reference_stills
+                            .iter()
+                            .filter(|still| {
+                                still.origin
+                                    == crate::model::project::ReferenceStillOrigin::ExportRender
+                            })
+                            .count();
+                        still.label = format!("Export {}", export_count + 1);
+                        still.filename = crate::media::reference_still::filename_for_id(&still.id);
+                        still
+                    });
+                still.origin = crate::model::project::ReferenceStillOrigin::ExportRender;
+                still.captured_at_ns = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0);
+                still.timeline_pos_ns = timeline_pos_ns;
+                still.width = proj.width;
+                still.height = proj.height;
+                (active_export_id, still)
+            };
+
+            let at_cap = project.borrow().reference_stills.len()
+                >= crate::model::project::MAX_REFERENCE_STILLS;
+            if refresh_existing_id.is_none() && at_cap {
+                toast(
+                    "Reference still limit reached — select an export still to refresh it, or delete one before rendering another.",
+                    ToastSeverity::Warning,
+                );
+                return;
+            }
+
+            if let Err(e) = crate::media::reference_still::ensure_reference_stills_dir() {
+                log::warn!("reference still dir create: {e}");
+                toast(
+                    "Failed to create reference-still cache directory.",
+                    ToastSeverity::Error,
+                );
+                return;
+            }
+
+            let render_project = project.borrow().clone();
+            let (bg_paths, interp_paths, rr_paths) = {
+                let player = prog_player.borrow();
+                (
+                    player.snapshot_bg_removal_paths(),
+                    player.snapshot_frame_interp_paths(),
+                    player.snapshot_render_replace_paths(),
+                )
+            };
+            let final_path = crate::media::reference_still::still_path(&pending_still.filename);
+            let temp_path = final_path.with_extension("tmp.png");
+            let temp_path_bg = temp_path.clone();
+            let (tx, rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+            toast("Rendering export compare frame…", ToastSeverity::Info);
+            std::thread::spawn(move || {
+                let result = crate::media::export::render_project_frame_to_png(
+                    &render_project,
+                    timeline_pos_ns,
+                    &temp_path_bg,
+                    &bg_paths,
+                    &interp_paths,
+                    &rr_paths,
+                )
+                .map_err(|e| e.to_string());
+                let _ = tx.send(result);
+            });
+
+            let project = project.clone();
+            let apply_ab_reference = apply_ab_reference.clone();
+            let refresh = refresh.clone();
+            let on_project_changed = on_project_changed.clone();
+            let toast = toast.clone();
+            glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+                match rx.try_recv() {
+                    Ok(Ok(())) => {
+                        if let Err(e) = std::fs::rename(&temp_path, &final_path) {
+                            let _ = std::fs::remove_file(&temp_path);
+                            log::warn!("export compare still rename failed: {e}");
+                            toast(
+                                "Rendered the export compare frame, but failed to store it on disk.",
+                                ToastSeverity::Error,
+                            );
+                            return glib::ControlFlow::Break;
+                        }
+
+                        let still_id = pending_still.id.clone();
+                        {
+                            let mut proj = project.borrow_mut();
+                            if let Some(existing) = proj
+                                .reference_stills
+                                .iter_mut()
+                                .find(|still| still.id == still_id)
+                            {
+                                *existing = pending_still.clone();
+                            } else {
+                                proj.reference_stills.push(pending_still.clone());
+                            }
+                            proj.dirty = true;
+                        }
+                        on_project_changed();
+                        refresh();
+                        apply_ab_reference(Some(still_id));
+                        toast(
+                            if refresh_existing_id.is_some() {
+                                "Updated export compare still."
+                            } else {
+                                "Captured export compare still."
+                            },
+                            ToastSeverity::Success,
+                        );
+                        glib::ControlFlow::Break
+                    }
+                    Ok(Err(e)) => {
+                        let _ = std::fs::remove_file(&temp_path);
+                        log::warn!("export compare still render failed: {e}");
+                        toast(
+                            &format!("Could not render export compare frame — {e}"),
+                            ToastSeverity::Error,
+                        );
+                        glib::ControlFlow::Break
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        let _ = std::fs::remove_file(&temp_path);
+                        toast(
+                            "Export compare render worker disconnected unexpectedly.",
+                            ToastSeverity::Error,
+                        );
+                        glib::ControlFlow::Break
+                    }
+                }
+            });
+        });
+        *on_capture_export_still_impl.borrow_mut() = Some(handler);
     }
 
     // Select handler: change the active reference still (None clears + turns
@@ -14534,10 +14843,8 @@ pub fn build_window(
                     let current_proxy_enabled = effective_proxy_enabled.get();
                     let desired_proxy_enabled = manual_proxy_mode;
                     let desired_scale = proxy_scale_for_mode(&proxy_mode);
-                    let desired_scale_divisor = match desired_scale {
-                        crate::media::proxy_cache::ProxyScale::Quarter => 4,
-                        _ => 2,
-                    };
+                    let desired_scale_divisor =
+                        proxy_scale_divisor_for_mode(&proxy_mode, project.borrow().height);
                     let wants_proxy_change = current_proxy_enabled != desired_proxy_enabled;
                     let wants_scale_change = desired_proxy_enabled
                         && effective_proxy_scale_divisor.get() != desired_scale_divisor;
@@ -14672,9 +14979,7 @@ pub fn build_window(
                                     root_pos >= clip.timeline_start
                                         && root_pos < clip.timeline_end()
                                         && !clip.source_path.is_empty()
-                                        && ts_ref
-                                            .proxy_ready_sources
-                                            .contains(&clip.source_path)
+                                        && ts_ref.proxy_ready_sources.contains(&clip.source_path)
                                 })
                         })
                     } else {
@@ -15082,6 +15387,9 @@ pub fn build_window(
                 is_image: marks.is_image,
                 is_animated_svg: marks.is_animated_svg,
                 source_timecode_base_ns: marks.source_timecode_base_ns,
+                audio_source_streams: marks.audio_source_streams.clone(),
+                audio_source_stream_index: marks.audio_source_stream_index,
+                audio_source_channel_offset: marks.audio_source_channel_offset,
                 audio_channel_mode: marks.audio_channel_mode,
             };
             drop(marks);
@@ -15098,14 +15406,14 @@ pub fn build_window(
                 let mut proj = project.borrow_mut();
                 ensure_source_patch_tracks_exist(
                     &mut proj,
-                    source_info,
+                    &source_info,
                     source_monitor_auto_link_av,
                     Some(&source_patch_routing),
                 );
                 let placement_plan = build_source_placement_plan_by_track_id_with_patch(
                     &proj,
                     active_tid.as_deref(),
-                    source_info,
+                    &source_info,
                     source_monitor_auto_link_av,
                     Some(&source_patch_routing),
                 );
@@ -15129,6 +15437,9 @@ pub fn build_window(
                         out_ns,
                         timeline_start,
                         source_info.source_timecode_base_ns,
+                        &source_info.audio_source_streams,
+                        source_info.audio_source_stream_index,
+                        source_info.audio_source_channel_offset,
                         source_info.audio_channel_mode,
                         media_dur_opt,
                         source_info.is_animated_svg,
@@ -15169,6 +15480,9 @@ pub fn build_window(
                 is_image: marks.is_image,
                 is_animated_svg: marks.is_animated_svg,
                 source_timecode_base_ns: marks.source_timecode_base_ns,
+                audio_source_streams: marks.audio_source_streams.clone(),
+                audio_source_stream_index: marks.audio_source_stream_index,
+                audio_source_channel_offset: marks.audio_source_channel_offset,
                 audio_channel_mode: marks.audio_channel_mode,
             };
             drop(marks);
@@ -15191,14 +15505,14 @@ pub fn build_window(
                 let mut proj = project.borrow_mut();
                 ensure_source_patch_tracks_exist(
                     &mut proj,
-                    source_info,
+                    &source_info,
                     source_monitor_auto_link_av,
                     Some(&source_patch_routing),
                 );
                 let placement_plan = build_source_placement_plan_by_track_id_with_patch(
                     &proj,
                     active_tid.as_deref(),
-                    source_info,
+                    &source_info,
                     source_monitor_auto_link_av,
                     Some(&source_patch_routing),
                 );
@@ -15221,6 +15535,9 @@ pub fn build_window(
                     out_ns,
                     playhead,
                     source_info.source_timecode_base_ns,
+                    &source_info.audio_source_streams,
+                    source_info.audio_source_stream_index,
+                    source_info.audio_source_channel_offset,
                     source_info.audio_channel_mode,
                     media_dur_opt,
                     source_info.is_animated_svg,
@@ -15286,6 +15603,9 @@ pub fn build_window(
                 is_image: marks.is_image,
                 is_animated_svg: marks.is_animated_svg,
                 source_timecode_base_ns: marks.source_timecode_base_ns,
+                audio_source_streams: marks.audio_source_streams.clone(),
+                audio_source_stream_index: marks.audio_source_stream_index,
+                audio_source_channel_offset: marks.audio_source_channel_offset,
                 audio_channel_mode: marks.audio_channel_mode,
             };
             drop(marks);
@@ -15311,14 +15631,14 @@ pub fn build_window(
                 let mut proj = project.borrow_mut();
                 ensure_source_patch_tracks_exist(
                     &mut proj,
-                    source_info,
+                    &source_info,
                     source_monitor_auto_link_av,
                     Some(&source_patch_routing),
                 );
                 let placement_plan = build_source_placement_plan_by_track_id_with_patch(
                     &proj,
                     active_tid.as_deref(),
-                    source_info,
+                    &source_info,
                     source_monitor_auto_link_av,
                     Some(&source_patch_routing),
                 );
@@ -15341,6 +15661,9 @@ pub fn build_window(
                     out_ns,
                     playhead,
                     source_info.source_timecode_base_ns,
+                    &source_info.audio_source_streams,
+                    source_info.audio_source_stream_index,
+                    source_info.audio_source_channel_offset,
                     source_info.audio_channel_mode,
                     media_dur_opt,
                     source_info.is_animated_svg,
@@ -15400,106 +15723,109 @@ pub fn build_window(
         let source_keyword_entry = source_keyword_entry.clone();
         let refresh_source_keyword_picker = refresh_source_keyword_picker.clone();
         let refresh_source_patch_controls = refresh_source_patch_controls.clone();
-        Rc::new(move |path: String, duration_ns: u64, subclip_window: Option<(u64, u64)>| {
-            // Show the source preview now that a clip is selected
-            source_monitor_panel.set_visible(true);
-            // Update the clip name label
-            let name = std::path::Path::new(&path)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or(&path)
-                .to_string();
-            clip_name_label.set_text(&name);
-            // Reload playbin only when the file actually changes (expensive).
-            // Reset marks when the *logical selection* changes — same file
-            // but a different subclip window still needs the scrubber's
-            // I/O markers and display position to move.
-            let (should_reload, should_reset_marks) = {
-                let m = source_marks.borrow();
-                let path_changed = m.path != path;
-                let window_changed = match subclip_window {
-                    Some((in_ns, out_ns)) => {
-                        m.in_ns != in_ns || m.out_ns != out_ns
-                    }
-                    None => false,
+        Rc::new(
+            move |path: String, duration_ns: u64, subclip_window: Option<(u64, u64)>| {
+                // Show the source preview now that a clip is selected
+                source_monitor_panel.set_visible(true);
+                // Update the clip name label
+                let name = std::path::Path::new(&path)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(&path)
+                    .to_string();
+                clip_name_label.set_text(&name);
+                // Reload playbin only when the file actually changes (expensive).
+                // Reset marks when the *logical selection* changes — same file
+                // but a different subclip window still needs the scrubber's
+                // I/O markers and display position to move.
+                let (should_reload, should_reset_marks) = {
+                    let m = source_marks.borrow();
+                    let path_changed = m.path != path;
+                    let window_changed = match subclip_window {
+                        Some((in_ns, out_ns)) => m.in_ns != in_ns || m.out_ns != out_ns,
+                        None => false,
+                    };
+                    (path_changed, path_changed || window_changed)
                 };
-                (path_changed, path_changed || window_changed)
-            };
-            let source_info = {
-                let lib = library.borrow();
-                let proj = project.borrow();
-                lookup_source_placement_info(&lib.items, &proj, &path)
-            };
-            if should_reload {
-                // Grab keyboard focus on the source monitor so
-                // single-key shortcuts (I / O for Mark In/Out,
-                // space for play/pause, J/K/L for shuttle) route
-                // to its EventControllerKey. Without this, clicking
-                // a library item leaves focus on the FlowBox and
-                // the shortcuts silently do nothing — which is
-                // what made every subclip come out full-range.
-                // Only runs on an actual source change so re-
-                // selecting the same item doesn't yank focus away
-                // from (e.g.) a search box the user is typing in.
-                source_monitor_panel.grab_focus();
-                let proxy_mode = preferences_state.borrow().proxy_mode.clone();
-                reload_source_preview_selection(
-                    &path,
-                    duration_ns,
-                    source_info,
-                    &player,
-                    &project,
-                    &proxy_cache,
-                    &proxy_mode,
-                    &source_original_uri_for_proxy_fallback,
-                    &set_audio_only,
-                );
-            } else {
-                set_audio_only(source_info.is_audio_only);
-            }
-            // Preserve Mark In / Mark Out when the selected path
-            // hasn't changed. This runs on every emission of the
-            // flow-box selection-change signal — including redundant
-            // re-selections from the library right-click auto-
-            // select fix, which would otherwise wipe marks that the
-            // user just set with I / O and was about to use for
-            // Create Subclip / Sync / etc. Reset only when the
-            // source actually changed (same guard as the playbin
-            // reload above).
-            let mut m = source_marks.borrow_mut();
-            m.path = path;
-            m.duration_ns = duration_ns;
-            if should_reset_marks {
-                match subclip_window {
-                    Some((in_ns, out_ns)) => {
-                        // Subclip selection: scope marks to the subclip
-                        // window so a drag from the source monitor (or a
-                        // drop that falls back to marks because the
-                        // library payload was missing) places the clip
-                        // with the subclip range already applied.
-                        m.in_ns = in_ns;
-                        m.out_ns = out_ns;
-                        m.display_pos_ns = in_ns;
-                    }
-                    None => {
-                        m.in_ns = 0;
-                        m.out_ns = duration_ns;
-                        m.display_pos_ns = 0;
+                let source_info = {
+                    let lib = library.borrow();
+                    let proj = project.borrow();
+                    lookup_source_placement_info(&lib.items, &proj, &path)
+                };
+                if should_reload {
+                    // Grab keyboard focus on the source monitor so
+                    // single-key shortcuts (I / O for Mark In/Out,
+                    // space for play/pause, J/K/L for shuttle) route
+                    // to its EventControllerKey. Without this, clicking
+                    // a library item leaves focus on the FlowBox and
+                    // the shortcuts silently do nothing — which is
+                    // what made every subclip come out full-range.
+                    // Only runs on an actual source change so re-
+                    // selecting the same item doesn't yank focus away
+                    // from (e.g.) a search box the user is typing in.
+                    source_monitor_panel.grab_focus();
+                    let proxy_mode = preferences_state.borrow().proxy_mode.clone();
+                    reload_source_preview_selection(
+                        &path,
+                        duration_ns,
+                        &source_info,
+                        &player,
+                        &project,
+                        &proxy_cache,
+                        &proxy_mode,
+                        &source_original_uri_for_proxy_fallback,
+                        &set_audio_only,
+                    );
+                } else {
+                    set_audio_only(source_info.is_audio_only);
+                }
+                // Preserve Mark In / Mark Out when the selected path
+                // hasn't changed. This runs on every emission of the
+                // flow-box selection-change signal — including redundant
+                // re-selections from the library right-click auto-
+                // select fix, which would otherwise wipe marks that the
+                // user just set with I / O and was about to use for
+                // Create Subclip / Sync / etc. Reset only when the
+                // source actually changed (same guard as the playbin
+                // reload above).
+                let mut m = source_marks.borrow_mut();
+                m.path = path;
+                m.duration_ns = duration_ns;
+                if should_reset_marks {
+                    match subclip_window {
+                        Some((in_ns, out_ns)) => {
+                            // Subclip selection: scope marks to the subclip
+                            // window so a drag from the source monitor (or a
+                            // drop that falls back to marks because the
+                            // library payload was missing) places the clip
+                            // with the subclip range already applied.
+                            m.in_ns = in_ns;
+                            m.out_ns = out_ns;
+                            m.display_pos_ns = in_ns;
+                        }
+                        None => {
+                            m.in_ns = 0;
+                            m.out_ns = duration_ns;
+                            m.display_pos_ns = 0;
+                        }
                     }
                 }
-            }
-            m.is_audio_only = source_info.is_audio_only;
-            m.has_audio = source_info.has_audio;
-            m.is_image = source_info.is_image;
-            m.is_animated_svg = source_info.is_animated_svg;
-            m.source_timecode_base_ns = source_info.source_timecode_base_ns;
-            m.audio_channel_mode = source_info.audio_channel_mode;
-            drop(m);
-            *selected_source_keyword_id.borrow_mut() = None;
-            source_keyword_entry.set_text("");
-            refresh_source_keyword_picker();
-            refresh_source_patch_controls();
-        })
+                m.is_audio_only = source_info.is_audio_only;
+                m.has_audio = source_info.has_audio;
+                m.is_image = source_info.is_image;
+                m.is_animated_svg = source_info.is_animated_svg;
+                m.source_timecode_base_ns = source_info.source_timecode_base_ns;
+                m.audio_source_streams = source_info.audio_source_streams.clone();
+                m.audio_source_stream_index = source_info.audio_source_stream_index;
+                m.audio_source_channel_offset = source_info.audio_source_channel_offset;
+                m.audio_channel_mode = source_info.audio_channel_mode;
+                drop(m);
+                *selected_source_keyword_id.borrow_mut() = None;
+                source_keyword_entry.set_text("");
+                refresh_source_keyword_picker();
+                refresh_source_patch_controls();
+            },
+        )
     };
     *on_apply_collected_files_impl.borrow_mut() = Some({
         let project = project.clone();
@@ -15892,10 +16218,8 @@ pub fn build_window(
             // parent, which is what the user saw and reported.
             let marks_snapshot: Option<(String, u64, u64)> = {
                 let marks = source_marks.borrow();
-                let has_valid_range =
-                    !marks.path.is_empty() && marks.in_ns < marks.out_ns;
-                let covers_full_source = marks.in_ns == 0
-                    && marks.out_ns == marks.duration_ns;
+                let has_valid_range = !marks.path.is_empty() && marks.in_ns < marks.out_ns;
+                let covers_full_source = marks.in_ns == 0 && marks.out_ns == marks.duration_ns;
                 if has_valid_range && !covers_full_source {
                     Some((marks.path.clone(), marks.in_ns, marks.out_ns))
                 } else {
@@ -15954,7 +16278,10 @@ pub fn build_window(
                 let out_tc = crate::ui::timecode::format_ns_as_timecode(out_ns, &fr);
                 let label = format!("{label_prefix} ({in_tc}–{out_tc})");
                 let subclip = crate::model::media_library::MediaItem::new_subclip(
-                    parent, in_ns, out_ns, label.clone(),
+                    parent,
+                    in_ns,
+                    out_ns,
+                    label.clone(),
                 );
                 (label, subclip)
             };
@@ -16009,19 +16336,11 @@ pub fn build_window(
             }
             // Anchor = earliest TC (deterministic tie-break on
             // source_path for stability).
-            let anchor_tc = members
-                .iter()
-                .map(|(_, _, tc)| *tc)
-                .min()
-                .unwrap_or(0);
+            let anchor_tc = members.iter().map(|(_, _, tc)| *tc).min().unwrap_or(0);
             let mut proposed: Vec<(String, u64, i128)> = members
                 .iter()
                 .map(|(path, dur, tc)| {
-                    (
-                        path.clone(),
-                        *dur,
-                        i128::from(*tc) - i128::from(anchor_tc),
-                    )
+                    (path.clone(), *dur, i128::from(*tc) - i128::from(anchor_tc))
                 })
                 .collect();
             if let Some(min_start) = proposed.iter().map(|(_, _, s)| *s).min() {
@@ -19467,8 +19786,7 @@ pub fn build_window(
             // work is happening; cancel is not supported (encode
             // jobs are short-lived and cancelling mid-encode would
             // leave a partial cache file).
-            let drawing_pending =
-                crate::media::drawing_render::drawing_encode_pending_count();
+            let drawing_pending = crate::media::drawing_render::drawing_encode_pending_count();
             if drawing_pending > 0 {
                 jobs.push(ActiveBackgroundJob {
                     id: "drawing-animation-bake".to_string(),
@@ -19675,11 +19993,15 @@ pub fn build_window(
                 let bg_resolved = bg_removal_cache.borrow_mut().poll();
                 if !bg_resolved.is_empty() || !bg_removal_cache.borrow().paths.is_empty() {
                     let paths = bg_removal_cache.borrow().paths.clone();
-                    prog_player.borrow_mut().update_bg_removal_paths(paths.clone());
+                    prog_player
+                        .borrow_mut()
+                        .update_bg_removal_paths(paths.clone());
                     // Mirror into the render-replace cache so compound
                     // bakes see up-to-date sidecars for internal clips
                     // that use bg-removal.
-                    render_replace_cache.borrow_mut().set_bg_removal_paths(paths);
+                    render_replace_cache
+                        .borrow_mut()
+                        .set_bg_removal_paths(paths);
                 }
                 // Keep inspector section visibility in sync with model availability.
                 inspector_view
@@ -19857,16 +20179,11 @@ pub fn build_window(
                             let status = render_replace_cache.borrow().status(&c);
                             match status {
                                 RenderReplaceStatus::Idle => (String::new(), false),
-                                RenderReplaceStatus::Pending => {
-                                    ("Baking…".to_string(), true)
+                                RenderReplaceStatus::Pending => ("Baking…".to_string(), true),
+                                RenderReplaceStatus::Ready => ("Sidecar ready".to_string(), false),
+                                RenderReplaceStatus::Failed => {
+                                    ("Bake failed — toggle off/on to retry".to_string(), false)
                                 }
-                                RenderReplaceStatus::Ready => {
-                                    ("Sidecar ready".to_string(), false)
-                                }
-                                RenderReplaceStatus::Failed => (
-                                    "Bake failed — toggle off/on to retry".to_string(),
-                                    false,
-                                ),
                             }
                         }
                         _ => (String::new(), false),

@@ -44,6 +44,30 @@ impl Marker {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReferenceStillOrigin {
+    #[default]
+    LivePreview,
+    ExportRender,
+}
+
+impl ReferenceStillOrigin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LivePreview => "live_preview",
+            Self::ExportRender => "export_render",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::LivePreview => "Live",
+            Self::ExportRender => "Export",
+        }
+    }
+}
+
 /// A pinned reference still captured from the Program Monitor, used as the
 /// fixed side of the A/B compare wipe. Thumbnails are stored as PNGs under
 /// `$XDG_CACHE_HOME/ultimateslice/reference_stills/<id>.png`; the project
@@ -69,6 +93,10 @@ pub struct ReferenceStill {
     /// (e.g. `d4f2...png`). Not a full path.
     #[serde(default)]
     pub filename: String,
+    /// Whether this still came from the live Program Monitor compositor or
+    /// from the export-compare render path.
+    #[serde(default)]
+    pub origin: ReferenceStillOrigin,
     /// True if this still was captured with grading bypassed.
     #[serde(default)]
     pub ungraded: bool,
@@ -84,6 +112,7 @@ impl ReferenceStill {
             width: 0,
             height: 0,
             filename: String::new(),
+            origin: ReferenceStillOrigin::default(),
             ungraded: false,
         }
     }
@@ -199,9 +228,7 @@ impl TimecodeBurninPosition {
         margin: f64,
     ) -> (f64, f64) {
         let (hx, vy) = match self {
-            TimecodeBurninPosition::TopLeft | TimecodeBurninPosition::BottomLeft => {
-                (margin, 0.0)
-            }
+            TimecodeBurninPosition::TopLeft | TimecodeBurninPosition::BottomLeft => (margin, 0.0),
             TimecodeBurninPosition::TopCenter | TimecodeBurninPosition::BottomCenter => {
                 ((canvas_w - pill_w) * 0.5, 0.0)
             }
@@ -472,8 +499,7 @@ impl Project {
         match self.color_label_names.get(&label) {
             Some(existing) if existing == trimmed => false,
             _ => {
-                self.color_label_names
-                    .insert(label, trimmed.to_string());
+                self.color_label_names.insert(label, trimmed.to_string());
                 true
             }
         }
@@ -635,8 +661,7 @@ impl Project {
         fn walk(tracks: &[super::track::Track], paths: &[String], acc: &mut usize) {
             for track in tracks {
                 for clip in &track.clips {
-                    if !clip.source_path.is_empty()
-                        && paths.iter().any(|p| p == &clip.source_path)
+                    if !clip.source_path.is_empty() && paths.iter().any(|p| p == &clip.source_path)
                     {
                         *acc += 1;
                     }
@@ -1021,9 +1046,12 @@ mod tests {
         project.tracks.clear();
         let mut video_track = crate::model::track::Track::new_video("V1");
         let target_src = "/tmp/target.mp4".to_string();
-        video_track
-            .clips
-            .push(Clip::new(target_src.clone(), 1_000_000_000, 0, ClipKind::Video));
+        video_track.clips.push(Clip::new(
+            target_src.clone(),
+            1_000_000_000,
+            0,
+            ClipKind::Video,
+        ));
         video_track.clips.push(Clip::new(
             target_src.clone(),
             1_000_000_000,
@@ -1056,10 +1084,8 @@ mod tests {
         let count = project.count_clips_using_source_paths(&["/tmp/nope.mp4".to_string()]);
         assert_eq!(count, 0);
         // Two paths at once → 3 target + 1 other = 4
-        let count = project.count_clips_using_source_paths(&[
-            target_src,
-            "/tmp/other.mp4".to_string(),
-        ]);
+        let count =
+            project.count_clips_using_source_paths(&[target_src, "/tmp/other.mp4".to_string()]);
         assert_eq!(count, 4);
     }
 
@@ -1071,7 +1097,8 @@ mod tests {
         let mut project = Project::new("empty-path");
         project.tracks.clear();
         let mut t = crate::model::track::Track::new_video("V1");
-        t.clips.push(Clip::new("", 5_000_000_000, 0, ClipKind::Compound));
+        t.clips
+            .push(Clip::new("", 5_000_000_000, 0, ClipKind::Compound));
         project.tracks.push(t);
         assert_eq!(
             project.count_clips_using_source_paths(&["".to_string()]),

@@ -1,7 +1,7 @@
 use crate::media::program_player::{ProgramPlayer, ScopeFrame};
 use crate::media::reference_still::DecodedStill;
 use crate::media::thumb_cache::ThumbnailCache;
-use crate::model::project::{FrameRate, TimecodeBurninPosition};
+use crate::model::project::{FrameRate, ReferenceStillOrigin, TimecodeBurninPosition};
 use crate::ui::colors::{LUMA_B, LUMA_G, LUMA_R};
 use crate::ui::timecode;
 use crate::ui::timeline::widget::{TrimPreview, TrimPreviewKind};
@@ -26,6 +26,7 @@ use std::rc::Rc;
 pub struct ReferenceStillSummary {
     pub id: String,
     pub label: String,
+    pub origin: ReferenceStillOrigin,
     /// Decoded thumbnail pixel data. `None` when the still is missing on disk
     /// (placeholder slot rendered instead).
     pub thumbnail: Option<Rc<DecodedStill>>,
@@ -280,6 +281,7 @@ pub fn build_program_monitor(
     on_ab_enabled_changed: impl Fn(bool) + 'static,
     on_ab_midline_changed: impl Fn(f64) + 'static,
     on_capture_still: impl Fn() + 'static,
+    on_capture_export_still: impl Fn() + 'static,
     on_select_still: impl Fn(Option<String>) + 'static,
     on_delete_still: impl Fn(String) + 'static,
     on_rename_still: impl Fn(String, String) + 'static,
@@ -311,9 +313,9 @@ pub fn build_program_monitor(
     Rc<dyn Fn(ScopeFrame)>,
     Rc<dyn Fn(Vec<SubtitleLine>)>,
     // A/B setters — see Program Monitor polish section in ROADMAP.
-    Rc<dyn Fn(bool)>,                                        // ab_enabled_setter
-    Rc<dyn Fn(f64)>,                                         // ab_midline_setter
-    Rc<dyn Fn(Option<Rc<DecodedStill>>)>,                    // ab_reference_setter
+    Rc<dyn Fn(bool)>,                                       // ab_enabled_setter
+    Rc<dyn Fn(f64)>,                                        // ab_midline_setter
+    Rc<dyn Fn(Option<Rc<DecodedStill>>)>,                   // ab_reference_setter
     Rc<dyn Fn(Vec<ReferenceStillSummary>, Option<String>)>, // stills_strip_setter
     // Timecode burn-in setter. Called on project load + after the
     // Project Settings dialog writes new values so the overlay
@@ -411,10 +413,8 @@ pub fn build_program_monitor(
     let aspect_mask_label = Label::new(Some("Aspect mask"));
     aspect_mask_label.set_xalign(0.0);
     aspect_mask_label.set_hexpand(true);
-    let aspect_mask_strings: Vec<&'static str> = AspectMaskPreset::ALL
-        .iter()
-        .map(|p| p.label())
-        .collect();
+    let aspect_mask_strings: Vec<&'static str> =
+        AspectMaskPreset::ALL.iter().map(|p| p.label()).collect();
     let aspect_mask_model = StringList::new(&aspect_mask_strings);
     let aspect_mask_dropdown = DropDown::new(Some(aspect_mask_model), None::<gtk::Expression>);
     aspect_mask_dropdown.set_tooltip_text(Some(
@@ -504,13 +504,10 @@ pub fn build_program_monitor(
     let trim_display_label = Label::new(Some("Precision trim"));
     trim_display_label.set_xalign(0.0);
     trim_display_label.set_hexpand(true);
-    let trim_display_strings: Vec<&'static str> = TrimDisplayMode::ALL
-        .iter()
-        .map(|m| m.label())
-        .collect();
+    let trim_display_strings: Vec<&'static str> =
+        TrimDisplayMode::ALL.iter().map(|m| m.label()).collect();
     let trim_display_model = StringList::new(&trim_display_strings);
-    let trim_display_dropdown =
-        DropDown::new(Some(trim_display_model), None::<gtk::Expression>);
+    let trim_display_dropdown = DropDown::new(Some(trim_display_model), None::<gtk::Expression>);
     trim_display_dropdown.set_tooltip_text(Some(
         "Show outgoing/incoming source frames over the Program Monitor during slip/slide/roll/trim drags. Auto picks 2-up or 4-up based on the active tool.",
     ));
@@ -550,6 +547,12 @@ pub fn build_program_monitor(
     ));
     ref_stills_capture_btn.set_hexpand(true);
     ref_stills_capture_row.append(&ref_stills_capture_btn);
+    let ref_stills_export_btn = Button::with_label("Render export frame");
+    ref_stills_export_btn.set_tooltip_text(Some(
+        "Render the current playhead frame through the export pipeline and store it as a compare still. If the active still is already an export still, it is refreshed in place.",
+    ));
+    ref_stills_export_btn.set_hexpand(true);
+    ref_stills_capture_row.append(&ref_stills_export_btn);
     overlays_popover_box.append(&ref_stills_capture_row);
 
     let ref_stills_empty_hint = Label::new(Some(
@@ -1989,6 +1992,13 @@ pub fn build_program_monitor(
             on_capture_still();
         });
     }
+    let on_capture_export_still = Rc::new(on_capture_export_still);
+    {
+        let on_capture_export_still = on_capture_export_still.clone();
+        ref_stills_export_btn.connect_clicked(move |_| {
+            on_capture_export_still();
+        });
+    }
 
     // ── Stills strip: rebuild on every list change ──
     let on_select_still = Rc::new(on_select_still);
@@ -2011,37 +2021,46 @@ pub fn build_program_monitor(
         let ref_stills_strip = ref_stills_strip.clone();
         let ref_stills_empty_hint = ref_stills_empty_hint.clone();
         let ref_stills_capture_btn = ref_stills_capture_btn.clone();
+        let ref_stills_export_btn = ref_stills_export_btn.clone();
         let on_select_still = on_select_still.clone();
         let on_delete_still = on_delete_still.clone();
         let on_rename_still = on_rename_still.clone();
         let close_overlays_popover = close_overlays_popover.clone();
-        Rc::new(move |stills: Vec<ReferenceStillSummary>, active_id: Option<String>| {
-            // Clear existing children.
-            while let Some(child) = ref_stills_strip.first_child() {
-                ref_stills_strip.remove(&child);
-            }
-            if stills.is_empty() {
-                ref_stills_strip.set_visible(false);
-                ref_stills_empty_hint.set_visible(true);
-            } else {
-                ref_stills_strip.set_visible(true);
-                ref_stills_empty_hint.set_visible(false);
-            }
-            // Cap the capture button when at max.
-            ref_stills_capture_btn.set_sensitive(stills.len() < 4);
+        Rc::new(
+            move |stills: Vec<ReferenceStillSummary>, active_id: Option<String>| {
+                // Clear existing children.
+                while let Some(child) = ref_stills_strip.first_child() {
+                    ref_stills_strip.remove(&child);
+                }
+                if stills.is_empty() {
+                    ref_stills_strip.set_visible(false);
+                    ref_stills_empty_hint.set_visible(true);
+                } else {
+                    ref_stills_strip.set_visible(true);
+                    ref_stills_empty_hint.set_visible(false);
+                }
+                // Cap the capture button when at max.
+                ref_stills_capture_btn.set_sensitive(stills.len() < 4);
+                let can_capture_export = stills.len() < 4
+                    || stills.iter().any(|still| {
+                        active_id.as_deref() == Some(still.id.as_str())
+                            && still.origin == ReferenceStillOrigin::ExportRender
+                    });
+                ref_stills_export_btn.set_sensitive(can_capture_export);
 
-            for still in stills.iter() {
-                let cell = build_reference_still_cell(
-                    still,
-                    active_id.as_deref() == Some(still.id.as_str()),
-                    on_select_still.clone(),
-                    on_delete_still.clone(),
-                    on_rename_still.clone(),
-                    close_overlays_popover.clone(),
-                );
-                ref_stills_strip.insert(&cell, -1);
-            }
-        })
+                for still in stills.iter() {
+                    let cell = build_reference_still_cell(
+                        still,
+                        active_id.as_deref() == Some(still.id.as_str()),
+                        on_select_still.clone(),
+                        on_delete_still.clone(),
+                        on_rename_still.clone(),
+                        close_overlays_popover.clone(),
+                    );
+                    ref_stills_strip.insert(&cell, -1);
+                }
+            },
+        )
     };
 
     // Apply the initial stills list so the strip reflects the loaded project.
@@ -2413,27 +2432,61 @@ fn draw_trim_preview_overlay(
     cr.rectangle(0.0, 0.0, width, height);
     let _ = cr.fill();
 
+    let banner_height = if let Some(title) = preview.overlay_title.as_deref() {
+        let banner_height = (height * 0.12).clamp(44.0, 76.0);
+        draw_trim_preview_banner(
+            cr,
+            width,
+            title,
+            preview.overlay_subtitle.as_deref(),
+            banner_height,
+        );
+        banner_height
+    } else {
+        0.0
+    };
+
     let rects = match preview.kind {
         TrimPreviewKind::TwoUp => {
             let margin = (width * 0.04).min(height * 0.08);
             let gap = margin * 0.6;
             let cell_w = (width - 2.0 * margin - gap) * 0.5;
-            let cell_h = height - 2.0 * margin;
+            let cell_h = (height - 2.0 * margin - banner_height).max(20.0);
             vec![
-                (margin, margin, cell_w, cell_h),
-                (margin + cell_w + gap, margin, cell_w, cell_h),
+                (margin, margin + banner_height, cell_w, cell_h),
+                (
+                    margin + cell_w + gap,
+                    margin + banner_height,
+                    cell_w,
+                    cell_h,
+                ),
             ]
         }
         TrimPreviewKind::FourUp => {
             let margin = (width * 0.04).min(height * 0.08);
             let gap = margin * 0.6;
             let cell_w = (width - 2.0 * margin - gap) * 0.5;
-            let cell_h = (height - 2.0 * margin - gap) * 0.5;
+            let cell_h = (height - 2.0 * margin - gap - banner_height).max(20.0) * 0.5;
             vec![
-                (margin, margin, cell_w, cell_h),
-                (margin + cell_w + gap, margin, cell_w, cell_h),
-                (margin, margin + cell_h + gap, cell_w, cell_h),
-                (margin + cell_w + gap, margin + cell_h + gap, cell_w, cell_h),
+                (margin, margin + banner_height, cell_w, cell_h),
+                (
+                    margin + cell_w + gap,
+                    margin + banner_height,
+                    cell_w,
+                    cell_h,
+                ),
+                (
+                    margin,
+                    margin + banner_height + cell_h + gap,
+                    cell_w,
+                    cell_h,
+                ),
+                (
+                    margin + cell_w + gap,
+                    margin + banner_height + cell_h + gap,
+                    cell_w,
+                    cell_h,
+                ),
             ]
         }
     };
@@ -2504,6 +2557,121 @@ fn draw_trim_preview_overlay(
         cr.set_line_width(1.0);
         cr.rectangle(x + 0.5, y + 0.5, w - 1.0, h - 1.0);
         let _ = cr.stroke();
+    }
+}
+
+fn draw_trim_preview_banner(
+    cr: &gtk::cairo::Context,
+    width: f64,
+    title: &str,
+    subtitle: Option<&str>,
+    banner_height: f64,
+) {
+    let title_size = (banner_height * 0.28).clamp(12.0, 18.0);
+    let subtitle_size = (banner_height * 0.20).clamp(10.0, 13.0);
+    let pad_x = 14.0;
+    let pad_y = 8.0;
+    let radius = 10.0;
+    let top = 10.0;
+
+    cr.select_font_face(
+        "sans",
+        gtk::cairo::FontSlant::Normal,
+        gtk::cairo::FontWeight::Bold,
+    );
+    cr.set_font_size(title_size);
+    let title_extents = match cr.text_extents(title) {
+        Ok(extents) => extents,
+        Err(_) => return,
+    };
+
+    let subtitle_extents = if let Some(text) = subtitle {
+        cr.select_font_face(
+            "sans",
+            gtk::cairo::FontSlant::Normal,
+            gtk::cairo::FontWeight::Normal,
+        );
+        cr.set_font_size(subtitle_size);
+        cr.text_extents(text).ok()
+    } else {
+        None
+    };
+
+    let text_width = subtitle_extents
+        .as_ref()
+        .map(|extents| title_extents.width().max(extents.width()))
+        .unwrap_or_else(|| title_extents.width());
+    let line_gap = subtitle_extents.as_ref().map(|_| 4.0).unwrap_or(0.0);
+    let box_height = pad_y * 2.0
+        + title_size
+        + subtitle_extents
+            .as_ref()
+            .map(|_| subtitle_size + line_gap)
+            .unwrap_or(0.0);
+    let box_width = text_width + pad_x * 2.0;
+    let box_x = ((width - box_width) * 0.5).max(8.0);
+    let box_y = top;
+
+    cr.new_sub_path();
+    cr.arc(
+        box_x + box_width - radius,
+        box_y + radius,
+        radius,
+        -std::f64::consts::FRAC_PI_2,
+        0.0,
+    );
+    cr.arc(
+        box_x + box_width - radius,
+        box_y + box_height - radius,
+        radius,
+        0.0,
+        std::f64::consts::FRAC_PI_2,
+    );
+    cr.arc(
+        box_x + radius,
+        box_y + box_height - radius,
+        radius,
+        std::f64::consts::FRAC_PI_2,
+        std::f64::consts::PI,
+    );
+    cr.arc(
+        box_x + radius,
+        box_y + radius,
+        radius,
+        std::f64::consts::PI,
+        3.0 * std::f64::consts::FRAC_PI_2,
+    );
+    cr.close_path();
+    cr.set_source_rgba(0.06, 0.06, 0.08, 0.88);
+    let _ = cr.fill_preserve();
+    cr.set_source_rgba(0.95, 0.95, 0.98, 0.28);
+    cr.set_line_width(1.0);
+    let _ = cr.stroke();
+
+    cr.select_font_face(
+        "sans",
+        gtk::cairo::FontSlant::Normal,
+        gtk::cairo::FontWeight::Bold,
+    );
+    cr.set_font_size(title_size);
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.98);
+    let title_x = box_x + (box_width - title_extents.width()) * 0.5 - title_extents.x_bearing();
+    let title_y = box_y + pad_y + title_size;
+    cr.move_to(title_x, title_y);
+    let _ = cr.show_text(title);
+
+    if let (Some(text), Some(extents)) = (subtitle, subtitle_extents.as_ref()) {
+        cr.select_font_face(
+            "sans",
+            gtk::cairo::FontSlant::Normal,
+            gtk::cairo::FontWeight::Normal,
+        );
+        cr.set_font_size(subtitle_size);
+        cr.set_source_rgba(0.92, 0.92, 0.95, 0.82);
+        let subtitle_x = box_x + (box_width - extents.width()) * 0.5 - extents.x_bearing();
+        let subtitle_y = title_y + line_gap + subtitle_size;
+        cr.move_to(subtitle_x, subtitle_y);
+        let _ = cr.show_text(text);
     }
 }
 
@@ -2624,11 +2792,13 @@ fn build_reference_still_cell(
     } else {
         still.label.clone()
     };
-    let label = Label::new(Some(&label_text));
+    let display_label = format!("{} · {}", still.origin.label(), label_text);
+    let label = Label::new(Some(&display_label));
     label.set_xalign(0.5);
     label.set_max_width_chars(14);
     label.set_ellipsize(pango::EllipsizeMode::End);
     label.add_css_class("dim-label");
+    label.set_tooltip_text(Some(&display_label));
     container.append(&label);
 
     // Left-click selects this still as the A/B reference.
@@ -2662,9 +2832,7 @@ fn build_reference_still_cell(
             popover.set_parent(&container);
             popover.set_has_arrow(false);
             popover.set_autohide(true);
-            popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
-                x as i32, y as i32, 1, 1,
-            )));
+            popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
             // Popovers created via `set_parent` must be explicitly unparented
             // when they close, otherwise they linger in the widget tree and
             // subsequent clicks can fall through without dismissing the menu.

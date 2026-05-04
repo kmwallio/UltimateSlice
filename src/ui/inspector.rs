@@ -360,6 +360,10 @@ pub struct InspectorView {
     pub measured_loudness_label: Label,
     // LADSPA effects
     pub ladspa_effects_list: GBox,
+    // Source audio routing
+    pub source_audio_stream_summary_label: Label,
+    pub source_audio_stream_dropdown: gtk4::ComboBoxText,
+    pub source_audio_pair_dropdown: gtk4::ComboBoxText,
     // Channel mode
     pub channel_mode_dropdown: gtk4::ComboBoxText,
     // Pitch controls
@@ -2414,8 +2418,7 @@ impl InspectorView {
                         self.source_tc_value.add_css_class("dim-label");
                     }
                     None => {
-                        self.source_tc_value
-                            .set_text("— (none; run Convert LTC)");
+                        self.source_tc_value.set_text("— (none; run Convert LTC)");
                         self.source_tc_value.add_css_class("dim-label");
                     }
                 }
@@ -2581,7 +2584,8 @@ impl InspectorView {
                     self.render_replace_status_label.set_visible(false);
                 }
                 if bakeable {
-                    self.render_replace_check.set_active(c.render_replace_enabled);
+                    self.render_replace_check
+                        .set_active(c.render_replace_enabled);
                 } else {
                     self.render_replace_check.set_active(false);
                 }
@@ -2855,6 +2859,12 @@ impl InspectorView {
                         }
                     }
                 }
+                sync_audio_source_routing_controls(
+                    &self.source_audio_stream_summary_label,
+                    &self.source_audio_stream_dropdown,
+                    &self.source_audio_pair_dropdown,
+                    c,
+                );
                 // Channel mode
                 #[allow(deprecated)]
                 self.channel_mode_dropdown
@@ -3134,6 +3144,11 @@ impl InspectorView {
                 self.vi_intervals_label.set_text("Not analyzed");
                 self.pan_slider.set_value(0.0);
                 self.measured_loudness_label.set_text("");
+                set_audio_source_routing_controls_empty(
+                    &self.source_audio_stream_summary_label,
+                    &self.source_audio_stream_dropdown,
+                    &self.source_audio_pair_dropdown,
+                );
                 self.clear_match_eq_btn.set_visible(false);
                 self.match_eq_curve.set_visible(false);
                 self.match_eq_curve_state.borrow_mut().clear();
@@ -4736,9 +4751,8 @@ pub fn build_inspector(
     // currently-selected clip so the worker kills ffmpeg at its next
     // poll tick.
     let render_replace_cancel_btn = Button::with_label("Cancel");
-    render_replace_cancel_btn.set_tooltip_text(Some(
-        "Stop the in-flight render-replace bake for this clip",
-    ));
+    render_replace_cancel_btn
+        .set_tooltip_text(Some("Stop the in-flight render-replace bake for this clip"));
     render_replace_cancel_btn.set_visible(false);
     render_replace_status_row.append(&render_replace_cancel_btn);
     render_replace_section.append(&render_replace_status_row);
@@ -5218,6 +5232,30 @@ pub fn build_inspector(
 
     // ── Channels sub-section (inside Audio) ────────────────────────────────
     row_label(&audio_inner, "Channels");
+    let source_audio_stream_summary_label = Label::new(Some("Source audio metadata unavailable"));
+    source_audio_stream_summary_label.set_halign(gtk4::Align::Start);
+    source_audio_stream_summary_label.add_css_class("dim-label");
+    source_audio_stream_summary_label.set_wrap(true);
+    audio_inner.append(&source_audio_stream_summary_label);
+
+    row_label(&audio_inner, "Source Stream");
+    #[allow(deprecated)]
+    let source_audio_stream_dropdown = gtk4::ComboBoxText::new();
+    #[allow(deprecated)]
+    source_audio_stream_dropdown.append(Some("0"), "Stream 1");
+    #[allow(deprecated)]
+    source_audio_stream_dropdown.set_active_id(Some("0"));
+    audio_inner.append(&source_audio_stream_dropdown);
+
+    row_label(&audio_inner, "Source Pair");
+    #[allow(deprecated)]
+    let source_audio_pair_dropdown = gtk4::ComboBoxText::new();
+    #[allow(deprecated)]
+    source_audio_pair_dropdown.append(Some("0"), "Channels 1-2");
+    #[allow(deprecated)]
+    source_audio_pair_dropdown.set_active_id(Some("0"));
+    audio_inner.append(&source_audio_pair_dropdown);
+
     #[allow(deprecated)]
     let channel_mode_dropdown = gtk4::ComboBoxText::new();
     for mode in crate::model::clip::AudioChannelMode::ALL {
@@ -7482,6 +7520,65 @@ pub fn build_inspector(
     }
 
     // Wire Channel mode dropdown
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_clip_changed = on_clip_changed.clone();
+        #[allow(deprecated)]
+        source_audio_stream_dropdown.connect_changed(move |combo| {
+            if *updating.borrow() {
+                return;
+            }
+            let id = selected_clip_id.borrow().clone();
+            #[allow(deprecated)]
+            if let (Some(ref clip_id), Some(stream_id)) = (id, combo.active_id()) {
+                if let Ok(stream_index) = stream_id.parse::<u32>() {
+                    {
+                        let mut proj = project.borrow_mut();
+                        if let Some(clip) = proj.clip_mut(clip_id) {
+                            clip.audio_source_stream_index = stream_index;
+                            clip.audio_source_channel_offset =
+                                normalize_audio_source_channel_offset(
+                                    clip.selected_audio_stream_channel_count(),
+                                    clip.audio_source_channel_offset,
+                                );
+                        }
+                        proj.dirty = true;
+                    }
+                    on_clip_changed();
+                }
+            }
+        });
+    }
+
+    {
+        let project = project.clone();
+        let selected_clip_id = selected_clip_id.clone();
+        let updating = updating.clone();
+        let on_clip_changed = on_clip_changed.clone();
+        #[allow(deprecated)]
+        source_audio_pair_dropdown.connect_changed(move |combo| {
+            if *updating.borrow() {
+                return;
+            }
+            let id = selected_clip_id.borrow().clone();
+            #[allow(deprecated)]
+            if let (Some(ref clip_id), Some(offset_id)) = (id, combo.active_id()) {
+                if let Ok(offset) = offset_id.parse::<u32>() {
+                    {
+                        let mut proj = project.borrow_mut();
+                        if let Some(clip) = proj.clip_mut(clip_id) {
+                            clip.audio_source_channel_offset = offset;
+                        }
+                        proj.dirty = true;
+                    }
+                    on_clip_changed();
+                }
+            }
+        });
+    }
+
     {
         let project = project.clone();
         let selected_clip_id = selected_clip_id.clone();
@@ -11115,6 +11212,9 @@ pub fn build_inspector(
         match_eq_curve_state,
         measured_loudness_label,
         ladspa_effects_list,
+        source_audio_stream_summary_label,
+        source_audio_stream_dropdown,
+        source_audio_pair_dropdown,
         channel_mode_dropdown,
         pitch_shift_slider,
         pitch_preserve_check,
@@ -11518,6 +11618,98 @@ fn row_label(parent: &GBox, text: &str) {
     parent.append(&l);
 }
 
+fn audio_source_channel_offset_options(channel_count: u32) -> Vec<(u32, String)> {
+    let channel_count = channel_count.max(1);
+    let mut options = Vec::new();
+    let mut offset = 0;
+    while offset < channel_count {
+        let label = if offset + 1 >= channel_count {
+            format!("Channel {}", offset + 1)
+        } else {
+            format!("Channels {}-{}", offset + 1, offset + 2)
+        };
+        options.push((offset, label));
+        offset = offset.saturating_add(2);
+    }
+    options
+}
+
+fn normalize_audio_source_channel_offset(channel_count: u32, requested: u32) -> u32 {
+    audio_source_channel_offset_options(channel_count)
+        .into_iter()
+        .map(|(offset, _)| offset)
+        .take_while(|offset| *offset <= requested)
+        .last()
+        .unwrap_or(0)
+}
+
+fn set_audio_source_routing_controls_empty(
+    summary_label: &Label,
+    #[allow(deprecated)] stream_dropdown: &gtk4::ComboBoxText,
+    #[allow(deprecated)] pair_dropdown: &gtk4::ComboBoxText,
+) {
+    summary_label.set_text("Select a clip to inspect source audio routing.");
+    #[allow(deprecated)]
+    stream_dropdown.remove_all();
+    #[allow(deprecated)]
+    stream_dropdown.append(Some("0"), "Stream 1");
+    #[allow(deprecated)]
+    stream_dropdown.set_active_id(Some("0"));
+    stream_dropdown.set_sensitive(false);
+    #[allow(deprecated)]
+    pair_dropdown.remove_all();
+    #[allow(deprecated)]
+    pair_dropdown.append(Some("0"), "Channels 1-2");
+    #[allow(deprecated)]
+    pair_dropdown.set_active_id(Some("0"));
+    pair_dropdown.set_sensitive(false);
+}
+
+fn sync_audio_source_routing_controls(
+    summary_label: &Label,
+    #[allow(deprecated)] stream_dropdown: &gtk4::ComboBoxText,
+    #[allow(deprecated)] pair_dropdown: &gtk4::ComboBoxText,
+    clip: &crate::model::clip::Clip,
+) {
+    let selected_stream_index = clip.clamped_audio_source_stream_index();
+    let selected_channel_offset = normalize_audio_source_channel_offset(
+        clip.selected_audio_stream_channel_count(),
+        clip.clamped_audio_source_channel_offset(),
+    );
+    let stream_summary = clip
+        .selected_audio_source_stream()
+        .map(|stream| stream.label())
+        .unwrap_or_else(|| "Source audio metadata unavailable; assuming first stereo pair.".into());
+    summary_label.set_text(&stream_summary);
+
+    #[allow(deprecated)]
+    stream_dropdown.remove_all();
+    if clip.audio_source_streams.is_empty() {
+        #[allow(deprecated)]
+        stream_dropdown.append(Some("0"), "Stream 1");
+    } else {
+        for stream in &clip.audio_source_streams {
+            #[allow(deprecated)]
+            stream_dropdown.append(Some(&stream.stream_index.to_string()), &stream.label());
+        }
+    }
+    #[allow(deprecated)]
+    stream_dropdown.set_active_id(Some(&selected_stream_index.to_string()));
+    stream_dropdown.set_sensitive(!clip.audio_source_streams.is_empty());
+
+    #[allow(deprecated)]
+    pair_dropdown.remove_all();
+    for (offset, label) in
+        audio_source_channel_offset_options(clip.selected_audio_stream_channel_count())
+    {
+        #[allow(deprecated)]
+        pair_dropdown.append(Some(&offset.to_string()), &label);
+    }
+    #[allow(deprecated)]
+    pair_dropdown.set_active_id(Some(&selected_channel_offset.to_string()));
+    pair_dropdown.set_sensitive(!clip.audio_source_streams.is_empty());
+}
+
 /// Restore an expander's expanded state from the persisted section map.
 fn restore_expander_state(expander: &Expander, sections: &std::collections::HashMap<String, bool>) {
     if let Some(label) = expander.label() {
@@ -11809,12 +12001,7 @@ pub fn attach_property_context_menus(
     // Phase 2: bundle Copy / Paste on the non-scalar controls
     // (Flip H/V, Blend Mode, LUT Stack, Frei0r Effect Chain,
     // LADSPA Audio Effect Chain, EQ Bands, Chroma Key, BG Removal).
-    attach_all_bundle_context_menus(
-        view,
-        project,
-        timeline_state,
-        on_project_changed,
-    );
+    attach_all_bundle_context_menus(view, project, timeline_state, on_project_changed);
 }
 
 fn attach_one_property_context_menu(
@@ -11883,7 +12070,8 @@ fn attach_one_property_context_menu(
         paste_btn.set_sensitive(clipboard_matches && primary_clip_compatible);
 
         let multi_select = selected_ids.len() > 1
-            || (selected_ids.len() == 1 && primary_id.is_some()
+            || (selected_ids.len() == 1
+                && primary_id.is_some()
                 && !selected_ids.contains(primary_id.as_deref().unwrap_or("")));
         paste_all_btn.set_visible(multi_select);
         paste_all_btn.set_sensitive(clipboard_matches);
@@ -11928,7 +12116,8 @@ fn attach_one_property_context_menu(
                     popover_close.popdown();
                     return;
                 };
-                let clipboard_value: Option<f64> = match timeline_state.borrow().property_clipboard {
+                let clipboard_value: Option<f64> = match timeline_state.borrow().property_clipboard
+                {
                     Some(PropertyClipboard::Scalar {
                         property: p,
                         value: v,
@@ -12186,9 +12375,7 @@ fn show_property_popover(
 /// where `selected_ids` always includes the primary even when the
 /// selection set does not.
 fn current_selection(
-    timeline_state: &std::rc::Rc<
-        std::cell::RefCell<crate::ui::timeline::widget::TimelineState>,
-    >,
+    timeline_state: &std::rc::Rc<std::cell::RefCell<crate::ui::timeline::widget::TimelineState>>,
 ) -> (Option<String>, HashSet<String>) {
     let ts = timeline_state.borrow();
     let primary = ts.selected_clip_id.clone();
@@ -12241,10 +12428,7 @@ fn apply_ladspa_chain(
     clip.ladspa_effects = value;
 }
 
-fn apply_eq_bands(
-    clip: &mut crate::model::clip::Clip,
-    value: [crate::model::clip::EqBand; 3],
-) {
+fn apply_eq_bands(clip: &mut crate::model::clip::Clip, value: [crate::model::clip::EqBand; 3]) {
     clip.eq_bands = value;
 }
 
@@ -12501,10 +12685,7 @@ fn vec_ladspa_eq(
 ) -> bool {
     a == b
 }
-fn eq_bands_eq(
-    a: &[crate::model::clip::EqBand; 3],
-    b: &[crate::model::clip::EqBand; 3],
-) -> bool {
+fn eq_bands_eq(a: &[crate::model::clip::EqBand; 3], b: &[crate::model::clip::EqBand; 3]) -> bool {
     a == b
 }
 fn chroma_eq(a: &ChromaKeyBundle, b: &ChromaKeyBundle) -> bool {
@@ -12516,10 +12697,7 @@ fn chroma_eq(a: &ChromaKeyBundle, b: &ChromaKeyBundle) -> bool {
 fn bg_removal_eq(a: &BgRemovalBundle, b: &BgRemovalBundle) -> bool {
     a.enabled == b.enabled && (a.threshold - b.threshold).abs() < 1e-9
 }
-fn blend_eq(
-    a: &crate::model::clip::BlendMode,
-    b: &crate::model::clip::BlendMode,
-) -> bool {
+fn blend_eq(a: &crate::model::clip::BlendMode, b: &crate::model::clip::BlendMode) -> bool {
     a == b
 }
 fn bool_eq(a: &bool, b: &bool) -> bool {
@@ -12735,10 +12913,7 @@ fn attach_all_bundle_context_menus(
             threshold: b.threshold,
         },
         |pc| match pc {
-            PropertyClipboard::BgRemoval {
-                enabled,
-                threshold,
-            } => Some(BgRemovalBundle {
+            PropertyClipboard::BgRemoval { enabled, threshold } => Some(BgRemovalBundle {
                 enabled: *enabled,
                 threshold: *threshold,
             }),

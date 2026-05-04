@@ -1594,9 +1594,7 @@ pub fn build_media_browser(
                             .items
                             .iter()
                             .find(|i| &i.id == item_id)
-                            .filter(|i| {
-                                i.has_backing_file() && i.source_timecode_base_ns.is_some()
-                            })
+                            .filter(|i| i.has_backing_file() && i.source_timecode_base_ns.is_some())
                             .map(|i| i.source_path.clone()),
                         _ => None,
                     }
@@ -1782,10 +1780,8 @@ pub fn build_media_browser(
                                 child_widget = w.next_sibling();
                                 continue;
                             }
-                            let payload = format!(
-                                "{}|{}|{}",
-                                item.source_path, item.duration_ns, item.id
-                            );
+                            let payload =
+                                format!("{}|{}|{}", item.source_path, item.duration_ns, item.id);
                             let val = glib::Value::from(&payload);
                             for ctrl in w.observe_controllers().into_iter().flatten() {
                                 if let Ok(ds) = ctrl.downcast::<gtk::DragSource>() {
@@ -2247,15 +2243,11 @@ fn make_grid_item(
             motion.connect_motion(move |_ctrl, x, _y| {
                 let width = thumb_area_inner.width().max(1) as f64;
                 let frac = (x / width).clamp(0.0, 1.0);
-                let raw_t = hover_start_ns
-                    + (frac * hover_span_ns as f64).round() as u64;
-                let bucket =
-                    crate::media::thumb_cache::quantize_hover_scrub_time_ns(raw_t);
+                let raw_t = hover_start_ns + (frac * hover_span_ns as f64).round() as u64;
+                let bucket = crate::media::thumb_cache::quantize_hover_scrub_time_ns(raw_t);
                 if scrub_time_ns.get() != Some(bucket) {
                     scrub_time_ns.set(Some(bucket));
-                    thumb_cache_inner
-                        .borrow_mut()
-                        .request(&path_motion, bucket);
+                    thumb_cache_inner.borrow_mut().request(&path_motion, bucket);
                     thumb_area_inner.queue_draw();
                 }
             });

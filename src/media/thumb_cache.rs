@@ -536,9 +536,6 @@ mod hover_scrub_tests {
             quantize_hover_scrub_time_ns(b)
         );
         assert_eq!(quantize_hover_scrub_time_ns(a), 0);
-        assert_eq!(
-            quantize_hover_scrub_time_ns(b),
-            HOVER_SCRUB_BUCKET_NS
-        );
+        assert_eq!(quantize_hover_scrub_time_ns(b), HOVER_SCRUB_BUCKET_NS);
     }
 }

@@ -56,10 +56,7 @@ pub fn build_color_legend_button(
     menu_btn
 }
 
-fn build_legend_content(
-    project: Rc<RefCell<Project>>,
-    on_project_changed: Rc<dyn Fn()>,
-) -> GBox {
+fn build_legend_content(project: Rc<RefCell<Project>>, on_project_changed: Rc<dyn Fn()>) -> GBox {
     let container = GBox::new(Orientation::Vertical, 4);
     container.set_margin_top(10);
     container.set_margin_bottom(10);

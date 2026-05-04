@@ -771,8 +771,8 @@ pub fn clamp_prerender_crf(value: u32) -> u32 {
 #[serde(rename_all = "snake_case")]
 pub enum ProxyMode {
     Off,
-    HalfRes,
-    QuarterRes,
+    P1080,
+    P640,
 }
 
 impl Default for ProxyMode {
@@ -785,15 +785,16 @@ impl ProxyMode {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Off => "off",
-            Self::HalfRes => "half_res",
-            Self::QuarterRes => "quarter_res",
+            Self::P1080 => "p1080",
+            Self::P640 => "p640",
         }
     }
 
     pub fn from_str(value: &str) -> Self {
+        // Accept legacy fractional names so saved settings/scripts keep working.
         match value {
-            "half_res" => Self::HalfRes,
-            "quarter_res" => Self::QuarterRes,
+            "p1080" | "half_res" => Self::P1080,
+            "p640" | "quarter_res" => Self::P640,
             _ => Self::Off,
         }
     }
@@ -804,7 +805,7 @@ impl ProxyMode {
 }
 
 fn default_last_non_off_proxy_mode() -> ProxyMode {
-    ProxyMode::HalfRes
+    ProxyMode::P1080
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1963,33 +1964,39 @@ mod tests {
     }
 
     #[test]
-    fn preferences_default_missing_proxy_restore_mode_to_half_res() {
+    fn preferences_default_missing_proxy_restore_mode_to_p1080() {
         let parsed: UiState =
             serde_json::from_str(r#"{"preferences":{"proxy_mode":"off"}}"#).unwrap();
         assert_eq!(parsed.preferences.proxy_mode, ProxyMode::Off);
-        assert_eq!(
-            parsed.preferences.remembered_proxy_mode(),
-            ProxyMode::HalfRes
-        );
+        assert_eq!(parsed.preferences.remembered_proxy_mode(), ProxyMode::P1080);
     }
 
     #[test]
     fn preferences_set_proxy_mode_remembers_last_enabled_mode() {
         let mut prefs = PreferencesState::default();
-        prefs.set_proxy_mode(ProxyMode::QuarterRes);
+        prefs.set_proxy_mode(ProxyMode::P640);
         prefs.set_proxy_mode(ProxyMode::Off);
         assert_eq!(prefs.proxy_mode, ProxyMode::Off);
-        assert_eq!(prefs.remembered_proxy_mode(), ProxyMode::QuarterRes);
+        assert_eq!(prefs.remembered_proxy_mode(), ProxyMode::P640);
     }
 
     #[test]
     fn preferences_set_proxy_enabled_restores_last_enabled_mode() {
         let mut prefs = PreferencesState::default();
-        prefs.set_proxy_mode(ProxyMode::QuarterRes);
+        prefs.set_proxy_mode(ProxyMode::P640);
         prefs.set_proxy_enabled(false);
         prefs.set_proxy_enabled(true);
-        assert_eq!(prefs.proxy_mode, ProxyMode::QuarterRes);
-        assert_eq!(prefs.remembered_proxy_mode(), ProxyMode::QuarterRes);
+        assert_eq!(prefs.proxy_mode, ProxyMode::P640);
+        assert_eq!(prefs.remembered_proxy_mode(), ProxyMode::P640);
+    }
+
+    #[test]
+    fn proxy_mode_from_str_migrates_legacy_values() {
+        assert_eq!(ProxyMode::from_str("half_res"), ProxyMode::P1080);
+        assert_eq!(ProxyMode::from_str("quarter_res"), ProxyMode::P640);
+        assert_eq!(ProxyMode::from_str("p1080"), ProxyMode::P1080);
+        assert_eq!(ProxyMode::from_str("p640"), ProxyMode::P640);
+        assert_eq!(ProxyMode::from_str("off"), ProxyMode::Off);
     }
 
     #[test]
@@ -2164,7 +2171,10 @@ mod tests {
         assert!(decoded.show_hud);
         let legacy: ProgramMonitorState =
             serde_json::from_str(r#"{"popped":false}"#).expect("legacy deserialize");
-        assert!(!legacy.show_hud, "legacy JSON without show_hud defaults false");
+        assert!(
+            !legacy.show_hud,
+            "legacy JSON without show_hud defaults false"
+        );
     }
 
     #[test]

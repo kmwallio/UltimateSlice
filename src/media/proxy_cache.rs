@@ -35,30 +35,26 @@ pub struct ProxyProgress {
     pub byte_fraction: Option<f64>,
 }
 
-/// Scale factor for proxy transcodes.
+/// Scale factor for proxy transcodes. Caps the height (preserving aspect ratio
+/// and never upscaling) so proxy decode cost is constant regardless of source
+/// resolution — vital for very high-res sources like 6.2K GoPro footage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ProxyScale {
-    Half,
-    Quarter,
-    Project { width: u32, height: u32 },
+    MaxHeight(u32),
 }
 
 impl ProxyScale {
     pub fn ffmpeg_scale_filter(&self) -> String {
         match self {
-            ProxyScale::Half => "scale=iw/2:ih/2".to_string(),
-            ProxyScale::Quarter => "scale=iw/4:ih/4".to_string(),
-            ProxyScale::Project { width, height } => format!(
-                "scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
-            ),
+            // -2 picks an even width that preserves the source aspect ratio.
+            // min(N,ih) prevents upscaling when the source is already shorter.
+            ProxyScale::MaxHeight(h) => format!("scale=-2:'min({h},ih)':flags=lanczos"),
         }
     }
 
     fn suffix(&self) -> String {
         match self {
-            ProxyScale::Half => "half".to_string(),
-            ProxyScale::Quarter => "quarter".to_string(),
-            ProxyScale::Project { width, height } => format!("proj{width}x{height}"),
+            ProxyScale::MaxHeight(h) => format!("{h}p"),
         }
     }
 }
@@ -406,11 +402,9 @@ impl ProxyCache {
     pub fn ready_source_paths(&self) -> HashSet<String> {
         self.proxies
             .keys()
-            .map(|k| {
-                match k.split_once('|') {
-                    Some((src, _)) => src.to_string(),
-                    None => k.clone(),
-                }
+            .map(|k| match k.split_once('|') {
+                Some((src, _)) => src.to_string(),
+                None => k.clone(),
             })
             .collect()
     }
@@ -1380,13 +1374,15 @@ fn run_transcode_command(
 }
 
 fn estimate_proxy_output_bitrate_bps(scale: ProxyScale, has_lut: bool) -> u64 {
+    // Estimate H.264 bitrate based on the proxy's pixel area, normalized against
+    // 1080p (~3.2 Mbps for 16:9). The width is approximated as 16/9 * height
+    // since MaxHeight preserves source aspect — close enough for an estimate.
     let base_video_bps = match scale {
-        ProxyScale::Half => 1_600_000f64,
-        ProxyScale::Quarter => 850_000f64,
-        ProxyScale::Project { width, height } => {
-            let pixel_scale =
-                ((width.max(1) as f64 * height.max(1) as f64) / (1920.0 * 1080.0)).clamp(0.25, 4.0);
-            (3_200_000f64 * pixel_scale).clamp(1_200_000.0, 12_000_000.0)
+        ProxyScale::MaxHeight(h) => {
+            let height_f = h.max(1) as f64;
+            let approx_pixels = height_f * height_f * (16.0 / 9.0);
+            let pixel_scale = (approx_pixels / (1920.0 * 1080.0)).clamp(0.25, 4.0);
+            (3_200_000f64 * pixel_scale).clamp(600_000.0, 12_000_000.0)
         }
     };
     let lut_scale = if has_lut { 1.1 } else { 1.0 };
@@ -1684,6 +1680,30 @@ mod tests {
     }
 
     #[test]
+    fn max_height_filter_caps_height_preserves_aspect_and_avoids_upscale() {
+        // -2 forces an even auto-computed width that preserves source aspect.
+        // min(N,ih) clamps the height to the target only when source is taller.
+        assert_eq!(
+            ProxyScale::MaxHeight(1080).ffmpeg_scale_filter(),
+            "scale=-2:'min(1080,ih)':flags=lanczos"
+        );
+        assert_eq!(
+            ProxyScale::MaxHeight(640).ffmpeg_scale_filter(),
+            "scale=-2:'min(640,ih)':flags=lanczos"
+        );
+    }
+
+    #[test]
+    fn max_height_suffix_uses_height_p_form() {
+        // Suffix lands in the on-disk filename, e.g. clip-s....proxy_1080p.mp4.
+        // Distinct heights must produce distinct suffixes so cache keys stay unique.
+        let s1080 = ProxyScale::MaxHeight(1080);
+        let s640 = ProxyScale::MaxHeight(640);
+        assert_eq!(s1080.suffix(), "1080p");
+        assert_eq!(s640.suffix(), "640p");
+    }
+
+    #[test]
     fn ready_source_paths_recovers_source_prefix_from_composite_keys() {
         let mut cache = ProxyCache::new();
         // Bare source-only key (no LUT, no vidstab)
@@ -1723,10 +1743,10 @@ mod tests {
     #[test]
     fn sidecar_proxy_path_detection_matches_directory_name() {
         assert!(is_sidecar_proxy_path(
-            "/tmp/project/UltimateSlice.cache/a.proxy_half.mp4"
+            "/tmp/project/UltimateSlice.cache/a.proxy_1080p.mp4"
         ));
         assert!(!is_sidecar_proxy_path(
-            "/tmp/ultimateslice/proxies/a.proxy_half.mp4"
+            "/tmp/ultimateslice/proxies/a.proxy_1080p.mp4"
         ));
     }
 
@@ -1754,7 +1774,7 @@ mod tests {
         let mut cache = ProxyCache::new();
         let local_path = cache
             .local_cache_root
-            .join("cleanup-policy-test.proxy_half.mp4")
+            .join("cleanup-policy-test.proxy_1080p.mp4")
             .to_string_lossy()
             .to_string();
         let _ = std::fs::create_dir_all(&cache.local_cache_root);
@@ -1789,7 +1809,7 @@ mod tests {
         let other_source_path = test_source_file("clip-b.mp4");
         let plain_local = local_proxy_path_for(
             &source_path,
-            ProxyScale::Half,
+            ProxyScale::MaxHeight(1080),
             None,
             false,
             0.0,
@@ -1798,7 +1818,7 @@ mod tests {
         .unwrap();
         let stabilized_local = local_proxy_path_for(
             &source_path,
-            ProxyScale::Half,
+            ProxyScale::MaxHeight(1080),
             None,
             true,
             0.45,
@@ -1806,12 +1826,14 @@ mod tests {
         )
         .unwrap();
         let plain_sidecar =
-            alongside_proxy_path_for(&source_path, ProxyScale::Half, None, false, 0.0).unwrap();
+            alongside_proxy_path_for(&source_path, ProxyScale::MaxHeight(1080), None, false, 0.0)
+                .unwrap();
         let stabilized_sidecar =
-            alongside_proxy_path_for(&source_path, ProxyScale::Half, None, true, 0.45).unwrap();
+            alongside_proxy_path_for(&source_path, ProxyScale::MaxHeight(1080), None, true, 0.45)
+                .unwrap();
         let other_source_local = local_proxy_path_for(
             &other_source_path,
-            ProxyScale::Half,
+            ProxyScale::MaxHeight(1080),
             None,
             false,
             0.0,
@@ -1825,7 +1847,7 @@ mod tests {
         let _ = std::fs::write(&source_path, b"source-modified-longer");
         let updated_local = local_proxy_path_for(
             &source_path,
-            ProxyScale::Half,
+            ProxyScale::MaxHeight(1080),
             None,
             false,
             0.0,
@@ -1833,7 +1855,8 @@ mod tests {
         )
         .unwrap();
         let updated_sidecar =
-            alongside_proxy_path_for(&source_path, ProxyScale::Half, None, false, 0.0).unwrap();
+            alongside_proxy_path_for(&source_path, ProxyScale::MaxHeight(1080), None, false, 0.0)
+                .unwrap();
         assert_eq!(plain_local, updated_local);
         assert_eq!(plain_sidecar, updated_sidecar);
 
@@ -1853,7 +1876,7 @@ mod tests {
         let source_path = test_source_file("clip-a.mp4");
         let proxy_path = local_proxy_path_for(
             &source_path,
-            ProxyScale::Half,
+            ProxyScale::MaxHeight(1080),
             None,
             false,
             0.0,
@@ -1868,7 +1891,7 @@ mod tests {
 
         let reused = existing_proxy_path_for(
             &source_path,
-            ProxyScale::Half,
+            ProxyScale::MaxHeight(1080),
             None,
             false,
             0.0,
@@ -1880,7 +1903,7 @@ mod tests {
         let _ = std::fs::write(&source_path, b"source-modified-longer");
         let stale = existing_proxy_path_for(
             &source_path,
-            ProxyScale::Half,
+            ProxyScale::MaxHeight(1080),
             None,
             false,
             0.0,
@@ -1901,7 +1924,8 @@ mod tests {
         let _ = std::fs::create_dir_all(&local_root);
         let source_path = test_source_file("clip-a.mp4");
         let legacy_sidecar =
-            legacy_alongside_proxy_path_for(&source_path, ProxyScale::Half, None).unwrap();
+            legacy_alongside_proxy_path_for(&source_path, ProxyScale::MaxHeight(1080), None)
+                .unwrap();
         if let Some(parent) = Path::new(&legacy_sidecar).parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -1909,7 +1933,7 @@ mod tests {
 
         let reused = existing_proxy_path_for(
             &source_path,
-            ProxyScale::Half,
+            ProxyScale::MaxHeight(1080),
             None,
             false,
             0.0,
@@ -1932,11 +1956,27 @@ mod tests {
         let source_a = test_source_file("clip-a.mp4");
         let source_b = test_source_file("clip-b.mp4");
 
-        let keep_spec = ProxyVariantSpec::new(source_a.clone(), ProxyScale::Half, None, false, 0.0);
-        let remove_spec =
-            ProxyVariantSpec::new(source_a.clone(), ProxyScale::Quarter, None, false, 0.0);
-        let unrelated_spec =
-            ProxyVariantSpec::new(source_b.clone(), ProxyScale::Quarter, None, false, 0.0);
+        let keep_spec = ProxyVariantSpec::new(
+            source_a.clone(),
+            ProxyScale::MaxHeight(1080),
+            None,
+            false,
+            0.0,
+        );
+        let remove_spec = ProxyVariantSpec::new(
+            source_a.clone(),
+            ProxyScale::MaxHeight(640),
+            None,
+            false,
+            0.0,
+        );
+        let unrelated_spec = ProxyVariantSpec::new(
+            source_b.clone(),
+            ProxyScale::MaxHeight(640),
+            None,
+            false,
+            0.0,
+        );
 
         let keep_local = local_proxy_path_for_spec(&keep_spec, &local_root).unwrap();
         let remove_local = local_proxy_path_for_spec(&remove_spec, &local_root).unwrap();
@@ -1999,9 +2039,11 @@ mod tests {
         let source_a = test_source_file("clip-a.mp4");
         let source_b = test_source_file("clip-b.mp4");
         let side_a =
-            alongside_proxy_path_for(&source_a, ProxyScale::Half, None, false, 0.0).unwrap();
+            alongside_proxy_path_for(&source_a, ProxyScale::MaxHeight(1080), None, false, 0.0)
+                .unwrap();
         let side_b =
-            alongside_proxy_path_for(&source_b, ProxyScale::Quarter, None, false, 0.0).unwrap();
+            alongside_proxy_path_for(&source_b, ProxyScale::MaxHeight(640), None, false, 0.0)
+                .unwrap();
 
         for (path, source_path) in [(&side_a, &source_a), (&side_b, &source_b)] {
             if let Some(parent) = Path::new(path).parent() {
@@ -2032,9 +2074,11 @@ mod tests {
         let source_a = test_source_file("clip-a.mp4");
         let source_b = test_source_file("clip-b.mp4");
         let side_a =
-            alongside_proxy_path_for(&source_a, ProxyScale::Half, None, false, 0.0).unwrap();
+            alongside_proxy_path_for(&source_a, ProxyScale::MaxHeight(1080), None, false, 0.0)
+                .unwrap();
         let side_b =
-            alongside_proxy_path_for(&source_b, ProxyScale::Quarter, None, false, 0.0).unwrap();
+            alongside_proxy_path_for(&source_b, ProxyScale::MaxHeight(640), None, false, 0.0)
+                .unwrap();
 
         for (path, source_path) in [(&side_a, &source_a), (&side_b, &source_b)] {
             if let Some(parent) = Path::new(path).parent() {

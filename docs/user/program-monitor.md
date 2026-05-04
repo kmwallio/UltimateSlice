@@ -36,6 +36,40 @@ or outside the export frame.
 | ▾ Scopes toggle | Show/hide the docked color scopes panel (waveform, histogram, vectorscope, RGB parade) |
 | Loudness button | Next to the Scopes toggle — opens the Loudness Radar popover for broadcast-standard EBU R128 analysis + normalize-to-target |
 
+## A/B Compare and Export Compare
+
+Open **Overlays** in the Program Monitor header to access the **Reference stills**
+section:
+
+- **Capture current frame** stores the live Program Monitor compositor output as a
+  compare still.
+- **Render export frame** runs the current playhead frame through the export
+  pipeline and stores that rendered result as a compare still. If the active
+  compare still is already an **Export** still, the button refreshes it in place
+  instead of creating another slot.
+- **A/B compare** toggles a vertical wipe between the live monitor frame and the
+  active reference still. Drag the midline to slide the split.
+- The still strip labels each item as **Live** or **Export** so you can tell
+  whether you are comparing against a captured preview frame or an
+  export-rendered parity frame.
+
+This is the fastest way to inspect preview/export parity for color, LUT, HDR
+tone-map, and compositing differences without running a full delivery export.
+
+Reference stills are capped at 4 per project. They are review aids, not timeline
+media: deleting one never affects clips on the timeline.
+
+### MCP automation
+
+The compare workflow is also scriptable:
+
+- `capture_reference_still` stores the live Program Monitor frame.
+- `capture_export_compare_still` renders the current playhead frame through the
+  export path and stores it as an **Export** compare still.
+- `set_program_monitor_ab_compare` selects the active compare still / wipe state.
+- `list_reference_stills` reports each still's `origin` (`live_preview` or
+  `export_render`) so automation can distinguish the two.
+
 ## Loudness Radar (EBU R128)
 
 The **Loudness** button next to the **▾ Scopes** toggle (below the
@@ -256,6 +290,14 @@ so you can see exactly what's on either side of the cut while dragging.
   slot shows a `—` placeholder so the layout stays stable.
 - The overlay auto-clears when you release the mouse; no separate toggle
   action is needed per drag.
+- Pressing **Enter** while the timeline has focus and **Ripple**, **Roll**,
+  **Slip**, or **Slide** is the active tool opens a modal **Precision Trim**
+  session instead of a mouse drag. The overlay stays pinned on screen with a
+  title bar showing the edit mode and frame delta (`+1f`, `-2f`, etc.) while
+  you nudge.
+- During that session, use **Left/Right** to step by 1 frame,
+  **Shift+Left/Right** to step by 5 frames, **Enter** to commit, and
+  **Escape** to cancel back to the original edit.
 - Sourceless clip kinds (compounds, titles, adjustment layers) skip the
   overlay because they have no extractable source frame.
 - Follows into the pop-out Program Monitor window automatically.

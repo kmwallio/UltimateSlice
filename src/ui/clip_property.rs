@@ -180,7 +180,9 @@ impl ClipProperty {
         use ClipProperty::*;
         match self {
             Volume | Pan | PitchShiftSemitones => Family::Audio,
-            ChromaKeyTolerance | ChromaKeySoftness | BgRemovalThreshold
+            ChromaKeyTolerance
+            | ChromaKeySoftness
+            | BgRemovalThreshold
             | MotionBlurShutterAngle => Family::VideoOnly,
             _ => Family::Visual,
         }
@@ -410,11 +412,7 @@ mod tests {
     fn applies_to_all_true_for_video_clip() {
         let video = sample_video_clip();
         for prop in PHASE_1_PROPERTIES.iter().copied() {
-            assert!(
-                prop.applies_to(&video),
-                "{:?} should apply to video",
-                prop
-            );
+            assert!(prop.applies_to(&video), "{:?} should apply to video", prop);
         }
     }
 }

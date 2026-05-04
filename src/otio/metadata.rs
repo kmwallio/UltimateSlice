@@ -196,6 +196,11 @@ pub(crate) struct UltimateSliceClipOtioMetadata {
     /// Audio channel routing (Stereo / Left / Right / MonoMix).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) audio_channel_mode: Option<AudioChannelMode>,
+    /// Selected source audio stream ordinal and channel offset within that stream.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) audio_source_stream_index: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) audio_source_channel_offset: Option<u32>,
     /// Variable speed keyframes + slow-motion interpolation mode.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) speed_keyframes: Option<Vec<NumericKeyframe>>,
@@ -441,10 +446,7 @@ pub(crate) struct UltimateSliceProjectOtioMetadata {
     /// custom display name. JSON keys are the label's snake_case
     /// serialization. Empty means "not authored" and is skipped so legacy
     /// projects don't grow on round-trip.
-    #[serde(
-        skip_serializing_if = "std::collections::BTreeMap::is_empty",
-        default
-    )]
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty", default)]
     pub(crate) color_label_names: std::collections::BTreeMap<String, String>,
 }
 

@@ -1062,6 +1062,18 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                             clip.audio_channel_mode.as_str(),
                         ));
                     }
+                    if clip.audio_source_stream_index != 0 {
+                        asset_clip.push_attribute((
+                            "us:audio-source-stream-index",
+                            clip.audio_source_stream_index.to_string().as_str(),
+                        ));
+                    }
+                    if clip.audio_source_channel_offset != 0 {
+                        asset_clip.push_attribute((
+                            "us:audio-source-channel-offset",
+                            clip.audio_source_channel_offset.to_string().as_str(),
+                        ));
+                    }
                     if let Some(lufs) = clip.measured_loudness_lufs {
                         asset_clip.push_attribute((
                             "us:measured-loudness-lufs",
@@ -4599,6 +4611,8 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:pitch-shift-semitones"
             | "us:pitch-preserve"
             | "us:audio-channel-mode"
+            | "us:audio-source-stream-index"
+            | "us:audio-source-channel-offset"
             | "us:ladspa-effects"
             | "us:motion-trackers"
             | "us:tracking-binding"
@@ -5198,6 +5212,7 @@ mod tests {
         use crate::fcpxml::parser::parse_fcpxml;
         let mut project = Project::new("ReferenceStillsRT");
         let mut still = crate::model::project::ReferenceStill::new("Take 1");
+        still.origin = crate::model::project::ReferenceStillOrigin::ExportRender;
         still.width = 1920;
         still.height = 1080;
         still.captured_at_ns = 42_000_000_000;
@@ -5221,6 +5236,40 @@ mod tests {
         assert_eq!(got.filename, still.filename);
         assert_eq!(got.captured_at_ns, 42_000_000_000);
         assert_eq!(got.timeline_pos_ns, 5_000_000_000);
+        assert_eq!(
+            got.origin,
+            crate::model::project::ReferenceStillOrigin::ExportRender
+        );
+    }
+
+    #[test]
+    fn test_audio_source_routing_round_trip_through_fcpxml() {
+        use crate::fcpxml::parser::parse_fcpxml;
+
+        let mut project = Project::new("AudioRoutingRT");
+        project.tracks.clear();
+        let mut track = crate::model::track::Track::new_audio("A1");
+        let mut clip = crate::model::clip::Clip::new(
+            "/tmp/multichannel.wav",
+            1_000_000_000,
+            0,
+            crate::model::clip::ClipKind::Audio,
+        );
+        clip.audio_channel_mode = crate::model::clip::AudioChannelMode::Right;
+        clip.audio_source_stream_index = 1;
+        clip.audio_source_channel_offset = 2;
+        track.add_clip(clip.clone());
+        project.tracks.push(track);
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(xml.contains("us:audio-source-stream-index=\"1\""));
+        assert!(xml.contains("us:audio-source-channel-offset=\"2\""));
+
+        let roundtripped = parse_fcpxml(&xml).expect("parse");
+        let got = &roundtripped.tracks[0].clips[0];
+        assert_eq!(got.audio_channel_mode, clip.audio_channel_mode);
+        assert_eq!(got.audio_source_stream_index, 1);
+        assert_eq!(got.audio_source_channel_offset, 2);
     }
 
     #[test]

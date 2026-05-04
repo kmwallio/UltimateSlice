@@ -730,6 +730,11 @@ pub enum McpCommand {
         label: Option<String>,
         reply: SyncSender<Value>,
     },
+    CaptureExportCompareStill {
+        label: Option<String>,
+        reference_still_id: Option<String>,
+        reply: SyncSender<Value>,
+    },
     ListReferenceStills {
         reply: SyncSender<Value>,
     },

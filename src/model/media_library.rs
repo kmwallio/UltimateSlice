@@ -1,4 +1,4 @@
-use crate::model::clip::{AudioChannelMode, ClipKind, SubtitleSegment};
+use crate::model::clip::{AudioChannelMode, AudioSourceStreamInfo, ClipKind, SubtitleSegment};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -369,6 +369,14 @@ pub struct MediaItem {
     /// Detected HDR colorimetry label (e.g. "bt2100-pq", "bt2100-hlg") when
     /// the source video uses a high dynamic range transfer function.
     pub hdr_colorimetry: Option<String>,
+    /// Probe-time source audio stream metadata.
+    pub audio_source_streams: Vec<AudioSourceStreamInfo>,
+    /// Preferred source audio stream when this item is placed on the timeline.
+    pub audio_source_stream_index: u32,
+    /// Preferred source channel offset within the chosen audio stream.
+    pub audio_source_channel_offset: u32,
+    /// Preferred program-audio routing when this source is placed on the timeline.
+    pub audio_channel_mode: AudioChannelMode,
     /// File size resolved from filesystem metadata.
     pub file_size_bytes: Option<u64>,
     /// Timeline-native clip kind when this item has no backing source file.
@@ -432,6 +440,10 @@ impl MediaItem {
             frame_rate_den: None,
             codec_summary: None,
             hdr_colorimetry: None,
+            audio_source_streams: Vec::new(),
+            audio_source_stream_index: 0,
+            audio_source_channel_offset: 0,
+            audio_channel_mode: AudioChannelMode::Stereo,
             file_size_bytes: None,
             clip_kind: None,
             title_text: None,
@@ -470,6 +482,10 @@ impl MediaItem {
         item.frame_rate_den = parent.frame_rate_den;
         item.codec_summary = parent.codec_summary.clone();
         item.hdr_colorimetry = parent.hdr_colorimetry.clone();
+        item.audio_source_streams = parent.audio_source_streams.clone();
+        item.audio_source_stream_index = parent.audio_source_stream_index;
+        item.audio_source_channel_offset = parent.audio_source_channel_offset;
+        item.audio_channel_mode = parent.audio_channel_mode;
         item.file_size_bytes = parent.file_size_bytes;
         item.clip_kind = parent.clip_kind.clone();
         // Subclip timecode = parent TC base shifted by the subclip's
@@ -1350,6 +1366,14 @@ struct SavedLibraryItem {
     pub codec_summary: Option<String>,
     #[serde(default)]
     pub hdr_colorimetry: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio_source_streams: Vec<AudioSourceStreamInfo>,
+    #[serde(default)]
+    pub audio_source_stream_index: u32,
+    #[serde(default)]
+    pub audio_source_channel_offset: u32,
+    #[serde(default)]
+    pub audio_channel_mode: AudioChannelMode,
     #[serde(default)]
     pub file_size_bytes: Option<u64>,
     /// Subclip parent reference. `None` (or absent on older saves)
@@ -1383,6 +1407,10 @@ impl SavedLibraryItem {
             frame_rate_den: item.frame_rate_den,
             codec_summary: item.codec_summary.clone(),
             hdr_colorimetry: item.hdr_colorimetry.clone(),
+            audio_source_streams: item.audio_source_streams.clone(),
+            audio_source_stream_index: item.audio_source_stream_index,
+            audio_source_channel_offset: item.audio_source_channel_offset,
+            audio_channel_mode: item.audio_channel_mode,
             file_size_bytes: item.file_size_bytes,
             parent_id: item.parent_id.clone(),
             subclip_source_in_ns: item.subclip_source_in_ns,
@@ -1408,6 +1436,10 @@ impl SavedLibraryItem {
         item.frame_rate_den = self.frame_rate_den;
         item.codec_summary = self.codec_summary.clone();
         item.hdr_colorimetry = self.hdr_colorimetry.clone();
+        item.audio_source_streams = self.audio_source_streams.clone();
+        item.audio_source_stream_index = self.audio_source_stream_index;
+        item.audio_source_channel_offset = self.audio_source_channel_offset;
+        item.audio_channel_mode = self.audio_channel_mode;
         item.file_size_bytes = self.file_size_bytes;
         item.is_missing = source_path_exists(&item.source_path);
         item.is_missing = !item.is_missing;
@@ -1439,6 +1471,10 @@ impl SavedLibraryItem {
         item.frame_rate_den = self.frame_rate_den;
         item.codec_summary = self.codec_summary;
         item.hdr_colorimetry = self.hdr_colorimetry;
+        item.audio_source_streams = self.audio_source_streams;
+        item.audio_source_stream_index = self.audio_source_stream_index;
+        item.audio_source_channel_offset = self.audio_source_channel_offset;
+        item.audio_channel_mode = self.audio_channel_mode;
         item.file_size_bytes = self.file_size_bytes;
         item.parent_id = self.parent_id;
         item.subclip_source_in_ns = self.subclip_source_in_ns;
@@ -1666,6 +1702,12 @@ pub struct SourceMarks {
     pub is_animated_svg: bool,
     /// Optional absolute source time reference for the start of the loaded media.
     pub source_timecode_base_ns: Option<u64>,
+    /// Probe-time source audio stream metadata for the loaded source.
+    pub audio_source_streams: Vec<AudioSourceStreamInfo>,
+    /// Preferred source audio stream when placing the current source on the timeline.
+    pub audio_source_stream_index: u32,
+    /// Preferred source channel offset when placing the current source on the timeline.
+    pub audio_source_channel_offset: u32,
     /// Preferred program-audio routing when this source is placed on the timeline.
     pub audio_channel_mode: AudioChannelMode,
 }
@@ -1684,6 +1726,9 @@ impl Default for SourceMarks {
             is_image: false,
             is_animated_svg: false,
             source_timecode_base_ns: None,
+            audio_source_streams: Vec::new(),
+            audio_source_stream_index: 0,
+            audio_source_channel_offset: 0,
             audio_channel_mode: AudioChannelMode::Stereo,
         }
     }
@@ -1714,6 +1759,10 @@ mod tests {
             frame_rate_den: None,
             codec_summary: None,
             hdr_colorimetry: None,
+            audio_source_streams: Vec::new(),
+            audio_source_stream_index: 0,
+            audio_source_channel_offset: 0,
+            audio_channel_mode: AudioChannelMode::Stereo,
             file_size_bytes: None,
             clip_kind: None,
             title_text: None,
@@ -1840,12 +1889,8 @@ mod tests {
         parent.video_height = Some(1080);
         parent.codec_summary = Some("H.264".into());
 
-        let sub = MediaItem::new_subclip(
-            &parent,
-            10_000_000_000,
-            20_000_000_000,
-            "Highlight".into(),
-        );
+        let sub =
+            MediaItem::new_subclip(&parent, 10_000_000_000, 20_000_000_000, "Highlight".into());
 
         assert!(sub.is_subclip());
         assert_eq!(sub.parent_id.as_deref(), Some(parent.id.as_str()));
@@ -1881,8 +1926,7 @@ mod tests {
         let sub = MediaItem::new_subclip(&parent, 5_000_000_000, 25_000_000_000, "Take".into());
         let saved = SavedLibraryItem::from_media_item(&sub).expect("backing-file subclip");
         let json = serde_json::to_string(&saved).expect("serialize");
-        let restored: SavedLibraryItem =
-            serde_json::from_str(&json).expect("deserialize");
+        let restored: SavedLibraryItem = serde_json::from_str(&json).expect("deserialize");
         let restored_item = restored.into_media_item();
         assert!(restored_item.is_subclip());
         assert_eq!(restored_item.parent_id, Some(parent.id.clone()));

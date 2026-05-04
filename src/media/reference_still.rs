@@ -22,8 +22,7 @@ pub fn reference_stills_dir() -> PathBuf {
 
 pub fn ensure_reference_stills_dir() -> Result<PathBuf> {
     let dir = reference_stills_dir();
-    fs::create_dir_all(&dir)
-        .map_err(|e| anyhow!("create reference_stills dir {:?}: {e}", dir))?;
+    fs::create_dir_all(&dir).map_err(|e| anyhow!("create reference_stills dir {:?}: {e}", dir))?;
     Ok(dir)
 }
 
@@ -89,17 +88,16 @@ pub struct DecodedStill {
 pub fn load_decoded(path: &Path) -> Result<DecodedStill> {
     let file = fs::File::open(path).map_err(|e| anyhow!("open {:?}: {e}", path))?;
     let decoder = png::Decoder::new(file);
-    let mut reader = decoder.read_info().map_err(|e| anyhow!("png read_info: {e}"))?;
+    let mut reader = decoder
+        .read_info()
+        .map_err(|e| anyhow!("png read_info: {e}"))?;
     let mut buf = vec![0u8; reader.output_buffer_size()];
     let info = reader
         .next_frame(&mut buf)
         .map_err(|e| anyhow!("png next_frame: {e}"))?;
     buf.truncate(info.buffer_size());
     if info.bit_depth != png::BitDepth::Eight {
-        return Err(anyhow!(
-            "unsupported PNG bit depth: {:?}",
-            info.bit_depth
-        ));
+        return Err(anyhow!("unsupported PNG bit depth: {:?}", info.bit_depth));
     }
     let rgba = match info.color_type {
         png::ColorType::Rgba => buf,

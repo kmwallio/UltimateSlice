@@ -1275,11 +1275,11 @@ fn tools_list() -> Value {
         },
         {
             "name": "set_proxy_mode",
-            "description": "Set proxy preview mode ('off', 'half_res', or 'quarter_res'). When enabled, lightweight proxy files are generated for smoother preview playback. Export always uses original media.",
+            "description": "Set proxy preview mode ('off', 'p1080', or 'p640'). 'p1080' caps proxy height at 1080 px; 'p640' caps at 640 px. Both preserve source aspect ratio and never upscale. Legacy values 'half_res' and 'quarter_res' are accepted for backward compatibility (mapped to 'p1080' and 'p640' respectively). Export always uses original media.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "mode": { "type": "string", "enum": ["off", "half_res", "quarter_res"], "description": "Proxy preview mode." }
+                    "mode": { "type": "string", "enum": ["off", "p1080", "p640", "half_res", "quarter_res"], "description": "Proxy preview mode. 'half_res'/'quarter_res' are legacy aliases for 'p1080'/'p640'." }
                 },
                 "required": ["mode"]
             }
@@ -1754,8 +1754,25 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "capture_export_compare_still",
+            "description": "Render the current playhead frame through the export pipeline and store it as a reference still for Program Monitor A/B compare. If reference_still_id points at an existing export-origin still, that still is refreshed in place; otherwise a new export compare still is created and activated.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "label": {
+                        "type": "string",
+                        "description": "Optional label to use when creating a new export compare still. Ignored when refreshing an existing still."
+                    },
+                    "reference_still_id": {
+                        "type": "string",
+                        "description": "Optional existing export-origin reference still id to refresh in place."
+                    }
+                }
+            }
+        },
+        {
             "name": "list_reference_stills",
-            "description": "List all reference stills currently pinned in the project, with id, label, capture timestamp (ns since epoch), dimensions, cache filename, and whether the PNG is present on disk.",
+            "description": "List all reference stills currently pinned in the project, with id, label, origin, capture timestamp (ns since epoch), dimensions, cache filename, and whether the PNG is present on disk.",
             "inputSchema": {
                 "type": "object",
                 "properties": {}
@@ -3904,9 +3921,7 @@ fn dispatch_tool_payload(
         }
         "set_program_monitor_ab_compare" => {
             let enabled = args.get("enabled").and_then(|v| v.as_bool());
-            let midline_percent = args
-                .get("midline_percent")
-                .and_then(|v| v.as_f64());
+            let midline_percent = args.get("midline_percent").and_then(|v| v.as_f64());
             let reference_still_id = args
                 .get("reference_still_id")
                 .and_then(|v| v.as_str())
@@ -3926,6 +3941,17 @@ fn dispatch_tool_payload(
         "capture_reference_still" => McpCommand::CaptureReferenceStill {
             label: args
                 .get("label")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            reply: tx,
+        },
+        "capture_export_compare_still" => McpCommand::CaptureExportCompareStill {
+            label: args
+                .get("label")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            reference_still_id: args
+                .get("reference_still_id")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
             reply: tx,

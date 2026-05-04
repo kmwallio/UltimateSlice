@@ -1279,6 +1279,7 @@ pub(crate) fn handle_mcp_command(
                     .ok();
                 return;
             }
+            let timeline_pos_ns = timeline_state.borrow().editing_playhead_ns();
             let frame = match prog_player.borrow_mut().capture_current_frame_rgba() {
                 Ok(f) => f,
                 Err(e) => {
@@ -1305,9 +1306,11 @@ pub(crate) fn handle_mcp_command(
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(0);
+            still.timeline_pos_ns = timeline_pos_ns;
             still.width = frame.width as u32;
             still.height = frame.height as u32;
             still.filename = crate::media::reference_still::filename_for_id(&still.id);
+            still.origin = crate::model::project::ReferenceStillOrigin::LivePreview;
             still.label = match label.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
                 Some(l) => l.to_string(),
                 None => format!("Still {}", project.borrow().reference_stills.len() + 1),
@@ -1337,9 +1340,201 @@ pub(crate) fn handle_mcp_command(
                     "success": true,
                     "id": new_id,
                     "label": new_label,
+                    "origin": crate::model::project::ReferenceStillOrigin::LivePreview.as_str(),
                     "path": path.to_string_lossy().to_string(),
                 }))
                 .ok();
+        }
+
+        McpCommand::CaptureExportCompareStill {
+            label,
+            reference_still_id,
+            reply,
+        } => {
+            let timeline_pos_ns = timeline_state.borrow().editing_playhead_ns();
+            let (refresh_existing, pending_still) = {
+                let proj = project.borrow();
+                let refresh_existing = if let Some(ref id) = reference_still_id {
+                    let Some(existing) = proj.reference_stills.iter().find(|still| still.id == *id)
+                    else {
+                        reply
+                            .send(json!({
+                                "success": false,
+                                "error": format!("no reference still with id {id}"),
+                            }))
+                            .ok();
+                        return;
+                    };
+                    if existing.origin != crate::model::project::ReferenceStillOrigin::ExportRender
+                    {
+                        reply
+                            .send(json!({
+                                "success": false,
+                                "error": format!("reference still {id} is not an export compare still"),
+                            }))
+                            .ok();
+                        return;
+                    }
+                    Some(existing.id.clone())
+                } else {
+                    None
+                };
+
+                if refresh_existing.is_none()
+                    && proj.reference_stills.len() >= crate::model::project::MAX_REFERENCE_STILLS
+                {
+                    reply
+                        .send(json!({
+                            "success": false,
+                            "error": "reference still limit reached (max 4); delete one first or refresh an existing export compare still"
+                        }))
+                        .ok();
+                    return;
+                }
+
+                let mut still = refresh_existing
+                    .as_ref()
+                    .and_then(|id| {
+                        proj.reference_stills
+                            .iter()
+                            .find(|still| &still.id == id)
+                            .cloned()
+                    })
+                    .unwrap_or_else(|| {
+                        let mut still = crate::model::project::ReferenceStill::new("Export");
+                        let export_count = proj
+                            .reference_stills
+                            .iter()
+                            .filter(|still| {
+                                still.origin
+                                    == crate::model::project::ReferenceStillOrigin::ExportRender
+                            })
+                            .count();
+                        still.label =
+                            match label.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                                Some(value) => value.to_string(),
+                                None => format!("Export {}", export_count + 1),
+                            };
+                        still.filename = crate::media::reference_still::filename_for_id(&still.id);
+                        still
+                    });
+                still.origin = crate::model::project::ReferenceStillOrigin::ExportRender;
+                still.captured_at_ns = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0);
+                still.timeline_pos_ns = timeline_pos_ns;
+                still.width = proj.width;
+                still.height = proj.height;
+                (refresh_existing, still)
+            };
+
+            if let Err(e) = crate::media::reference_still::ensure_reference_stills_dir() {
+                reply
+                    .send(json!({
+                        "success": false,
+                        "error": format!("cache dir: {e}")
+                    }))
+                    .ok();
+                return;
+            }
+
+            let proj_snapshot = project.borrow().clone();
+            let (bg_paths, interp_paths, rr_paths) = {
+                let player = prog_player.borrow();
+                (
+                    player.snapshot_bg_removal_paths(),
+                    player.snapshot_frame_interp_paths(),
+                    player.snapshot_render_replace_paths(),
+                )
+            };
+            let final_path = crate::media::reference_still::still_path(&pending_still.filename);
+            let temp_path = final_path.with_extension("tmp.png");
+            let temp_path_bg = temp_path.clone();
+            let (tx, rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+            std::thread::spawn(move || {
+                let result = crate::media::export::render_project_frame_to_png(
+                    &proj_snapshot,
+                    timeline_pos_ns,
+                    &temp_path_bg,
+                    &bg_paths,
+                    &interp_paths,
+                    &rr_paths,
+                )
+                .map_err(|e| e.to_string());
+                let _ = tx.send(result);
+            });
+
+            let project = project.clone();
+            let apply_program_monitor_ab_reference = apply_program_monitor_ab_reference.clone();
+            let refresh_reference_stills = refresh_reference_stills.clone();
+            let on_project_changed = on_project_changed.clone();
+            glib::timeout_add_local(std::time::Duration::from_millis(10), move || {
+                match rx.try_recv() {
+                    Ok(Ok(())) => {
+                        if let Err(e) = std::fs::rename(&temp_path, &final_path) {
+                            let _ = std::fs::remove_file(&temp_path);
+                            reply
+                                .send(json!({
+                                    "success": false,
+                                    "error": format!("store: {e}")
+                                }))
+                                .ok();
+                            return glib::ControlFlow::Break;
+                        }
+                        let still_id = pending_still.id.clone();
+                        let still_label = pending_still.label.clone();
+                        {
+                            let mut proj = project.borrow_mut();
+                            if let Some(existing) = proj
+                                .reference_stills
+                                .iter_mut()
+                                .find(|still| still.id == still_id)
+                            {
+                                *existing = pending_still.clone();
+                            } else {
+                                proj.reference_stills.push(pending_still.clone());
+                            }
+                            proj.dirty = true;
+                        }
+                        on_project_changed();
+                        apply_program_monitor_ab_reference(Some(still_id.clone()));
+                        refresh_reference_stills();
+                        reply
+                            .send(json!({
+                                "success": true,
+                                "id": still_id,
+                                "label": still_label,
+                                "origin": crate::model::project::ReferenceStillOrigin::ExportRender.as_str(),
+                                "refreshed": refresh_existing.is_some(),
+                                "path": final_path.to_string_lossy().to_string(),
+                            }))
+                            .ok();
+                        glib::ControlFlow::Break
+                    }
+                    Ok(Err(e)) => {
+                        let _ = std::fs::remove_file(&temp_path);
+                        reply
+                            .send(json!({
+                                "success": false,
+                                "error": format!("render: {e}")
+                            }))
+                            .ok();
+                        glib::ControlFlow::Break
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        let _ = std::fs::remove_file(&temp_path);
+                        reply
+                            .send(json!({
+                                "success": false,
+                                "error": "capture_export_compare_still worker disconnected"
+                            }))
+                            .ok();
+                        glib::ControlFlow::Break
+                    }
+                }
+            });
         }
 
         McpCommand::ListReferenceStills { reply } => {
@@ -1358,6 +1553,7 @@ pub(crate) fn handle_mcp_command(
                         "width": s.width,
                         "height": s.height,
                         "filename": s.filename,
+                        "origin": s.origin.as_str(),
                         "ungraded": s.ungraded,
                         "path": path.to_string_lossy().to_string(),
                         "exists": exists,
@@ -1526,7 +1722,7 @@ pub(crate) fn handle_mcp_command(
                 let placement_plan = crate::ui::window::build_source_placement_plan_by_track_index(
                     &proj,
                     Some(track_index),
-                    source_info,
+                    &source_info,
                     source_monitor_auto_link_av,
                 );
                 if placement_plan.targets.is_empty() {
@@ -1542,6 +1738,9 @@ pub(crate) fn handle_mcp_command(
                         source_out_ns,
                         timeline_start_ns,
                         source_info.source_timecode_base_ns,
+                        &source_info.audio_source_streams,
+                        source_info.audio_source_stream_index,
+                        source_info.audio_source_channel_offset,
                         source_info.audio_channel_mode,
                         None,
                         source_info.is_animated_svg,
@@ -2049,8 +2248,7 @@ pub(crate) fn handle_mcp_command(
                 .map(|(id, _, tc)| {
                     (
                         id.clone(),
-                        i128::from(anchor_timeline_start) + i128::from(*tc)
-                            - i128::from(anchor_tc),
+                        i128::from(anchor_timeline_start) + i128::from(*tc) - i128::from(anchor_tc),
                     )
                 })
                 .collect();
@@ -4087,11 +4285,7 @@ pub(crate) fn handle_mcp_command(
             on_project_changed();
         }
 
-        McpCommand::SetColorLabelName {
-            label,
-            name,
-            reply,
-        } => {
+        McpCommand::SetColorLabelName { label, name, reply } => {
             use crate::model::clip::ClipColorLabel;
             let label_enum = ClipColorLabel::from_str(&label);
             if label_enum.is_none() || label_enum == Some(ClipColorLabel::None) {
@@ -5641,7 +5835,7 @@ pub(crate) fn handle_mcp_command(
                 let placement_plan = crate::ui::window::build_source_placement_plan_by_track_index(
                     &proj,
                     track_index,
-                    source_info,
+                    &source_info,
                     source_monitor_auto_link_av,
                 );
                 let mut track_changes: Vec<TrackClipsChange> = Vec::new();
@@ -5655,6 +5849,9 @@ pub(crate) fn handle_mcp_command(
                     source_out_ns,
                     playhead,
                     source_info.source_timecode_base_ns,
+                    &source_info.audio_source_streams,
+                    source_info.audio_source_stream_index,
+                    source_info.audio_source_channel_offset,
                     source_info.audio_channel_mode,
                     None,
                     source_info.is_animated_svg,
@@ -5750,7 +5947,7 @@ pub(crate) fn handle_mcp_command(
                 let placement_plan = crate::ui::window::build_source_placement_plan_by_track_index(
                     &proj,
                     track_index,
-                    source_info,
+                    &source_info,
                     source_monitor_auto_link_av,
                 );
                 let mut track_changes: Vec<TrackClipsChange> = Vec::new();
@@ -5764,6 +5961,9 @@ pub(crate) fn handle_mcp_command(
                     source_out_ns,
                     playhead,
                     source_info.source_timecode_base_ns,
+                    &source_info.audio_source_streams,
+                    source_info.audio_source_stream_index,
+                    source_info.audio_source_channel_offset,
                     source_info.audio_channel_mode,
                     None,
                     source_info.is_animated_svg,
