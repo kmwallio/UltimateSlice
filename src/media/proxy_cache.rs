@@ -160,7 +160,11 @@ impl ProxyVariantSpec {
     }
 }
 
+/// Summary of a proxy-cache cleanup pass. Fields are read by callers via
+/// pattern destructuring rather than by name, which the dead-code lint
+/// doesn't see — annotate to keep the warnings out of the build.
 #[derive(Default)]
+#[allow(dead_code)]
 pub struct ProxyCleanupSummary {
     pub removed_local: usize,
     pub removed_sidecar: usize,
@@ -252,7 +256,10 @@ pub struct ProxyCache {
     hw_decode_failed_sources: Arc<Mutex<HashSet<String>>>,
     /// Counting semaphore that limits concurrent transcodes of sources at
     /// or above [`HEAVY_SOURCE_HEIGHT_THRESHOLD`]. Workers that pick up a
-    /// light source bypass the permit entirely.
+    /// light source bypass the permit entirely. Held only to keep the
+    /// Arc alive for the lifetime of the cache; the worker threads each
+    /// own their own clone.
+    #[allow(dead_code)]
     heavy_permit: Arc<HeavyPermit>,
 }
 
@@ -1486,18 +1493,19 @@ fn run_transcode_command(
     // decoded frames flow back to CPU memory and the existing software
     // filter chain (lanczos/lut3d/...) keeps working unchanged.
     //
-    // SKIP when the encoder is VA-API. Empirical finding on Intel iGPUs
-    // (Xe2 / Lunar Lake): VA-API HEVC 10-bit decode is *slower* than
-    // libavcodec SW decode on a modern multi-core CPU because the iGPU
-    // path goes through a hybrid CPU+GPU implementation and the implicit
-    // 10-bit→8-bit p010→nv12 conversion (mandatory before the encoder)
-    // adds bandwidth on top. Measured cost on a 6:13 5952×3968 10-bit
-    // HEVC source: 6:39 (sw decode + vaapi encode) vs 14:12 (vaapi decode
-    // + vaapi encode), 2× regression. NVENC encoders on discrete NVIDIA
-    // GPUs don't have this trade-off, so HW decode is still emitted for
-    // them.
-    if !matches!(hw_family, Some(HwEncoderFamily::Vaapi)) {
-        if let Some(method) = hw_decode_method {
+    // SKIP `-hwaccel vaapi` regardless of encoder. Empirical finding on
+    // Intel iGPUs (Xe2 / Lunar Lake): VA-API HEVC 10-bit decode is
+    // *slower* than libavcodec SW decode on a modern multi-core CPU —
+    // the iGPU path goes through a hybrid CPU+GPU implementation, and
+    // the lut3d step in our proxy filter chain forces a GPU→CPU
+    // roundtrip that wastes the work the GPU did. Measured on a 6:13
+    // 5952×3968 10-bit HEVC source: 6:39 (sw decode + vaapi encode) vs
+    // 14:12 (vaapi decode + vaapi encode), 2× regression. CUDA (NVDEC
+    // on discrete NVIDIA) and QSV decode hints are still emitted —
+    // their drivers handle the roundtrip more efficiently and NVDEC's
+    // dedicated 10-bit HEVC silicon is genuinely faster than CPU.
+    if let Some(method) = hw_decode_method {
+        if method != "vaapi" {
             cmd.arg("-hwaccel").arg(method);
         }
     }
@@ -1565,10 +1573,10 @@ fn run_transcode_command(
         Some(HwEncoderFamily::Vaapi) => "h264_vaapi",
         None => "libx264",
     };
-    let dec_label = match (hw_family, hw_decode_method) {
-        (Some(HwEncoderFamily::Vaapi), _) => "sw (vaapi-encode pairs better with sw decode on Intel iGPUs)",
-        (_, Some(method)) => method,
-        (_, None) => "sw",
+    let dec_label = match hw_decode_method {
+        Some("vaapi") => "sw (vaapi decode skipped — slower than CPU for HEVC 10-bit on Intel iGPUs)",
+        Some(method) => method,
+        None => "sw",
     };
     log::info!(
         "ProxyCache: spawning ffmpeg for {} (decode={dec_label}, encode={enc_label})",

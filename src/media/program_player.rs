@@ -12377,7 +12377,16 @@ impl ProgramPlayer {
         // ffmpeg encoder selected later (libx264 or h264_nvenc) is
         // independent of which hwaccel decodes the input. Skipped on
         // lavfi sources (titles) where there's nothing to decode.
-        let prerender_decode_hwaccel = crate::media::hwaccel::pick_decode_hwaccel(hw_encoder_mode);
+        //
+        // SKIP `-hwaccel vaapi` regardless of encoder — same Intel-iGPU
+        // empirical finding as the proxy path: VA-API HEVC 10-bit decode
+        // goes through a hybrid CPU+GPU path that loses to libavcodec on
+        // a multi-core CPU once the lut3d/color filters force a CPU
+        // roundtrip. CUDA / QSV decode hints are still emitted.
+        let prerender_decode_hwaccel = match crate::media::hwaccel::pick_decode_hwaccel(hw_encoder_mode) {
+            Some("vaapi") => None,
+            other => other,
+        };
         for (clip, path, source_ns, _, _) in inputs {
             if clip.is_title {
                 // Title clips use a lavfi color source instead of a file.
