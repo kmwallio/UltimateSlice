@@ -10,7 +10,7 @@ use crate::model::transition::{
     TransitionAlignment, TransitionOverlapWindow,
 };
 use crate::ui_state::{
-    clamp_prerender_crf, CrossfadeCurve, PlaybackPriority, PrerenderEncodingPreset,
+    clamp_prerender_crf, CrossfadeCurve, HwEncoderMode, PlaybackPriority, PrerenderEncodingPreset,
     DEFAULT_PRERENDER_CRF,
 };
 /// A "program monitor" player that composites the assembled timeline.
@@ -1787,6 +1787,9 @@ pub struct ProgramPlayer {
     background_prerender: bool,
     prerender_preset: PrerenderEncodingPreset,
     prerender_crf: u32,
+    /// Hardware encoder family to try for background prerender segments before
+    /// falling back to libx264. Mirrors the proxy cache control surface.
+    hw_encoder_mode: HwEncoderMode,
     crossfade_enabled: bool,
     crossfade_curve: CrossfadeCurve,
     crossfade_duration_ns: u64,
@@ -2640,6 +2643,7 @@ impl ProgramPlayer {
                 background_prerender: false,
                 prerender_preset: PrerenderEncodingPreset::default(),
                 prerender_crf: DEFAULT_PRERENDER_CRF,
+                hw_encoder_mode: HwEncoderMode::default(),
                 crossfade_enabled: false,
                 crossfade_curve: CrossfadeCurve::default(),
                 crossfade_duration_ns: 200_000_000,
@@ -2801,6 +2805,18 @@ impl ProgramPlayer {
         }
         self.prerender_preset = preset;
         self.prerender_crf = crf;
+        self.prewarmed_boundary_ns = None;
+    }
+
+    /// Update the hardware encoder family used for background prerender. The
+    /// next prerender bake will use the new mode; in-flight bakes finish under
+    /// their existing settings. We also reset the prewarm cursor so previously
+    /// scheduled boundaries get re-evaluated against the new cache signature.
+    pub fn set_hw_encoder_mode(&mut self, mode: HwEncoderMode) {
+        if self.hw_encoder_mode == mode {
+            return;
+        }
+        self.hw_encoder_mode = mode;
         self.prewarmed_boundary_ns = None;
     }
 
@@ -8218,6 +8234,13 @@ impl ProgramPlayer {
         self.preview_divisor.hash(&mut hasher);
         self.prerender_preset.as_str().hash(&mut hasher);
         self.prerender_crf.hash(&mut hasher);
+        // Encoder identity participates in the signature so that switching
+        // hardware mode (e.g. Auto → Off, or Vaapi → Nvenc) does not reuse
+        // segments encoded under a different codec/quality envelope.
+        crate::media::hwaccel::encoder_signature(
+            crate::media::hwaccel::pick_h264_encoder(self.hw_encoder_mode),
+        )
+        .hash(&mut hasher);
         self.proxy_enabled.hash(&mut hasher);
         self.proxy_scale_divisor.hash(&mut hasher);
         for &idx in active {
@@ -8415,6 +8438,7 @@ impl ProgramPlayer {
         let generation = self.prerender_generation;
         let prerender_preset = self.prerender_preset.clone();
         let prerender_crf = self.prerender_crf;
+        let hw_encoder_mode = self.hw_encoder_mode;
         std::thread::spawn(move || {
             let output_path_buf = PathBuf::from(&output_path);
             let mut success = Self::render_prerender_segment_video_file(
@@ -8429,6 +8453,7 @@ impl ProgramPlayer {
                 transition_offset_ns,
                 prerender_preset,
                 prerender_crf,
+                hw_encoder_mode,
             );
             if success
                 && Self::write_prerender_manifest_for_path(&output_path_buf, &manifest_for_job)
@@ -12325,6 +12350,7 @@ impl ProgramPlayer {
         transition_offset_ns: u64,
         prerender_preset: PrerenderEncodingPreset,
         prerender_crf: u32,
+        hw_encoder_mode: HwEncoderMode,
     ) -> bool {
         let Ok(ffmpeg) = crate::media::export::find_ffmpeg() else {
             return false;
@@ -12344,6 +12370,14 @@ impl ProgramPlayer {
             .arg("-loglevel")
             .arg("error")
             .arg("-nostats");
+        // HW decode hint: applied per-input *before* `-ss`/`-i`. Decoded
+        // frames flow back to CPU memory by default (no
+        // `-hwaccel_output_format`), so the existing CPU-side prerender
+        // filter graph (color/LUT/blur/...) consumes them unchanged. The
+        // ffmpeg encoder selected later (libx264 or h264_nvenc) is
+        // independent of which hwaccel decodes the input. Skipped on
+        // lavfi sources (titles) where there's nothing to decode.
+        let prerender_decode_hwaccel = crate::media::hwaccel::pick_decode_hwaccel(hw_encoder_mode);
         for (clip, path, source_ns, _, _) in inputs {
             if clip.is_title {
                 // Title clips use a lavfi color source instead of a file.
@@ -12351,6 +12385,9 @@ impl ProgramPlayer {
                     Self::prerender_title_clip_lavfi_color(clip, out_w, out_h, fps, duration_s);
                 cmd.arg("-f").arg("lavfi").arg("-i").arg(lavfi);
             } else {
+                if let Some(method) = prerender_decode_hwaccel {
+                    cmd.arg("-hwaccel").arg(method);
+                }
                 let source_s = *source_ns as f64 / 1_000_000_000.0;
                 let clip_max_s = clip.source_duration_ns() as f64 / 1_000_000_000.0;
                 let t = duration_s.min(clip_max_s).max(0.05);
@@ -12710,17 +12747,21 @@ impl ProgramPlayer {
                 .arg("-b:a")
                 .arg("192k");
         }
-        cmd.arg("-t")
-            .arg(format!("{duration_s:.6}"))
-            .arg("-c:v")
-            .arg("libx264")
-            .arg("-preset")
-            .arg(prerender_preset.as_str())
-            .arg("-crf")
-            .arg(prerender_crf.to_string())
-            .arg("-pix_fmt")
-            .arg("yuv420p")
-            .arg("-f")
+        cmd.arg("-t").arg(format!("{duration_s:.6}"));
+        // Prerender HW path: NVENC is a drop-in encoder swap (CPU-side
+        // frames work fine). VA-API would need the filter_complex graph to
+        // end with `format=nv12,hwupload`, which is awkward across the
+        // existing multi-input compositor wiring; skip it here and treat
+        // VA-API mode as software for prerender. The proxy path still uses
+        // VA-API since its filter chain is single-pass `-vf`.
+        let prerender_hw = match crate::media::hwaccel::pick_h264_encoder(hw_encoder_mode) {
+            Some(crate::media::hwaccel::HwEncoderFamily::Nvenc) => {
+                Some(crate::media::hwaccel::HwEncoderFamily::Nvenc)
+            }
+            _ => None,
+        };
+        Self::apply_prerender_video_encoder(&mut cmd, prerender_hw, &prerender_preset, prerender_crf);
+        cmd.arg("-f")
             .arg("mp4")
             .arg("-movflags")
             .arg("+faststart")
@@ -12763,6 +12804,45 @@ impl ProgramPlayer {
             return false;
         }
         true
+    }
+
+    /// Append the `-c:v` and related video-encoder args to a prerender
+    /// ffmpeg command. NVENC swaps in cleanly because it accepts CPU-side
+    /// frames; libx264 is the software fallback. VA-API is intentionally
+    /// not handled here — see the dispatch site for the rationale.
+    fn apply_prerender_video_encoder(
+        cmd: &mut Command,
+        family: Option<crate::media::hwaccel::HwEncoderFamily>,
+        prerender_preset: &PrerenderEncodingPreset,
+        prerender_crf: u32,
+    ) {
+        match family {
+            Some(crate::media::hwaccel::HwEncoderFamily::Nvenc) => {
+                cmd.arg("-c:v")
+                    .arg("h264_nvenc")
+                    .arg("-preset")
+                    .arg("p1")
+                    .arg("-tune")
+                    .arg("ll")
+                    .arg("-rc")
+                    .arg("constqp")
+                    .arg("-cq")
+                    .arg(prerender_crf.to_string())
+                    .arg("-pix_fmt")
+                    .arg("yuv420p");
+            }
+            // VA-API not used here; treat as software.
+            _ => {
+                cmd.arg("-c:v")
+                    .arg("libx264")
+                    .arg("-preset")
+                    .arg(prerender_preset.as_str())
+                    .arg("-crf")
+                    .arg(prerender_crf.to_string())
+                    .arg("-pix_fmt")
+                    .arg("yuv420p");
+            }
+        }
     }
 
     /// Generate the lavfi color source string for a prerendered title clip.
@@ -16172,7 +16252,7 @@ mod tests {
     use crate::media::color_math;
     use crate::model::clip::{KeyframeInterpolation, MaskShape, NumericKeyframe};
     use crate::model::transition::TransitionAlignment;
-    use crate::ui_state::{PrerenderEncodingPreset, DEFAULT_PRERENDER_CRF};
+    use crate::ui_state::{HwEncoderMode, PrerenderEncodingPreset, DEFAULT_PRERENDER_CRF};
     use gstreamer as gst;
     use std::collections::hash_map::DefaultHasher;
     use std::collections::HashMap;
@@ -18292,6 +18372,7 @@ mod tests {
             0,
             PrerenderEncodingPreset::Veryfast,
             DEFAULT_PRERENDER_CRF,
+            HwEncoderMode::Off,
         );
 
         assert!(ok, "expected prerender render to succeed");

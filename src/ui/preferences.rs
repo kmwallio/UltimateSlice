@@ -1,7 +1,7 @@
 use crate::ui_state::{
-    clamp_prerender_crf, AutoScrollMode, CrossfadeCurve, GskRenderer, PlaybackPriority,
-    PreferencesState, PrerenderEncodingPreset, PreviewQuality, ProxyMode, MAX_PRERENDER_CRF,
-    MIN_PRERENDER_CRF,
+    clamp_prerender_crf, AutoScrollMode, CrossfadeCurve, GskRenderer, HwEncoderMode,
+    PlaybackPriority, PreferencesState, PrerenderEncodingPreset, PreviewQuality, ProxyMode,
+    MAX_PRERENDER_CRF, MIN_PRERENDER_CRF,
 };
 use gtk4::prelude::*;
 use gtk4::{
@@ -248,9 +248,35 @@ pub fn show_preferences_dialog(
     let priority_hint = Label::new(Some("Program monitor playback priority controls smoothness vs frame precision during active playback."));
     priority_hint.set_halign(gtk::Align::Start);
     priority_hint.add_css_class("dim-label");
+    let hw_caps = crate::media::hwaccel::detect();
+    let hw_encoder_combo = gtk4::ComboBoxText::new();
+    hw_encoder_combo.append(Some("auto"), "Auto (use hardware when available)");
+    hw_encoder_combo.append(Some("vaapi"), "VA-API (Intel / AMD)");
+    hw_encoder_combo.append(Some("nvenc"), "NVENC (NVIDIA)");
+    hw_encoder_combo.append(Some("off"), "Off (always libx264)");
+    hw_encoder_combo.set_active_id(Some(current.hw_encoder_mode.as_str()));
+    hw_encoder_combo.set_halign(gtk::Align::Start);
+    let hw_encoder_hint = Label::new(Some(
+        "Used for proxy generation and background prerender only. Falls back to \
+         libx264 automatically when the requested encoder is unavailable. Final \
+         exports always use software encoders.",
+    ));
+    hw_encoder_hint.set_halign(gtk::Align::Start);
+    hw_encoder_hint.add_css_class("dim-label");
+    hw_encoder_hint.set_wrap(true);
+    hw_encoder_hint.set_max_width_chars(60);
+    if !hw_caps.any_usable() {
+        hw_encoder_combo.set_sensitive(false);
+        hw_encoder_combo
+            .set_tooltip_text(Some("No hardware encoder detected (h264_vaapi / h264_nvenc)."));
+    }
+
     playback_box.append(&playback_label);
     playback_box.append(&hw_accel);
     playback_box.append(&hint);
+    playback_box.append(&Label::new(Some("Hardware encoder (proxy / prerender)")));
+    playback_box.append(&hw_encoder_combo);
+    playback_box.append(&hw_encoder_hint);
     playback_box.append(&Label::new(Some("Program monitor playback priority")));
     playback_box.append(&playback_priority);
     playback_box.append(&priority_hint);
@@ -1491,6 +1517,9 @@ pub fn show_preferences_dialog(
                 background_auto_tagging: background_auto_tagging_check.is_active(),
                 prerender_preset: current.prerender_preset.clone(),
                 prerender_crf: current.prerender_crf,
+                hw_encoder_mode: HwEncoderMode::from_str(
+                    hw_encoder_combo.active_id().as_deref().unwrap_or("auto"),
+                ),
                 persist_prerenders_next_to_project_file: persist_prerenders_check.is_active(),
                 preview_luts: preview_luts_check.is_active(),
                 crossfade_enabled: crossfade_enabled_check.is_active(),

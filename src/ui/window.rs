@@ -6550,6 +6550,8 @@ pub fn build_window(
     prog_player_raw.set_realtime_preview(preferences_state.borrow().realtime_preview);
     prog_player_raw.set_background_prerender(initial_background_prerender);
     prog_player_raw.set_prerender_quality(initial_prerender_preset, initial_prerender_crf);
+    let initial_hw_encoder_mode = preferences_state.borrow().hw_encoder_mode;
+    prog_player_raw.set_hw_encoder_mode(initial_hw_encoder_mode);
     {
         let p = project.borrow();
         prog_player_raw.set_prerender_project_path(
@@ -6572,6 +6574,11 @@ pub fn build_window(
     proxy_cache.borrow_mut().set_sidecar_mirror_enabled(
         initial_proxy_mode.is_enabled() && initial_persist_proxies_next_to_original_media,
     );
+    // Push the saved hw_encoder_mode preference into the freshly-built
+    // cache. ProxyCache::new() defaults to Auto, but a saved Off/Vaapi/Nvenc
+    // preference would otherwise silently revert to Auto until the user
+    // re-applies Preferences.
+    proxy_cache.borrow().set_hw_encoder_mode(initial_hw_encoder_mode);
     let bg_removal_cache = Rc::new(RefCell::new(
         crate::media::bg_removal_cache::BgRemovalCache::new(),
     ));
@@ -6718,6 +6725,10 @@ pub fn build_window(
             prog_player
                 .borrow_mut()
                 .set_prerender_quality(new_state.prerender_preset.clone(), new_state.prerender_crf);
+            prog_player
+                .borrow_mut()
+                .set_hw_encoder_mode(new_state.hw_encoder_mode);
+            proxy_cache.borrow().set_hw_encoder_mode(new_state.hw_encoder_mode);
             let project_file_path = { project.borrow().file_path.clone() };
             prog_player.borrow_mut().set_prerender_project_path(
                 project_file_path.as_deref(),

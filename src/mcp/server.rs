@@ -464,6 +464,17 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_hw_encoder_mode",
+            "description": "Set the hardware encoder family used for proxy generation and background prerender ('off', 'auto', 'vaapi', or 'nvenc'). 'auto' picks NVENC over VA-API when both are available; falls back to libx264 when the chosen family is unsupported. Does not affect the export pipeline.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "mode": { "type": "string", "enum": ["off", "auto", "vaapi", "nvenc"], "description": "Encoder selection mode." }
+                },
+                "required": ["mode"]
+            }
+        },
+        {
             "name": "set_playback_priority",
             "description": "Set program monitor playback priority ('smooth', 'balanced', or 'accurate').",
             "inputSchema": {
@@ -2935,6 +2946,10 @@ fn dispatch_tool_payload(
         },
         "set_hardware_acceleration" => McpCommand::SetHardwareAcceleration {
             enabled: arg_bool!(args, "enabled"),
+            reply: tx,
+        },
+        "set_hw_encoder_mode" => McpCommand::SetHwEncoderMode {
+            mode: arg_str!(args, "mode", "auto"),
             reply: tx,
         },
         "set_playback_priority" => McpCommand::SetPlaybackPriority {

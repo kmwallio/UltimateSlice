@@ -132,6 +132,10 @@ pub enum McpCommand {
         enabled: bool,
         reply: SyncSender<Value>,
     },
+    SetHwEncoderMode {
+        mode: String,
+        reply: SyncSender<Value>,
+    },
     SetPlaybackPriority {
         priority: String,
         reply: SyncSender<Value>,

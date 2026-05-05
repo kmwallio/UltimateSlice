@@ -767,6 +767,48 @@ pub fn clamp_prerender_crf(value: u32) -> u32 {
     value.clamp(MIN_PRERENDER_CRF, MAX_PRERENDER_CRF)
 }
 
+/// User preference controlling whether the FFmpeg-based proxy and background
+/// prerender pipelines try a hardware H.264 encoder before falling back to
+/// `libx264`. The export pipeline does its own encoder selection today and
+/// is intentionally not affected by this preference.
+///
+/// `Auto` is a no-op when no hardware encoder family is detected at startup,
+/// so users can leave it on safely.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HwEncoderMode {
+    Off,
+    Auto,
+    Vaapi,
+    Nvenc,
+}
+
+impl Default for HwEncoderMode {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+impl HwEncoderMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Auto => "auto",
+            Self::Vaapi => "vaapi",
+            Self::Nvenc => "nvenc",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "off" => Self::Off,
+            "vaapi" => Self::Vaapi,
+            "nvenc" => Self::Nvenc,
+            _ => Self::Auto,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProxyMode {
@@ -1346,6 +1388,11 @@ pub struct PreferencesState {
     /// FFmpeg x264 CRF used for background prerender video segments.
     #[serde(default = "default_prerender_crf")]
     pub prerender_crf: u32,
+    /// Selects whether the proxy and background-prerender FFmpeg pipelines
+    /// try a hardware H.264 encoder (VA-API / NVENC) before falling back to
+    /// libx264. Has no effect on the export pipeline.
+    #[serde(default)]
+    pub hw_encoder_mode: HwEncoderMode,
     /// Preserve prerender cache files beside saved project files instead of using
     /// a temporary-only cache root.
     #[serde(default = "default_persist_prerenders_next_to_project_file")]
@@ -1440,6 +1487,7 @@ impl Default for PreferencesState {
             background_auto_tagging: false,
             prerender_preset: PrerenderEncodingPreset::default(),
             prerender_crf: default_prerender_crf(),
+            hw_encoder_mode: HwEncoderMode::default(),
             persist_prerenders_next_to_project_file:
                 default_persist_prerenders_next_to_project_file(),
             preview_luts: false,

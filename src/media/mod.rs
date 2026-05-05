@@ -20,6 +20,7 @@ pub mod export;
 pub mod frame_interp_cache;
 pub mod frei0r_registry;
 pub mod hsl_qualifier;
+pub mod hwaccel;
 pub mod ladspa_registry;
 pub mod ltc;
 pub mod mask_alpha;

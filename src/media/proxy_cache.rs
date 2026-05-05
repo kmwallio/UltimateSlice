@@ -4,8 +4,67 @@ use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::media::hwaccel::{self, HwEncoderFamily};
+use crate::ui_state::HwEncoderMode;
+
+/// Source pixel height at and above which a transcode counts as a "heavy"
+/// job and acquires a permit from [`HeavyPermit`] before launching ffmpeg.
+/// 2160 = 4K UHD; 6K / 8K sources are also heavy.
+pub const HEAVY_SOURCE_HEIGHT_THRESHOLD: u32 = 2160;
+
+/// Maximum number of "heavy" (4K+) ffmpeg transcodes allowed in flight at
+/// once. Prevents the worker pool from oversaturating decoder/GPU resources
+/// on high-resolution sources where 4 simultaneous decodes contend for the
+/// same hardware. Light (sub-4K) jobs ignore this cap.
+const MAX_HEAVY_PARALLEL_TRANSCODES: u32 = 2;
+
+/// Counting semaphore implemented with [`Mutex`] + [`Condvar`]. Used to gate
+/// concurrent heavy proxy transcodes without restructuring the work queue.
+pub(crate) struct HeavyPermit {
+    available: Mutex<u32>,
+    cond: Condvar,
+}
+
+impl HeavyPermit {
+    fn new(initial: u32) -> Self {
+        Self {
+            available: Mutex::new(initial),
+            cond: Condvar::new(),
+        }
+    }
+
+    /// Block until a permit is available, then take one. Returned guard
+    /// releases the permit on drop.
+    fn acquire(self: &Arc<Self>) -> HeavyPermitGuard {
+        let mut g = self.available.lock().unwrap();
+        while *g == 0 {
+            g = self.cond.wait(g).unwrap();
+        }
+        *g -= 1;
+        HeavyPermitGuard {
+            owner: self.clone(),
+        }
+    }
+
+    fn release(&self) {
+        let mut g = self.available.lock().unwrap();
+        *g += 1;
+        self.cond.notify_one();
+    }
+}
+
+pub(crate) struct HeavyPermitGuard {
+    owner: Arc<HeavyPermit>,
+}
+
+impl Drop for HeavyPermitGuard {
+    fn drop(&mut self) {
+        self.owner.release();
+    }
+}
 
 /// Result of a background proxy transcode.
 pub struct ProxyResult {
@@ -180,6 +239,21 @@ pub struct ProxyCache {
     /// When true, successful local proxy transcodes are mirrored to
     /// alongside-media `UltimateSlice.cache` files too.
     sidecar_mirror_enabled: bool,
+    /// User preference: which hardware encoder family (if any) to try before
+    /// falling back to libx264 for proxy transcodes. Shared with worker
+    /// threads via `RwLock` so live preference changes apply to *future*
+    /// jobs without disturbing in-flight transcodes.
+    hw_encoder_mode: Arc<RwLock<HwEncoderMode>>,
+    /// Source paths that failed under HW encoding in this session and should
+    /// be transcoded with libx264 directly to avoid the wasted HW attempt.
+    hw_failed_sources: Arc<Mutex<HashSet<String>>>,
+    /// Source paths that failed under HW *decode* in this session and should
+    /// be re-decoded in software directly.
+    hw_decode_failed_sources: Arc<Mutex<HashSet<String>>>,
+    /// Counting semaphore that limits concurrent transcodes of sources at
+    /// or above [`HEAVY_SOURCE_HEIGHT_THRESHOLD`]. Workers that pick up a
+    /// light source bypass the permit entirely.
+    heavy_permit: Arc<HeavyPermit>,
 }
 
 impl ProxyCache {
@@ -199,6 +273,12 @@ impl ProxyCache {
         let (work_tx, work_rx) =
             mpsc::channel::<(String, ProxyScale, Vec<String>, bool, bool, f32)>();
 
+        let hw_encoder_mode = Arc::new(RwLock::new(HwEncoderMode::default()));
+        let hw_failed_sources: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+        let hw_decode_failed_sources: Arc<Mutex<HashSet<String>>> =
+            Arc::new(Mutex::new(HashSet::new()));
+        let heavy_permit = Arc::new(HeavyPermit::new(MAX_HEAVY_PARALLEL_TRANSCODES));
+
         // Pool of worker threads to transcode proxies in parallel.
         let work_rx = std::sync::Arc::new(std::sync::Mutex::new(work_rx));
         let num_workers = 4;
@@ -206,6 +286,10 @@ impl ProxyCache {
             let rx = work_rx.clone();
             let tx = result_tx.clone();
             let local_root = local_cache_root.clone();
+            let hw_mode_ref = hw_encoder_mode.clone();
+            let hw_failed_ref = hw_failed_sources.clone();
+            let hw_decode_failed_ref = hw_decode_failed_sources.clone();
+            let heavy_permit_ref = heavy_permit.clone();
             std::thread::spawn(move || loop {
                 let item = {
                     let lock = rx.lock().unwrap();
@@ -231,6 +315,25 @@ impl ProxyCache {
                             vidstab_enabled,
                             vidstab_smoothing,
                         );
+                        let mode_snapshot = *hw_mode_ref.read().unwrap();
+                        let already_failed_enc = hw_failed_ref
+                            .lock()
+                            .map(|set| set.contains(&source_path))
+                            .unwrap_or(false);
+                        let initial_family = if already_failed_enc {
+                            None
+                        } else {
+                            hwaccel::pick_h264_encoder(mode_snapshot)
+                        };
+                        let already_failed_dec = hw_decode_failed_ref
+                            .lock()
+                            .map(|set| set.contains(&source_path))
+                            .unwrap_or(false);
+                        let initial_decode_hwaccel = if already_failed_dec {
+                            None
+                        } else {
+                            hwaccel::pick_decode_hwaccel(mode_snapshot)
+                        };
                         let (proxy_path, success, owned_local) = transcode_proxy(
                             &source_path,
                             scale,
@@ -241,6 +344,11 @@ impl ProxyCache {
                             &key,
                             &tx,
                             sidecar_mirror_enabled,
+                            initial_family,
+                            &hw_failed_ref,
+                            initial_decode_hwaccel,
+                            &hw_decode_failed_ref,
+                            &heavy_permit_ref,
                         );
                         if tx
                             .send(ProxyWorkerUpdate::Done(ProxyResult {
@@ -272,11 +380,32 @@ impl ProxyCache {
             ffprobe_path: find_ffprobe_path(),
             runtime_owned_local_files: HashSet::new(),
             sidecar_mirror_enabled: false,
+            hw_encoder_mode,
+            hw_failed_sources,
+            hw_decode_failed_sources,
+            heavy_permit,
         }
     }
 
     pub fn set_sidecar_mirror_enabled(&mut self, enabled: bool) {
         self.sidecar_mirror_enabled = enabled;
+    }
+
+    /// Update the hardware encoder preference. Applies to *future* worker
+    /// jobs; in-flight transcodes keep the mode they were started with.
+    pub fn set_hw_encoder_mode(&self, mode: HwEncoderMode) {
+        if let Ok(mut guard) = self.hw_encoder_mode.write() {
+            *guard = mode;
+        }
+        // Forget previous HW failures when the user changes mode — fresh
+        // mode might succeed on sources that failed under the old one
+        // (e.g. switching Vaapi → Nvenc after a missing /dev/dri/renderD128).
+        if let Ok(mut set) = self.hw_failed_sources.lock() {
+            set.clear();
+        }
+        if let Ok(mut set) = self.hw_decode_failed_sources.lock() {
+            set.clear();
+        }
     }
 
     /// Enqueue a proxy transcode for `source_path` (with optional LUT paths).
@@ -1262,6 +1391,32 @@ fn find_ffprobe_path() -> Option<String> {
     }
 }
 
+/// Run a quick `ffprobe` to read the source's first video-stream height.
+/// Used to decide whether a transcode counts as a "heavy" job for the
+/// HeavyPermit gate. Returns `None` on probe failure or unparseable output;
+/// callers should treat unknown-height as light (don't acquire a permit).
+fn probe_source_height(source_path: &str, ffprobe: &str) -> Option<u32> {
+    let output = Command::new(ffprobe)
+        .arg("-v")
+        .arg("error")
+        .arg("-select_streams")
+        .arg("v:0")
+        .arg("-show_entries")
+        .arg("stream=height")
+        .arg("-of")
+        .arg("default=noprint_wrappers=1:nokey=1")
+        .arg(source_path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u32>()
+        .ok()
+}
+
 fn proxy_file_is_ready(path: &str, ffprobe_path: Option<&str>) -> bool {
     let Ok(meta) = std::fs::metadata(path) else {
         return false;
@@ -1296,6 +1451,7 @@ fn proxy_file_is_ready(path: &str, ffprobe_path: Option<&str>) -> bool {
     duration.is_some_and(|d| d.is_finite() && d > 0.0)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_transcode_command(
     ffmpeg: &str,
     source_path: &str,
@@ -1304,6 +1460,8 @@ fn run_transcode_command(
     cache_key: &str,
     estimated_size_bytes: Option<u64>,
     progress_tx: &mpsc::SyncSender<ProxyWorkerUpdate>,
+    hw_family: Option<HwEncoderFamily>,
+    hw_decode_method: Option<&str>,
 ) -> bool {
     let mut cmd = Command::new(ffmpeg);
     cmd.arg("-y")
@@ -1312,26 +1470,85 @@ fn run_transcode_command(
         .arg("error")
         .arg("-progress")
         .arg("pipe:2")
-        .arg("-nostats")
-        .arg("-i")
-        .arg(source_path)
-        .arg("-vf")
-        .arg(filter)
-        .arg("-c:v")
-        .arg("libx264")
-        .arg("-preset")
-        .arg("ultrafast")
-        .arg("-tune")
-        .arg("fastdecode")
-        .arg("-crf")
-        .arg("28")
-        .arg("-bf")
-        .arg("0")
-        .arg("-refs")
-        .arg("1")
-        .arg("-pix_fmt")
-        .arg("yuv420p")
-        .arg("-c:a")
+        .arg("-nostats");
+    // VA-API needs the hwaccel device declared *before* the input so the
+    // decoded frames can be uploaded to the GPU later in the filter chain.
+    // Use the render node we actually probed at startup (multi-GPU systems
+    // can expose renderD129/130/etc. when /dev/dri/renderD128 isn't
+    // accessible, and we already know this one opens cleanly).
+    if matches!(hw_family, Some(HwEncoderFamily::Vaapi)) {
+        if let Some(node) = hwaccel::detect().vaapi_render_node.as_ref() {
+            cmd.arg("-vaapi_device").arg(node);
+        }
+    }
+    // HW decode hint: tells FFmpeg to use the GPU/iGPU decoder for the
+    // input. We deliberately do NOT set `-hwaccel_output_format`, so
+    // decoded frames flow back to CPU memory and the existing software
+    // filter chain (lanczos/lut3d/...) keeps working unchanged.
+    //
+    // SKIP when the encoder is VA-API. Empirical finding on Intel iGPUs
+    // (Xe2 / Lunar Lake): VA-API HEVC 10-bit decode is *slower* than
+    // libavcodec SW decode on a modern multi-core CPU because the iGPU
+    // path goes through a hybrid CPU+GPU implementation and the implicit
+    // 10-bit→8-bit p010→nv12 conversion (mandatory before the encoder)
+    // adds bandwidth on top. Measured cost on a 6:13 5952×3968 10-bit
+    // HEVC source: 6:39 (sw decode + vaapi encode) vs 14:12 (vaapi decode
+    // + vaapi encode), 2× regression. NVENC encoders on discrete NVIDIA
+    // GPUs don't have this trade-off, so HW decode is still emitted for
+    // them.
+    if !matches!(hw_family, Some(HwEncoderFamily::Vaapi)) {
+        if let Some(method) = hw_decode_method {
+            cmd.arg("-hwaccel").arg(method);
+        }
+    }
+    cmd.arg("-i").arg(source_path);
+    // VA-API requires explicit format conversion + hwupload at the tail of
+    // the software filter chain so the encoder receives GPU surfaces.
+    let effective_filter = match hw_family {
+        Some(HwEncoderFamily::Vaapi) => format!("{filter},format=nv12,hwupload"),
+        _ => filter.to_string(),
+    };
+    cmd.arg("-vf").arg(&effective_filter);
+    match hw_family {
+        Some(HwEncoderFamily::Vaapi) => {
+            cmd.arg("-c:v")
+                .arg("h264_vaapi")
+                // qp ~ CRF in spirit; 28 keeps proxy bitrate similar to libx264 CRF 28.
+                .arg("-qp")
+                .arg("28");
+        }
+        Some(HwEncoderFamily::Nvenc) => {
+            cmd.arg("-c:v")
+                .arg("h264_nvenc")
+                .arg("-preset")
+                .arg("p1")
+                .arg("-tune")
+                .arg("ll")
+                .arg("-rc")
+                .arg("constqp")
+                .arg("-cq")
+                .arg("28")
+                .arg("-pix_fmt")
+                .arg("yuv420p");
+        }
+        None => {
+            cmd.arg("-c:v")
+                .arg("libx264")
+                .arg("-preset")
+                .arg("ultrafast")
+                .arg("-tune")
+                .arg("fastdecode")
+                .arg("-crf")
+                .arg("28")
+                .arg("-bf")
+                .arg("0")
+                .arg("-refs")
+                .arg("1")
+                .arg("-pix_fmt")
+                .arg("yuv420p");
+        }
+    }
+    cmd.arg("-c:a")
         .arg("aac")
         .arg("-b:a")
         .arg("128k")
@@ -1343,7 +1560,27 @@ fn run_transcode_command(
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
 
+    let enc_label = match hw_family {
+        Some(HwEncoderFamily::Nvenc) => "h264_nvenc",
+        Some(HwEncoderFamily::Vaapi) => "h264_vaapi",
+        None => "libx264",
+    };
+    let dec_label = match (hw_family, hw_decode_method) {
+        (Some(HwEncoderFamily::Vaapi), _) => "sw (vaapi-encode pairs better with sw decode on Intel iGPUs)",
+        (_, Some(method)) => method,
+        (_, None) => "sw",
+    };
+    log::info!(
+        "ProxyCache: spawning ffmpeg for {} (decode={dec_label}, encode={enc_label})",
+        source_path
+    );
+    let attempt_started = std::time::Instant::now();
+
     let Ok(mut child) = cmd.spawn() else {
+        log::warn!(
+            "ProxyCache: failed to spawn ffmpeg for {} (decode={dec_label}, encode={enc_label})",
+            source_path
+        );
         return false;
     };
     let Some(stderr) = child.stderr.take() else {
@@ -1359,6 +1596,9 @@ fn run_transcode_command(
             estimated_bytes: estimate,
         });
     }
+    // Keep a small ring buffer of non-progress stderr lines so we can include
+    // them in the failure log and tell HW-path errors apart from anything else.
+    let mut recent_stderr: Vec<String> = Vec::with_capacity(8);
     for line in BufReader::new(stderr).lines().map_while(|r| r.ok()) {
         if let Some(v) = line.strip_prefix("total_size=") {
             if let Ok(bytes) = v.parse::<u64>() {
@@ -1368,9 +1608,43 @@ fn run_transcode_command(
                     estimated_bytes: estimate,
                 });
             }
+            continue;
+        }
+        // Filter out the periodic ffmpeg `-progress pipe:2` key=value rows
+        // (frame=, fps=, bitrate=, ...) so the buffer only retains real
+        // diagnostics like decoder/encoder errors.
+        if line.contains('=') && !line.contains(' ') {
+            continue;
+        }
+        if !line.trim().is_empty() {
+            if recent_stderr.len() == 8 {
+                recent_stderr.remove(0);
+            }
+            recent_stderr.push(line);
         }
     }
-    matches!(child.wait(), Ok(s) if s.success())
+    let success = matches!(child.wait(), Ok(s) if s.success());
+    let elapsed = attempt_started.elapsed();
+    if success {
+        log::info!(
+            "ProxyCache: ffmpeg ok for {} (decode={dec_label}, encode={enc_label}) in {:.1}s",
+            source_path,
+            elapsed.as_secs_f64()
+        );
+    } else {
+        let tail = if recent_stderr.is_empty() {
+            String::from("(no stderr captured)")
+        } else {
+            recent_stderr.join(" | ")
+        };
+        log::warn!(
+            "ProxyCache: ffmpeg FAILED for {} (decode={dec_label}, encode={enc_label}) after {:.1}s: {}",
+            source_path,
+            elapsed.as_secs_f64(),
+            tail
+        );
+    }
+    success
 }
 
 fn estimate_proxy_output_bitrate_bps(scale: ProxyScale, has_lut: bool) -> u64 {
@@ -1461,6 +1735,7 @@ fn mirror_local_proxy_to_sidecar(
 
 /// Run ffmpeg to create a proxy file.
 /// Returns `(proxy_path, success, owned_local)`.
+#[allow(clippy::too_many_arguments)]
 fn transcode_proxy(
     source_path: &str,
     scale: ProxyScale,
@@ -1471,6 +1746,11 @@ fn transcode_proxy(
     cache_key: &str,
     progress_tx: &mpsc::SyncSender<ProxyWorkerUpdate>,
     sidecar_mirror_enabled: bool,
+    initial_hw_family: Option<HwEncoderFamily>,
+    hw_failed_sources: &Arc<Mutex<HashSet<String>>>,
+    initial_decode_hwaccel: Option<&'static str>,
+    hw_decode_failed_sources: &Arc<Mutex<HashSet<String>>>,
+    heavy_permit: &Arc<HeavyPermit>,
 ) -> (String, bool, bool) {
     let lut_composite = if lut_paths.is_empty() {
         None
@@ -1503,6 +1783,21 @@ fn transcode_proxy(
     };
     let estimated_size_bytes = estimate_proxy_size_bytes(source_path, scale, lut_key, &ffmpeg);
     let ffprobe = ffmpeg.replace("ffmpeg", "ffprobe");
+
+    // Heavy-job gate: throttle 4K+ transcodes to keep the worker pool from
+    // saturating GPU/decoder resources. Held for the full transcode_proxy
+    // duration so the slow decode dominates the held window. Sources whose
+    // height we can't probe are treated as light (no permit).
+    let _heavy_permit_guard = match probe_source_height(source_path, &ffprobe) {
+        Some(h) if h >= HEAVY_SOURCE_HEIGHT_THRESHOLD => {
+            log::info!(
+                "ProxyCache: {} is heavy ({h}p), waiting for heavy-job permit",
+                source_path
+            );
+            Some(heavy_permit.acquire())
+        }
+        _ => None,
+    };
 
     // Build the -vf filter string: scale, then vidstab (if enabled), then LUT chain.
     let mut filter = scale.ffmpeg_scale_filter().to_string();
@@ -1579,7 +1874,11 @@ fn transcode_proxy(
         }
         let temp_proxy_path = format!("{proxy_path}.partial");
         let _ = std::fs::remove_file(&temp_proxy_path);
-        if run_transcode_command(
+        // Attempt 1: best-effort HW encode + HW decode (each independently
+        // gated on availability + per-source failure history).
+        let mut attempt_hw_enc = initial_hw_family;
+        let mut attempt_hw_dec = initial_decode_hwaccel;
+        let mut command_ok = run_transcode_command(
             &ffmpeg,
             source_path,
             &temp_proxy_path,
@@ -1587,7 +1886,61 @@ fn transcode_proxy(
             cache_key,
             estimated_size_bytes,
             progress_tx,
-        ) {
+            attempt_hw_enc,
+            attempt_hw_dec,
+        );
+        // Attempt 2: if HW encode was active, blame the encoder first
+        // (more commonly fragile on 10-bit / unusual input) and retry with
+        // libx264 while keeping the decoder choice.
+        if !command_ok && attempt_hw_enc.is_some() {
+            log::warn!(
+                "ProxyCache: hw encoder ({}) failed for {}, falling back to libx264",
+                attempt_hw_enc.map(|f| f.as_str()).unwrap_or("unknown"),
+                source_path
+            );
+            if let Ok(mut set) = hw_failed_sources.lock() {
+                set.insert(source_path.to_string());
+            }
+            attempt_hw_enc = None;
+            let _ = std::fs::remove_file(&temp_proxy_path);
+            command_ok = run_transcode_command(
+                &ffmpeg,
+                source_path,
+                &temp_proxy_path,
+                &filter,
+                cache_key,
+                estimated_size_bytes,
+                progress_tx,
+                attempt_hw_enc,
+                attempt_hw_dec,
+            );
+        }
+        // Attempt 3: if HW decode was active and we still failed, fall
+        // back to fully-software decode + encode.
+        if !command_ok && attempt_hw_dec.is_some() {
+            log::warn!(
+                "ProxyCache: hw decoder ({}) failed for {}, falling back to software decode",
+                attempt_hw_dec.unwrap_or("unknown"),
+                source_path
+            );
+            if let Ok(mut set) = hw_decode_failed_sources.lock() {
+                set.insert(source_path.to_string());
+            }
+            attempt_hw_dec = None;
+            let _ = std::fs::remove_file(&temp_proxy_path);
+            command_ok = run_transcode_command(
+                &ffmpeg,
+                source_path,
+                &temp_proxy_path,
+                &filter,
+                cache_key,
+                estimated_size_bytes,
+                progress_tx,
+                attempt_hw_enc,
+                attempt_hw_dec,
+            );
+        }
+        if command_ok {
             if !proxy_file_is_ready(&temp_proxy_path, Some(&ffprobe)) {
                 let _ = std::fs::remove_file(&temp_proxy_path);
                 continue;

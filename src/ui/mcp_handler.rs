@@ -880,6 +880,7 @@ pub(crate) fn handle_mcp_command(
                     "background_auto_tagging": prefs.background_auto_tagging,
                     "prerender_preset": prefs.prerender_preset.as_str(),
                     "prerender_crf": prefs.prerender_crf,
+                    "hw_encoder_mode": prefs.hw_encoder_mode.as_str(),
                     "persist_prerenders_next_to_project_file": prefs.persist_prerenders_next_to_project_file,
                     "preview_luts": prefs.preview_luts,
                     "crossfade_enabled": prefs.crossfade_enabled,
@@ -930,6 +931,29 @@ pub(crate) fn handle_mcp_command(
                     reply.send(json!({"success": false, "error": message})).ok();
                 }
             }
+        }
+
+        McpCommand::SetHwEncoderMode { mode, reply } => {
+            let parsed = crate::ui_state::HwEncoderMode::from_str(&mode);
+            let new_state = {
+                let mut prefs = preferences_state.borrow_mut();
+                prefs.hw_encoder_mode = parsed;
+                prefs.clone()
+            };
+            crate::ui_state::save_preferences_state(&new_state);
+            prog_player.borrow_mut().set_hw_encoder_mode(parsed);
+            proxy_cache.borrow().set_hw_encoder_mode(parsed);
+            let caps = crate::media::hwaccel::detect();
+            reply
+                .send(json!({
+                    "success": true,
+                    "hw_encoder_mode": parsed.as_str(),
+                    "available": {
+                        "vaapi_h264": caps.vaapi_h264 && caps.vaapi_device_present,
+                        "nvenc_h264": caps.nvenc_h264,
+                    },
+                }))
+                .ok();
         }
 
         McpCommand::SetHardwareAcceleration { enabled, reply } => {
