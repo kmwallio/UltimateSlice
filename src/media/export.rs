@@ -183,6 +183,11 @@ pub struct ExportOptions {
     /// output file (10-bit pixel format, PQ/HLG transfer characteristics,
     /// MaxCLL/MaxFALL). Only effective with H.265, VP9, or AV1 codecs.
     pub hdr_passthrough: bool,
+    /// Hardware encoder selection mode. Default = Off (libx264 / libx265 /
+    /// etc. — the historical behaviour). Phase 1: only H.264 with NVENC
+    /// is wired in; other codecs and VA-API export-side encoding are
+    /// follow-up work.
+    pub hw_encoder_mode: crate::ui_state::HwEncoderMode,
 }
 
 impl Default for ExportOptions {
@@ -198,6 +203,7 @@ impl Default for ExportOptions {
             gif_fps: None,
             audio_channel_layout: AudioChannelLayout::Stereo,
             hdr_passthrough: false,
+            hw_encoder_mode: crate::ui_state::HwEncoderMode::Off,
         }
     }
 }
@@ -1935,12 +1941,39 @@ pub fn export_project_with_cancel(
     } else {
         match options.video_codec {
             VideoCodec::H264 => {
-                cmd.arg("-c:v")
-                    .arg("libx264")
-                    .arg("-crf")
-                    .arg(options.crf.to_string())
-                    .arg("-pix_fmt")
-                    .arg("yuv420p");
+                // Phase 1 of export-side HW encoding: NVENC only. Drop-in
+                // encoder swap (no filter chain changes — NVENC accepts
+                // CPU-side frames). VA-API export would require appending
+                // `format=nv12,hwupload` to the complex filter graph and
+                // is deferred to Phase 2.
+                let hw = crate::media::hwaccel::pick_encoder(
+                    crate::ui_state::ProxyCodec::H264,
+                    options.hw_encoder_mode,
+                    crate::media::hwaccel::detect(),
+                    crate::media::hwaccel::cuda_runtime_loadable(),
+                );
+                if matches!(hw, Some(crate::media::hwaccel::HwEncoderFamily::Nvenc)) {
+                    log::info!("export: using h264_nvenc (mode={})", options.hw_encoder_mode.as_str());
+                    cmd.arg("-c:v")
+                        .arg("h264_nvenc")
+                        .arg("-preset")
+                        .arg("p5")
+                        // Map the CRF value to NVENC -cq directly; both are
+                        // 0–51 quality scales with the same direction.
+                        .arg("-cq")
+                        .arg(options.crf.to_string())
+                        .arg("-rc")
+                        .arg("constqp")
+                        .arg("-pix_fmt")
+                        .arg("yuv420p");
+                } else {
+                    cmd.arg("-c:v")
+                        .arg("libx264")
+                        .arg("-crf")
+                        .arg(options.crf.to_string())
+                        .arg("-pix_fmt")
+                        .arg("yuv420p");
+                }
             }
             VideoCodec::H265 => {
                 cmd.arg("-c:v")
@@ -6269,6 +6302,9 @@ pub fn analyze_project_loudness(project: &Project) -> Result<LoudnessReport> {
         gif_fps: None,
         audio_channel_layout: AudioChannelLayout::Stereo,
         hdr_passthrough: false,
+        // Loudness analysis is deterministic-by-codec; HW encoder choice
+        // doesn't affect the audio probe, so leave it Off.
+        hw_encoder_mode: crate::ui_state::HwEncoderMode::Off,
     };
 
     let (tx, _rx) = mpsc::channel();

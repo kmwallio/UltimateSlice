@@ -4813,6 +4813,9 @@ pub(crate) fn handle_mcp_command(
                 gif_fps: None,
                 audio_channel_layout: layout,
                 hdr_passthrough: false,
+                // MCP-driven exports honour the user's saved hw_encoder_mode
+                // preference automatically — no per-call override yet.
+                hw_encoder_mode: preferences_state.borrow().hw_encoder_mode,
             };
             let mut state = crate::ui_state::load_export_presets_state();
             match state.upsert_preset(crate::ui_state::ExportPreset::from_export_options(

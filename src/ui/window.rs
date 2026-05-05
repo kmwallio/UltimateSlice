@@ -5385,10 +5385,7 @@ fn auto_preview_divisor(
 pub(crate) fn proxy_scale_for_mode(
     mode: &crate::ui_state::ProxyMode,
 ) -> crate::media::proxy_cache::ProxyScale {
-    match mode {
-        crate::ui_state::ProxyMode::P640 => crate::media::proxy_cache::ProxyScale::MaxHeight(640),
-        _ => crate::media::proxy_cache::ProxyScale::MaxHeight(1080),
-    }
+    crate::media::proxy_cache::ProxyScale::MaxHeight(proxy_mode_height(mode))
 }
 
 /// Effective preview-divisor floor for the current proxy mode. Fixed-height
@@ -5398,18 +5395,29 @@ pub(crate) fn proxy_scale_divisor_for_mode(
     mode: &crate::ui_state::ProxyMode,
     project_height: u32,
 ) -> u32 {
-    let target = match mode {
-        crate::ui_state::ProxyMode::P640 => 640,
+    if matches!(mode, crate::ui_state::ProxyMode::Off) {
+        return 1;
+    }
+    (project_height / proxy_mode_height(mode)).max(1)
+}
+
+fn proxy_mode_height(mode: &crate::ui_state::ProxyMode) -> u32 {
+    match mode {
+        crate::ui_state::ProxyMode::Off => 1080,
         crate::ui_state::ProxyMode::P1080 => 1080,
-        crate::ui_state::ProxyMode::Off => return 1,
-    };
-    (project_height / target).max(1)
+        crate::ui_state::ProxyMode::P720 => 720,
+        crate::ui_state::ProxyMode::P640 => 640,
+        crate::ui_state::ProxyMode::P540 => 540,
+    }
 }
 
 fn proxy_mode_label(mode: &crate::ui_state::ProxyMode) -> &'static str {
     match mode {
+        crate::ui_state::ProxyMode::P1080 => "1080p",
+        crate::ui_state::ProxyMode::P720 => "720p",
         crate::ui_state::ProxyMode::P640 => "640p",
-        _ => "1080p",
+        crate::ui_state::ProxyMode::P540 => "540p",
+        crate::ui_state::ProxyMode::Off => "1080p",
     }
 }
 
@@ -6579,6 +6587,9 @@ pub fn build_window(
     // preference would otherwise silently revert to Auto until the user
     // re-applies Preferences.
     proxy_cache.borrow().set_hw_encoder_mode(initial_hw_encoder_mode);
+    proxy_cache
+        .borrow()
+        .set_proxy_codec(preferences_state.borrow().proxy_codec);
     let bg_removal_cache = Rc::new(RefCell::new(
         crate::media::bg_removal_cache::BgRemovalCache::new(),
     ));
@@ -6729,6 +6740,7 @@ pub fn build_window(
                 .borrow_mut()
                 .set_hw_encoder_mode(new_state.hw_encoder_mode);
             proxy_cache.borrow().set_hw_encoder_mode(new_state.hw_encoder_mode);
+            proxy_cache.borrow().set_proxy_codec(new_state.proxy_codec);
             let project_file_path = { project.borrow().file_path.clone() };
             prog_player.borrow_mut().set_prerender_project_path(
                 project_file_path.as_deref(),

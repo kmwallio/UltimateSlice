@@ -1,7 +1,7 @@
 use crate::ui_state::{
     clamp_prerender_crf, AutoScrollMode, CrossfadeCurve, GskRenderer, HwEncoderMode,
-    PlaybackPriority, PreferencesState, PrerenderEncodingPreset, PreviewQuality, ProxyMode,
-    MAX_PRERENDER_CRF, MIN_PRERENDER_CRF,
+    PlaybackPriority, PreferencesState, PrerenderEncodingPreset, PreviewQuality, ProxyCodec,
+    ProxyMode, MAX_PRERENDER_CRF, MIN_PRERENDER_CRF,
 };
 use gtk4::prelude::*;
 use gtk4::{
@@ -365,7 +365,9 @@ pub fn show_preferences_dialog(
     let proxy_mode = gtk4::ComboBoxText::new();
     proxy_mode.append(Some("off"), "Off (use original media)");
     proxy_mode.append(Some("p1080"), "1080p (HD-tall preview)");
+    proxy_mode.append(Some("p720"), "720p (smaller, ~10–15% faster)");
     proxy_mode.append(Some("p640"), "640p (very small, fastest scrubbing)");
+    proxy_mode.append(Some("p540"), "540p (smallest, fastest)");
     proxy_mode.set_active_id(Some(current.proxy_mode.as_str()));
     proxy_mode.set_halign(gtk::Align::Start);
     let proxy_hint = Label::new(Some(
@@ -378,6 +380,27 @@ pub fn show_preferences_dialog(
     proxies_box.append(&proxy_label);
     proxies_box.append(&proxy_mode);
     proxies_box.append(&proxy_hint);
+
+    let proxy_codec_label = Label::new(Some("Proxy codec"));
+    proxy_codec_label.set_halign(gtk::Align::Start);
+    let proxy_codec_combo = gtk4::ComboBoxText::new();
+    proxy_codec_combo.append(Some("h264"), "H.264 (universal)");
+    proxy_codec_combo.append(
+        Some("hevc"),
+        "HEVC / H.265 (smaller files, often faster on iGPUs)",
+    );
+    proxy_codec_combo.set_active_id(Some(current.proxy_codec.as_str()));
+    proxy_codec_combo.set_halign(gtk::Align::Start);
+    let proxy_codec_hint = Label::new(Some(
+        "HEVC compresses ~30–50% better than H.264 at the same visual quality, and on Intel iGPUs the dedicated HEVC encoder can be faster than H.264 for very-high-resolution sources. Falls back to libx265 (software) when no hardware HEVC encoder is available.",
+    ));
+    proxy_codec_hint.set_halign(gtk::Align::Start);
+    proxy_codec_hint.add_css_class("dim-label");
+    proxy_codec_hint.set_wrap(true);
+    proxy_codec_hint.set_max_width_chars(60);
+    proxies_box.append(&proxy_codec_label);
+    proxies_box.append(&proxy_codec_combo);
+    proxies_box.append(&proxy_codec_hint);
 
     let persist_proxies_check = CheckButton::with_label("Persist proxies next to original media");
     persist_proxies_check.set_active(current.persist_proxies_next_to_original_media);
@@ -1494,6 +1517,9 @@ pub fn show_preferences_dialog(
                 ),
                 proxy_mode: current.proxy_mode.clone(),
                 last_non_off_proxy_mode: current.last_non_off_proxy_mode.clone(),
+                proxy_codec: ProxyCodec::from_str(
+                    proxy_codec_combo.active_id().as_deref().unwrap_or("h264"),
+                ),
                 persist_proxies_next_to_original_media: persist_proxies_check.is_active(),
                 show_waveform_on_video: waveform_video_check.is_active(),
                 show_timeline_preview: timeline_preview_check.is_active(),

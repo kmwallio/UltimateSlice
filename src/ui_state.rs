@@ -814,6 +814,8 @@ impl HwEncoderMode {
 pub enum ProxyMode {
     Off,
     P1080,
+    P720,
+    P540,
     P640,
 }
 
@@ -828,6 +830,8 @@ impl ProxyMode {
         match self {
             Self::Off => "off",
             Self::P1080 => "p1080",
+            Self::P720 => "p720",
+            Self::P540 => "p540",
             Self::P640 => "p640",
         }
     }
@@ -836,6 +840,8 @@ impl ProxyMode {
         // Accept legacy fractional names so saved settings/scripts keep working.
         match value {
             "p1080" | "half_res" => Self::P1080,
+            "p720" => Self::P720,
+            "p540" => Self::P540,
             "p640" | "quarter_res" => Self::P640,
             _ => Self::Off,
         }
@@ -848,6 +854,40 @@ impl ProxyMode {
 
 fn default_last_non_off_proxy_mode() -> ProxyMode {
     ProxyMode::P1080
+}
+
+/// Codec used to encode proxy files. Defaults to H.264 for compatibility
+/// with everything; HEVC produces smaller files at the same visual
+/// quality and on Intel iGPUs the dedicated HEVC encoder is often faster
+/// per frame than the H.264 encoder for very-high-resolution sources
+/// (less compression work per output pixel).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyCodec {
+    H264,
+    Hevc,
+}
+
+impl Default for ProxyCodec {
+    fn default() -> Self {
+        Self::H264
+    }
+}
+
+impl ProxyCodec {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::H264 => "h264",
+            Self::Hevc => "hevc",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "hevc" | "h265" => Self::Hevc,
+            _ => Self::H264,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1082,6 +1122,11 @@ impl ExportPreset {
             audio_bitrate_kbps: self.audio_bitrate_kbps,
             gif_fps: self.gif_fps,
             audio_channel_layout: self.audio_channel_layout.to_layout(),
+            // ExportPreset doesn't currently round-trip hw_encoder_mode —
+            // the user's *current* preference is applied at export time
+            // by the toolbar/MCP plumbing, not baked into the saved
+            // preset. Default to Off here so test loads stay deterministic.
+            hw_encoder_mode: HwEncoderMode::Off,
             hdr_passthrough: self.hdr_passthrough,
         }
     }
@@ -1336,6 +1381,10 @@ pub struct PreferencesState {
     /// user's preferred proxy quality.
     #[serde(default = "default_last_non_off_proxy_mode")]
     pub last_non_off_proxy_mode: ProxyMode,
+    /// Codec used for proxy transcodes. H.264 is universal; HEVC produces
+    /// smaller files at the same quality and is often faster on iGPUs.
+    #[serde(default)]
+    pub proxy_codec: ProxyCodec,
     /// Mirror/preserve proxy files in `UltimateSlice.cache/` next to source media.
     #[serde(default = "default_persist_proxies_next_to_original_media")]
     pub persist_proxies_next_to_original_media: bool,
@@ -1470,6 +1519,7 @@ impl Default for PreferencesState {
             source_playback_priority: PlaybackPriority::default(),
             proxy_mode: ProxyMode::default(),
             last_non_off_proxy_mode: default_last_non_off_proxy_mode(),
+            proxy_codec: ProxyCodec::default(),
             persist_proxies_next_to_original_media: default_persist_proxies_next_to_original_media(
             ),
             show_waveform_on_video: false,
@@ -1765,6 +1815,7 @@ mod tests {
             gif_fps: None,
             audio_channel_layout: AudioChannelLayout::Surround51,
             hdr_passthrough: false,
+            hw_encoder_mode: HwEncoderMode::Off,
         };
         let preset = ExportPreset::from_export_options("High Quality", &options);
         assert_eq!(preset.name, "High Quality");

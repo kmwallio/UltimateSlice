@@ -8,7 +8,7 @@ use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::media::hwaccel::{self, HwEncoderFamily};
-use crate::ui_state::HwEncoderMode;
+use crate::ui_state::{HwEncoderMode, ProxyCodec};
 
 /// Source pixel height at and above which a transcode counts as a "heavy"
 /// job and acquires a permit from [`HeavyPermit`] before launching ffmpeg.
@@ -248,12 +248,27 @@ pub struct ProxyCache {
     /// threads via `RwLock` so live preference changes apply to *future*
     /// jobs without disturbing in-flight transcodes.
     hw_encoder_mode: Arc<RwLock<HwEncoderMode>>,
+    /// User preference: which video codec to use for proxy files. H.264
+    /// for compatibility, HEVC for smaller files / faster iGPU encode.
+    proxy_codec: Arc<RwLock<ProxyCodec>>,
     /// Source paths that failed under HW encoding in this session and should
     /// be transcoded with libx264 directly to avoid the wasted HW attempt.
     hw_failed_sources: Arc<Mutex<HashSet<String>>>,
     /// Source paths that failed under HW *decode* in this session and should
     /// be re-decoded in software directly.
     hw_decode_failed_sources: Arc<Mutex<HashSet<String>>>,
+    /// Process-global blacklist of HW *encoder* families that have failed
+    /// at runtime during this session. Future picks skip the family
+    /// straight to libx264/libx265 instead of repeating the wasted
+    /// attempt for every source. Cleared when the encoder mode or codec
+    /// preference changes (the new combination might just work).
+    hw_encoder_blacklist: Arc<Mutex<HashSet<HwEncoderFamily>>>,
+    /// Process-global blacklist of HW *decode* methods (`cuda`, `qsv`,
+    /// `vaapi`) that have failed at runtime. Same semantics as
+    /// `hw_encoder_blacklist` — saves wasted per-source HW attempts on
+    /// machines where startup probes passed but runtime use still fails
+    /// (rare; usually narrows down to a specific source codec edge case).
+    hw_decode_blacklist: Arc<Mutex<HashSet<String>>>,
     /// Counting semaphore that limits concurrent transcodes of sources at
     /// or above [`HEAVY_SOURCE_HEIGHT_THRESHOLD`]. Workers that pick up a
     /// light source bypass the permit entirely. Held only to keep the
@@ -281,9 +296,13 @@ impl ProxyCache {
             mpsc::channel::<(String, ProxyScale, Vec<String>, bool, bool, f32)>();
 
         let hw_encoder_mode = Arc::new(RwLock::new(HwEncoderMode::default()));
+        let proxy_codec = Arc::new(RwLock::new(ProxyCodec::default()));
         let hw_failed_sources: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
         let hw_decode_failed_sources: Arc<Mutex<HashSet<String>>> =
             Arc::new(Mutex::new(HashSet::new()));
+        let hw_encoder_blacklist: Arc<Mutex<HashSet<HwEncoderFamily>>> =
+            Arc::new(Mutex::new(HashSet::new()));
+        let hw_decode_blacklist: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
         let heavy_permit = Arc::new(HeavyPermit::new(MAX_HEAVY_PARALLEL_TRANSCODES));
 
         // Pool of worker threads to transcode proxies in parallel.
@@ -294,8 +313,11 @@ impl ProxyCache {
             let tx = result_tx.clone();
             let local_root = local_cache_root.clone();
             let hw_mode_ref = hw_encoder_mode.clone();
+            let proxy_codec_ref = proxy_codec.clone();
             let hw_failed_ref = hw_failed_sources.clone();
             let hw_decode_failed_ref = hw_decode_failed_sources.clone();
+            let enc_blacklist_ref = hw_encoder_blacklist.clone();
+            let dec_blacklist_ref = hw_decode_blacklist.clone();
             let heavy_permit_ref = heavy_permit.clone();
             std::thread::spawn(move || loop {
                 let item = {
@@ -323,14 +345,27 @@ impl ProxyCache {
                             vidstab_smoothing,
                         );
                         let mode_snapshot = *hw_mode_ref.read().unwrap();
+                        let codec_snapshot = *proxy_codec_ref.read().unwrap();
                         let already_failed_enc = hw_failed_ref
                             .lock()
                             .map(|set| set.contains(&source_path))
                             .unwrap_or(false);
+                        let session_blacklisted_enc = |fam: HwEncoderFamily| {
+                            enc_blacklist_ref
+                                .lock()
+                                .map(|set| set.contains(&fam))
+                                .unwrap_or(false)
+                        };
                         let initial_family = if already_failed_enc {
                             None
                         } else {
-                            hwaccel::pick_h264_encoder(mode_snapshot)
+                            hwaccel::pick_encoder(
+                                codec_snapshot,
+                                mode_snapshot,
+                                hwaccel::detect(),
+                                hwaccel::cuda_runtime_loadable(),
+                            )
+                            .filter(|fam| !session_blacklisted_enc(*fam))
                         };
                         let already_failed_dec = hw_decode_failed_ref
                             .lock()
@@ -339,7 +374,12 @@ impl ProxyCache {
                         let initial_decode_hwaccel = if already_failed_dec {
                             None
                         } else {
-                            hwaccel::pick_decode_hwaccel(mode_snapshot)
+                            hwaccel::pick_decode_hwaccel(mode_snapshot).filter(|method| {
+                                !dec_blacklist_ref
+                                    .lock()
+                                    .map(|set| set.contains(*method))
+                                    .unwrap_or(false)
+                            })
                         };
                         let (proxy_path, success, owned_local) = transcode_proxy(
                             &source_path,
@@ -352,9 +392,12 @@ impl ProxyCache {
                             &tx,
                             sidecar_mirror_enabled,
                             initial_family,
+                            codec_snapshot,
                             &hw_failed_ref,
                             initial_decode_hwaccel,
                             &hw_decode_failed_ref,
+                            &enc_blacklist_ref,
+                            &dec_blacklist_ref,
                             &heavy_permit_ref,
                         );
                         if tx
@@ -388,10 +431,23 @@ impl ProxyCache {
             runtime_owned_local_files: HashSet::new(),
             sidecar_mirror_enabled: false,
             hw_encoder_mode,
+            proxy_codec,
             hw_failed_sources,
             hw_decode_failed_sources,
+            hw_encoder_blacklist,
+            hw_decode_blacklist,
             heavy_permit,
         }
+    }
+
+    /// Update the proxy codec preference. Applies to *future* worker jobs.
+    pub fn set_proxy_codec(&self, codec: ProxyCodec) {
+        if let Ok(mut guard) = self.proxy_codec.write() {
+            *guard = codec;
+        }
+        // Switching codec invalidates HW failure caches because a source
+        // that failed under (h264, nvenc) might succeed under (hevc, nvenc).
+        self.clear_hw_failure_state();
     }
 
     pub fn set_sidecar_mirror_enabled(&mut self, enabled: bool) {
@@ -407,10 +463,23 @@ impl ProxyCache {
         // Forget previous HW failures when the user changes mode — fresh
         // mode might succeed on sources that failed under the old one
         // (e.g. switching Vaapi → Nvenc after a missing /dev/dri/renderD128).
+        self.clear_hw_failure_state();
+    }
+
+    /// Clear all per-session HW failure caches and process-global
+    /// blacklists. Called whenever the user changes a preference that
+    /// could turn a previously-broken HW path into a working one.
+    fn clear_hw_failure_state(&self) {
         if let Ok(mut set) = self.hw_failed_sources.lock() {
             set.clear();
         }
         if let Ok(mut set) = self.hw_decode_failed_sources.lock() {
+            set.clear();
+        }
+        if let Ok(mut set) = self.hw_encoder_blacklist.lock() {
+            set.clear();
+        }
+        if let Ok(mut set) = self.hw_decode_blacklist.lock() {
             set.clear();
         }
     }
@@ -1468,6 +1537,7 @@ fn run_transcode_command(
     estimated_size_bytes: Option<u64>,
     progress_tx: &mpsc::SyncSender<ProxyWorkerUpdate>,
     hw_family: Option<HwEncoderFamily>,
+    proxy_codec: ProxyCodec,
     hw_decode_method: Option<&str>,
 ) -> bool {
     let mut cmd = Command::new(ffmpeg);
@@ -1517,15 +1587,21 @@ fn run_transcode_command(
         _ => filter.to_string(),
     };
     cmd.arg("-vf").arg(&effective_filter);
-    match hw_family {
-        Some(HwEncoderFamily::Vaapi) => {
+    match (hw_family, proxy_codec) {
+        (Some(HwEncoderFamily::Vaapi), ProxyCodec::H264) => {
             cmd.arg("-c:v")
                 .arg("h264_vaapi")
                 // qp ~ CRF in spirit; 28 keeps proxy bitrate similar to libx264 CRF 28.
                 .arg("-qp")
                 .arg("28");
         }
-        Some(HwEncoderFamily::Nvenc) => {
+        (Some(HwEncoderFamily::Vaapi), ProxyCodec::Hevc) => {
+            cmd.arg("-c:v")
+                .arg("hevc_vaapi")
+                .arg("-qp")
+                .arg("28");
+        }
+        (Some(HwEncoderFamily::Nvenc), ProxyCodec::H264) => {
             cmd.arg("-c:v")
                 .arg("h264_nvenc")
                 .arg("-preset")
@@ -1539,7 +1615,21 @@ fn run_transcode_command(
                 .arg("-pix_fmt")
                 .arg("yuv420p");
         }
-        None => {
+        (Some(HwEncoderFamily::Nvenc), ProxyCodec::Hevc) => {
+            cmd.arg("-c:v")
+                .arg("hevc_nvenc")
+                .arg("-preset")
+                .arg("p1")
+                .arg("-tune")
+                .arg("ll")
+                .arg("-rc")
+                .arg("constqp")
+                .arg("-cq")
+                .arg("28")
+                .arg("-pix_fmt")
+                .arg("yuv420p");
+        }
+        (None, ProxyCodec::H264) => {
             cmd.arg("-c:v")
                 .arg("libx264")
                 .arg("-preset")
@@ -1552,6 +1642,18 @@ fn run_transcode_command(
                 .arg("0")
                 .arg("-refs")
                 .arg("1")
+                .arg("-pix_fmt")
+                .arg("yuv420p");
+        }
+        (None, ProxyCodec::Hevc) => {
+            cmd.arg("-c:v")
+                .arg("libx265")
+                .arg("-preset")
+                .arg("ultrafast")
+                .arg("-x265-params")
+                .arg("log-level=error")
+                .arg("-crf")
+                .arg("28")
                 .arg("-pix_fmt")
                 .arg("yuv420p");
         }
@@ -1568,10 +1670,13 @@ fn run_transcode_command(
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
 
-    let enc_label = match hw_family {
-        Some(HwEncoderFamily::Nvenc) => "h264_nvenc",
-        Some(HwEncoderFamily::Vaapi) => "h264_vaapi",
-        None => "libx264",
+    let enc_label = match (hw_family, proxy_codec) {
+        (Some(HwEncoderFamily::Nvenc), ProxyCodec::H264) => "h264_nvenc",
+        (Some(HwEncoderFamily::Nvenc), ProxyCodec::Hevc) => "hevc_nvenc",
+        (Some(HwEncoderFamily::Vaapi), ProxyCodec::H264) => "h264_vaapi",
+        (Some(HwEncoderFamily::Vaapi), ProxyCodec::Hevc) => "hevc_vaapi",
+        (None, ProxyCodec::H264) => "libx264",
+        (None, ProxyCodec::Hevc) => "libx265",
     };
     let dec_label = match hw_decode_method {
         Some("vaapi") => "sw (vaapi decode skipped — slower than CPU for HEVC 10-bit on Intel iGPUs)",
@@ -1755,9 +1860,12 @@ fn transcode_proxy(
     progress_tx: &mpsc::SyncSender<ProxyWorkerUpdate>,
     sidecar_mirror_enabled: bool,
     initial_hw_family: Option<HwEncoderFamily>,
+    proxy_codec: ProxyCodec,
     hw_failed_sources: &Arc<Mutex<HashSet<String>>>,
     initial_decode_hwaccel: Option<&'static str>,
     hw_decode_failed_sources: &Arc<Mutex<HashSet<String>>>,
+    hw_encoder_blacklist: &Arc<Mutex<HashSet<HwEncoderFamily>>>,
+    hw_decode_blacklist: &Arc<Mutex<HashSet<String>>>,
     heavy_permit: &Arc<HeavyPermit>,
 ) -> (String, bool, bool) {
     let lut_composite = if lut_paths.is_empty() {
@@ -1895,6 +2003,7 @@ fn transcode_proxy(
             estimated_size_bytes,
             progress_tx,
             attempt_hw_enc,
+            proxy_codec,
             attempt_hw_dec,
         );
         // Attempt 2: if HW encode was active, blame the encoder first
@@ -1909,6 +2018,18 @@ fn transcode_proxy(
             if let Ok(mut set) = hw_failed_sources.lock() {
                 set.insert(source_path.to_string());
             }
+            // Process-global blacklist: this encoder family failed at
+            // runtime, future per-source picks will skip it from the start.
+            if let Some(fam) = attempt_hw_enc {
+                if let Ok(mut set) = hw_encoder_blacklist.lock() {
+                    if set.insert(fam) {
+                        log::info!(
+                            "ProxyCache: session-blacklisting hw encoder family `{}` after runtime failure",
+                            fam.as_str()
+                        );
+                    }
+                }
+            }
             attempt_hw_enc = None;
             let _ = std::fs::remove_file(&temp_proxy_path);
             command_ok = run_transcode_command(
@@ -1920,6 +2041,7 @@ fn transcode_proxy(
                 estimated_size_bytes,
                 progress_tx,
                 attempt_hw_enc,
+                proxy_codec,
                 attempt_hw_dec,
             );
         }
@@ -1934,6 +2056,15 @@ fn transcode_proxy(
             if let Ok(mut set) = hw_decode_failed_sources.lock() {
                 set.insert(source_path.to_string());
             }
+            if let Some(method) = attempt_hw_dec {
+                if let Ok(mut set) = hw_decode_blacklist.lock() {
+                    if set.insert(method.to_string()) {
+                        log::info!(
+                            "ProxyCache: session-blacklisting hw decoder `{method}` after runtime failure"
+                        );
+                    }
+                }
+            }
             attempt_hw_dec = None;
             let _ = std::fs::remove_file(&temp_proxy_path);
             command_ok = run_transcode_command(
@@ -1945,6 +2076,7 @@ fn transcode_proxy(
                 estimated_size_bytes,
                 progress_tx,
                 attempt_hw_enc,
+                proxy_codec,
                 attempt_hw_dec,
             );
         }

@@ -14,9 +14,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
-use crate::ui_state::HwEncoderMode;
+use crate::ui_state::{HwEncoderMode, ProxyCodec};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum HwEncoderFamily {
     Vaapi,
     Nvenc,
@@ -367,7 +367,7 @@ pub fn parse_ffmpeg_encoders_lines(output: &str) -> HwEncoderCaps {
 /// requests fall through to `None` if the requested family isn't actually
 /// usable, so the caller emits libx264 instead of a broken HW command.
 pub fn pick_h264_encoder(mode: HwEncoderMode) -> Option<HwEncoderFamily> {
-    pick_h264_encoder_with_caps(mode, detect())
+    pick_encoder(ProxyCodec::H264, mode, detect(), cuda_runtime_loadable())
 }
 
 pub fn pick_h264_encoder_with_caps(
@@ -382,17 +382,34 @@ pub fn pick_h264_encoder_with_caps_and_runtime(
     caps: &HwEncoderCaps,
     cuda_loadable: bool,
 ) -> Option<HwEncoderFamily> {
+    pick_encoder(ProxyCodec::H264, mode, caps, cuda_loadable)
+}
+
+/// Codec-aware version of [`pick_h264_encoder_with_caps_and_runtime`].
+/// Returns the HW encoder family that should be used for the chosen
+/// codec under the given user mode + runtime caps, or `None` for the
+/// software fallback (libx264 / libx265).
+pub fn pick_encoder(
+    codec: ProxyCodec,
+    mode: HwEncoderMode,
+    caps: &HwEncoderCaps,
+    cuda_loadable: bool,
+) -> Option<HwEncoderFamily> {
+    let (vaapi_codec_supported, nvenc_codec_supported) = match codec {
+        ProxyCodec::H264 => (caps.vaapi_h264, caps.nvenc_h264),
+        ProxyCodec::Hevc => (caps.vaapi_h265, caps.nvenc_h265),
+    };
     // NVENC is gated on libcuda.so.1 being loadable: ffmpeg lists the
     // encoder whenever it was compiled in, but at runtime it errors out
     // with "Could not dynamically load CUDA" on machines without the
     // NVIDIA driver. Treat that as encoder-unavailable and let Auto fall
     // through to VA-API.
-    let nvenc_usable = caps.nvenc_h264 && cuda_loadable;
+    let nvenc_usable = nvenc_codec_supported && cuda_loadable;
     // VA-API is additionally gated on the startup init probe — if libva
     // can't load a driver for the GPU (e.g. missing intel-media-va-driver)
     // every per-source attempt would fail with the same error, so we drop
     // it from the candidate list up front.
-    let vaapi_usable = caps.vaapi_device_present && caps.vaapi_h264 && caps.vaapi_init_ok;
+    let vaapi_usable = caps.vaapi_device_present && vaapi_codec_supported && caps.vaapi_init_ok;
     match mode {
         HwEncoderMode::Off => None,
         HwEncoderMode::Vaapi => {
