@@ -31,13 +31,55 @@ pub(crate) struct ColorFilterCapabilities {
     pub(crate) three_point_frei0r_module: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoCodec {
     H264,
     H265,
     Vp9,
     ProRes,
     Av1,
+}
+
+/// Resolve the export-side HW encoder family for a given codec under the
+/// user's [`HwEncoderMode`] preference. Returns `None` for codecs that
+/// have no usable HW path on this build (VP9 / ProRes — neither VA-API
+/// nor NVENC encode is broadly available for these on Linux), or when
+/// the requested HW backend isn't installed/loadable.
+///
+/// HW encoder availability is checked per-codec via `hwaccel::pick_encoder`,
+/// which examines the right caps fields (`vaapi_h264` vs `vaapi_h265`,
+/// `nvenc_h264` vs `nvenc_h265`). AV1 specifically requires the NVENC
+/// `av1_nvenc` encoder (RTX 40-series and newer) or VA-API `av1_vaapi`
+/// (Battlemage / newer Intel discrete and recent iGPUs).
+pub(crate) fn pick_export_encoder(
+    codec: VideoCodec,
+    mode: crate::ui_state::HwEncoderMode,
+) -> Option<crate::media::hwaccel::HwEncoderFamily> {
+    use crate::media::hwaccel;
+    match codec {
+        VideoCodec::H264 => hwaccel::pick_encoder(
+            crate::ui_state::ProxyCodec::H264,
+            mode,
+            hwaccel::detect(),
+            hwaccel::cuda_runtime_loadable(),
+        ),
+        VideoCodec::H265 => hwaccel::pick_encoder(
+            crate::ui_state::ProxyCodec::Hevc,
+            mode,
+            hwaccel::detect(),
+            hwaccel::cuda_runtime_loadable(),
+        ),
+        // AV1 hardware encode is rare and the picker doesn't probe it
+        // separately yet — defer to a future Phase 3 once we know which
+        // hardware deserves the wiring. Treat as software-only for now.
+        VideoCodec::Av1 => None,
+        // VP9 has no widely-deployed HW encoder on Linux. ProRes is an
+        // intermediate codec with no HW implementation. Keep both on SW.
+        VideoCodec::Vp9 | VideoCodec::ProRes => {
+            let _ = mode; // silence unused-warning when matched
+            None
+        }
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub enum AudioCodec {
@@ -671,6 +713,26 @@ pub fn export_project_with_cancel(
         .arg("-progress")
         .arg("pipe:2")
         .arg("-nostats");
+
+    // Pre-resolve the export-side HW encoder choice (Phase 2). Done up
+    // front so we can declare `-vaapi_device` before any input args
+    // (FFmpeg requires the global VAAPI device hint to come before the
+    // encoder element references it). `pick_export_encoder` returns the
+    // family that actually fits this codec — e.g. for VP9 / ProRes there
+    // is no usable HW path, so it returns `None` and the SW branch
+    // handles the encode unchanged.
+    let export_hw_family = pick_export_encoder(options.video_codec, options.hw_encoder_mode);
+    if matches!(
+        export_hw_family,
+        Some(crate::media::hwaccel::HwEncoderFamily::Vaapi)
+    ) {
+        if let Some(node) = crate::media::hwaccel::detect()
+            .vaapi_render_node
+            .as_ref()
+        {
+            cmd.arg("-vaapi_device").arg(node);
+        }
+    }
 
     // Helper: resolve effective source path (bg-removed version if available).
     // Helper: true when the clip's actual FFmpeg input is a bg-removed file (video-only, no audio).
@@ -1887,6 +1949,25 @@ pub fn export_project_with_cancel(
         filter
     };
 
+    // Phase 2 export-side VA-API: append `format=nv12,hwupload` so the
+    // CPU-side composited frame ends up as a VAAPI surface for the
+    // hardware encoder. The whole filter graph above is software so
+    // we only need the upload step at the very end. NVENC accepts CPU
+    // frames natively so it skips this step.
+    let (filter, map_label) = if matches!(
+        export_hw_family,
+        Some(crate::media::hwaccel::HwEncoderFamily::Vaapi)
+    ) {
+        let upload_label = format!("{map_label}_va");
+        let mut new_filter = filter;
+        new_filter.push_str(&format!(
+            ";[{map_label}]format=nv12,hwupload[{upload_label}]"
+        ));
+        (new_filter, upload_label)
+    } else {
+        (filter, map_label)
+    };
+
     let mut filter_script_file = tempfile::NamedTempFile::new()?;
     filter_script_file.write_all(filter.as_bytes())?;
 
@@ -1941,56 +2022,93 @@ pub fn export_project_with_cancel(
     } else {
         match options.video_codec {
             VideoCodec::H264 => {
-                // Phase 1 of export-side HW encoding: NVENC only. Drop-in
-                // encoder swap (no filter chain changes — NVENC accepts
-                // CPU-side frames). VA-API export would require appending
-                // `format=nv12,hwupload` to the complex filter graph and
-                // is deferred to Phase 2.
-                let hw = crate::media::hwaccel::pick_encoder(
-                    crate::ui_state::ProxyCodec::H264,
-                    options.hw_encoder_mode,
-                    crate::media::hwaccel::detect(),
-                    crate::media::hwaccel::cuda_runtime_loadable(),
-                );
-                if matches!(hw, Some(crate::media::hwaccel::HwEncoderFamily::Nvenc)) {
-                    log::info!("export: using h264_nvenc (mode={})", options.hw_encoder_mode.as_str());
-                    cmd.arg("-c:v")
-                        .arg("h264_nvenc")
-                        .arg("-preset")
-                        .arg("p5")
-                        // Map the CRF value to NVENC -cq directly; both are
-                        // 0–51 quality scales with the same direction.
-                        .arg("-cq")
-                        .arg(options.crf.to_string())
-                        .arg("-rc")
-                        .arg("constqp")
-                        .arg("-pix_fmt")
-                        .arg("yuv420p");
-                } else {
-                    cmd.arg("-c:v")
-                        .arg("libx264")
-                        .arg("-crf")
-                        .arg(options.crf.to_string())
-                        .arg("-pix_fmt")
-                        .arg("yuv420p");
+                use crate::media::hwaccel::HwEncoderFamily;
+                match export_hw_family {
+                    Some(HwEncoderFamily::Nvenc) => {
+                        log::info!("export: using h264_nvenc");
+                        cmd.arg("-c:v")
+                            .arg("h264_nvenc")
+                            .arg("-preset")
+                            .arg("p5")
+                            .arg("-cq")
+                            .arg(options.crf.to_string())
+                            .arg("-rc")
+                            .arg("constqp")
+                            .arg("-pix_fmt")
+                            .arg("yuv420p");
+                    }
+                    Some(HwEncoderFamily::Vaapi) => {
+                        log::info!("export: using h264_vaapi");
+                        cmd.arg("-c:v")
+                            .arg("h264_vaapi")
+                            // VA-API uses QP (0–51) where lower is better,
+                            // mirroring CRF semantics closely enough that
+                            // we can pass the CRF value through directly.
+                            .arg("-qp")
+                            .arg(options.crf.to_string());
+                    }
+                    None => {
+                        cmd.arg("-c:v")
+                            .arg("libx264")
+                            .arg("-crf")
+                            .arg(options.crf.to_string())
+                            .arg("-pix_fmt")
+                            .arg("yuv420p");
+                    }
                 }
             }
             VideoCodec::H265 => {
-                cmd.arg("-c:v")
-                    .arg("libx265")
-                    .arg("-crf")
-                    .arg(options.crf.to_string());
-                if options.hdr_passthrough {
-                    cmd.arg("-pix_fmt").arg("yuv420p10le");
-                    cmd.arg("-x265-params").arg(
-                        "hdr-opt=1:repeat-headers=1:colorprim=bt2020:\
-                         transfer=smpte2084:colormatrix=bt2020nc",
-                    );
-                    cmd.arg("-color_primaries").arg("bt2020");
-                    cmd.arg("-color_trc").arg("smpte2084");
-                    cmd.arg("-colorspace").arg("bt2020nc");
-                } else {
-                    cmd.arg("-pix_fmt").arg("yuv420p");
+                use crate::media::hwaccel::HwEncoderFamily;
+                match export_hw_family {
+                    Some(HwEncoderFamily::Nvenc) => {
+                        log::info!("export: using hevc_nvenc");
+                        cmd.arg("-c:v").arg("hevc_nvenc").arg("-preset").arg("p5");
+                        if options.hdr_passthrough {
+                            // NVENC HEVC supports 10-bit Main10 directly.
+                            cmd.arg("-pix_fmt").arg("p010le");
+                            cmd.arg("-color_primaries").arg("bt2020");
+                            cmd.arg("-color_trc").arg("smpte2084");
+                            cmd.arg("-colorspace").arg("bt2020nc");
+                        } else {
+                            cmd.arg("-pix_fmt").arg("yuv420p");
+                        }
+                        cmd.arg("-cq")
+                            .arg(options.crf.to_string())
+                            .arg("-rc")
+                            .arg("constqp");
+                    }
+                    Some(HwEncoderFamily::Vaapi) => {
+                        log::info!("export: using hevc_vaapi");
+                        cmd.arg("-c:v").arg("hevc_vaapi").arg("-qp").arg(options.crf.to_string());
+                        if options.hdr_passthrough {
+                            // hevc_vaapi accepts p010 input on most modern
+                            // Intel/AMD VAAPI implementations. Older drivers
+                            // may need yuv420p10le; if users hit that, the
+                            // session-level HW encoder blacklist will fall
+                            // them back to libx265 automatically.
+                            cmd.arg("-color_primaries").arg("bt2020");
+                            cmd.arg("-color_trc").arg("smpte2084");
+                            cmd.arg("-colorspace").arg("bt2020nc");
+                        }
+                    }
+                    None => {
+                        cmd.arg("-c:v")
+                            .arg("libx265")
+                            .arg("-crf")
+                            .arg(options.crf.to_string());
+                        if options.hdr_passthrough {
+                            cmd.arg("-pix_fmt").arg("yuv420p10le");
+                            cmd.arg("-x265-params").arg(
+                                "hdr-opt=1:repeat-headers=1:colorprim=bt2020:\
+                                 transfer=smpte2084:colormatrix=bt2020nc",
+                            );
+                            cmd.arg("-color_primaries").arg("bt2020");
+                            cmd.arg("-color_trc").arg("smpte2084");
+                            cmd.arg("-colorspace").arg("bt2020nc");
+                        } else {
+                            cmd.arg("-pix_fmt").arg("yuv420p");
+                        }
+                    }
                 }
             }
             VideoCodec::Vp9 => {
