@@ -1927,20 +1927,58 @@ fn mirror_local_proxy_to_sidecar(
         return;
     }
     let sidecar_dir = Path::new(sidecar_path).parent().unwrap_or(Path::new("."));
-    if std::fs::create_dir_all(sidecar_dir).is_err() {
+    if let Err(e) = std::fs::create_dir_all(sidecar_dir) {
+        // Most common real cause: the source's parent directory isn't
+        // writable — read-only mount (cinema RAW DIT drives often lock
+        // the volume), network share without write perms, sandboxed app
+        // paths, etc. Surface so users don't wonder why some sources
+        // get an alongside-media `UltimateSlice.cache/` and others don't.
+        log::warn!(
+            "ProxyCache: cannot create alongside-media cache dir {} for {}: {}. \
+             Proxy will live only in the managed local cache. Common causes: \
+             read-only source media (mount as rw or import to a writable drive), \
+             missing write permissions on the source directory, or sandboxed FS \
+             that hides the source parent.",
+            sidecar_dir.display(),
+            source_path,
+            e
+        );
         return;
     }
     let temp_sidecar_path = format!("{sidecar_path}.partial");
     let _ = std::fs::remove_file(&temp_sidecar_path);
-    if std::fs::copy(local_proxy_path, &temp_sidecar_path).is_err() {
+    if let Err(e) = std::fs::copy(local_proxy_path, &temp_sidecar_path) {
+        log::warn!(
+            "ProxyCache: failed to copy local proxy {} → {}: {}. \
+             Proxy will live only in the managed local cache. \
+             Common causes: target volume out of space, permission error, \
+             quota exceeded.",
+            local_proxy_path,
+            temp_sidecar_path,
+            e
+        );
         let _ = std::fs::remove_file(&temp_sidecar_path);
         return;
     }
     if !proxy_file_is_ready(&temp_sidecar_path, Some(ffprobe)) {
+        log::warn!(
+            "ProxyCache: mirrored copy at {} failed ffprobe readiness check; \
+             discarding alongside-media file (local proxy at {} is unaffected). \
+             This usually indicates the source volume truncated or corrupted the \
+             copy mid-write.",
+            temp_sidecar_path,
+            local_proxy_path
+        );
         let _ = std::fs::remove_file(&temp_sidecar_path);
         return;
     }
     if !finalize_output_file(&temp_sidecar_path, sidecar_path) {
+        log::warn!(
+            "ProxyCache: failed to atomically rename mirrored proxy {} → {}; \
+             alongside-media cache will not be populated for this source.",
+            temp_sidecar_path,
+            sidecar_path
+        );
         let _ = std::fs::remove_file(&temp_sidecar_path);
         return;
     }
