@@ -5166,6 +5166,202 @@ pub(crate) fn handle_mcp_command(
             sync_library_change();
         }
 
+        McpCommand::ReplaceClipSource {
+            clip_id,
+            new_path,
+            old_width,
+            old_height,
+            reply,
+        } => {
+            // Probe new file synchronously — same path Convert LTC and other
+            // MCP-driven file actions take. ffprobe is fast enough.
+            if !std::path::Path::new(&new_path).exists() {
+                reply
+                    .send(json!({"success": false, "error": "new_path does not exist on disk"}))
+                    .ok();
+                return;
+            }
+            let new_meta = crate::media::probe_cache::probe_media_metadata(&new_path);
+            // Capture, simulate, validate, push command. Bail with the
+            // helper's typed error if the swap would invalidate the trim.
+            let cmd_result: Result<
+                Option<(
+                    crate::undo::ClipSourceState,
+                    crate::undo::ClipSourceState,
+                    crate::media::replace_media::ReplaceMediaSummary,
+                )>,
+                String,
+            > = {
+                let mut proj = project.borrow_mut();
+                if let Some(clip) = proj.clip_mut(&clip_id) {
+                    let old_state = crate::undo::ClipSourceState::capture(clip);
+                    // Best-effort old-dim seeding: caller can pass dims;
+                    // if absent we fall back to the library-side resolution.
+                    let mut work = clip.clone();
+                    let _ = (old_width, old_height); // used by the UI seeding path
+                    match crate::media::replace_media::apply_replace_media(
+                        &mut work, &new_path, &new_meta,
+                    ) {
+                        Ok(summary) => {
+                            let new_state = crate::undo::ClipSourceState::capture(&work);
+                            Ok(Some((old_state, new_state, summary)))
+                        }
+                        Err(e) => Err(e.to_string()),
+                    }
+                } else {
+                    Err(format!("clip not found: {clip_id}"))
+                }
+            };
+            match cmd_result {
+                Ok(Some((old_state, new_state, summary))) => {
+                    let cmd = crate::undo::ReplaceClipSourceCommand {
+                        clip_id: clip_id.clone(),
+                        old_state,
+                        new_state,
+                    };
+                    {
+                        let mut st = timeline_state.borrow_mut();
+                        let mut p = project.borrow_mut();
+                        st.history.execute(Box::new(cmd), &mut p);
+                    }
+                    on_project_changed();
+                    reply
+                        .send(json!({
+                            "success": true,
+                            "clip_id": clip_id,
+                            "new_path": new_path,
+                            "crop_rescaled": summary.crop_rescaled,
+                            "source_out_clamped": summary.source_out_clamped.is_some(),
+                            "aspect_changed": summary.aspect_changed,
+                            "audio_stream_reset": summary.audio_stream_reset,
+                        }))
+                        .ok();
+                }
+                Ok(None) => {
+                    reply
+                        .send(json!({"success": false, "error": "no clip mutation occurred"}))
+                        .ok();
+                }
+                Err(e) => {
+                    reply
+                        .send(json!({"success": false, "error": e}))
+                        .ok();
+                }
+            }
+        }
+
+        McpCommand::ReplaceLibrarySource {
+            item_id,
+            new_path,
+            reply,
+        } => {
+            if !std::path::Path::new(&new_path).exists() {
+                reply
+                    .send(json!({"success": false, "error": "new_path does not exist on disk"}))
+                    .ok();
+                return;
+            }
+            let new_meta = crate::media::probe_cache::probe_media_metadata(&new_path);
+            // Steps:
+            //  1. Find the library item + capture its old source_path.
+            //  2. Walk every timeline clip whose source_path matches the
+            //     OLD path; build per-clip undo commands.
+            //  3. Wrap them in a CompoundEditCommand so a single Ctrl+Z
+            //     reverts all clip changes (the library mutation is
+            //     non-undoable like relink_media — documented in the
+            //     tool description).
+            //  4. Mutate the library item directly.
+            let old_path = {
+                let lib = library.borrow();
+                lib.items
+                    .iter()
+                    .find(|it| it.id == item_id)
+                    .map(|it| it.source_path.clone())
+            };
+            let Some(old_path) = old_path else {
+                reply
+                    .send(json!({"success": false, "error": format!("library item not found: {item_id}")}))
+                    .ok();
+                return;
+            };
+            let instances = {
+                let proj = project.borrow();
+                proj.source_clip_instances(&old_path)
+            };
+            // Build per-clip child commands.
+            let mut children: Vec<Box<dyn crate::undo::EditCommand>> = Vec::new();
+            let mut updated_clip_count = 0usize;
+            let mut clamped_count = 0usize;
+            let mut rescaled_count = 0usize;
+            let mut errored_clip_ids: Vec<String> = Vec::new();
+            {
+                let mut proj = project.borrow_mut();
+                for inst in &instances {
+                    let clip_id = inst.clip_id.clone();
+                    if let Some(clip) = proj.clip_mut(&clip_id) {
+                        let old_state = crate::undo::ClipSourceState::capture(clip);
+                        let mut work = clip.clone();
+                        match crate::media::replace_media::apply_replace_media(
+                            &mut work, &new_path, &new_meta,
+                        ) {
+                            Ok(summary) => {
+                                if summary.crop_rescaled {
+                                    rescaled_count += 1;
+                                }
+                                if summary.source_out_clamped.is_some() {
+                                    clamped_count += 1;
+                                }
+                                let new_state = crate::undo::ClipSourceState::capture(&work);
+                                children.push(Box::new(
+                                    crate::undo::ReplaceClipSourceCommand {
+                                        clip_id: clip_id.clone(),
+                                        old_state,
+                                        new_state,
+                                    },
+                                ));
+                                updated_clip_count += 1;
+                            }
+                            Err(_) => {
+                                errored_clip_ids.push(clip_id);
+                            }
+                        }
+                    }
+                }
+            }
+            if !children.is_empty() {
+                let compound = crate::undo::CompoundEditCommand {
+                    children,
+                    description: "Replace library source".to_string(),
+                };
+                let mut st = timeline_state.borrow_mut();
+                let mut p = project.borrow_mut();
+                st.history.execute(Box::new(compound), &mut p);
+            }
+            // Library mutation: direct, not undoable (mirrors relink_media).
+            {
+                let mut lib = library.borrow_mut();
+                if let Some(item) = lib.items.iter_mut().find(|it| it.id == item_id) {
+                    crate::media::replace_media::apply_library_replace(
+                        item, &new_path, &new_meta,
+                    );
+                }
+            }
+            on_project_changed();
+            sync_library_change();
+            reply
+                .send(json!({
+                    "success": true,
+                    "item_id": item_id,
+                    "new_path": new_path,
+                    "old_path": old_path,
+                    "updated_clip_count": updated_clip_count,
+                    "crop_rescaled_clip_count": rescaled_count,
+                    "source_out_clamped_clip_count": clamped_count,
+                    "errored_clip_ids": errored_clip_ids,
+                }))
+                .ok();
+        }
+
         McpCommand::RelinkMedia { root_path, reply } => {
             let root = std::path::PathBuf::from(&root_path);
             if !root.is_dir() {

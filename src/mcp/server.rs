@@ -1097,6 +1097,32 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "replace_clip_source",
+            "description": "Swap a single timeline clip's source media for a different file (e.g., proxy → master, 1080p → 4K). The new file is probed for dimensions/duration/audio streams. If the new media has different resolution than the old source, the clip's pixel-based crop values (and their keyframe lanes) are auto-rescaled to maintain visual parity. The clip's source_in/source_out is clamped if the new file is shorter; an error is returned if clamping would invert the trim range. Other clips referencing the old source path are NOT affected — see `replace_library_source` for the project-wide swap.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "ID of the timeline clip whose source to replace." },
+                    "new_path": { "type": "string", "description": "Absolute path to the replacement media file." },
+                    "old_width": { "type": "number", "description": "Optional: source width of the OLD media in pixels. When supplied alongside old_height the helper rescales crop values; when omitted, crop values are left as-is (best-effort)." },
+                    "old_height": { "type": "number", "description": "Optional: source height of the OLD media in pixels. See old_width." }
+                },
+                "required": ["clip_id", "new_path"]
+            }
+        },
+        {
+            "name": "replace_library_source",
+            "description": "Swap a Media Library item's source media file and propagate the change to every timeline clip that referenced the old path (analogous to `relink_media` but for deliberate version swaps rather than offline-media recovery). Library `MediaItem` metadata (resolution, codec, duration, HDR colorimetry, audio streams) is updated from the new file's probe. Per-clip fields adapt the same way `replace_clip_source` does — pixel crops rescale on resolution change, source_out clamps on shorter media. Returns the count of timeline clips updated.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "item_id": { "type": "string", "description": "ID of the library MediaItem whose source to replace." },
+                    "new_path": { "type": "string", "description": "Absolute path to the replacement media file." }
+                },
+                "required": ["item_id", "new_path"]
+            }
+        },
+        {
             "name": "create_bin",
             "description": "Create a media library bin (folder) for organizing media items",
             "inputSchema": {
@@ -3371,6 +3397,24 @@ fn dispatch_tool_payload(
         },
         "relink_media" => McpCommand::RelinkMedia {
             root_path: arg_str!(args, "root_path"),
+            reply: tx,
+        },
+        "replace_clip_source" => McpCommand::ReplaceClipSource {
+            clip_id: arg_str!(args, "clip_id"),
+            new_path: arg_str!(args, "new_path"),
+            old_width: args
+                .get("old_width")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32),
+            old_height: args
+                .get("old_height")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32),
+            reply: tx,
+        },
+        "replace_library_source" => McpCommand::ReplaceLibrarySource {
+            item_id: arg_str!(args, "item_id"),
+            new_path: arg_str!(args, "new_path"),
             reply: tx,
         },
 

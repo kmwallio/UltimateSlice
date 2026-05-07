@@ -438,6 +438,18 @@ pub enum McpCommand {
         root_path: String,
         reply: SyncSender<Value>,
     },
+    ReplaceClipSource {
+        clip_id: String,
+        new_path: String,
+        old_width: Option<u32>,
+        old_height: Option<u32>,
+        reply: SyncSender<Value>,
+    },
+    ReplaceLibrarySource {
+        item_id: String,
+        new_path: String,
+        reply: SyncSender<Value>,
+    },
     CreateBin {
         name: String,
         parent_id: Option<String>,

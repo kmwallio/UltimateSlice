@@ -34,6 +34,7 @@ pub mod project_health;
 pub mod proxy_cache;
 pub mod reference_still;
 pub mod render_replace_cache;
+pub mod replace_media;
 #[cfg(feature = "ai-inference")]
 pub mod sam_cache;
 #[cfg(feature = "ai-inference")]

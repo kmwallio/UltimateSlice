@@ -1,4 +1,4 @@
-use crate::model::clip::{AuditionTake, Clip, VoiceIsolationSource};
+use crate::model::clip::{AudioSourceStreamInfo, AuditionTake, Clip, NumericKeyframe, VoiceIsolationSource};
 use crate::model::project::Project;
 use crate::model::track::{AudioRole, Track};
 use crate::model::transition::OutgoingTransition;
@@ -2686,6 +2686,106 @@ impl EditCommand for EditMarkerCommand {
     }
     fn description(&self) -> &str {
         "Edit marker"
+    }
+}
+
+/// Captured snapshot of every clip field that
+/// `media::replace_media::apply_replace_media` may mutate. Held by
+/// [`ReplaceClipSourceCommand`] so undo can restore an exact byte-for-byte
+/// pre-swap state. Only the source path, source-time fields, audio-stream
+/// selection, and the four crop fields (plus their keyframe lanes) get
+/// touched — everything else on the Clip is normalized and never moves.
+#[derive(Clone, Debug)]
+pub struct ClipSourceState {
+    pub source_path: String,
+    pub source_in: u64,
+    pub source_out: u64,
+    pub media_duration_ns: Option<u64>,
+    pub source_timecode_base_ns: Option<u64>,
+    pub audio_source_streams: Vec<AudioSourceStreamInfo>,
+    pub audio_source_stream_index: u32,
+    pub crop_left: i32,
+    pub crop_right: i32,
+    pub crop_top: i32,
+    pub crop_bottom: i32,
+    pub crop_left_keyframes: Vec<NumericKeyframe>,
+    pub crop_right_keyframes: Vec<NumericKeyframe>,
+    pub crop_top_keyframes: Vec<NumericKeyframe>,
+    pub crop_bottom_keyframes: Vec<NumericKeyframe>,
+}
+
+impl ClipSourceState {
+    /// Snapshot the current source-related state of `clip`.
+    pub fn capture(clip: &Clip) -> Self {
+        Self {
+            source_path: clip.source_path.clone(),
+            source_in: clip.source_in,
+            source_out: clip.source_out,
+            media_duration_ns: clip.media_duration_ns,
+            source_timecode_base_ns: clip.source_timecode_base_ns,
+            audio_source_streams: clip.audio_source_streams.clone(),
+            audio_source_stream_index: clip.audio_source_stream_index,
+            crop_left: clip.crop_left,
+            crop_right: clip.crop_right,
+            crop_top: clip.crop_top,
+            crop_bottom: clip.crop_bottom,
+            crop_left_keyframes: clip.crop_left_keyframes.clone(),
+            crop_right_keyframes: clip.crop_right_keyframes.clone(),
+            crop_top_keyframes: clip.crop_top_keyframes.clone(),
+            crop_bottom_keyframes: clip.crop_bottom_keyframes.clone(),
+        }
+    }
+
+    /// Apply `self` to `clip`, restoring all captured fields. Used by
+    /// both `execute` (with `new_state`) and `undo` (with `old_state`).
+    pub fn apply_to(&self, clip: &mut Clip) {
+        clip.source_path = self.source_path.clone();
+        clip.source_in = self.source_in;
+        clip.source_out = self.source_out;
+        clip.media_duration_ns = self.media_duration_ns;
+        clip.source_timecode_base_ns = self.source_timecode_base_ns;
+        clip.audio_source_streams = self.audio_source_streams.clone();
+        clip.audio_source_stream_index = self.audio_source_stream_index;
+        clip.crop_left = self.crop_left;
+        clip.crop_right = self.crop_right;
+        clip.crop_top = self.crop_top;
+        clip.crop_bottom = self.crop_bottom;
+        clip.crop_left_keyframes = self.crop_left_keyframes.clone();
+        clip.crop_right_keyframes = self.crop_right_keyframes.clone();
+        clip.crop_top_keyframes = self.crop_top_keyframes.clone();
+        clip.crop_bottom_keyframes = self.crop_bottom_keyframes.clone();
+    }
+}
+
+/// Replace a clip's source media with a different file. The new state
+/// is computed by the UI/MCP caller via
+/// `media::replace_media::apply_replace_media` so command execution is
+/// purely deterministic — no probing, no fallback paths inside undo.
+///
+/// Used both for per-clip swaps (Inspector / right-click on timeline)
+/// and as a child of [`CompoundEditCommand`] for library-driven swaps
+/// that propagate through every timeline instance of the same source.
+pub struct ReplaceClipSourceCommand {
+    pub clip_id: String,
+    pub old_state: ClipSourceState,
+    pub new_state: ClipSourceState,
+}
+
+impl EditCommand for ReplaceClipSourceCommand {
+    fn execute(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            self.new_state.apply_to(clip);
+        }
+        project.dirty = true;
+    }
+    fn undo(&self, project: &mut Project) {
+        if let Some(clip) = project.clip_mut(&self.clip_id) {
+            self.old_state.apply_to(clip);
+        }
+        project.dirty = true;
+    }
+    fn description(&self) -> &str {
+        "Replace source media"
     }
 }
 
