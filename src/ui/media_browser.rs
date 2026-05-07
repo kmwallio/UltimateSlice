@@ -166,6 +166,13 @@ pub fn build_media_browser(
     on_source_selected: Rc<dyn Fn(String, u64, Option<(u64, u64)>)>,
     on_reverse_match_frame: Rc<dyn Fn(String)>,
     on_relink_media: Rc<dyn Fn()>,
+    // Invoked from the library item context menu to swap the source
+    // file for a deliberately-different version (e.g. proxy → master).
+    // Receives the library item id; the callback drives the file
+    // picker, probe, aspect-mismatch warning, and propagation to all
+    // timeline clips. Window-side wiring builds this from
+    // `on_replace_media_gui` with a `LibraryItem(id)` target.
+    on_replace_library_source: Rc<dyn Fn(String)>,
     on_create_multicam_from_browser: Rc<dyn Fn(Vec<String>)>,
     on_library_changed: Rc<dyn Fn()>,
     // Given a set of source paths about to be removed from the
@@ -832,6 +839,7 @@ pub fn build_media_browser(
         let on_reverse_match_frame_ctx = on_reverse_match_frame.clone();
         let on_check_library_usage_ctx = on_check_library_usage.clone();
         let on_convert_library_ltc_ctx = on_convert_library_ltc.clone();
+        let on_replace_library_source_ctx = on_replace_library_source.clone();
         let on_create_subclip_from_marks_ctx = on_create_subclip_from_marks.clone();
         let rclick = gtk::GestureClick::new();
         rclick.set_button(3); // right button
@@ -1276,6 +1284,41 @@ pub fn build_media_browser(
                             convert_btn.connect_clicked(move |_| {
                                 popover.popdown();
                                 on_convert_library_ltc(source_path.clone());
+                            });
+                        }
+
+                        // Replace Source File… — single-select only,
+                        // requires a backing source file. Swaps the
+                        // library item's source AND propagates to all
+                        // timeline clips referencing it (with crop
+                        // rescale on resolution change). Distinct from
+                        // Relink which is for offline-media recovery.
+                        let replace_target_id: Option<String> = if selected_ids.len() == 1 {
+                            let lib = library_ctx.borrow();
+                            lib.items
+                                .iter()
+                                .find(|i| {
+                                    i.id == selected_ids[0]
+                                        && i.has_backing_file()
+                                        && i.parent_id.is_none()
+                                })
+                                .map(|i| i.id.clone())
+                        } else {
+                            None
+                        };
+                        if let Some(item_id) = replace_target_id {
+                            let replace_btn =
+                                add_menu_item(&menu_box, "Replace Source File…");
+                            replace_btn.set_tooltip_text(Some(
+                                "Swap this library item's source file for a different version (e.g. proxy → master). \
+                                 Updates every timeline clip that references the old source. \
+                                 Crop values rescale automatically when the new file has a different resolution.",
+                            ));
+                            let popover = popover.clone();
+                            let cb = on_replace_library_source_ctx.clone();
+                            replace_btn.connect_clicked(move |_| {
+                                popover.popdown();
+                                cb(item_id.clone());
                             });
                         }
 

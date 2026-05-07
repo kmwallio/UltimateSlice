@@ -132,3 +132,52 @@ Bins are saved with your project and restored when you reopen it.
 - Use **Export ▼ → Project Health…** when you want an overview of all offline paths plus generated cache usage before relinking.
 - Choose a folder to scan. UltimateSlice searches recursively and remaps missing paths by filename, then breaks ties using deepest tail-path match.
 - The relink pass reports how many items were remapped and how many remain unresolved.
+
+## Replacing source media (deliberate version swap)
+
+Distinct from **Relink** (which is for offline-media recovery), **Replace Source File** is the path for deliberate version swaps:
+
+- Proxy → master (when you've finished a rough cut and want to flip every clip to the high-res original)
+- 1080p preview → 4K final delivery
+- Online → offline grade pass (e.g. graded ProRes from your colorist)
+- A re-export of the same shot with corrections applied
+
+### Three ways to invoke it
+
+1. **Right-click a Media Library item → "Replace Source File…"** — swaps the library item AND every timeline clip that references the old source path. Preserves trim points, color grading, transforms, masks, motion tracking, and titles. A single Ctrl+Z reverts every clip change in one step (the library item's metadata refresh is direct and not undoable, mirroring Relink).
+
+2. **Right-click a timeline clip → "Replace Source File…"** — swaps just that clip's source. Other clips that referenced the same source stay untouched. Useful when you want one shot to use a different cut without touching siblings.
+
+3. **Inspector → "Replace…" button** (next to the existing "Relink…" button) — same as the timeline right-click; operates on the selected clip.
+
+### What carries across the swap
+
+UltimateSlice's transform model is mostly resolution-independent, so very little needs to change visually:
+
+| Field | Behavior on swap |
+|---|---|
+| Trim points (`source_in` / `source_out`) | Preserved verbatim. `source_out` clamps to the new file's duration if it's shorter. |
+| Color grading (brightness / contrast / saturation / temperature / tint / shadows / highlights / LUTs) | Preserved verbatim. |
+| Transform (scale / position X+Y / rotation / flips) | Preserved verbatim — values are normalized, not pixel-based. |
+| Crop (left / right / top / bottom) | **Auto-rescaled** by the height/width ratio when the new media has different dimensions. e.g. `crop_top=200` on a 1080p source becomes `crop_top=400` on a 4K source — the same fraction of the frame stays cropped. |
+| Masks (rectangle / ellipse / bezier path) | Preserved verbatim — geometry is normalized 0.0–1.0. |
+| Motion tracking samples + binding offsets | Preserved verbatim. |
+| Titles / subtitles | Preserved verbatim. |
+| Drawing items (vector strokes drawn on the clip) | Preserved verbatim — widths are project-canvas-relative, not source-relative. |
+| Audio source stream selection | Re-validated against the new file's stream layout. If your previously-selected stream no longer exists, falls back to stream 0. |
+| HDR colorimetry (library item only) | Refreshed from the new file's probe. |
+
+### When you'll see a warning
+
+- **Aspect ratio change > 1%** — a confirmation dialog appears: "Old: 16:9 (1.78:1), New: 4:3 (1.33:1) — framing math may not match exactly. Continue?" Crop values still rescale per axis (horizontal by width ratio, vertical by height ratio), but the visual result may shift slightly. Cancel here if you'd rather adjust the crops manually.
+
+- **New file shorter than the clip's start point** — a hard error: "New media is 5.00s but the clip starts at 8.00s — trim the clip to start earlier or pick a longer file." No mutation happens; the clip stays exactly as it was. Trim the clip back, then retry.
+
+### MCP automation
+
+Both flows are scriptable:
+
+- `replace_clip_source { clip_id, new_path }` — per-clip swap
+- `replace_library_source { item_id, new_path }` — library-driven swap with all-instance propagation
+
+The reply payload reports `crop_rescaled`, `source_out_clamped`, `aspect_changed`, and `audio_stream_reset` so scripts can surface the right user-facing toast.

@@ -656,6 +656,11 @@ pub struct TimelineState {
     pub on_detect_scene_cuts: Option<Rc<dyn Fn(String, String, String, u64, u64, f64)>>,
     pub on_convert_ltc_to_timecode:
         Option<Rc<dyn Fn(String, LtcChannelSelection, Option<FrameRate>)>>,
+    /// Driven by the timeline clip context menu's "Replace Source File…"
+    /// entry. Receives the clip id; window.rs wires it to dispatch the
+    /// shared per-clip Replace Media driver (file picker → probe →
+    /// aspect-mismatch warning → undo command).
+    pub on_replace_clip_source: Option<Rc<dyn Fn(String)>>,
     pub on_generate_music: Option<Rc<dyn Fn(MusicGenerationTarget)>>,
     /// Lightweight status callback for the MusicGen region workflow.
     pub on_music_generation_status: Option<Rc<dyn Fn(String)>>,
@@ -985,6 +990,7 @@ impl TimelineState {
             on_remove_silent_parts: None,
             on_detect_scene_cuts: None,
             on_convert_ltc_to_timecode: None,
+            on_replace_clip_source: None,
             on_generate_music: None,
             on_music_generation_status: None,
             magnetic_mode: false,
@@ -6940,6 +6946,14 @@ pub fn build_timeline(
         "Decode LTC from the selected clip and store it as source timecode metadata",
     ));
     clip_context_box.append(&btn_convert_ltc);
+    let btn_replace_source = gtk::Button::with_label("Replace Source File\u{2026}");
+    btn_replace_source.add_css_class("flat");
+    btn_replace_source.set_tooltip_text(Some(
+        "Swap this clip's source media for a different file (e.g. proxy → master). \
+         Other clips referencing the same source are not affected. Crop values rescale \
+         automatically if the new file has a different resolution.",
+    ));
+    clip_context_box.append(&btn_replace_source);
     let btn_split_stereo = gtk::Button::with_label("Split Stereo to Mono Tracks");
     btn_split_stereo.add_css_class("flat");
     btn_split_stereo.set_tooltip_text(Some(
@@ -7339,6 +7353,51 @@ pub fn build_timeline(
                 pop.popdown();
             }
             open_convert_ltc_dialog(state.clone());
+        });
+    }
+
+    {
+        let state = state.clone();
+        let pop_weak = clip_context_pop.downgrade();
+        btn_replace_source.connect_clicked(move |_| {
+            if let Some(pop) = pop_weak.upgrade() {
+                pop.popdown();
+            }
+            // Resolve which clip to swap: primary selection if one,
+            // first of the multi-selection otherwise. Bail when the
+            // resolved clip has no source path or isn't a file-backed
+            // kind (titles / adjustments / compounds skip).
+            let st = state.borrow();
+            let clip_id = match st.selected_ids_or_primary().into_iter().next() {
+                Some(id) => id,
+                None => return,
+            };
+            let cb = match st.on_replace_clip_source.clone() {
+                Some(cb) => cb,
+                None => return,
+            };
+            let path_ok = {
+                let proj = st.project.borrow();
+                proj.tracks
+                    .iter()
+                    .flat_map(|t| t.clips.iter())
+                    .find(|c| c.id == clip_id)
+                    .map(|c| {
+                        !c.source_path.trim().is_empty()
+                            && !matches!(
+                                c.kind,
+                                crate::model::clip::ClipKind::Title
+                                    | crate::model::clip::ClipKind::Adjustment
+                                    | crate::model::clip::ClipKind::Compound
+                            )
+                    })
+                    .unwrap_or(false)
+            };
+            drop(st);
+            if !path_ok {
+                return;
+            }
+            cb(clip_id);
         });
     }
 

@@ -294,6 +294,7 @@ pub struct InspectorView {
     pub path_value: Label,
     pub path_status_value: Label,
     pub relink_btn: gtk4::Button,
+    pub replace_btn: gtk4::Button,
     pub in_value: Label,
     pub out_value: Label,
     pub dur_value: Label,
@@ -2388,6 +2389,20 @@ impl InspectorView {
                     self.path_status_value.add_css_class("dim-label");
                     self.relink_btn.set_visible(false);
                 }
+                // Replace button is independent of online/offline: it's
+                // for deliberate version swaps (proxy → master, etc.),
+                // which makes sense even on online media. Hide it for
+                // clip kinds that don't have a real source file
+                // (titles, adjustment layers, compounds).
+                self.replace_btn.set_visible(
+                    !c.source_path.trim().is_empty()
+                        && !matches!(
+                            c.kind,
+                            crate::model::clip::ClipKind::Title
+                                | crate::model::clip::ClipKind::Adjustment
+                                | crate::model::clip::ClipKind::Compound
+                        ),
+                );
                 self.clip_color_label_combo
                     .set_selected(clip_color_label_index(c.color_label));
                 self.blend_mode_dropdown.set_selected(
@@ -3097,6 +3112,7 @@ impl InspectorView {
                 self.path_status_value.remove_css_class("offline-label");
                 self.path_status_value.add_css_class("dim-label");
                 self.relink_btn.set_visible(false);
+                self.replace_btn.set_visible(false);
                 self.transition_kind_dropdown.set_active_id(Some(""));
                 self.transition_duration_ms.set_range(
                     (MIN_TRANSITION_DURATION_NS as f64) / 1_000_000.0,
@@ -3600,6 +3616,16 @@ pub fn build_inspector(
     relink_btn.add_css_class("small-btn");
     relink_btn.set_visible(false);
     content_box.append(&relink_btn);
+
+    let replace_btn = gtk4::Button::with_label("Replace…");
+    replace_btn.set_tooltip_text(Some(
+        "Swap this clip's source media with a different file. \
+         If the new file has a different resolution, crop values are \
+         rescaled to maintain visual parity.",
+    ));
+    replace_btn.add_css_class("small-btn");
+    replace_btn.set_visible(false);
+    content_box.append(&replace_btn);
 
     content_box.append(&Separator::new(Orientation::Horizontal));
 
@@ -11156,6 +11182,7 @@ pub fn build_inspector(
         path_value,
         path_status_value,
         relink_btn,
+        replace_btn,
         in_value,
         out_value,
         dur_value,

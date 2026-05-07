@@ -5388,6 +5388,157 @@ pub(crate) fn proxy_scale_for_mode(
     crate::media::proxy_cache::ProxyScale::MaxHeight(proxy_mode_height(mode))
 }
 
+/// Discriminator for the shared Replace Media GUI driver. `Clip` swaps a
+/// single timeline clip's source in isolation; `LibraryItem` propagates
+/// the swap through every timeline clip referencing the library item's
+/// current source path AND updates the library MediaItem itself.
+#[derive(Clone, Debug)]
+pub enum ReplaceMediaTarget {
+    Clip(String),
+    LibraryItem(String),
+}
+
+/// Returns a user-facing aspect-mismatch warning message when the new
+/// media's aspect ratio differs from the old by more than 1% (relative).
+/// `None` means the swap can proceed without a confirmation dialog.
+pub(crate) fn aspect_mismatch_message(
+    old_dims: Option<(u32, u32)>,
+    new_dims: Option<(u32, u32)>,
+) -> Option<String> {
+    let (ow, oh) = old_dims?;
+    let (nw, nh) = new_dims?;
+    if oh == 0 || nh == 0 {
+        return None;
+    }
+    let old_aspect = ow as f64 / oh as f64;
+    let new_aspect = nw as f64 / nh as f64;
+    if (old_aspect - new_aspect).abs() / old_aspect.max(0.0001) <= 0.01 {
+        return None;
+    }
+    Some(format!(
+        "Old media: {ow}×{oh} ({old_aspect:.2}:1)\n\
+         New media: {nw}×{nh} ({new_aspect:.2}:1)\n\n\
+         Crop values will be rescaled per axis (horizontal by width ratio, \
+         vertical by height ratio), but framing math may not match exactly. \
+         Continue?",
+    ))
+}
+
+/// Run the full replace-media flow against `target`. Captures clip
+/// state, runs the helper, builds the right undo command(s), and
+/// mutates the library when needed. Returns a one-line summary string
+/// for logging on success, or a user-friendly error message on failure.
+pub(crate) fn apply_replace_media_target(
+    target: &ReplaceMediaTarget,
+    old_path: &str,
+    new_path: &str,
+    new_meta: &crate::media::probe_cache::MediaProbeMetadata,
+    project: &Rc<RefCell<crate::model::project::Project>>,
+    library: &Rc<RefCell<crate::model::media_library::MediaLibrary>>,
+    timeline_state: &Rc<RefCell<crate::ui::timeline::TimelineState>>,
+) -> Result<String, String> {
+    use crate::media::replace_media::apply_replace_media;
+    use crate::undo::{ClipSourceState, CompoundEditCommand, EditCommand, ReplaceClipSourceCommand};
+    match target {
+        ReplaceMediaTarget::Clip(clip_id) => {
+            // Capture, simulate on a clone, validate.
+            let prepared = {
+                let mut proj = project.borrow_mut();
+                let Some(clip) = proj.clip_mut(clip_id) else {
+                    return Err(format!("Clip not found: {clip_id}"));
+                };
+                let old_state = ClipSourceState::capture(clip);
+                let mut work = clip.clone();
+                match apply_replace_media(&mut work, new_path, new_meta) {
+                    Ok(summary) => {
+                        let new_state = ClipSourceState::capture(&work);
+                        Ok((old_state, new_state, summary))
+                    }
+                    Err(e) => Err(e.to_string()),
+                }
+            };
+            let (old_state, new_state, summary) = prepared?;
+            let cmd = ReplaceClipSourceCommand {
+                clip_id: clip_id.clone(),
+                old_state,
+                new_state,
+            };
+            {
+                let mut st = timeline_state.borrow_mut();
+                let mut p = project.borrow_mut();
+                st.history.execute(Box::new(cmd), &mut p);
+            }
+            Ok(format!(
+                "clip {clip_id}: crop_rescaled={}, source_out_clamped={}, aspect_changed={}",
+                summary.crop_rescaled,
+                summary.source_out_clamped.is_some(),
+                summary.aspect_changed
+            ))
+        }
+        ReplaceMediaTarget::LibraryItem(item_id) => {
+            // Walk all instances, build per-clip child commands.
+            let instances = project.borrow().source_clip_instances(old_path);
+            let mut children: Vec<Box<dyn EditCommand>> = Vec::new();
+            let mut updated_clip_count = 0usize;
+            let mut errored: Vec<String> = Vec::new();
+            {
+                let mut proj = project.borrow_mut();
+                for inst in &instances {
+                    if let Some(clip) = proj.clip_mut(&inst.clip_id) {
+                        let old_state = ClipSourceState::capture(clip);
+                        let mut work = clip.clone();
+                        match apply_replace_media(&mut work, new_path, new_meta) {
+                            Ok(_) => {
+                                let new_state = ClipSourceState::capture(&work);
+                                children.push(Box::new(ReplaceClipSourceCommand {
+                                    clip_id: inst.clip_id.clone(),
+                                    old_state,
+                                    new_state,
+                                }));
+                                updated_clip_count += 1;
+                            }
+                            Err(e) => {
+                                errored.push(format!("{}: {}", inst.clip_id, e));
+                            }
+                        }
+                    }
+                }
+            }
+            if !errored.is_empty() {
+                // Don't apply anything if even one clip would be invalid;
+                // keep the undo state consistent.
+                return Err(format!(
+                    "Cannot replace: {} clip(s) would be invalidated:\n  {}",
+                    errored.len(),
+                    errored.join("\n  ")
+                ));
+            }
+            if !children.is_empty() {
+                let compound = CompoundEditCommand {
+                    children,
+                    description: "Replace library source".to_string(),
+                };
+                let mut st = timeline_state.borrow_mut();
+                let mut p = project.borrow_mut();
+                st.history.execute(Box::new(compound), &mut p);
+            }
+            // Library mutation is direct + non-undoable, mirroring the
+            // existing relink_media pattern.
+            {
+                let mut lib = library.borrow_mut();
+                if let Some(item) = lib.items.iter_mut().find(|it| &it.id == item_id) {
+                    crate::media::replace_media::apply_library_replace(
+                        item, new_path, new_meta,
+                    );
+                }
+            }
+            Ok(format!(
+                "library item {item_id}: {updated_clip_count} clip(s) updated"
+            ))
+        }
+    }
+}
+
 /// Effective preview-divisor floor for the current proxy mode. Fixed-height
 /// proxies don't have a fixed source-relative divisor — the floor depends on
 /// how much smaller the proxy is than the project canvas. Returns 1 for Off.
@@ -6915,6 +7066,21 @@ pub fn build_window(
         Rc::new(move || {
             if let Some(f) = cb.borrow().as_ref() {
                 f();
+            }
+        })
+    };
+    // Replace Media — late-bound like relink so the callback can capture
+    // window / library / project / timeline_state Rcs after they're built.
+    // The target enum drives whether we swap one timeline clip in
+    // isolation or propagate through every clip referencing a library
+    // item's source path.
+    let on_replace_media_impl: Rc<RefCell<Option<Rc<dyn Fn(ReplaceMediaTarget)>>>> =
+        Rc::new(RefCell::new(None));
+    let on_replace_media_gui: Rc<dyn Fn(ReplaceMediaTarget)> = {
+        let cb = on_replace_media_impl.clone();
+        Rc::new(move |target| {
+            if let Some(f) = cb.borrow().as_ref() {
+                f(target);
             }
         })
     };
@@ -8841,6 +9007,20 @@ pub fn build_window(
     {
         let cb = on_relink_media_gui.clone();
         inspector_view.relink_btn.connect_clicked(move |_| cb());
+    }
+
+    // Wire inspector "Replace…" button. Reads the currently-selected
+    // clip ID from `inspector_view.selected_clip_id` and dispatches to
+    // the shared per-clip replace driver.
+    {
+        let cb = on_replace_media_gui.clone();
+        let selected = inspector_view.selected_clip_id.clone();
+        inspector_view.replace_btn.connect_clicked(move |_| {
+            let clip_id = selected.borrow().clone();
+            if let Some(clip_id) = clip_id {
+                cb(ReplaceMediaTarget::Clip(clip_id));
+            }
+        });
     }
 
     // Wire inspector "Retry" button (under the Voice Enhance status row)
@@ -11978,6 +12158,10 @@ pub fn build_window(
                 glib::ControlFlow::Continue
             });
         }
+        timeline_state.borrow_mut().on_replace_clip_source = Some(Rc::new({
+            let cb = on_replace_media_gui.clone();
+            move |clip_id: String| cb(ReplaceMediaTarget::Clip(clip_id))
+        }));
         timeline_state.borrow_mut().on_convert_ltc_to_timecode = Some(Rc::new({
             let project = project.clone();
             let library = library.clone();
@@ -16402,12 +16586,17 @@ pub fn build_window(
             on_project_changed();
         })
     };
+    let on_replace_library_source: Rc<dyn Fn(String)> = {
+        let cb = on_replace_media_gui.clone();
+        Rc::new(move |item_id: String| cb(ReplaceMediaTarget::LibraryItem(item_id)))
+    };
     let (browser, clear_media_selection, force_rebuild_media_browser) =
         media_browser::build_media_browser(
             library.clone(),
             on_source_selected.clone(),
             on_reverse_match_frame,
             on_relink_media_gui.clone(),
+            on_replace_library_source,
             on_create_multicam_from_browser,
             on_library_changed.clone(),
             on_check_library_usage,
@@ -16720,6 +16909,195 @@ pub fn build_window(
             let _ = player.borrow().stop();
         })
     });
+    // Replace Media — late-bound impl that drives both per-clip and
+    // library-driven swaps from the same closure. UI sites (Inspector
+    // button, timeline right-click, library item right-click) just call
+    // `on_replace_media_gui(target)` and this routine handles file
+    // picker / probe / aspect warning / undo command construction.
+    *on_replace_media_impl.borrow_mut() = Some({
+        let window_weak = window_weak.clone();
+        let project = project.clone();
+        let library = library.clone();
+        let timeline_state = timeline_state.clone();
+        let on_project_changed = on_project_changed.clone();
+        let force_rebuild_media_browser = force_rebuild_media_browser.clone();
+        Rc::new(move |target: ReplaceMediaTarget| {
+            let Some(win) = window_weak.upgrade() else {
+                return;
+            };
+
+            // Resolve old path + (optionally) old dimensions for the
+            // aspect-mismatch warning + crop rescale. Per-clip target
+            // looks up its source path on the clip; library target
+            // reads directly from the MediaItem. Old dims come from
+            // the library item in either case (clips don't store
+            // their source resolution — only the library does).
+            let (old_path, old_dims, friendly_name) = match &target {
+                ReplaceMediaTarget::Clip(clip_id) => {
+                    let mut proj = project.borrow_mut();
+                    let path = match proj.clip_mut(clip_id) {
+                        Some(clip) => clip.source_path.clone(),
+                        None => {
+                            log::warn!("on_replace_media: clip not found: {clip_id}");
+                            return;
+                        }
+                    };
+                    drop(proj);
+                    if path.trim().is_empty() {
+                        log::warn!(
+                            "on_replace_media: clip {clip_id} has empty source_path; skipping"
+                        );
+                        return;
+                    }
+                    let lib = library.borrow();
+                    let dims = lib
+                        .items
+                        .iter()
+                        .find(|it| it.source_path == path)
+                        .and_then(|it| it.video_width.zip(it.video_height));
+                    let label = std::path::Path::new(&path)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.clone());
+                    (path, dims, label)
+                }
+                ReplaceMediaTarget::LibraryItem(item_id) => {
+                    let lib = library.borrow();
+                    let Some(item) = lib.items.iter().find(|it| &it.id == item_id) else {
+                        log::warn!("on_replace_media: library item not found: {item_id}");
+                        return;
+                    };
+                    let path = item.source_path.clone();
+                    if path.trim().is_empty() {
+                        log::warn!(
+                            "on_replace_media: library item {item_id} has empty source_path; skipping"
+                        );
+                        return;
+                    }
+                    let dims = item.video_width.zip(item.video_height);
+                    (path, dims, item.label.clone())
+                }
+            };
+
+            // File picker — same filter set as Import Media.
+            let dialog = gtk::FileDialog::new();
+            dialog.set_title(&format!("Replace Source — {}", friendly_name));
+            let filter = gtk::FileFilter::new();
+            filter.add_mime_type("video/*");
+            filter.add_mime_type("audio/*");
+            filter.add_mime_type("image/*");
+            filter.set_name(Some("Media Files"));
+            let filters = gio::ListStore::new::<gtk::FileFilter>();
+            filters.append(&filter);
+            let all_filter = gtk::FileFilter::new();
+            all_filter.add_pattern("*");
+            all_filter.set_name(Some("All Files"));
+            filters.append(&all_filter);
+            dialog.set_filters(Some(&filters));
+
+            let project = project.clone();
+            let library = library.clone();
+            let timeline_state = timeline_state.clone();
+            let on_project_changed = on_project_changed.clone();
+            let force_rebuild_media_browser = force_rebuild_media_browser.clone();
+            let target = target.clone();
+            let win_outer = win.clone();
+            let old_path_for_apply = old_path.clone();
+            dialog.open(Some(&win), gio::Cancellable::NONE, move |result| {
+                let Ok(file) = result else { return };
+                let Some(new_path_buf) = file.path() else {
+                    return;
+                };
+                let new_path = new_path_buf.to_string_lossy().into_owned();
+
+                // Synchronous probe — ffprobe-fast and we're already
+                // off the GTK paint loop now that the file picker has
+                // returned.
+                let new_meta = crate::media::probe_cache::probe_media_metadata(&new_path);
+
+                // Aspect-mismatch warning (>1% relative diff). Surface
+                // before applying so the user can cancel cleanly.
+                let aspect_warning_text =
+                    aspect_mismatch_message(old_dims, new_meta.video_width.zip(new_meta.video_height));
+
+                let target_apply = target.clone();
+                let project_apply = project.clone();
+                let library_apply = library.clone();
+                let timeline_state_apply = timeline_state.clone();
+                let on_project_changed_apply = on_project_changed.clone();
+                let force_rebuild_media_browser_apply = force_rebuild_media_browser.clone();
+                let new_path_apply = new_path.clone();
+                let old_path_apply = old_path_for_apply.clone();
+                let new_meta_apply = new_meta.clone();
+                let win_for_dialog = win_outer.clone();
+                let do_apply = move || {
+                    let outcome = apply_replace_media_target(
+                        &target_apply,
+                        &old_path_apply,
+                        &new_path_apply,
+                        &new_meta_apply,
+                        &project_apply,
+                        &library_apply,
+                        &timeline_state_apply,
+                    );
+                    match outcome {
+                        Ok(summary) => {
+                            log::info!(
+                                "Replace Media OK: {summary}",
+                                summary = summary
+                            );
+                            on_project_changed_apply();
+                            force_rebuild_media_browser_apply();
+                        }
+                        Err(err) => {
+                            log::warn!("Replace Media failed: {err}");
+                            #[allow(deprecated)]
+                            let dlg = gtk::MessageDialog::builder()
+                                .transient_for(&win_for_dialog)
+                                .modal(true)
+                                .message_type(gtk::MessageType::Error)
+                                .buttons(gtk::ButtonsType::Close)
+                                .text("Replace Source")
+                                .secondary_text(&err)
+                                .build();
+                            #[allow(deprecated)]
+                            dlg.connect_response(|d, _| d.close());
+                            #[allow(deprecated)]
+                            dlg.present();
+                        }
+                    }
+                };
+
+                if let Some(warning) = aspect_warning_text {
+                    #[allow(deprecated)]
+                    let dlg = gtk::MessageDialog::builder()
+                        .transient_for(&win_outer)
+                        .modal(true)
+                        .message_type(gtk::MessageType::Warning)
+                        .buttons(gtk::ButtonsType::OkCancel)
+                        .text("Aspect ratio change")
+                        .secondary_text(&warning)
+                        .build();
+                    let do_apply_cell: Rc<RefCell<Option<Box<dyn FnOnce()>>>> =
+                        Rc::new(RefCell::new(Some(Box::new(do_apply))));
+                    #[allow(deprecated)]
+                    dlg.connect_response(move |d, resp| {
+                        d.close();
+                        if resp == gtk::ResponseType::Ok {
+                            if let Some(f) = do_apply_cell.borrow_mut().take() {
+                                f();
+                            }
+                        }
+                    });
+                    #[allow(deprecated)]
+                    dlg.present();
+                } else {
+                    do_apply();
+                }
+            });
+        })
+    });
+
     // Left panel: vertical Paned — browser/effects stack (top) + source preview (bottom)
     // The Paned lets the user resize the split after a source is selected.
     source_monitor_panel.set_visible(false);
