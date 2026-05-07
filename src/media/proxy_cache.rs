@@ -123,11 +123,19 @@ pub struct ProxyVariantSpec {
     pub source_path: String,
     pub scale: ProxyScale,
     pub lut_path: Option<String>,
+    /// Codec the variant was transcoded with. Carried so cleanup-pass
+    /// path resolution matches the on-disk filename produced by the
+    /// worker (which folds codec into `proxy_filename_for_variant`).
+    pub codec: ProxyCodec,
     pub vidstab_enabled: bool,
     vidstab_smoothing_hundredths: i32,
 }
 
 impl ProxyVariantSpec {
+    /// Construct a spec assuming the historical H.264 codec. Existing
+    /// callers that don't carry codec context (legacy paths, tests) keep
+    /// using this — see [`ProxyVariantSpec::with_codec`] for the
+    /// codec-aware variant.
     pub fn new(
         source_path: impl Into<String>,
         scale: ProxyScale,
@@ -135,10 +143,29 @@ impl ProxyVariantSpec {
         vidstab_enabled: bool,
         vidstab_smoothing: f32,
     ) -> Self {
+        Self::with_codec(
+            source_path,
+            scale,
+            lut_path,
+            ProxyCodec::H264,
+            vidstab_enabled,
+            vidstab_smoothing,
+        )
+    }
+
+    pub fn with_codec(
+        source_path: impl Into<String>,
+        scale: ProxyScale,
+        lut_path: Option<String>,
+        codec: ProxyCodec,
+        vidstab_enabled: bool,
+        vidstab_smoothing: f32,
+    ) -> Self {
         Self {
             source_path: source_path.into(),
             scale,
             lut_path,
+            codec,
             vidstab_enabled,
             vidstab_smoothing_hundredths: normalized_vidstab_smoothing_hundredths(
                 vidstab_enabled,
@@ -191,10 +218,33 @@ pub fn proxy_key(source_path: &str, lut_path: Option<&str>) -> String {
     proxy_key_with_vidstab(source_path, lut_path, false, 0.0)
 }
 
-/// Extended composite key including vidstab stabilization state.
+/// Extended composite key including vidstab stabilization state. Defaults
+/// to H.264 codec for backwards compatibility — see
+/// [`proxy_key_with_codec_and_vidstab`] for the codec-aware variant.
 pub fn proxy_key_with_vidstab(
     source_path: &str,
     lut_path: Option<&str>,
+    vidstab_enabled: bool,
+    vidstab_smoothing: f32,
+) -> String {
+    proxy_key_with_codec_and_vidstab(
+        source_path,
+        lut_path,
+        ProxyCodec::H264,
+        vidstab_enabled,
+        vidstab_smoothing,
+    )
+}
+
+/// Authoritative composite cache key. H.264 — the historical default —
+/// produces the same key shape as the original `proxy_key_with_vidstab`
+/// so existing on-disk caches stay valid for users who never touch the
+/// codec preference. HEVC appends a `|c:hevc` discriminator so it lives
+/// at a distinct cache slot and gets its own transcode.
+pub fn proxy_key_with_codec_and_vidstab(
+    source_path: &str,
+    lut_path: Option<&str>,
+    codec: ProxyCodec,
     vidstab_enabled: bool,
     vidstab_smoothing: f32,
 ) -> String {
@@ -204,6 +254,9 @@ pub fn proxy_key_with_vidstab(
     };
     if vidstab_enabled && vidstab_smoothing > 0.0 {
         key.push_str(&format!("|vs:{:.2}", vidstab_smoothing));
+    }
+    if matches!(codec, ProxyCodec::Hevc) {
+        key.push_str("|c:hevc");
     }
     key
 }
@@ -230,7 +283,9 @@ pub struct ProxyCache {
     /// Total items ever requested in this session (for progress).
     total_requested: usize,
     result_rx: mpsc::Receiver<ProxyWorkerUpdate>,
-    work_tx: Option<mpsc::Sender<(String, ProxyScale, Vec<String>, bool, bool, f32)>>,
+    work_tx: Option<
+        mpsc::Sender<(String, ProxyScale, Vec<String>, bool, bool, f32, ProxyCodec)>,
+    >,
     /// Per-job estimated bytes and written bytes for byte-based status progress.
     estimated_bytes: HashMap<String, u64>,
     written_bytes: HashMap<String, u64>,
@@ -291,9 +346,21 @@ impl ProxyCache {
             );
         }
         let (result_tx, result_rx) = mpsc::sync_channel::<ProxyWorkerUpdate>(64);
-        // (source_path, scale, lut_paths, sidecar_mirror, vidstab_enabled, vidstab_smoothing)
-        let (work_tx, work_rx) =
-            mpsc::channel::<(String, ProxyScale, Vec<String>, bool, bool, f32)>();
+        // (source_path, scale, lut_paths, sidecar_mirror, vidstab_enabled,
+        //  vidstab_smoothing, codec_snapshot)
+        // The codec is snapshotted at enqueue time so the worker's cache
+        // key matches what `request_with_vidstab` already reserved in
+        // `pending` — without this, a codec preference change between
+        // enqueue and dequeue would orphan the work item.
+        let (work_tx, work_rx) = mpsc::channel::<(
+            String,
+            ProxyScale,
+            Vec<String>,
+            bool,
+            bool,
+            f32,
+            ProxyCodec,
+        )>();
 
         let hw_encoder_mode = Arc::new(RwLock::new(HwEncoderMode::default()));
         let proxy_codec = Arc::new(RwLock::new(ProxyCodec::default()));
@@ -332,20 +399,25 @@ impl ProxyCache {
                         sidecar_mirror_enabled,
                         vidstab_enabled,
                         vidstab_smoothing,
+                        codec_snapshot,
                     )) => {
                         let lut_composite = if lut_paths.is_empty() {
                             None
                         } else {
                             Some(lut_paths.join("|"))
                         };
-                        let key = proxy_key_with_vidstab(
+                        let key = proxy_key_with_codec_and_vidstab(
                             &source_path,
                             lut_composite.as_deref(),
+                            codec_snapshot,
                             vidstab_enabled,
                             vidstab_smoothing,
                         );
                         let mode_snapshot = *hw_mode_ref.read().unwrap();
-                        let codec_snapshot = *proxy_codec_ref.read().unwrap();
+                        // codec_snapshot already arrived in the work tuple — keep
+                        // proxy_codec_ref alive in the closure so the outer Arc
+                        // doesn't get dropped, but read from the message.
+                        let _ = &proxy_codec_ref;
                         let already_failed_enc = hw_failed_ref
                             .lock()
                             .map(|set| set.contains(&source_path))
@@ -499,7 +571,22 @@ impl ProxyCache {
         vidstab_enabled: bool,
         vidstab_smoothing: f32,
     ) {
-        let key = proxy_key_with_vidstab(source_path, lut_path, vidstab_enabled, vidstab_smoothing);
+        // Snapshot the codec preference up front so the cache key, the
+        // disk-check, and the work-queue message all agree even if the
+        // user changes the preference between this call and the worker
+        // dequeue.
+        let codec_snapshot = self
+            .proxy_codec
+            .read()
+            .map(|g| *g)
+            .unwrap_or(ProxyCodec::H264);
+        let key = proxy_key_with_codec_and_vidstab(
+            source_path,
+            lut_path,
+            codec_snapshot,
+            vidstab_enabled,
+            vidstab_smoothing,
+        );
         if self.proxies.contains_key(&key)
             || self.pending.contains(&key)
             || self.failed.contains(&key)
@@ -511,6 +598,7 @@ impl ProxyCache {
             source_path,
             scale,
             lut_path,
+            codec_snapshot,
             vidstab_enabled,
             vidstab_smoothing,
             &self.local_cache_root,
@@ -519,17 +607,15 @@ impl ProxyCache {
             self.proxies.insert(key, p);
             return;
         }
-        self.pending.insert(key);
+        self.pending.insert(key.clone());
         self.total_requested += 1;
         log::info!(
-            "ProxyCache: enqueuing proxy for {} (scale={:?})",
+            "ProxyCache: enqueuing proxy for {} (scale={:?}, codec={})",
             source_path,
-            scale
+            scale,
+            codec_snapshot.as_str()
         );
-        self.written_bytes.insert(
-            proxy_key_with_vidstab(source_path, lut_path, vidstab_enabled, vidstab_smoothing),
-            0,
-        );
+        self.written_bytes.insert(key, 0);
         if let Some(ref tx) = self.work_tx {
             // Split composite key back into individual paths for the worker.
             let lut_paths: Vec<String> = match lut_path {
@@ -545,6 +631,7 @@ impl ProxyCache {
                 self.sidecar_mirror_enabled,
                 vidstab_enabled,
                 vidstab_smoothing,
+                codec_snapshot,
             ));
         }
     }
@@ -1265,6 +1352,7 @@ fn source_variant_hash(
     source_path: &str,
     scale: ProxyScale,
     lut_path: Option<&str>,
+    codec: ProxyCodec,
     vidstab_enabled: bool,
     vidstab_smoothing: f32,
 ) -> u64 {
@@ -1278,6 +1366,12 @@ fn source_variant_hash(
             vidstab_enabled,
             vidstab_smoothing,
         ));
+    // Codec only participates when it deviates from the historical H.264
+    // default. This keeps the variant hash stable for users who never
+    // touch the new HEVC preference, so their existing cache survives.
+    if matches!(codec, ProxyCodec::Hevc) {
+        hasher.add(codec.as_str());
+    }
     hasher.finish()
 }
 
@@ -1285,6 +1379,7 @@ fn proxy_filename_for_variant(
     source_path: &str,
     scale: ProxyScale,
     lut_path: Option<&str>,
+    codec: ProxyCodec,
     vidstab_enabled: bool,
     vidstab_smoothing: f32,
 ) -> Option<String> {
@@ -1294,6 +1389,7 @@ fn proxy_filename_for_variant(
         source_path,
         scale,
         lut_path,
+        codec,
         vidstab_enabled,
         vidstab_smoothing,
     );
@@ -1325,6 +1421,7 @@ fn local_proxy_path_for(
     source_path: &str,
     scale: ProxyScale,
     lut_path: Option<&str>,
+    codec: ProxyCodec,
     vidstab_enabled: bool,
     vidstab_smoothing: f32,
     local_root: &Path,
@@ -1333,6 +1430,7 @@ fn local_proxy_path_for(
         source_path,
         scale,
         lut_path,
+        codec,
         vidstab_enabled,
         vidstab_smoothing,
     )?;
@@ -1356,6 +1454,7 @@ fn alongside_proxy_path_for(
     source_path: &str,
     scale: ProxyScale,
     lut_path: Option<&str>,
+    codec: ProxyCodec,
     vidstab_enabled: bool,
     vidstab_smoothing: f32,
 ) -> Option<String> {
@@ -1366,6 +1465,7 @@ fn alongside_proxy_path_for(
         source_path,
         scale,
         lut_path,
+        codec,
         vidstab_enabled,
         vidstab_smoothing,
     )?;
@@ -1389,6 +1489,7 @@ fn local_proxy_path_for_spec(spec: &ProxyVariantSpec, local_root: &Path) -> Opti
         &spec.source_path,
         spec.scale,
         spec.lut_key(),
+        spec.codec,
         spec.vidstab_enabled,
         spec.vidstab_smoothing(),
         local_root,
@@ -1406,6 +1507,7 @@ fn alongside_proxy_path_for_spec(spec: &ProxyVariantSpec) -> Option<String> {
         &spec.source_path,
         spec.scale,
         spec.lut_key(),
+        spec.codec,
         spec.vidstab_enabled,
         spec.vidstab_smoothing(),
     )
@@ -1415,6 +1517,7 @@ fn existing_proxy_path_for(
     source_path: &str,
     scale: ProxyScale,
     lut_path: Option<&str>,
+    codec: ProxyCodec,
     vidstab_enabled: bool,
     vidstab_smoothing: f32,
     local_root: &Path,
@@ -1425,6 +1528,7 @@ fn existing_proxy_path_for(
             source_path,
             scale,
             lut_path,
+            codec,
             vidstab_enabled,
             vidstab_smoothing,
             local_root,
@@ -1433,6 +1537,7 @@ fn existing_proxy_path_for(
             source_path,
             scale,
             lut_path,
+            codec,
             vidstab_enabled,
             vidstab_smoothing,
         ),
@@ -1878,6 +1983,7 @@ fn transcode_proxy(
         source_path,
         scale,
         lut_key,
+        proxy_codec,
         vidstab_enabled,
         vidstab_smoothing,
         local_root,
@@ -1889,6 +1995,7 @@ fn transcode_proxy(
         source_path,
         scale,
         lut_key,
+        proxy_codec,
         vidstab_enabled,
         vidstab_smoothing,
     );
@@ -2173,6 +2280,74 @@ mod tests {
     }
 
     #[test]
+    fn proxy_key_h264_default_matches_legacy_shape() {
+        // Regression guard: existing on-disk caches were keyed without the
+        // codec discriminator. proxy_key_with_vidstab (the historical
+        // entry point) must keep producing the same shape so users who
+        // never touch the codec preference don't get forced re-transcodes.
+        let key_legacy = proxy_key_with_vidstab("/tmp/a.mp4", None, false, 0.0);
+        let key_h264 = proxy_key_with_codec_and_vidstab(
+            "/tmp/a.mp4",
+            None,
+            ProxyCodec::H264,
+            false,
+            0.0,
+        );
+        assert_eq!(key_legacy, key_h264);
+        assert_eq!(key_legacy, "/tmp/a.mp4");
+    }
+
+    #[test]
+    fn proxy_key_codec_separates_h264_from_hevc_paths() {
+        let key_h264 = proxy_key_with_codec_and_vidstab(
+            "/tmp/a.mp4",
+            Some("/luts/lut.cube"),
+            ProxyCodec::H264,
+            false,
+            0.0,
+        );
+        let key_hevc = proxy_key_with_codec_and_vidstab(
+            "/tmp/a.mp4",
+            Some("/luts/lut.cube"),
+            ProxyCodec::Hevc,
+            false,
+            0.0,
+        );
+        assert_ne!(
+            key_h264, key_hevc,
+            "switching codec must produce a distinct cache key"
+        );
+        // H.264 omits the codec suffix; HEVC adds `|c:hevc`.
+        assert!(!key_h264.contains("|c:"));
+        assert!(key_hevc.ends_with("|c:hevc"));
+
+        // The on-disk path must also differ so the worker doesn't
+        // overwrite an existing H.264 file with a fresh HEVC transcode
+        // at the same location.
+        let local_root = std::env::temp_dir();
+        let path_h264 = local_proxy_path_for(
+            "/tmp/a.mp4",
+            ProxyScale::MaxHeight(1080),
+            None,
+            ProxyCodec::H264,
+            false,
+            0.0,
+            &local_root,
+        );
+        let path_hevc = local_proxy_path_for(
+            "/tmp/a.mp4",
+            ProxyScale::MaxHeight(1080),
+            None,
+            ProxyCodec::Hevc,
+            false,
+            0.0,
+            &local_root,
+        );
+        assert!(path_h264.is_some() && path_hevc.is_some());
+        assert_ne!(path_h264, path_hevc);
+    }
+
+    #[test]
     fn max_height_filter_caps_height_preserves_aspect_and_avoids_upscale() {
         // -2 forces an even auto-computed width that preserves source aspect.
         // min(N,ih) clamps the height to the target only when source is taller.
@@ -2304,6 +2479,7 @@ mod tests {
             &source_path,
             ProxyScale::MaxHeight(1080),
             None,
+            ProxyCodec::H264,
             false,
             0.0,
             &local_root,
@@ -2313,21 +2489,23 @@ mod tests {
             &source_path,
             ProxyScale::MaxHeight(1080),
             None,
+            ProxyCodec::H264,
             true,
             0.45,
             &local_root,
         )
         .unwrap();
         let plain_sidecar =
-            alongside_proxy_path_for(&source_path, ProxyScale::MaxHeight(1080), None, false, 0.0)
+            alongside_proxy_path_for(&source_path, ProxyScale::MaxHeight(1080), None, ProxyCodec::H264, false, 0.0)
                 .unwrap();
         let stabilized_sidecar =
-            alongside_proxy_path_for(&source_path, ProxyScale::MaxHeight(1080), None, true, 0.45)
+            alongside_proxy_path_for(&source_path, ProxyScale::MaxHeight(1080), None, ProxyCodec::H264, true, 0.45)
                 .unwrap();
         let other_source_local = local_proxy_path_for(
             &other_source_path,
             ProxyScale::MaxHeight(1080),
             None,
+            ProxyCodec::H264,
             false,
             0.0,
             &local_root,
@@ -2342,13 +2520,14 @@ mod tests {
             &source_path,
             ProxyScale::MaxHeight(1080),
             None,
+            ProxyCodec::H264,
             false,
             0.0,
             &local_root,
         )
         .unwrap();
         let updated_sidecar =
-            alongside_proxy_path_for(&source_path, ProxyScale::MaxHeight(1080), None, false, 0.0)
+            alongside_proxy_path_for(&source_path, ProxyScale::MaxHeight(1080), None, ProxyCodec::H264, false, 0.0)
                 .unwrap();
         assert_eq!(plain_local, updated_local);
         assert_eq!(plain_sidecar, updated_sidecar);
@@ -2371,6 +2550,7 @@ mod tests {
             &source_path,
             ProxyScale::MaxHeight(1080),
             None,
+            ProxyCodec::H264,
             false,
             0.0,
             &local_root,
@@ -2386,6 +2566,7 @@ mod tests {
             &source_path,
             ProxyScale::MaxHeight(1080),
             None,
+            ProxyCodec::H264,
             false,
             0.0,
             &local_root,
@@ -2398,6 +2579,7 @@ mod tests {
             &source_path,
             ProxyScale::MaxHeight(1080),
             None,
+            ProxyCodec::H264,
             false,
             0.0,
             &local_root,
@@ -2428,6 +2610,7 @@ mod tests {
             &source_path,
             ProxyScale::MaxHeight(1080),
             None,
+            ProxyCodec::H264,
             false,
             0.0,
             &local_root,
@@ -2532,10 +2715,10 @@ mod tests {
         let source_a = test_source_file("clip-a.mp4");
         let source_b = test_source_file("clip-b.mp4");
         let side_a =
-            alongside_proxy_path_for(&source_a, ProxyScale::MaxHeight(1080), None, false, 0.0)
+            alongside_proxy_path_for(&source_a, ProxyScale::MaxHeight(1080), None, ProxyCodec::H264, false, 0.0)
                 .unwrap();
         let side_b =
-            alongside_proxy_path_for(&source_b, ProxyScale::MaxHeight(640), None, false, 0.0)
+            alongside_proxy_path_for(&source_b, ProxyScale::MaxHeight(640), None, ProxyCodec::H264, false, 0.0)
                 .unwrap();
 
         for (path, source_path) in [(&side_a, &source_a), (&side_b, &source_b)] {
@@ -2567,10 +2750,10 @@ mod tests {
         let source_a = test_source_file("clip-a.mp4");
         let source_b = test_source_file("clip-b.mp4");
         let side_a =
-            alongside_proxy_path_for(&source_a, ProxyScale::MaxHeight(1080), None, false, 0.0)
+            alongside_proxy_path_for(&source_a, ProxyScale::MaxHeight(1080), None, ProxyCodec::H264, false, 0.0)
                 .unwrap();
         let side_b =
-            alongside_proxy_path_for(&source_b, ProxyScale::MaxHeight(640), None, false, 0.0)
+            alongside_proxy_path_for(&source_b, ProxyScale::MaxHeight(640), None, ProxyCodec::H264, false, 0.0)
                 .unwrap();
 
         for (path, source_path) in [(&side_a, &source_a), (&side_b, &source_b)] {

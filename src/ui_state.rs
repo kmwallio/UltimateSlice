@@ -861,7 +861,7 @@ fn default_last_non_off_proxy_mode() -> ProxyMode {
 /// quality and on Intel iGPUs the dedicated HEVC encoder is often faster
 /// per frame than the H.264 encoder for very-high-resolution sources
 /// (less compression work per output pixel).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProxyCodec {
     H264,

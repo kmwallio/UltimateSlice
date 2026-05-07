@@ -5531,6 +5531,7 @@ fn reload_source_preview_selection(
 fn collect_unique_proxy_variants(
     project: &Project,
     scale: crate::media::proxy_cache::ProxyScale,
+    codec: crate::ui_state::ProxyCodec,
 ) -> Vec<crate::media::proxy_cache::ProxyVariantSpec> {
     let mut seen: HashSet<crate::media::proxy_cache::ProxyVariantSpec> = HashSet::new();
     let mut out = Vec::new();
@@ -5538,10 +5539,11 @@ fn collect_unique_proxy_variants(
         for c in &track.clips {
             // Regular clip (or any clip with a source path).
             if !c.source_path.is_empty() {
-                let spec = crate::media::proxy_cache::ProxyVariantSpec::new(
+                let spec = crate::media::proxy_cache::ProxyVariantSpec::with_codec(
                     c.source_path.clone(),
                     scale,
                     c.lut_key(),
+                    codec,
                     c.vidstab_enabled,
                     c.vidstab_smoothing,
                 );
@@ -5562,10 +5564,11 @@ fn collect_unique_proxy_variants(
                     } else {
                         c.lut_key()
                     };
-                    let spec = crate::media::proxy_cache::ProxyVariantSpec::new(
+                    let spec = crate::media::proxy_cache::ProxyVariantSpec::with_codec(
                         angle.source_path.clone(),
                         scale,
                         angle_lut,
+                        codec,
                         false, // angles don't have per-angle vidstab
                         0.0,
                     );
@@ -6778,7 +6781,7 @@ pub fn build_window(
                 let scale = proxy_scale_for_mode(&new_state.proxy_mode);
                 let variants = {
                     let proj = project.borrow();
-                    collect_unique_proxy_variants(&proj, scale)
+                    collect_unique_proxy_variants(&proj, scale, new_state.proxy_codec)
                 };
                 {
                     let mut cache = proxy_cache.borrow_mut();
@@ -7244,6 +7247,7 @@ pub fn build_window(
                             collect_unique_proxy_variants(
                                 &proj,
                                 proxy_scale_for_mode(&prefs.proxy_mode),
+                                prefs.proxy_codec,
                             )
                         } else {
                             collect_unique_preview_lut_proxy_variants(&proj)
@@ -7347,7 +7351,7 @@ pub fn build_window(
                     let scale = proxy_scale_for_mode(&prefs.proxy_mode);
                     let variants = {
                         let proj = project.borrow();
-                        collect_unique_proxy_variants(&proj, scale)
+                        collect_unique_proxy_variants(&proj, scale, prefs.proxy_codec)
                     };
                     {
                         let mut cache = proxy_cache.borrow_mut();
@@ -14886,7 +14890,8 @@ pub fn build_window(
                         last_proxy_refresh_us_c.set(now_us);
                         let variants = {
                             let proj = project.borrow();
-                            collect_unique_proxy_variants(&proj, desired_scale)
+                            let codec_now = preferences_state.borrow().proxy_codec;
+                            collect_unique_proxy_variants(&proj, desired_scale, codec_now)
                         };
                         {
                             let mut cache = proxy_cache.borrow_mut();
@@ -17462,7 +17467,8 @@ pub fn build_window(
                             };
                             let clip_variants = {
                                 let proj = project_reload.borrow();
-                                collect_unique_proxy_variants(&proj, manual_scale)
+                                let codec_now = preferences_state_reload.borrow().proxy_codec;
+                                collect_unique_proxy_variants(&proj, manual_scale, codec_now)
                             };
                             {
                                 let mut cache = proxy_cache_reload.borrow_mut();

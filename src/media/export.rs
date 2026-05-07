@@ -40,6 +40,21 @@ pub enum VideoCodec {
     Av1,
 }
 
+/// Append a `format=nv12,hwupload` step to a filter_complex graph and
+/// rename the output pad. Used by VA-API export and prerender paths to
+/// flip the CPU-composited frame onto a VAAPI surface for the encoder.
+///
+/// Returns `(new_filter, new_map_label)`. The new label is
+/// `<old_label>_va`; callers must update the `-map` arg accordingly.
+pub(crate) fn append_vaapi_upload(filter: String, map_label: &str) -> (String, String) {
+    let upload_label = format!("{map_label}_va");
+    let mut new_filter = filter;
+    new_filter.push_str(&format!(
+        ";[{map_label}]format=nv12,hwupload[{upload_label}]"
+    ));
+    (new_filter, upload_label)
+}
+
 /// Resolve the export-side HW encoder family for a given codec under the
 /// user's [`HwEncoderMode`] preference. Returns `None` for codecs that
 /// have no usable HW path on this build (VP9 / ProRes — neither VA-API
@@ -55,19 +70,36 @@ pub(crate) fn pick_export_encoder(
     codec: VideoCodec,
     mode: crate::ui_state::HwEncoderMode,
 ) -> Option<crate::media::hwaccel::HwEncoderFamily> {
+    pick_export_encoder_with_caps(
+        codec,
+        mode,
+        crate::media::hwaccel::detect(),
+        crate::media::hwaccel::cuda_runtime_loadable(),
+    )
+}
+
+/// Test-friendly variant of [`pick_export_encoder`] that accepts caps +
+/// libcuda-loadable explicitly instead of probing the running system.
+/// Production code goes through [`pick_export_encoder`].
+pub(crate) fn pick_export_encoder_with_caps(
+    codec: VideoCodec,
+    mode: crate::ui_state::HwEncoderMode,
+    caps: &crate::media::hwaccel::HwEncoderCaps,
+    cuda_loadable: bool,
+) -> Option<crate::media::hwaccel::HwEncoderFamily> {
     use crate::media::hwaccel;
     match codec {
         VideoCodec::H264 => hwaccel::pick_encoder(
             crate::ui_state::ProxyCodec::H264,
             mode,
-            hwaccel::detect(),
-            hwaccel::cuda_runtime_loadable(),
+            caps,
+            cuda_loadable,
         ),
         VideoCodec::H265 => hwaccel::pick_encoder(
             crate::ui_state::ProxyCodec::Hevc,
             mode,
-            hwaccel::detect(),
-            hwaccel::cuda_runtime_loadable(),
+            caps,
+            cuda_loadable,
         ),
         // AV1 hardware encode is rare and the picker doesn't probe it
         // separately yet — defer to a future Phase 3 once we know which
@@ -1958,12 +1990,7 @@ pub fn export_project_with_cancel(
         export_hw_family,
         Some(crate::media::hwaccel::HwEncoderFamily::Vaapi)
     ) {
-        let upload_label = format!("{map_label}_va");
-        let mut new_filter = filter;
-        new_filter.push_str(&format!(
-            ";[{map_label}]format=nv12,hwupload[{upload_label}]"
-        ));
-        (new_filter, upload_label)
+        append_vaapi_upload(filter, &map_label)
     } else {
         (filter, map_label)
     };
@@ -2218,6 +2245,45 @@ pub fn export_project_with_cancel(
     }
     if !status.success() {
         let detail = error_lines.join("; ");
+        // HW → SW fallback: when this attempt actually used a hardware
+        // encoder family, recurse once with `hw_encoder_mode = Off` so a
+        // runtime VA-API / NVENC failure (driver issue, codec init error,
+        // unusual input) degrades to libx264 / libx265 instead of erroring
+        // out to the user. Mirrors the proxy_cache 3-attempt fallback
+        // pattern; export only needs HW → SW since there's no decode-side
+        // dimension to retry.
+        if export_hw_family.is_some()
+            && options.hw_encoder_mode != crate::ui_state::HwEncoderMode::Off
+        {
+            let fam_label = match export_hw_family {
+                Some(crate::media::hwaccel::HwEncoderFamily::Nvenc) => "nvenc",
+                Some(crate::media::hwaccel::HwEncoderFamily::Vaapi) => "vaapi",
+                None => "?",
+            };
+            log::warn!(
+                "export: hw encoder ({fam_label}) failed for {output_path}, falling back to software: {detail}"
+            );
+            // Drop the partial HW output before retrying so the SW pass
+            // doesn't see a half-written file at the same path.
+            let _ = std::fs::remove_file(output_path);
+            // Clean up any vidstab artifacts the HW attempt may have left.
+            for trf in vidstab_trf.values() {
+                let _ = std::fs::remove_file(trf);
+            }
+            let mut sw_options = options.clone();
+            sw_options.hw_encoder_mode = crate::ui_state::HwEncoderMode::Off;
+            return export_project_with_cancel(
+                project,
+                output_path,
+                sw_options,
+                estimated_size_bytes,
+                bg_removal_paths,
+                frame_interp_paths,
+                render_replace_paths,
+                tx,
+                cancel_flag,
+            );
+        }
         let msg = format!("ffmpeg export failed: {detail}");
         let _ = tx.send(ExportProgress::Error(msg.clone()));
         return Err(anyhow!("{msg}"));
@@ -6762,21 +6828,22 @@ fn flatten_clips(
 #[cfg(test)]
 mod tests {
     use super::{
-        adjustment_roi_padding_px, append_pan_filter_chain, audio_crossfade_curve_name,
-        build_adjustment_export_roi, build_adjustment_layer_filter_graph,
-        build_adjustment_scope_alpha_expression, build_audio_crossfade_filters, build_color_filter,
-        build_crop_filter, build_export_snapshot_project, build_grading_filter,
-        build_hsl_qualifier_filter, build_keyframed_property_expression, build_pan_expression,
-        build_rotation_filter, build_scale_position_filter, build_subtitle_filter_composited,
+        adjustment_roi_padding_px, append_pan_filter_chain, append_vaapi_upload,
+        audio_crossfade_curve_name, build_adjustment_export_roi,
+        build_adjustment_layer_filter_graph, build_adjustment_scope_alpha_expression,
+        build_audio_crossfade_filters, build_color_filter, build_crop_filter,
+        build_export_snapshot_project, build_grading_filter, build_hsl_qualifier_filter,
+        build_keyframed_property_expression, build_pan_expression, build_rotation_filter,
+        build_scale_position_filter, build_subtitle_filter_composited,
         build_surround_lfe_tap_filter, build_surround_upmix_filter, build_temperature_tint_filter,
         build_timing_filter, build_title_filter, build_volume_filter,
         clamped_primary_transition_timing, clamped_primary_xfade_duration_s,
         compute_clip_audio_fades, compute_export_coloradj_params, estimate_export_size_bytes,
         find_ffmpeg, flatten_compound_tracks, has_linked_audio_peer, has_transform_keyframes,
-        parse_loudness_report, parse_progress_line, primary_clip_transition_stop_pad_ns,
-        resolve_stem_position, resolve_subtitle_font_style, split_active_video_tracks_for_export,
-        video_input_seek_and_duration, write_chapter_metadata, AdjustmentExportRoi,
-        AdjustmentMatteInput, AudioChannelLayout, AudioCodec, ClipAudioFade,
+        parse_loudness_report, parse_progress_line,
+        primary_clip_transition_stop_pad_ns, resolve_stem_position, resolve_subtitle_font_style,
+        split_active_video_tracks_for_export, video_input_seek_and_duration, write_chapter_metadata,
+        AdjustmentExportRoi, AdjustmentMatteInput, AudioChannelLayout, AudioCodec, ClipAudioFade,
         ColorFilterCapabilities, ExportOptions, LoudnessReport, SurroundPosition, VideoCodec,
     };
     use crate::media::color_math;
@@ -9517,5 +9584,102 @@ mod tests {
             .map(|p| p.split('=').next().unwrap_or(""))
             .collect();
         assert_eq!(order, vec!["FL", "FR", "FC", "LFE", "BL", "BR", "SL", "SR"]);
+    }
+
+    // ----- HW encoder picker + filter mutation tests (Phase 2 follow-up) -----
+
+    fn caps_with_full_hw() -> crate::media::hwaccel::HwEncoderCaps {
+        crate::media::hwaccel::HwEncoderCaps {
+            vaapi_h264: true,
+            vaapi_h265: true,
+            vaapi_device_present: true,
+            vaapi_render_node: Some(std::path::PathBuf::from("/dev/dri/renderD128")),
+            render_node_blocked_by_permissions: false,
+            vaapi_init_ok: true,
+            qsv_init_ok: true,
+            nvenc_h264: true,
+            nvenc_h265: true,
+            hwaccels_available: vec!["cuda".into(), "qsv".into(), "vaapi".into()],
+        }
+    }
+
+    #[test]
+    fn pick_export_encoder_h264_picks_nvenc_when_loadable() {
+        // libcuda loadable + nvenc available + Auto mode → Nvenc preferred.
+        let caps = caps_with_full_hw();
+        assert_eq!(
+            super::pick_export_encoder_with_caps(
+                VideoCodec::H264,
+                crate::ui_state::HwEncoderMode::Auto,
+                &caps,
+                true,
+            ),
+            Some(crate::media::hwaccel::HwEncoderFamily::Nvenc),
+        );
+    }
+
+    #[test]
+    fn pick_export_encoder_hevc_uses_hevc_caps() {
+        // Synthesise caps with H.264 family enabled but not H.265.
+        // VideoCodec::H265 must consult hevc_h264 / nvenc_h265 only —
+        // returning None when those flags are off proves the codec→caps
+        // routing is correct (regression guard against accidental
+        // h264/h265 cross-talk in pick_encoder).
+        let mut caps = caps_with_full_hw();
+        caps.vaapi_h265 = false;
+        caps.nvenc_h265 = false;
+        assert_eq!(
+            super::pick_export_encoder_with_caps(
+                VideoCodec::H265,
+                crate::ui_state::HwEncoderMode::Auto,
+                &caps,
+                true,
+            ),
+            None,
+        );
+        // H.264 with the same caps still picks Nvenc — confirms we
+        // didn't accidentally read the H.265 flags for the H.264 path.
+        assert_eq!(
+            super::pick_export_encoder_with_caps(
+                VideoCodec::H264,
+                crate::ui_state::HwEncoderMode::Auto,
+                &caps,
+                true,
+            ),
+            Some(crate::media::hwaccel::HwEncoderFamily::Nvenc),
+        );
+    }
+
+    #[test]
+    fn pick_export_encoder_vp9_prores_av1_always_software() {
+        // Phase 2 keeps VP9 / ProRes / AV1 on the SW path even with full
+        // HW caps. Phase 3 will add av1_nvenc / av1_vaapi detection;
+        // this test will need updating then.
+        let caps = caps_with_full_hw();
+        for codec in [VideoCodec::Vp9, VideoCodec::ProRes, VideoCodec::Av1] {
+            assert_eq!(
+                super::pick_export_encoder_with_caps(
+                    codec,
+                    crate::ui_state::HwEncoderMode::Auto,
+                    &caps,
+                    true,
+                ),
+                None,
+                "{codec:?} must remain on software encoder path",
+            );
+        }
+    }
+
+    #[test]
+    fn vaapi_filter_graph_appends_hwupload() {
+        let (filter, label) = append_vaapi_upload(
+            "[v0]format=yuv420p[vout]".to_string(),
+            "vout",
+        );
+        assert_eq!(label, "vout_va");
+        assert!(filter.ends_with(";[vout]format=nv12,hwupload[vout_va]"));
+        // Pre-existing graph content must be preserved verbatim — the
+        // helper is purely additive.
+        assert!(filter.starts_with("[v0]format=yuv420p[vout]"));
     }
 }

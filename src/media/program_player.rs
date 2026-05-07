@@ -12741,11 +12741,45 @@ impl ProgramPlayer {
                 ));
             }
         }
-        let filter = nodes.join(";");
+        let mut filter = nodes.join(";");
+        // Prerender HW encoder selection. VA-API export taught us how to
+        // splice a `format=nv12,hwupload` step at the end of the filter
+        // graph so VA-API encoders see GPU surfaces; the same trick works
+        // here. NVENC stays a drop-in encoder swap. Filter mutation
+        // happens *before* the `-filter_complex` arg gets the string.
+        let prerender_hw = crate::media::hwaccel::pick_h264_encoder(hw_encoder_mode);
+        let map_label = if matches!(
+            prerender_hw,
+            Some(crate::media::hwaccel::HwEncoderFamily::Vaapi)
+        ) {
+            // Reuse the export-path helper so both pipelines stay
+            // syntactically identical for the upload step.
+            let (new_filter, new_label) =
+                crate::media::export::append_vaapi_upload(filter, &last_label);
+            filter = new_filter;
+            new_label
+        } else {
+            last_label.clone()
+        };
+        // VA-API also needs `-vaapi_device` set as a *global* arg
+        // (before any output args). Inject it at the cmd before
+        // we tack on the filter+map+encoder block. Safe to do here
+        // because we haven't appended any output args yet.
+        if matches!(
+            prerender_hw,
+            Some(crate::media::hwaccel::HwEncoderFamily::Vaapi)
+        ) {
+            if let Some(node) = crate::media::hwaccel::detect()
+                .vaapi_render_node
+                .as_ref()
+            {
+                cmd.arg("-vaapi_device").arg(node);
+            }
+        }
         cmd.arg("-filter_complex")
             .arg(filter)
             .arg("-map")
-            .arg(format!("[{last_label}]"));
+            .arg(format!("[{map_label}]"));
         if audio_labels.is_empty() {
             cmd.arg("-an");
         } else {
@@ -12757,18 +12791,6 @@ impl ProgramPlayer {
                 .arg("192k");
         }
         cmd.arg("-t").arg(format!("{duration_s:.6}"));
-        // Prerender HW path: NVENC is a drop-in encoder swap (CPU-side
-        // frames work fine). VA-API would need the filter_complex graph to
-        // end with `format=nv12,hwupload`, which is awkward across the
-        // existing multi-input compositor wiring; skip it here and treat
-        // VA-API mode as software for prerender. The proxy path still uses
-        // VA-API since its filter chain is single-pass `-vf`.
-        let prerender_hw = match crate::media::hwaccel::pick_h264_encoder(hw_encoder_mode) {
-            Some(crate::media::hwaccel::HwEncoderFamily::Nvenc) => {
-                Some(crate::media::hwaccel::HwEncoderFamily::Nvenc)
-            }
-            _ => None,
-        };
         Self::apply_prerender_video_encoder(&mut cmd, prerender_hw, &prerender_preset, prerender_crf);
         cmd.arg("-f")
             .arg("mp4")
@@ -12817,8 +12839,10 @@ impl ProgramPlayer {
 
     /// Append the `-c:v` and related video-encoder args to a prerender
     /// ffmpeg command. NVENC swaps in cleanly because it accepts CPU-side
-    /// frames; libx264 is the software fallback. VA-API is intentionally
-    /// not handled here — see the dispatch site for the rationale.
+    /// frames; libx264 is the software fallback. VA-API is now also
+    /// handled — the dispatch site appends `format=nv12,hwupload` to the
+    /// filter graph + declares `-vaapi_device` before this runs, so by
+    /// the time the encoder is selected the GPU surface is ready.
     fn apply_prerender_video_encoder(
         cmd: &mut Command,
         family: Option<crate::media::hwaccel::HwEncoderFamily>,
@@ -12840,8 +12864,18 @@ impl ProgramPlayer {
                     .arg("-pix_fmt")
                     .arg("yuv420p");
             }
-            // VA-API not used here; treat as software.
-            _ => {
+            Some(crate::media::hwaccel::HwEncoderFamily::Vaapi) => {
+                cmd.arg("-c:v")
+                    .arg("h264_vaapi")
+                    // QP and CRF share a 0–51 lower-is-better scale so we
+                    // pass the prerender CRF directly. No `-pix_fmt`
+                    // override — the filter chain ends with
+                    // `format=nv12,hwupload` so the encoder receives the
+                    // expected VAAPI surface.
+                    .arg("-qp")
+                    .arg(prerender_crf.to_string());
+            }
+            None => {
                 cmd.arg("-c:v")
                     .arg("libx264")
                     .arg("-preset")
