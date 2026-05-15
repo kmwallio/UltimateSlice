@@ -9,6 +9,7 @@ pub mod audio_sync;
 pub mod auto_tag_cache;
 pub mod bg_removal_cache;
 pub mod cache_key;
+pub mod model_manifest;
 pub mod cache_support;
 pub mod clip_embedding_cache;
 pub mod color_match;

@@ -712,9 +712,8 @@ pub fn show_preferences_dialog(
     // ── Models section (only when ai-inference feature is enabled) ─────────
     #[cfg(feature = "ai-inference")]
     {
-        use crate::media::bg_removal_cache::{
-            find_model_path, model_download_dir, MODEL_DOWNLOAD_URL, MODEL_FILENAME,
-        };
+        use crate::media::bg_removal_cache::{find_model_path, model_download_dir, model_manifest};
+        use crate::media::model_manifest::{download_model_in_background, DownloadState};
 
         let models_box = GBox::new(Orientation::Vertical, 10);
         models_box.set_margin_start(8);
@@ -832,9 +831,12 @@ pub fn show_preferences_dialog(
             models_box.append(&Separator::new(Orientation::Horizontal));
         }
 
-        // MODNet status row.
+        // Portrait-matting model status row. Identity, URL, expected size,
+        // and license attribution all come from the manifest entry so this
+        // UI doesn't need to change when the underlying model is swapped.
+        let manifest_entry = model_manifest();
         let modnet_row = GBox::new(Orientation::Horizontal, 8);
-        let modnet_name = Label::new(Some("MODNet (Background Removal)"));
+        let modnet_name = Label::new(Some(manifest_entry.display_name));
         modnet_name.set_halign(gtk::Align::Start);
         modnet_name.set_hexpand(true);
         let status_label = Label::new(None);
@@ -852,15 +854,32 @@ pub fn show_preferences_dialog(
         modnet_row.append(&status_label);
         models_box.append(&modnet_row);
 
-        let modnet_hint = Label::new(Some(
-            "MODNet is used for AI-powered background removal on video clips. \
-             The model file (~25 MB) will be downloaded to your local data directory.",
-        ));
+        // Description (purpose) — pulled from manifest.
+        let modnet_hint = Label::new(Some(manifest_entry.description));
         modnet_hint.set_halign(gtk::Align::Start);
         modnet_hint.add_css_class("dim-label");
         modnet_hint.set_wrap(true);
         modnet_hint.set_max_width_chars(60);
         models_box.append(&modnet_hint);
+
+        // Size + license attribution. Surface the license up front because
+        // the user is about to download a binary they'll be governed by.
+        let size_text = match manifest_entry.expected_size_bytes {
+            Some(n) => format!("~{:.0} MB", (n as f64) / 1_000_000.0),
+            None => "size unknown".to_string(),
+        };
+        let license_link = format!(
+            "<a href=\"{}\">{}</a>",
+            glib::markup_escape_text(manifest_entry.license_url),
+            glib::markup_escape_text(manifest_entry.license_short),
+        );
+        let license_label = Label::new(None);
+        license_label.set_markup(&format!("Download size: {size_text}. License: {license_link}."));
+        license_label.set_halign(gtk::Align::Start);
+        license_label.add_css_class("dim-label");
+        license_label.set_wrap(true);
+        license_label.set_max_width_chars(60);
+        models_box.append(&license_label);
 
         // Download button + progress bar.
         let download_btn = gtk::Button::with_label(if has_model {
@@ -880,43 +899,55 @@ pub fn show_preferences_dialog(
         download_btn.connect_clicked(move |_| {
             let dest_dir = model_download_dir();
             let _ = std::fs::create_dir_all(&dest_dir);
-            let dest = dest_dir.join(MODEL_FILENAME);
-            let partial = dest_dir.join(format!("{MODEL_FILENAME}.partial"));
-            let url = MODEL_DOWNLOAD_URL.to_string();
 
             progress_bar_c.set_visible(true);
             progress_bar_c.set_fraction(0.0);
-            progress_bar_c.set_text(Some("Downloading…"));
+            progress_bar_c.set_text(Some("Starting download…"));
             progress_bar_c.set_show_text(true);
             download_btn_c.set_sensitive(false);
             status_label_c.set_text("Downloading…");
 
-            // result: None = still running, Some(true) = success, Some(false) = failure.
-            let result = std::sync::Arc::new(std::sync::Mutex::new(None::<bool>));
-            let result_w = result.clone();
-            std::thread::spawn(move || {
-                let ok = std::process::Command::new("curl")
-                    .args(["-L", "-o", &partial.to_string_lossy(), &url])
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false);
-                if ok {
-                    let _ = std::fs::rename(&partial, &dest);
-                } else {
-                    let _ = std::fs::remove_file(&partial);
-                }
-                *result_w.lock().unwrap() = Some(ok);
-            });
+            let state = download_model_in_background(model_manifest(), dest_dir);
 
             let bg_cache_c = bg_cache.clone();
             let status_label_cc = status_label_c.clone();
             let progress_bar_cc = progress_bar_c.clone();
             let download_btn_cc = download_btn_c.clone();
-            glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
-                let done = result.lock().unwrap().clone();
-                match done {
-                    None => glib::ControlFlow::Continue,
-                    Some(true) => {
+            glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
+                let snapshot = state.lock().unwrap().clone();
+                match snapshot {
+                    DownloadState::Pending => {
+                        progress_bar_cc.pulse();
+                        glib::ControlFlow::Continue
+                    }
+                    DownloadState::Downloading { downloaded, total } => {
+                        match total {
+                            Some(t) if t > 0 => {
+                                let frac = ((downloaded as f64) / (t as f64)).clamp(0.0, 1.0);
+                                progress_bar_cc.set_fraction(frac);
+                                progress_bar_cc.set_text(Some(&format!(
+                                    "{:.1} / {:.1} MB",
+                                    (downloaded as f64) / 1_000_000.0,
+                                    (t as f64) / 1_000_000.0,
+                                )));
+                            }
+                            _ => {
+                                progress_bar_cc.pulse();
+                                progress_bar_cc.set_text(Some(&format!(
+                                    "{:.1} MB downloaded",
+                                    (downloaded as f64) / 1_000_000.0,
+                                )));
+                            }
+                        }
+                        glib::ControlFlow::Continue
+                    }
+                    DownloadState::Verifying => {
+                        progress_bar_cc.pulse();
+                        progress_bar_cc.set_text(Some("Verifying SHA-256…"));
+                        status_label_cc.set_text("Verifying…");
+                        glib::ControlFlow::Continue
+                    }
+                    DownloadState::Done { .. } => {
                         progress_bar_cc.set_fraction(1.0);
                         progress_bar_cc.set_text(Some("Done"));
                         status_label_cc.set_text("✓ Installed");
@@ -925,8 +956,8 @@ pub fn show_preferences_dialog(
                         bg_cache_c.borrow_mut().refresh_model_path();
                         glib::ControlFlow::Break
                     }
-                    Some(false) => {
-                        progress_bar_cc.set_text(Some("Download failed"));
+                    DownloadState::Failed(msg) => {
+                        progress_bar_cc.set_text(Some(&msg));
                         progress_bar_cc.set_fraction(0.0);
                         status_label_cc.set_text("Download failed");
                         download_btn_cc.set_sensitive(true);

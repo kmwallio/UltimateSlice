@@ -835,6 +835,10 @@ FCPXML persistence).
 
 ### AI & Automation
 - [ ] Custom background removal model — train/export a self-hosted segmentation model with secure distribution and in-app download (Preferences → Models); replace third-party MODNet dependency
+  - [x] Phase C: model manifest infrastructure — `src/media/model_manifest.rs` with `ModelManifestEntry { url, expected_sha256, expected_size_bytes, license_short, license_url }`, real progress UI via `.partial` size polling, SHA-256 verification on completion (delete partial on mismatch), license attribution surfaced before download, `bg_removal_cache` reads identity from manifest. MODNet entry currently has `expected_sha256: None` (third-party Google Drive mirror could re-encode); the downloader logs the actual computed hash so it can be promoted to a pinned `Some(...)` once we either trust the upstream binary or replace it
+  - [ ] Phase A: train/export a portrait-matting model on properly licensed data, ONNX with same I/O spec as MODNet (1×3×512×512 in / 1×1×512×512 out) — outside this codebase
+  - [ ] Phase B: hosting target (S3 / Cloudflare R2 / GitHub Releases?), generate stable URL + SHA-256
+  - [ ] Phase D: flip MODNet's manifest entry to point at our model + pin its hash + update license attribution
 - [x] Speech-to-Text: Automatic subtitle generation and transcription
   - [x] Local Whisper model inference via `whisper-rs` (GGML models, auto-discovery)
   - [x] Per-clip subtitle segments with word-level timestamps
