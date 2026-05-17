@@ -215,7 +215,10 @@ When **Motion Tracking → Edit Region in Monitor** is enabled for the selected 
   - **DROP** — cumulative video frames the preview pipeline has dropped
     under QoS pressure since the project was loaded. Reset on project
     open/new; a steadily climbing counter is a hint to drop preview
-    quality, enable proxies, or enable background prerender.
+    quality, enable proxies, or enable background prerender. On simple
+    single-clip playback this should usually stay at `0`; if it climbs,
+    the monitor is still shedding presentation frames somewhere in the
+    live preview path.
 - The HUD does not appear in export output — it is a monitoring overlay only.
 - Toggle state persists across launches (stored with the other Program Monitor
   overlay toggles in `ui-state.json`). The MCP tool `set_program_monitor_hud`

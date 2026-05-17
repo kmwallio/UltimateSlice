@@ -392,6 +392,7 @@ Tracking docs:
            - [x] Tighter post-seek budgets after prewarm: reduce arrival wait when sidecar proved file decodable
            - [x] Skip preroll for already-settled decoders: avoid redundant blocking in wait_for_paused_preroll
            - [x] Fix Smooth-mode single-slot drop-late removing backpressure (compositor spun at 11K fps, QoS dropped 99.99% → 1-2 displayed fps); now only enables drop-late for transition overlaps or 3+ tracks
+           - [x] Initialize the conservative Program Monitor sink policy on startup (`qos=false`, `max-lateness=-1`, non-leaky display queue) so single-clip playback does not inherit gtk4paintablesink's default 5 ms lateness drop threshold before the first playback-policy transition
            - [x] Enable `realtime_preview` by default for out-of-box boundary stutter reduction
            - [x] Reduce teardown state-query timeout from 100ms to 10ms per element (10x faster teardown)
            - [x] Lower adaptive arrival wait floor from 200ms to 100ms for faster single-track boundary transitions

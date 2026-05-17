@@ -4,6 +4,9 @@ All notable project changes and progress should be recorded here.
 
 ## [Unreleased]
 
+### Fixed
+- **Program Monitor single-clip playback now clears the sink's default late-frame drop threshold on startup**: `ProgramPlayer` now applies the conservative "drop-late off" sink/queue settings (`qos=false`, `max-lateness=-1`, non-leaky display queue) as soon as the display branch is created, instead of waiting for a later state change to flip the cached bool. This closes a startup hole where simple one-slot playback could still drop visible video frames even though Smooth/Balanced mode was supposed to preserve backpressure outside transition/3+ track pressure cases. Added a regression test covering the conservative sink policy constants.
+
 ### Added
 - **Model manifest + SHA-256 verified downloads (Phase C of the custom background-removal model roadmap item)**: groundwork for replacing the third-party MODNet binary with our own self-hosted segmentation model. New `src/media/model_manifest.rs` is the single source of truth for AI model identity, fetch URL, expected size, expected SHA-256, and license attribution. `ModelManifestEntry { key, display_name, filename, url, expected_sha256, expected_size_bytes, license_short, license_url, description }` keeps everything in one place — when we swap MODNet for our own model later, only the manifest entry changes; the cache, downloader, and Preferences UI all keep working unchanged.
   - **Real progress UI.** Preferences → Models now shows "12.3 / 25.0 MB" instead of an indeterminate "Downloading…" pulse, by polling the `.partial` file's on-disk size against the manifest's `expected_size_bytes` every 250 ms. When the manifest doesn't declare an expected size the bar falls back to pulse-mode with the live downloaded byte count.

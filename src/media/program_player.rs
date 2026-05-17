@@ -2611,6 +2611,7 @@ impl ProgramPlayer {
         let (prerender_result_tx, prerender_result_rx) = mpsc::channel::<PrerenderJobResult>();
         let prerender_cache_root = default_prerender_cache_root();
         let _ = std::fs::create_dir_all(&prerender_cache_root);
+        Self::apply_display_drop_late_policy(display_queue.as_ref(), &display_sink_ref, false);
 
         Ok((
             Self {
@@ -8237,9 +8238,9 @@ impl ProgramPlayer {
         // Encoder identity participates in the signature so that switching
         // hardware mode (e.g. Auto → Off, or Vaapi → Nvenc) does not reuse
         // segments encoded under a different codec/quality envelope.
-        crate::media::hwaccel::encoder_signature(
-            crate::media::hwaccel::pick_h264_encoder(self.hw_encoder_mode),
-        )
+        crate::media::hwaccel::encoder_signature(crate::media::hwaccel::pick_h264_encoder(
+            self.hw_encoder_mode,
+        ))
         .hash(&mut hasher);
         self.proxy_enabled.hash(&mut hasher);
         self.proxy_scale_divisor.hash(&mut hasher);
@@ -8852,22 +8853,11 @@ impl ProgramPlayer {
             return;
         }
         self.playback_drop_late_active = should_drop_late;
-        if let Some(ref q) = self.display_queue {
-            if should_drop_late {
-                q.set_property_from_str("leaky", "downstream");
-                q.set_property("max-size-buffers", 1u32);
-            } else {
-                q.set_property_from_str("leaky", "no");
-                q.set_property("max-size-buffers", 3u32);
-            }
-        }
-        if self.display_sink.find_property("qos").is_some() {
-            self.display_sink.set_property("qos", should_drop_late);
-        }
-        if self.display_sink.find_property("max-lateness").is_some() {
-            let max_lateness: i64 = if should_drop_late { 40_000_000 } else { -1 };
-            self.display_sink.set_property("max-lateness", max_lateness);
-        }
+        Self::apply_display_drop_late_policy(
+            self.display_queue.as_ref(),
+            &self.display_sink,
+            should_drop_late,
+        );
         log::info!(
             "update_drop_late_policy: active={} slots={}",
             should_drop_late,
@@ -8895,6 +8885,53 @@ impl ProgramPlayer {
             should_drop_late,
             self.slots.len()
         );
+    }
+
+    fn display_queue_leaky_mode(should_drop_late: bool) -> &'static str {
+        if should_drop_late {
+            "downstream"
+        } else {
+            "no"
+        }
+    }
+
+    fn display_queue_max_buffers(should_drop_late: bool) -> u32 {
+        if should_drop_late {
+            1
+        } else {
+            3
+        }
+    }
+
+    fn display_sink_max_lateness(should_drop_late: bool) -> i64 {
+        if should_drop_late {
+            40_000_000
+        } else {
+            -1
+        }
+    }
+
+    fn apply_display_drop_late_policy(
+        display_queue: Option<&gst::Element>,
+        display_sink: &gst::Element,
+        should_drop_late: bool,
+    ) {
+        if let Some(q) = display_queue {
+            q.set_property_from_str("leaky", Self::display_queue_leaky_mode(should_drop_late));
+            q.set_property(
+                "max-size-buffers",
+                Self::display_queue_max_buffers(should_drop_late),
+            );
+        }
+        if display_sink.find_property("qos").is_some() {
+            display_sink.set_property("qos", should_drop_late);
+        }
+        if display_sink.find_property("max-lateness").is_some() {
+            display_sink.set_property(
+                "max-lateness",
+                Self::display_sink_max_lateness(should_drop_late),
+            );
+        }
     }
 
     fn should_prioritize_ui_responsiveness(&self) -> bool {
@@ -12383,10 +12420,11 @@ impl ProgramPlayer {
         // goes through a hybrid CPU+GPU path that loses to libavcodec on
         // a multi-core CPU once the lut3d/color filters force a CPU
         // roundtrip. CUDA / QSV decode hints are still emitted.
-        let prerender_decode_hwaccel = match crate::media::hwaccel::pick_decode_hwaccel(hw_encoder_mode) {
-            Some("vaapi") => None,
-            other => other,
-        };
+        let prerender_decode_hwaccel =
+            match crate::media::hwaccel::pick_decode_hwaccel(hw_encoder_mode) {
+                Some("vaapi") => None,
+                other => other,
+            };
         for (clip, path, source_ns, _, _) in inputs {
             if clip.is_title {
                 // Title clips use a lavfi color source instead of a file.
@@ -12769,10 +12807,7 @@ impl ProgramPlayer {
             prerender_hw,
             Some(crate::media::hwaccel::HwEncoderFamily::Vaapi)
         ) {
-            if let Some(node) = crate::media::hwaccel::detect()
-                .vaapi_render_node
-                .as_ref()
-            {
+            if let Some(node) = crate::media::hwaccel::detect().vaapi_render_node.as_ref() {
                 cmd.arg("-vaapi_device").arg(node);
             }
         }
@@ -12791,7 +12826,12 @@ impl ProgramPlayer {
                 .arg("192k");
         }
         cmd.arg("-t").arg(format!("{duration_s:.6}"));
-        Self::apply_prerender_video_encoder(&mut cmd, prerender_hw, &prerender_preset, prerender_crf);
+        Self::apply_prerender_video_encoder(
+            &mut cmd,
+            prerender_hw,
+            &prerender_preset,
+            prerender_crf,
+        );
         cmd.arg("-f")
             .arg("mp4")
             .arg("-movflags")
@@ -16412,6 +16452,13 @@ mod tests {
             3,
             false,
         ));
+    }
+
+    #[test]
+    fn conservative_display_drop_late_policy_disables_sink_drops() {
+        assert_eq!(ProgramPlayer::display_queue_leaky_mode(false), "no");
+        assert_eq!(ProgramPlayer::display_queue_max_buffers(false), 3);
+        assert_eq!(ProgramPlayer::display_sink_max_lateness(false), -1);
     }
 
     #[test]
