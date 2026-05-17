@@ -283,9 +283,7 @@ pub struct ProxyCache {
     /// Total items ever requested in this session (for progress).
     total_requested: usize,
     result_rx: mpsc::Receiver<ProxyWorkerUpdate>,
-    work_tx: Option<
-        mpsc::Sender<(String, ProxyScale, Vec<String>, bool, bool, f32, ProxyCodec)>,
-    >,
+    work_tx: Option<mpsc::Sender<(String, ProxyScale, Vec<String>, bool, bool, f32, ProxyCodec)>>,
     /// Per-job estimated bytes and written bytes for byte-based status progress.
     estimated_bytes: HashMap<String, u64>,
     written_bytes: HashMap<String, u64>,
@@ -352,15 +350,8 @@ impl ProxyCache {
         // key matches what `request_with_vidstab` already reserved in
         // `pending` — without this, a codec preference change between
         // enqueue and dequeue would orphan the work item.
-        let (work_tx, work_rx) = mpsc::channel::<(
-            String,
-            ProxyScale,
-            Vec<String>,
-            bool,
-            bool,
-            f32,
-            ProxyCodec,
-        )>();
+        let (work_tx, work_rx) =
+            mpsc::channel::<(String, ProxyScale, Vec<String>, bool, bool, f32, ProxyCodec)>();
 
         let hw_encoder_mode = Arc::new(RwLock::new(HwEncoderMode::default()));
         let proxy_codec = Arc::new(RwLock::new(ProxyCodec::default()));
@@ -1701,10 +1692,7 @@ fn run_transcode_command(
                 .arg("28");
         }
         (Some(HwEncoderFamily::Vaapi), ProxyCodec::Hevc) => {
-            cmd.arg("-c:v")
-                .arg("hevc_vaapi")
-                .arg("-qp")
-                .arg("28");
+            cmd.arg("-c:v").arg("hevc_vaapi").arg("-qp").arg("28");
         }
         (Some(HwEncoderFamily::Nvenc), ProxyCodec::H264) => {
             cmd.arg("-c:v")
@@ -1784,7 +1772,9 @@ fn run_transcode_command(
         (None, ProxyCodec::Hevc) => "libx265",
     };
     let dec_label = match hw_decode_method {
-        Some("vaapi") => "sw (vaapi decode skipped — slower than CPU for HEVC 10-bit on Intel iGPUs)",
+        Some("vaapi") => {
+            "sw (vaapi decode skipped — slower than CPU for HEVC 10-bit on Intel iGPUs)"
+        }
         Some(method) => method,
         None => "sw",
     };
@@ -2324,13 +2314,8 @@ mod tests {
         // entry point) must keep producing the same shape so users who
         // never touch the codec preference don't get forced re-transcodes.
         let key_legacy = proxy_key_with_vidstab("/tmp/a.mp4", None, false, 0.0);
-        let key_h264 = proxy_key_with_codec_and_vidstab(
-            "/tmp/a.mp4",
-            None,
-            ProxyCodec::H264,
-            false,
-            0.0,
-        );
+        let key_h264 =
+            proxy_key_with_codec_and_vidstab("/tmp/a.mp4", None, ProxyCodec::H264, false, 0.0);
         assert_eq!(key_legacy, key_h264);
         assert_eq!(key_legacy, "/tmp/a.mp4");
     }
@@ -2533,12 +2518,24 @@ mod tests {
             &local_root,
         )
         .unwrap();
-        let plain_sidecar =
-            alongside_proxy_path_for(&source_path, ProxyScale::MaxHeight(1080), None, ProxyCodec::H264, false, 0.0)
-                .unwrap();
-        let stabilized_sidecar =
-            alongside_proxy_path_for(&source_path, ProxyScale::MaxHeight(1080), None, ProxyCodec::H264, true, 0.45)
-                .unwrap();
+        let plain_sidecar = alongside_proxy_path_for(
+            &source_path,
+            ProxyScale::MaxHeight(1080),
+            None,
+            ProxyCodec::H264,
+            false,
+            0.0,
+        )
+        .unwrap();
+        let stabilized_sidecar = alongside_proxy_path_for(
+            &source_path,
+            ProxyScale::MaxHeight(1080),
+            None,
+            ProxyCodec::H264,
+            true,
+            0.45,
+        )
+        .unwrap();
         let other_source_local = local_proxy_path_for(
             &other_source_path,
             ProxyScale::MaxHeight(1080),
@@ -2564,9 +2561,15 @@ mod tests {
             &local_root,
         )
         .unwrap();
-        let updated_sidecar =
-            alongside_proxy_path_for(&source_path, ProxyScale::MaxHeight(1080), None, ProxyCodec::H264, false, 0.0)
-                .unwrap();
+        let updated_sidecar = alongside_proxy_path_for(
+            &source_path,
+            ProxyScale::MaxHeight(1080),
+            None,
+            ProxyCodec::H264,
+            false,
+            0.0,
+        )
+        .unwrap();
         assert_eq!(plain_local, updated_local);
         assert_eq!(plain_sidecar, updated_sidecar);
 
@@ -2752,12 +2755,24 @@ mod tests {
     fn sidecar_proxy_usage_for_sources_counts_matching_proxy_artifacts() {
         let source_a = test_source_file("clip-a.mp4");
         let source_b = test_source_file("clip-b.mp4");
-        let side_a =
-            alongside_proxy_path_for(&source_a, ProxyScale::MaxHeight(1080), None, ProxyCodec::H264, false, 0.0)
-                .unwrap();
-        let side_b =
-            alongside_proxy_path_for(&source_b, ProxyScale::MaxHeight(640), None, ProxyCodec::H264, false, 0.0)
-                .unwrap();
+        let side_a = alongside_proxy_path_for(
+            &source_a,
+            ProxyScale::MaxHeight(1080),
+            None,
+            ProxyCodec::H264,
+            false,
+            0.0,
+        )
+        .unwrap();
+        let side_b = alongside_proxy_path_for(
+            &source_b,
+            ProxyScale::MaxHeight(640),
+            None,
+            ProxyCodec::H264,
+            false,
+            0.0,
+        )
+        .unwrap();
 
         for (path, source_path) in [(&side_a, &source_a), (&side_b, &source_b)] {
             if let Some(parent) = Path::new(path).parent() {
@@ -2787,12 +2802,24 @@ mod tests {
     fn purge_sidecar_proxy_cache_for_sources_only_removes_matching_artifacts() {
         let source_a = test_source_file("clip-a.mp4");
         let source_b = test_source_file("clip-b.mp4");
-        let side_a =
-            alongside_proxy_path_for(&source_a, ProxyScale::MaxHeight(1080), None, ProxyCodec::H264, false, 0.0)
-                .unwrap();
-        let side_b =
-            alongside_proxy_path_for(&source_b, ProxyScale::MaxHeight(640), None, ProxyCodec::H264, false, 0.0)
-                .unwrap();
+        let side_a = alongside_proxy_path_for(
+            &source_a,
+            ProxyScale::MaxHeight(1080),
+            None,
+            ProxyCodec::H264,
+            false,
+            0.0,
+        )
+        .unwrap();
+        let side_b = alongside_proxy_path_for(
+            &source_b,
+            ProxyScale::MaxHeight(640),
+            None,
+            ProxyCodec::H264,
+            false,
+            0.0,
+        )
+        .unwrap();
 
         for (path, source_path) in [(&side_a, &source_a), (&side_b, &source_b)] {
             if let Some(parent) = Path::new(path).parent() {

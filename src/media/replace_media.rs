@@ -29,9 +29,7 @@ pub enum ReplaceMediaError {
         new_duration_ns: u64,
     },
     /// New file has zero duration / no decodable streams.
-    NewMediaUnusable {
-        reason: &'static str,
-    },
+    NewMediaUnusable { reason: &'static str },
 }
 
 impl std::fmt::Display for ReplaceMediaError {
@@ -106,7 +104,10 @@ pub fn apply_replace_media(
         });
     }
 
-    let old_dims = match (clip_old_dims(clip), (new_meta.video_width, new_meta.video_height)) {
+    let old_dims = match (
+        clip_old_dims(clip),
+        (new_meta.video_width, new_meta.video_height),
+    ) {
         (Some(o), _) => Some(o),
         _ => None,
     };
@@ -139,8 +140,8 @@ pub fn apply_replace_media(
             || !clip.crop_right_keyframes.is_empty()
             || !clip.crop_top_keyframes.is_empty()
             || !clip.crop_bottom_keyframes.is_empty();
-        let nonidentity = (scale_x - 1.0).abs() > f64::EPSILON
-            || (scale_y - 1.0).abs() > f64::EPSILON;
+        let nonidentity =
+            (scale_x - 1.0).abs() > f64::EPSILON || (scale_y - 1.0).abs() > f64::EPSILON;
         if any_crop && nonidentity {
             clip.crop_left = rescale_pixel(clip.crop_left, scale_x);
             clip.crop_right = rescale_pixel(clip.crop_right, scale_x);
@@ -173,10 +174,7 @@ pub fn apply_replace_media(
     clip.media_duration_ns = new_meta.duration_ns;
     clip.source_timecode_base_ns = new_meta.source_timecode_base_ns;
     clip.audio_source_streams = new_meta.audio_source_streams.clone();
-    if !audio_stream_index_valid(
-        clip.audio_source_stream_index,
-        &clip.audio_source_streams,
-    ) {
+    if !audio_stream_index_valid(clip.audio_source_stream_index, &clip.audio_source_streams) {
         clip.audio_source_stream_index = 0;
         summary.audio_stream_reset = true;
     }
@@ -194,7 +192,7 @@ pub fn apply_replace_media(
             // already the new value. Use the active-take check as a
             // second guard.
             let _ = take; // placeholder to silence unused; full audition
-                           // walk is wired in step 7 below.
+                          // walk is wired in step 7 below.
         }
         sync_active_audition_take_with_host(takes, new_path, new_meta);
     }
@@ -225,14 +223,20 @@ pub fn apply_library_replace(
     set_if_diff!(item.has_audio, new_meta.has_audio);
     set_if_diff!(item.is_image, new_meta.is_image);
     set_if_diff!(item.is_animated_svg, new_meta.is_animated_svg);
-    set_if_diff!(item.source_timecode_base_ns, new_meta.source_timecode_base_ns);
+    set_if_diff!(
+        item.source_timecode_base_ns,
+        new_meta.source_timecode_base_ns
+    );
     set_if_diff!(item.video_width, new_meta.video_width);
     set_if_diff!(item.video_height, new_meta.video_height);
     set_if_diff!(item.frame_rate_num, new_meta.frame_rate_num);
     set_if_diff!(item.frame_rate_den, new_meta.frame_rate_den);
     set_if_diff!(item.codec_summary, new_meta.codec_summary.clone());
     set_if_diff!(item.hdr_colorimetry, new_meta.hdr_colorimetry.clone());
-    set_if_diff!(item.audio_source_streams, new_meta.audio_source_streams.clone());
+    set_if_diff!(
+        item.audio_source_streams,
+        new_meta.audio_source_streams.clone()
+    );
     set_if_diff!(item.file_size_bytes, new_meta.file_size_bytes);
     if !audio_stream_index_valid(item.audio_source_stream_index, &item.audio_source_streams) {
         item.audio_source_stream_index = 0;
@@ -396,8 +400,7 @@ mod tests {
     fn replace_returns_err_when_clamping_would_invert_range() {
         let mut clip = make_clip_with_source("/old.mp4", 10_000_000_000);
         clip.source_in = 8_000_000_000;
-        let result =
-            apply_replace_media(&mut clip, "/new.mp4", &meta(1920, 1080, 5_000_000_000));
+        let result = apply_replace_media(&mut clip, "/new.mp4", &meta(1920, 1080, 5_000_000_000));
         assert!(matches!(
             result,
             Err(ReplaceMediaError::SourceOutWouldInvert { .. })
@@ -435,8 +438,7 @@ mod tests {
         clip.flip_h = true;
         clip.title_x = 0.3;
         clip.title_y = 0.7;
-        apply_replace_media(&mut clip, "/new.mp4", &meta(3840, 2160, 10_000_000_000))
-            .unwrap();
+        apply_replace_media(&mut clip, "/new.mp4", &meta(3840, 2160, 10_000_000_000)).unwrap();
         assert_eq!(clip.scale, 1.7);
         assert_eq!(clip.position_x, 0.25);
         assert_eq!(clip.position_y, -0.1);

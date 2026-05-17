@@ -477,8 +477,7 @@ pub fn pick_decode_hwaccel_with_caps_and_runtime(
     // does — but we keep the gates independent for ffmpeg builds with
     // alternative QSV backends).
     let qsv_usable = caps.has_hwaccel("qsv") && caps.qsv_init_ok;
-    let vaapi_usable =
-        caps.has_hwaccel("vaapi") && caps.vaapi_device_present && caps.vaapi_init_ok;
+    let vaapi_usable = caps.has_hwaccel("vaapi") && caps.vaapi_device_present && caps.vaapi_init_ok;
     match mode {
         HwEncoderMode::Off => None,
         HwEncoderMode::Vaapi => {
@@ -607,7 +606,10 @@ Encoders:
     #[test]
     fn auto_returns_none_without_any_hw() {
         let caps = HwEncoderCaps::default();
-        assert_eq!(pick_h264_encoder_with_caps(HwEncoderMode::Auto, &caps), None);
+        assert_eq!(
+            pick_h264_encoder_with_caps(HwEncoderMode::Auto, &caps),
+            None
+        );
     }
 
     #[test]
@@ -621,7 +623,10 @@ Encoders:
             pick_h264_encoder_with_caps(HwEncoderMode::Vaapi, &caps),
             None
         );
-        assert_eq!(pick_h264_encoder_with_caps(HwEncoderMode::Auto, &caps), None);
+        assert_eq!(
+            pick_h264_encoder_with_caps(HwEncoderMode::Auto, &caps),
+            None
+        );
     }
 
     #[test]
@@ -678,7 +683,10 @@ vulkan
             vaapi_device_present: true,
             ..HwEncoderCaps::default()
         };
-        assert_eq!(pick_decode_hwaccel_with_caps(HwEncoderMode::Off, &caps), None);
+        assert_eq!(
+            pick_decode_hwaccel_with_caps(HwEncoderMode::Off, &caps),
+            None
+        );
     }
 
     #[test]
@@ -749,9 +757,18 @@ vulkan
     #[test]
     fn pick_decode_returns_none_when_method_missing() {
         let caps = HwEncoderCaps::default();
-        assert_eq!(pick_decode_hwaccel_with_caps(HwEncoderMode::Auto, &caps), None);
-        assert_eq!(pick_decode_hwaccel_with_caps(HwEncoderMode::Nvenc, &caps), None);
-        assert_eq!(pick_decode_hwaccel_with_caps(HwEncoderMode::Vaapi, &caps), None);
+        assert_eq!(
+            pick_decode_hwaccel_with_caps(HwEncoderMode::Auto, &caps),
+            None
+        );
+        assert_eq!(
+            pick_decode_hwaccel_with_caps(HwEncoderMode::Nvenc, &caps),
+            None
+        );
+        assert_eq!(
+            pick_decode_hwaccel_with_caps(HwEncoderMode::Vaapi, &caps),
+            None
+        );
     }
 
     #[test]

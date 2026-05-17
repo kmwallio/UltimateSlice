@@ -324,14 +324,8 @@ mod tests {
         // Hex digests are conventionally lowercase but accepting either
         // saves a future maintainer from a foot-gun if a manifest entry
         // gets pasted in uppercase.
-        assert!(digest_matches(
-            Some("ABCDEF1234567890"),
-            "abcdef1234567890"
-        ));
-        assert!(digest_matches(
-            Some("abcdef1234567890"),
-            "ABCDEF1234567890"
-        ));
+        assert!(digest_matches(Some("ABCDEF1234567890"), "abcdef1234567890"));
+        assert!(digest_matches(Some("abcdef1234567890"), "ABCDEF1234567890"));
     }
 
     #[test]

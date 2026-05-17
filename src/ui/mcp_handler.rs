@@ -5243,9 +5243,7 @@ pub(crate) fn handle_mcp_command(
                         .ok();
                 }
                 Err(e) => {
-                    reply
-                        .send(json!({"success": false, "error": e}))
-                        .ok();
+                    reply.send(json!({"success": false, "error": e})).ok();
                 }
             }
         }
@@ -5312,13 +5310,11 @@ pub(crate) fn handle_mcp_command(
                                     clamped_count += 1;
                                 }
                                 let new_state = crate::undo::ClipSourceState::capture(&work);
-                                children.push(Box::new(
-                                    crate::undo::ReplaceClipSourceCommand {
-                                        clip_id: clip_id.clone(),
-                                        old_state,
-                                        new_state,
-                                    },
-                                ));
+                                children.push(Box::new(crate::undo::ReplaceClipSourceCommand {
+                                    clip_id: clip_id.clone(),
+                                    old_state,
+                                    new_state,
+                                }));
                                 updated_clip_count += 1;
                             }
                             Err(_) => {
@@ -5341,9 +5337,7 @@ pub(crate) fn handle_mcp_command(
             {
                 let mut lib = library.borrow_mut();
                 if let Some(item) = lib.items.iter_mut().find(|it| it.id == item_id) {
-                    crate::media::replace_media::apply_library_replace(
-                        item, &new_path, &new_meta,
-                    );
+                    crate::media::replace_media::apply_library_replace(item, &new_path, &new_meta);
                 }
             }
             on_project_changed();

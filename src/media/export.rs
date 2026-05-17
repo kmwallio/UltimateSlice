@@ -89,18 +89,12 @@ pub(crate) fn pick_export_encoder_with_caps(
 ) -> Option<crate::media::hwaccel::HwEncoderFamily> {
     use crate::media::hwaccel;
     match codec {
-        VideoCodec::H264 => hwaccel::pick_encoder(
-            crate::ui_state::ProxyCodec::H264,
-            mode,
-            caps,
-            cuda_loadable,
-        ),
-        VideoCodec::H265 => hwaccel::pick_encoder(
-            crate::ui_state::ProxyCodec::Hevc,
-            mode,
-            caps,
-            cuda_loadable,
-        ),
+        VideoCodec::H264 => {
+            hwaccel::pick_encoder(crate::ui_state::ProxyCodec::H264, mode, caps, cuda_loadable)
+        }
+        VideoCodec::H265 => {
+            hwaccel::pick_encoder(crate::ui_state::ProxyCodec::Hevc, mode, caps, cuda_loadable)
+        }
         // AV1 hardware encode is rare and the picker doesn't probe it
         // separately yet — defer to a future Phase 3 once we know which
         // hardware deserves the wiring. Treat as software-only for now.
@@ -758,10 +752,7 @@ pub fn export_project_with_cancel(
         export_hw_family,
         Some(crate::media::hwaccel::HwEncoderFamily::Vaapi)
     ) {
-        if let Some(node) = crate::media::hwaccel::detect()
-            .vaapi_render_node
-            .as_ref()
-        {
+        if let Some(node) = crate::media::hwaccel::detect().vaapi_render_node.as_ref() {
             cmd.arg("-vaapi_device").arg(node);
         }
     }
@@ -2106,7 +2097,10 @@ pub fn export_project_with_cancel(
                     }
                     Some(HwEncoderFamily::Vaapi) => {
                         log::info!("export: using hevc_vaapi");
-                        cmd.arg("-c:v").arg("hevc_vaapi").arg("-qp").arg(options.crf.to_string());
+                        cmd.arg("-c:v")
+                            .arg("hevc_vaapi")
+                            .arg("-qp")
+                            .arg(options.crf.to_string());
                         if options.hdr_passthrough {
                             // hevc_vaapi accepts p010 input on most modern
                             // Intel/AMD VAAPI implementations. Older drivers
@@ -6840,10 +6834,10 @@ mod tests {
         clamped_primary_transition_timing, clamped_primary_xfade_duration_s,
         compute_clip_audio_fades, compute_export_coloradj_params, estimate_export_size_bytes,
         find_ffmpeg, flatten_compound_tracks, has_linked_audio_peer, has_transform_keyframes,
-        parse_loudness_report, parse_progress_line,
-        primary_clip_transition_stop_pad_ns, resolve_stem_position, resolve_subtitle_font_style,
-        split_active_video_tracks_for_export, video_input_seek_and_duration, write_chapter_metadata,
-        AdjustmentExportRoi, AdjustmentMatteInput, AudioChannelLayout, AudioCodec, ClipAudioFade,
+        parse_loudness_report, parse_progress_line, primary_clip_transition_stop_pad_ns,
+        resolve_stem_position, resolve_subtitle_font_style, split_active_video_tracks_for_export,
+        video_input_seek_and_duration, write_chapter_metadata, AdjustmentExportRoi,
+        AdjustmentMatteInput, AudioChannelLayout, AudioCodec, ClipAudioFade,
         ColorFilterCapabilities, ExportOptions, LoudnessReport, SurroundPosition, VideoCodec,
     };
     use crate::media::color_math;
@@ -9672,10 +9666,7 @@ mod tests {
 
     #[test]
     fn vaapi_filter_graph_appends_hwupload() {
-        let (filter, label) = append_vaapi_upload(
-            "[v0]format=yuv420p[vout]".to_string(),
-            "vout",
-        );
+        let (filter, label) = append_vaapi_upload("[v0]format=yuv420p[vout]".to_string(), "vout");
         assert_eq!(label, "vout_va");
         assert!(filter.ends_with(";[vout]format=nv12,hwupload[vout_va]"));
         // Pre-existing graph content must be preserved verbatim — the

@@ -5438,7 +5438,9 @@ pub(crate) fn apply_replace_media_target(
     timeline_state: &Rc<RefCell<crate::ui::timeline::TimelineState>>,
 ) -> Result<String, String> {
     use crate::media::replace_media::apply_replace_media;
-    use crate::undo::{ClipSourceState, CompoundEditCommand, EditCommand, ReplaceClipSourceCommand};
+    use crate::undo::{
+        ClipSourceState, CompoundEditCommand, EditCommand, ReplaceClipSourceCommand,
+    };
     match target {
         ReplaceMediaTarget::Clip(clip_id) => {
             // Capture, simulate on a clone, validate.
@@ -5527,9 +5529,7 @@ pub(crate) fn apply_replace_media_target(
             {
                 let mut lib = library.borrow_mut();
                 if let Some(item) = lib.items.iter_mut().find(|it| &it.id == item_id) {
-                    crate::media::replace_media::apply_library_replace(
-                        item, new_path, new_meta,
-                    );
+                    crate::media::replace_media::apply_library_replace(item, new_path, new_meta);
                 }
             }
             Ok(format!(
@@ -6740,7 +6740,9 @@ pub fn build_window(
     // cache. ProxyCache::new() defaults to Auto, but a saved Off/Vaapi/Nvenc
     // preference would otherwise silently revert to Auto until the user
     // re-applies Preferences.
-    proxy_cache.borrow().set_hw_encoder_mode(initial_hw_encoder_mode);
+    proxy_cache
+        .borrow()
+        .set_hw_encoder_mode(initial_hw_encoder_mode);
     proxy_cache
         .borrow()
         .set_proxy_codec(preferences_state.borrow().proxy_codec);
@@ -6893,7 +6895,9 @@ pub fn build_window(
             prog_player
                 .borrow_mut()
                 .set_hw_encoder_mode(new_state.hw_encoder_mode);
-            proxy_cache.borrow().set_hw_encoder_mode(new_state.hw_encoder_mode);
+            proxy_cache
+                .borrow()
+                .set_hw_encoder_mode(new_state.hw_encoder_mode);
             proxy_cache.borrow().set_proxy_codec(new_state.proxy_codec);
             let project_file_path = { project.borrow().file_path.clone() };
             prog_player.borrow_mut().set_prerender_project_path(
@@ -17017,8 +17021,10 @@ pub fn build_window(
 
                 // Aspect-mismatch warning (>1% relative diff). Surface
                 // before applying so the user can cancel cleanly.
-                let aspect_warning_text =
-                    aspect_mismatch_message(old_dims, new_meta.video_width.zip(new_meta.video_height));
+                let aspect_warning_text = aspect_mismatch_message(
+                    old_dims,
+                    new_meta.video_width.zip(new_meta.video_height),
+                );
 
                 let target_apply = target.clone();
                 let project_apply = project.clone();
@@ -17042,10 +17048,7 @@ pub fn build_window(
                     );
                     match outcome {
                         Ok(summary) => {
-                            log::info!(
-                                "Replace Media OK: {summary}",
-                                summary = summary
-                            );
+                            log::info!("Replace Media OK: {summary}", summary = summary);
                             on_project_changed_apply();
                             force_rebuild_media_browser_apply();
                         }

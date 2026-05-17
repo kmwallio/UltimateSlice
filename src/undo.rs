@@ -1,4 +1,6 @@
-use crate::model::clip::{AudioSourceStreamInfo, AuditionTake, Clip, NumericKeyframe, VoiceIsolationSource};
+use crate::model::clip::{
+    AudioSourceStreamInfo, AuditionTake, Clip, NumericKeyframe, VoiceIsolationSource,
+};
 use crate::model::project::Project;
 use crate::model::track::{AudioRole, Track};
 use crate::model::transition::OutgoingTransition;

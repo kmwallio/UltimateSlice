@@ -267,8 +267,9 @@ pub fn show_preferences_dialog(
     hw_encoder_hint.set_max_width_chars(60);
     if !hw_caps.any_usable() {
         hw_encoder_combo.set_sensitive(false);
-        hw_encoder_combo
-            .set_tooltip_text(Some("No hardware encoder detected (h264_vaapi / h264_nvenc)."));
+        hw_encoder_combo.set_tooltip_text(Some(
+            "No hardware encoder detected (h264_vaapi / h264_nvenc).",
+        ));
     }
 
     playback_box.append(&playback_label);
@@ -874,7 +875,9 @@ pub fn show_preferences_dialog(
             glib::markup_escape_text(manifest_entry.license_short),
         );
         let license_label = Label::new(None);
-        license_label.set_markup(&format!("Download size: {size_text}. License: {license_link}."));
+        license_label.set_markup(&format!(
+            "Download size: {size_text}. License: {license_link}."
+        ));
         license_label.set_halign(gtk::Align::Start);
         license_label.add_css_class("dim-label");
         license_label.set_wrap(true);
