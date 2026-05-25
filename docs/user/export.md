@@ -17,6 +17,8 @@ Tracked clip transforms and first-mask attachments use the same motion data duri
 
 When an export queue job is actively running, the footer **Jobs** dropdown next to **Workspace** shows the current export with live progress, and the bottom status bar mirrors that continuous activity. Pending queue entries that have not started yet stay in the queue dialog rather than appearing as active jobs.
 
+**Export Project with Media…** writes the project XML plus a sibling `ProjectName.Library` folder containing every timeline-referenced backing file needed to reopen the packaged project elsewhere. That packaged-media walk now includes sources nested inside **compound clips**, **multicam angles**, **audition takes**, and any clip/per-angle **LUTs**, so moving the exported bundle to another drive does not leave those nested references behind.
+
 ## Export Dialog Options
 
 ### Video Codec
