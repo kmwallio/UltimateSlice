@@ -18,6 +18,7 @@ Tracking docs:
 - [x] GApplication entry point with CSS loading
 - [x] GNOME HIG-compliant app icon (`data/io.github.ultimateslice.svg`) — camera-cake slice concept
 - [x] GitHub Actions workflows on push for native Cargo build/test and Flatpak manifest build
+- [x] Flatpak vendored-crate drift recovery: `cargo-sources.json` is regenerated whenever `Cargo.lock` changes so Flatpak CI's sandboxed `cargo --offline` step stays in sync with newly added Rust crates
 - [x] Non-deprecation warning cleanup pass for `cargo build --quiet` / `cargo test --quiet` (unused imports/vars/mut, `unused_must_use`, and targeted intentional dead-code allowances)
 - [x] Legacy GTK deprecation-warning suppression pass for existing Dialog/ComboBoxText UI paths with narrowly scoped `#[allow(deprecated)]` (no runtime behavior change)
 - [x] Runtime GTK slider warning cleanup: added a generic slider CSS reset (border/margin/padding/box-shadow none) plus explicit scale-thumb sizing to remove negative min-size warnings (`GtkGizmo ... slider ... -4`)
