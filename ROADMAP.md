@@ -784,7 +784,7 @@ FCPXML persistence).
 **Project housekeeping**
 - [x] Autosave + crash recovery: persistent per-project autosave files in `$XDG_DATA_HOME/ultimateslice/autosave/` with metadata sidecars; "Recover Unsaved Work" section on welcome screen; autosave cleaned up on save/discard/new-project
 - [x] Project health panel — **Export ▼ → Project Health…** now surfaces missing source media, managed/generated cache disk usage, and installed model directories in one place, with safe cleanup actions for generated caches plus MCP `get_project_health` / `cleanup_project_cache`. Thumbnail previews remain in-memory-only, so they are intentionally not reported as an on-disk cache here.
-- [ ] Recent projects with thumbnails in the welcome screen and a File menu submenu (currently text-only in `welcome.rs`)
+- [x] Recent projects with thumbnails in the welcome screen — both the "Jump back in" hero card and the "More Recent Projects" list show a 16:9 first-frame thumbnail next to project name/path. New `src/ui/welcome_project_peek.rs` lightweight quick_xml peek extracts the first asset's source path without a full project load. (File menu submenu still text-only — separate menu redesign work.)
 
 ### Professional Workflow (The "Pro" Edge)
 - [x] Multicam editing (sync by audio or timecode)

@@ -3122,7 +3122,7 @@ fn fcpxml_mount_root(path: &Path) -> Option<PathBuf> {
     Some(root)
 }
 
-fn parse_fcpxml_src_path(src: &str) -> String {
+pub(crate) fn parse_fcpxml_src_path(src: &str) -> String {
     let raw_path = src.strip_prefix("file://").unwrap_or(src);
     decode_percent_encoded_path(raw_path)
 }

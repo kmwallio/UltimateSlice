@@ -31,4 +31,5 @@ pub mod toolbar;
 pub mod transcript_panel;
 pub mod transform_overlay;
 pub mod welcome;
+pub mod welcome_project_peek;
 pub mod window;

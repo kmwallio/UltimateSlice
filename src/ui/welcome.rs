@@ -1,8 +1,21 @@
 use gtk4::prelude::*;
-use gtk4::{Align, Box as GBox, Button, Expander, Label, Orientation, ScrolledWindow};
+use gtk4::{Align, Box as GBox, Button, DrawingArea, Expander, Label, Orientation, ScrolledWindow};
+use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::media::thumb_cache::ThumbnailCache;
 use crate::project_versions::RecoverableAutosave;
+
+/// Thumbnail dimensions for recent-project cards in the list. Same 16:9
+/// shape as the editor's clip thumbnails, scaled down so two columns
+/// (thumb + text) fit comfortably without resizing the welcome layout.
+const THUMB_LIST_W: i32 = 120;
+const THUMB_LIST_H: i32 = 68;
+
+/// Larger thumbnail for the featured hero card — gets a bigger surface
+/// area in the layout so it can take the visual lead.
+const THUMB_HERO_W: i32 = 200;
+const THUMB_HERO_H: i32 = 112;
 
 #[derive(Clone)]
 struct WelcomeRecentProject {
@@ -10,6 +23,12 @@ struct WelcomeRecentProject {
     display_name: String,
     directory_label: String,
     date_label: Option<String>,
+    /// Path of the first asset's media source, extracted via the
+    /// lightweight `welcome_project_peek` helper. `None` when the
+    /// project has no recognizable asset (just-saved blank project,
+    /// asset-less template, unreadable file, etc.) — the card then
+    /// falls back to a dim placeholder instead of showing nothing.
+    first_source: Option<String>,
 }
 
 /// Build the welcome panel shown on fresh launch (no startup project).
@@ -43,6 +62,16 @@ pub fn build_welcome_panel(
     scroll.set_child(Some(&inner));
 
     let recent_projects = load_recent_projects();
+
+    // Shared thumbnail cache for every card on this welcome panel. Lives
+    // for as long as the panel is alive; created fresh on each welcome
+    // build (the editor has its own separate cache for the timeline).
+    // A glib timer below polls the cache and queues redraws on the
+    // DrawingArea widgets when frames finish extracting in the
+    // background.
+    let thumb_cache: Rc<RefCell<ThumbnailCache>> =
+        Rc::new(RefCell::new(ThumbnailCache::new()));
+    let thumb_areas: Rc<RefCell<Vec<DrawingArea>>> = Rc::new(RefCell::new(Vec::new()));
 
     // Title
     let title = Label::new(Some("UltimateSlice"));
@@ -95,17 +124,32 @@ pub fn build_welcome_panel(
         hero_header.set_halign(Align::Start);
         hero.append(&hero_header);
 
+        // Two-column body: thumbnail on the left, text + actions on
+        // the right.
+        let hero_body = GBox::new(Orientation::Horizontal, 16);
+        let hero_thumb = build_thumb_area(
+            featured.first_source.clone(),
+            thumb_cache.clone(),
+            THUMB_HERO_W,
+            THUMB_HERO_H,
+        );
+        thumb_areas.borrow_mut().push(hero_thumb.clone());
+        hero_body.append(&hero_thumb);
+
+        let hero_text = GBox::new(Orientation::Vertical, 6);
+        hero_text.set_hexpand(true);
+
         let hero_name = Label::new(Some(&featured.display_name));
         hero_name.add_css_class("welcome-hero-project");
         hero_name.set_halign(Align::Start);
         hero_name.set_wrap(true);
-        hero.append(&hero_name);
+        hero_text.append(&hero_name);
 
         let hero_meta = Label::new(Some(&format_recent_project_meta(&featured)));
         hero_meta.add_css_class("welcome-card-summary");
         hero_meta.set_halign(Align::Start);
         hero_meta.set_wrap(true);
-        hero.append(&hero_meta);
+        hero_text.append(&hero_meta);
 
         let hero_path = Label::new(Some(&featured.directory_label));
         hero_path.add_css_class("welcome-card-detail");
@@ -113,7 +157,7 @@ pub fn build_welcome_panel(
         hero_path.set_ellipsize(gtk4::pango::EllipsizeMode::Start);
         hero_path.set_max_width_chars(56);
         hero_path.set_tooltip_text(Some(&featured.path));
-        hero.append(&hero_path);
+        hero_text.append(&hero_path);
 
         let hero_actions = GBox::new(Orientation::Horizontal, 8);
         let btn_open_recent = Button::with_label("Open Most Recent");
@@ -125,7 +169,10 @@ pub fn build_welcome_panel(
             btn_open_recent.connect_clicked(move |_| cb(path.clone()));
         }
         hero_actions.append(&btn_open_recent);
-        hero.append(&hero_actions);
+        hero_text.append(&hero_actions);
+
+        hero_body.append(&hero_text);
+        hero.append(&hero_body);
 
         inner.append(&hero);
     }
@@ -226,7 +273,12 @@ pub fn build_welcome_panel(
         recent_list.set_hexpand(true);
 
         for recent in recent_projects.iter().skip(1) {
-            recent_list.append(&build_recent_project_row(recent, on_open_recent.clone()));
+            recent_list.append(&build_recent_project_row(
+                recent,
+                on_open_recent.clone(),
+                thumb_cache.clone(),
+                &thumb_areas,
+            ));
         }
 
         inner.append(&recent_list);
@@ -282,6 +334,32 @@ pub fn build_welcome_panel(
     ));
     tip.add_css_class("welcome-tip");
     inner.append(&tip);
+
+    // Poll the shared thumbnail cache and queue redraws on each
+    // DrawingArea when its surface arrives. Bounded run (60 ticks ×
+    // 250 ms = 15 s) so the timer can't outlive a meaningful "all
+    // ten thumbs extracted" window. Welcome screens with offline
+    // media will simply paint placeholders forever, which is fine —
+    // re-entering the welcome screen restarts the timer.
+    if !thumb_areas.borrow().is_empty() {
+        let thumb_cache_poll = thumb_cache.clone();
+        let thumb_areas_poll = thumb_areas.clone();
+        let mut ticks = 0u32;
+        glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
+            ticks += 1;
+            let has_new = thumb_cache_poll.borrow_mut().poll();
+            if has_new {
+                for area in thumb_areas_poll.borrow().iter() {
+                    area.queue_draw();
+                }
+            }
+            if ticks >= 60 {
+                glib::ControlFlow::Break
+            } else {
+                glib::ControlFlow::Continue
+            }
+        });
+    }
     outer
 }
 
@@ -299,29 +377,120 @@ fn load_recent_projects() -> Vec<WelcomeRecentProject> {
                 .and_then(|p| p.to_str())
                 .unwrap_or(&path)
                 .to_string();
+            let first_source = crate::ui::welcome_project_peek::peek_first_asset_source(
+                std::path::Path::new(&path),
+            );
             WelcomeRecentProject {
                 date_label: modification_date_label(&path),
                 path,
                 display_name,
                 directory_label,
+                first_source,
             }
         })
         .collect()
 }
 
+/// Build a DrawingArea that paints the recent project's first-frame
+/// thumbnail (or a dim rounded-rect placeholder while the thumb is
+/// still being extracted, or forever if the source is missing).
+///
+/// The cache is shared across every card on the welcome screen so the
+/// same source path being referenced by two recents only extracts once.
+/// A glib timer set up in `build_welcome_panel` polls the cache and
+/// queues redraws on each area when its surface becomes available.
+fn build_thumb_area(
+    first_source: Option<String>,
+    thumb_cache: Rc<RefCell<ThumbnailCache>>,
+    width: i32,
+    height: i32,
+) -> DrawingArea {
+    let area = DrawingArea::new();
+    area.set_content_width(width);
+    area.set_content_height(height);
+    area.add_css_class("welcome-thumb");
+
+    if let Some(ref src) = first_source {
+        // Kick off the extraction immediately so it's ready by the
+        // time the user's eye gets to this card. request() is a no-op
+        // if the surface is already cached.
+        thumb_cache.borrow_mut().request(src, 0);
+    }
+
+    area.set_draw_func(move |_, cr, w, h| {
+        let (wf, hf) = (w as f64, h as f64);
+        // Rounded placeholder background — always drawn so the card
+        // has a visible shape even before (or instead of) the thumb.
+        rounded_rect_local(cr, 0.0, 0.0, wf, hf, 6.0);
+        cr.save().ok();
+        cr.clip();
+        cr.set_source_rgba(0.18, 0.21, 0.28, 0.92);
+        let _ = cr.paint();
+
+        if let Some(ref src) = first_source {
+            let cache = thumb_cache.borrow();
+            if let Some(surface) = cache.get(src, 0) {
+                let sw = surface.width() as f64;
+                let sh = surface.height() as f64;
+                if sw > 0.0 && sh > 0.0 {
+                    // Cover-style fit: scale to fill the card, center,
+                    // crop the overflow with the clip we set above.
+                    let scale = (wf / sw).max(hf / sh);
+                    let dx = (wf - sw * scale) / 2.0;
+                    let dy = (hf - sh * scale) / 2.0;
+                    cr.save().ok();
+                    cr.translate(dx, dy);
+                    cr.scale(scale, scale);
+                    let _ = cr.set_source_surface(surface, 0.0, 0.0);
+                    let _ = cr.paint();
+                    cr.restore().ok();
+                }
+            }
+        }
+        cr.restore().ok();
+    });
+
+    area
+}
+
+/// Local copy of the timeline widget's `rounded_rect` so we don't drag
+/// the timeline module's whole surface into the welcome screen just for
+/// one Cairo helper.
+fn rounded_rect_local(cr: &gtk4::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
+    use std::f64::consts::PI;
+    cr.new_sub_path();
+    let _ = cr.arc(x + w - r, y + r, r, -PI / 2.0, 0.0);
+    let _ = cr.arc(x + w - r, y + h - r, r, 0.0, PI / 2.0);
+    let _ = cr.arc(x + r, y + h - r, r, PI / 2.0, PI);
+    let _ = cr.arc(x + r, y + r, r, PI, 3.0 * PI / 2.0);
+    cr.close_path();
+}
+
 fn build_recent_project_row(
     recent: &WelcomeRecentProject,
     on_open_recent: Rc<dyn Fn(String)>,
+    thumb_cache: Rc<RefCell<ThumbnailCache>>,
+    thumb_areas: &Rc<RefCell<Vec<DrawingArea>>>,
 ) -> Button {
     let row = Button::new();
     row.add_css_class("flat");
     row.add_css_class("welcome-recent-item");
 
-    let row_box = GBox::new(Orientation::Horizontal, 8);
+    let row_box = GBox::new(Orientation::Horizontal, 12);
     row_box.set_hexpand(true);
+
+    let thumb_area = build_thumb_area(
+        recent.first_source.clone(),
+        thumb_cache,
+        THUMB_LIST_W,
+        THUMB_LIST_H,
+    );
+    thumb_areas.borrow_mut().push(thumb_area.clone());
+    row_box.append(&thumb_area);
 
     let info_box = GBox::new(Orientation::Vertical, 2);
     info_box.set_hexpand(true);
+    info_box.set_valign(Align::Center);
 
     let name_label = Label::new(Some(&recent.display_name));
     name_label.set_halign(Align::Start);

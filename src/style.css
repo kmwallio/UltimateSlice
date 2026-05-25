@@ -552,7 +552,11 @@ entry:focus {
     margin-bottom: 2px;
 }
 .welcome-recent-item {
-    padding: 4px 8px;
+    padding: 6px 8px;
+}
+.welcome-thumb {
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.18);
 }
 .welcome-tip {
     font-size: 11px;
