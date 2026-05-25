@@ -19530,7 +19530,11 @@ pub fn build_window(
 
                                 let timeline_state = timeline_state.clone();
                                 let stack = stack.clone();
-                                timeline_state.borrow_mut().loading = true;
+                                {
+                                    let mut ts = timeline_state.borrow_mut();
+                                    ts.loading = true;
+                                    ts.loading_path = Some(path_str.clone());
+                                }
                                 glib::timeout_add_local(
                                     std::time::Duration::from_millis(50),
                                     move || match rx.try_recv() {
@@ -19539,7 +19543,11 @@ pub fn build_window(
                                             new_proj.file_path = Some(path_str.clone());
                                             crate::recent::push(&path_str);
                                             *project.borrow_mut() = new_proj;
-                                            timeline_state.borrow_mut().loading = false;
+                                            {
+                                                let mut ts = timeline_state.borrow_mut();
+                                                ts.loading = false;
+                                                ts.loading_path = None;
+                                            }
 
                                             sync_monitor();
                                             on_project_changed();
@@ -19548,14 +19556,18 @@ pub fn build_window(
                                         }
                                         Ok(Err(e)) => {
                                             log::error!("Failed to open project: {e}");
-                                            timeline_state.borrow_mut().loading = false;
+                                            let mut ts = timeline_state.borrow_mut();
+                                            ts.loading = false;
+                                            ts.loading_path = None;
                                             glib::ControlFlow::Break
                                         }
                                         Err(std::sync::mpsc::TryRecvError::Empty) => {
                                             glib::ControlFlow::Continue
                                         }
                                         Err(_) => {
-                                            timeline_state.borrow_mut().loading = false;
+                                            let mut ts = timeline_state.borrow_mut();
+                                            ts.loading = false;
+                                            ts.loading_path = None;
                                             glib::ControlFlow::Break
                                         }
                                     },
@@ -19589,7 +19601,11 @@ pub fn build_window(
 
                     let timeline_state = timeline_state.clone();
                     let stack = stack.clone();
-                    timeline_state.borrow_mut().loading = true;
+                    {
+                        let mut ts = timeline_state.borrow_mut();
+                        ts.loading = true;
+                        ts.loading_path = Some(path_str.clone());
+                    }
                     glib::timeout_add_local(std::time::Duration::from_millis(50), move || match rx
                         .try_recv()
                     {
@@ -19598,7 +19614,11 @@ pub fn build_window(
                             new_proj.file_path = Some(path_str.clone());
                             crate::recent::push(&path_str);
                             *project.borrow_mut() = new_proj;
-                            timeline_state.borrow_mut().loading = false;
+                            {
+                                let mut ts = timeline_state.borrow_mut();
+                                ts.loading = false;
+                                ts.loading_path = None;
+                            }
                             sync_monitor();
                             on_project_changed();
                             stack.set_visible_child_name("editor");
@@ -19606,12 +19626,16 @@ pub fn build_window(
                         }
                         Ok(Err(e)) => {
                             log::error!("Failed to open recent project: {e}");
-                            timeline_state.borrow_mut().loading = false;
+                            let mut ts = timeline_state.borrow_mut();
+                            ts.loading = false;
+                            ts.loading_path = None;
                             glib::ControlFlow::Break
                         }
                         Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
                         Err(_) => {
-                            timeline_state.borrow_mut().loading = false;
+                            let mut ts = timeline_state.borrow_mut();
+                            ts.loading = false;
+                            ts.loading_path = None;
                             glib::ControlFlow::Break
                         }
                     });
@@ -21988,7 +22012,11 @@ pub fn build_window(
                 .map_err(|e| format!("Failed to open startup project: {e}"));
             let _ = tx.send(result);
         });
-        timeline_state.borrow_mut().loading = true;
+        {
+            let mut ts = timeline_state.borrow_mut();
+            ts.loading = true;
+            ts.loading_path = Some(path.clone());
+        }
         let project = project.clone();
         let timeline_state = timeline_state.clone();
         let on_project_changed = on_project_changed.clone();
@@ -22001,7 +22029,11 @@ pub fn build_window(
                     new_proj.file_path = Some(path.clone());
                     recent::push(&path);
                     *project.borrow_mut() = new_proj;
-                    timeline_state.borrow_mut().loading = false;
+                    {
+                        let mut ts = timeline_state.borrow_mut();
+                        ts.loading = false;
+                        ts.loading_path = None;
+                    }
                     suppress_resume_on_next_reload.set(true);
                     clear_media_browser_on_next_reload.set(true);
                     sync_monitor();
@@ -22009,13 +22041,17 @@ pub fn build_window(
                     glib::ControlFlow::Break
                 }
                 Ok(Err(e)) => {
-                    timeline_state.borrow_mut().loading = false;
+                    let mut ts = timeline_state.borrow_mut();
+                    ts.loading = false;
+                    ts.loading_path = None;
                     log::error!("{e}");
                     glib::ControlFlow::Break
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    timeline_state.borrow_mut().loading = false;
+                    let mut ts = timeline_state.borrow_mut();
+                    ts.loading = false;
+                    ts.loading_path = None;
                     log::error!("Startup project open worker disconnected");
                     glib::ControlFlow::Break
                 }

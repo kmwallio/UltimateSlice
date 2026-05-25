@@ -772,7 +772,7 @@ FCPXML persistence).
 - [x] Export queue panel persistence + drag-reorder — persistence shipped earlier via `ExportQueueState` serde JSON; drag-reorder (insert-before + end-zone), pause-after-current (worker checks `Arc<AtomicBool>` between jobs, no mid-export kill), retry-failed (`↻` button on Error rows), and crash recovery (`repair_stuck_running` on dialog open) all landed in `src/ui/export_queue.rs`
 
 **Performance perception**
-- [ ] Skeleton loaders during project open — show track placeholders + "Loading project…" with the project filename instead of a blank window
+- [x] Skeleton loaders during project open — `draw_timeline_loading_state` in `timeline/widget.rs` shows track-shaped grey placeholders + "Loading <filename>…" while `TimelineState.loading` is true; suppresses the misleading empty-state hint during the parse window. Wired into File→Open, Recent, and CLI/file-manager startup paths.
 - [ ] Lazy-render off-screen tracks in `timeline/widget.rs` Cairo draw path on very tall timelines (12+ tracks)
 - [ ] Thumbnail/waveform progressive reveal with a subtle fade-in instead of pop-in when caches finish
 

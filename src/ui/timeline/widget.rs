@@ -674,6 +674,11 @@ pub struct TimelineState {
     pub show_timeline_preview: bool,
     /// When true, the timeline is loading a project and interaction is suppressed.
     pub loading: bool,
+    /// Path of the project currently being loaded. Drives the skeleton
+    /// loader label so users see "Loading <filename>…" rather than a
+    /// generic spinner. Cleared together with `loading` when the load
+    /// completes or fails.
+    pub loading_path: Option<String>,
     /// Per-track stereo audio peaks (dBFS) keyed by track index.
     pub track_audio_peak_db: Vec<[f64; 2]>,
     /// Show/hide per-track audio meters in track labels.
@@ -998,6 +1003,7 @@ impl TimelineState {
             show_waveform_on_video: false,
             show_timeline_preview: true,
             loading: false,
+            loading_path: None,
             track_audio_peak_db: Vec::new(),
             show_track_audio_levels: true,
             clipboard: None,
@@ -10964,6 +10970,23 @@ fn draw_timeline(
     cr.set_source_rgb(bg_r, bg_g, bg_b);
     cr.paint().ok();
 
+    // Project-load skeleton: when a background parse is in flight, suppress
+    // every other draw (tracks, ruler, playhead, empty-state hint, drag
+    // previews) and show track-shaped placeholders plus "Loading <name>…"
+    // instead. The previous behavior flashed the "Drop media here" empty
+    // state for the few hundred ms of the parse, which was misleading.
+    if st.loading {
+        let loading_label_owned = st.loading_path.as_deref().map(|p| {
+            let filename = std::path::Path::new(p)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(p);
+            format!("Loading {filename}…")
+        });
+        draw_timeline_loading_state(cr, w, h, loading_label_owned.as_deref());
+        return;
+    }
+
     // Compound breadcrumb bar (when drilled into a compound clip)
     let overlay_top = if draw_ruler_overlay {
         RULER_HEIGHT
@@ -13182,6 +13205,80 @@ fn draw_timeline_empty_state(
     let _ = cr.show_text("Drag clips from Media Library or your file manager onto a track.");
     let _ = cr.move_to(box_x + 22.0, box_y + 78.0);
     let _ = cr.show_text("Import video, audio, or images in Media Library to get started.");
+    cr.restore().ok();
+}
+
+/// Skeleton-style placeholder painted while a project is parsing in the
+/// background. Replaces the "Drop media here" empty-state (which would
+/// otherwise flash briefly on every open) with track-shaped grey bars +
+/// a "Loading <filename>…" label so the user knows the gap is intentional.
+fn draw_timeline_loading_state(
+    cr: &gtk::cairo::Context,
+    width: f64,
+    height: f64,
+    loading_label: Option<&str>,
+) {
+    let avail_w = (width - TRACK_LABEL_WIDTH - 32.0).max(0.0);
+    if avail_w < 200.0 || height < 120.0 {
+        return;
+    }
+
+    let bar_x = TRACK_LABEL_WIDTH + 16.0;
+    let bar_w = avail_w;
+    // Five skeleton rows of varying height to suggest the typical
+    // mix of video (taller) and audio (shorter) tracks. Total height
+    // budget is centered vertically in whatever space we have.
+    let row_specs: [(f64, f64); 5] = [
+        (TRACK_HEIGHT, 0.34),
+        (TRACK_HEIGHT_SMALL, 0.28),
+        (TRACK_HEIGHT, 0.30),
+        (TRACK_HEIGHT_SMALL, 0.26),
+        (TRACK_HEIGHT_SMALL, 0.24),
+    ];
+    let gap = 8.0;
+    let total_h: f64 = row_specs.iter().map(|(h, _)| h).sum::<f64>() + gap * 4.0;
+    let mut y = ((height - total_h) / 2.0).max(40.0);
+
+    cr.save().ok();
+    for (row_h, alpha) in row_specs.iter().copied() {
+        rounded_rect(cr, bar_x, y, bar_w, row_h, 6.0);
+        cr.set_source_rgba(0.32, 0.36, 0.44, alpha);
+        cr.fill().ok();
+        // Subtle inner stripe to mimic a clip block within the track row.
+        let block_w = (bar_w * 0.62).min(bar_w - 24.0);
+        let block_h = (row_h - 14.0).max(8.0);
+        if block_w > 60.0 {
+            rounded_rect(
+                cr,
+                bar_x + 12.0,
+                y + 7.0,
+                block_w,
+                block_h,
+                4.0,
+            );
+            cr.set_source_rgba(0.48, 0.54, 0.66, alpha * 0.45);
+            cr.fill().ok();
+        }
+        y += row_h + gap;
+    }
+    cr.restore().ok();
+
+    // Centered status label below the skeleton.
+    let label = loading_label.unwrap_or("Loading project…");
+    cr.save().ok();
+    cr.select_font_face(
+        "sans",
+        gtk::cairo::FontSlant::Normal,
+        gtk::cairo::FontWeight::Bold,
+    );
+    cr.set_font_size(14.0);
+    cr.set_source_rgba(0.86, 0.90, 0.96, 0.92);
+    if let Ok(extents) = cr.text_extents(label) {
+        let label_x = (width - extents.width()) / 2.0 - extents.x_bearing();
+        let label_y = (y + 24.0).min(height - 20.0);
+        let _ = cr.move_to(label_x, label_y);
+        let _ = cr.show_text(label);
+    }
     cr.restore().ok();
 }
 
