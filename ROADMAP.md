@@ -769,7 +769,7 @@ FCPXML persistence).
 **Export & sharing**
 - [ ] Export presets gallery with thumbnail cards (YouTube 1080p, YouTube 4K, Instagram Reel 9:16, TikTok, ProRes Master, Web Compressed, etc.) instead of a flat dropdown
 - [ ] Share-link panel — after export, a popover with "Reveal in file manager", "Open with...", "Copy path", and (optional) upload-to-service hooks
-- [ ] Export queue panel persistence + drag-reorder — add reorder, pause-all, retry-failed, and persistence across app restarts to `src/ui/export_queue.rs`
+- [x] Export queue panel persistence + drag-reorder — persistence shipped earlier via `ExportQueueState` serde JSON; drag-reorder (insert-before + end-zone), pause-after-current (worker checks `Arc<AtomicBool>` between jobs, no mid-export kill), retry-failed (`↻` button on Error rows), and crash recovery (`repair_stuck_running` on dialog open) all landed in `src/ui/export_queue.rs`
 
 **Performance perception**
 - [ ] Skeleton loaders during project open — show track placeholders + "Loading project…" with the project filename instead of a blank window

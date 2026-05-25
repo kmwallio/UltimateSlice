@@ -1367,6 +1367,96 @@ pub struct ExportQueueState {
     pub jobs: Vec<ExportQueueJob>,
 }
 
+impl ExportQueueState {
+    /// Reorder a pending job by removing it from its current slot and
+    /// inserting it just before `target_id` (also a pending job). Both
+    /// jobs must be Pending — running/done/error jobs are anchored.
+    /// Returns true if the move happened.
+    pub fn move_pending_before(&mut self, src_id: &str, target_id: &str) -> bool {
+        if src_id == target_id {
+            return false;
+        }
+        let src_idx = match self
+            .jobs
+            .iter()
+            .position(|j| j.id == src_id && j.status == ExportQueueJobStatus::Pending)
+        {
+            Some(i) => i,
+            None => return false,
+        };
+        let target_idx = match self
+            .jobs
+            .iter()
+            .position(|j| j.id == target_id && j.status == ExportQueueJobStatus::Pending)
+        {
+            Some(i) => i,
+            None => return false,
+        };
+        let job = self.jobs.remove(src_idx);
+        // Removing src may shift target_idx down by 1.
+        let insert_at = if src_idx < target_idx {
+            target_idx - 1
+        } else {
+            target_idx
+        };
+        self.jobs.insert(insert_at, job);
+        true
+    }
+
+    /// Move a pending job to the very end of the queue. Anchors the
+    /// other non-pending jobs in place. Returns true if the move happened.
+    pub fn move_pending_to_end(&mut self, src_id: &str) -> bool {
+        let src_idx = match self
+            .jobs
+            .iter()
+            .position(|j| j.id == src_id && j.status == ExportQueueJobStatus::Pending)
+        {
+            Some(i) => i,
+            None => return false,
+        };
+        if src_idx == self.jobs.len() - 1 {
+            return false;
+        }
+        let job = self.jobs.remove(src_idx);
+        self.jobs.push(job);
+        true
+    }
+
+    /// Flip an Error job back to Pending and clear its error message so
+    /// the user can re-run it on the next Run Queue press. No-op on any
+    /// non-Error status. Returns true if a status flip happened.
+    pub fn retry_errored(&mut self, id: &str) -> bool {
+        if let Some(job) = self
+            .jobs
+            .iter_mut()
+            .find(|j| j.id == id && j.status == ExportQueueJobStatus::Error)
+        {
+            job.status = ExportQueueJobStatus::Pending;
+            job.error = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// One-shot load-time fixup: if the app crashed (or was force-quit)
+    /// during an export, the persisted queue still has that job marked
+    /// `Running` with no live worker behind it. Flip those back to
+    /// `Pending` so the user can re-press Run Queue to recover.
+    /// Returns the number of jobs repaired.
+    pub fn repair_stuck_running(&mut self) -> usize {
+        let mut count = 0;
+        for job in self.jobs.iter_mut() {
+            if job.status == ExportQueueJobStatus::Running {
+                job.status = ExportQueueJobStatus::Pending;
+                job.error = None;
+                count += 1;
+            }
+        }
+        count
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PreferencesState {
     #[serde(default)]
@@ -1801,6 +1891,170 @@ pub fn save_inspector_sections_state(state: &HashMap<String, bool>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pending(id: &str) -> ExportQueueJob {
+        ExportQueueJob {
+            id: id.to_string(),
+            label: format!("job-{id}"),
+            output_path: format!("/tmp/{id}.mp4"),
+            options: ExportPreset::from_export_options("test", &ExportOptions::default()),
+            status: ExportQueueJobStatus::Pending,
+            error: None,
+        }
+    }
+
+    fn errored(id: &str) -> ExportQueueJob {
+        let mut j = pending(id);
+        j.status = ExportQueueJobStatus::Error;
+        j.error = Some("ffmpeg blew up".to_string());
+        j
+    }
+
+    fn running(id: &str) -> ExportQueueJob {
+        let mut j = pending(id);
+        j.status = ExportQueueJobStatus::Running;
+        j
+    }
+
+    fn done(id: &str) -> ExportQueueJob {
+        let mut j = pending(id);
+        j.status = ExportQueueJobStatus::Done;
+        j
+    }
+
+    fn ids(state: &ExportQueueState) -> Vec<String> {
+        state.jobs.iter().map(|j| j.id.clone()).collect()
+    }
+
+    #[test]
+    fn move_pending_before_reorders_within_pending() {
+        let mut q = ExportQueueState {
+            jobs: vec![pending("a"), pending("b"), pending("c"), pending("d")],
+        };
+        // Drag 'c' onto 'a' → c lands before a.
+        assert!(q.move_pending_before("c", "a"));
+        assert_eq!(ids(&q), vec!["c", "a", "b", "d"]);
+    }
+
+    #[test]
+    fn move_pending_before_handles_src_after_target_idx_shift() {
+        // Removing src that's before target should not skip the target
+        // by one — verifies the `if src_idx < target_idx { target_idx - 1 }`
+        // adjustment is correct.
+        let mut q = ExportQueueState {
+            jobs: vec![pending("a"), pending("b"), pending("c"), pending("d")],
+        };
+        // Move 'a' (idx 0) before 'c' (idx 2). After removing 'a', 'c' is
+        // at idx 1; inserting before 'c' puts 'a' at idx 1.
+        assert!(q.move_pending_before("a", "c"));
+        assert_eq!(ids(&q), vec!["b", "a", "c", "d"]);
+    }
+
+    #[test]
+    fn move_pending_before_is_noop_for_same_id() {
+        let mut q = ExportQueueState {
+            jobs: vec![pending("a"), pending("b")],
+        };
+        assert!(!q.move_pending_before("a", "a"));
+        assert_eq!(ids(&q), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn move_pending_before_refuses_non_pending_jobs() {
+        let mut q = ExportQueueState {
+            jobs: vec![running("a"), pending("b"), done("c"), errored("d")],
+        };
+        // 'a' is Running — can't move it.
+        assert!(!q.move_pending_before("a", "b"));
+        // 'c' is Done — can't be a drop target.
+        assert!(!q.move_pending_before("b", "c"));
+        // 'd' is Error — can't be a drop target either.
+        assert!(!q.move_pending_before("b", "d"));
+        assert_eq!(ids(&q), vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn move_pending_to_end_moves_to_last_slot() {
+        let mut q = ExportQueueState {
+            jobs: vec![pending("a"), pending("b"), pending("c")],
+        };
+        assert!(q.move_pending_to_end("a"));
+        assert_eq!(ids(&q), vec!["b", "c", "a"]);
+    }
+
+    #[test]
+    fn move_pending_to_end_is_noop_when_already_last() {
+        let mut q = ExportQueueState {
+            jobs: vec![pending("a"), pending("b")],
+        };
+        assert!(!q.move_pending_to_end("b"));
+        assert_eq!(ids(&q), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn move_pending_to_end_anchors_past_non_pending_tail() {
+        // Non-pending jobs at the end still move past — the operation
+        // is "last in the Vec", not "last among pending". Document the
+        // chosen semantics so the test catches accidental changes.
+        let mut q = ExportQueueState {
+            jobs: vec![pending("a"), done("b"), pending("c")],
+        };
+        assert!(q.move_pending_to_end("a"));
+        assert_eq!(ids(&q), vec!["b", "c", "a"]);
+    }
+
+    #[test]
+    fn retry_errored_flips_status_and_clears_error() {
+        let mut q = ExportQueueState {
+            jobs: vec![pending("a"), errored("b")],
+        };
+        assert!(q.retry_errored("b"));
+        let b = q.jobs.iter().find(|j| j.id == "b").unwrap();
+        assert_eq!(b.status, ExportQueueJobStatus::Pending);
+        assert!(b.error.is_none());
+    }
+
+    #[test]
+    fn retry_errored_is_noop_for_non_error_jobs() {
+        let mut q = ExportQueueState {
+            jobs: vec![pending("a"), running("b"), done("c")],
+        };
+        assert!(!q.retry_errored("a"));
+        assert!(!q.retry_errored("b"));
+        assert!(!q.retry_errored("c"));
+        assert!(!q.retry_errored("does-not-exist"));
+    }
+
+    #[test]
+    fn repair_stuck_running_flips_only_running() {
+        let mut q = ExportQueueState {
+            jobs: vec![
+                running("a"),
+                pending("b"),
+                done("c"),
+                errored("d"),
+                running("e"),
+            ],
+        };
+        assert_eq!(q.repair_stuck_running(), 2);
+        assert_eq!(q.jobs[0].status, ExportQueueJobStatus::Pending);
+        assert_eq!(q.jobs[1].status, ExportQueueJobStatus::Pending);
+        assert_eq!(q.jobs[2].status, ExportQueueJobStatus::Done);
+        assert_eq!(q.jobs[3].status, ExportQueueJobStatus::Error);
+        assert_eq!(q.jobs[4].status, ExportQueueJobStatus::Pending);
+        // Repaired jobs lose their error too (a Running job that had
+        // an old error from a previous failed run shouldn't carry it
+        // forward as a misleading message in the new Pending state).
+        assert!(q.jobs[0].error.is_none());
+    }
+
+    #[test]
+    fn repair_stuck_running_returns_zero_when_nothing_to_fix() {
+        let mut q = ExportQueueState {
+            jobs: vec![pending("a"), done("b"), errored("c")],
+        };
+        assert_eq!(q.repair_stuck_running(), 0);
+    }
 
     #[test]
     fn export_preset_round_trip_to_export_options() {
